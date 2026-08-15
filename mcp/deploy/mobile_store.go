@@ -681,7 +681,7 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 			if strings.TrimSpace(doc.Copyright) == "" {
 				add("copyright.required", "error", "version", "", "copyright", "Copyright is required for App Store review.", "Set the copyright for this App Store version.", true)
 			}
-			if !doc.ContentRights.RightsConfirmed {
+			if !doc.ContentRights.RightsConfirmed && !providerReadinessVerified(cfg, "content_rights") {
 				add("content_rights.required", "error", "compliance", "", "content_rights", "The app content-rights declaration must be confirmed.", "Declare whether the app uses third-party content and confirm the necessary rights.", true)
 			}
 			if doc.Review.FirstName == "" || doc.Review.LastName == "" || doc.Review.Email == "" || doc.Review.Phone == "" {
@@ -1007,7 +1007,15 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 	readiness := observed["readiness"].(map[string]any)
 	if appRaw, appErr := executeIntegration(bound, "get_app", map[string]any{"app_id": appID}); appErr == nil {
 		observed["app"] = decodeJSONValue(appRaw)
-		readiness["content_rights"] = readinessCheck(appleContentRightsMatches(appRaw, doc.ContentRights), "provider", "App content rights were compared with the desired declaration.")
+		providerRights, _ := appleContentRightsFromProvider(appRaw)
+		observed["content_rights"] = providerRights
+		verified := appleContentRightsVerified(appRaw, doc.ContentRights)
+		message := "Apple's content-rights declaration was read from the provider."
+		if doc.ContentRights.RightsConfirmed {
+			verified = appleContentRightsMatches(appRaw, doc.ContentRights)
+			message = "App content rights were compared with the confirmed desired declaration."
+		}
+		readiness["content_rights"] = readinessCheck(verified, "provider", message)
 	} else {
 		observed["app_error"] = storeObservationError(appErr, false, "retry_sync")
 		readiness["content_rights"] = readinessCheck(false, "provider", "App content rights could not be read from Apple.")
@@ -1927,6 +1935,30 @@ func appleContentRightsDeclaration(rights StoreContentRights) string {
 
 func appleContentRightsMatches(raw json.RawMessage, rights StoreContentRights) bool {
 	return rights.RightsConfirmed && jsonStringAt(raw, "data", "attributes", "contentRightsDeclaration") == appleContentRightsDeclaration(rights)
+}
+
+func appleContentRightsFromProvider(raw json.RawMessage) (map[string]any, bool) {
+	declaration := jsonStringAt(raw, "data", "attributes", "contentRightsDeclaration")
+	usesThirdParty := false
+	switch declaration {
+	case "USES_THIRD_PARTY_CONTENT":
+		usesThirdParty = true
+	case "DOES_NOT_USE_THIRD_PARTY_CONTENT":
+	default:
+		return map[string]any{"declaration": declaration, "rights_confirmed": false, "source": "provider"}, false
+	}
+	return map[string]any{
+		"declaration": declaration, "uses_third_party_content": usesThirdParty,
+		"rights_confirmed": true, "source": "provider",
+	}, true
+}
+
+func appleContentRightsVerified(raw json.RawMessage, rights StoreContentRights) bool {
+	_, valid := appleContentRightsFromProvider(raw)
+	if !valid {
+		return false
+	}
+	return !rights.RightsConfirmed || appleContentRightsMatches(raw, rights)
 }
 
 func upsertAppleVersionLocalization(bound *sdk.BoundIntegration, versionID, locale string, loc StoreLocalization) (string, error) {

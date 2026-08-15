@@ -412,6 +412,9 @@ interface StoreConfigState {
   } | null;
   desired: StoreDocument;
   preflight: StorePreflight;
+  release?: Release;
+  review_outcome?: MobileReviewOutcome | null;
+  release_sync_error?: string;
 }
 
 interface StoreApplyResult {
@@ -2591,6 +2594,7 @@ function StoreListingDialog({
   const [reviewPassword, setReviewPassword] = useState("");
   const [hasConfig, setHasConfig] = useState(Boolean(initial.config));
   const [readiness, setReadiness] = useState(() => storeReadiness(initial.config?.observed_json));
+  const [reviewOutcome, setReviewOutcome] = useState<MobileReviewOutcome | null>(initial.review_outcome || null);
   const [ageJSON, setAgeJSON] = useState(
     JSON.stringify(initial.desired.classification.age_declaration || {}, null, 2),
   );
@@ -2644,6 +2648,7 @@ function StoreListingDialog({
     setDoc(structuredClone(next.desired));
     setPreflight(next.preflight);
     setReadiness(storeReadiness(next.config?.observed_json));
+	setReviewOutcome(next.review_outcome || null);
     setHasConfig(true);
     onSaved(next);
     return next;
@@ -2677,6 +2682,7 @@ function StoreListingDialog({
       setDoc(structuredClone(next.desired));
       setPreflight(next.preflight);
       setReadiness(storeReadiness(next.config?.observed_json));
+	  setReviewOutcome(next.review_outcome || null);
       onSaved(next);
     } catch (e) {
       setErr((e as Error).message);
@@ -2694,6 +2700,7 @@ function StoreListingDialog({
       setDoc(structuredClone(next.desired));
       setPreflight(next.preflight);
       setReadiness(storeReadiness(next.config?.observed_json));
+	  setReviewOutcome(next.review_outcome || null);
       onSaved(next);
     } catch (e) {
       setErr((e as Error).message);
@@ -2768,6 +2775,20 @@ function StoreListingDialog({
           <span className={`text-xs ${preflight.ready ? "text-green" : "text-yellow"}`}>
             {preflight.ready ? "Ready" : `${preflight.errors} blocking · ${preflight.warnings} warning`}
           </span>
+		  {reviewOutcome && (
+			<div className="basis-full flex flex-wrap items-center gap-2 text-xs text-text-dim">
+			  <span className={reviewOutcome.item_state === "REJECTED" ? "text-red" : "text-text-dim"}>
+				App Review: {reviewOutcome.item_state || reviewOutcome.submission_state || "unknown"}
+			  </span>
+			  {reviewOutcome.submitted_artifact_version && <span>reviewed build {reviewOutcome.submitted_artifact_version}</span>}
+			  {reviewOutcome.latest_artifact_version && reviewOutcome.latest_artifact_version !== reviewOutcome.submitted_artifact_version && (
+				<span className="text-yellow">latest build {reviewOutcome.latest_artifact_version}</span>
+			  )}
+			  {reviewOutcome.provider_console_url && (
+				<a href={reviewOutcome.provider_console_url} target="_blank" rel="noreferrer" className="text-accent hover:underline">Open App Store Connect</a>
+			  )}
+			</div>
+		  )}
           <button type="button" onClick={onClose} className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input">
             Close
           </button>

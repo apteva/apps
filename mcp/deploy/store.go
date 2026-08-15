@@ -873,6 +873,22 @@ func dbListReleasesForEnv(db *sql.DB, deploymentID, environmentID int64, limit i
 	return out, rows.Err()
 }
 
+func dbGetLatestMobileReleaseForChannel(db *sql.DB, deploymentID, environmentID int64, provider, channel string) (*Release, error) {
+	row := db.QueryRow(`SELECT `+releaseColumns+`
+		FROM releases
+		WHERE deployment_id = ?
+		  AND COALESCE(environment_id, 0) = ?
+		  AND provider = ?
+		  AND channel = ?
+		ORDER BY id DESC
+		LIMIT 1`, deploymentID, environmentID, provider, channel)
+	release, err := scanRelease(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return release, err
+}
+
 func dbListLiveReleases(db *sql.DB) ([]Release, error) {
 	rows, err := db.Query(`SELECT ` + releaseColumns + ` FROM releases WHERE provider = '' AND status IN ('starting','live') ORDER BY id`)
 	if err != nil {

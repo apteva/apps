@@ -149,4 +149,56 @@ func TestAppStoreVersionSyncRejectsMissingState(t *testing.T) {
 	}
 }
 
+func TestLatestProductionReleaseIsNotHiddenByNewerInternalBuilds(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"))
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "ios-history", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	build, err := dbCreateBuildForEnv(ctx.AppDB(), d.ID, env.ID, "ios", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	production, err := dbCreateReleaseForEnv(ctx.AppDB(), d.ID, env.ID, build.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbUpdateRelease(ctx.AppDB(), production.ID, map[string]any{
+		"provider": "app_store_connect", "channel": "production", "status": "failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		release, createErr := dbCreateReleaseForEnv(ctx.AppDB(), d.ID, env.ID, build.ID)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if updateErr := dbUpdateRelease(ctx.AppDB(), release.ID, map[string]any{
+			"provider": "app_store_connect", "channel": "internal", "status": "live",
+		}); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}
+
+	d.EnvironmentID = env.ID
+	got, err := latestProductionMobileRelease(ctx.AppDB(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.ID != production.ID {
+		t.Fatalf("release=%+v, want production %d", got, production.ID)
+	}
+	response := map[string]any{}
+	addMobileStoreReleaseState(response, got, nil)
+	if response["release"] == nil {
+		t.Fatalf("response=%#v", response)
+	}
+}
+
 var _ sdk.PlatformClient = (*iosPlatform)(nil)

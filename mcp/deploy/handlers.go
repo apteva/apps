@@ -122,7 +122,10 @@ func (a *App) httpDeploymentStoreConfig(w http.ResponseWriter, r *http.Request, 
 		}
 		preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, false)
 		appendProviderReadinessFindings(&preflight, d, cfg)
-		httpJSON(w, map[string]any{"config": cfg, "desired": doc, "preflight": preflight})
+		response := map[string]any{"config": cfg, "desired": doc, "preflight": preflight}
+		release, releaseErr := latestProductionMobileRelease(globalCtx.AppDB(), d)
+		addMobileStoreReleaseState(response, release, releaseErr)
+		httpJSON(w, response)
 	case http.MethodPut:
 		var body map[string]any
 		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err != nil {
@@ -231,7 +234,10 @@ func (a *App) httpDeploymentStoreSync(w http.ResponseWriter, r *http.Request, d 
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"config": cfg, "observed": observed})
+	response := map[string]any{"config": cfg, "observed": observed}
+	release, releaseErr := a.syncLatestProductionMobileRelease(d)
+	addMobileStoreReleaseState(response, release, releaseErr)
+	httpJSON(w, response)
 }
 
 func (a *App) httpDeploymentStoreAssets(w http.ResponseWriter, r *http.Request, d *Deployment) {

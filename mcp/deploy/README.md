@@ -104,6 +104,14 @@ Resolution Center message text, attachments, or replies, so those details
 remain provider-console actions. Google Play releases use the same sync tool
 and reconcile the published version code against the selected track.
 
+`deploy_store_sync` also refreshes the latest production release and returns
+the same provider-neutral `review_outcome`. This keeps review diagnostics
+visible when newer internal or TestFlight releases have displaced the
+production release from the normal recent-release list. A valid provider-side
+content-rights declaration satisfies legacy store documents that predate the
+local declaration field; explicitly confirmed desired values still require an
+exact provider match.
+
 Use `deploy_promote` to move the same Android version code or iOS build
 from a test channel to production without rebuilding. `deploy_rollout`
 changes a staged Google Play production fraction; `deploy_halt` halts a

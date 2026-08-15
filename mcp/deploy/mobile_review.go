@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -338,6 +339,41 @@ func releaseReviewOutcome(rel *Release) *mobileReviewOutcome {
 		return nil
 	}
 	return meta.ReviewOutcome
+}
+
+func latestProductionMobileRelease(db *sql.DB, d *Deployment) (*Release, error) {
+	if db == nil || d == nil {
+		return nil, nil
+	}
+	provider := mobileStoreProvider(d.TargetKind)
+	if provider == "" {
+		return nil, nil
+	}
+	return dbGetLatestMobileReleaseForChannel(db, d.ID, d.EnvironmentID, provider, "production")
+}
+
+func (a *App) syncLatestProductionMobileRelease(d *Deployment) (*Release, error) {
+	release, err := latestProductionMobileRelease(globalCtx.AppDB(), d)
+	if err != nil || release == nil {
+		return release, err
+	}
+	if err := a.syncMobileReleaseState(release); err != nil {
+		return release, err
+	}
+	return dbGetRelease(globalCtx.AppDB(), release.ID)
+}
+
+func addMobileStoreReleaseState(response map[string]any, release *Release, syncErr error) {
+	if response == nil {
+		return
+	}
+	if release != nil {
+		response["release"] = release
+		response["review_outcome"] = releaseReviewOutcome(release)
+	}
+	if syncErr != nil {
+		response["release_sync_error"] = syncErr.Error()
+	}
 }
 
 func (a *App) toolReleaseSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {

@@ -676,6 +676,38 @@ func TestAppleContentRightsUsesCanonicalDeclaration(t *testing.T) {
 	if appleContentRightsMatches(raw, rights) {
 		t.Fatal("mismatched Apple content-rights declaration was accepted")
 	}
+	providerRights, ok := appleContentRightsFromProvider(raw)
+	if !ok || providerRights["uses_third_party_content"] != true || providerRights["rights_confirmed"] != true {
+		t.Fatalf("provider rights=%#v valid=%t", providerRights, ok)
+	}
+	if !appleContentRightsVerified(raw, StoreContentRights{}) {
+		t.Fatal("valid provider declaration did not satisfy an unconfirmed legacy desired document")
+	}
+	if appleContentRightsVerified(raw, StoreContentRights{RightsConfirmed: true}) {
+		t.Fatal("provider declaration overrode a conflicting confirmed desired declaration")
+	}
+}
+
+func TestProviderContentRightsSatisfyLegacyDesiredDocument(t *testing.T) {
+	root := t.TempDir()
+	d := &Deployment{ID: 1, EnvironmentID: 2, TargetKind: "ios"}
+	doc := completeIOSStoreDocument()
+	doc.ContentRights = StoreContentRights{}
+	doc.Assets[0].Path = writeTestStorePNG(t, root, d, "shot", 1290, 2796, true)
+	cfg := &MobileStoreConfig{ObservedJSON: `{"readiness":{"content_rights":{"status":"verified"}}}`}
+
+	preflight := validateStoreDocument(root, d, nil, cfg, doc, true)
+	if hasStoreFinding(preflight, "content_rights.required") {
+		t.Fatalf("provider-confirmed rights remained blocked: %#v", preflight.Findings)
+	}
+}
+
+func TestInvalidProviderContentRightsRemainUnverified(t *testing.T) {
+	raw := json.RawMessage(`{"data":{"attributes":{"contentRightsDeclaration":""}}}`)
+	providerRights, ok := appleContentRightsFromProvider(raw)
+	if ok || providerRights["rights_confirmed"] != false {
+		t.Fatalf("provider rights=%#v valid=%t", providerRights, ok)
+	}
 }
 
 func TestExistingAppleVersionSettingsAreUpdatedAndVerified(t *testing.T) {

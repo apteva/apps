@@ -266,7 +266,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_store_sync", Handler: a.toolStoreSync,
-			Description: "Read the current listing state from App Store Connect or Google Play and persist a non-secret observed snapshot. Args: name OR id, environment?.",
+			Description: "Read the current listing state from App Store Connect or Google Play, persist a non-secret observed snapshot, and refresh the latest production release and provider review outcome. Args: name OR id, environment?.",
 			InputSchema: storeToolDeploymentSchema(nil),
 		},
 		{
@@ -927,11 +927,14 @@ func (a *App) toolStoreGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, false)
 	appendProviderReadinessFindings(&preflight, d, cfg)
-	return map[string]any{
+	response := map[string]any{
 		"deployment_id": d.ID, "environment_id": d.EnvironmentID,
 		"platform": d.TargetKind, "provider": mobileStoreProvider(d.TargetKind),
 		"config": cfg, "desired": doc, "preflight": preflight,
-	}, nil
+	}
+	release, releaseErr := latestProductionMobileRelease(globalCtx.AppDB(), d)
+	addMobileStoreReleaseState(response, release, releaseErr)
+	return response, nil
 }
 
 func (a *App) toolStoreUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1040,7 +1043,10 @@ func (a *App) toolStoreSync(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"config": cfg, "observed": observed}, nil
+	response := map[string]any{"config": cfg, "observed": observed}
+	release, releaseErr := a.syncLatestProductionMobileRelease(d)
+	addMobileStoreReleaseState(response, release, releaseErr)
+	return response, nil
 }
 
 func (a *App) toolStoreReleaseApproved(ctx *sdk.AppCtx, args map[string]any) (any, error) {

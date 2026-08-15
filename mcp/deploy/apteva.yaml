@@ -111,7 +111,7 @@ provides:
     - name: deploy_store_apply
       description: Reconcile selected listing scopes or individual media kinds transactionally with the bound store provider without submitting it.
     - name: deploy_store_sync
-      description: Read and persist the current provider listing state.
+      description: Read and persist provider listing state and refresh the latest production release outcome.
     - name: deploy_store_release_approved
       description: Release an Apple-approved version waiting for manual developer release.
     - name: deploy_distribution_status
