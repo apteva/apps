@@ -55,11 +55,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.74
+version: 0.7.75
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.74 keeps routine
-  browser opens minimal by making proxy and environment overrides explicitly
-  opt-in while tolerating serializer-filled defaults.
+  Watch, steer, and replay hosted browser sessions. v0.7.75 adds
+  outcome-specific waits, structured stability timeouts, guarded semantic
+  refreshes, and compact SoM observations for dynamic browser workflows.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
