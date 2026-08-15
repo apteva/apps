@@ -44,13 +44,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.9.1
+version: 0.9.2
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
   owns N orgs; each org has its own users, clients, signing keys, JWKS,
   and audit log. EdDSA JWTs, refresh-token rotation, email verification,
-  password reset, magic links, TOTP MFA.
+  password reset, magic links, TOTP MFA. Optional Apteva delegated tokens
+  are restricted to configured Channel Chat agents and OAuth client origins.
 author: Apteva
 scopes: [project]
 requires:
@@ -185,6 +186,64 @@ db:
   driver: sqlite
   path: /data/auth.db
   migrations: migrations/
+config_schema:
+  - name: app_url
+    type: text
+    label: Public app URL (override)
+    description: Optional. Used in JWT issuer, email links, and OAuth redirects. Leave blank to auto-derive from the platform's public URL; set this only when this auth install fronts a custom domain different from apteva-server. e.g. https://app.example.com
+  - name: from_email
+    type: text
+    label: Outbound from-address
+    description: Sender address for transactional email (verify, reset, magic-link). Configure a Messaging-verified address for production portals. When omitted, links are written to the audit log for local development only.
+  - name: jwt_access_ttl_seconds
+    type: text
+    default: "900"
+    label: Access token TTL (seconds)
+    description: Default 15 minutes. Per-client overrides supported.
+  - name: jwt_refresh_ttl_days
+    type: text
+    default: "30"
+    label: Refresh token TTL (days)
+    description: Default 30. Per-client overrides supported.
+  - name: password_min_length
+    type: text
+    default: "8"
+    label: Password minimum length
+    description: Minimum character count for new passwords. Default 8.
+  - name: password_classes_required
+    type: text
+    default: "0"
+    label: Password classes required
+    description: Of [lower, upper, digit, symbol], how many must appear. 0–4. Default 0 (no character-class requirement).
+  - name: lockout_threshold
+    type: text
+    default: "5"
+    label: Failed-login lockout threshold
+    description: Consecutive failures before the account locks. 0 disables lockout.
+  - name: lockout_initial_minutes
+    type: text
+    default: "15"
+    label: Initial lockout duration (minutes)
+    description: Doubles on each subsequent lockout while the failure streak persists.
+  - name: email_verification_required
+    type: text
+    default: "true"
+    label: Require verified email to log in
+    description: When true, /login refuses unverified accounts. true | false.
+  - name: magic_link_enabled
+    type: text
+    default: "true"
+    label: Enable magic-link login
+    description: Allows /magic-link/request — passwordless login by emailed token. true | false.
+  - name: apteva_chat_agent_ids
+    type: text
+    label: Delegated Channel Chat agent IDs
+    description: Optional comma-separated positive agent IDs. When configured, Auth can return a least-privilege apteva_access_token for Channel Chat using each OAuth client's allowed_origins. When empty, or when the client has no allowed origins, normal Auth sessions continue without an Apteva delegated token.
+  - name: apteva_token_ttl_seconds
+    type: text
+    default: "3600"
+    label: Delegated token TTL (seconds)
+    description: Lifetime requested for optional Apteva delegated tokens. The platform may enforce a lower maximum.
 upgrade_policy: auto-patch
 `
 

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: auth
 display_name: Auth
-version: 0.9.1
+version: 0.9.2
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One auth install
@@ -15,9 +15,9 @@ description: |
   URL changes from v0.3); the dashboard renders a consolidated AuthPanel
   with OrgSwitcher.
 
-  v0.9.0 adds complete public email-verification and password-reset
-  routes, client-bound recovery links, and transactional delivery through
-  Messaging for branded customer portals.
+  v0.9.2 restricts optional Apteva delegated tokens to Channel Chat,
+  propagates the OAuth client's trusted browser origins, and requires an
+  explicit agent allowlist. Existing identity and RBAC sessions are unchanged.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/auth
@@ -217,5 +217,14 @@ config_schema:
     default: "true"
     label: Enable magic-link login
     description: Allows /magic-link/request — passwordless login by emailed token. true | false.
+  - name: apteva_chat_agent_ids
+    type: text
+    label: Delegated Channel Chat agent IDs
+    description: Optional comma-separated positive agent IDs. When configured, Auth can return a least-privilege apteva_access_token for Channel Chat using each OAuth client's allowed_origins. When empty, or when the client has no allowed origins, normal Auth sessions continue without an Apteva delegated token.
+  - name: apteva_token_ttl_seconds
+    type: text
+    default: "3600"
+    label: Delegated token TTL (seconds)
+    description: Lifetime requested for optional Apteva delegated tokens. The platform may enforce a lower maximum.
 
 upgrade_policy: auto-patch

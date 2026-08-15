@@ -274,7 +274,7 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, org, user)
+	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, org, user, client)
 	if err != nil {
 		ctx.Logger().Warn("delegated user token mint failed", "err", err)
 		aptevaToken = nil
@@ -402,7 +402,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, org, user)
+	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, org, user, client)
 	if err != nil {
 		ctx.Logger().Warn("delegated user token mint failed", "err", err)
 		aptevaToken = nil
@@ -524,7 +524,7 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, org, user)
+	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, org, user, client)
 	if err != nil {
 		ctx.Logger().Warn("delegated user token mint failed", "err", err)
 		aptevaToken = nil

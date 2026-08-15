@@ -64,6 +64,11 @@ func TestManifest_OnDiskMatchesEmbedded(t *testing.T) {
 	if !equalStrSlices(dr, er) {
 		t.Errorf("http route drift\ndisk: %v\nembd: %v", dr, er)
 	}
+	dc := configSpecs(mDisk.ConfigSchema)
+	ec := configSpecs(mEmb.ConfigSchema)
+	if !equalStrSlices(dc, ec) {
+		t.Errorf("config schema drift\ndisk: %v\nembd: %v", dc, ec)
+	}
 }
 
 func TestManifest_PublicRoutesAreNoAuth(t *testing.T) {
@@ -144,6 +149,15 @@ func routeSpecs(routes []sdk.RouteSpec) []string {
 			auth = "noauth"
 		}
 		out[i] = r.Method + " " + r.Prefix + " " + auth
+	}
+	sort.Strings(out)
+	return out
+}
+
+func configSpecs(fields []sdk.ConfigField) []string {
+	out := make([]string, len(fields))
+	for i, field := range fields {
+		out[i] = field.Name + "\x00" + field.Type + "\x00" + field.Default + "\x00" + field.Label + "\x00" + field.Description
 	}
 	sort.Strings(out)
 	return out

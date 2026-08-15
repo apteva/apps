@@ -1,4 +1,4 @@
-# Auth (v0.9.0)
+# Auth (v0.9.2)
 
 Identity and authorization layer for Apteva-deployed SaaS. One project-scoped
 install owns multiple organizations; each has isolated users, clients, signing
@@ -32,6 +32,26 @@ manages role assignments. The equivalent MCP tools are
 `auth_roles_{list,create,update,delete}`,
 `auth_permissions_{list,create,update,delete}`,
 `auth_role_permissions_set`, and `auth_user_roles_set`.
+
+## Optional delegated Channel Chat access
+
+Auth can also return an `apteva_access_token` alongside its own identity token.
+This is opt-in: configure `apteva_chat_agent_ids` as a comma-separated list of
+positive agent IDs and add at least one `allowed_origin` to the OAuth client.
+Auth then asks the platform for a delegated token containing:
+
+- the authenticated user and organization identity;
+- the OAuth client's complete validated `allowed_origins` list;
+- one `channel-chat` scope with only the Chat, message, and stream actions the
+  web SDK needs; and
+- only the configured agent IDs.
+
+Auth never derives these grants from user-editable metadata and never falls
+back to wildcard app or action access. If agent IDs or client origins are not
+configured—or if the platform mint callback is unavailable—the Auth signup,
+login, refresh, password-reset, and email-verification flows still succeed and
+simply omit `apteva_access_token`. This behavior is independent of organization
+RBAC: existing users with no roles continue to authenticate normally.
 
 ## Pipeline of an Apteva-deployed SaaS
 

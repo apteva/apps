@@ -175,7 +175,7 @@ func mintPublicAuthResponse(ctx *sdk.AppCtx, pid string, org *Organization, user
 		"user": user, "authorization": tokens.authorization, "access_token": tokens.access,
 		"refresh_token": tokens.refresh, "expires_in": tokens.expiresIn, "token_type": "Bearer",
 	}
-	delegated, err := mintAptevaDelegatedToken(ctx, pid, org, user)
+	delegated, err := mintAptevaDelegatedToken(ctx, pid, org, user, client)
 	if err != nil {
 		ctx.Logger().Warn("delegated user token mint failed", "err", err)
 	} else if delegated != nil {
