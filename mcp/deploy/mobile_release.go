@@ -857,28 +857,30 @@ func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Rele
 	})
 	status := "ready_for_review"
 	if meta.SubmitForReview {
-		submissionID, itemAttached, err := ensureAppleReviewSubmission(bound, meta.AppID, versionID)
+		submission, err := ensureAppleReviewSubmission(bound, meta.AppID, versionID)
 		if err != nil {
 			return err
 		}
-		meta.ReviewSubmissionID = submissionID
+		meta.ReviewSubmissionID = submission.ID
 		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
 			"external_status": "validating_submission", "release_meta_json": mustJSON(meta),
 		})
-		if !itemAttached {
-			if _, err := executeIntegration(bound, "create_review_submission_item", map[string]any{"submission_id": submissionID, "version_id": versionID}); err != nil {
+		if !submission.ItemAttached {
+			if _, err := executeIntegration(bound, "create_review_submission_item", map[string]any{"submission_id": submission.ID, "version_id": versionID}); err != nil {
 				return wrapProviderCommitValidationError("app_store_connect", "store_submission", "create_review_submission_item", err)
 			}
 		}
-		if _, err := executeIntegration(bound, "submit_review_submission", map[string]any{"submission_id": submissionID, "submitted": true}); err != nil {
-			return wrapProviderCommitValidationError("app_store_connect", "store_submission", "submit_review_submission", err)
+		if submission.NeedsSubmit {
+			if _, err := executeIntegration(bound, "submit_review_submission", map[string]any{"submission_id": submission.ID, "submitted": true}); err != nil {
+				return wrapProviderCommitValidationError("app_store_connect", "store_submission", "submit_review_submission", err)
+			}
 		}
 		if meta.ProviderValidations == nil {
 			meta.ProviderValidations = map[string]providerValidationEvidence{}
 		}
 		evidence := providerValidationEvidence{
 			Provider: "app_store_connect", Requirement: "app_privacy", Action: "submit_review_submission",
-			Status: "accepted", ExternalID: submissionID, VersionName: meta.VersionName, ValidatedAt: nowUTC(),
+			Status: "accepted", ExternalID: submission.ID, VersionName: meta.VersionName, ValidatedAt: nowUTC(),
 		}
 		meta.ProviderValidations["app_privacy"] = evidence
 		if err := recordStoreProviderValidation(rel, "ios", evidence); err != nil {
@@ -893,31 +895,38 @@ func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Rele
 	return nil
 }
 
-func ensureAppleReviewSubmission(bound *sdk.BoundIntegration, appID, versionID string) (string, bool, error) {
+type appleReviewSubmissionSelection struct {
+	ID           string
+	ItemAttached bool
+	NeedsSubmit  bool
+	State        string
+}
+
+func ensureAppleReviewSubmission(bound *sdk.BoundIntegration, appID, versionID string) (appleReviewSubmissionSelection, error) {
 	listed, err := executeIntegration(bound, "list_review_submissions", map[string]any{
-		"app_id": appID, "platform": "IOS", "state": "READY_FOR_REVIEW",
+		"app_id": appID, "platform": "IOS",
 		"include": "items,appStoreVersionForReview", "limit": 200, "limit_items": 50,
 	})
 	if err != nil {
-		return "", false, err
+		return appleReviewSubmissionSelection{}, err
 	}
-	if submissionID, itemAttached, conflictingID := reusableAppleReviewSubmission(listed, versionID); submissionID != "" {
-		return submissionID, itemAttached, nil
+	if submission, conflictingID := reusableAppleReviewSubmission(listed, versionID); submission.ID != "" {
+		return submission, nil
 	} else if conflictingID != "" {
-		return "", false, fmt.Errorf("App Store Connect draft review submission %s already contains another version", conflictingID)
+		return appleReviewSubmissionSelection{}, fmt.Errorf("App Store Connect active review submission %s already contains another version", conflictingID)
 	}
 	created, err := executeIntegration(bound, "create_review_submission", map[string]any{"app_id": appID, "platform": "IOS"})
 	if err != nil {
-		return "", false, err
+		return appleReviewSubmissionSelection{}, err
 	}
 	submissionID := jsonStringAt(created, "data", "id")
 	if submissionID == "" {
-		return "", false, errors.New("review submission response missing id")
+		return appleReviewSubmissionSelection{}, errors.New("review submission response missing id")
 	}
-	return submissionID, false, nil
+	return appleReviewSubmissionSelection{ID: submissionID, NeedsSubmit: true, State: "READY_FOR_REVIEW"}, nil
 }
 
-func reusableAppleReviewSubmission(raw json.RawMessage, versionID string) (string, bool, string) {
+func reusableAppleReviewSubmission(raw json.RawMessage, versionID string) (appleReviewSubmissionSelection, string) {
 	type relationshipData struct {
 		ID string `json:"id"`
 	}
@@ -933,8 +942,11 @@ func reusableAppleReviewSubmission(raw json.RawMessage, versionID string) (strin
 		} `json:"items"`
 	}
 	type resource struct {
-		ID            string        `json:"id"`
-		Type          string        `json:"type"`
+		ID         string `json:"id"`
+		Type       string `json:"type"`
+		Attributes struct {
+			State string `json:"state"`
+		} `json:"attributes"`
 		Relationships relationships `json:"relationships"`
 	}
 	var payload struct {
@@ -942,7 +954,7 @@ func reusableAppleReviewSubmission(raw json.RawMessage, versionID string) (strin
 		Included []resource `json:"included"`
 	}
 	if json.Unmarshal(raw, &payload) != nil {
-		return "", false, ""
+		return appleReviewSubmissionSelection{}, ""
 	}
 	itemVersions := map[string]string{}
 	for _, item := range payload.Included {
@@ -951,24 +963,49 @@ func reusableAppleReviewSubmission(raw json.RawMessage, versionID string) (strin
 		}
 	}
 	conflictingID := ""
+	var emptyDraft appleReviewSubmissionSelection
 	for _, submission := range payload.Data {
+		state := strings.ToUpper(strings.TrimSpace(submission.Attributes.State))
+		if !reusableAppleReviewSubmissionState(state) {
+			continue
+		}
+		selection := appleReviewSubmissionSelection{
+			ID: submission.ID, State: state, NeedsSubmit: state == "" || state == "READY_FOR_REVIEW" || state == "UNRESOLVED_ISSUES",
+		}
 		if submission.Relationships.AppStoreVersionForReview.Data.ID == versionID {
-			return submission.ID, true, ""
+			selection.ItemAttached = true
+			return selection, ""
 		}
 		items := submission.Relationships.Items.Data
 		for _, item := range items {
 			if itemVersions[item.ID] == versionID {
-				return submission.ID, true, ""
+				selection.ItemAttached = true
+				return selection, ""
 			}
 		}
-		if len(items) == 0 {
-			return submission.ID, false, ""
+		if len(items) == 0 && (state == "" || state == "READY_FOR_REVIEW") {
+			if emptyDraft.ID == "" {
+				emptyDraft = selection
+			}
+			continue
 		}
 		if conflictingID == "" {
 			conflictingID = submission.ID
 		}
 	}
-	return "", false, conflictingID
+	if emptyDraft.ID != "" {
+		return emptyDraft, ""
+	}
+	return appleReviewSubmissionSelection{}, conflictingID
+}
+
+func reusableAppleReviewSubmissionState(state string) bool {
+	switch state {
+	case "", "READY_FOR_REVIEW", "UNRESOLVED_ISSUES", "WAITING_FOR_REVIEW", "IN_REVIEW":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *App) syncAppStoreVersionState(bound *sdk.BoundIntegration, rel *Release, meta *mobileReleaseMeta) error {

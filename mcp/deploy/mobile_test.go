@@ -510,6 +510,79 @@ func TestIOSProductionReleaseReusesCompatibleReviewDraft(t *testing.T) {
 	}
 }
 
+func TestIOSProductionReleaseResubmitsRejectedVersionWithNewBuild(t *testing.T) {
+	platform := &iosPlatform{reviewSubmissions: json.RawMessage(`{"data":[{"type":"reviewSubmissions","id":"review-rejected","attributes":{"state":"UNRESOLVED_ISSUES"},"relationships":{"items":{"data":[{"type":"reviewSubmissionItems","id":"item-existing"}]},"appStoreVersionForReview":{"data":{"type":"appStoreVersions","id":"version-1"}}}}],"included":[{"type":"reviewSubmissionItems","id":"item-existing","attributes":{"state":"REJECTED"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}]}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+	d, _ := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "ios-review-resubmit", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	build, _ := dbCreateBuildForEnv(ctx.AppDB(), d.ID, env.ID, "ios", "")
+	release, _ := dbCreateReleaseForEnv(ctx.AppDB(), d.ID, env.ID, build.ID)
+	meta := mobileReleaseMeta{
+		Platform: "ios", AppID: "app-1", AppStoreVersionID: "version-1",
+		VersionName: "1.0", BuildNumber: "23", SubmitForReview: true,
+	}
+	bound := &sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}
+	if err := (&App{}).prepareIOSProductionRelease(bound, release, "build-23", &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.ReviewSubmissionID != "review-rejected" {
+		t.Fatalf("submission=%q", meta.ReviewSubmissionID)
+	}
+	if countIntegrationCalls(platform.calls, "create_review_submission") != 0 || countIntegrationCalls(platform.calls, "create_review_submission_item") != 0 {
+		t.Fatalf("resubmission created duplicate review resources: %#v", platform.calls)
+	}
+	if countIntegrationCalls(platform.calls, "submit_review_submission") != 1 {
+		t.Fatalf("rejected submission was not resubmitted: %#v", platform.calls)
+	}
+	setBuildIndex, submitIndex := -1, -1
+	for i, call := range platform.calls {
+		switch call.Tool {
+		case "set_app_version_build":
+			setBuildIndex = i
+			body, _ := call.Input["body"].(map[string]any)
+			data, _ := body["data"].(map[string]any)
+			if data["id"] != "build-23" {
+				t.Fatalf("selected build=%#v", data["id"])
+			}
+		case "submit_review_submission":
+			submitIndex = i
+		}
+	}
+	if setBuildIndex < 0 || submitIndex < 0 || setBuildIndex >= submitIndex {
+		t.Fatalf("build must be selected before resubmission: %#v", platform.calls)
+	}
+}
+
+func TestIOSProductionReleaseRetryIsIdempotentWhileWaitingForReview(t *testing.T) {
+	platform := &iosPlatform{reviewSubmissions: json.RawMessage(`{"data":[{"type":"reviewSubmissions","id":"review-waiting","attributes":{"state":"WAITING_FOR_REVIEW"},"relationships":{"appStoreVersionForReview":{"data":{"type":"appStoreVersions","id":"version-1"}},"items":{"data":[{"type":"reviewSubmissionItems","id":"item-existing"}]}}}],"included":[{"type":"reviewSubmissionItems","id":"item-existing","relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}]}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+	d, _ := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "ios-review-idempotent", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	build, _ := dbCreateBuildForEnv(ctx.AppDB(), d.ID, env.ID, "ios", "")
+	release, _ := dbCreateReleaseForEnv(ctx.AppDB(), d.ID, env.ID, build.ID)
+	meta := mobileReleaseMeta{
+		Platform: "ios", AppID: "app-1", AppStoreVersionID: "version-1",
+		VersionName: "1.0", BuildNumber: "23", SubmitForReview: true,
+	}
+	bound := &sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}
+	if err := (&App{}).prepareIOSProductionRelease(bound, release, "build-23", &meta); err != nil {
+		t.Fatal(err)
+	}
+	if countIntegrationCalls(platform.calls, "create_review_submission") != 0 || countIntegrationCalls(platform.calls, "create_review_submission_item") != 0 || countIntegrationCalls(platform.calls, "submit_review_submission") != 0 {
+		t.Fatalf("idempotent retry mutated review resources: %#v", platform.calls)
+	}
+}
+
 func TestMobileRetentionPinsOnlyUploadProcessing(t *testing.T) {
 	db := openSchemaDB(t)
 	defer db.Close()

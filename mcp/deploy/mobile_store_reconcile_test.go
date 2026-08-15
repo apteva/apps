@@ -1028,16 +1028,24 @@ func TestProviderValidationPreservesAssociatedErrors(t *testing.T) {
 
 func TestReusableAppleReviewSubmissionPrefersMatchingOrEmptyDraft(t *testing.T) {
 	matching := json.RawMessage(`{"data":[{"type":"reviewSubmissions","id":"draft-1","relationships":{"items":{"data":[{"type":"reviewSubmissionItems","id":"item-1"}]}}}],"included":[{"type":"reviewSubmissionItems","id":"item-1","relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}]}`)
-	if id, attached, conflict := reusableAppleReviewSubmission(matching, "version-1"); id != "draft-1" || !attached || conflict != "" {
-		t.Fatalf("matching draft id=%q attached=%v conflict=%q", id, attached, conflict)
+	if submission, conflict := reusableAppleReviewSubmission(matching, "version-1"); submission.ID != "draft-1" || !submission.ItemAttached || !submission.NeedsSubmit || conflict != "" {
+		t.Fatalf("matching draft=%+v conflict=%q", submission, conflict)
 	}
 	empty := json.RawMessage(`{"data":[{"type":"reviewSubmissions","id":"draft-empty","relationships":{"items":{"data":[]}}}]}`)
-	if id, attached, conflict := reusableAppleReviewSubmission(empty, "version-1"); id != "draft-empty" || attached || conflict != "" {
-		t.Fatalf("empty draft id=%q attached=%v conflict=%q", id, attached, conflict)
+	if submission, conflict := reusableAppleReviewSubmission(empty, "version-1"); submission.ID != "draft-empty" || submission.ItemAttached || !submission.NeedsSubmit || conflict != "" {
+		t.Fatalf("empty draft=%+v conflict=%q", submission, conflict)
 	}
 	conflicting := json.RawMessage(`{"data":[{"type":"reviewSubmissions","id":"draft-other","relationships":{"items":{"data":[{"type":"reviewSubmissionItems","id":"item-2"}]}}}],"included":[{"type":"reviewSubmissionItems","id":"item-2","relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-2"}}}}]}`)
-	if id, attached, conflict := reusableAppleReviewSubmission(conflicting, "version-1"); id != "" || attached || conflict != "draft-other" {
-		t.Fatalf("conflicting draft id=%q attached=%v conflict=%q", id, attached, conflict)
+	if submission, conflict := reusableAppleReviewSubmission(conflicting, "version-1"); submission.ID != "" || submission.ItemAttached || conflict != "draft-other" {
+		t.Fatalf("conflicting draft=%+v conflict=%q", submission, conflict)
+	}
+}
+
+func TestReusableAppleReviewSubmissionIgnoresCompletedHistory(t *testing.T) {
+	raw := json.RawMessage(`{"data":[{"type":"reviewSubmissions","id":"complete-old","attributes":{"state":"COMPLETE"},"relationships":{"items":{"data":[{"type":"reviewSubmissionItems","id":"item-old"}]}}},{"type":"reviewSubmissions","id":"empty-draft","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"items":{"data":[]}}},{"type":"reviewSubmissions","id":"rejected-current","attributes":{"state":"UNRESOLVED_ISSUES"},"relationships":{"items":{"data":[{"type":"reviewSubmissionItems","id":"item-current"}]}}}],"included":[{"type":"reviewSubmissionItems","id":"item-old","relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-old"}}}},{"type":"reviewSubmissionItems","id":"item-current","relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}]}`)
+	submission, conflict := reusableAppleReviewSubmission(raw, "version-1")
+	if submission.ID != "rejected-current" || !submission.ItemAttached || !submission.NeedsSubmit || submission.State != "UNRESOLVED_ISSUES" || conflict != "" {
+		t.Fatalf("submission=%+v conflict=%q", submission, conflict)
 	}
 }
 
