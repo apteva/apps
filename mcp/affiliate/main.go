@@ -1,14 +1,17 @@
 // Apteva Affiliate app — publisher-side affiliate manager.
 //
-// The app owns a small normalized model: networks, offers, links, and
+// The app owns a small normalized model: networks, offers, products, links, and
 // daily stats. Provider-specific connectors stay as integrations; this
 // app executes their tools through bound integration roles.
 package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	_ "embed"
+	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +31,7 @@ import (
 const legacyManifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.14
+version: 0.2.0
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -99,6 +102,16 @@ provides:
       description: Refresh offers and/or stats from a network dependency.
     - name: affiliate_offers
       description: Search offers.
+    - name: affiliate_products
+      description: Search normalized physical products.
+    - name: affiliate_product_create
+      description: Create or update a manual affiliate product.
+    - name: affiliate_product_get
+      description: Get one affiliate product by ID.
+    - name: affiliate_product_update
+      description: Update a manual affiliate product.
+    - name: affiliate_product_archive
+      description: Archive a manual affiliate product.
     - name: affiliate_link_create
       description: Create a monetized link.
     - name: affiliate_links
@@ -181,9 +194,10 @@ upgrade_policy: auto-patch
 var manifestYAML []byte
 
 const (
-	automaticStatsRefreshSchedule  = "@every 6h"
-	automaticOffersRefreshSchedule = "@every 24h"
-	automaticStatsWindowDays       = 7
+	automaticStatsRefreshSchedule    = "@every 6h"
+	automaticOffersRefreshSchedule   = "@every 24h"
+	automaticProductsRefreshSchedule = "@every 24h"
+	automaticStatsWindowDays         = 7
 )
 
 type App struct {
@@ -213,6 +227,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/networks", Handler: a.handleNetworks},
 		{Pattern: "/refresh", Handler: a.handleRefresh},
 		{Pattern: "/offers", Handler: a.handleOffers},
+		{Pattern: "/products", Handler: a.handleProducts},
+		{Pattern: "/products/", Handler: a.handleProduct},
 		{Pattern: "/links", Handler: a.handleLinks},
 		{Pattern: "/stats", Handler: a.handleStats},
 	}
@@ -230,12 +246,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "affiliate_refresh",
-			Description: "Refresh offers and/or stats from a bound provider integration. " +
-				"Args: network (req: target-circle|impact|awin|cj-affiliate|amazon-associates|skimlinks|sovrn|partnerstack|shareasale), " +
-				"kind? (offers|stats|all, default all), from?, to?, plus provider IDs such as publisherId, requestor-cid, website-id, partnerTag, campaignId, keywords.",
+			Description: "Refresh offers, products, and/or stats from a bound provider integration. " +
+				"Args: network (req), kind? (offers|products|stats|all, default all), from?, to?, plus provider-specific search and account fields.",
 			InputSchema: schemaObject(map[string]any{
 				"network":       map[string]any{"type": "string"},
-				"kind":          map[string]any{"type": "string", "enum": []string{"offers", "stats", "all"}},
+				"kind":          map[string]any{"type": "string", "enum": []string{"offers", "products", "stats", "all"}},
 				"from":          map[string]any{"type": "string"},
 				"to":            map[string]any{"type": "string"},
 				"publisherId":   map[string]any{"type": "string"},
@@ -244,6 +259,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"partnerTag":    map[string]any{"type": "string"},
 				"campaignId":    map[string]any{"type": "string"},
 				"keywords":      map[string]any{"type": "string"},
+				"q":             map[string]any{"type": "string"},
+				"feedId":        map[string]any{"type": "integer"},
+				"feedIds":       map[string]any{"type": "string"},
+				"language":      map[string]any{"type": "string"},
+				"category_ids":  map[string]any{"type": "string"},
+				"gtin":          map[string]any{"type": "string"},
+				"epid":          map[string]any{"type": "string"},
+				"mid":           map[string]any{"type": "integer"},
+				"cat":           map[string]any{"type": "string"},
+				"brand":         map[string]any{"type": "string"},
+				"browseNodeId":  map[string]any{"type": "string"},
 			}, []string{"network"}),
 			Handler: a.toolRefresh,
 		},
@@ -260,14 +286,55 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolOffers,
 		},
 		{
+			Name:        "affiliate_products",
+			Description: "Search normalized physical products with total-count pagination. Archived products are hidden by default. Args: q?, network?, merchant?, category?, availability?, source?, status? (active|archived|all), limit?, offset?.",
+			InputSchema: schemaObject(map[string]any{
+				"q":            map[string]any{"type": "string"},
+				"network":      map[string]any{"type": "string"},
+				"merchant":     map[string]any{"type": "string"},
+				"category":     map[string]any{"type": "string"},
+				"availability": map[string]any{"type": "string"},
+				"source":       map[string]any{"type": "string", "enum": []string{"provider", "manual"}},
+				"status":       map[string]any{"type": "string", "enum": []string{"active", "archived", "all"}},
+				"limit":        map[string]any{"type": "integer"},
+				"offset":       map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolProducts,
+		},
+		{
+			Name:        "affiliate_product_create",
+			Description: "Create or update a manual affiliate product. Amazon products can be created from an ASIN or Amazon URL and partner tag without Creators API access. Other networks require destination_url and affiliate_url.",
+			InputSchema: manualProductSchema([]string{"network", "name"}),
+			Handler:     a.toolProductCreate,
+		},
+		{
+			Name:        "affiliate_product_get",
+			Description: "Get one affiliate product by ID, including archived products.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
+			Handler:     a.toolProductGet,
+		},
+		{
+			Name:        "affiliate_product_update",
+			Description: "Update an existing manual affiliate product. Provider-synced products are read-only.",
+			InputSchema: manualProductSchema([]string{"id"}),
+			Handler:     a.toolProductUpdate,
+		},
+		{
+			Name:        "affiliate_product_archive",
+			Description: "Archive a manual affiliate product. Existing managed links and stats remain intact.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
+			Handler:     a.toolProductArchive,
+		},
+		{
 			Name: "affiliate_link_create",
-			Description: "Create a monetized link. If affiliate_url is absent, calls the configured provider integration. " +
+			Description: "Create a monetized link from product_id, or from a URL plus an offer/network. If affiliate_url is absent, uses the product catalog URL or calls the configured provider integration. " +
 				"If shorten=true, calls redirects.redirect_add with short_hostname/default_short_hostname and short_path. " +
-				"Args: url (req), network?, offer_id?, affiliate_url?, campaign?, subid?, shorten?, short_hostname?, short_path?, plus provider IDs such as publisherId, website-id, partnerTag, adInventorySid.",
+				"Args: product_id?, url?, network?, offer_id?, affiliate_url?, campaign?, subid?, shorten?, short_hostname?, short_path?, plus provider-specific IDs.",
 			InputSchema: schemaObject(map[string]any{
 				"url":            map[string]any{"type": "string"},
 				"network":        map[string]any{"type": "string"},
 				"offer_id":       map[string]any{"type": "integer"},
+				"product_id":     map[string]any{"type": "integer"},
 				"affiliate_url":  map[string]any{"type": "string"},
 				"campaign":       map[string]any{"type": "string"},
 				"subid":          map[string]any{"type": "string"},
@@ -280,33 +347,35 @@ func (a *App) MCPTools() []sdk.Tool {
 				"marketplace":    map[string]any{"type": "string"},
 				"adInventorySid": map[string]any{"type": "string"},
 				"asin":           map[string]any{"type": "string"},
-			}, []string{"url"}),
+			}, nil),
 			Handler: a.toolLinkCreate,
 		},
 		{
 			Name:        "affiliate_links",
 			Description: "Search managed links with total-count pagination. Args: q?, network?, offer_id?, status?, limit? (default 50), offset?.",
 			InputSchema: schemaObject(map[string]any{
-				"q":        map[string]any{"type": "string"},
-				"network":  map[string]any{"type": "string"},
-				"offer_id": map[string]any{"type": "integer"},
-				"status":   map[string]any{"type": "string"},
-				"limit":    map[string]any{"type": "integer"},
-				"offset":   map[string]any{"type": "integer"},
+				"q":          map[string]any{"type": "string"},
+				"network":    map[string]any{"type": "string"},
+				"offer_id":   map[string]any{"type": "integer"},
+				"product_id": map[string]any{"type": "integer"},
+				"status":     map[string]any{"type": "string"},
+				"limit":      map[string]any{"type": "integer"},
+				"offset":     map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolLinks,
 		},
 		{
 			Name: "affiliate_stats",
-			Description: "Read normalized affiliate stats. Top-level clicks is the total; stats contains the grouped breakdown. Args: from?, to? (YYYY-MM-DD or RFC3339), network?, offer_id?, link_id?, " +
-				"group_by? (network|offer|link|day, default day).",
+			Description: "Read normalized affiliate stats. Top-level clicks is the total; stats contains the grouped breakdown. Args: from?, to? (YYYY-MM-DD or RFC3339), network?, offer_id?, product_id?, link_id?, " +
+				"group_by? (network|offer|product|link|day, default day).",
 			InputSchema: schemaObject(map[string]any{
-				"from":     map[string]any{"type": "string"},
-				"to":       map[string]any{"type": "string"},
-				"network":  map[string]any{"type": "string"},
-				"offer_id": map[string]any{"type": "integer"},
-				"link_id":  map[string]any{"type": "integer"},
-				"group_by": map[string]any{"type": "string", "enum": []string{"network", "offer", "link", "day"}},
+				"from":       map[string]any{"type": "string"},
+				"to":         map[string]any{"type": "string"},
+				"network":    map[string]any{"type": "string"},
+				"offer_id":   map[string]any{"type": "integer"},
+				"product_id": map[string]any{"type": "integer"},
+				"link_id":    map[string]any{"type": "integer"},
+				"group_by":   map[string]any{"type": "string", "enum": []string{"network", "offer", "product", "link", "day"}},
 			}, nil),
 			Handler: a.toolStats,
 		},
@@ -339,6 +408,13 @@ func (a *App) Workers() []sdk.Worker {
 				return a.runAutomaticRefresh(ctx, app, "offers", "", "")
 			},
 		},
+		{
+			Name:     "affiliate-products-refresh",
+			Schedule: automaticProductsRefreshSchedule,
+			Run: func(ctx context.Context, app *sdk.AppCtx) error {
+				return a.runAutomaticRefresh(ctx, app, "products", "", "")
+			},
+		},
 	}
 }
 
@@ -363,7 +439,7 @@ func (a *App) runAutomaticRefresh(ctx context.Context, app *sdk.AppCtx, kind, fr
 
 	var refreshErrors []error
 	for _, capability := range providerCapabilities {
-		if (kind == "stats" && !capability.Stats) || (kind == "offers" && !capability.Offers) {
+		if (kind == "stats" && !capability.Stats) || (kind == "offers" && !capability.Offers) || (kind == "products" && !capability.Products) {
 			continue
 		}
 		if network, exists := byKey[capability.Key]; exists && !network.Enabled {
@@ -387,6 +463,7 @@ func (a *App) runAutomaticRefresh(ctx context.Context, app *sdk.AppCtx, kind, fr
 			"network", capability.Key,
 			"kind", kind,
 			"offers", summary.OffersUpserted,
+			"products", summary.ProductsUpserted,
 			"links", summary.LinksUpserted,
 			"stat_rows", summary.StatsDaysUpserted)
 	}
@@ -495,28 +572,30 @@ func (a *App) reconcileRedirectClicks(ctx context.Context, app *sdk.AppCtx, from
 }
 
 type Network struct {
-	ID              int64  `json:"id"`
-	Key             string `json:"key"`
-	Name            string `json:"name"`
-	Enabled         bool   `json:"enabled"`
-	Bound           bool   `json:"bound"`
-	SupportsOffers  bool   `json:"supports_offers"`
-	SupportsStats   bool   `json:"supports_stats"`
-	SupportsLinks   bool   `json:"supports_links"`
-	SupportsClicks  bool   `json:"supports_clicks"`
-	StatsNeedsDates bool   `json:"stats_needs_dates"`
-	StatsMode       string `json:"stats_mode,omitempty"`
-	LinkMode        string `json:"link_mode,omitempty"`
-	ConnectionRef   string `json:"connection_ref,omitempty"`
-	LastRefreshedAt string `json:"last_refreshed_at,omitempty"`
-	MetadataJSON    string `json:"metadata_json,omitempty"`
-	CreatedAt       string `json:"created_at,omitempty"`
-	UpdatedAt       string `json:"updated_at,omitempty"`
+	ID               int64  `json:"id"`
+	Key              string `json:"key"`
+	Name             string `json:"name"`
+	Enabled          bool   `json:"enabled"`
+	Bound            bool   `json:"bound"`
+	SupportsOffers   bool   `json:"supports_offers"`
+	SupportsProducts bool   `json:"supports_products"`
+	SupportsStats    bool   `json:"supports_stats"`
+	SupportsLinks    bool   `json:"supports_links"`
+	SupportsClicks   bool   `json:"supports_clicks"`
+	StatsNeedsDates  bool   `json:"stats_needs_dates"`
+	StatsMode        string `json:"stats_mode,omitempty"`
+	LinkMode         string `json:"link_mode,omitempty"`
+	ConnectionRef    string `json:"connection_ref,omitempty"`
+	LastRefreshedAt  string `json:"last_refreshed_at,omitempty"`
+	MetadataJSON     string `json:"metadata_json,omitempty"`
+	CreatedAt        string `json:"created_at,omitempty"`
+	UpdatedAt        string `json:"updated_at,omitempty"`
 }
 
 type providerCapability struct {
 	Key             string
 	Offers          bool
+	Products        bool
 	Stats           bool
 	Links           bool
 	Clicks          bool
@@ -527,13 +606,15 @@ type providerCapability struct {
 
 var providerCapabilities = []providerCapability{
 	{Key: "target-circle", Offers: true, Stats: true, Links: true, StatsMode: "range", LinkMode: "provider"},
-	{Key: "impact", Offers: true, Stats: true, Links: true, StatsMode: "range", LinkMode: "provider"},
-	{Key: "awin", Offers: true, Stats: true, Links: true, StatsNeedsDates: true, StatsMode: "range", LinkMode: "provider"},
-	{Key: "cj-affiliate", Offers: true, Stats: true, Links: true, StatsMode: "range", LinkMode: "manual"},
-	{Key: "amazon-associates", Offers: true, Links: true, LinkMode: "provider"},
+	{Key: "impact", Offers: true, Stats: true, Links: true, StatsNeedsDates: true, StatsMode: "range", LinkMode: "provider"},
+	{Key: "awin", Offers: true, Products: true, Stats: true, Links: true, Clicks: true, StatsNeedsDates: true, StatsMode: "range", LinkMode: "provider"},
+	{Key: "cj-affiliate", Offers: true, Products: true, Stats: true, Links: true, StatsMode: "range", LinkMode: "manual"},
+	{Key: "amazon-associates", Products: true, Links: true, LinkMode: "provider"},
+	{Key: "ebay-partner-network", Products: true, Links: true, LinkMode: "catalog"},
+	{Key: "rakuten-advertising", Offers: true, Products: true, Stats: true, Links: true, StatsNeedsDates: true, StatsMode: "range", LinkMode: "provider"},
 	{Key: "skimlinks", Links: true, LinkMode: "provider"},
-	{Key: "sovrn", Offers: true, Stats: true, Links: true, StatsMode: "daily", LinkMode: "provider"},
-	{Key: "partnerstack", Offers: true, Stats: true, Links: true, StatsMode: "range", LinkMode: "manual"},
+	{Key: "sovrn", Offers: true, Stats: true, Links: true, Clicks: true, StatsNeedsDates: true, StatsMode: "range", LinkMode: "provider"},
+	{Key: "partnerstack", Offers: true, Stats: true, Links: true, StatsNeedsDates: true, StatsMode: "range", LinkMode: "manual"},
 	{Key: "shareasale", Offers: true, Stats: true, Links: true, StatsMode: "current-day", LinkMode: "manual"},
 }
 
@@ -552,6 +633,7 @@ func enrichNetwork(ctx *sdk.AppCtx, network *Network, capability providerCapabil
 		return
 	}
 	network.SupportsOffers = capability.Offers
+	network.SupportsProducts = capability.Products
 	network.SupportsStats = capability.Stats
 	network.SupportsLinks = capability.Links
 	network.SupportsClicks = capability.Clicks
@@ -585,12 +667,42 @@ type Offer struct {
 	UpdatedAt         string `json:"updated_at,omitempty"`
 }
 
+type Product struct {
+	ID              int64  `json:"id"`
+	NetworkKey      string `json:"network_key"`
+	ExternalID      string `json:"external_id"`
+	Source          string `json:"source"`
+	Status          string `json:"status"`
+	OfferID         int64  `json:"offer_id,omitempty"`
+	MerchantID      string `json:"merchant_id,omitempty"`
+	MerchantName    string `json:"merchant_name,omitempty"`
+	Name            string `json:"name"`
+	Description     string `json:"description,omitempty"`
+	Category        string `json:"category,omitempty"`
+	Brand           string `json:"brand,omitempty"`
+	SKU             string `json:"sku,omitempty"`
+	GTIN            string `json:"gtin,omitempty"`
+	Currency        string `json:"currency,omitempty"`
+	PriceCents      int64  `json:"price_cents"`
+	SalePriceCents  int64  `json:"sale_price_cents"`
+	ImageURL        string `json:"image_url,omitempty"`
+	DestinationURL  string `json:"destination_url,omitempty"`
+	AffiliateURL    string `json:"affiliate_url,omitempty"`
+	Availability    string `json:"availability,omitempty"`
+	RawJSON         string `json:"raw_json,omitempty"`
+	LastRefreshedAt string `json:"last_refreshed_at,omitempty"`
+	CreatedAt       string `json:"created_at,omitempty"`
+	UpdatedAt       string `json:"updated_at,omitempty"`
+}
+
 type Link struct {
 	ID             int64  `json:"id"`
 	NetworkKey     string `json:"network_key"`
 	OfferID        int64  `json:"offer_id,omitempty"`
+	ProductID      int64  `json:"product_id,omitempty"`
 	MerchantName   string `json:"merchant_name,omitempty"`
 	OfferName      string `json:"offer_name,omitempty"`
+	ProductName    string `json:"product_name,omitempty"`
 	DestinationURL string `json:"destination_url"`
 	AffiliateURL   string `json:"affiliate_url"`
 	ShortURL       string `json:"short_url,omitempty"`
@@ -608,6 +720,7 @@ type StatRow struct {
 	Date            string `json:"date,omitempty"`
 	NetworkKey      string `json:"network_key,omitempty"`
 	OfferID         int64  `json:"offer_id,omitempty"`
+	ProductID       int64  `json:"product_id,omitempty"`
 	LinkID          int64  `json:"link_id,omitempty"`
 	Clicks          int64  `json:"clicks"`
 	RedirectClicks  int64  `json:"redirect_clicks"`
@@ -623,6 +736,7 @@ type UnifiedStatRow struct {
 	Date            string `json:"date,omitempty"`
 	NetworkKey      string `json:"network_key,omitempty"`
 	OfferID         int64  `json:"offer_id,omitempty"`
+	ProductID       int64  `json:"product_id,omitempty"`
 	LinkID          int64  `json:"link_id,omitempty"`
 	Clicks          int64  `json:"clicks"`
 	Conversions     int64  `json:"conversions"`
@@ -647,6 +761,7 @@ type RefreshSummary struct {
 	Network           string `json:"network"`
 	Kind              string `json:"kind"`
 	OffersUpserted    int    `json:"offers_upserted"`
+	ProductsUpserted  int    `json:"products_upserted"`
 	LinksUpserted     int    `json:"links_upserted"`
 	StatsDaysUpserted int    `json:"stats_days_upserted"`
 	RefreshedAt       string `json:"refreshed_at"`
@@ -859,9 +974,230 @@ func scanOffer(s rowScanner) (*Offer, error) {
 	return &o, nil
 }
 
+type ProductInput struct {
+	NetworkKey     string
+	ExternalID     string
+	Source         string
+	Status         string
+	OfferID        int64
+	MerchantID     string
+	MerchantName   string
+	Name           string
+	Description    string
+	Category       string
+	Brand          string
+	SKU            string
+	GTIN           string
+	Currency       string
+	PriceCents     int64
+	SalePriceCents int64
+	ImageURL       string
+	DestinationURL string
+	AffiliateURL   string
+	Availability   string
+	RawJSON        string
+}
+
+func dbUpsertProduct(db *sql.DB, in ProductInput) (*Product, error) {
+	if in.NetworkKey == "" {
+		return nil, errors.New("network required")
+	}
+	if in.ExternalID == "" {
+		return nil, errors.New("external_id required")
+	}
+	if in.Name == "" {
+		return nil, errors.New("product name required")
+	}
+	if in.Source == "" {
+		in.Source = "provider"
+	}
+	if in.Source != "provider" && in.Source != "manual" {
+		return nil, fmt.Errorf("invalid product source %q", in.Source)
+	}
+	if in.Status == "" {
+		in.Status = "active"
+	}
+	if in.Status != "active" && in.Status != "archived" {
+		return nil, fmt.Errorf("invalid product status %q", in.Status)
+	}
+	if in.RawJSON == "" {
+		in.RawJSON = "{}"
+	}
+	now := nowUTC()
+	_, err := db.Exec(`
+		INSERT INTO products (
+			network_key, external_id, source, status, offer_id, merchant_id, merchant_name, name,
+			description, category, brand, sku, gtin, currency, price_cents,
+			sale_price_cents, image_url, destination_url, affiliate_url,
+			availability, raw_json, last_refreshed_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(network_key, external_id) DO UPDATE SET
+			source = CASE WHEN excluded.source = 'provider' THEN 'provider' ELSE products.source END,
+			status = excluded.status,
+			offer_id = COALESCE(excluded.offer_id, products.offer_id),
+			merchant_id = excluded.merchant_id,
+			merchant_name = excluded.merchant_name,
+			name = excluded.name,
+			description = excluded.description,
+			category = excluded.category,
+			brand = excluded.brand,
+			sku = excluded.sku,
+			gtin = excluded.gtin,
+			currency = excluded.currency,
+			price_cents = excluded.price_cents,
+			sale_price_cents = excluded.sale_price_cents,
+			image_url = excluded.image_url,
+			destination_url = excluded.destination_url,
+			affiliate_url = excluded.affiliate_url,
+			availability = excluded.availability,
+			raw_json = excluded.raw_json,
+			last_refreshed_at = excluded.last_refreshed_at,
+			updated_at = excluded.updated_at`,
+		in.NetworkKey, in.ExternalID, in.Source, in.Status, nullInt(in.OfferID), in.MerchantID, in.MerchantName, in.Name,
+		in.Description, in.Category, in.Brand, in.SKU, in.GTIN, in.Currency, in.PriceCents,
+		in.SalePriceCents, in.ImageURL, in.DestinationURL, in.AffiliateURL,
+		in.Availability, in.RawJSON, now, now, now)
+	if err != nil {
+		return nil, err
+	}
+	return dbGetProductByExternal(db, in.NetworkKey, in.ExternalID)
+}
+
+const productCols = `id, network_key, external_id, source, status, COALESCE(offer_id,0), merchant_id,
+	merchant_name, name, description, category, brand, sku, gtin, currency,
+	price_cents, sale_price_cents, image_url, destination_url, affiliate_url,
+	availability, raw_json, last_refreshed_at, created_at, updated_at`
+
+func dbGetProduct(db *sql.DB, id int64) (*Product, error) {
+	product, err := scanProduct(db.QueryRow(`SELECT `+productCols+` FROM products WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return product, err
+}
+
+func dbGetProductByExternal(db *sql.DB, network, externalID string) (*Product, error) {
+	product, err := scanProduct(db.QueryRow(`SELECT `+productCols+` FROM products WHERE network_key = ? AND external_id = ?`, network, externalID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return product, err
+}
+
+func dbListProducts(db *sql.DB, q, network, merchant, category, availability, source, status string, limit, offset int) ([]Product, int, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	where := []string{"1=1"}
+	args := []any{}
+	for _, filter := range []struct{ column, value string }{
+		{"network_key", network}, {"merchant_name", merchant}, {"category", category},
+		{"availability", availability}, {"source", source},
+	} {
+		if filter.value != "" {
+			where = append(where, filter.column+" = ?")
+			args = append(args, filter.value)
+		}
+	}
+	if status == "" {
+		status = "active"
+	}
+	if status != "all" {
+		where = append(where, "status = ?")
+		args = append(args, status)
+	}
+	if q != "" {
+		like := "%" + q + "%"
+		where = append(where, "(name LIKE ? OR merchant_name LIKE ? OR description LIKE ? OR category LIKE ? OR brand LIKE ? OR sku LIKE ? OR gtin LIKE ?)")
+		args = append(args, like, like, like, like, like, like, like)
+	}
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM products WHERE `+strings.Join(where, " AND "), args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	args = append(args, limit, offset)
+	rows, err := db.Query(`SELECT `+productCols+` FROM products WHERE `+strings.Join(where, " AND ")+` ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	products := []Product{}
+	for rows.Next() {
+		product, err := scanProduct(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		products = append(products, *product)
+	}
+	return products, total, rows.Err()
+}
+
+func scanProduct(s rowScanner) (*Product, error) {
+	var p Product
+	if err := s.Scan(&p.ID, &p.NetworkKey, &p.ExternalID, &p.Source, &p.Status, &p.OfferID, &p.MerchantID,
+		&p.MerchantName, &p.Name, &p.Description, &p.Category, &p.Brand, &p.SKU,
+		&p.GTIN, &p.Currency, &p.PriceCents, &p.SalePriceCents, &p.ImageURL,
+		&p.DestinationURL, &p.AffiliateURL, &p.Availability, &p.RawJSON,
+		&p.LastRefreshedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func dbUpdateManualProduct(db *sql.DB, id int64, in ProductInput) (*Product, error) {
+	current, err := dbGetProduct(db, id)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, fmt.Errorf("product_id %d not found", id)
+	}
+	if current.Source != "manual" {
+		return nil, errors.New("provider-synced products are read-only")
+	}
+	if in.Name == "" {
+		return nil, errors.New("product name required")
+	}
+	_, err = db.Exec(`UPDATE products SET
+		offer_id = ?, merchant_id = ?, merchant_name = ?, name = ?, description = ?,
+		category = ?, brand = ?, sku = ?, gtin = ?, currency = ?, price_cents = ?,
+		sale_price_cents = ?, image_url = ?, destination_url = ?, affiliate_url = ?,
+		availability = ?, raw_json = ?, updated_at = ?
+		WHERE id = ? AND source = 'manual'`,
+		nullInt(in.OfferID), in.MerchantID, in.MerchantName, in.Name, in.Description,
+		in.Category, in.Brand, in.SKU, in.GTIN, in.Currency, in.PriceCents,
+		in.SalePriceCents, in.ImageURL, in.DestinationURL, in.AffiliateURL,
+		in.Availability, in.RawJSON, nowUTC(), id)
+	if err != nil {
+		return nil, err
+	}
+	return dbGetProduct(db, id)
+}
+
+func dbArchiveManualProduct(db *sql.DB, id int64) (*Product, error) {
+	current, err := dbGetProduct(db, id)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, fmt.Errorf("product_id %d not found", id)
+	}
+	if current.Source != "manual" {
+		return nil, errors.New("provider-synced products are read-only")
+	}
+	if _, err := db.Exec(`UPDATE products SET status = 'archived', updated_at = ? WHERE id = ?`, nowUTC(), id); err != nil {
+		return nil, err
+	}
+	return dbGetProduct(db, id)
+}
+
 type LinkInput struct {
 	NetworkKey     string
 	OfferID        int64
+	ProductID      int64
 	DestinationURL string
 	AffiliateURL   string
 	ShortURL       string
@@ -891,10 +1227,10 @@ func dbInsertLink(db *sql.DB, in LinkInput) (*Link, error) {
 	now := nowUTC()
 	res, err := db.Exec(`
 		INSERT INTO links (
-			network_key, offer_id, destination_url, affiliate_url, short_url,
+			network_key, offer_id, product_id, destination_url, affiliate_url, short_url,
 			redirect_rule_id, campaign, subid, status, raw_json, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		in.NetworkKey, nullInt(in.OfferID), in.DestinationURL, in.AffiliateURL, in.ShortURL,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		in.NetworkKey, nullInt(in.OfferID), nullInt(in.ProductID), in.DestinationURL, in.AffiliateURL, in.ShortURL,
 		in.RedirectRuleID, in.Campaign, in.SubID, in.Status, in.RawJSON, now, now)
 	if err != nil {
 		return nil, err
@@ -922,8 +1258,8 @@ func dbUpsertDefaultLink(db *sql.DB, in LinkInput) (*Link, bool, error) {
 	var id int64
 	err := db.QueryRow(`
 		SELECT id FROM links
-		WHERE network_key = ? AND COALESCE(offer_id, 0) = ? AND campaign = '' AND subid = ''
-		ORDER BY id DESC LIMIT 1`, in.NetworkKey, in.OfferID).Scan(&id)
+		WHERE network_key = ? AND COALESCE(offer_id, 0) = ? AND COALESCE(product_id, 0) = ? AND campaign = '' AND subid = ''
+		ORDER BY id DESC LIMIT 1`, in.NetworkKey, in.OfferID, in.ProductID).Scan(&id)
 	if err == nil {
 		_, err = db.Exec(`
 			UPDATE links
@@ -1173,15 +1509,15 @@ func dbGetLink(db *sql.DB, id int64) (*Link, error) {
 	return l, err
 }
 
-const linkCols = `id, network_key, COALESCE(offer_id,0), destination_url, affiliate_url,
+const linkCols = `id, network_key, COALESCE(offer_id,0), COALESCE(product_id,0), destination_url, affiliate_url,
 	short_url, redirect_rule_id, campaign, subid, status, raw_json, last_checked_at,
 	created_at, updated_at`
 
-const linkColsQualified = `l.id, l.network_key, COALESCE(l.offer_id,0), l.destination_url, l.affiliate_url,
+const linkColsQualified = `l.id, l.network_key, COALESCE(l.offer_id,0), COALESCE(l.product_id,0), l.destination_url, l.affiliate_url,
 	l.short_url, l.redirect_rule_id, l.campaign, l.subid, l.status, l.raw_json, l.last_checked_at,
 	l.created_at, l.updated_at`
 
-func dbListLinks(db *sql.DB, q, network string, offerID int64, status string, limit, offset int) ([]Link, int, error) {
+func dbListLinks(db *sql.DB, q, network string, offerID, productID int64, status string, limit, offset int) ([]Link, int, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
@@ -1195,6 +1531,10 @@ func dbListLinks(db *sql.DB, q, network string, offerID int64, status string, li
 		where = append(where, "l.offer_id = ?")
 		args = append(args, offerID)
 	}
+	if productID != 0 {
+		where = append(where, "l.product_id = ?")
+		args = append(args, productID)
+	}
 	if status != "" {
 		where = append(where, "l.status = ?")
 		args = append(args, status)
@@ -1202,20 +1542,21 @@ func dbListLinks(db *sql.DB, q, network string, offerID int64, status string, li
 	if q != "" {
 		like := "%" + q + "%"
 		where = append(where, `(l.destination_url LIKE ? OR l.affiliate_url LIKE ? OR l.short_url LIKE ?
-			OR l.campaign LIKE ? OR l.subid LIKE ? OR o.merchant_name LIKE ? OR o.offer_name LIKE ?)`)
-		args = append(args, like, like, like, like, like, like, like)
+			OR l.campaign LIKE ? OR l.subid LIKE ? OR o.merchant_name LIKE ? OR o.offer_name LIKE ? OR p.merchant_name LIKE ? OR p.name LIKE ?)`)
+		args = append(args, like, like, like, like, like, like, like, like, like)
 	}
 	if offset < 0 {
 		offset = 0
 	}
 	var total int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM links l LEFT JOIN offers o ON o.id = l.offer_id WHERE `+strings.Join(where, " AND "), args...).Scan(&total); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM links l LEFT JOIN offers o ON o.id = l.offer_id LEFT JOIN products p ON p.id = l.product_id WHERE `+strings.Join(where, " AND "), args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	args = append(args, limit, offset)
-	rows, err := db.Query(`SELECT `+linkColsQualified+`, COALESCE(o.merchant_name,''), COALESCE(o.offer_name,'')
+	rows, err := db.Query(`SELECT `+linkColsQualified+`, COALESCE(NULLIF(p.merchant_name,''),o.merchant_name,''), COALESCE(o.offer_name,''), COALESCE(p.name,'')
 		FROM links l
 		LEFT JOIN offers o ON o.id = l.offer_id
+		LEFT JOIN products p ON p.id = l.product_id
 		WHERE `+strings.Join(where, " AND ")+`
 		ORDER BY l.id DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
@@ -1225,9 +1566,9 @@ func dbListLinks(db *sql.DB, q, network string, offerID int64, status string, li
 	var out []Link
 	for rows.Next() {
 		var l Link
-		if err := rows.Scan(&l.ID, &l.NetworkKey, &l.OfferID, &l.DestinationURL, &l.AffiliateURL,
+		if err := rows.Scan(&l.ID, &l.NetworkKey, &l.OfferID, &l.ProductID, &l.DestinationURL, &l.AffiliateURL,
 			&l.ShortURL, &l.RedirectRuleID, &l.Campaign, &l.SubID, &l.Status, &l.RawJSON,
-			&l.LastCheckedAt, &l.CreatedAt, &l.UpdatedAt, &l.MerchantName, &l.OfferName); err != nil {
+			&l.LastCheckedAt, &l.CreatedAt, &l.UpdatedAt, &l.MerchantName, &l.OfferName, &l.ProductName); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, l)
@@ -1270,7 +1611,7 @@ func dbFindLinkForStat(db *sql.DB, network string, offerID int64, raw map[string
 
 func scanLink(s rowScanner) (*Link, error) {
 	var l Link
-	if err := s.Scan(&l.ID, &l.NetworkKey, &l.OfferID, &l.DestinationURL, &l.AffiliateURL,
+	if err := s.Scan(&l.ID, &l.NetworkKey, &l.OfferID, &l.ProductID, &l.DestinationURL, &l.AffiliateURL,
 		&l.ShortURL, &l.RedirectRuleID, &l.Campaign, &l.SubID, &l.Status, &l.RawJSON,
 		&l.LastCheckedAt, &l.CreatedAt, &l.UpdatedAt); err != nil {
 		return nil, err
@@ -1322,22 +1663,25 @@ func dbUpsertStat(db *sql.DB, in StatInput) error {
 	return err
 }
 
-func dbStats(db *sql.DB, from, to, network string, offerID, linkID int64, groupBy string) ([]StatRow, error) {
+func dbStats(db *sql.DB, from, to, network string, offerID, productID, linkID int64, groupBy string) ([]StatRow, error) {
 	if groupBy == "" {
 		groupBy = "day"
 	}
-	selectCols := "date, '' AS network_key, 0 AS offer_id, 0 AS link_id"
-	groupCols := "date"
+	selectCols := "s.date, s.network_key, 0 AS offer_id, 0 AS product_id, 0 AS link_id"
+	groupCols := "s.date, s.network_key"
 	switch groupBy {
 	case "network":
-		selectCols = "'' AS date, network_key, 0 AS offer_id, 0 AS link_id"
-		groupCols = "network_key"
+		selectCols = "'' AS date, s.network_key, 0 AS offer_id, 0 AS product_id, 0 AS link_id"
+		groupCols = "s.network_key"
 	case "offer":
-		selectCols = "'' AS date, '' AS network_key, COALESCE(offer_id,0) AS offer_id, 0 AS link_id"
-		groupCols = "offer_id"
+		selectCols = "'' AS date, s.network_key, COALESCE(s.offer_id,0) AS offer_id, 0 AS product_id, 0 AS link_id"
+		groupCols = "s.network_key, s.offer_id"
+	case "product":
+		selectCols = "'' AS date, s.network_key, 0 AS offer_id, COALESCE(l.product_id,0) AS product_id, 0 AS link_id"
+		groupCols = "s.network_key, l.product_id"
 	case "link":
-		selectCols = "'' AS date, '' AS network_key, 0 AS offer_id, COALESCE(link_id,0) AS link_id"
-		groupCols = "link_id"
+		selectCols = "'' AS date, s.network_key, 0 AS offer_id, 0 AS product_id, COALESCE(s.link_id,0) AS link_id"
+		groupCols = "s.network_key, s.link_id"
 	case "day":
 	default:
 		return nil, fmt.Errorf("invalid group_by %q", groupBy)
@@ -1345,27 +1689,32 @@ func dbStats(db *sql.DB, from, to, network string, offerID, linkID int64, groupB
 	where := []string{"1=1"}
 	args := []any{}
 	if from != "" {
-		where = append(where, "date >= ?")
+		where = append(where, "s.date >= ?")
 		args = append(args, from)
 	}
 	if to != "" {
-		where = append(where, "date <= ?")
+		where = append(where, "s.date <= ?")
 		args = append(args, to)
 	}
 	if network != "" {
-		where = append(where, "network_key = ?")
+		where = append(where, "s.network_key = ?")
 		args = append(args, network)
 	}
 	if offerID != 0 {
-		where = append(where, "offer_id = ?")
+		where = append(where, "s.offer_id = ?")
 		args = append(args, offerID)
 	}
+	if productID != 0 {
+		where = append(where, "COALESCE(l.product_id,0) = ?")
+		args = append(args, productID)
+	}
 	if linkID != 0 {
-		where = append(where, "link_id = ?")
+		where = append(where, "s.link_id = ?")
 		args = append(args, linkID)
 	}
-	q := fmt.Sprintf(`SELECT %s, SUM(clicks), SUM(conversions), SUM(revenue_cents), SUM(commission_cents), currency
-		FROM stats_daily WHERE %s GROUP BY %s, currency ORDER BY %s`,
+	q := fmt.Sprintf(`SELECT %s, SUM(s.clicks), SUM(s.conversions), SUM(s.revenue_cents), SUM(s.commission_cents), s.currency
+		FROM stats_daily s LEFT JOIN links l ON l.id = s.link_id
+		WHERE %s GROUP BY %s, s.currency ORDER BY %s`,
 		selectCols, strings.Join(where, " AND "), groupCols, groupCols)
 	rows, err := db.Query(q, args...)
 	if err != nil {
@@ -1375,7 +1724,7 @@ func dbStats(db *sql.DB, from, to, network string, offerID, linkID int64, groupB
 	var out []StatRow
 	for rows.Next() {
 		var s StatRow
-		if err := rows.Scan(&s.Date, &s.NetworkKey, &s.OfferID, &s.LinkID, &s.Clicks, &s.Conversions, &s.RevenueCents, &s.CommissionCents, &s.Currency); err != nil {
+		if err := rows.Scan(&s.Date, &s.NetworkKey, &s.OfferID, &s.ProductID, &s.LinkID, &s.Clicks, &s.Conversions, &s.RevenueCents, &s.CommissionCents, &s.Currency); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -1384,18 +1733,21 @@ func dbStats(db *sql.DB, from, to, network string, offerID, linkID int64, groupB
 		return nil, err
 	}
 
-	redirectSelect := "r.date, '' AS network_key, 0 AS offer_id, 0 AS link_id"
-	redirectGroup := "r.date"
+	redirectSelect := "r.date, l.network_key, 0 AS offer_id, 0 AS product_id, 0 AS link_id"
+	redirectGroup := "r.date, l.network_key"
 	switch groupBy {
 	case "network":
-		redirectSelect = "'' AS date, l.network_key, 0 AS offer_id, 0 AS link_id"
+		redirectSelect = "'' AS date, l.network_key, 0 AS offer_id, 0 AS product_id, 0 AS link_id"
 		redirectGroup = "l.network_key"
 	case "offer":
-		redirectSelect = "'' AS date, '' AS network_key, COALESCE(l.offer_id,0) AS offer_id, 0 AS link_id"
-		redirectGroup = "l.offer_id"
+		redirectSelect = "'' AS date, l.network_key, COALESCE(l.offer_id,0) AS offer_id, 0 AS product_id, 0 AS link_id"
+		redirectGroup = "l.network_key, l.offer_id"
+	case "product":
+		redirectSelect = "'' AS date, l.network_key, 0 AS offer_id, COALESCE(l.product_id,0) AS product_id, 0 AS link_id"
+		redirectGroup = "l.network_key, l.product_id"
 	case "link":
-		redirectSelect = "'' AS date, '' AS network_key, 0 AS offer_id, r.link_id"
-		redirectGroup = "r.link_id"
+		redirectSelect = "'' AS date, l.network_key, 0 AS offer_id, 0 AS product_id, r.link_id"
+		redirectGroup = "l.network_key, r.link_id"
 	}
 	redirectWhere := []string{"1=1"}
 	redirectArgs := []any{}
@@ -1414,6 +1766,10 @@ func dbStats(db *sql.DB, from, to, network string, offerID, linkID int64, groupB
 	if offerID != 0 {
 		redirectWhere = append(redirectWhere, "COALESCE(l.offer_id,0) = ?")
 		redirectArgs = append(redirectArgs, offerID)
+	}
+	if productID != 0 {
+		redirectWhere = append(redirectWhere, "COALESCE(l.product_id,0) = ?")
+		redirectArgs = append(redirectArgs, productID)
 	}
 	if linkID != 0 {
 		redirectWhere = append(redirectWhere, "r.link_id = ?")
@@ -1439,7 +1795,7 @@ func dbStats(db *sql.DB, from, to, network string, offerID, linkID int64, groupB
 	}
 	for redirectRows.Next() {
 		var redirect StatRow
-		if err := redirectRows.Scan(&redirect.Date, &redirect.NetworkKey, &redirect.OfferID, &redirect.LinkID, &redirect.RedirectClicks); err != nil {
+		if err := redirectRows.Scan(&redirect.Date, &redirect.NetworkKey, &redirect.OfferID, &redirect.ProductID, &redirect.LinkID, &redirect.RedirectClicks); err != nil {
 			return nil, err
 		}
 		key := statRowGroupKey(redirect, groupBy)
@@ -1454,8 +1810,8 @@ func dbStats(db *sql.DB, from, to, network string, offerID, linkID int64, groupB
 		return nil, err
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		left := fmt.Sprintf("%s\x00%s\x00%020d\x00%020d\x00%s", out[i].Date, out[i].NetworkKey, out[i].OfferID, out[i].LinkID, out[i].Currency)
-		right := fmt.Sprintf("%s\x00%s\x00%020d\x00%020d\x00%s", out[j].Date, out[j].NetworkKey, out[j].OfferID, out[j].LinkID, out[j].Currency)
+		left := fmt.Sprintf("%s\x00%s\x00%020d\x00%020d\x00%020d\x00%s", out[i].Date, out[i].NetworkKey, out[i].OfferID, out[i].ProductID, out[i].LinkID, out[i].Currency)
+		right := fmt.Sprintf("%s\x00%s\x00%020d\x00%020d\x00%020d\x00%s", out[j].Date, out[j].NetworkKey, out[j].OfferID, out[j].ProductID, out[j].LinkID, out[j].Currency)
 		return left < right
 	})
 	return out, nil
@@ -1466,11 +1822,13 @@ func statRowGroupKey(row StatRow, groupBy string) string {
 	case "network":
 		return row.NetworkKey
 	case "offer":
-		return strconv.FormatInt(row.OfferID, 10)
+		return row.NetworkKey + "\x00" + strconv.FormatInt(row.OfferID, 10)
+	case "product":
+		return row.NetworkKey + "\x00" + strconv.FormatInt(row.ProductID, 10)
 	case "link":
-		return strconv.FormatInt(row.LinkID, 10)
+		return row.NetworkKey + "\x00" + strconv.FormatInt(row.LinkID, 10)
 	default:
-		return row.Date
+		return row.NetworkKey + "\x00" + row.Date
 	}
 }
 
@@ -1525,7 +1883,7 @@ func (a *App) toolRefresh(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if kind == "" {
 		kind = "all"
 	}
-	if kind != "offers" && kind != "stats" && kind != "all" {
+	if kind != "offers" && kind != "products" && kind != "stats" && kind != "all" {
 		return nil, fmt.Errorf("invalid kind %q", kind)
 	}
 	capability, ok := capabilityFor(network)
@@ -1535,11 +1893,14 @@ func (a *App) toolRefresh(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if kind == "offers" && !capability.Offers {
 		return nil, fmt.Errorf("%s does not expose offer refresh", network)
 	}
+	if kind == "products" && !capability.Products {
+		return nil, fmt.Errorf("%s does not expose product refresh", network)
+	}
 	if kind == "stats" && !capability.Stats {
 		return nil, fmt.Errorf("%s does not expose stats refresh", network)
 	}
-	if kind == "all" && !capability.Offers && !capability.Stats {
-		return nil, fmt.Errorf("%s has no refreshable offer or stats data", network)
+	if kind == "all" && !capability.Offers && !capability.Products && !capability.Stats {
+		return nil, fmt.Errorf("%s has no refreshable offer, product, or stats data", network)
 	}
 	if (kind == "stats" || kind == "all") && capability.Stats && capability.StatsNeedsDates && (strArg(args, "from") == "" || strArg(args, "to") == "") {
 		return nil, fmt.Errorf("%s stats require from and to dates", network)
@@ -1559,18 +1920,148 @@ func (a *App) toolOffers(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"offers": rows, "count": len(rows), "total": total}, nil
 }
 
-func (a *App) toolLinkCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	destination := strArg(args, "url")
-	if destination == "" {
-		return nil, errors.New("url required")
-	}
-	if err := validateAbsoluteURL(destination); err != nil {
-		return nil, err
-	}
-	offerID := toInt64(args["offer_id"])
+func (a *App) toolProducts(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	network := strArg(args, "network")
 	if network != "" {
 		network = canonicalNetworkKey(network)
+	}
+	status := strArg(args, "status")
+	if status != "" && status != "active" && status != "archived" && status != "all" {
+		return nil, fmt.Errorf("invalid product status %q", status)
+	}
+	source := strArg(args, "source")
+	if source != "" && source != "provider" && source != "manual" {
+		return nil, fmt.Errorf("invalid product source %q", source)
+	}
+	rows, total, err := dbListProducts(ctx.AppDB(), strArg(args, "q"), network,
+		strArg(args, "merchant"), strArg(args, "category"), strArg(args, "availability"),
+		source, status,
+		intArg(args, "limit", 50), intArg(args, "offset", 0))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"products": rows, "count": len(rows), "total": total}, nil
+}
+
+func (a *App) toolProductCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	in, err := normalizeManualProductInput(ctx.AppDB(), args)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := dbGetProductByExternal(ctx.AppDB(), in.NetworkKey, in.ExternalID)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil && existing.Source != "manual" {
+		return nil, fmt.Errorf("product %s/%s already exists from provider sync", in.NetworkKey, in.ExternalID)
+	}
+	product, err := dbUpsertProduct(ctx.AppDB(), in)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"product": product}, nil
+}
+
+func (a *App) toolProductGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := toInt64(args["id"])
+	if id <= 0 {
+		return nil, errors.New("id required")
+	}
+	product, err := dbGetProduct(ctx.AppDB(), id)
+	if err != nil {
+		return nil, err
+	}
+	if product == nil {
+		return nil, fmt.Errorf("product_id %d not found", id)
+	}
+	return map[string]any{"product": product}, nil
+}
+
+func (a *App) toolProductUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := toInt64(args["id"])
+	if id <= 0 {
+		return nil, errors.New("id required")
+	}
+	current, err := dbGetProduct(ctx.AppDB(), id)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, fmt.Errorf("product_id %d not found", id)
+	}
+	if current.Source != "manual" {
+		return nil, errors.New("provider-synced products are read-only")
+	}
+	merged := manualProductArgs(current)
+	for key, value := range args {
+		if key != "id" {
+			merged[key] = value
+		}
+	}
+	in, err := normalizeManualProductInput(ctx.AppDB(), merged)
+	if err != nil {
+		return nil, err
+	}
+	if in.NetworkKey != current.NetworkKey || in.ExternalID != current.ExternalID {
+		return nil, errors.New("network and external_id cannot be changed")
+	}
+	product, err := dbUpdateManualProduct(ctx.AppDB(), id, in)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"product": product}, nil
+}
+
+func (a *App) toolProductArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := toInt64(args["id"])
+	if id <= 0 {
+		return nil, errors.New("id required")
+	}
+	product, err := dbArchiveManualProduct(ctx.AppDB(), id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"product": product}, nil
+}
+
+func (a *App) toolLinkCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	destination := strArg(args, "url")
+	offerID := toInt64(args["offer_id"])
+	productID := toInt64(args["product_id"])
+	network := strArg(args, "network")
+	if network != "" {
+		network = canonicalNetworkKey(network)
+	}
+	var product *Product
+	if productID != 0 {
+		var err error
+		product, err = dbGetProduct(ctx.AppDB(), productID)
+		if err != nil {
+			return nil, err
+		}
+		if product == nil {
+			return nil, fmt.Errorf("product_id %d not found", productID)
+		}
+		if product.Status == "archived" {
+			return nil, fmt.Errorf("product_id %d is archived", productID)
+		}
+		if network == "" {
+			network = product.NetworkKey
+		} else if network != product.NetworkKey {
+			return nil, fmt.Errorf("product_id %d belongs to %s, not %s", productID, product.NetworkKey, network)
+		}
+		if offerID == 0 {
+			offerID = product.OfferID
+		}
+		if destination == "" {
+			destination = product.DestinationURL
+		}
+	}
+	if destination == "" {
+		return nil, errors.New("url required when product_id has no destination URL")
+	}
+	if err := validateAbsoluteURL(destination); err != nil {
+		return nil, err
 	}
 	var offer *Offer
 	if offerID != 0 {
@@ -1592,6 +2083,12 @@ func (a *App) toolLinkCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, errors.New("network required when offer_id is absent")
 	}
 	affiliateURL := strArg(args, "affiliate_url")
+	if affiliateURL == "" && product != nil {
+		affiliateURL = product.AffiliateURL
+	}
+	if product != nil && affiliateURL == product.AffiliateURL && product.DestinationURL != "" && destination != product.DestinationURL {
+		return nil, errors.New("a catalog product's stored affiliate URL can only be used with its original destination URL")
+	}
 	raw := map[string]any{}
 	if affiliateURL == "" {
 		out, err := a.createProviderLink(ctx, network, destination, offer, args)
@@ -1607,6 +2104,7 @@ func (a *App) toolLinkCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	link, err := dbInsertLink(ctx.AppDB(), LinkInput{
 		NetworkKey:     network,
 		OfferID:        offerID,
+		ProductID:      productID,
 		DestinationURL: destination,
 		AffiliateURL:   affiliateURL,
 		Campaign:       strArg(args, "campaign"),
@@ -1619,7 +2117,7 @@ func (a *App) toolLinkCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	warning := ""
 	if boolArg(args, "shorten", false) {
-		shortened, err := a.createRedirect(ctx, link, args, offer)
+		shortened, err := a.createRedirect(ctx, link, args, offer, product)
 		if err != nil {
 			warning = err.Error()
 		} else {
@@ -1634,7 +2132,7 @@ func (a *App) toolLinks(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if network != "" {
 		network = canonicalNetworkKey(network)
 	}
-	rows, total, err := dbListLinks(ctx.AppDB(), strArg(args, "q"), network, toInt64(args["offer_id"]), strArg(args, "status"), intArg(args, "limit", 50), intArg(args, "offset", 0))
+	rows, total, err := dbListLinks(ctx.AppDB(), strArg(args, "q"), network, toInt64(args["offer_id"]), toInt64(args["product_id"]), strArg(args, "status"), intArg(args, "limit", 50), intArg(args, "offset", 0))
 	if err != nil {
 		return nil, err
 	}
@@ -1682,27 +2180,14 @@ func (a *App) toolStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := dbStats(ctx.AppDB(), from, to, network, toInt64(args["offer_id"]), toInt64(args["link_id"]), strArg(args, "group_by"))
+	rows, err := dbStats(ctx.AppDB(), from, to, network, toInt64(args["offer_id"]), toInt64(args["product_id"]), toInt64(args["link_id"]), strArg(args, "group_by"))
 	if err != nil {
 		return nil, err
 	}
-	unified := make([]UnifiedStatRow, 0, len(rows))
+	unified := unifyStatRows(rows, strArg(args, "group_by"), network)
 	var totalClicks int64
-	for _, row := range rows {
-		rowNetwork := network
-		if rowNetwork == "" {
-			rowNetwork = row.NetworkKey
-		}
-		clicks := row.RedirectClicks
-		if capability, ok := capabilityFor(rowNetwork); ok && capability.Clicks {
-			clicks = row.Clicks
-		}
-		totalClicks += clicks
-		unified = append(unified, UnifiedStatRow{
-			Date: row.Date, NetworkKey: row.NetworkKey, OfferID: row.OfferID, LinkID: row.LinkID,
-			Clicks: clicks, Conversions: row.Conversions, RevenueCents: row.RevenueCents,
-			CommissionCents: row.CommissionCents, Currency: row.Currency,
-		})
+	for _, row := range unified {
+		totalClicks += row.Clicks
 	}
 	return map[string]any{"clicks": totalClicks, "stats": unified}, nil
 }
@@ -1716,27 +2201,91 @@ func (a *App) detailedStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := dbStats(ctx.AppDB(), from, to, network, toInt64(args["offer_id"]), toInt64(args["link_id"]), strArg(args, "group_by"))
+	rows, err := dbStats(ctx.AppDB(), from, to, network, toInt64(args["offer_id"]), toInt64(args["product_id"]), toInt64(args["link_id"]), strArg(args, "group_by"))
 	if err != nil {
 		return nil, err
 	}
-	providerClicksAvailable := false
-	if network != "" {
-		if capability, ok := capabilityFor(network); ok {
-			providerClicksAvailable = capability.Clicks
-		}
+	unified := unifyStatRows(rows, strArg(args, "group_by"), network)
+	var totalClicks int64
+	for _, row := range unified {
+		totalClicks += row.Clicks
 	}
+	providerClicksAvailable := boundProviderClicksAvailable(ctx, network)
 	redirectClicksAvailable, err := dbRedirectTrackingAvailable(ctx.AppDB(), network)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"stats":                     rows,
-		"count":                     len(rows),
+		"stats":                     unified,
+		"count":                     len(unified),
+		"clicks":                    totalClicks,
 		"clicks_available":          providerClicksAvailable || redirectClicksAvailable,
 		"provider_clicks_available": providerClicksAvailable,
 		"redirect_clicks_available": redirectClicksAvailable,
 	}, nil
+}
+
+func boundProviderClicksAvailable(ctx *sdk.AppCtx, selectedNetwork string) bool {
+	for _, capability := range providerCapabilities {
+		if !capability.Clicks || selectedNetwork != "" && capability.Key != selectedNetwork {
+			continue
+		}
+		binding := ctx.IntegrationFor(capability.Key)
+		if binding != nil && binding.ConnectionID != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func effectiveClicks(row StatRow, selectedNetwork string) int64 {
+	rowNetwork := canonicalNetworkKey(firstNonEmpty(row.NetworkKey, selectedNetwork))
+	if capability, ok := capabilityFor(rowNetwork); ok && capability.Clicks {
+		return row.Clicks
+	}
+	return row.RedirectClicks
+}
+
+func unifyStatRows(rows []StatRow, groupBy, selectedNetwork string) []UnifiedStatRow {
+	if groupBy == "" {
+		groupBy = "day"
+	}
+	byKey := map[string]int{}
+	out := make([]UnifiedStatRow, 0, len(rows))
+	for _, row := range rows {
+		unified := UnifiedStatRow{
+			Date: row.Date, NetworkKey: row.NetworkKey, OfferID: row.OfferID, ProductID: row.ProductID, LinkID: row.LinkID,
+			Clicks: effectiveClicks(row, selectedNetwork), Conversions: row.Conversions,
+			RevenueCents: row.RevenueCents, CommissionCents: row.CommissionCents, Currency: row.Currency,
+		}
+		key := unified.Currency
+		switch groupBy {
+		case "network":
+			key += "\x00" + unified.NetworkKey
+		case "offer":
+			key += "\x00" + strconv.FormatInt(unified.OfferID, 10)
+			unified.NetworkKey = ""
+		case "product":
+			key += "\x00" + strconv.FormatInt(unified.ProductID, 10)
+			unified.NetworkKey = ""
+		case "link":
+			key += "\x00" + strconv.FormatInt(unified.LinkID, 10)
+			unified.NetworkKey = ""
+		default:
+			key += "\x00" + unified.Date
+			unified.NetworkKey = ""
+		}
+		if index, ok := byKey[key]; ok {
+			out[index].Clicks += unified.Clicks
+			out[index].Conversions += unified.Conversions
+			out[index].RevenueCents += unified.RevenueCents
+			out[index].CommissionCents += unified.CommissionCents
+			continue
+		}
+		byKey[key] = len(out)
+		out = append(out, unified)
+	}
+	return out
 }
 
 func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, args map[string]any) (*RefreshSummary, error) {
@@ -1758,7 +2307,11 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 			return nil, err
 		}
 		for _, call := range calls {
-			pages, err := executeProviderPages(ctx, call, []string{"offers", "Campaigns", "campaigns", "programs", "partnerships", "advertisers", "data", "items", "results"})
+			recordKeys := call.RecordKeys
+			if len(recordKeys) == 0 {
+				recordKeys = []string{"offers", "Campaigns", "campaigns", "programs", "partnerships", "advertisers", "body", "data", "items", "results"}
+			}
+			pages, err := executeProviderPages(ctx, call, recordKeys)
 			if err != nil {
 				return nil, err
 			}
@@ -1785,6 +2338,55 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 			}
 		}
 	}
+	if capability.Products && (kind == "products" || kind == "all") {
+		productArgs := args
+		if network == "awin" && len(commaSeparated(firstNonEmpty(strArg(args, "feedIds"), firstString(args, "feedId"), configValue("awin_product_feed_ids")))) == 0 {
+			discovered, discoverErr := a.withDiscoveredAwinFeedIDs(ctx, args)
+			if discoverErr != nil {
+				return nil, discoverErr
+			}
+			productArgs = discovered
+		}
+		calls, err := providerProductCalls(network, productArgs)
+		if err != nil {
+			return nil, err
+		}
+		for _, call := range calls {
+			recordKeys := call.RecordKeys
+			if len(recordKeys) == 0 {
+				recordKeys = []string{"itemSummaries", "Items", "items", "products", "product", "data", "results", "result", "body"}
+			}
+			pages, err := executeProviderPages(ctx, call, recordKeys)
+			if err != nil {
+				return nil, err
+			}
+			for _, page := range pages {
+				records, err := productRecordsFromPage(network, page)
+				if err != nil {
+					return nil, fmt.Errorf("%s.%s products: %w", call.Role, call.Tool, err)
+				}
+				for _, record := range records {
+					in := productInputFromMap(network, record)
+					if in.ExternalID == "" || in.Name == "" {
+						continue
+					}
+					if in.OfferID == 0 && in.MerchantID != "" {
+						if offer, err := dbGetOfferByExternal(ctx.AppDB(), network, in.MerchantID); err == nil && offer != nil {
+							in.OfferID = offer.ID
+						}
+					}
+					_, err := dbUpsertProduct(ctx.AppDB(), in)
+					if err != nil {
+						return nil, err
+					}
+					summary.ProductsUpserted++
+				}
+				if _, err := dbUpsertNetwork(ctx.AppDB(), network, displayNetworkName(network), page.Output); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
 	if capability.Stats && (kind == "stats" || kind == "all") {
 		calls, err := providerStatCalls(network, from, to, args)
 		if err != nil {
@@ -1792,7 +2394,7 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 		}
 		aggregated := map[string]StatInput{}
 		for _, call := range calls {
-			pages, err := executeProviderPages(ctx, call, []string{"stats", "Actions", "actions", "transactions", "Transactions", "rewards", "records", "data", "items", "result", "results"})
+			pages, err := executeProviderPages(ctx, call, []string{"stats", "Actions", "actions", "transactions", "Transactions", "rewards", "merchants", "records", "body", "data", "items", "result", "results"})
 			if err != nil {
 				return nil, err
 			}
@@ -1802,7 +2404,7 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 					if row.Date == "" {
 						continue
 					}
-					if ext := firstString(m, "offer_external_id", "offerSid", "offerId", "offer_id", "external_id", "offer.sid", "offer.slug", "CampaignId", "campaignId", "advertiserId", "advertiser.id", "merchantGroupId", "company_key"); ext != "" && row.OfferID == 0 {
+					if ext := firstString(m, "offer_external_id", "offerSid", "offerId", "offer_id", "external_id", "offer.sid", "offer.slug", "CampaignId", "campaignId", "advertiserId", "advertiser.id", "merchantGroupId", "company.key", "company_key"); ext != "" && row.OfferID == 0 {
 						if o, err := dbGetOfferByExternal(ctx.AppDB(), network, ext); err == nil && o != nil {
 							row.OfferID = o.ID
 						}
@@ -1840,15 +2442,45 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 	return summary, nil
 }
 
+func (a *App) withDiscoveredAwinFeedIDs(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
+	var decoded any
+	if err := executeProviderCall(ctx, providerCall{Role: "awin", Tool: "product_feeds_list", Input: map[string]any{}}, &decoded); err != nil {
+		return nil, fmt.Errorf("discover Awin product feeds: %w", err)
+	}
+	raw, ok := decoded.(string)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil, errors.New("Awin product feed list returned no CSV data")
+	}
+	records, err := parseCSVRecords(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse Awin product feed list: %w", err)
+	}
+	feedIDs := make([]string, 0, len(records))
+	for _, record := range records {
+		if !strings.EqualFold(firstString(record, "Membership Status", "membership_status"), "Joined") {
+			continue
+		}
+		if feedID := firstString(record, "Feed ID", "feed_id"); feedID != "" {
+			feedIDs = append(feedIDs, feedID)
+		}
+	}
+	if len(feedIDs) == 0 {
+		return nil, errors.New("Awin returned no joined product feeds")
+	}
+	out := cloneMap(args)
+	out["feedIds"] = strings.Join(feedIDs, ",")
+	return out, nil
+}
+
 func upsertDefaultLinkFromOffer(db *sql.DB, network string, offer *Offer, raw map[string]any) (bool, error) {
 	if offer == nil {
 		return false, nil
 	}
-	affiliateURL := firstString(raw, "defaultTrackingUrl", "defaultClickTrackingUrl", "clickTrackingUrl", "clickUrl", "trackingLink")
+	affiliateURL := firstString(raw, "defaultTrackingUrl", "defaultClickTrackingUrl", "clickTrackingUrl", "clickUrl", "clickThroughUrl", "TrackingLink", "trackingLink", "referral_link", "referralLink")
 	if affiliateURL == "" {
 		return false, nil
 	}
-	destinationURL := firstString(raw, "targetUrl", "defaultTargetUrl", "destinationUrl", "url")
+	destinationURL := firstString(raw, "targetUrl", "defaultTargetUrl", "destinationUrl", "AdvertiserUrl", "displayUrl", "url")
 	if destinationURL == "" {
 		destinationURL = affiliateURL
 	}
@@ -1910,7 +2542,7 @@ func executeProviderCall(ctx *sdk.AppCtx, call providerCall, out any) error {
 	return nil
 }
 
-func (a *App) createRedirect(ctx *sdk.AppCtx, link *Link, args map[string]any, offer *Offer) (*Link, error) {
+func (a *App) createRedirect(ctx *sdk.AppCtx, link *Link, args map[string]any, offer *Offer, product *Product) (*Link, error) {
 	if ctx.PlatformAPI() == nil {
 		return nil, errors.New("platform API unavailable")
 	}
@@ -1923,7 +2555,7 @@ func (a *App) createRedirect(ctx *sdk.AppCtx, link *Link, args map[string]any, o
 	}
 	path := strArg(args, "short_path")
 	if path == "" {
-		path = "/" + slugForLink(link, offer)
+		path = "/" + slugForLink(link, offer, product)
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
@@ -1993,17 +2625,69 @@ func (a *App) handleOffers(w http.ResponseWriter, r *http.Request) {
 	writeToolResponse(w, out, err)
 }
 
+func (a *App) handleProducts(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		q := r.URL.Query()
+		out, err := a.toolProducts(globalCtx, map[string]any{
+			"q": q.Get("q"), "network": q.Get("network"), "merchant": q.Get("merchant"),
+			"category": q.Get("category"), "availability": q.Get("availability"),
+			"source": q.Get("source"), "status": q.Get("status"),
+			"limit": q.Get("limit"), "offset": q.Get("offset"),
+		})
+		writeToolResponse(w, out, err)
+	case http.MethodPost:
+		var args map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		out, err := a.toolProductCreate(globalCtx, args)
+		writeToolResponse(w, out, err)
+	default:
+		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *App) handleProduct(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/products/"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "valid product id required", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		out, err := a.toolProductGet(globalCtx, map[string]any{"id": id})
+		writeToolResponse(w, out, err)
+	case http.MethodPatch:
+		args := map[string]any{"id": id}
+		if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		args["id"] = id
+		out, err := a.toolProductUpdate(globalCtx, args)
+		writeToolResponse(w, out, err)
+	case http.MethodDelete:
+		out, err := a.toolProductArchive(globalCtx, map[string]any{"id": id})
+		writeToolResponse(w, out, err)
+	default:
+		http.Error(w, "GET, PATCH, or DELETE", http.StatusMethodNotAllowed)
+	}
+}
+
 func (a *App) handleLinks(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		q := r.URL.Query()
 		out, err := a.toolLinks(globalCtx, map[string]any{
-			"q":        q.Get("q"),
-			"network":  q.Get("network"),
-			"offer_id": q.Get("offer_id"),
-			"status":   q.Get("status"),
-			"limit":    q.Get("limit"),
-			"offset":   q.Get("offset"),
+			"q":          q.Get("q"),
+			"network":    q.Get("network"),
+			"offer_id":   q.Get("offer_id"),
+			"product_id": q.Get("product_id"),
+			"status":     q.Get("status"),
+			"limit":      q.Get("limit"),
+			"offset":     q.Get("offset"),
 		})
 		writeToolResponse(w, out, err)
 	case http.MethodPost:
@@ -2026,12 +2710,13 @@ func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	out, err := a.detailedStats(globalCtx, map[string]any{
-		"from":     q.Get("from"),
-		"to":       q.Get("to"),
-		"network":  q.Get("network"),
-		"offer_id": q.Get("offer_id"),
-		"link_id":  q.Get("link_id"),
-		"group_by": q.Get("group_by"),
+		"from":       q.Get("from"),
+		"to":         q.Get("to"),
+		"network":    q.Get("network"),
+		"offer_id":   q.Get("offer_id"),
+		"product_id": q.Get("product_id"),
+		"link_id":    q.Get("link_id"),
+		"group_by":   q.Get("group_by"),
 	})
 	writeToolResponse(w, out, err)
 }
@@ -2042,6 +2727,7 @@ type providerCall struct {
 	Role       string
 	Tool       string
 	Input      map[string]any
+	RecordKeys []string
 	Pagination *providerPagination
 }
 
@@ -2096,6 +2782,10 @@ func executeProviderPages(ctx *sdk.AppCtx, call providerCall, recordKeys []strin
 			input = cloneMap(input)
 			input[pagination.Param] = pagination.Start + (pageIndex+1)*pagination.PageSize
 		case "page":
+			currentPage := pagination.Start + pageIndex
+			if totalPages := toInt64(firstAny(out, "TotalPages", "totalPages", "total_pages", "metadata.total_pages", "_metadata.total_pages")); totalPages > 0 && int64(currentPage) >= totalPages {
+				return pages, nil
+			}
 			if !hasMore && len(records) < pagination.PageSize {
 				return pages, nil
 			}
@@ -2103,6 +2793,9 @@ func executeProviderPages(ctx *sdk.AppCtx, call providerCall, recordKeys []strin
 			input[pagination.Param] = pagination.Start + pageIndex + 1
 		case "cursor":
 			cursor := firstString(out, pagination.CursorPath, "next_cursor", "nextCursor", "meta.next_cursor", "pagination.next_cursor")
+			if cursor == "" && hasMore && len(records) > 0 {
+				cursor = firstString(records[len(records)-1], "key")
+			}
 			if cursor == "" {
 				return pages, nil
 			}
@@ -2119,7 +2812,7 @@ func executeProviderPages(ctx *sdk.AppCtx, call providerCall, recordKeys []strin
 }
 
 func responseHasNext(out map[string]any) bool {
-	v := firstAny(out, "next", "links.next", "meta.next", "pagination.next", "has_more", "hasMore")
+	v := firstAny(out, "next", "links.next", "meta.next", "pagination.next", "data.has_more", "data.hasMore", "has_more", "hasMore")
 	switch x := v.(type) {
 	case bool:
 		return x
@@ -2209,18 +2902,98 @@ func providerOfferCalls(network string, args map[string]any) ([]providerCall, er
 		return []providerCall{{Role: "partnerstack", Tool: "partnerships_list", Input: compactMap(map[string]any{
 			"include_offers":   true,
 			"include_archived": boolArg(args, "include_archived", false),
-			"limit":            boundedLimit(args, 100, 100),
-		}), Pagination: &providerPagination{Mode: "cursor", Param: "starting_after", PageSize: boundedLimit(args, 100, 100), MaxPages: maxPageArg(args), CursorPath: "next"}}}, nil
+			"limit":            boundedLimit(args, 250, 250),
+		}), RecordKeys: []string{"partnerships", "body", "data", "items", "results"}, Pagination: &providerPagination{Mode: "cursor", Param: "starting_after", PageSize: boundedLimit(args, 250, 250), MaxPages: maxPageArg(args), CursorPath: "next"}}}, nil
 	case "shareasale":
 		return []providerCall{{Role: "shareasale", Tool: "merchants_search", Input: compactMap(map[string]any{
 			"keyword":   strArg(args, "keyword"),
 			"category":  strArg(args, "category"),
 			"XMLFormat": 0,
 		})}}, nil
+	case "rakuten-advertising":
+		limit := boundedLimit(args, 50, 100)
+		return []providerCall{{Role: "rakuten-advertising", Tool: "partnerships_list", Input: compactMap(map[string]any{
+			"partner_status": firstNonEmpty(strArg(args, "partner_status"), strArg(args, "status"), "active"),
+			"network":        nullInt(toInt64(firstAny(args, "network_id"))), "category": strArg(args, "category"),
+			"limit": limit, "page": 1,
+		}), RecordKeys: []string{"partnerships", "advertisers", "data", "items", "results"}, Pagination: &providerPagination{Mode: "page", Param: "page", PageSize: limit, MaxPages: maxPageArg(args), Start: 1}}}, nil
 	case "skimlinks":
 		return nil, errors.New("skimlinks merchant/program refresh is not exposed by the current integration; use skimlinks for link_wrapper_url link creation")
 	default:
 		return nil, fmt.Errorf("unsupported affiliate network %q", network)
+	}
+}
+
+func providerProductCalls(network string, args map[string]any) ([]providerCall, error) {
+	network = canonicalNetworkKey(network)
+	switch network {
+	case "awin":
+		feedIDs := commaSeparated(firstNonEmpty(strArg(args, "feedIds"), firstString(args, "feedId"), configValue("awin_product_feed_ids")))
+		if len(feedIDs) == 0 {
+			return nil, errors.New("awin product refresh requires feedId/feedIds or awin_product_feed_ids; use awin.product_feeds_list to discover feed IDs")
+		}
+		calls := make([]providerCall, 0, len(feedIDs))
+		for _, feedID := range feedIDs {
+			id, err := strconv.ParseInt(feedID, 10, 64)
+			if err != nil || id <= 0 {
+				return nil, fmt.Errorf("invalid Awin feed ID %q", feedID)
+			}
+			calls = append(calls, providerCall{Role: "awin", Tool: "product_feed_download", Input: map[string]any{
+				"feedId": id, "language": argOrConfig(args, "language", "awin_feed_language", "en"),
+				"adultContent": intArg(args, "adultContent", 0),
+			}})
+		}
+		return calls, nil
+	case "cj-affiliate":
+		websiteID := requiredArgOrConfig(args, "website-id", "cj_website_id")
+		if websiteID == "" {
+			return nil, errors.New("cj-affiliate product refresh requires website-id or cj_website_id")
+		}
+		limit := boundedLimit(args, 100, 100)
+		return []providerCall{{Role: "cj-affiliate", Tool: "products_search", Input: compactMap(map[string]any{
+			"website-id": websiteID, "advertiser-ids": argOrConfig(args, "advertiser-ids", "cj_advertiser_ids", "joined"),
+			"keywords": strArg(args, "keywords"), "serviceable-area": strArg(args, "serviceable-area"),
+			"low-price": firstAny(args, "low-price"), "high-price": firstAny(args, "high-price"),
+			"currency": strArg(args, "currency"), "records-per-page": limit, "page-number": 1,
+		}), RecordKeys: []string{"products", "product", "body", "data", "items", "results"}, Pagination: &providerPagination{Mode: "page", Param: "page-number", PageSize: limit, MaxPages: maxPageArg(args), Start: 1}}}, nil
+	case "amazon-associates":
+		partnerTag := requiredArgOrConfig(args, "partnerTag", "amazon_partner_tag")
+		keywords := requiredArgOrConfig(args, "keywords", "amazon_keywords")
+		if partnerTag == "" || keywords == "" {
+			return nil, errors.New("amazon-associates product refresh requires partnerTag and keywords; pass them or set amazon_partner_tag and amazon_keywords")
+		}
+		limit := boundedLimit(args, 10, 10)
+		return []providerCall{{Role: "amazon-associates", Tool: "items_search", Input: compactMap(map[string]any{
+			"partnerTag": partnerTag, "marketplace": argOrConfig(args, "marketplace", "amazon_marketplace", "www.amazon.com"),
+			"keywords": keywords, "searchIndex": argOrConfig(args, "searchIndex", "amazon_search_index", "All"),
+			"brand": strArg(args, "brand"), "browseNodeId": strArg(args, "browseNodeId"),
+			"itemCount": limit, "itemPage": 1, "resources": defaultAmazonResources(),
+		}), RecordKeys: []string{"SearchResult", "Items", "items"}, Pagination: &providerPagination{Mode: "page", Param: "itemPage", PageSize: limit, MaxPages: maxPageArg(args), Start: 1}}}, nil
+	case "ebay-partner-network":
+		keywords := firstNonEmpty(strArg(args, "q"), strArg(args, "keywords"), configValue("ebay_keywords"))
+		categoryID := strArg(args, "category_ids")
+		if keywords == "" && categoryID == "" && strArg(args, "gtin") == "" && strArg(args, "epid") == "" {
+			return nil, errors.New("ebay product refresh requires q/keywords, category_ids, gtin, or epid")
+		}
+		limit := boundedLimit(args, 50, 200)
+		return []providerCall{{Role: "ebay-partner-network", Tool: "products_search", Input: compactMap(map[string]any{
+			"q": keywords, "category_ids": categoryID, "gtin": strArg(args, "gtin"), "epid": strArg(args, "epid"),
+			"aspect_filter": strArg(args, "aspect_filter"), "limit": limit, "offset": 0, "fieldgroups": "MATCHING_ITEMS",
+		}), RecordKeys: []string{"itemSummaries"}, Pagination: &providerPagination{Mode: "offset", Param: "offset", PageSize: limit, MaxPages: maxPageArg(args), Start: 0}}}, nil
+	case "rakuten-advertising":
+		keyword := firstNonEmpty(strArg(args, "keyword"), strArg(args, "keywords"), configValue("rakuten_keywords"))
+		mid := toInt64(firstAny(args, "mid", "advertiser_id"))
+		category := strArg(args, "cat")
+		if keyword == "" && mid == 0 && category == "" {
+			return nil, errors.New("rakuten product refresh requires keyword/keywords, mid/advertiser_id, or cat")
+		}
+		limit := boundedLimit(args, 50, 100)
+		return []providerCall{{Role: "rakuten-advertising", Tool: "products_search", Input: compactMap(map[string]any{
+			"keyword": keyword, "mid": nullInt(mid), "cat": category,
+			"language": firstNonEmpty(strArg(args, "language"), "en_US"), "max": limit, "pagenumber": 1,
+		}), RecordKeys: []string{"item", "items", "result"}, Pagination: &providerPagination{Mode: "page", Param: "pagenumber", PageSize: limit, MaxPages: maxPageArg(args), Start: 1}}}, nil
+	default:
+		return nil, fmt.Errorf("%s does not expose product refresh", network)
 	}
 }
 
@@ -2277,17 +3050,36 @@ func providerStatCalls(network, from, to string, args map[string]any) ([]provide
 			},
 		})}}, nil
 	case "sovrn":
-		dates, err := inclusiveDates(firstNonEmpty(strArg(args, "clickDate"), from, time.Now().UTC().Format("2006-01-02")), firstNonEmpty(to, from))
-		if err != nil {
+		if from == "" || to == "" {
+			return nil, errors.New("sovrn stats require from and to")
+		}
+		if days, err := inclusiveDates(from, to); err != nil {
 			return nil, err
+		} else if len(days) > 31 {
+			return nil, errors.New("sovrn stats support a maximum 31-day range per refresh")
 		}
-		calls := make([]providerCall, 0, len(dates))
-		for _, date := range dates {
-			calls = append(calls, providerCall{Role: "sovrn", Tool: "transactions_report", Input: compactMap(map[string]any{
-				"clickDate": date, "campaignIds": strArg(args, "campaignIds"), "merchantGroupIds": strArg(args, "merchantGroupIds"), "programType": strArg(args, "programType"),
-			})})
-		}
-		return calls, nil
+		return []providerCall{{Role: "sovrn", Tool: "merchants_by_date_report", Input: compactMap(map[string]any{
+			"clickDateStart":   from,
+			"clickDateEnd":     exclusiveEndDate(to),
+			"campaignIds":      strArg(args, "campaignIds"),
+			"subIds":           strArg(args, "subIds"),
+			"merchantGroupIds": strArg(args, "merchantGroupIds"),
+			"cuids":            strArg(args, "cuids"),
+			"pageUtmSource":    strArg(args, "pageUtmSource"),
+			"pageUtmMedium":    strArg(args, "pageUtmMedium"),
+			"pageUtmCampaign":  strArg(args, "pageUtmCampaign"),
+			"pageUtmTerm":      strArg(args, "pageUtmTerm"),
+			"pageUtmContent":   strArg(args, "pageUtmContent"),
+			"linkUtmSource":    strArg(args, "linkUtmSource"),
+			"linkUtmMedium":    strArg(args, "linkUtmMedium"),
+			"linkUtmCampaign":  strArg(args, "linkUtmCampaign"),
+			"linkUtmTerm":      strArg(args, "linkUtmTerm"),
+			"linkUtmContent":   strArg(args, "linkUtmContent"),
+			"programType":      strArg(args, "programType"),
+			"sovrnProduct":     strArg(args, "sovrnProduct"),
+			"deviceType":       strArg(args, "deviceType"),
+			"country":          strings.ToUpper(strArg(args, "country")),
+		})}}, nil
 	case "partnerstack":
 		minCreated := toInt64(firstAny(args, "min_created"))
 		maxCreated := toInt64(firstAny(args, "max_created"))
@@ -2297,15 +3089,30 @@ func providerStatCalls(network, from, to string, args map[string]any) ([]provide
 		if maxCreated == 0 {
 			maxCreated = unixDateBoundary(to, true)
 		}
-		return []providerCall{{Role: "partnerstack", Tool: "transactions_list", Input: compactMap(map[string]any{
+		limit := boundedLimit(args, 250, 250)
+		common := compactMap(map[string]any{
 			"min_created": minCreated,
 			"max_created": maxCreated,
-			"limit":       boundedLimit(args, 100, 100),
-		}), Pagination: &providerPagination{Mode: "cursor", Param: "starting_after", PageSize: boundedLimit(args, 100, 100), MaxPages: maxPageArg(args), CursorPath: "next"}}}, nil
+			"limit":       limit,
+		})
+		return []providerCall{
+			{Role: "partnerstack", Tool: "transactions_list", Input: common, Pagination: &providerPagination{Mode: "cursor", Param: "starting_after", PageSize: limit, MaxPages: maxPageArg(args), CursorPath: "next"}},
+			{Role: "partnerstack", Tool: "rewards_list", Input: cloneMap(common), Pagination: &providerPagination{Mode: "cursor", Param: "starting_after", PageSize: limit, MaxPages: maxPageArg(args), CursorPath: "next"}},
+		}, nil
 	case "shareasale":
 		return []providerCall{{Role: "shareasale", Tool: "daily_activity", Input: compactMap(map[string]any{
 			"XMLFormat": 0,
 		})}}, nil
+	case "rakuten-advertising":
+		if from == "" || to == "" {
+			return nil, errors.New("rakuten stats require from and to")
+		}
+		limit := boundedLimit(args, 100, 1000)
+		return []providerCall{{Role: "rakuten-advertising", Tool: "transactions_list", Input: compactMap(map[string]any{
+			"transaction_date_start": from + " 00:00:00",
+			"transaction_date_end":   exclusiveEndDate(to) + " 00:00:00",
+			"limit":                  limit, "page": 1, "currency": strArg(args, "currency"), "type": strArg(args, "type"),
+		}), RecordKeys: []string{"transactions", "data", "items", "results"}, Pagination: &providerPagination{Mode: "page", Param: "page", PageSize: limit, MaxPages: maxPageArg(args), Start: 1}}}, nil
 	case "amazon-associates", "skimlinks":
 		return nil, fmt.Errorf("%s does not expose stats through the current integration", network)
 	default:
@@ -2340,8 +3147,9 @@ func providerLinkCall(network, destination string, offer *Offer, args map[string
 		return providerCall{Role: "impact", Tool: "tracking_link_create", Input: compactMap(map[string]any{
 			"program_id": programID,
 			"DeepLink":   destination,
-			"SubId1":     strArg(args, "campaign"),
-			"SubId2":     strArg(args, "subid"),
+			"Type":       "Regular",
+			"subId1":     strArg(args, "campaign"),
+			"subId2":     strArg(args, "subid"),
 		})}, nil
 	case "awin":
 		publisherID := requiredArgOrConfig(args, "publisherId", "awin_publisher_id")
@@ -2392,38 +3200,288 @@ func providerLinkCall(network, destination string, offer *Offer, args map[string
 		})}, nil
 	case "partnerstack", "shareasale":
 		return providerCall{}, fmt.Errorf("%s link creation requires manual affiliate_url with the current integration", network)
+	case "ebay-partner-network":
+		return providerCall{}, errors.New("eBay links must be created from a synced eBay product because Browse returns the commissionable itemAffiliateWebUrl")
+	case "rakuten-advertising":
+		advertiserID := firstNonEmpty(strArg(args, "advertiser_id"), offerExternalID)
+		if advertiserID == "" {
+			return providerCall{}, errors.New("rakuten link creation requires advertiser_id or offer_id")
+		}
+		return providerCall{Role: "rakuten-advertising", Tool: "deep_link_generate", Input: compactMap(map[string]any{
+			"url": destination, "advertiser_id": toInt64(advertiserID), "u1": firstNonEmpty(strArg(args, "subid"), strArg(args, "campaign")),
+		})}, nil
 	default:
 		return providerCall{}, fmt.Errorf("unsupported affiliate network %q", network)
 	}
 }
 
 func offerInputFromMap(network string, m map[string]any) OfferInput {
-	merchant := firstString(m, "merchant_name", "merchant", "advertiser.name", "advertiserName", "advertiser_name", "AdvertiserName", "advertiser-name", "merchantGroupName", "company_name")
-	name := firstString(m, "offer_name", "offerName", "name", "title", "campaign_name", "CampaignName", "programName", "display_name")
+	network = canonicalNetworkKey(network)
+	merchant := firstString(m, "merchant_name", "merchant", "advertiser.name", "advertiserName", "advertiser_name", "AdvertiserName", "advertiser-name", "merchantGroupName", "company.name", "company_name", "programmeInfo.name")
+	name := firstString(m, "offer_name", "offerName", "name", "title", "campaign_name", "CampaignName", "programName", "display_name", "company.name", "programmeInfo.name")
 	if merchant == "" {
 		merchant = name
 	}
 	if name == "" {
 		name = merchant
 	}
+	externalID := firstString(m, "external_id", "id", "slug", "sid", "key", "company_key", "asin", "offerSid", "offer_id", "offerId", "campaign_id", "campaignId", "CampaignId", "advertiserId", "advertiser-id", "advertiser.id", "merchantGroupId", "programmeInfo.id")
+	if network == "partnerstack" {
+		externalID = firstNonEmpty(firstString(m, "company.key", "company_key"), externalID)
+	}
 	return OfferInput{
 		NetworkKey:        network,
-		ExternalID:        firstString(m, "external_id", "id", "slug", "sid", "key", "company_key", "asin", "offerSid", "offer_id", "offerId", "campaign_id", "campaignId", "CampaignId", "advertiserId", "advertiser-id", "merchantGroupId"),
+		ExternalID:        externalID,
 		MerchantName:      merchant,
 		OfferName:         name,
-		Status:            strings.ToLower(firstString(m, "status", "relationship_status", "relationship-status", "approval_status", "approvalStatus", "ContractStatus")),
-		Category:          firstString(m, "category", "primaryCategory", "Category"),
+		Status:            strings.ToLower(firstString(m, "status", "relationship_status", "relationship-status", "approval_status", "approvalStatus", "approved_status", "ContractStatus", "membershipStatus", "programmeInfo.membershipStatus")),
+		Category:          firstString(m, "category", "primaryCategory", "Category", "primarySector", "advertiser.categories", "programmeInfo.primarySector"),
 		Vertical:          firstString(m, "vertical"),
-		CountriesJSON:     mustJSON(firstAny(m, "countries", "country", "targetedCountries", "allowed_countries", "ShippingRegions")),
-		CommissionSummary: firstNonEmpty(firstString(m, "commission_summary", "commission", "payout", "payout_summary", "commissionRange", "defaultCommissionRate", "rate"), pricingSummaryFromMap(m)),
-		CookieWindow:      firstString(m, "cookie_window", "cookieWindow", "cookie_expiration", "cookieExpiration", "cookieDuration", "tracking.cookieExpiration"),
-		TrackingDeepLink:  firstBool(m, "tracking_deeplink", "deeplinking", "tracking.deeplinking", "deepLinking", "deeplink", "AllowsDeeplinking"),
+		CountriesJSON:     mustJSON(firstAny(m, "countries", "country", "targetedCountries", "allowed_countries", "ShippingRegions", "primaryRegion", "programmeInfo.primaryRegion")),
+		CommissionSummary: firstNonEmpty(firstString(m, "commission_summary", "commission", "payout", "payout_summary", "defaultCommissionRate", "rate"), pricingSummaryFromMap(m)),
+		CookieWindow:      firstString(m, "cookie_window", "cookieWindow", "cookie_expiration", "cookieExpiration", "cookieDuration", "tracking.cookieExpiration", "ReferralPeriod"),
+		TrackingDeepLink:  firstBool(m, "tracking_deeplink", "deeplinking", "tracking.deeplinking", "deepLinking", "deeplink", "AllowsDeeplinking", "deeplinkEnabled", "programmeInfo.deeplinkEnabled"),
 		RawJSON:           mustJSON(redactSecrets(m)),
 	}
 }
 
+func productRecordsFromPage(network string, page providerPage) ([]map[string]any, error) {
+	if canonicalNetworkKey(network) != "awin" {
+		return page.Records, nil
+	}
+	raw, _ := firstAny(page.Output, "data").(string)
+	if strings.TrimSpace(raw) == "" {
+		return nil, errors.New("product feed returned no CSV data")
+	}
+	return parseCSVRecords(raw)
+}
+
+func parseCSVRecords(raw string) ([]map[string]any, error) {
+	reader := csv.NewReader(strings.NewReader(raw))
+	firstLine := raw
+	if newline := strings.IndexByte(firstLine, '\n'); newline >= 0 {
+		firstLine = firstLine[:newline]
+	}
+	if strings.Count(firstLine, "\t") > strings.Count(firstLine, ",") {
+		reader.Comma = '\t'
+	}
+	reader.FieldsPerRecord = -1
+	rows, err := reader.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) < 2 {
+		return nil, nil
+	}
+	headers := rows[0]
+	if len(headers) > 0 {
+		headers[0] = strings.TrimPrefix(headers[0], "\ufeff")
+	}
+	records := make([]map[string]any, 0, len(rows)-1)
+	for _, row := range rows[1:] {
+		record := make(map[string]any, len(headers))
+		for index, header := range headers {
+			if index < len(row) {
+				record[header] = row[index]
+			}
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+func productInputFromMap(network string, m map[string]any) ProductInput {
+	network = canonicalNetworkKey(network)
+	merchantID := firstString(m, "merchant_id", "merchantId", "advertiser-id", "advertiser_id", "advertiserId", "mid")
+	merchantName := firstString(m, "merchant_name", "merchantName", "advertiser-name", "advertiser_name", "advertiserName", "seller.username")
+	name := firstString(m, "product_name", "productname", "name", "title", "ItemInfo.Title.DisplayValue")
+	externalID := firstString(m, "aw_product_id", "itemId", "ASIN", "asin", "linkid", "linkId", "product-id", "product_id", "id", "sku")
+	sku := firstString(m, "merchant_product_id", "sku", "SKU", "legacyItemId")
+	if network == "cj-affiliate" && merchantID != "" && sku != "" {
+		externalID = merchantID + ":" + sku
+	}
+	brand := firstString(m, "brand_name", "brand", "manufacturer-name", "manufacturer_name", "ItemInfo.ByLineInfo.Brand.DisplayValue", "ItemInfo.ByLineInfo.Manufacturer.DisplayValue")
+	if brand == "" && network == "ebay-partner-network" {
+		brand = aspectValue(m, "Brand")
+	}
+	category := firstString(m, "category_name", "merchant_category", "category.primary", "primary-category", "primary_category", "ItemInfo.Classifications.ProductGroup.DisplayValue")
+	if category == "" && network == "ebay-partner-network" {
+		category = firstArrayString(m, "categories", "categoryName")
+	}
+	priceValue := firstAny(m, "search_price", "price", "retail-price", "retail_price")
+	saleValue := firstAny(m, "store_price", "saleprice", "sale-price", "sale_price")
+	currency := firstNonEmpty(currencyFromAny(priceValue), strings.ToUpper(firstString(m, "currency", "currencyCode")))
+	priceCents := productMoneyCents(priceValue)
+	salePriceCents := productMoneyCents(saleValue)
+
+	switch network {
+	case "amazon-associates":
+		listing := firstArrayMap(m, "OffersV2.Listings")
+		if len(listing) == 0 {
+			listing = firstArrayMap(m, "Offers.Listings")
+		}
+		price := firstArrayMap(listing, "Price")
+		current := firstAny(price, "Money")
+		if current == nil {
+			current = firstAny(listing, "Price")
+		}
+		original := firstAny(price, "SavingBasis.Money")
+		if original == nil {
+			original = firstAny(listing, "SavingBasis")
+		}
+		priceCents = productMoneyCents(original)
+		salePriceCents = productMoneyCents(current)
+		if priceCents == 0 {
+			priceCents, salePriceCents = salePriceCents, 0
+		}
+		currency = firstNonEmpty(currencyFromAny(current), currencyFromAny(original))
+		if merchantName == "" {
+			merchantName = firstNonEmpty(firstString(listing, "MerchantInfo.Name"), "Amazon")
+		}
+	case "ebay-partner-network":
+		current := firstAny(m, "price", "currentBidPrice")
+		original := firstAny(m, "marketingPrice.originalPrice")
+		priceCents = productMoneyCents(original)
+		salePriceCents = productMoneyCents(current)
+		if priceCents == 0 {
+			priceCents, salePriceCents = salePriceCents, 0
+		}
+		currency = firstNonEmpty(currencyFromAny(current), currencyFromAny(original))
+	}
+	if salePriceCents >= priceCents && priceCents > 0 {
+		salePriceCents = 0
+	}
+	affiliateURL := firstString(m, "aw_deep_link", "itemAffiliateWebUrl", "DetailPageURL", "detailPageURL", "buy-url", "buy_url", "linkurl", "linkUrl")
+	destinationURL := firstString(m, "merchant_deep_link", "itemWebUrl", "destinationUrl", "destination_url", "url")
+	if destinationURL == "" {
+		destinationURL = affiliateURL
+	}
+	availability := strings.ToLower(firstString(m, "stock_status", "availability", "estimatedAvailabilityStatus", "in-stock", "in_stock", "OffersV2.Listings.Availability.Message", "OffersV2.Listings.Availability.Type"))
+	if availability == "" && firstAny(m, "Offers.Listings", "OffersV2.Listings") != nil {
+		availability = "available"
+	}
+	return ProductInput{
+		NetworkKey: network, ExternalID: externalID, MerchantID: merchantID, MerchantName: merchantName,
+		Name: name, Description: firstString(m, "description", "description.long", "description.short", "product_short_description", "ItemInfo.Features.DisplayValues"),
+		Category: category, Brand: brand, SKU: sku,
+		GTIN:     firstString(m, "product_GTIN", "gtin", "ean", "upc", "upccode", "upc-code", "ItemInfo.ExternalIds.EANs.DisplayValues", "ItemInfo.ExternalIds.UPCs.DisplayValues"),
+		Currency: currency, PriceCents: priceCents, SalePriceCents: salePriceCents,
+		ImageURL:       firstString(m, "merchant_image_url", "image-url", "image_url", "imageurl", "image.imageUrl", "Images.Primary.Large.URL", "Images.Primary.Medium.URL"),
+		DestinationURL: destinationURL, AffiliateURL: affiliateURL, Availability: availability,
+		RawJSON: mustJSON(redactSecrets(m)),
+	}
+}
+
+func productMoneyCents(value any) int64 {
+	if object, ok := value.(map[string]any); ok {
+		return moneyCentsFromAny(firstAny(object, "value", "Value", "amount", "Amount", "#text", "DisplayAmount"))
+	}
+	return moneyCentsFromAny(value)
+}
+
+func currencyFromAny(value any) string {
+	if object, ok := value.(map[string]any); ok {
+		return strings.ToUpper(firstString(object, "currency", "Currency", "currencyCode", "@currency"))
+	}
+	return ""
+}
+
+func firstArrayMap(m map[string]any, path string) map[string]any {
+	value := firstAny(m, path)
+	if object, ok := value.(map[string]any); ok {
+		return object
+	}
+	if values, ok := value.([]any); ok {
+		for _, value := range values {
+			if object, ok := value.(map[string]any); ok {
+				return object
+			}
+		}
+	}
+	return map[string]any{}
+}
+
+func firstArrayString(m map[string]any, path, key string) string {
+	value := firstAny(m, path)
+	if values, ok := value.([]any); ok {
+		for _, value := range values {
+			if object, ok := value.(map[string]any); ok {
+				if text := firstString(object, key); text != "" {
+					return text
+				}
+			}
+		}
+	}
+	return firstString(firstArrayMap(m, path), key)
+}
+
+func aspectValue(m map[string]any, name string) string {
+	value := firstAny(m, "localizedAspects")
+	values, _ := value.([]any)
+	for _, value := range values {
+		object, _ := value.(map[string]any)
+		if strings.EqualFold(firstString(object, "name"), name) {
+			return firstString(object, "value")
+		}
+	}
+	return ""
+}
+
+func commaSeparated(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 func pricingSummaryFromMap(m map[string]any) string {
-	raw := firstAny(m, "pricings", "priceCombinations")
+	if terms, ok := firstAny(m, "PayoutTermsList").([]any); ok {
+		parts := make([]string, 0, len(terms))
+		for _, item := range terms {
+			term, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			label := firstString(term, "TrackerName", "TrackerType")
+			if amount := firstString(term, "PayoutAmount", "PayoutAmountLowerLimit"); amount != "" {
+				parts = append(parts, strings.TrimSpace(fmt.Sprintf("%s %s %s", amount, firstString(term, "PayoutCurrency"), label)))
+			} else if percentage := firstString(term, "PayoutPercentage", "PayoutPercentageLowerLimit"); percentage != "" {
+				parts = append(parts, strings.TrimSpace(fmt.Sprintf("%s%% %s", percentage, label)))
+			}
+		}
+		return joinPricingParts(parts)
+	}
+	if ranges, ok := firstAny(m, "commissionRange").([]any); ok {
+		parts := make([]string, 0, len(ranges))
+		currency := firstString(m, "currencyCode", "programmeInfo.currencyCode")
+		for _, item := range ranges {
+			rate, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			minValue := firstString(rate, "min")
+			maxValue := firstString(rate, "max")
+			if minValue == "" {
+				continue
+			}
+			value := minValue
+			if maxValue != "" && maxValue != minValue {
+				value += "-" + maxValue
+			}
+			if strings.EqualFold(firstString(rate, "type"), "percentage") {
+				value += "%"
+			} else if currency != "" {
+				value += " " + currency
+			}
+			parts = append(parts, value)
+		}
+		return joinPricingParts(parts)
+	}
+	raw := firstAny(m, "pricings", "priceCombinations", "offers")
 	items, ok := raw.([]any)
 	if !ok || len(items) == 0 {
 		return ""
@@ -2458,6 +3516,10 @@ func pricingSummaryFromMap(m map[string]any) string {
 		currency := firstString(pm, "currency")
 		parts = append(parts, strings.TrimSpace(fmt.Sprintf("%s %s %s %s", commissionType, transactionType, value, currency)))
 	}
+	return joinPricingParts(parts)
+}
+
+func joinPricingParts(parts []string) string {
 	if len(parts) > 3 {
 		parts = parts[:3]
 	}
@@ -2465,14 +3527,75 @@ func pricingSummaryFromMap(m map[string]any) string {
 }
 
 func statInputFromMap(network string, m map[string]any) StatInput {
-	if canonicalNetworkKey(network) == "awin" && firstAny(m, "quantity") != nil {
+	network = canonicalNetworkKey(network)
+	switch network {
+	case "impact":
 		return StatInput{
-			Date:            normalizeStatDate(firstString(m, "date")),
+			Date:            normalizeStatDate(firstString(m, "EventDate", "CreationDate", "ActionDate")),
 			NetworkKey:      network,
-			Clicks:          toInt64(firstAny(m, "quantity.clicks", "clicks")),
-			Conversions:     toInt64(firstAny(m, "quantity.total", "totalNo", "transactions")),
-			RevenueCents:    moneyCentsFromAny(firstAny(m, "saleAmount.total", "totalValue")),
-			CommissionCents: moneyCentsFromAny(firstAny(m, "commissionAmount.total", "totalComm")),
+			Conversions:     boolCount(firstString(m, "Id", "ActionId") != ""),
+			RevenueCents:    moneyCentsFromAny(firstAny(m, "Amount")),
+			CommissionCents: moneyCentsFromAny(firstAny(m, "Payout")),
+			Currency:        firstNonEmpty(firstString(m, "Currency"), "USD"),
+			RawJSON:         mustJSON(redactSecrets(m)),
+		}
+	case "awin":
+		if firstAny(m, "quantity") != nil {
+			return StatInput{
+				Date:            normalizeStatDate(firstString(m, "date")),
+				NetworkKey:      network,
+				Clicks:          toInt64(firstAny(m, "quantity.clicks", "clicks")),
+				Conversions:     toInt64(firstAny(m, "quantity.total", "totalNo", "transactions")),
+				RevenueCents:    moneyCentsFromAny(firstAny(m, "saleAmount.total", "totalValue")),
+				CommissionCents: moneyCentsFromAny(firstAny(m, "commissionAmount.total", "totalComm")),
+				Currency:        firstNonEmpty(firstString(m, "currency"), "USD"),
+				RawJSON:         mustJSON(redactSecrets(m)),
+			}
+		}
+		return StatInput{
+			Date:            normalizeStatDate(firstString(m, "transactionDate", "validationDate")),
+			NetworkKey:      network,
+			Conversions:     boolCount(firstString(m, "id") != ""),
+			RevenueCents:    moneyCentsFromAny(firstAny(m, "saleAmount.amount")),
+			CommissionCents: moneyCentsFromAny(firstAny(m, "commissionAmount.amount")),
+			Currency:        firstNonEmpty(firstString(m, "commissionAmount.currency", "saleAmount.currency"), "USD"),
+			RawJSON:         mustJSON(redactSecrets(m)),
+		}
+	case "partnerstack":
+		key := firstString(m, "key")
+		isReward := strings.HasPrefix(key, "rew") || strings.HasPrefix(key, "rwrd") || firstAny(m, "reward_status", "source") != nil
+		row := StatInput{
+			Date:       normalizeStatDate(firstString(m, "created_at")),
+			NetworkKey: network,
+			Currency:   firstNonEmpty(firstString(m, "currency"), "USD"),
+			RawJSON:    mustJSON(redactSecrets(m)),
+		}
+		if isReward {
+			row.CommissionCents = centsFromAny(firstAny(m, "amount"))
+		} else {
+			row.Conversions = boolCount(firstString(m, "key") != "" && !firstBool(m, "archived"))
+			row.RevenueCents = centsFromAny(firstAny(m, "amount"))
+		}
+		return row
+	case "sovrn":
+		if firstAny(m, "clicks", "Clicks", "sales", "Sales", "actions", "Actions") != nil {
+			return StatInput{
+				Date:            normalizeStatDate(firstString(m, "date", "clickDate")),
+				NetworkKey:      network,
+				Clicks:          toInt64(firstAny(m, "clicks", "Clicks")),
+				Conversions:     toInt64(firstAny(m, "actions", "Actions", "sales", "Sales")),
+				CommissionCents: moneyCentsFromAny(firstAny(m, "revenue", "Revenue", "publisherRevenue", "publisherNetRevenue")),
+				Currency:        firstNonEmpty(firstString(m, "currency", "Currency"), "USD"),
+				RawJSON:         mustJSON(redactSecrets(m)),
+			}
+		}
+	case "rakuten-advertising":
+		return StatInput{
+			Date:            normalizeStatDate(firstString(m, "transaction_date", "process_date")),
+			NetworkKey:      network,
+			Conversions:     boolCount(firstString(m, "etransaction_id", "order_id") != ""),
+			RevenueCents:    moneyCentsFromAny(firstAny(m, "sale_amount")),
+			CommissionCents: moneyCentsFromAny(firstAny(m, "commissions")),
 			Currency:        firstNonEmpty(firstString(m, "currency"), "USD"),
 			RawJSON:         mustJSON(redactSecrets(m)),
 		}
@@ -2515,6 +3638,12 @@ func normalizeStatDate(s string) string {
 	if s == "" {
 		return ""
 	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if n > 10_000_000_000 {
+			n /= 1000
+		}
+		return time.Unix(n, 0).UTC().Format("2006-01-02")
+	}
 	if len(s) >= 10 {
 		return s[:10]
 	}
@@ -2553,7 +3682,7 @@ func collectMaps(root map[string]any, keys ...string) []map[string]any {
 }
 
 func looksLikeRecord(m map[string]any) bool {
-	return firstString(m, "external_id", "id", "slug", "sid", "key", "asin", "offerSid", "offer_id", "offerId", "CampaignId", "campaignId", "advertiserId", "merchantGroupId", "company_key", "date", "day", "ActionDate", "eventDate", "transactionDate") != ""
+	return firstString(m, "external_id", "id", "Id", "slug", "sid", "key", "asin", "ASIN", "itemId", "linkid", "product_id", "product-id", "sku", "offerSid", "offer_id", "offerId", "CampaignId", "campaignId", "advertiserId", "merchantGroupId", "company_key", "date", "day", "clickDate", "ActionDate", "EventDate", "eventDate", "transactionDate", "created_at") != ""
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -2568,6 +3697,214 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 		out["required"] = required
 	}
 	return out
+}
+
+func manualProductSchema(required []string) map[string]any {
+	return schemaObject(map[string]any{
+		"id":               map[string]any{"type": "integer"},
+		"network":          map[string]any{"type": "string"},
+		"external_id":      map[string]any{"type": "string"},
+		"offer_id":         map[string]any{"type": "integer"},
+		"name":             map[string]any{"type": "string"},
+		"description":      map[string]any{"type": "string"},
+		"merchant_id":      map[string]any{"type": "string"},
+		"merchant_name":    map[string]any{"type": "string"},
+		"category":         map[string]any{"type": "string"},
+		"brand":            map[string]any{"type": "string"},
+		"sku":              map[string]any{"type": "string"},
+		"gtin":             map[string]any{"type": "string"},
+		"currency":         map[string]any{"type": "string"},
+		"price_cents":      map[string]any{"type": "integer"},
+		"sale_price_cents": map[string]any{"type": "integer"},
+		"image_url":        map[string]any{"type": "string"},
+		"destination_url":  map[string]any{"type": "string"},
+		"affiliate_url":    map[string]any{"type": "string"},
+		"availability":     map[string]any{"type": "string"},
+		"asin":             map[string]any{"type": "string"},
+		"marketplace":      map[string]any{"type": "string"},
+		"partner_tag":      map[string]any{"type": "string"},
+		"partnerTag":       map[string]any{"type": "string"},
+	}, required)
+}
+
+func normalizeManualProductInput(db *sql.DB, args map[string]any) (ProductInput, error) {
+	network := canonicalNetworkKey(strArg(args, "network"))
+	name := strArg(args, "name")
+	if network == "" {
+		return ProductInput{}, errors.New("network required")
+	}
+	if name == "" {
+		return ProductInput{}, errors.New("name required")
+	}
+	offerID := toInt64(args["offer_id"])
+	if offerID < 0 {
+		return ProductInput{}, errors.New("offer_id must be positive")
+	}
+	if offerID > 0 {
+		offer, err := dbGetOffer(db, offerID)
+		if err != nil {
+			return ProductInput{}, err
+		}
+		if offer == nil {
+			return ProductInput{}, fmt.Errorf("offer_id %d not found", offerID)
+		}
+		if offer.NetworkKey != network {
+			return ProductInput{}, fmt.Errorf("offer_id %d belongs to %s, not %s", offerID, offer.NetworkKey, network)
+		}
+	}
+
+	destination := firstNonEmpty(strArg(args, "destination_url"), strArg(args, "url"))
+	affiliateURL := strArg(args, "affiliate_url")
+	externalID := strArg(args, "external_id")
+	if network == "amazon-associates" {
+		marketplace, err := normalizeAmazonMarketplace(argOrConfig(args, "marketplace", "amazon_marketplace", "www.amazon.com"))
+		if err != nil {
+			return ProductInput{}, err
+		}
+		asin := normalizeASIN(firstNonEmpty(strArg(args, "asin"), externalID, asinFromURL(destination)))
+		if asin == "" {
+			return ProductInput{}, errors.New("valid 10-character Amazon ASIN or Amazon product URL required")
+		}
+		externalID = asin
+		if destination == "" {
+			destination = amazonProductURL(marketplace, asin, "")
+		} else if err := validateAmazonDestination(destination, marketplace); err != nil {
+			return ProductInput{}, err
+		}
+		if affiliateURL == "" {
+			partnerTag := firstNonEmpty(strArg(args, "partner_tag"), argOrConfig(args, "partnerTag", "amazon_partner_tag", ""))
+			if partnerTag == "" {
+				return ProductInput{}, errors.New("partner_tag required when affiliate_url is not supplied")
+			}
+			affiliateURL = amazonProductURL(marketplace, asin, partnerTag)
+		}
+	} else {
+		if externalID == "" {
+			var err error
+			externalID, err = newManualExternalID()
+			if err != nil {
+				return ProductInput{}, err
+			}
+		}
+		if destination == "" || affiliateURL == "" {
+			return ProductInput{}, errors.New("destination_url and affiliate_url required for non-Amazon manual products")
+		}
+	}
+	if err := validateAbsoluteURL(destination); err != nil {
+		return ProductInput{}, fmt.Errorf("destination_url: %w", err)
+	}
+	if err := validateAbsoluteURL(affiliateURL); err != nil {
+		return ProductInput{}, fmt.Errorf("affiliate_url: %w", err)
+	}
+	if imageURL := strArg(args, "image_url"); imageURL != "" {
+		if err := validateAbsoluteURL(imageURL); err != nil {
+			return ProductInput{}, fmt.Errorf("image_url: %w", err)
+		}
+	}
+	currency := strings.ToUpper(strArg(args, "currency"))
+	if currency != "" && len(currency) != 3 {
+		return ProductInput{}, errors.New("currency must be a three-letter code")
+	}
+	priceCents := toInt64(args["price_cents"])
+	salePriceCents := toInt64(args["sale_price_cents"])
+	if priceCents < 0 || salePriceCents < 0 {
+		return ProductInput{}, errors.New("prices cannot be negative")
+	}
+	availability := strArg(args, "availability")
+	if availability == "" {
+		availability = "available"
+	}
+	return ProductInput{
+		NetworkKey: network, ExternalID: externalID, Source: "manual", Status: "active",
+		OfferID: offerID, MerchantID: strArg(args, "merchant_id"), MerchantName: strArg(args, "merchant_name"),
+		Name: name, Description: strArg(args, "description"), Category: strArg(args, "category"),
+		Brand: strArg(args, "brand"), SKU: strArg(args, "sku"), GTIN: strArg(args, "gtin"),
+		Currency: currency, PriceCents: priceCents, SalePriceCents: salePriceCents,
+		ImageURL: strArg(args, "image_url"), DestinationURL: destination, AffiliateURL: affiliateURL,
+		Availability: availability, RawJSON: mustJSON(redactSecrets(args)),
+	}, nil
+}
+
+func manualProductArgs(product *Product) map[string]any {
+	args := map[string]any{
+		"network": product.NetworkKey, "external_id": product.ExternalID, "offer_id": product.OfferID,
+		"name": product.Name, "description": product.Description, "merchant_id": product.MerchantID,
+		"merchant_name": product.MerchantName, "category": product.Category, "brand": product.Brand,
+		"sku": product.SKU, "gtin": product.GTIN, "currency": product.Currency,
+		"price_cents": product.PriceCents, "sale_price_cents": product.SalePriceCents,
+		"image_url": product.ImageURL, "destination_url": product.DestinationURL,
+		"affiliate_url": product.AffiliateURL, "availability": product.Availability,
+	}
+	if product.NetworkKey == "amazon-associates" {
+		if destination, err := url.Parse(product.DestinationURL); err == nil {
+			args["marketplace"] = destination.Hostname()
+		}
+	}
+	return args
+}
+
+func normalizeASIN(value string) string {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if len(value) != 10 {
+		return ""
+	}
+	for _, r := range value {
+		if !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') {
+			return ""
+		}
+	}
+	return value
+}
+
+func normalizeAmazonMarketplace(value string) (string, error) {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		value = "www.amazon.com"
+	}
+	if !strings.Contains(value, "://") {
+		value = "https://" + value
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Hostname() == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("marketplace must be an Amazon hostname such as www.amazon.com")
+	}
+	host := strings.ToLower(u.Hostname())
+	base := strings.TrimPrefix(host, "www.")
+	if !strings.HasPrefix(base, "amazon.") {
+		return "", errors.New("marketplace must be an Amazon hostname such as www.amazon.com")
+	}
+	return host, nil
+}
+
+func validateAmazonDestination(raw, marketplace string) error {
+	if err := validateAbsoluteURL(raw); err != nil {
+		return fmt.Errorf("destination_url: %w", err)
+	}
+	u, _ := url.Parse(raw)
+	destinationHost := strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
+	marketplaceHost := strings.TrimPrefix(strings.ToLower(marketplace), "www.")
+	if destinationHost != marketplaceHost {
+		return fmt.Errorf("destination_url host %q does not match marketplace %q", u.Hostname(), marketplace)
+	}
+	return nil
+}
+
+func amazonProductURL(marketplace, asin, partnerTag string) string {
+	u := &url.URL{Scheme: "https", Host: marketplace, Path: "/dp/" + asin + "/ref=nosim"}
+	if partnerTag != "" {
+		query := u.Query()
+		query.Set("tag", partnerTag)
+		u.RawQuery = query.Encode()
+	}
+	return u.String()
+}
+
+func newManualExternalID() (string, error) {
+	value := make([]byte, 8)
+	if _, err := rand.Read(value); err != nil {
+		return "", fmt.Errorf("generate manual product id: %w", err)
+	}
+	return "manual:" + hex.EncodeToString(value), nil
 }
 
 func writeToolResponse(w http.ResponseWriter, out any, err error) {
@@ -2602,6 +3939,13 @@ func nowUTC() string {
 }
 
 func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func boolCount(v bool) int64 {
 	if v {
 		return 1
 	}
@@ -2704,9 +4048,9 @@ func unixDateBoundary(value string, endOfDay bool) int64 {
 		return 0
 	}
 	if endOfDay {
-		date = date.AddDate(0, 0, 1).Add(-time.Second)
+		date = date.AddDate(0, 0, 1).Add(-time.Millisecond)
 	}
-	return date.Unix()
+	return date.UnixMilli()
 }
 
 func boolArg(args map[string]any, key string, def bool) bool {
@@ -2788,6 +4132,10 @@ func defaultAmazonResources() []string {
 		"images.primary.medium",
 		"itemInfo.title",
 		"itemInfo.byLineInfo",
+		"itemInfo.classifications",
+		"itemInfo.externalIds",
+		"offersV2.listings.availability",
+		"offersV2.listings.merchantInfo",
 		"offersV2.listings.price",
 	}
 }
@@ -2799,11 +4147,17 @@ func asinFromURL(raw string) string {
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	for i, part := range parts {
-		if (part == "dp" || part == "gp" || part == "product") && i+1 < len(parts) {
-			return strings.TrimSpace(parts[i+1])
+		if part == "dp" && i+1 < len(parts) {
+			return normalizeASIN(parts[i+1])
 		}
-		if len(part) == 10 && strings.HasPrefix(part, "B") {
-			return part
+		if part == "gp" && i+2 < len(parts) && parts[i+1] == "product" {
+			return normalizeASIN(parts[i+2])
+		}
+		if part == "product" && i+1 < len(parts) {
+			return normalizeASIN(parts[i+1])
+		}
+		if asin := normalizeASIN(part); asin != "" {
+			return asin
 		}
 	}
 	return ""
@@ -2812,7 +4166,7 @@ func asinFromURL(raw string) string {
 func providerAffiliateURL(out map[string]any) string {
 	for _, key := range []string{
 		"affiliate_url", "clickUrl", "click_url", "trackingLink", "TrackingLink",
-		"optimized", "url", "detailPageURL", "searchURL", "shortUrl",
+		"TrackingURL", "optimized", "url", "detailPageURL", "searchURL", "shortUrl",
 	} {
 		if v := firstString(out, key); strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") {
 			return v
@@ -2837,7 +4191,7 @@ func findURL(v any) string {
 			}
 		}
 	case map[string]any:
-		for _, key := range []string{"affiliate_url", "clickUrl", "click_url", "trackingLink", "TrackingLink", "optimized", "detailPageURL", "searchURL", "url"} {
+		for _, key := range []string{"affiliate_url", "clickUrl", "click_url", "trackingLink", "TrackingLink", "TrackingURL", "optimized", "detailPageURL", "searchURL", "url"} {
 			if s := firstString(x, key); strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
 				return s
 			}
@@ -2994,6 +4348,32 @@ func firstString(m map[string]any, keys ...string) string {
 		return strconv.FormatInt(x, 10)
 	case json.Number:
 		return x.String()
+	case []any:
+		for _, item := range x {
+			if text := scalarString(item); text != "" {
+				return text
+			}
+		}
+	case map[string]any:
+		return firstString(x, "#text", "value", "Value", "DisplayValue")
+	}
+	return ""
+}
+
+func scalarString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(x)
+	case int64:
+		return strconv.FormatInt(x, 10)
+	case json.Number:
+		return x.String()
+	case map[string]any:
+		return firstString(x, "#text", "value", "Value", "DisplayValue")
 	}
 	return ""
 }
@@ -3060,6 +4440,10 @@ func displayNetworkName(key string) string {
 		return "Target Circle (Circlewise)"
 	case "amazon-associates":
 		return "Amazon Associates"
+	case "ebay-partner-network":
+		return "eBay Partner Network"
+	case "rakuten-advertising":
+		return "Rakuten Advertising"
 	case "skimlinks":
 		return "Skimlinks"
 	case "sovrn":
@@ -3073,10 +4457,13 @@ func displayNetworkName(key string) string {
 	}
 }
 
-func slugForLink(link *Link, offer *Offer) string {
+func slugForLink(link *Link, offer *Offer, product *Product) string {
 	base := link.Campaign
 	if base == "" && offer != nil {
 		base = offer.MerchantName
+	}
+	if base == "" && product != nil {
+		base = firstNonEmpty(product.MerchantName, product.Name)
 	}
 	if base == "" {
 		u, _ := url.Parse(link.DestinationURL)

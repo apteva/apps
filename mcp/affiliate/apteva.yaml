@@ -2,26 +2,24 @@ schema: apteva-app/v1
 
 name: affiliate
 display_name: Affiliate
-version: 0.1.14
+version: 0.2.0
 description: |
   Publisher-side affiliate manager. Connect affiliate networks, refresh
-  offers and stats, create monetized links, and optionally wrap them
+  offers, physical products, and stats, create monetized links, and optionally wrap them
   with branded redirects.
 
   Mental model:
     - Networks: where the affiliate relationship lives.
     - Offers: what the publisher can promote.
+    - Products: physical catalog items returned by network APIs/feeds or added manually.
     - Links: URLs the publisher places in content.
     - Stats: normalized performance by day, network, offer, or link.
-
-  v0.1.14 adds Affiliate's adaptive themed app icon and updates the
-  app to the current Apteva app SDK.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/affiliate
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [affiliate, publishers, offers, links, marketing]
+tags: [affiliate, publishers, offers, products, links, marketing, ecommerce]
 
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -67,7 +65,19 @@ requires:
       required: false
       compatible_slugs: [amazon-associates]
       label: Amazon Associates
-      hint: "Generates Amazon affiliate links and imports product/link performance where available."
+      hint: "Searches Amazon's product catalog and imports commissionable product links."
+    - role: ebay-partner-network
+      kind: integration
+      required: false
+      compatible_slugs: [ebay-partner-network]
+      label: eBay Partner Network
+      hint: "Searches domestic fixed-price eBay inventory and imports EPN item links."
+    - role: rakuten-advertising
+      kind: integration
+      required: false
+      compatible_slugs: [rakuten-advertising]
+      label: Rakuten Advertising
+      hint: "Imports Rakuten partnerships and products, generates deep links, and refreshes recent transactions."
     - role: skimlinks
       kind: integration
       required: false
@@ -100,15 +110,25 @@ provides:
     - name: affiliate_networks
       description: "List configured affiliate networks. Args: enabled? (bool filter)."
     - name: affiliate_refresh
-      description: "Refresh offers and/or stats from a network dependency. Args: network (req), kind? (offers|stats|all), from?, to?, plus provider IDs such as publisherId, requestor-cid, website-id, partnerTag, campaignId, keywords."
+      description: "Refresh offers, products, and/or stats from a network dependency. Args: network (req), kind? (offers|products|stats|all), from?, to?, plus provider-specific search and account fields."
     - name: affiliate_offers
       description: "Search offers with total-count pagination. Args: q?, network?, status?, limit?, offset?."
+    - name: affiliate_products
+      description: "Search normalized physical products with total-count pagination. Archived products are hidden by default. Args: q?, network?, merchant?, category?, availability?, source?, status?, limit?, offset?."
+    - name: affiliate_product_create
+      description: "Create or update a manual product. Amazon products can use an ASIN or URL and partner tag without Creators API access."
+    - name: affiliate_product_get
+      description: "Get one affiliate product by ID, including archived products."
+    - name: affiliate_product_update
+      description: "Update a manual affiliate product. Provider-synced products are read-only."
+    - name: affiliate_product_archive
+      description: "Archive a manual affiliate product while preserving its managed links and stats."
     - name: affiliate_link_create
-      description: "Create a monetized link. Args: url (req), network?, offer_id?, affiliate_url? (manual fallback), campaign?, subid?, shorten?, short_hostname?, short_path?, plus provider IDs such as publisherId, website-id, partnerTag, adInventorySid."
+      description: "Create a monetized link from a product_id, offer_id plus URL, or explicit network URL. Args: product_id?, url?, network?, offer_id?, affiliate_url? (manual fallback), campaign?, subid?, shorten?, short_hostname?, short_path?."
     - name: affiliate_links
-      description: "Search managed links with total-count pagination. Args: q?, network?, offer_id?, status?, limit?, offset?."
+      description: "Search managed links with total-count pagination. Args: q?, network?, offer_id?, product_id?, status?, limit?, offset?."
     - name: affiliate_stats
-      description: "Read normalized affiliate stats. Top-level clicks is the total; stats contains the grouped breakdown. Args: from?, to? (YYYY-MM-DD or RFC3339), network?, offer_id?, link_id?, group_by? (network|offer|link|day)."
+      description: "Read normalized affiliate stats. Top-level clicks is the total; stats contains the grouped breakdown. Args: from?, to? (YYYY-MM-DD or RFC3339), network?, offer_id?, product_id?, link_id?, group_by? (network|offer|product|link|day)."
   ui_panels:
     - slot: project.page
       label: Affiliate
@@ -118,6 +138,8 @@ provides:
     - name: affiliate-stats-refresh
       schedule: "@every 6h"
     - name: affiliate-offers-refresh
+      schedule: "@every 24h"
+    - name: affiliate-products-refresh
       schedule: "@every 24h"
 
 runtime:
@@ -185,6 +207,16 @@ config_schema:
     default: ""
     label: Awin advertiser region
     description: Required for Awin performance refreshes. Use the advertiser region code, such as GB, DE, FR, or US.
+  - name: awin_product_feed_ids
+    type: text
+    default: ""
+    label: Awin product feed IDs
+    description: Optional comma-separated feed IDs used by automatic product refresh. Discover them with the Awin product_feeds_list tool.
+  - name: awin_feed_language
+    type: text
+    default: "en"
+    label: Awin feed language
+    description: Product feed language code used for Awin downloads.
   - name: cj_advertiser_ids
     type: text
     default: "joined"
@@ -205,5 +237,15 @@ config_schema:
     default: ""
     label: Target Circle ad inventory SID
     description: Optional default Target Circle adInventorySid used when generating codes/deeplinks.
+  - name: ebay_keywords
+    type: text
+    default: ""
+    label: eBay product keywords
+    description: Optional default eBay Browse query used by automatic product refresh.
+  - name: rakuten_keywords
+    type: text
+    default: ""
+    label: Rakuten product keywords
+    description: Optional default Rakuten Product Search query used by automatic product refresh.
 
 upgrade_policy: auto-patch
