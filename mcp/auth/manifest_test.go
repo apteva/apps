@@ -53,6 +53,9 @@ func TestManifest_OnDiskMatchesEmbedded(t *testing.T) {
 	if mDisk.Version != mEmb.Version {
 		t.Errorf("version drift: disk=%q embedded=%q", mDisk.Version, mEmb.Version)
 	}
+	if mDisk.MinAptevaVersion != mEmb.MinAptevaVersion {
+		t.Errorf("min_apteva_version drift: disk=%q embedded=%q", mDisk.MinAptevaVersion, mEmb.MinAptevaVersion)
+	}
 	// The disk manifest is the contract, so we check the tool list matches.
 	dt := toolNames(mDisk.Provides.MCPTools)
 	et := toolNames(mEmb.Provides.MCPTools)

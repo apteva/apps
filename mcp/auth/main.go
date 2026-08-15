@@ -44,16 +44,17 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.9.2
+version: 0.9.3
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
   owns N orgs; each org has its own users, clients, signing keys, JWKS,
   and audit log. EdDSA JWTs, refresh-token rotation, email verification,
-  password reset, magic links, TOTP MFA. Optional Apteva delegated tokens
-  are restricted to configured Channel Chat agents and OAuth client origins.
+  password reset, magic links, TOTP MFA. Optional delegated authorization
+  is resolved independently by the Apteva server per OAuth client.
 author: Apteva
 scopes: [project]
+min_apteva_version: "0.14.1"
 requires:
   permissions:
     - db.write.app
@@ -235,15 +236,6 @@ config_schema:
     default: "true"
     label: Enable magic-link login
     description: Allows /magic-link/request — passwordless login by emailed token. true | false.
-  - name: apteva_chat_agent_ids
-    type: text
-    label: Delegated Channel Chat agent IDs
-    description: Optional comma-separated positive agent IDs. When configured, Auth can return a least-privilege apteva_access_token for Channel Chat using each OAuth client's allowed_origins. When empty, or when the client has no allowed origins, normal Auth sessions continue without an Apteva delegated token.
-  - name: apteva_token_ttl_seconds
-    type: text
-    default: "3600"
-    label: Delegated token TTL (seconds)
-    description: Lifetime requested for optional Apteva delegated tokens. The platform may enforce a lower maximum.
 upgrade_policy: auto-patch
 `
 

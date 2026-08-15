@@ -1,4 +1,4 @@
-# Auth (v0.9.2)
+# Auth (v0.9.3)
 
 Identity and authorization layer for Apteva-deployed SaaS. One project-scoped
 install owns multiple organizations; each has isolated users, clients, signing
@@ -33,25 +33,31 @@ manages role assignments. The equivalent MCP tools are
 `auth_permissions_{list,create,update,delete}`,
 `auth_role_permissions_set`, and `auth_user_roles_set`.
 
-## Optional delegated Channel Chat access
+## Optional delegated Apteva access
 
 Auth can also return an `apteva_access_token` alongside its own identity token.
-This is opt-in: configure `apteva_chat_agent_ids` as a comma-separated list of
-positive agent IDs and add at least one `allowed_origin` to the OAuth client.
-Auth then asks the platform for a delegated token containing:
+This is opt-in: add at least one `allowed_origin` to the OAuth client and
+configure a matching delegated-access policy on the Apteva server. Auth sends
+the platform only:
 
 - the authenticated user and organization identity;
-- the OAuth client's complete validated `allowed_origins` list;
-- one `channel-chat` scope with only the Chat, message, and stream actions the
-  web SDK needs; and
-- only the configured agent IDs.
+- the OAuth client's stable `client_id`; and
+- the OAuth client's complete validated `allowed_origins` list.
 
-Auth never derives these grants from user-editable metadata and never falls
-back to wildcard app or action access. If agent IDs or client origins are not
-configured—or if the platform mint callback is unavailable—the Auth signup,
-login, refresh, password-reset, and email-verification flows still succeed and
-simply omit `apteva_access_token`. This behavior is independent of organization
-RBAC: existing users with no roles continue to authenticate normally.
+Auth does not send apps, actions, resource IDs, token lifetime, or rate limits.
+The server resolves those fields from its owner-managed policy for the Auth
+install, project, and OAuth client. Policies can authorize any installed app
+that supports delegated scopes and preserve app-specific resource constraints
+without coupling Auth to that app. If the client has no policy or origins—or
+if the platform mint callback is unavailable—the Auth signup, login, refresh,
+password-reset, and email-verification flows still succeed and simply omit
+`apteva_access_token`.
+This is independent of organization RBAC: existing users with no roles continue
+to authenticate normally.
+
+The generic policy exchange requires Apteva Server `0.14.1` or newer. Auth also
+verifies the server echoed the requested OAuth client policy, so a legacy
+server response is discarded rather than returned to the browser.
 
 ## Pipeline of an Apteva-deployed SaaS
 
