@@ -524,6 +524,17 @@ func (a *App) handleReleaseItem(w http.ResponseWriter, r *http.Request) {
 		body, _ := tailFile(rel.LogPath, queryInt(r, "tail", 200))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte(body))
+	case "sync":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		out, err := a.toolReleaseSync(globalCtx, map[string]any{"release_id": float64(rel.ID)})
+		if err != nil {
+			httpStoreErr(w, err, http.StatusBadRequest)
+			return
+		}
+		httpJSON(w, out)
 	case "rollout":
 		if r.Method != http.MethodPost {
 			httpErr(w, http.StatusMethodNotAllowed, "POST")

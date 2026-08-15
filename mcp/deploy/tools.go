@@ -330,6 +330,15 @@ func (a *App) MCPTools() []sdk.Tool {
 			},
 		},
 		{
+			Name: "deploy_release_sync", Handler: a.toolReleaseSync,
+			Description: "Refresh a mobile store release from its provider, including review submission/item state and the exact reviewed artifact when available. Also refreshes store readiness. Args: release_id.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"release_id": map[string]any{"type": "integer"}},
+				"required":   []string{"release_id"},
+			},
+		},
+		{
 			Name: "deploy_release", Handler: a.toolRelease,
 			Description: "Release a build. Services start a process; mobile builds publish to a store channel. Args: build_id, environment?, channel?, rollout_fraction?, release_notes?, submit_for_review?, beta_group_id?",
 			InputSchema: map[string]any{

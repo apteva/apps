@@ -120,6 +120,8 @@ provides:
       description: Persist and reconcile a desired mobile test audience. Android uses exact Google Group replacement; iOS safely adds individual testers.
     - name: deploy_release
       description: Start a service release or publish a mobile build to a store channel.
+    - name: deploy_release_sync
+      description: Refresh a mobile release, provider review outcome, reviewed artifact, and store readiness.
     - name: deploy_promote
       description: Promote a service build between environments or validate and promote a mobile release between store channels.
     - name: deploy_rollout

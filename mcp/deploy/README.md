@@ -96,6 +96,14 @@ or `external` TestFlight and `production` App Store. Deploy polls App
 Store processing, assigns the processed build to a TestFlight group or
 App Store version, and can submit the production version for review.
 
+`deploy_release_sync` refreshes a mobile release after submission. For App
+Store releases it records the review submission and item states, the exact
+build attached to the reviewed version, the latest processed build, and an
+App Store Connect link when action is required. Apple's API does not expose
+Resolution Center message text, attachments, or replies, so those details
+remain provider-console actions. Google Play releases use the same sync tool
+and reconcile the published version code against the selected track.
+
 Use `deploy_promote` to move the same Android version code or iOS build
 from a test channel to production without rebuilding. `deploy_rollout`
 changes a staged Google Play production fraction; `deploy_halt` halts a

@@ -44,6 +44,27 @@ type mobilePromotionValidation struct {
 	ProviderError     string         `json:"provider_error,omitempty"`
 }
 
+type mobileReviewOutcome struct {
+	Provider                 string `json:"provider"`
+	SubmissionID             string `json:"submission_id,omitempty"`
+	SubmissionState          string `json:"submission_state,omitempty"`
+	SubmittedAt              string `json:"submitted_at,omitempty"`
+	ItemID                   string `json:"item_id,omitempty"`
+	ItemState                string `json:"item_state,omitempty"`
+	VersionID                string `json:"version_id,omitempty"`
+	VersionName              string `json:"version_name,omitempty"`
+	SubmittedArtifactID      string `json:"submitted_artifact_id,omitempty"`
+	SubmittedArtifactVersion string `json:"submitted_artifact_version,omitempty"`
+	LatestArtifactID         string `json:"latest_artifact_id,omitempty"`
+	LatestArtifactVersion    string `json:"latest_artifact_version,omitempty"`
+	DetailsAvailable         bool   `json:"details_available"`
+	DetailsSource            string `json:"details_source,omitempty"`
+	ProviderConsoleURL       string `json:"provider_console_url,omitempty"`
+	ActionRequired           string `json:"action_required,omitempty"`
+	SyncError                string `json:"sync_error,omitempty"`
+	SyncedAt                 string `json:"synced_at"`
+}
+
 type mobileReleaseMeta struct {
 	Platform            string                                `json:"platform"`
 	PackageName         string                                `json:"package_name,omitempty"`
@@ -66,6 +87,7 @@ type mobileReleaseMeta struct {
 	TesterSyncedAt      string                                `json:"tester_synced_at,omitempty"`
 	Prepared            bool                                  `json:"prepared,omitempty"`
 	ProviderValidations map[string]providerValidationEvidence `json:"provider_validations,omitempty"`
+	ReviewOutcome       *mobileReviewOutcome                  `json:"review_outcome,omitempty"`
 }
 
 type providerValidationEvidence struct {
@@ -661,7 +683,7 @@ func (a *App) syncPendingMobileReleases(ctx context.Context) error {
 			})
 			continue
 		}
-		if err := a.syncIOSRelease(&releases[i]); err != nil {
+		if err := a.syncMobileReleaseState(&releases[i]); err != nil {
 			fields := map[string]any{"error": err.Error(), "external_status": "sync_error"}
 			var validationErr *providerValidationError
 			if errors.As(err, &validationErr) {
@@ -950,7 +972,7 @@ func reusableAppleReviewSubmission(raw json.RawMessage, versionID string) (strin
 }
 
 func (a *App) syncAppStoreVersionState(bound *sdk.BoundIntegration, rel *Release, meta *mobileReleaseMeta) error {
-	version, err := executeIntegration(bound, "get_app_version", map[string]any{"version_id": meta.AppStoreVersionID})
+	version, err := executeIntegration(bound, "get_app_version", map[string]any{"version_id": meta.AppStoreVersionID, "include": "build"})
 	if err != nil {
 		return err
 	}
@@ -958,8 +980,13 @@ func (a *App) syncAppStoreVersionState(bound *sdk.BoundIntegration, rel *Release
 	if state == "" {
 		state = jsonStringAt(version, "data", "attributes", "appVersionState")
 	}
+	if state == "" {
+		return errors.New("App Store version response missing state")
+	}
 	normalized := strings.ToLower(state)
-	fields := map[string]any{"external_status": normalized}
+	previousOutcome := meta.ReviewOutcome
+	meta.ReviewOutcome = a.observeAppleReviewOutcome(bound, rel, meta, version)
+	fields := map[string]any{"external_status": normalized, "release_meta_json": mustJSON(meta), "error": ""}
 	switch state {
 	case "READY_FOR_SALE", "PRE_ORDER_READY_FOR_SALE":
 		fields["status"] = "live"
@@ -968,9 +995,15 @@ func (a *App) syncAppStoreVersionState(bound *sdk.BoundIntegration, rel *Release
 		fields["external_status"] = "approved_pending_release"
 	case "REJECTED", "METADATA_REJECTED", "INVALID_BINARY":
 		fields["status"] = "failed"
-		fields["error"] = "App Store state: " + state
+		fields["error"] = appleReviewFailureMessage(state, meta.ReviewOutcome)
 	}
-	return dbUpdateRelease(globalCtx.AppDB(), rel.ID, fields)
+	if err := dbUpdateRelease(globalCtx.AppDB(), rel.ID, fields); err != nil {
+		return err
+	}
+	if mobileReviewOutcomeChanged(previousOutcome, meta.ReviewOutcome) {
+		_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "store_review_state_changed", mustJSON(meta.ReviewOutcome))
+	}
+	return nil
 }
 
 func (a *App) toolPromoteMobile(ctx *sdk.AppCtx, base *Deployment, args map[string]any) (any, error) {

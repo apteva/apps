@@ -135,6 +135,7 @@ type iosPlatform struct {
 	calls             []integrationCall
 	state             string
 	reviewSubmissions json.RawMessage
+	responses         map[string]json.RawMessage
 }
 
 func (p *iosPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -147,6 +148,9 @@ func (p *iosPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
 
 func (p *iosPlatform) ExecuteIntegrationTool(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	p.calls = append(p.calls, integrationCall{Tool: tool, Input: input})
+	if data, ok := p.responses[tool]; ok {
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: data}, nil
+	}
 	data := json.RawMessage(`{}`)
 	switch tool {
 	case "list_builds":

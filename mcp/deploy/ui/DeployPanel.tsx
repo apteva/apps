@@ -167,6 +167,27 @@ interface Release {
   created_at: string;
 }
 
+interface MobileReviewOutcome {
+  provider: string;
+  submission_id?: string;
+  submission_state?: string;
+  submitted_at?: string;
+  item_id?: string;
+  item_state?: string;
+  version_id?: string;
+  version_name?: string;
+  submitted_artifact_id?: string;
+  submitted_artifact_version?: string;
+  latest_artifact_id?: string;
+  latest_artifact_version?: string;
+  details_available: boolean;
+  details_source?: string;
+  provider_console_url?: string;
+  action_required?: string;
+  sync_error?: string;
+  synced_at: string;
+}
+
 interface DeploymentDetail {
   deployment: Deployment;
   builds: Build[];
@@ -552,6 +573,14 @@ function releaseTesterAccess(release: Release): { status: string; count: number;
     };
   } catch {
     return { status: "not_configured", count: 0, installURL: "" };
+  }
+}
+
+function releaseReviewOutcome(release: Release): MobileReviewOutcome | null {
+  try {
+    return JSON.parse(release.release_meta_json || "{}").review_outcome || null;
+  } catch {
+    return null;
   }
 }
 
@@ -1087,6 +1116,19 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
       if (detail) await loadDetail(detail.deployment.id);
     } catch (e) {
       setError("Release request failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSyncMobileRelease = async (releaseId: number) => {
+    setBusy(true);
+    try {
+      await api("POST", `/releases/${releaseId}/sync`);
+      if (detail) await loadDetail(detail.deployment.id);
+      setError("");
+    } catch (e) {
+      setError("Store sync failed: " + (e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -1745,12 +1787,23 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                     </tr>
                   </thead>
                   <tbody>
-                    {detail.releases.map((rel) => (
-                      <tr key={rel.id} className="border-t border-border/40">
+                    {detail.releases.map((rel) => {
+                      const review = releaseReviewOutcome(rel);
+                      const reviewedVersion = review?.submitted_artifact_version;
+                      const latestVersion = review?.latest_artifact_version;
+                      const artifactMismatch = reviewedVersion && latestVersion && reviewedVersion !== latestVersion;
+                      return <tr key={rel.id} className="border-t border-border/40">
                         <td className="py-1">{rel.id}</td>
                         <td>{rel.channel || "-"}</td>
                         <td className={statusColor(rel.status)}>{rel.status}</td>
-                        <td className="text-text-dim">{rel.external_status || "-"}</td>
+						<td className="text-text-dim" title={review?.sync_error || review?.action_required || ""}>
+							<div>{review?.item_state || review?.submission_state || rel.external_status || "-"}</div>
+							{reviewedVersion && (
+								<div className={artifactMismatch ? "text-yellow" : "text-text-dim"}>
+									reviewed {reviewedVersion}{artifactMismatch ? ` · latest ${latestVersion}` : ""}
+								</div>
+							)}
+						</td>
 						<td className="text-text-dim">
 							{isProductionMobileChannel(detail.deployment.target_kind, rel.channel) ? "-" : (() => {
 								const access = releaseTesterAccess(rel);
@@ -1762,6 +1815,10 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                         <td>{rel.build_id}</td>
                         <td className="text-right space-x-2">
                           <button type="button" onClick={() => { setLogKind("release"); setLogTargetId(rel.id); }} className="text-text-dim hover:text-text">log</button>
+                          <button type="button" disabled={busy} onClick={() => handleSyncMobileRelease(rel.id)} className="text-text-dim hover:text-text disabled:opacity-40">sync</button>
+						  {review?.provider_console_url && (review.action_required || review.sync_error) && (
+							<a href={review.provider_console_url} target="_blank" rel="noreferrer" className="text-accent hover:underline">review</a>
+						  )}
                           {rel.status !== "failed" && rel.channel !== mobileChannel && (
                             <>
                               <button type="button" disabled={busy} onClick={() => handleValidateMobilePromotion(rel.id)} className="text-text-dim hover:text-text disabled:opacity-40">validate</button>
@@ -1805,8 +1862,8 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                             <button type="button" disabled={busy} onClick={() => handleHaltMobileRelease(rel)} className="text-red hover:underline disabled:opacity-40">expire</button>
                           )}
                         </td>
-                      </tr>
-                    ))}
+                      </tr>;
+                    })}
                   </tbody>
                 </table>
               </section>
