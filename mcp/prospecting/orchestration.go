@@ -60,6 +60,9 @@ func runDiscoveryWithOptions(ctx *sdk.AppCtx, profileID int64, query string, lim
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil, errors.New("prospecting context unavailable")
 	}
+	if err := requireOptionalApp(ctx, "web"); err != nil {
+		return nil, err
+	}
 	pid := ctx.CurrentProject()
 	profile, err := getProfile(ctx.AppDB(), pid, profileID)
 	if err != nil {
@@ -163,6 +166,9 @@ func runDiscoveryWithOptions(ctx *sdk.AppCtx, profileID int64, query string, lim
 func researchCandidate(ctx *sdk.AppCtx, id int64, question string) (map[string]any, error) {
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil, errors.New("prospecting context unavailable")
+	}
+	if err := requireOptionalApp(ctx, "web"); err != nil {
+		return nil, err
 	}
 	pid := ctx.CurrentProject()
 	candidate, err := getCandidate(ctx.AppDB(), pid, id)
@@ -445,6 +451,9 @@ func acceptCandidate(ctx *sdk.AppCtx, id int64, listIDs any) (map[string]any, er
 	} else if existing != nil {
 		candidate, _ := getCandidate(ctx.AppDB(), pid, id)
 		return map[string]any{"candidate": candidate, "handoff": existing, "idempotent": true}, nil
+	}
+	if err := requireOptionalApp(ctx, "crm"); err != nil {
+		return nil, err
 	}
 	candidate, err := getCandidate(ctx.AppDB(), pid, id)
 	if err != nil {

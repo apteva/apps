@@ -22,6 +22,19 @@ type platformStub struct {
 	blockedEngines map[string]bool
 	searchPayload  any
 	extractPages   map[string]any
+	disableWeb     bool
+	disableCRM     bool
+}
+
+func (p *platformStub) WhoAmI() (*sdk.InstallIdentity, error) {
+	bindings := map[string]any{}
+	if !p.disableWeb {
+		bindings["web"] = int64(101)
+	}
+	if !p.disableCRM {
+		bindings["crm"] = int64(102)
+	}
+	return &sdk.InstallIdentity{AppName: "prospecting", InstallID: 1, ProjectID: "project-a", Bindings: bindings}, nil
 }
 
 func (p *platformStub) CallAppResult(app, tool string, input map[string]any, out any) error {
@@ -82,6 +95,60 @@ func (p *platformStub) CallAppResult(app, tool string, input map[string]any, out
 }
 
 var _ sdk.PlatformClient = (*platformStub)(nil)
+
+func TestManifestMakesExternalAppsOptional(t *testing.T) {
+	manifest, err := sdk.ParseManifest(manifestBytes)
+	if err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if len(manifest.Requires.Apps) != 2 {
+		t.Fatalf("requires apps=%d, want Web and CRM", len(manifest.Requires.Apps))
+	}
+	for _, dependency := range manifest.Requires.Apps {
+		if !dependency.Optional {
+			t.Fatalf("dependency %s is still required", dependency.Name)
+		}
+	}
+}
+
+func TestStandaloneImportExportAndCapabilityGating(t *testing.T) {
+	platform := &platformStub{disableWeb: true, disableCRM: true}
+	ctx := newTestContext(t, platform)
+	app := &App{}
+	capabilities := capabilitiesFor(ctx)
+	if capabilities.Web || capabilities.CRM {
+		t.Fatalf("capabilities=%+v, want standalone", capabilities)
+	}
+	imported, err := app.toolCandidatesImport(ctx, map[string]any{
+		"format": "csv",
+		"data":   "company,email,phone,website,notes\nAcme Dental,hello@acme.example,5125550199,https://acme.example,Seeded lead\nBeta Law,contact@beta.example,2125550142,https://beta.example,Review later\n",
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	result := imported.(map[string]any)
+	if result["imported"] != 2 || result["profile_created"] != true {
+		t.Fatalf("import result=%#v", result)
+	}
+	exported, err := app.toolCandidatesExport(ctx, map[string]any{"status": "all"})
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if exported.(map[string]any)["count"] != 2 {
+		t.Fatalf("export result=%#v", exported)
+	}
+	profiles, _ := listProfiles(ctx.AppDB(), ctx.CurrentProject(), "active")
+	if len(profiles) != 1 || profiles[0].Name != "Imported leads" {
+		t.Fatalf("profiles=%+v", profiles)
+	}
+	if _, err := runDiscovery(ctx, profiles[0].ID, "dentists", 10); err == nil || !strings.Contains(err.Error(), "Web integration unavailable") {
+		t.Fatalf("discovery error=%v, want optional Web guidance", err)
+	}
+	candidates, _, _ := listCandidates(ctx.AppDB(), ctx.CurrentProject(), candidateFilter{Status: "all", Limit: 10})
+	if _, err := acceptCandidate(ctx, candidates[0].ID, nil); err == nil || !strings.Contains(err.Error(), "CRM integration unavailable") {
+		t.Fatalf("accept error=%v, want optional CRM guidance", err)
+	}
+}
 
 func newTestContext(t *testing.T, platform sdk.PlatformClient) *sdk.AppCtx {
 	t.Helper()

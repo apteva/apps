@@ -2,23 +2,17 @@ schema: apteva-app/v1
 
 name: prospecting
 display_name: Prospecting
-version: 0.2.8
+version: 0.2.9
 description: |
-  Web-first prospect discovery and deterministic qualification for Apteva.
-  Define target profiles, run bounded company searches with provider fallback
-  and noise filtering, extract facts and automation signals from first-party
-  websites, preserve evidence, and hand accepted contacts to CRM idempotently.
+  A standalone lead workspace for Apteva. Seed companies manually or in bulk,
+  organize them with target profiles, explore and update the catalog, record
+  decisions, and export portable CSV or JSON without installing another app.
 
-  Prospecting owns only the pre-CRM workflow. Web remains the source of raw
-  research artifacts and CRM remains the canonical owner of accepted contacts.
-  v0.2.8 replaces generic website labels with first-party company identities.
-  It retains explicit structured-data phone fields, contact rebuilding, nearby labels for unformatted digits, third-party email and
-  directory/document filtering, US-aware phone validation, contact-first traversal, and stronger
-  deterministic contact extraction, marketplace filtering, and cleaner company
-  identities. The
-  qualification pipeline uses no AI model and deliberately does not send
-  messages, run campaigns, create opportunities, or call paid lead-data
-  providers.
+  Optional Web integration adds bounded company discovery, first-party page
+  extraction, deterministic qualification, and cited research. Optional CRM
+  integration adds an explicit, duplicate-safe handoff for selected leads.
+  Prospecting never sends messages, runs campaigns, makes calls, creates
+  opportunities, or calls paid lead-data providers.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/prospecting
@@ -36,17 +30,18 @@ requires:
   apps:
     - name: web
       version: ">=0.2.7"
-      optional: false
-      reason: Performs browser-backed company discovery and research while retaining raw artifacts.
+      optional: true
+      reason: Optional browser-backed company discovery and enrichment. Manual seed, import, exploration, and export work without it.
     - name: crm
-      optional: false
-      reason: Owns accepted contacts, duplicate detection, lists, and relationship history.
+      optional: true
+      reason: Optional duplicate-safe handoff for selected leads. Prospecting retains its own working catalog without CRM.
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - { name: prospecting_overview, description: "Summarize target profiles, runs, and candidate statuses for the current project." }
+    - { name: prospecting_capabilities, description: "Report whether optional Web discovery and CRM handoff are connected." }
     - { name: prospecting_profiles_create, description: "Create a target profile. Args: name, description?, industries?, locations?, employee_min?, employee_max?, target_titles?, keywords?." }
     - { name: prospecting_profiles_list, description: "List target profiles. Args: status? (active|archived|all)." }
     - { name: prospecting_profiles_get, description: "Get one target profile. Args: id." }
@@ -54,16 +49,18 @@ provides:
     - { name: prospecting_profiles_archive, description: "Archive a target profile. Args: id." }
     - { name: prospecting_search_run, description: "Run a bounded Web search with provider fallback and deterministic noise filtering. Args: profile_id, query?, limit? (1-50), engine?, fallback_engine?." }
     - { name: prospecting_runs_list, description: "List discovery runs. Args: profile_id?, limit?." }
-    - { name: prospecting_candidates_create, description: "Create a candidate manually. Args: profile_id, company_name, website?, person fields?, email?, phone?, summary?, source_url?." }
+    - { name: prospecting_candidates_create, description: "Create a candidate manually. Args: company_name, profile_id? (an Imported leads profile is created when omitted), website?, person fields?, email?, phone?, summary?, source_url?." }
+    - { name: prospecting_candidates_import, description: "Bulk seed up to 1000 candidates from CSV, JSON, or candidate objects without Web or CRM." }
+    - { name: prospecting_candidates_export, description: "Export a portable JSON candidate set without CRM." }
     - { name: prospecting_candidates_search, description: "Search candidates. Args: profile_id?, status?, q?, limit?, offset?." }
-    - { name: prospecting_candidates_get, description: "Get one candidate with evidence and handoff state. Args: id." }
+    - { name: prospecting_candidates_get, description: "Get one candidate with evidence and optional CRM handoff state. Args: id." }
     - { name: prospecting_candidates_update, description: "Patch a candidate's company or person details and recalculate its explainable scores. Args: id and editable fields." }
     - { name: prospecting_candidates_research, description: "Research one candidate through Web and persist cited evidence. Args: id, question?." }
     - { name: prospecting_candidates_qualify, description: "Deterministically qualify one candidate from first-party pages without AI. Args: id, max_pages? (1-5)." }
     - { name: prospecting_candidates_qualify_batch, description: "Deterministically qualify a bounded candidate batch without AI. Args: profile_id?, status?, limit? (1-25), max_pages? (1-5)." }
     - { name: prospecting_candidates_defer, description: "Defer a candidate without rejecting it. Args: id, reason?." }
     - { name: prospecting_candidates_reject, description: "Reject a candidate. Args: id, reason?, exclude_company? (default false)." }
-    - { name: prospecting_candidates_accept, description: "REAL CRM WRITE: accept a candidate and idempotently upsert it into CRM. Requires email or phone. Args: id, list_ids?. Does not send a message or create an opportunity." }
+    - { name: prospecting_candidates_accept, description: "OPTIONAL REAL CRM WRITE: send a candidate to connected CRM and idempotently upsert it. Requires CRM plus email or phone. Args: id, list_ids?. Does not send a message or create an opportunity." }
     - { name: prospecting_exclusions_list, description: "List excluded companies, domains, or people. Args: kind?, limit?." }
     - { name: prospecting_exclusions_remove, description: "Remove one exclusion. Args: id." }
   ui_panels:
@@ -76,9 +73,8 @@ provides:
       command: /prospecting
       body_file: skills/how-to-use-prospecting.md
       description: |
-        Teaches agents to define target profiles, run bounded Web discovery,
-        research and qualify candidates, preserve evidence, and hand accepted
-        contacts to CRM without initiating outreach.
+        Teaches agents to seed, import, explore, update, and export a standalone
+        lead catalog, with optional Web discovery and optional CRM handoff.
       metadata:
         category: sales
   publishes:
@@ -94,7 +90,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: prospecting/v0.2.8
+    ref: prospecting/v0.2.9
     entry: mcp/prospecting
   port: 8080
   health_check: /health

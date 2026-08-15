@@ -97,6 +97,11 @@ interface Overview {
   exclusions: number;
 }
 
+interface Capabilities {
+  web: boolean;
+  crm: boolean;
+}
+
 type Tab = "overview" | "discover" | "candidates" | "settings";
 
 const API = "/api/apps/prospecting";
@@ -132,6 +137,7 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [exclusions, setExclusions] = useState<Exclusion[]>([]);
   const [overview, setOverview] = useState<Overview | null>(null);
+  const [capabilities, setCapabilities] = useState<Capabilities>({ web: false, crm: false });
   const [selectedCandidateId, setSelectedCandidateId] = useState(0);
   const [selectedEvidence, setSelectedEvidence] = useState<Evidence[]>([]);
   const [handoff, setHandoff] = useState<Record<string, unknown> | null>(null);
@@ -157,13 +163,15 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
       const params = new URLSearchParams({ status: statusFilter, limit: "200" });
       if (profileFilter) params.set("profile_id", String(profileFilter));
       if (query.trim()) params.set("q", query.trim());
-      const [overviewData, profileData, candidateData, runData, exclusionData] = await Promise.all([
+      const [capabilityData, overviewData, profileData, candidateData, runData, exclusionData] = await Promise.all([
+        api("/capabilities"),
         api("/overview"),
         api("/profiles?status=all"),
         api(`/candidates?${params.toString()}`),
         api("/runs?limit=30"),
         api("/exclusions?limit=200"),
       ]);
+      setCapabilities(capabilityData);
       setOverview(overviewData);
       setProfiles(profileData.profiles || []);
       setCandidates(candidateData.candidates || []);
@@ -222,7 +230,7 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
         <div className="flex items-start gap-4">
           <div>
             <h1 className="text-lg font-semibold">Prospecting</h1>
-            <p className="text-xs text-text-muted">Discover and qualify candidates before they enter CRM.</p>
+            <p className="text-xs text-text-muted">Seed, explore, and share a lead catalog. Web discovery and CRM handoff are optional.</p>
           </div>
           <div className="ml-auto text-xs text-text-muted min-h-5 max-w-xl text-right">{busy ? "Working…" : message}</div>
           <button type="button" onClick={load} disabled={busy} className="px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50">
@@ -245,10 +253,10 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
 
       <main className="flex-1 min-h-0 overflow-auto">
         {tab === "overview" && (
-          <OverviewView overview={overview} profiles={profiles} candidates={candidates} runs={runs} onDiscover={() => setTab("discover")} onCandidates={() => setTab("candidates")} />
+          <OverviewView overview={overview} profiles={profiles} candidates={candidates} runs={runs} capabilities={capabilities} onDiscover={() => setTab("discover")} onCandidates={() => setTab("candidates")} />
         )}
         {tab === "discover" && (
-          <DiscoverView profiles={profiles.filter((profile) => profile.status === "active")} runs={runs} busy={busy} api={api} onDone={async (text) => { setMessage(text); await load(); setTab("candidates"); }} onError={setMessage} setBusy={setBusy} />
+          <DiscoverView profiles={profiles.filter((profile) => profile.status === "active")} runs={runs} webAvailable={capabilities.web} busy={busy} api={api} onDone={async (text) => { setMessage(text); await load(); setTab("candidates"); }} onError={setMessage} setBusy={setBusy} />
         )}
         {tab === "candidates" && (
           <CandidatesView
@@ -265,6 +273,8 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
             setStatusFilter={setStatusFilter}
             profileFilter={profileFilter}
             setProfileFilter={setProfileFilter}
+            capabilities={capabilities}
+            projectId={projectId}
             busy={busy}
             api={api}
             runAction={runAction}
@@ -278,11 +288,12 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
   );
 }
 
-function OverviewView({ overview, profiles, candidates, runs, onDiscover, onCandidates }: {
+function OverviewView({ overview, profiles, candidates, runs, capabilities, onDiscover, onCandidates }: {
   overview: Overview | null;
   profiles: Profile[];
   candidates: Candidate[];
   runs: Run[];
+  capabilities: Capabilities;
   onDiscover: () => void;
   onCandidates: () => void;
 }) {
@@ -301,10 +312,11 @@ function OverviewView({ overview, profiles, candidates, runs, onDiscover, onCand
       </section>
       <section className="border border-border rounded-lg p-5 flex items-center gap-5">
         <div>
-          <h2 className="font-medium">Start with a target profile</h2>
-          <p className="mt-1 text-sm text-text-muted">Prospecting searches the Web, preserves evidence, and never contacts anyone automatically.</p>
+          <h2 className="font-medium">Your standalone lead workspace</h2>
+          <p className="mt-1 text-sm text-text-muted">Add or import leads, review them here, and export a portable list. Optional integrations add discovery and CRM handoff.</p>
+          <div className="mt-2 flex gap-2 text-[11px]"><CapabilityBadge label="Web discovery" available={capabilities.web} /><CapabilityBadge label="CRM handoff" available={capabilities.crm} /></div>
         </div>
-        <button type="button" onClick={onDiscover} className="ml-auto px-4 py-2 text-sm bg-accent text-bg rounded font-medium">Discover companies</button>
+        <button type="button" onClick={capabilities.web ? onDiscover : onCandidates} className="ml-auto px-4 py-2 text-sm bg-accent text-bg rounded font-medium">{capabilities.web ? "Discover companies" : "Seed leads"}</button>
       </section>
       <div className="grid lg:grid-cols-2 gap-5">
         <section className="border border-border rounded-lg overflow-hidden">
@@ -349,9 +361,10 @@ function OverviewView({ overview, profiles, candidates, runs, onDiscover, onCand
   );
 }
 
-function DiscoverView({ profiles, runs, busy, api, onDone, onError, setBusy }: {
+function DiscoverView({ profiles, runs, webAvailable, busy, api, onDone, onError, setBusy }: {
   profiles: Profile[];
   runs: Run[];
+  webAvailable: boolean;
   busy: boolean;
   api: (path: string, init?: RequestInit) => Promise<any>;
   onDone: (message: string) => Promise<void>;
@@ -386,7 +399,12 @@ function DiscoverView({ profiles, runs, busy, api, onDone, onError, setBusy }: {
           <h2 className="font-medium">Discover companies</h2>
           <p className="mt-1 text-sm text-text-muted">Run a bounded browser-backed search with automatic provider fallback and deterministic noise filtering. No messages are sent.</p>
         </div>
-        {profiles.length === 0 ? <Empty text="Create an active target profile in Settings first." /> : (
+        {!webAvailable ? (
+          <div className="rounded border border-border bg-bg-input/40 p-4 text-sm">
+            <div className="font-medium">Web discovery is optional and not connected</div>
+            <p className="mt-1 text-text-muted">You can continue using the Candidates tab to add, import, explore, and export leads. Connect the Web app only when you want browser-backed discovery and enrichment.</p>
+          </div>
+        ) : profiles.length === 0 ? <Empty text="Create an active target profile in Settings first." /> : (
           <>
             <Field label="Target profile">
               <select value={profileId} onChange={(event) => setProfileId(Number(event.target.value))} className={controlClass}>
@@ -434,7 +452,7 @@ function DiscoverView({ profiles, runs, busy, api, onDone, onError, setBusy }: {
   );
 }
 
-function CandidatesView({ profiles, candidates, selected, evidence, handoff, selectedId, setSelectedId, query, setQuery, statusFilter, setStatusFilter, profileFilter, setProfileFilter, busy, api, runAction }: {
+function CandidatesView({ profiles, candidates, selected, evidence, handoff, selectedId, setSelectedId, query, setQuery, statusFilter, setStatusFilter, profileFilter, setProfileFilter, capabilities, projectId, busy, api, runAction }: {
   profiles: Profile[];
   candidates: Candidate[];
   selected: Candidate | null;
@@ -448,15 +466,29 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
   setStatusFilter: (status: string) => void;
   profileFilter: number;
   setProfileFilter: (id: number) => void;
+  capabilities: Capabilities;
+  projectId: string;
   busy: boolean;
   api: (path: string, init?: RequestInit) => Promise<any>;
   runAction: (action: () => Promise<unknown>, success: string) => Promise<void>;
 }) {
 	const [creating, setCreating] = useState(false);
+	const [importing, setImporting] = useState(false);
 	const qualifyReady = () => runAction(() => api("/qualify", {
 		method: "POST",
 		body: JSON.stringify({ profile_id: profileFilter || undefined, status: statusFilter === "all" ? "ready" : statusFilter, limit: 10, max_pages: 5 }),
 	}), "Candidate batch qualified from first-party websites without AI.");
+	const exportLeads = (format: "csv" | "json") => {
+		const params = new URLSearchParams({ project_id: projectId, format, status: statusFilter });
+		if (profileFilter) params.set("profile_id", String(profileFilter));
+		if (query.trim()) params.set("q", query.trim());
+		const link = document.createElement("a");
+		link.href = `${API}/candidates/export?${params.toString()}`;
+		link.download = `prospecting-leads.${format}`;
+		document.body.appendChild(link);
+		link.click();
+		link.remove();
+	};
 	return (
     <div className="h-full min-h-0 flex flex-col">
       <div className="shrink-0 px-4 py-3 border-b border-border flex flex-wrap gap-2">
@@ -469,7 +501,10 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
           <option value={0}>All profiles</option>
           {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
         </select>
-		<button type="button" onClick={qualifyReady} disabled={busy || candidates.length === 0} title="Extract facts and workflow signals from up to five first-party pages per candidate" className="ml-auto px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50">Qualify batch</button>
+		<button type="button" onClick={qualifyReady} disabled={busy || candidates.length === 0 || !capabilities.web} title={capabilities.web ? "Extract facts and workflow signals from up to five first-party pages per candidate" : "Connect the optional Web app to qualify candidates"} className="ml-auto px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50">Qualify batch</button>
+		<button type="button" onClick={() => setImporting(true)} className="px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input">Import</button>
+		<button type="button" onClick={() => exportLeads("csv")} disabled={candidates.length === 0} className="px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50">Export CSV</button>
+		<button type="button" onClick={() => exportLeads("json")} disabled={candidates.length === 0} className="px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50">Export JSON</button>
 		<button type="button" onClick={() => setCreating(true)} className="px-3 py-1.5 text-xs bg-accent text-bg rounded">Add manually</button>
       </div>
       <div className="flex-1 min-h-0 grid lg:grid-cols-[390px_minmax(0,1fr)]">
@@ -493,7 +528,7 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
         </aside>
         <section className="min-h-0 overflow-auto">
           {selected ? (
-            <CandidateDetail candidate={selected} profile={profiles.find((profile) => profile.id === selected.profile_id)} evidence={evidence} handoff={handoff} busy={busy} api={api} runAction={runAction} />
+            <CandidateDetail candidate={selected} profile={profiles.find((profile) => profile.id === selected.profile_id)} evidence={evidence} handoff={handoff} capabilities={capabilities} busy={busy} api={api} runAction={runAction} />
           ) : <Empty text="Select a candidate." />}
         </section>
       </div>
@@ -501,15 +536,20 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
         await api("/candidates", { method: "POST", body: JSON.stringify({ profile_id: profileId, ...body }) });
         setCreating(false);
       }, "Candidate created.")} />}
+	  {importing && <ImportModal profiles={profiles.filter((profile) => profile.status === "active")} onClose={() => setImporting(false)} onSave={(profileId, format, data) => runAction(async () => {
+		await api("/candidates/import", { method: "POST", body: JSON.stringify({ profile_id: profileId || undefined, format, data }) });
+		setImporting(false);
+	  }, "Lead import completed. Duplicates were skipped.")} />}
     </div>
   );
 }
 
-function CandidateDetail({ candidate, profile, evidence, handoff, busy, api, runAction }: {
+function CandidateDetail({ candidate, profile, evidence, handoff, capabilities, busy, api, runAction }: {
   candidate: Candidate;
   profile?: Profile;
   evidence: Evidence[];
   handoff: Record<string, unknown> | null;
+  capabilities: Capabilities;
   busy: boolean;
   api: (path: string, init?: RequestInit) => Promise<any>;
   runAction: (action: () => Promise<unknown>, success: string) => Promise<void>;
@@ -537,11 +577,11 @@ function CandidateDetail({ candidate, profile, evidence, handoff, busy, api, run
           <div className="mt-1 text-xs text-text-muted">{profile?.name || `Profile ${candidate.profile_id}`} · {candidate.source} · updated {dateLabel(candidate.updated_at)}</div>
         </div>
 		<div className="ml-auto flex flex-wrap gap-2">
-		  <button type="button" onClick={qualify} disabled={busy || candidate.status === "accepted" || candidate.status === "rejected"} className={secondaryButton}>Qualify</button>
-		  <button type="button" onClick={research} disabled={busy || candidate.status === "accepted" || candidate.status === "rejected"} className={secondaryButton}>Research</button>
+		  <button type="button" onClick={qualify} disabled={busy || !capabilities.web || candidate.status === "accepted" || candidate.status === "rejected"} title={capabilities.web ? "Qualify from first-party pages" : "Connect the optional Web app"} className={secondaryButton}>Qualify</button>
+		  <button type="button" onClick={research} disabled={busy || !capabilities.web || candidate.status === "accepted" || candidate.status === "rejected"} title={capabilities.web ? "Research with Web" : "Connect the optional Web app"} className={secondaryButton}>Research</button>
           <button type="button" onClick={defer} disabled={busy || candidate.status === "accepted"} className={secondaryButton}>Defer</button>
           <button type="button" onClick={reject} disabled={busy || candidate.status === "accepted"} className={secondaryButton}>Reject</button>
-          <button type="button" onClick={accept} disabled={busy || candidate.status === "accepted" || (!candidate.email && !candidate.phone)} title={!candidate.email && !candidate.phone ? "Add an email or phone first" : "Writes to CRM; does not send a message"} className="px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium disabled:opacity-40">Accept into CRM</button>
+          <button type="button" onClick={accept} disabled={busy || !capabilities.crm || candidate.status === "accepted" || (!candidate.email && !candidate.phone)} title={!capabilities.crm ? "Connect the optional CRM app to hand off this lead" : !candidate.email && !candidate.phone ? "Add an email or phone first" : "Writes to CRM; does not send a message"} className="px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium disabled:opacity-40">Send to CRM</button>
         </div>
       </div>
       {handoff && <div className="rounded border border-green/40 bg-green/10 px-4 py-3 text-sm">Linked to CRM contact #{String(handoff.crm_contact_id)}. No message was sent.</div>}
@@ -659,13 +699,14 @@ function SettingsView({ profiles, exclusions, busy, api, runAction }: {
       </section>
       <div className="space-y-5">
         <section className="border border-border rounded-lg p-4">
-		  <h2 className="text-sm font-medium">Deterministic v0.2</h2>
+		  <h2 className="text-sm font-medium">Standalone by default</h2>
 		  <ul className="mt-3 space-y-2 text-xs text-text-muted">
-			<li>Web performs discovery and first-party page extraction; Google can fall back to DuckDuckGo when blocked.</li>
+			<li>Manual creation, CSV/JSON import, catalog exploration, decisions, and export require no other app.</li>
+			<li>Optional Web adds discovery and first-party page extraction; Google can fall back to DuckDuckGo when blocked.</li>
 			<li>Noise filtering, field extraction, workflow signals, eligibility, and scoring use fixed rules—not an AI model.</li>
 			<li>Prospecting owns candidates, evidence references, decisions, and scores.</li>
-            <li>CRM owns accepted contacts and duplicate detection.</li>
-            <li>Accepting a candidate never sends a message or creates an opportunity.</li>
+            <li>Optional CRM receives only leads explicitly sent to it and provides duplicate-safe contact ownership.</li>
+            <li>Sending a lead to CRM never sends a message or creates an opportunity.</li>
           </ul>
         </section>
         <section className="border border-border rounded-lg overflow-hidden">
@@ -694,7 +735,7 @@ function CandidateModal({ profiles, onClose, onSave }: { profiles: Profile[]; on
       <div className="w-full max-w-2xl max-h-[90vh] overflow-auto bg-bg border border-border rounded-lg shadow-xl">
         <div className="px-5 py-4 border-b border-border flex items-center"><h2 className="font-medium">Add candidate manually</h2><button type="button" onClick={onClose} className="ml-auto text-text-muted">×</button></div>
         <div className="p-5 grid sm:grid-cols-2 gap-3">
-          <Field label="Target profile"><select value={profileId} onChange={(event) => setProfileId(Number(event.target.value))} className={controlClass}>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></Field>
+          <Field label="Target profile"><select value={profileId} onChange={(event) => setProfileId(Number(event.target.value))} className={controlClass}>{profiles.length === 0 && <option value={0}>Imported leads (created automatically)</option>}{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></Field>
           <Field label="Company name"><input value={draft.company_name} onChange={(event) => setDraft({ ...draft, company_name: event.target.value })} className={controlClass} /></Field>
           <Field label="Website"><input value={draft.website} onChange={(event) => setDraft({ ...draft, website: event.target.value })} className={controlClass} /></Field>
           <Field label="Decision-maker"><input value={draft.person_display_name} onChange={(event) => setDraft({ ...draft, person_display_name: event.target.value })} className={controlClass} /></Field>
@@ -703,7 +744,31 @@ function CandidateModal({ profiles, onClose, onSave }: { profiles: Profile[]; on
           <Field label="Phone"><input value={draft.phone} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} className={controlClass} /></Field>
           <div className="sm:col-span-2"><Field label="Summary"><textarea value={draft.summary} onChange={(event) => setDraft({ ...draft, summary: event.target.value })} rows={3} className={controlClass} /></Field></div>
         </div>
-        <div className="px-5 py-4 border-t border-border flex justify-end gap-2"><button type="button" onClick={onClose} className={secondaryButton}>Cancel</button><button type="button" onClick={() => onSave(profileId, draft)} disabled={!profileId || !draft.company_name.trim()} className="px-3 py-1.5 text-xs bg-accent text-bg rounded disabled:opacity-50">Create</button></div>
+        <div className="px-5 py-4 border-t border-border flex justify-end gap-2"><button type="button" onClick={onClose} className={secondaryButton}>Cancel</button><button type="button" onClick={() => onSave(profileId, draft)} disabled={!draft.company_name.trim()} className="px-3 py-1.5 text-xs bg-accent text-bg rounded disabled:opacity-50">Create</button></div>
+      </div>
+    </div>
+  );
+}
+
+function ImportModal({ profiles, onClose, onSave }: { profiles: Profile[]; onClose: () => void; onSave: (profileId: number, format: string, data: string) => Promise<void> }) {
+  const [profileId, setProfileId] = useState(profiles[0]?.id || 0);
+  const [format, setFormat] = useState("auto");
+  const [data, setData] = useState("");
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className="w-full max-w-3xl max-h-[90vh] overflow-auto bg-bg border border-border rounded-lg shadow-xl">
+        <div className="px-5 py-4 border-b border-border flex items-center"><div><h2 className="font-medium">Import leads</h2><p className="mt-1 text-xs text-text-muted">Paste CSV or JSON. No Web or CRM connection is required.</p></div><button type="button" onClick={onClose} className="ml-auto text-text-muted">×</button></div>
+        <div className="p-5 space-y-4">
+          <div className="grid sm:grid-cols-2 gap-3">
+            <Field label="Target profile"><select value={profileId} onChange={(event) => setProfileId(Number(event.target.value))} className={controlClass}>{profiles.length === 0 && <option value={0}>Imported leads (created automatically)</option>}{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></Field>
+            <Field label="Format"><select value={format} onChange={(event) => setFormat(event.target.value)} className={controlClass}><option value="auto">Detect automatically</option><option value="csv">CSV</option><option value="json">JSON</option></select></Field>
+          </div>
+          <Field label="Lead data" hint="CSV headers can include company, website, contact_name, title, email, phone, notes, and source_url">
+            <textarea value={data} onChange={(event) => setData(event.target.value)} rows={14} placeholder={'company,email,phone,website\nAcme Dental,hello@acme.com,512-555-0100,https://acme.com'} className={`${controlClass} font-mono text-xs`} />
+          </Field>
+          <p className="text-xs text-text-muted">Duplicates are skipped. Imports are limited to 1,000 rows per request.</p>
+        </div>
+        <div className="px-5 py-4 border-t border-border flex justify-end gap-2"><button type="button" onClick={onClose} className={secondaryButton}>Cancel</button><button type="button" onClick={() => onSave(profileId, format, data)} disabled={!data.trim()} className="px-3 py-1.5 text-xs bg-accent text-bg rounded disabled:opacity-50">Import leads</button></div>
       </div>
     </div>
   );
@@ -711,6 +776,10 @@ function CandidateModal({ profiles, onClose, onSave }: { profiles: Profile[]; on
 
 function Metric({ label, value, accent = false }: { label: string; value: number; accent?: boolean }) {
   return <div className={`border rounded-lg p-4 ${accent ? "border-accent/50 bg-accent/5" : "border-border"}`}><div className="text-2xl font-semibold">{value}</div><div className="mt-1 text-xs text-text-muted">{label}</div></div>;
+}
+
+function CapabilityBadge({ label, available }: { label: string; available: boolean }) {
+  return <span className={`rounded px-2 py-1 ${available ? "bg-green/10 text-green" : "bg-border text-text-muted"}`}>{label}: {available ? "connected" : "optional"}</span>;
 }
 
 function Score({ value, label }: { value: number; label: string }) {

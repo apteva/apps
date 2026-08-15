@@ -47,11 +47,14 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/overview", Handler: a.handleOverview},
+		{Pattern: "/capabilities", Handler: a.handleCapabilities},
 		{Pattern: "/profiles", Handler: a.handleProfiles},
 		{Pattern: "/profiles/", Handler: a.handleProfileItem},
 		{Pattern: "/discover", Handler: a.handleDiscover},
 		{Pattern: "/qualify", Handler: a.handleQualifyBatch},
 		{Pattern: "/runs", Handler: a.handleRuns},
+		{Pattern: "/candidates/import", Handler: a.handleCandidateImport},
+		{Pattern: "/candidates/export", Handler: a.handleCandidateExport},
 		{Pattern: "/candidates", Handler: a.handleCandidates},
 		{Pattern: "/candidates/", Handler: a.handleCandidateItem},
 		{Pattern: "/exclusions", Handler: a.handleExclusions},
@@ -85,6 +88,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 	return []sdk.Tool{
 		{Name: "prospecting_overview", Description: "Summarize target profiles, runs, candidate statuses, evidence, and exclusions. Args: none.", InputSchema: schemaObject(nil, nil), Handler: a.toolOverview},
+		{Name: "prospecting_capabilities", Description: "Report whether the optional Web discovery and CRM handoff integrations are currently connected. Args: none.", InputSchema: schemaObject(nil, nil), Handler: a.toolCapabilities},
 		{Name: "prospecting_profiles_create", Description: "Create a target profile. Args: name, description?, industries?, locations?, employee_min?, employee_max?, target_titles?, keywords?.", InputSchema: schemaObject(profileFields, []string{"name"}), Handler: a.toolProfilesCreate},
 		{Name: "prospecting_profiles_list", Description: "List target profiles. Args: status? (active default, archived, all).", InputSchema: schemaObject(map[string]any{"status": sString()}, nil), Handler: a.toolProfilesList},
 		{Name: "prospecting_profiles_get", Description: "Get one target profile. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolProfilesGet},
@@ -92,7 +96,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "prospecting_profiles_archive", Description: "Archive a target profile. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolProfilesArchive},
 		{Name: "prospecting_search_run", Description: "Run a bounded Web search, fall back to another engine when blocked, filter deterministic noise, and persist new company candidates. Args: profile_id, query?, limit? (default 20, max 50), engine? (default google), fallback_engine? (default duckduckgo). Does not contact anyone.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "query": sString(), "limit": sInteger(), "engine": sString(), "fallback_engine": sString()}, []string{"profile_id"}), Handler: a.toolSearchRun},
 		{Name: "prospecting_runs_list", Description: "List discovery runs. Args: profile_id?, limit?.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "limit": sInteger()}, nil), Handler: a.toolRunsList},
-		{Name: "prospecting_candidates_create", Description: "Create a candidate manually. Args: profile_id, company_name, website?, person fields?, email?, phone?, summary?, source_url?.", InputSchema: schemaObject(mergeSchemas(map[string]any{"profile_id": sInteger()}, candidateFields), []string{"profile_id", "company_name"}), Handler: a.toolCandidatesCreate},
+		{Name: "prospecting_candidates_create", Description: "Create a candidate manually without Web or CRM. Args: profile_id? (uses the newest active profile or creates Imported leads), company_name, website?, person fields?, email?, phone?, summary?, source_url?.", InputSchema: schemaObject(mergeSchemas(map[string]any{"profile_id": sInteger()}, candidateFields), []string{"company_name"}), Handler: a.toolCandidatesCreate},
+		{Name: "prospecting_candidates_import", Description: "Bulk seed candidates without Web or CRM. Args: profile_id?; candidates? array of candidate objects, or data string plus format auto|csv|json. Maximum 1000 rows.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "candidates": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "data": sString(), "format": sString()}, nil), Handler: a.toolCandidatesImport},
+		{Name: "prospecting_candidates_export", Description: "Export a portable JSON candidate set without CRM. Args: profile_id?, status?, q?, limit? (max 200).", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "status": sString(), "q": sString(), "limit": sInteger()}, nil), Handler: a.toolCandidatesExport},
 		{Name: "prospecting_candidates_search", Description: "Search candidates. Args: profile_id?, status?, q?, limit?, offset?.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "status": sString(), "q": sString(), "limit": sInteger(), "offset": sInteger()}, nil), Handler: a.toolCandidatesSearch},
 		{Name: "prospecting_candidates_get", Description: "Get one candidate with evidence and CRM handoff state. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolCandidatesGet},
 		{Name: "prospecting_candidates_update", Description: "Patch a candidate's company or person details and recalculate explainable scores. Args: id and editable fields.", InputSchema: schemaObject(mergeSchemas(map[string]any{"id": sInteger()}, candidateFields), []string{"id"}), Handler: a.toolCandidatesUpdate},
@@ -157,11 +163,8 @@ func (a *App) toolRunsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) toolCandidatesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	profileID := int64Arg(args, "profile_id")
-	profile, err := getProfile(ctx.AppDB(), ctx.CurrentProject(), profileID)
-	if err != nil || profile == nil {
-		if err == nil {
-			err = errors.New("target profile not found")
-		}
+	profile, profileCreated, err := resolveSeedProfile(ctx, profileID)
+	if err != nil {
 		return nil, err
 	}
 	input, err := candidateInputFromArgs(args)
@@ -176,7 +179,7 @@ func (a *App) toolCandidatesCreate(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if created {
 		ctx.EmitWithProject("prospecting.candidate.created", candidate.ProjectID, candidateEvent(candidate))
 	}
-	return map[string]any{"candidate": candidate, "was_created": created}, nil
+	return map[string]any{"candidate": candidate, "was_created": created, "profile_created": profileCreated}, nil
 }
 
 func (a *App) toolCandidatesSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {

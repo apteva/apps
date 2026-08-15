@@ -182,6 +182,9 @@ func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, 
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil, errors.New("prospecting context unavailable")
 	}
+	if err := requireOptionalApp(ctx, "web"); err != nil {
+		return nil, err
+	}
 	pid := ctx.CurrentProject()
 	candidate, err := getCandidate(ctx.AppDB(), pid, id)
 	if err != nil {
@@ -284,6 +287,9 @@ func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, 
 func qualifyBatch(ctx *sdk.AppCtx, profileID int64, status string, limit, maxPages int, requalify bool) (map[string]any, error) {
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil, errors.New("prospecting context unavailable")
+	}
+	if err := requireOptionalApp(ctx, "web"); err != nil {
+		return nil, err
 	}
 	if status == "" {
 		status = "ready"

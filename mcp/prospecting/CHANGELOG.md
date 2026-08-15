@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.9
+
+- Make Web and CRM optional installation dependencies.
+- Add standalone manual creation with automatic profile setup.
+- Add bulk CSV/JSON import and portable CSV/JSON export.
+- Expose connected capabilities and gate integration-only actions with clear messages.
+- Update the panel for standalone seeding, exploration, and sharing.
+
 ## v0.2.8
 
 - Treat `Website`, `Homepage`, and `Official Website` as generic search/page titles.
