@@ -163,6 +163,8 @@ func (p *iosPlatform) ExecuteIntegrationTool(_ int64, tool string, input map[str
 		data = json.RawMessage(`{"data":{"id":"version-1"}}`)
 	case "create_review_submission":
 		data = json.RawMessage(`{"data":{"id":"review-1"}}`)
+	case "update_review_submission_item":
+		data = json.RawMessage(`{"data":{"type":"reviewSubmissionItems","id":"item-existing","attributes":{"state":"READY_FOR_REVIEW"}}}`)
 	case "list_review_submissions":
 		data = p.reviewSubmissions
 		if len(data) == 0 {
@@ -539,7 +541,10 @@ func TestIOSProductionReleaseResubmitsRejectedVersionWithNewBuild(t *testing.T) 
 	if countIntegrationCalls(platform.calls, "submit_review_submission") != 1 {
 		t.Fatalf("rejected submission was not resubmitted: %#v", platform.calls)
 	}
-	setBuildIndex, submitIndex := -1, -1
+	if countIntegrationCalls(platform.calls, "update_review_submission_item") != 1 {
+		t.Fatalf("rejected item was not resolved: %#v", platform.calls)
+	}
+	setBuildIndex, resolveIndex, submitIndex := -1, -1, -1
 	for i, call := range platform.calls {
 		switch call.Tool {
 		case "set_app_version_build":
@@ -549,12 +554,42 @@ func TestIOSProductionReleaseResubmitsRejectedVersionWithNewBuild(t *testing.T) 
 			if data["id"] != "build-23" {
 				t.Fatalf("selected build=%#v", data["id"])
 			}
+		case "update_review_submission_item":
+			resolveIndex = i
+			if call.Input["item_id"] != "item-existing" || call.Input["resolved"] != true {
+				t.Fatalf("resolve input=%#v", call.Input)
+			}
 		case "submit_review_submission":
 			submitIndex = i
 		}
 	}
-	if setBuildIndex < 0 || submitIndex < 0 || setBuildIndex >= submitIndex {
-		t.Fatalf("build must be selected before resubmission: %#v", platform.calls)
+	if setBuildIndex < 0 || resolveIndex < 0 || submitIndex < 0 || setBuildIndex >= resolveIndex || resolveIndex >= submitIndex {
+		t.Fatalf("build selection, item resolution, and resubmission are out of order: %#v", platform.calls)
+	}
+}
+
+func TestIOSProductionReleaseRetriesAfterItemAlreadyResolved(t *testing.T) {
+	platform := &iosPlatform{reviewSubmissions: json.RawMessage(`{"data":[{"type":"reviewSubmissions","id":"review-unresolved","attributes":{"state":"UNRESOLVED_ISSUES"},"relationships":{"items":{"data":[{"type":"reviewSubmissionItems","id":"item-existing"}]}}}],"included":[{"type":"reviewSubmissionItems","id":"item-existing","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}]}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+	d, _ := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "ios-review-resolved-retry", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	build, _ := dbCreateBuildForEnv(ctx.AppDB(), d.ID, env.ID, "ios", "")
+	release, _ := dbCreateReleaseForEnv(ctx.AppDB(), d.ID, env.ID, build.ID)
+	meta := mobileReleaseMeta{
+		Platform: "ios", AppID: "app-1", AppStoreVersionID: "version-1",
+		VersionName: "1.0", BuildNumber: "23", SubmitForReview: true,
+	}
+	bound := &sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}
+	if err := (&App{}).prepareIOSProductionRelease(bound, release, "build-23", &meta); err != nil {
+		t.Fatal(err)
+	}
+	if countIntegrationCalls(platform.calls, "update_review_submission_item") != 0 || countIntegrationCalls(platform.calls, "submit_review_submission") != 1 {
+		t.Fatalf("resolved retry calls=%#v", platform.calls)
 	}
 }
 

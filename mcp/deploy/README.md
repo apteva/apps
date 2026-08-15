@@ -96,7 +96,8 @@ or `external` TestFlight and `production` App Store. Deploy polls App
 Store processing, assigns the processed build to a TestFlight group or
 App Store version, and can submit the production version for review.
 When Apple rejects a version, Deploy reuses its unresolved review submission
-and existing item, selects the replacement build, and resubmits idempotently.
+and existing item, selects the replacement build, marks the rejected item
+resolved, and resubmits idempotently.
 
 `deploy_release_sync` refreshes a mobile release after submission. For App
 Store releases it records the review submission and item states, the exact

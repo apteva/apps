@@ -1044,8 +1044,15 @@ func TestReusableAppleReviewSubmissionPrefersMatchingOrEmptyDraft(t *testing.T) 
 func TestReusableAppleReviewSubmissionIgnoresCompletedHistory(t *testing.T) {
 	raw := json.RawMessage(`{"data":[{"type":"reviewSubmissions","id":"complete-old","attributes":{"state":"COMPLETE"},"relationships":{"items":{"data":[{"type":"reviewSubmissionItems","id":"item-old"}]}}},{"type":"reviewSubmissions","id":"empty-draft","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"items":{"data":[]}}},{"type":"reviewSubmissions","id":"rejected-current","attributes":{"state":"UNRESOLVED_ISSUES"},"relationships":{"items":{"data":[{"type":"reviewSubmissionItems","id":"item-current"}]}}}],"included":[{"type":"reviewSubmissionItems","id":"item-old","relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-old"}}}},{"type":"reviewSubmissionItems","id":"item-current","relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}]}`)
 	submission, conflict := reusableAppleReviewSubmission(raw, "version-1")
-	if submission.ID != "rejected-current" || !submission.ItemAttached || !submission.NeedsSubmit || submission.State != "UNRESOLVED_ISSUES" || conflict != "" {
+	if submission.ID != "rejected-current" || !submission.ItemAttached || submission.ItemID != "item-current" || submission.ItemState != "" || !submission.NeedsSubmit || submission.State != "UNRESOLVED_ISSUES" || conflict != "" {
 		t.Fatalf("submission=%+v conflict=%q", submission, conflict)
+	}
+}
+
+func TestAppleReviewItemForVersion(t *testing.T) {
+	raw := json.RawMessage(`{"data":[{"type":"reviewSubmissionItems","id":"item-other","attributes":{"state":"REJECTED"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-other"}}}},{"type":"reviewSubmissionItems","id":"item-1","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}]}`)
+	if id, state := appleReviewItemForVersion(raw, "version-1"); id != "item-1" || state != "READY_FOR_REVIEW" {
+		t.Fatalf("item id=%q state=%q", id, state)
 	}
 }
 
