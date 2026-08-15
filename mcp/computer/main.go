@@ -55,11 +55,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.75
+version: 0.7.76
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.75 adds
-  outcome-specific waits, structured stability timeouts, guarded semantic
-  refreshes, and compact SoM observations for dynamic browser workflows.
+  Watch, steer, and replay hosted browser sessions. v0.7.76 returns stable
+  historical status after sessions close while preserving outcome waits,
+  compact semantic observations, and all previous browser safeguards.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
