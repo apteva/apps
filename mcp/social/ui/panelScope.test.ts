@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { isTrustedOAuthMessage, scopedAppURL } from "./panelScope";
+import { isTrustedOAuthMessage, parseStoredProfileId, scopedAppURL } from "./panelScope";
 
 test("scopedAppURL never retains a prior project", () => {
   expect(scopedAppURL("/api/apps/social", "/profiles", "project-a"))
@@ -18,4 +18,14 @@ test("OAuth messages must come from this origin and have numeric ids", () => {
     ...message,
     pending_account_id: "12",
   })).toBe(false);
+});
+
+test("stored profile ids only accept positive safe integers", () => {
+  expect(parseStoredProfileId("42")).toBe(42);
+  expect(parseStoredProfileId(null)).toBeNull();
+  expect(parseStoredProfileId("")).toBeNull();
+  expect(parseStoredProfileId("0")).toBeNull();
+  expect(parseStoredProfileId("-1")).toBeNull();
+  expect(parseStoredProfileId("profile-42")).toBeNull();
+  expect(parseStoredProfileId("1.5")).toBeNull();
 });

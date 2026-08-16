@@ -8,6 +8,12 @@ export function scopedAppURL(
   return `${base}${path}${separator}project_id=${encodeURIComponent(projectId)}`;
 }
 
+export function parseStoredProfileId(raw: string | null): number | null {
+  if (!raw) return null;
+  const id = Number(raw);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
 export function isTrustedOAuthMessage(
   eventOrigin: string,
   currentOrigin: string,

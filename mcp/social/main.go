@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.84
+version: 0.14.85
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -860,16 +860,21 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolPostMetrics,
 		},
 		{
-			Name: "account_metrics",
-			Description: "Fetch account-level totals (followers, total likes/videos where available) for one connected social account. " +
-				"Native accounts use their platform adapter; provider-backed accounts use the bound provider adapter, including LinkedIn and other Zernio-backed platforms. " +
-				"Returns normalized totals and stored history for period (default 30d, maximum 730d). Raw provider JSON is omitted by default; set include_raw=true only for explicit debugging or provider-specific detail. " +
-				"Args: social_account_id, period?, include_raw?.",
+			Name:        "account_metrics",
+			Description: "Fetch normalized totals, history, and provider-supported audience breakdowns. Use social_account_id for the backward-compatible single-account response. Use social_account_ids or profile_id with group_by=['social_account'] to compare channels; filters such as {device:['tv']} rank only matching views. Unsupported dimensions are reported explicitly and never treated as zero. YouTube supports device, OS, country, traffic source, audience type, content type, sharing service, and video; Instagram supports available audience demographics; organic X currently exposes temporal metrics but no device breakdown.",
 			InputSchema: schemaObject(map[string]any{
-				"social_account_id": map[string]any{"type": "integer"},
-				"period":            map[string]any{"type": "string", "description": "Stored history window to return, formatted as Nd (for example 7d, 30d, or 365d). Defaults to 30d; maximum 730d."},
-				"include_raw":       map[string]any{"type": "boolean", "description": "Include the sanitized raw provider response for explicit debugging. Defaults to false."},
-			}, []string{"social_account_id"}),
+				"social_account_id":  map[string]any{"type": "integer"},
+				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "Accounts to compare."},
+				"profile_id":         map[string]any{"type": "integer", "description": "Compare active accounts in this Social profile."},
+				"range":              map[string]any{"type": "string", "description": "Relative window such as 7d, 28d, or 90d (maximum 730d)."},
+				"start_date":         map[string]any{"type": "string", "description": "Optional YYYY-MM-DD range start."},
+				"end_date":           map[string]any{"type": "string", "description": "Optional YYYY-MM-DD range end."},
+				"breakdowns":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Canonical dimensions such as device, os, country, traffic_source, age, gender, audience_type, content_type, video."},
+				"filters":            map[string]any{"type": "object", "description": "Dimension filters, for example {device:[\"tv\"]}."},
+				"group_by":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Use social_account to rank connected channels."},
+				"metric":             map[string]any{"type": "string", "enum": []string{"views", "followers", "reach", "impressions", "engagements"}},
+				"include_raw":        map[string]any{"type": "boolean", "description": "Include sanitized raw provider responses for explicit debugging. Defaults to false."},
+			}, nil),
 			Handler: a.toolAccountMetrics,
 		},
 		{
@@ -3587,6 +3592,9 @@ func (a *App) publishTikTok(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 }
 
 func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string, error) {
+	if status, err := sdk.GetIntegrationURLProperty(ctx.PlatformAPI(), j.connID, "content_delivery"); err == nil && !status.Ready {
+		return "", "", errors.New("TikTok media delivery is not ready; upload TikTok's verification file and confirm the URL prefix in Integrations")
+	}
 	if len(j.media) > 35 {
 		return "", "", fmt.Errorf("tiktok photo posts accept at most 35 images, got %d", len(j.media))
 	}
@@ -3673,6 +3681,13 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 	first := j.media[0]
 	if !first.IsVideo() {
 		return "", "", errors.New("tiktok only accepts video files")
+	}
+	// Prefer provider pull once the Server confirms that this OAuth app's
+	// URL prefix is hosted and verified. Older servers (method unavailable)
+	// and unconfigured installs retain the established FILE_UPLOAD fallback.
+	if status, err := sdk.GetIntegrationURLProperty(ctx.PlatformAPI(), j.connID, "content_delivery"); err == nil && status.Ready && first.URL != "" {
+		ctx.Logger().Info("publishTikTok: using verified URL delivery")
+		return a.publishTikTokPullFromURL(ctx, def, j)
 	}
 	if first.Bytes <= 0 {
 		return "", "", errors.New("tiktok FILE_UPLOAD needs the video's byte size — storage didn't return size_bytes")
@@ -3909,13 +3924,10 @@ func (a *App) getTikTokPublishStatus(ctx *sdk.AppCtx, connID int64, publishID st
 	return payload.Data.Status, payload.Data.Fail, postIDs, nil
 }
 
-// publishTikTokPullFromURL is the original PULL_FROM_URL implementation,
-// kept around for installs that have verified their domain in the
-// TikTok dev portal and prefer letting TikTok's servers do the fetch
-// (saves bandwidth on the social sidecar's host vs streaming bytes
-// through us). Not currently called — runStrategy dispatches to
-// publishTikTok which uses FILE_UPLOAD. Wire this in if you ever add
-// a per-target / per-platformDef opt-in flag.
+// publishTikTokPullFromURL uses the Server's verified, redirect-free relay.
+// The integration runner rewrites the signed Storage URL immediately before
+// the provider request, so Social continues to use media_storage_ids as its
+// source of truth and never stores or copies provider-facing media URLs.
 func (a *App) publishTikTokPullFromURL(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
 	if len(j.media) == 0 {
 		return "", "", errors.New("tiktok requires a video URL")
@@ -3938,7 +3950,10 @@ func (a *App) publishTikTokPullFromURL(ctx *sdk.AppCtx, def platformDef, j publi
 		return "", "", upstreamError(out)
 	}
 	pubID := extractTikTokPublishID(out.Data)
-	return pubID, "", nil
+	if pubID == "" {
+		return "", "", fmt.Errorf("post_video: missing publish_id in response: %s", string(out.Data))
+	}
+	return a.waitTikTokPublish(ctx, j.connID, pubID)
 }
 
 // extractTikTokUploadInit pulls upload_url + publish_id out of the
@@ -4831,10 +4846,11 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 
 // ─── metrics ──────────────────────────────────────────────────────
 //
-// post_metrics(post_id) and account_metrics(social_account_id) fan out
-// to per-platform analytics tools, persist normalized points, and return
-// fresh numbers plus bounded stored history. Every refresh still hits the
-// upstream, so callers should avoid tight loops across many accounts.
+// post_metrics(post_id) and account_metrics(...) fan out to provider
+// analytics tools, normalize their responses, and persist metric points.
+// Account analytics support optional canonical breakdowns and filters;
+// provider-specific omissions are surfaced as unsupported capabilities.
+// Fresh requests still hit upstream APIs, so callers should avoid tight loops.
 //
 // Per-target outcome envelope mirrors post_delete's vocabulary:
 //   ok          — upstream returned numbers; metrics populated
@@ -5529,33 +5545,35 @@ func parseInt64(s string) int64 {
 // ─── account_metrics ──────────────────────────────────────────────
 
 type accountMetricsResult struct {
-	SocialAccountID int64           `json:"social_account_id"`
-	ProfileID       int64           `json:"profile_id,omitempty"`
-	Platform        string          `json:"platform"`
-	DisplayName     string          `json:"display_name"`
-	Status          string          `json:"status"` // ok | unsupported | failed
-	Reason          string          `json:"reason,omitempty"`
-	Error           string          `json:"error,omitempty"`
-	Followers       int64           `json:"followers,omitempty"`
-	Following       int64           `json:"following,omitempty"`
-	TotalLikes      int64           `json:"total_likes,omitempty"`
-	TotalVideos     int64           `json:"total_videos,omitempty"`
-	Posts           int64           `json:"posts,omitempty"`
-	Reach           int64           `json:"reach,omitempty"`
-	Impressions     int64           `json:"impressions,omitempty"`
-	Engagements     int64           `json:"engagements,omitempty"`
-	Views           int64           `json:"views,omitempty"`
-	Likes           int64           `json:"likes,omitempty"`
-	Comments        int64           `json:"comments,omitempty"`
-	Shares          int64           `json:"shares,omitempty"`
-	Saves           int64           `json:"saves,omitempty"`
-	Sends           int64           `json:"sends,omitempty"`
-	Clicks          int64           `json:"clicks,omitempty"`
-	EngagementRate  float64         `json:"engagement_rate,omitempty"`
-	Insights        insightSeries   `json:"insights,omitempty"`
-	HistorySource   string          `json:"history_source,omitempty"`
-	UpdatedAt       string          `json:"updated_at,omitempty"`
-	Raw             json.RawMessage `json:"raw,omitempty"`
+	SocialAccountID int64                 `json:"social_account_id"`
+	ProfileID       int64                 `json:"profile_id,omitempty"`
+	Platform        string                `json:"platform"`
+	DisplayName     string                `json:"display_name"`
+	Status          string                `json:"status"` // ok | unsupported | failed
+	Reason          string                `json:"reason,omitempty"`
+	Error           string                `json:"error,omitempty"`
+	Followers       int64                 `json:"followers,omitempty"`
+	Following       int64                 `json:"following,omitempty"`
+	TotalLikes      int64                 `json:"total_likes,omitempty"`
+	TotalVideos     int64                 `json:"total_videos,omitempty"`
+	Posts           int64                 `json:"posts,omitempty"`
+	Reach           int64                 `json:"reach,omitempty"`
+	Impressions     int64                 `json:"impressions,omitempty"`
+	Engagements     int64                 `json:"engagements,omitempty"`
+	Views           int64                 `json:"views,omitempty"`
+	Likes           int64                 `json:"likes,omitempty"`
+	Comments        int64                 `json:"comments,omitempty"`
+	Shares          int64                 `json:"shares,omitempty"`
+	Saves           int64                 `json:"saves,omitempty"`
+	Sends           int64                 `json:"sends,omitempty"`
+	Clicks          int64                 `json:"clicks,omitempty"`
+	EngagementRate  float64               `json:"engagement_rate,omitempty"`
+	Insights        insightSeries         `json:"insights,omitempty"`
+	Breakdowns      []analyticsBreakdown  `json:"breakdowns,omitempty"`
+	Capabilities    analyticsCapabilities `json:"capabilities"`
+	HistorySource   string                `json:"history_source,omitempty"`
+	UpdatedAt       string                `json:"updated_at,omitempty"`
+	Raw             json.RawMessage       `json:"raw,omitempty"`
 }
 
 type insightPoint struct {
@@ -5565,7 +5583,7 @@ type insightPoint struct {
 
 type insightSeries map[string][]insightPoint
 
-func (a *App) getAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, period string) accountMetricsResult {
+func (a *App) getAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, period string, query analyticsQuery) accountMetricsResult {
 	var platform, displayName, extID, pageCreds, providerSlug, providerAccountID string
 	var connID, profileID int64
 	err := ctx.AppDB().QueryRow(
@@ -5588,31 +5606,36 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, pe
 		Platform:        platform,
 		DisplayName:     displayName,
 	}
+	var result accountMetricsResult
 	if providerSlug != "" && providerSlug != "native" {
-		return a.getProviderAccountMetrics(ctx, out, connID, providerSlug, providerAccountID, platform)
+		result = a.getProviderAccountMetrics(ctx, out, connID, providerSlug, providerAccountID, platform, query)
+		a.addAccountBreakdowns(ctx, &result, connID, providerSlug, providerAccountID, extID, pageCreds, query)
+		return result
 	}
 	switch platform {
 	case "twitter":
-		return a.getTwitterAccountMetrics(ctx, out, connID)
+		result = a.getTwitterAccountMetrics(ctx, out, connID)
 	case "youtube":
-		return a.getYoutubeChannelMetrics(ctx, out, connID)
+		result = a.getYoutubeChannelMetrics(ctx, out, connID, query)
 	case "tiktok":
-		return a.getTikTokAccountMetrics(ctx, out, connID)
+		result = a.getTikTokAccountMetrics(ctx, out, connID)
 	case "facebook":
-		return a.getFacebookAccountMetrics(ctx, out, connID, extID, pageCreds, period)
+		result = a.getFacebookAccountMetrics(ctx, out, connID, extID, pageCreds, period, query)
 	case "instagram":
-		return a.getInstagramAccountMetrics(ctx, out, connID, extID, pageCreds, period)
+		result = a.getInstagramAccountMetrics(ctx, out, connID, extID, pageCreds, period, query)
 	default:
 		out.Status = "unsupported"
 		out.Reason = "account-level metrics not wired for this platform yet"
-		return out
+		result = out
 	}
+	a.addAccountBreakdowns(ctx, &result, connID, providerSlug, providerAccountID, extID, pageCreds, query)
+	return result
 }
 
-func (a *App) getProviderAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, providerSlug, providerAccountID, platform string) accountMetricsResult {
+func (a *App) getProviderAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, providerSlug, providerAccountID, platform string, query analyticsQuery) accountMetricsResult {
 	switch providerSlug {
 	case zernioProviderSlug:
-		return a.getZernioAccountMetrics(ctx, out, connID, providerAccountID, platform)
+		return a.getZernioAccountMetrics(ctx, out, connID, providerAccountID, platform, query)
 	default:
 		out.Status = "unsupported"
 		out.Reason = "analytics not wired for provider " + providerSlug
@@ -5684,7 +5707,7 @@ func twitterAuthenticatedUser(ctx *sdk.AppCtx, connID int64) (id, username strin
 	return resp.Data.ID, resp.Data.Username, nil
 }
 
-func (a *App) getYoutubeChannelMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64) accountMetricsResult {
+func (a *App) getYoutubeChannelMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, query analyticsQuery) accountMetricsResult {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_my_channel", map[string]any{
 		"part": "statistics,snippet",
 	})
@@ -5716,13 +5739,13 @@ func (a *App) getYoutubeChannelMetrics(ctx *sdk.AppCtx, out accountMetricsResult
 	out.Followers = parseInt64(s.SubscriberCount)
 	out.TotalVideos = parseInt64(s.VideoCount)
 	out.Views = parseInt64(s.ViewCount)
-	a.addYoutubeAnalytics(ctx, &out, connID)
+	a.addYoutubeAnalytics(ctx, &out, connID, query)
 	out.Raw = sanitizeRawJSON(res.Data)
 	return out
 }
 
-func (a *App) addYoutubeAnalytics(ctx *sdk.AppCtx, out *accountMetricsResult, connID int64) {
-	since, until := metricsDateWindow(90)
+func (a *App) addYoutubeAnalytics(ctx *sdk.AppCtx, out *accountMetricsResult, connID int64, query analyticsQuery) {
+	since, until := query.dates()
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "query_analytics_report", map[string]any{
 		"ids":        "channel==MINE",
 		"startDate":  since,
@@ -5777,7 +5800,7 @@ func parseYoutubeAnalyticsSeries(raw json.RawMessage) insightSeries {
 	return out
 }
 
-func (a *App) getFacebookAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, pageID, pageCreds, period string) accountMetricsResult {
+func (a *App) getFacebookAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, pageID, pageCreds, period string, query analyticsQuery) accountMetricsResult {
 	if pageID == "" {
 		out.Status = "failed"
 		out.Error = "facebook account has no page id stored"
@@ -5792,7 +5815,7 @@ func (a *App) getFacebookAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResul
 	if period == "" {
 		period = "day"
 	}
-	since, until := metricsDateWindow(90)
+	since, until := query.dates()
 	series := insightSeries{}
 	var raw json.RawMessage
 	var skipped []string
@@ -5837,7 +5860,7 @@ func (a *App) getFacebookAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResul
 	return out
 }
 
-func (a *App) getInstagramAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, instagramAccountID, pageCreds, period string) accountMetricsResult {
+func (a *App) getInstagramAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, instagramAccountID, pageCreds, period string, query analyticsQuery) accountMetricsResult {
 	if instagramAccountID == "" {
 		out.Status = "failed"
 		out.Error = "instagram account id missing"
@@ -5852,7 +5875,7 @@ func (a *App) getInstagramAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResu
 	if period == "" {
 		period = "day"
 	}
-	since, until := metricsDateWindow(30)
+	since, until := query.dates()
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_account_insights", map[string]any{
 		"instagramAccountId": instagramAccountID,
 		"metric":             "reach",
@@ -6126,7 +6149,11 @@ func (a *App) collectProjectAccountMetrics(runCtx context.Context, app *sdk.AppC
 		if !due {
 			continue
 		}
-		res := a.collectAndStoreAccountMetrics(app, pid, id, defaultAccountMetricsHistoryDays)
+		query := analyticsQuery{RangeDays: 28, Filters: map[string][]string{}}
+		if due, err := accountBreakdownsDue(app, pid, id, 24*time.Hour); err == nil && due {
+			query.Breakdowns = []string{"device", "country", "traffic_source", "age", "gender"}
+		}
+		res := a.collectAndStoreAccountMetrics(app, pid, id, "day", query)
 		if res.Status == "failed" {
 			app.Logger().Warn("analytics_collector: account metrics failed",
 				"project", pid, "account", id, "platform", res.Platform, "err", res.Error)
@@ -6307,21 +6334,51 @@ func accountAnalyticsDue(ctx *sdk.AppCtx, pid string, accountID int64, minInterv
 	return time.Since(t) >= minInterval, nil
 }
 
-func (a *App) collectAndStoreAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, historyDays int) accountMetricsResult {
-	// Provider insight endpoints use daily granularity. historyDays only
-	// controls how much persisted history is returned to the caller.
-	res := a.getAccountMetrics(ctx, pid, accountID, "day")
+func accountBreakdownsDue(ctx *sdk.AppCtx, pid string, accountID int64, minInterval time.Duration) (bool, error) {
+	var latest string
+	err := ctx.AppDB().QueryRow(
+		`SELECT COALESCE(MAX(point_time),'')
+		   FROM social_metric_points
+		  WHERE project_id=? AND social_account_id=? AND scope='account' AND dimensions_key<>''`,
+		pid, accountID,
+	).Scan(&latest)
+	if err != nil || strings.TrimSpace(latest) == "" {
+		return true, err
+	}
+	t, ok := parseMetricPointTime(latest)
+	return !ok || time.Since(t) >= minInterval, nil
+}
+
+func (a *App) collectAndStoreAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, period string, query analyticsQuery) accountMetricsResult {
+	if query.RangeDays <= 0 {
+		query.RangeDays = 28
+	}
+	if query.Filters == nil {
+		query.Filters = map[string][]string{}
+	}
+	res := a.getAccountMetrics(ctx, pid, accountID, period, query)
 	res.Raw = sanitizeRawJSON(res.Raw)
 	persisted := true
-	if err := a.persistAccountMetrics(ctx, pid, res); err != nil {
+	if err := a.persistAccountMetrics(ctx, pid, res, query); err != nil {
 		persisted = false
 		ctx.Logger().Warn("account_metrics: persist failed",
 			"project", pid, "account", accountID, "platform", res.Platform, "err", err)
 	}
 	res.UpdatedAt, _ = latestAccountMetricsRefresh(ctx, pid, accountID)
-	if history := loadAccountMetricHistory(ctx, pid, accountID, historyDays); len(history) > 0 {
-		res.Insights = history
+	if history := loadAccountMetricHistory(ctx, pid, accountID, query.RangeDays); len(history) > 0 {
+		if res.Insights == nil {
+			res.Insights = history
+		} else {
+			for name, points := range history {
+				if len(res.Insights[name]) == 0 {
+					res.Insights[name] = points
+				}
+			}
+		}
 		res.HistorySource = "social_metric_points"
+	}
+	if stored := loadAccountBreakdowns(ctx, pid, accountID, query.period()); len(stored) > 0 {
+		res.Breakdowns = mergeAccountBreakdowns(res.Breakdowns, stored)
 	}
 	if res.Status != "failed" && persisted {
 		ctx.EmitWithProject("metrics.updated", pid, map[string]any{
@@ -6333,14 +6390,14 @@ func (a *App) collectAndStoreAccountMetrics(ctx *sdk.AppCtx, pid string, account
 	return res
 }
 
-func (a *App) storedAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, historyDays int) accountMetricsResult {
-	var platform, displayName string
+func (a *App) storedAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, query analyticsQuery) accountMetricsResult {
+	var platform, displayName, providerSlug string
 	var profileID int64
 	err := ctx.AppDB().QueryRow(
-		`SELECT platform, COALESCE(display_name,''), COALESCE(profile_id,0)
+		`SELECT platform, COALESCE(display_name,''), COALESCE(profile_id,0), COALESCE(provider_slug,'native')
 		   FROM social_accounts WHERE id=? AND project_id=?`,
 		accountID, pid,
-	).Scan(&platform, &displayName, &profileID)
+	).Scan(&platform, &displayName, &profileID, &providerSlug)
 	if err != nil {
 		return accountMetricsResult{
 			SocialAccountID: accountID,
@@ -6353,9 +6410,18 @@ func (a *App) storedAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64,
 		ProfileID:       profileID,
 		Platform:        platform,
 		DisplayName:     displayName,
+		Capabilities:    analyticsCapabilitiesFor(platform, providerSlug),
 	}
 	out.UpdatedAt, _ = latestAccountMetricsRefresh(ctx, pid, accountID)
-	history := loadAccountMetricHistory(ctx, pid, accountID, historyDays)
+	requested := requestedProviderBreakdowns(query)
+	out.Capabilities = enrichAnalyticsCapabilities(out.Capabilities, requested)
+	out.Breakdowns = unsupportedBreakdowns(out.Capabilities, requested)
+	storedBreakdowns := loadAccountBreakdowns(ctx, pid, accountID, query.period())
+	if len(storedBreakdowns) == 0 {
+		storedBreakdowns = loadLatestAccountBreakdowns(ctx, pid, accountID)
+	}
+	out.Breakdowns = mergeAccountBreakdowns(out.Breakdowns, storedBreakdowns)
+	history := loadAccountMetricHistory(ctx, pid, accountID, query.RangeDays)
 	if len(history) == 0 {
 		out.Status = "unsupported"
 		out.Reason = "No stored analytics yet. A refresh will run automatically."
@@ -6409,7 +6475,7 @@ func applyLatestAccountHistory(out *accountMetricsResult, history insightSeries)
 	out.Clicks = latest("clicks_total")
 }
 
-func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetricsResult) error {
+func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetricsResult, query analyticsQuery) error {
 	if res.SocialAccountID <= 0 || pid == "" || res.Platform == "" || res.Status == "failed" {
 		return nil
 	}
@@ -6459,6 +6525,19 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 			pointTime := normaliseMetricPointTime(point.Time, now)
 			if err := insertSocialMetricPoint(ctx, pid, profileID, res.SocialAccountID, 0, 0, res.Platform, "account", metric, "day", pointTime, point.Value, seriesSource, "ok", ""); err != nil {
 				return err
+			}
+		}
+	}
+	for _, breakdown := range res.Breakdowns {
+		if breakdown.Status != "ok" {
+			continue
+		}
+		for _, row := range breakdown.Rows {
+			for metric, value := range row.Metrics {
+				source := accountMetricSource(res.Platform, "breakdown") + ":" + breakdown.Dimension
+				if err := insertSocialMetricPointDimensions(ctx, pid, profileID, res.SocialAccountID, 0, 0, res.Platform, "account", metric, query.period(), now, value, source, "ok", "", row.Dimensions); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -6525,6 +6604,10 @@ func metricAvailable(metrics *normalizedMetrics, name string) bool {
 }
 
 func insertSocialMetricPoint(ctx *sdk.AppCtx, pid string, profileID, accountID, postID, targetID int64, platform, scope, metric, period, pointTime string, value int64, source, status, note string) error {
+	return insertSocialMetricPointDimensions(ctx, pid, profileID, accountID, postID, targetID, platform, scope, metric, period, pointTime, value, source, status, note, nil)
+}
+
+func insertSocialMetricPointDimensions(ctx *sdk.AppCtx, pid string, profileID, accountID, postID, targetID int64, platform, scope, metric, period, pointTime string, value int64, source, status, note string, dimensions map[string]string) error {
 	if pid == "" || accountID <= 0 || platform == "" || scope == "" || metric == "" || pointTime == "" {
 		return nil
 	}
@@ -6537,18 +6620,20 @@ func insertSocialMetricPoint(ctx *sdk.AppCtx, pid string, profileID, accountID, 
 	if status == "" {
 		status = "ok"
 	}
+	dimensionsJSON, dimensionsKey := canonicalDimensionsJSON(dimensions)
 	_, err := ctx.AppDB().Exec(
 		`INSERT INTO social_metric_points (
 		    project_id, profile_id, social_account_id, post_id, post_target_id,
-		    platform, scope, metric, period, point_time, value, source, status, note
-		  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		  ON CONFLICT(project_id, scope, social_account_id, post_target_id, metric, period, point_time, source)
+		    platform, scope, metric, period, point_time, value, source, status, note,
+		    dimensions_json, dimensions_key
+		  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		  ON CONFLICT(project_id, scope, social_account_id, post_target_id, metric, period, point_time, source, dimensions_key)
 		  DO UPDATE SET
 		    value=excluded.value,
 		    status=excluded.status,
 		    note=excluded.note,
 		    created_at=CURRENT_TIMESTAMP`,
-		pid, profileID, accountID, postID, targetID, platform, scope, metric, period, pointTime, value, source, status, note,
+		pid, profileID, accountID, postID, targetID, platform, scope, metric, period, pointTime, value, source, status, note, dimensionsJSON, dimensionsKey,
 	)
 	return err
 }
@@ -6564,7 +6649,7 @@ func loadAccountMetricHistory(ctx *sdk.AppCtx, pid string, accountID int64, days
 	rows, err := ctx.AppDB().Query(
 		`SELECT metric, period, point_time, value
 		   FROM social_metric_points
-		  WHERE project_id=? AND social_account_id=? AND scope='account'
+		  WHERE project_id=? AND social_account_id=? AND scope='account' AND dimensions_key=''
 		    AND status='ok' AND metric<>'_refresh' AND point_time >= ?
 		  ORDER BY point_time ASC, id ASC`,
 		pid, accountID, since,
@@ -6605,11 +6690,128 @@ func latestAccountMetricsRefresh(ctx *sdk.AppCtx, pid string, accountID int64) (
 	return latest, err
 }
 
+func loadLatestAccountBreakdowns(ctx *sdk.AppCtx, pid string, accountID int64) []analyticsBreakdown {
+	var period string
+	err := ctx.AppDB().QueryRow(
+		`SELECT COALESCE(period,'') FROM social_metric_points
+		  WHERE project_id=? AND social_account_id=? AND scope='account' AND dimensions_key<>''
+		  ORDER BY point_time DESC, id DESC LIMIT 1`,
+		pid, accountID,
+	).Scan(&period)
+	if err != nil || period == "" {
+		return nil
+	}
+	return loadAccountBreakdowns(ctx, pid, accountID, period)
+}
+
+func loadAccountBreakdowns(ctx *sdk.AppCtx, pid string, accountID int64, period string) []analyticsBreakdown {
+	if pid == "" || accountID <= 0 || period == "" {
+		return nil
+	}
+	rows, err := ctx.AppDB().Query(
+		`SELECT p.metric, p.value, p.dimensions_json, p.source
+		   FROM social_metric_points p
+		  WHERE p.project_id=? AND p.social_account_id=? AND p.scope='account'
+		    AND p.period=? AND p.dimensions_key<>'' AND p.status='ok'
+		    AND p.point_time=(
+		      SELECT MAX(newer.point_time) FROM social_metric_points newer
+		       WHERE newer.project_id=p.project_id
+		         AND newer.social_account_id=p.social_account_id
+		         AND newer.scope=p.scope AND newer.period=p.period
+		         AND newer.source=p.source AND newer.status='ok'
+		    )
+		  ORDER BY dimensions_key, metric`,
+		pid, accountID, period,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	type groupedBreakdown struct {
+		source string
+		rows   map[string]*analyticsBreakdownRow
+	}
+	groups := map[string]*groupedBreakdown{}
+	for rows.Next() {
+		var metric, dimensionsJSON, source string
+		var value int64
+		if rows.Scan(&metric, &value, &dimensionsJSON, &source) != nil {
+			continue
+		}
+		dimensions := map[string]string{}
+		if json.Unmarshal([]byte(dimensionsJSON), &dimensions) != nil || len(dimensions) == 0 {
+			continue
+		}
+		dimension := ""
+		for _, candidate := range canonicalBreakdownOrder {
+			if dimensions[candidate] != "" {
+				dimension = candidate
+				break
+			}
+		}
+		if dimension == "" {
+			continue
+		}
+		group := groups[dimension]
+		if group == nil {
+			group = &groupedBreakdown{source: source, rows: map[string]*analyticsBreakdownRow{}}
+			groups[dimension] = group
+		}
+		_, key := canonicalDimensionsJSON(dimensions)
+		row := group.rows[key]
+		if row == nil {
+			row = &analyticsBreakdownRow{Dimensions: dimensions, Metrics: map[string]int64{}}
+			group.rows[key] = row
+		}
+		row.Metrics[metric] = value
+	}
+	out := []analyticsBreakdown{}
+	for _, dimension := range canonicalBreakdownOrder {
+		group := groups[dimension]
+		if group == nil {
+			continue
+		}
+		breakdown := analyticsBreakdown{Dimension: dimension, Status: "ok", Source: group.source}
+		for _, row := range group.rows {
+			breakdown.Rows = append(breakdown.Rows, *row)
+		}
+		sort.SliceStable(breakdown.Rows, func(i, j int) bool {
+			return breakdown.Rows[i].Metrics["views"] > breakdown.Rows[j].Metrics["views"]
+		})
+		out = append(out, breakdown)
+	}
+	return out
+}
+
+func mergeAccountBreakdowns(fresh, stored []analyticsBreakdown) []analyticsBreakdown {
+	byDimension := map[string]analyticsBreakdown{}
+	for _, breakdown := range stored {
+		byDimension[breakdown.Dimension] = breakdown
+	}
+	for _, breakdown := range fresh {
+		if breakdown.Status == "ok" && len(breakdown.Rows) > 0 {
+			byDimension[breakdown.Dimension] = breakdown
+		} else if _, exists := byDimension[breakdown.Dimension]; !exists {
+			byDimension[breakdown.Dimension] = breakdown
+		}
+	}
+	out := make([]analyticsBreakdown, 0, len(byDimension))
+	for _, dimension := range canonicalBreakdownOrder {
+		if breakdown, ok := byDimension[dimension]; ok {
+			out = append(out, breakdown)
+		}
+	}
+	return out
+}
+
 func accountMetricSource(platform, kind string) string {
 	switch platform {
 	case "youtube":
 		if kind == "series" {
 			return "youtube_analytics"
+		}
+		if kind == "breakdown" {
+			return "youtube_analytics_breakdown"
 		}
 		return "youtube_snapshot"
 	case "facebook":
@@ -6620,6 +6822,9 @@ func accountMetricSource(platform, kind string) string {
 	case "instagram":
 		if kind == "series" {
 			return "instagram_insights"
+		}
+		if kind == "breakdown" {
+			return "instagram_insights_breakdown"
 		}
 		return "instagram_snapshot"
 	case "tiktok":
@@ -6809,18 +7014,101 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 // toolAccountMetrics is the account_metrics MCP entrypoint.
 func (a *App) toolAccountMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := int64(intArg(args, "social_account_id", 0))
-	if id <= 0 {
-		return mcpError("social_account_id required"), nil
+	for _, key := range []string{"period", "range"} {
+		if value := strings.TrimSpace(toString(args[key])); value != "" {
+			if _, err := accountMetricsHistoryDays(value, defaultAccountMetricsHistoryDays); err != nil {
+				return mcpError(err.Error()), nil
+			}
+		}
 	}
-	historyDays, err := accountMetricsHistoryDays(toString(args["period"]), defaultAccountMetricsHistoryDays)
-	if err != nil {
-		return mcpError(err.Error()), nil
+	query := analyticsQueryFromArgs(args)
+	if len(query.Filters) > 1 {
+		return mcpError("only one analytics breakdown filter can be applied at a time; issue separate queries for independent dimensions"), nil
 	}
-	res := a.collectAndStoreAccountMetrics(ctx, projectScope(ctx, args), id, historyDays)
-	if !boolArg(args, "include_raw", false) {
-		res.Raw = nil
+	providerPeriod := "day"
+	pid := projectScope(ctx, args)
+	ids := int64Values(args["social_account_ids"])
+	if id > 0 {
+		ids = append([]int64{id}, ids...)
 	}
-	return res, nil
+	profileID := int64(intArg(args, "profile_id", 0))
+	multiRequest := len(ids) > 1 || (id <= 0 && (len(ids) > 0 || profileID > 0)) || containsFold(query.GroupBy, "social_account")
+	if len(ids) == 0 && profileID > 0 {
+		rows, err := ctx.AppDB().Query(
+			`SELECT id FROM social_accounts WHERE project_id=? AND profile_id=? AND status='active' ORDER BY id`,
+			pid, profileID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var accountID int64
+			if rows.Scan(&accountID) == nil {
+				ids = append(ids, accountID)
+			}
+		}
+		rows.Close()
+	}
+	ids = uniquePositiveInt64s(ids)
+	if len(ids) == 0 {
+		return mcpError("social_account_id, social_account_ids, or profile_id required"), nil
+	}
+	results := make([]accountMetricsResult, 0, len(ids))
+	for _, accountID := range ids {
+		result := a.collectAndStoreAccountMetrics(ctx, pid, accountID, providerPeriod, query)
+		if !boolArg(args, "include_raw", false) {
+			result.Raw = nil
+		}
+		results = append(results, result)
+	}
+	if !multiRequest && len(results) == 1 {
+		return results[0], nil
+	}
+	metric := strings.ToLower(strings.TrimSpace(toString(args["metric"])))
+	comparison := aggregateAccountComparison(results, metric, query.Filters)
+	return map[string]any{
+		"status":     "ok",
+		"range":      query.period(),
+		"accounts":   results,
+		"comparison": comparison,
+	}, nil
+}
+
+func int64Values(value any) []int64 {
+	var out []int64
+	switch values := value.(type) {
+	case []any:
+		for _, item := range values {
+			if id := toInt64Loose(item); id > 0 {
+				out = append(out, id)
+			}
+		}
+	case []int64:
+		out = append(out, values...)
+	case []int:
+		for _, id := range values {
+			out = append(out, int64(id))
+		}
+	case string:
+		for _, item := range strings.Split(values, ",") {
+			if id, err := strconv.ParseInt(strings.TrimSpace(item), 10, 64); err == nil && id > 0 {
+				out = append(out, id)
+			}
+		}
+	}
+	return out
+}
+
+func uniquePositiveInt64s(values []int64) []int64 {
+	seen := map[int64]bool{}
+	out := make([]int64, 0, len(values))
+	for _, value := range values {
+		if value > 0 && !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func accountMetricsHistoryDays(period string, defaultDays int) (int, error) {
@@ -8626,20 +8914,11 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "metrics" && r.Method == http.MethodGet {
-		args := scopedQueryArgs(r, "period", "refresh", "include_raw")
-		if strings.TrimSpace(toString(args["period"])) == "" {
-			// The panel charts the complete stored history. MCP callers use
-			// the smaller account_metrics default unless they opt in.
-			args["period"] = fmt.Sprintf("%dd", maxAccountMetricsHistoryDays)
-		}
+		args := scopedQueryArgs(r, "period", "range", "start_date", "end_date", "breakdowns", "group_by", "metric", "refresh",
+			"include_raw", "device", "os", "country", "region", "city", "age", "gender", "traffic_source", "audience_type", "content_type", "sharing_service", "video")
 		refresh := strings.TrimSpace(strings.ToLower(toString(args["refresh"])))
 		if refresh == "0" || refresh == "false" || refresh == "stored" {
-			historyDays, err := accountMetricsHistoryDays(toString(args["period"]), maxAccountMetricsHistoryDays)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			out := a.storedAccountMetrics(globalCtx, projectScope(globalCtx, args), id, historyDays)
+			out := a.storedAccountMetrics(globalCtx, projectScope(globalCtx, args), id, analyticsQueryFromArgs(args))
 			writeJSON(w, out)
 			return
 		}

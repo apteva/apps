@@ -1013,19 +1013,23 @@ func (a *App) importZernioPosts(ctx *sdk.AppCtx, pid string, out importResult, a
 	return out
 }
 
-func (a *App) getZernioAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, providerAccountID, platform string) accountMetricsResult {
+func (a *App) getZernioAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, providerAccountID, platform string, query analyticsQuery) accountMetricsResult {
 	if providerAccountID == "" {
 		out.Status = "failed"
 		out.Error = "zernio account missing provider_account_id"
 		return out
 	}
-	now := time.Now().UTC()
-	from := now.AddDate(0, 0, -180)
+	fromDate, untilDate := query.dates()
+	from, fromErr := time.Parse("2006-01-02", fromDate)
+	until, untilErr := time.Parse("2006-01-02", untilDate)
+	if fromErr != nil || untilErr != nil {
+		until = time.Now().UTC()
+		from = until.AddDate(0, 0, -180)
+	}
 	raw := map[string]json.RawMessage{}
 	loaded := false
 	if normalizeZernioPlatform(platform) == "linkedin" {
-		linkedinFrom := now.AddDate(0, 0, -(defaultAccountMetricsHistoryDays - 1))
-		series, totals, linkedinRaw, err := a.getZernioLinkedInAccountMetrics(ctx, connID, providerAccountID, linkedinFrom, now)
+		series, totals, linkedinRaw, err := a.getZernioLinkedInAccountMetrics(ctx, connID, providerAccountID, from, until)
 		if err == nil {
 			out.Status = "ok"
 			out.Insights = series
@@ -1037,7 +1041,7 @@ func (a *App) getZernioAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult,
 		}
 	}
 	if !loaded {
-		series, genericRaw, err := a.getZernioGenericAccountMetrics(ctx, connID, providerAccountID, platform, from, now)
+		series, genericRaw, err := a.getZernioGenericAccountMetrics(ctx, connID, providerAccountID, platform, from, until)
 		if err != nil {
 			out.Status, out.Error = "failed", err.Error()
 			return out
@@ -1060,7 +1064,7 @@ func (a *App) getZernioAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult,
 		raw["daily_metrics"] = genericRaw
 	}
 
-	followers, followerSeries, followerRaw, followerErr := a.getZernioFollowerMetrics(ctx, connID, providerAccountID, from, now)
+	followers, followerSeries, followerRaw, followerErr := a.getZernioFollowerMetrics(ctx, connID, providerAccountID, from, until)
 	if followerErr == nil {
 		out.Followers = followers
 		mergeInsightSeries(out.Insights, followerSeries)

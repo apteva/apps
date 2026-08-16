@@ -23,7 +23,7 @@ import {
   YAxis,
 } from "recharts";
 import { uploadResumable } from "./uploadResumable";
-import { isTrustedOAuthMessage, scopedAppURL } from "./panelScope";
+import { isTrustedOAuthMessage, parseStoredProfileId, scopedAppURL } from "./panelScope";
 import { finalizedAccountError, mcpEnvelopeError } from "./accountFlow";
 import {
   ACCOUNT_METRICS_STALE_MS,
@@ -75,6 +75,14 @@ function appendStorageScope(params: URLSearchParams, projectId?: string | null) 
 
 function appendProjectScope(params: URLSearchParams, projectId?: string | null) {
   if (projectId) params.set("project_id", projectId);
+}
+
+function storedProfileId(projectId: string): number | null {
+  try {
+    return parseStoredProfileId(localStorage.getItem(`social.activeProfile.${projectId || ""}`));
+  } catch {
+    return null;
+  }
 }
 
 interface NativePanelProps {
@@ -320,19 +328,41 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   // Persists per-project so refreshing the page keeps the user's
   // last-selected brand context.
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [activeProfileId, setActiveProfileId] = useState<number | null>(null);
+  const [profilesLoaded, setProfilesLoaded] = useState(false);
+  const [profileSelection, setProfileSelection] = useState(() => ({
+    projectId,
+    id: storedProfileId(projectId),
+  }));
+  const activeProfileId = profileSelection.projectId === projectId
+    ? profileSelection.id
+    : storedProfileId(projectId);
+  const projectRef = useRef(projectId);
+  projectRef.current = projectId;
+  const dataScope = `${projectId}:${activeProfileId ?? "all"}`;
+  const dataScopeRef = useRef(dataScope);
+  dataScopeRef.current = dataScope;
+  const previousProjectRef = useRef(projectId);
+  const profileRequestRef = useRef(0);
+  const accountRequestRef = useRef(0);
+  const postRequestRef = useRef(0);
+  const platformRequestRef = useRef(0);
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(`social.activeProfile.${projectId || ""}`);
-      setActiveProfileId(raw ? Number(raw) || null : null);
-    } catch {
-      setActiveProfileId(null);
-    }
+    if (previousProjectRef.current === projectId) return;
+    previousProjectRef.current = projectId;
+    const id = storedProfileId(projectId);
+    dataScopeRef.current = `${projectId}:${id ?? "all"}`;
+    setProfileSelection({ projectId, id });
     setProfiles([]);
+    setProfilesLoaded(false);
+    setAccounts([]);
+    setPosts([]);
   }, [projectId]);
   const [manageOpen, setManageOpen] = useState(false);
   const selectProfile = useCallback((id: number | null) => {
-    setActiveProfileId(id);
+    dataScopeRef.current = `${projectId}:${id ?? "all"}`;
+    setProfileSelection({ projectId, id });
+    setAccounts([]);
+    setPosts([]);
     try {
       if (id == null) {
         localStorage.removeItem(`social.activeProfile.${projectId || ""}`);
@@ -343,20 +373,31 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   }, [projectId]);
 
   const loadProfiles = useCallback(async () => {
+    const requestProject = projectId;
+    const requestId = ++profileRequestRef.current;
     try {
       const res = await fetch(appURL("/profiles", projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
+      if (requestId !== profileRequestRef.current || projectRef.current !== requestProject) return;
       const next = data.profiles || [];
       setProfiles(next);
-      setActiveProfileId((current) => {
-        if (current != null && !next.some((p: Profile) => p.id === current)) {
+      setProfilesLoaded(true);
+      setProfileSelection((current) => {
+        const currentId = current.projectId === requestProject
+          ? current.id
+          : storedProfileId(requestProject);
+        if (currentId != null && !next.some((p: Profile) => p.id === currentId)) {
           try { localStorage.removeItem(`social.activeProfile.${projectId || ""}`); } catch {}
-          return null;
+          dataScopeRef.current = `${requestProject}:all`;
+          return { projectId: requestProject, id: null };
         }
-        return current;
+        if (current.projectId === requestProject && current.id === currentId) return current;
+        return { projectId: requestProject, id: currentId };
       });
     } catch (e) {
+      if (requestId !== profileRequestRef.current || projectRef.current !== requestProject) return;
+      setProfilesLoaded(true);
       setStatus("Load profiles: " + (e as Error).message);
     }
   }, [projectId]);
@@ -370,41 +411,55 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   }, [activeProfileId]);
 
   const loadAccounts = useCallback(async () => {
+    const requestScope = dataScope;
+    const requestId = ++accountRequestRef.current;
     try {
       const res = await fetch(appURL(`/accounts${profileQuery()}`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
+      if (requestId !== accountRequestRef.current || dataScopeRef.current !== requestScope) return;
       setAccounts(data.accounts || []);
     } catch (e) {
+      if (requestId !== accountRequestRef.current || dataScopeRef.current !== requestScope) return;
       setStatus("Load accounts: " + (e as Error).message);
     }
-  }, [profileQuery, projectId]);
+  }, [dataScope, profileQuery, projectId]);
 
   const loadPosts = useCallback(async () => {
+    const requestScope = dataScope;
+    const requestId = ++postRequestRef.current;
     try {
       const res = await fetch(appURL(`/posts${profileQuery()}`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
+      if (requestId !== postRequestRef.current || dataScopeRef.current !== requestScope) return;
       setPosts(data.posts || []);
     } catch (e) {
+      if (requestId !== postRequestRef.current || dataScopeRef.current !== requestScope) return;
       setStatus("Load posts: " + (e as Error).message);
     }
-  }, [profileQuery, projectId]);
+  }, [dataScope, profileQuery, projectId]);
 
   const loadPlatforms = useCallback(async () => {
+    const requestProject = projectId;
+    const requestId = ++platformRequestRef.current;
     try {
       const res = await fetch(appURL("/platforms", projectId), { credentials: "same-origin" });
       const data = await res.json();
+      if (requestId !== platformRequestRef.current || projectRef.current !== requestProject) return;
       setPlatforms(data.platforms || []);
     } catch {}
   }, [projectId]);
 
   useEffect(() => {
     loadProfiles();
+    loadPlatforms();
+  }, [loadProfiles, loadPlatforms]);
+
+  useEffect(() => {
     loadAccounts();
     loadPosts();
-    loadPlatforms();
-  }, [loadProfiles, loadAccounts, loadPosts, loadPlatforms]);
+  }, [loadAccounts, loadPosts]);
 
   // Live updates — account adds/removals + per-target publish events
   // + profile CRUD + post lifecycle (reschedule/delete from agent).
@@ -463,6 +518,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         <ProfileSwitcher
           profiles={profiles}
           activeId={activeProfileId}
+          loaded={profilesLoaded}
           onSelect={selectProfile}
           onManage={() => setManageOpen(true)}
         />
@@ -549,10 +605,11 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
 // --- ProfileSwitcher: header dropdown ----------------------------
 
 function ProfileSwitcher({
-  profiles, activeId, onSelect, onManage,
+  profiles, activeId, loaded, onSelect, onManage,
 }: {
   profiles: Profile[];
   activeId: number | null;
+  loaded: boolean;
   onSelect: (id: number | null) => void;
   onManage: () => void;
 }) {
@@ -568,18 +625,23 @@ function ProfileSwitcher({
     return () => window.removeEventListener("mousedown", onDoc);
   }, [open]);
   const active = profiles.find((p) => p.id === activeId) || null;
+  const unresolved = activeId != null && !active;
+  const label = active?.name || (unresolved ? (loaded ? "Profile unavailable" : "Loading profile…") : "All profiles");
   return (
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex items-center gap-2 px-2 py-1 text-sm rounded hover:bg-bg-card transition-colors"
-        title={active ? `Profile: ${active.name}` : "All profiles"}
+        style={{ minWidth: "10rem", maxWidth: "16rem" }}
+        title={active ? `Profile: ${active.name}` : label}
       >
         <span
           className="w-2 h-2 rounded-full"
           style={{ backgroundColor: active?.color || "#94a3b8" }}
         />
-        <span className="text-text font-medium">{active ? active.name : "All profiles"}</span>
+        <span className={`min-w-0 flex-1 truncate text-left font-medium ${unresolved ? "text-text-dim" : "text-text"}`}>
+          {label}
+        </span>
         <span className="text-text-dim text-xs">▾</span>
       </button>
       {open && (
@@ -5340,10 +5402,43 @@ interface AccountMetrics {
   clicks?: number;
   engagement_rate?: number;
   insights?: Record<string, { time?: string; value: number }[]>;
+  breakdowns?: AnalyticsBreakdown[];
+  capabilities?: {
+    available?: string[];
+    unavailable?: { dimension: string; reason: string }[];
+  };
   history_source?: string;
   updated_at?: string;
   raw?: any;
 }
+
+interface AnalyticsBreakdownRow {
+  dimensions: Record<string, string>;
+  metrics: Record<string, number>;
+}
+
+interface AnalyticsBreakdown {
+  dimension: string;
+  status: "ok" | "unsupported" | "failed";
+  reason?: string;
+  source?: string;
+  rows?: AnalyticsBreakdownRow[];
+}
+
+const ANALYTICS_BREAKDOWNS = [
+  ["device", "Device"],
+  ["os", "Operating system"],
+  ["country", "Country"],
+  ["region", "Region"],
+  ["city", "City"],
+  ["age", "Age"],
+  ["gender", "Gender"],
+  ["traffic_source", "Traffic source"],
+  ["audience_type", "Audience"],
+  ["content_type", "Content type"],
+  ["sharing_service", "Sharing service"],
+  ["video", "Video"],
+] as const;
 
 function MetricsView({
   posts, accounts, projectId, setStatus, onPostsChanged,
@@ -5360,7 +5455,9 @@ function MetricsView({
   const [activeAccountId, setActiveAccountId] = useState<number | null>(accounts[0]?.id ?? null);
   const [syncFor, setSyncFor] = useState<Record<number, "loading" | "done" | { error: string }>>({});
   const [refreshingFor, setRefreshingFor] = useState<Record<number, boolean>>({});
-  const [rangeDays, setRangeDays] = useState<30 | 90 | 365>(30);
+  const [analyticsRange, setAnalyticsRange] = useState("28d");
+  const [breakdownDimension, setBreakdownDimension] = useState("device");
+  const [breakdownFilter, setBreakdownFilter] = useState("all");
   const autoLoadedAccounts = useRef<Set<string>>(new Set());
   const autoRefreshedAccounts = useRef<Set<string>>(new Set());
   const accountIds = accounts.map((a) => a.id).join(",");
@@ -5391,7 +5488,8 @@ function MetricsView({
     try {
       const params = new URLSearchParams({
         refresh: refresh ? "1" : "0",
-        period: `${rangeDays}d`,
+        range: analyticsRange,
+        breakdowns: breakdownDimension,
       });
       const res = await fetch(appURL(`/accounts/${id}/metrics?${params}`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
@@ -5439,14 +5537,19 @@ function MetricsView({
   };
 
   useEffect(() => {
+    autoLoadedAccounts.current.clear();
     for (const account of accounts) {
-      const key = `${account.id}:${rangeDays}`;
+      const key = `${account.id}:${analyticsRange}:${breakdownDimension}`;
       if (!autoLoadedAccounts.current.has(key)) {
         autoLoadedAccounts.current.add(key);
         loadAccount(account.id);
       }
     }
-  }, [accountIds, rangeDays]);
+  }, [accountIds, analyticsRange, breakdownDimension]);
+
+  useEffect(() => {
+    setBreakdownFilter("all");
+  }, [analyticsRange, breakdownDimension]);
 
   const loadPost = async (id: number) => {
     setPostFor((prev) => ({ ...prev, [id]: "loading" }));
@@ -5497,6 +5600,12 @@ function MetricsView({
     return () => window.clearTimeout(timer);
   }, [activeAccount?.id, activeMetrics]);
 
+  const activeBreakdown = activeMetrics && typeof activeMetrics === "object" && "status" in activeMetrics
+    ? (activeMetrics.breakdowns || []).find((item) => item.dimension === breakdownDimension)
+    : undefined;
+  const breakdownValues = Array.from(new Set(
+    (activeBreakdown?.rows || []).map((row) => row.dimensions[breakdownDimension]).filter(Boolean)
+  ));
   const published = posts.filter((p) =>
     (p.status === "published" || p.status === "partial") &&
     (!activeAccount || (p.targets || []).some((t) => t.social_account_id === activeAccount.id))
@@ -5555,7 +5664,7 @@ function MetricsView({
               disabled={refreshingFor[activeAccount.id]}
               className="px-2.5 py-1.5 text-xs border border-border rounded text-accent hover:border-accent disabled:opacity-50"
             >
-              {refreshingFor[activeAccount.id] ? "Refreshing…" : "Refresh metrics"}
+              {refreshingFor[activeAccount.id] ? "Refreshing…" : "Refresh analytics"}
             </button>
             <button
               onClick={() => syncAccountPosts(activeAccount.id)}
@@ -5564,6 +5673,46 @@ function MetricsView({
             >
               {syncFor[activeAccount.id] === "loading" ? "Syncing..." : "Sync posts"}
             </button>
+          </div>
+          <div className="flex flex-wrap items-end gap-2 border-y border-border py-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wide text-text-dim">Range</span>
+              <select
+                value={analyticsRange}
+                onChange={(event) => setAnalyticsRange(event.target.value)}
+                className="h-9 min-w-[110px] bg-bg-input border border-border rounded px-2 text-sm"
+              >
+                <option value="7d">Last 7 days</option>
+                <option value="28d">Last 28 days</option>
+                <option value="90d">Last 90 days</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wide text-text-dim">Breakdown</span>
+              <select
+                value={breakdownDimension}
+                onChange={(event) => setBreakdownDimension(event.target.value)}
+                className="h-9 min-w-[180px] bg-bg-input border border-border rounded px-2 text-sm"
+              >
+                {ANALYTICS_BREAKDOWNS.map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wide text-text-dim">Show</span>
+              <select
+                value={breakdownFilter}
+                onChange={(event) => setBreakdownFilter(event.target.value)}
+                disabled={breakdownValues.length === 0}
+                className="h-9 min-w-[160px] bg-bg-input border border-border rounded px-2 text-sm disabled:opacity-50"
+              >
+                <option value="all">All values</option>
+                {breakdownValues.map((value) => (
+                  <option key={value} value={value}>{analyticsLabel(value)}</option>
+                ))}
+              </select>
+            </label>
           </div>
           {activeMetrics === "loading" ? (
             <div className="text-text-dim text-sm">Loading account metrics...</div>
@@ -5575,22 +5724,9 @@ function MetricsView({
               <AccountMetricsSummary metrics={activeMetrics as AccountMetrics} />
               {(activeMetrics as AccountMetrics).status === "ok" && (
                 <>
-                  <div className="flex items-center justify-between gap-3 mt-1">
-                    <div className="text-xs uppercase tracking-wide text-text-dim">Trends</div>
-                    <div className="inline-flex border border-border rounded overflow-hidden" aria-label="Metrics history range">
-                      {([30, 90, 365] as const).map((days) => (
-                        <button
-                          key={days}
-                          type="button"
-                          onClick={() => setRangeDays(days)}
-                          className={`px-2.5 py-1 text-xs border-r border-border last:border-r-0 ${rangeDays === days ? "bg-bg-card text-text" : "text-text-muted hover:text-text"}`}
-                        >
-                          {days === 365 ? "1y" : `${days}d`}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                  <div className="text-xs uppercase tracking-wide text-text-dim mt-1">Trends</div>
                   <InsightCharts metrics={activeMetrics as AccountMetrics} />
+                  <BreakdownView breakdown={activeBreakdown} filter={breakdownFilter} />
                 </>
               )}
             </>
@@ -5603,6 +5739,14 @@ function MetricsView({
         </section>
       )}
 
+      {accounts.length > 1 && (
+        <AccountBreakdownComparison
+          accounts={accounts}
+          accountFor={accountFor}
+          dimension={breakdownDimension}
+          filter={breakdownFilter}
+        />
+      )}
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <h2 className="text-sm uppercase tracking-wide text-text-dim">Post performance</h2>
@@ -5737,6 +5881,109 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
       ))}
     </div>
   );
+}
+
+function AccountBreakdownComparison({
+  accounts,
+  accountFor,
+  dimension,
+  filter,
+}: {
+  accounts: SocialAccount[];
+  accountFor: Record<number, AccountMetrics | "loading" | { error: string }>;
+  dimension: string;
+  filter: string;
+}) {
+  const rows = accounts.flatMap((account) => {
+    const metrics = accountFor[account.id];
+    if (!metrics || metrics === "loading" || !("status" in metrics)) return [];
+    const breakdown = (metrics.breakdowns || []).find((item) => item.dimension === dimension && item.status === "ok");
+    if (!breakdown) return [];
+    const matching = (breakdown.rows || []).filter((row) => filter === "all" || row.dimensions[dimension] === filter);
+    const value = matching.reduce((total, row) => total + breakdownMetric(row.metrics).value, 0);
+    return [{ account, value }];
+  }).sort((a, b) => b.value - a.value);
+  if (rows.length < 2) return null;
+  const max = Math.max(...rows.map((row) => row.value), 1);
+  return (
+    <section className="flex flex-col gap-3 border-t border-border pt-4">
+      <div>
+        <h2 className="text-sm uppercase tracking-wide text-text-dim">Account comparison</h2>
+        <div className="text-text-dim text-xs mt-1">
+          {filter === "all" ? `All ${analyticsLabel(dimension)} values` : analyticsLabel(filter)}
+        </div>
+      </div>
+      <div className="flex flex-col gap-2">
+        {rows.map(({ account, value }) => (
+          <div key={account.id} className="grid grid-cols-[minmax(140px,220px)_1fr_auto] items-center gap-3">
+            <div className="min-w-0">
+              <div className="text-text text-sm truncate">{account.display_name}</div>
+              <div className="text-text-dim text-xs">{account.platform}</div>
+            </div>
+            <div className="h-2 bg-bg-input rounded overflow-hidden">
+              <div className="h-full bg-accent" style={{ width: `${Math.max(2, (value / max) * 100)}%` }} />
+            </div>
+            <div className="text-text text-sm tabular-nums min-w-[64px] text-right">{formatNumber(value)}</div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function BreakdownView({ breakdown, filter }: { breakdown?: AnalyticsBreakdown; filter: string }) {
+  if (!breakdown) return null;
+  if (breakdown.status !== "ok") {
+    return (
+      <div className="border-t border-border pt-3 text-text-dim text-sm">
+        {breakdown.reason || `${analyticsLabel(breakdown.dimension)} analytics are not available from this provider.`}
+      </div>
+    );
+  }
+  const rows = (breakdown.rows || [])
+    .filter((row) => filter === "all" || row.dimensions[breakdown.dimension] === filter)
+    .map((row) => ({ row, metric: breakdownMetric(row.metrics) }))
+    .sort((a, b) => b.metric.value - a.metric.value);
+  if (rows.length === 0) {
+    return <div className="border-t border-border pt-3 text-text-dim text-sm">No breakdown data returned for this range.</div>;
+  }
+  const max = Math.max(...rows.map(({ metric }) => metric.value), 1);
+  return (
+    <div className="border-t border-border pt-3 flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm uppercase tracking-wide text-text-dim">{analyticsLabel(breakdown.dimension)}</h3>
+        <span className="text-text-dim text-xs">{analyticsLabel(rows[0].metric.name)}</span>
+      </div>
+      <div className="flex flex-col gap-2">
+        {rows.map(({ row, metric }) => {
+          const value = row.dimensions[breakdown.dimension] || "unknown";
+          return (
+            <div key={JSON.stringify(row.dimensions)} className="grid grid-cols-[minmax(120px,200px)_1fr_auto] items-center gap-3">
+              <span className="text-text text-sm truncate" title={analyticsLabel(value)}>{analyticsLabel(value)}</span>
+              <div className="h-2 bg-bg-input rounded overflow-hidden">
+                <div className="h-full bg-accent" style={{ width: `${Math.max(2, (metric.value / max) * 100)}%` }} />
+              </div>
+              <span className="text-text text-sm tabular-nums min-w-[64px] text-right">{formatNumber(metric.value)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function breakdownMetric(metrics: Record<string, number>): { name: string; value: number } {
+  for (const name of ["views", "audience", "impressions", "reach", "engagements", "watch_time_minutes"]) {
+    if (metrics[name] != null) return { name, value: Number(metrics[name]) || 0 };
+  }
+  const first = Object.entries(metrics)[0];
+  return first ? { name: first[0], value: Number(first[1]) || 0 } : { name: "views", value: 0 };
+}
+
+function analyticsLabel(value: string): string {
+  return value
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function InsightCharts({ metrics }: { metrics: AccountMetrics }) {

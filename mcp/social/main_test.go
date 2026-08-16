@@ -56,6 +56,7 @@ type recordingPlatform struct {
 	connections      []sdk.PlatformConnection
 	executeErr       error
 	identity         *sdk.InstallIdentity
+	urlPropertyReady *bool
 }
 
 type executeCall struct {
@@ -121,6 +122,13 @@ func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, in
 		return r, nil
 	}
 	return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}, nil
+}
+
+func (p *recordingPlatform) GetIntegrationURLProperty(int64, string) (*sdk.IntegrationURLPropertyStatus, error) {
+	if p.urlPropertyReady == nil {
+		return nil, tk.ErrNotImplemented
+	}
+	return &sdk.IntegrationURLPropertyStatus{Ready: *p.urlPropertyReady}, nil
 }
 
 type callAppCall struct {
@@ -2418,6 +2426,8 @@ func TestPublishTikTok_BuildsFileUploadInitInput_SingleChunk(t *testing.T) {
 	// 4 MB video — well under the 64 MB single-chunk threshold.
 	const videoBytes = 4 * 1024 * 1024
 	pf := newRecordingPlatform()
+	notReady := false
+	pf.urlPropertyReady = &notReady
 	pf.callAppResponses["storage:files_get"] = json.RawMessage(
 		`{"result":{"content":[{"type":"text","text":"{\"id\":7,\"content_type\":\"video/mp4\",\"size_bytes\":4194304}"}]}}`,
 	)
@@ -2483,6 +2493,42 @@ func TestPublishTikTok_BuildsFileUploadInitInput_SingleChunk(t *testing.T) {
 	).Scan(&lastErr)
 	if !strings.Contains(lastErr, "upload_url") {
 		t.Errorf("expected error about missing upload_url; got %q", lastErr)
+	}
+}
+
+func TestPublishTikTok_UsesPullFromURLWhenDeliveryReady(t *testing.T) {
+	ready := true
+	pf := newRecordingPlatform()
+	pf.urlPropertyReady = &ready
+	pf.callAppResponses["storage:files_get"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":17,\"content_type\":\"video/mp4\",\"size_bytes\":4194304}"}]}}`,
+	)
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://agents.test/api/apps/storage/files/17/content/v.mp4?sig=x&exp=1999999999\"}"}]}}`,
+	)
+	pf.executeResponses["post_video"] = &sdk.ExecuteResult{Success: true, Data: json.RawMessage(`{"data":{"publish_id":"pull_pub_1"}}`)}
+	pf.executeResponses["get_publish_status"] = &sdk.ExecuteResult{Success: true, Data: json.RawMessage(`{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":["video_post_1"]}}`)}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'tiktok', 42, '@tt', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+	app := &App{}
+	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"body": "verified pull", "social_account_ids": []any{acctID}, "media_storage_ids": []any{int64(17)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) < 1 || pf.executeCalls[0].Tool != "post_video" {
+		t.Fatalf("expected post_video: %+v", pf.executeCalls)
+	}
+	source := pf.executeCalls[0].Input["source_info"].(map[string]any)
+	if source["source"] != "PULL_FROM_URL" || source["video_url"] == "" {
+		t.Fatalf("expected PULL_FROM_URL input, got %+v", source)
+	}
+	if _, exists := source["video_size"]; exists {
+		t.Fatalf("pull input must not contain FILE_UPLOAD fields: %+v", source)
 	}
 }
 
@@ -4275,5 +4321,113 @@ func TestPostDelete_AcceptsStringPostID(t *testing.T) {
 	}
 	if res["deleted"] != postID {
 		t.Errorf("delete id mismatch: %v vs %d", res["deleted"], postID)
+	}
+}
+
+func TestYouTubeBreakdownMapsDeviceFilterAndRows(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["query_analytics_report"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(`{
+			"columnHeaders":[
+				{"name":"deviceType","columnType":"DIMENSION"},
+				{"name":"views","columnType":"METRIC"},
+				{"name":"estimatedMinutesWatched","columnType":"METRIC"}
+			],
+			"rows":[["TV",420,900],["MOBILE",120,240]]
+		}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	got := (&App{}).fetchYouTubeBreakdown(ctx, 12, "device", analyticsQuery{
+		RangeDays: 28,
+		Filters:   map[string][]string{"device": {"tv"}},
+	})
+	if got.Status != "ok" || len(got.Rows) != 2 {
+		t.Fatalf("breakdown = %+v", got)
+	}
+	if got.Rows[0].Dimensions["device"] != "tv" || got.Rows[0].Metrics["views"] != 420 || got.Rows[0].Metrics["watch_time_minutes"] != 900 {
+		t.Fatalf("first row = %+v", got.Rows[0])
+	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("calls = %d, want 1", len(pf.executeCalls))
+	}
+	input := pf.executeCalls[0].Input
+	if input["dimensions"] != "deviceType" || input["filters"] != "deviceType==TV" || input["sort"] != "-views" {
+		t.Fatalf("query input = %+v", input)
+	}
+}
+
+func TestAnalyticsQueryCanonicalizesDimensions(t *testing.T) {
+	query := analyticsQueryFromArgs(map[string]any{
+		"range":      "90d",
+		"breakdowns": []any{"deviceType", "traffic-source", "unknown"},
+		"filters": map[string]any{
+			"operatingSystem": []any{"ios", "android"},
+		},
+		"device": "tv,mobile",
+	})
+	if query.RangeDays != 90 {
+		t.Fatalf("range = %d", query.RangeDays)
+	}
+	if strings.Join(query.Breakdowns, ",") != "device,traffic_source" {
+		t.Fatalf("breakdowns = %v", query.Breakdowns)
+	}
+	if strings.Join(query.Filters["os"], ",") != "ios,android" || strings.Join(query.Filters["device"], ",") != "tv,mobile" {
+		t.Fatalf("filters = %#v", query.Filters)
+	}
+}
+
+func TestMetricBreakdownsPersistWithoutPollutingHistory(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	result := accountMetricsResult{
+		SocialAccountID: 42,
+		ProfileID:       3,
+		Platform:        "youtube",
+		Status:          "ok",
+		Insights: insightSeries{
+			"views": {{Time: "2026-08-15", Value: 1000}},
+		},
+		Breakdowns: []analyticsBreakdown{{
+			Dimension: "device",
+			Status:    "ok",
+			Rows: []analyticsBreakdownRow{
+				{Dimensions: map[string]string{"device": "tv"}, Metrics: map[string]int64{"views": 600}},
+				{Dimensions: map[string]string{"device": "mobile"}, Metrics: map[string]int64{"views": 400}},
+			},
+		}},
+	}
+	if err := (&App{}).persistAccountMetrics(ctx, "test-proj", result, analyticsQuery{RangeDays: 28}); err != nil {
+		t.Fatal(err)
+	}
+	history := loadAccountMetricHistory(ctx, "test-proj", 42, 730)
+	if len(history["views"]) != 1 || history["views"][0].Value != 1000 {
+		t.Fatalf("history polluted by dimensions: %#v", history)
+	}
+	breakdowns := loadAccountBreakdowns(ctx, "test-proj", 42, "range_28d")
+	if len(breakdowns) != 1 || len(breakdowns[0].Rows) != 2 {
+		t.Fatalf("stored breakdowns = %#v", breakdowns)
+	}
+	if breakdowns[0].Rows[0].Metrics["views"]+breakdowns[0].Rows[1].Metrics["views"] != 1000 {
+		t.Fatalf("stored values = %#v", breakdowns[0].Rows)
+	}
+}
+
+func TestAccountComparisonFiltersUnsupportedAccounts(t *testing.T) {
+	results := []accountMetricsResult{
+		{
+			SocialAccountID: 1, DisplayName: "YouTube A", Platform: "youtube", Views: 1000,
+			Breakdowns: []analyticsBreakdown{{Dimension: "device", Status: "ok", Rows: []analyticsBreakdownRow{
+				{Dimensions: map[string]string{"device": "tv"}, Metrics: map[string]int64{"views": 700}},
+			}}},
+		},
+		{SocialAccountID: 2, DisplayName: "X A", Platform: "twitter", Views: 5000},
+	}
+	comparison := aggregateAccountComparison(results, "views", map[string][]string{"device": {"tv"}})
+	if len(comparison.Rows) != 1 {
+		t.Fatalf("rows = %#v, want only supported account", comparison.Rows)
+	}
+	if comparison.Rows[0].Dimensions["account_name"] != "YouTube A" || comparison.Rows[0].Metrics["views"] != 700 {
+		t.Fatalf("comparison = %#v", comparison.Rows[0])
 	}
 }
