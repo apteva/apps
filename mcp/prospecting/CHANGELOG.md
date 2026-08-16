@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.11
+
+- Use the full desktop width across Overview, Discover, Leads, and Settings.
+- Replace the broken stacked lead detail layout with a working queue on the left and qualification workspace on the right.
+- Hide rejected leads by default while keeping them available through an explicit status filter.
+- Consolidate manual creation and CSV/JSON import into one Add leads side panel.
+- Normalize the app header, tab spacing, content padding, and lead terminology.
+
 ## v0.2.10
 
 - Add an explicitly confirmed operation to permanently purge rejected candidates and their Prospecting evidence from the current project.
