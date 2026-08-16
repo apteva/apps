@@ -132,6 +132,20 @@ func (a *App) handleCandidates(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) handleCandidatePurgeRejected(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	args, err := decodeBody(r)
+	if err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
+	}
+	out, err := a.toolCandidatesPurgeRejected(requestCtx(r), args)
+	respond(w, out, err)
+}
+
 func (a *App) handleCandidateItem(w http.ResponseWriter, r *http.Request) {
 	ctx := requestCtx(r)
 	id, action := pathIDAction(r.URL.Path, "/candidates/")

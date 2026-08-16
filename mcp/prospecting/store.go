@@ -290,6 +290,33 @@ func getCandidateByKey(db *sql.DB, pid string, profileID int64, key string) (*Ca
 	return scanCandidateRow(db.QueryRow(candidateSelect+` WHERE project_id=? AND profile_id=? AND canonical_key=?`, pid, profileID, key))
 }
 
+func purgeRejectedCandidates(db *sql.DB, pid string) (int64, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	for _, table := range []string{"candidate_evidence", "crm_handoffs"} {
+		if _, err := tx.Exec(`DELETE FROM `+table+` WHERE project_id=? AND candidate_id IN (
+			SELECT id FROM candidates WHERE project_id=? AND status='rejected'
+		)`, pid, pid); err != nil {
+			return 0, err
+		}
+	}
+	result, err := tx.Exec(`DELETE FROM candidates WHERE project_id=? AND status='rejected'`, pid)
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
 const candidateSelect = `SELECT id,project_id,profile_id,run_id,canonical_key,company_name,company_domain,website,
     person_first_name,person_last_name,person_display_name,job_title,email,phone,summary,
     location,employee_estimate,location_count,eligibility,eligibility_reasons_json,automation_signals_json,

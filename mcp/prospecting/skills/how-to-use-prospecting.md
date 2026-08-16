@@ -36,6 +36,9 @@ SMS, WhatsApp messages, or telephone calls.
    numbers, or research claims.
 11. Defer uncertain candidates. Reject clear mismatches and use
    `exclude_company=true` when future discovery should suppress the company.
+   Permanently remove all rejected candidates only when the user explicitly
+   requests cleanup, using `prospecting_candidates_purge_rejected` with
+   `confirm=true`.
 12. If CRM is connected, call `prospecting_candidates_accept` only when the
    user explicitly wants the candidate retained there. Acceptance is a real
    CRM write, requires a valid email or phone, is idempotent, and never

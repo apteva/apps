@@ -150,6 +150,44 @@ func TestStandaloneImportExportAndCapabilityGating(t *testing.T) {
 	}
 }
 
+func TestPurgeRejectedCandidatesRequiresConfirmationAndKeepsReady(t *testing.T) {
+	ctx := newTestContext(t, &platformStub{})
+	app := &App{}
+	profile, _, err := resolveSeedProfile(ctx, 0)
+	if err != nil {
+		t.Fatalf("profile: %v", err)
+	}
+	for _, company := range []string{"Keep Dental", "Remove Dental"} {
+		if _, err := app.toolCandidatesCreate(ctx, map[string]any{"profile_id": profile.ID, "company_name": company}); err != nil {
+			t.Fatalf("create %s: %v", company, err)
+		}
+	}
+	candidates, _, _ := listCandidates(ctx.AppDB(), ctx.CurrentProject(), candidateFilter{Status: "all", Limit: 10})
+	var rejectedID int64
+	for _, candidate := range candidates {
+		if candidate.CompanyName == "Remove Dental" {
+			rejectedID = candidate.ID
+		}
+	}
+	if _, err := app.toolCandidatesReject(ctx, map[string]any{"id": rejectedID, "reason": "not a fit"}); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if _, err := app.toolCandidatesPurgeRejected(ctx, map[string]any{}); err == nil || !strings.Contains(err.Error(), "confirm=true") {
+		t.Fatalf("purge without confirmation error=%v", err)
+	}
+	result, err := app.toolCandidatesPurgeRejected(ctx, map[string]any{"confirm": true})
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if result.(map[string]any)["deleted"] != int64(1) {
+		t.Fatalf("purge result=%#v", result)
+	}
+	remaining, total, err := listCandidates(ctx.AppDB(), ctx.CurrentProject(), candidateFilter{Status: "all", Limit: 10})
+	if err != nil || total != 1 || len(remaining) != 1 || remaining[0].CompanyName != "Keep Dental" {
+		t.Fatalf("remaining=%+v total=%d err=%v", remaining, total, err)
+	}
+}
+
 func newTestContext(t *testing.T, platform sdk.PlatformClient) *sdk.AppCtx {
 	t.Helper()
 	return tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))

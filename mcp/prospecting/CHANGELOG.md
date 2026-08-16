@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.10
+
+- Add an explicitly confirmed operation to permanently purge rejected candidates and their Prospecting evidence from the current project.
+- Preserve ready, deferred, accepted, and other non-rejected candidates during cleanup.
+
 ## v0.2.9
 
 - Make Web and CRM optional installation dependencies.

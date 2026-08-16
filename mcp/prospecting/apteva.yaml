@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: prospecting
 display_name: Prospecting
-version: 0.2.9
+version: 0.2.10
 description: |
   A standalone lead workspace for Apteva. Seed companies manually or in bulk,
   organize them with target profiles, explore and update the catalog, record
@@ -60,6 +60,7 @@ provides:
     - { name: prospecting_candidates_qualify_batch, description: "Deterministically qualify a bounded candidate batch without AI. Args: profile_id?, status?, limit? (1-25), max_pages? (1-5)." }
     - { name: prospecting_candidates_defer, description: "Defer a candidate without rejecting it. Args: id, reason?." }
     - { name: prospecting_candidates_reject, description: "Reject a candidate. Args: id, reason?, exclude_company? (default false)." }
+    - { name: prospecting_candidates_purge_rejected, description: "PERMANENT DELETE: remove every rejected candidate and its Prospecting evidence from the current project. Requires confirm=true." }
     - { name: prospecting_candidates_accept, description: "OPTIONAL REAL CRM WRITE: send a candidate to connected CRM and idempotently upsert it. Requires CRM plus email or phone. Args: id, list_ids?. Does not send a message or create an opportunity." }
     - { name: prospecting_exclusions_list, description: "List excluded companies, domains, or people. Args: kind?, limit?." }
     - { name: prospecting_exclusions_remove, description: "Remove one exclusion. Args: id." }
@@ -90,7 +91,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: prospecting/v0.2.9
+    ref: prospecting/v0.2.10
     entry: mcp/prospecting
   port: 8080
   health_check: /health

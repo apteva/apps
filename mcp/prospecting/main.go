@@ -55,6 +55,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/runs", Handler: a.handleRuns},
 		{Pattern: "/candidates/import", Handler: a.handleCandidateImport},
 		{Pattern: "/candidates/export", Handler: a.handleCandidateExport},
+		{Pattern: "/candidates/purge-rejected", Handler: a.handleCandidatePurgeRejected},
 		{Pattern: "/candidates", Handler: a.handleCandidates},
 		{Pattern: "/candidates/", Handler: a.handleCandidateItem},
 		{Pattern: "/exclusions", Handler: a.handleExclusions},
@@ -107,6 +108,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "prospecting_candidates_qualify_batch", Description: "Deterministically qualify the next bounded batch of unenriched candidates without AI. Args: profile_id?, status? (default ready), limit? (default 10, max 25), max_pages? (default 5, max 5), requalify? (default false). Does not contact anyone.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "status": sString(), "limit": sInteger(), "max_pages": sInteger(), "requalify": sBoolean()}, nil), Handler: a.toolCandidatesQualifyBatch},
 		{Name: "prospecting_candidates_defer", Description: "Defer a candidate. Args: id, reason?.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "reason": sString()}, []string{"id"}), Handler: a.toolCandidatesDefer},
 		{Name: "prospecting_candidates_reject", Description: "Reject a candidate. Args: id, reason?, exclude_company? (default false). Rejected or excluded candidates are not contacted.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "reason": sString(), "exclude_company": sBoolean()}, []string{"id"}), Handler: a.toolCandidatesReject},
+		{Name: "prospecting_candidates_purge_rejected", Description: "PERMANENT DELETE: remove every rejected candidate and its Prospecting evidence from the current project. Args: confirm=true. Does not delete CRM contacts or exclusions.", InputSchema: schemaObject(map[string]any{"confirm": sBoolean()}, []string{"confirm"}), Handler: a.toolCandidatesPurgeRejected},
 		{Name: "prospecting_candidates_accept", Description: "REAL CRM WRITE: accept a candidate and idempotently upsert it into CRM. Requires email or phone. Args: id, list_ids? (CRM list ids or slugs). This does not send a message or create an opportunity.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "list_ids": map[string]any{"type": "array"}}, []string{"id"}), Handler: a.toolCandidatesAccept},
 		{Name: "prospecting_exclusions_list", Description: "List exclusions. Args: kind? (domain|company|email|phone), limit?.", InputSchema: schemaObject(map[string]any{"kind": sString(), "limit": sInteger()}, nil), Handler: a.toolExclusionsList},
 		{Name: "prospecting_exclusions_remove", Description: "Remove one exclusion. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolExclusionsRemove},
@@ -249,6 +251,14 @@ func (a *App) toolCandidatesReject(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	ctx.EmitWithProject("prospecting.candidate.rejected", candidate.ProjectID, candidateEvent(candidate))
 	return map[string]any{"candidate": candidate, "exclusion": exclusion}, nil
+}
+
+func (a *App) toolCandidatesPurgeRejected(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if !boolArg(args, "confirm", false) {
+		return nil, errors.New("confirm=true is required to permanently delete rejected candidates")
+	}
+	deleted, err := purgeRejectedCandidates(ctx.AppDB(), ctx.CurrentProject())
+	return map[string]any{"deleted": deleted, "status": "rejected"}, err
 }
 
 func (a *App) toolCandidatesAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) {
