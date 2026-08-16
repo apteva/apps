@@ -89,7 +89,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 	return []sdk.Tool{
 		{Name: "prospecting_overview", Description: "Summarize target profiles, runs, candidate statuses, evidence, and exclusions. Args: none.", InputSchema: schemaObject(nil, nil), Handler: a.toolOverview},
-		{Name: "prospecting_capabilities", Description: "Report whether the optional Web discovery and CRM handoff integrations are currently connected. Args: none.", InputSchema: schemaObject(nil, nil), Handler: a.toolCapabilities},
+		{Name: "prospecting_capabilities", Description: "Report whether optional Web discovery and CRM-backed outreach are currently connected. Args: none.", InputSchema: schemaObject(nil, nil), Handler: a.toolCapabilities},
 		{Name: "prospecting_profiles_create", Description: "Create a target profile. Args: name, description?, industries?, locations?, employee_min?, employee_max?, target_titles?, keywords?.", InputSchema: schemaObject(profileFields, []string{"name"}), Handler: a.toolProfilesCreate},
 		{Name: "prospecting_profiles_list", Description: "List target profiles. Args: status? (active default, archived, all).", InputSchema: schemaObject(map[string]any{"status": sString()}, nil), Handler: a.toolProfilesList},
 		{Name: "prospecting_profiles_get", Description: "Get one target profile. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolProfilesGet},
@@ -100,7 +100,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "prospecting_candidates_create", Description: "Create a candidate manually without Web or CRM. Args: profile_id? (uses the newest active profile or creates Imported leads), company_name, website?, person fields?, email?, phone?, summary?, source_url?.", InputSchema: schemaObject(mergeSchemas(map[string]any{"profile_id": sInteger()}, candidateFields), []string{"company_name"}), Handler: a.toolCandidatesCreate},
 		{Name: "prospecting_candidates_import", Description: "Bulk seed candidates without Web or CRM. Args: profile_id?; candidates? array of candidate objects, or data string plus format auto|csv|json. Maximum 1000 rows.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "candidates": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "data": sString(), "format": sString()}, nil), Handler: a.toolCandidatesImport},
 		{Name: "prospecting_candidates_export", Description: "Export a portable JSON candidate set without CRM. Args: profile_id?, status?, q?, limit? (max 200).", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "status": sString(), "q": sString(), "limit": sInteger()}, nil), Handler: a.toolCandidatesExport},
-		{Name: "prospecting_candidates_search", Description: "Search candidates. Args: profile_id?, status?, q?, limit?, offset?.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "status": sString(), "q": sString(), "limit": sInteger(), "offset": sInteger()}, nil), Handler: a.toolCandidatesSearch},
+		{Name: "prospecting_candidates_search", Description: "Search candidates. Args: profile_id?, status? (active excludes rejected), q?, limit?, offset?.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "status": sString(), "q": sString(), "limit": sInteger(), "offset": sInteger()}, nil), Handler: a.toolCandidatesSearch},
 		{Name: "prospecting_candidates_get", Description: "Get one candidate with evidence and CRM handoff state. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolCandidatesGet},
 		{Name: "prospecting_candidates_update", Description: "Patch a candidate's company or person details and recalculate explainable scores. Args: id and editable fields.", InputSchema: schemaObject(mergeSchemas(map[string]any{"id": sInteger()}, candidateFields), []string{"id"}), Handler: a.toolCandidatesUpdate},
 		{Name: "prospecting_candidates_research", Description: "Research one candidate through Web and persist cited evidence. Args: id, question?. Does not contact anyone.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "question": sString()}, []string{"id"}), Handler: a.toolCandidatesResearch},
@@ -110,6 +110,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "prospecting_candidates_reject", Description: "Reject a candidate. Args: id, reason?, exclude_company? (default false). Rejected or excluded candidates are not contacted.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "reason": sString(), "exclude_company": sBoolean()}, []string{"id"}), Handler: a.toolCandidatesReject},
 		{Name: "prospecting_candidates_purge_rejected", Description: "PERMANENT DELETE: remove every rejected candidate and its Prospecting evidence from the current project. Args: confirm=true. Does not delete CRM contacts or exclusions.", InputSchema: schemaObject(map[string]any{"confirm": sBoolean()}, []string{"confirm"}), Handler: a.toolCandidatesPurgeRejected},
 		{Name: "prospecting_candidates_accept", Description: "REAL CRM WRITE: accept a candidate and idempotently upsert it into CRM. Requires email or phone. Args: id, list_ids? (CRM list ids or slugs). This does not send a message or create an opportunity.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "list_ids": map[string]any{"type": "array"}}, []string{"id"}), Handler: a.toolCandidatesAccept},
+		{Name: "prospecting_candidate_outreach_start", Description: "REAL CRM WRITE: create or link the CRM contact so one-to-one outreach can begin while keeping the lead in Prospecting's active queue. Requires email or phone. Does not send a message. Args: id, list_ids?.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "list_ids": map[string]any{"type": "array"}}, []string{"id"}), Handler: a.toolCandidateOutreachStart},
+		{Name: "prospecting_candidate_outreach_get", Description: "Read the linked CRM contact's recent activities, conversations, opportunities, verified Messaging senders, and WhatsApp session/template state. Args: id (candidate id). Read-only.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolCandidateOutreachGet},
+		{Name: "prospecting_candidate_outreach_send", Description: "REAL EXTERNAL SEND through CRM and its bound Messaging app. Sends email, SMS, or WhatsApp and records the CRM conversation. Requires confirm=true. Args: id, channel, body? or template_id, subject?, conversation_id?, from?, template_vars?, idempotency_key?, confirm.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "channel": sString(), "body": sString(), "subject": sString(), "conversation_id": sInteger(), "from": sString(), "template_id": sInteger(), "template_vars": map[string]any{"type": "object"}, "idempotency_key": sString(), "confirm": sBoolean()}, []string{"id", "channel", "confirm"}), Handler: a.toolCandidateOutreachSend},
 		{Name: "prospecting_exclusions_list", Description: "List exclusions. Args: kind? (domain|company|email|phone), limit?.", InputSchema: schemaObject(map[string]any{"kind": sString(), "limit": sInteger()}, nil), Handler: a.toolExclusionsList},
 		{Name: "prospecting_exclusions_remove", Description: "Remove one exclusion. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolExclusionsRemove},
 	}
@@ -263,6 +266,18 @@ func (a *App) toolCandidatesPurgeRejected(ctx *sdk.AppCtx, args map[string]any) 
 
 func (a *App) toolCandidatesAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return acceptCandidate(ctx, int64Arg(args, "id"), args["list_ids"])
+}
+
+func (a *App) toolCandidateOutreachStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return startCandidateOutreach(ctx, int64Arg(args, "id"), args["list_ids"])
+}
+
+func (a *App) toolCandidateOutreachGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return candidateOutreach(ctx, int64Arg(args, "id"))
+}
+
+func (a *App) toolCandidateOutreachSend(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return sendCandidateOutreach(ctx, int64Arg(args, "id"), args)
 }
 
 func (a *App) toolExclusionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {

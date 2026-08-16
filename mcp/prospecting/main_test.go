@@ -84,6 +84,28 @@ func (p *platformStub) CallAppResult(app, tool string, input map[string]any, out
 		}
 	case "crm/contacts_log_activity":
 		payload = map[string]any{"activity": map[string]any{"id": 88}}
+	case "crm/contacts_get_context":
+		payload = map[string]any{
+			"found":         true,
+			"contact":       map[string]any{"id": 701, "display_name": "Alex Rivera", "primary_email": "alex@acme.example", "primary_phone": "+15125550199"},
+			"activities":    []map[string]any{{"id": 89, "kind": "email_sent", "body": "Hello", "occurred_at": "2026-08-16T12:00:00Z", "conversation_id": 91}},
+			"conversations": []map[string]any{{"id": 91, "channel": "email", "subject": "Automation", "status": "pending", "priority": "normal", "last_activity_at": "2026-08-16T12:00:00Z"}},
+			"opportunities": []any{},
+		}
+	case "crm/messaging_senders_list":
+		payload = map[string]any{"senders": []map[string]any{
+			{"channel": "email", "address": "hello@example.com", "verified": true, "sending_enabled": true},
+			{"channel": "sms", "address": "+15125550100", "verified": true, "sending_enabled": true},
+			{"channel": "whatsapp", "address": "+15125550100", "verified": true, "sending_enabled": true},
+		}, "count": 3}
+	case "crm/messaging_whatsapp_session_check":
+		payload = map[string]any{"active": false, "to": "+15125550199"}
+	case "crm/messaging_templates_list":
+		payload = map[string]any{"templates": []map[string]any{{"id": 51, "channel": "whatsapp", "name": "Intro", "provider_status": "approved"}}, "count": 1}
+	case "crm/contacts_send_message":
+		payload = map[string]any{"activity": map[string]any{"id": 90}, "conversation": map[string]any{"id": 92}, "message": map[string]any{"id": 501, "status": "sent"}}
+	case "crm/contacts_reply":
+		payload = map[string]any{"activity": map[string]any{"id": 91}, "conversation": map[string]any{"id": input["conversation_id"]}, "message": map[string]any{"id": 502, "status": "sent"}}
 	default:
 		return fmt.Errorf("unexpected app call %s/%s", app, tool)
 	}
@@ -569,6 +591,71 @@ func TestCRMHandoffIsIdempotent(t *testing.T) {
 	stored, _ := getCandidate(ctx.AppDB(), ctx.CurrentProject(), candidate.ID)
 	if stored.Status != "accepted" || stored.CRMContactID == nil || *stored.CRMContactID != 701 {
 		t.Fatalf("candidate handoff not persisted: %+v", stored)
+	}
+}
+
+func TestCRMOutreachReadsContextAndRequiresConfirmedSend(t *testing.T) {
+	platform := &platformStub{}
+	ctx := newTestContext(t, platform)
+	profile := testProfile(t, ctx)
+	candidate, _, err := insertCandidate(ctx.AppDB(), ctx.CurrentProject(), candidateInput{
+		ProfileID: profile.ID, CompanyName: "Acme Cloud", CompanyDomain: "acme.example", Website: "https://acme.example",
+		PersonDisplayName: "Alex Rivera", Email: "alex@acme.example", Phone: "+15125550199", Source: "manual",
+	}, profile)
+	if err != nil {
+		t.Fatalf("insert candidate: %v", err)
+	}
+	if _, err := startCandidateOutreach(ctx, candidate.ID, nil); err != nil {
+		t.Fatalf("start outreach: %v", err)
+	}
+	stored, err := getCandidate(ctx.AppDB(), ctx.CurrentProject(), candidate.ID)
+	if err != nil || stored.Status != "ready" || stored.CRMContactID == nil || *stored.CRMContactID != 701 {
+		t.Fatalf("start outreach changed lead workflow state: candidate=%+v err=%v", stored, err)
+	}
+
+	outreach, err := candidateOutreach(ctx, candidate.ID)
+	if err != nil {
+		t.Fatalf("outreach context: %v", err)
+	}
+	if outreach["linked"] != true || outreach["crm_contact_id"] != int64(701) {
+		t.Fatalf("outreach link=%#v", outreach)
+	}
+	messaging := outreach["messaging"].(map[string]any)
+	if messaging["available"] != true || messaging["senders"] == nil || messaging["whatsapp_templates"] == nil {
+		t.Fatalf("messaging context=%#v", messaging)
+	}
+
+	before := len(platform.calls)
+	if _, err := sendCandidateOutreach(ctx, candidate.ID, map[string]any{
+		"channel": "email", "subject": "Automation", "body": "Hello",
+	}); err == nil || !strings.Contains(err.Error(), "confirm=true") {
+		t.Fatalf("unconfirmed send error=%v", err)
+	}
+	if len(platform.calls) != before {
+		t.Fatalf("unconfirmed send made platform calls: before=%d after=%d", before, len(platform.calls))
+	}
+
+	sent, err := sendCandidateOutreach(ctx, candidate.ID, map[string]any{
+		"channel": "email", "subject": "Automation", "body": "Hello", "confirm": true, "idempotency_key": "prospecting-test-1",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if sent["channel"] != "email" || sent["reply"] != false {
+		t.Fatalf("send result=%#v", sent)
+	}
+	call := platform.calls[len(platform.calls)-1]
+	if call.App != "crm" || call.Tool != "contacts_send_message" || call.Input["id"] != int64(701) || call.Input["subject"] != "Automation" {
+		t.Fatalf("send call=%+v", call)
+	}
+
+	if _, err := sendCandidateOutreach(ctx, candidate.ID, map[string]any{
+		"channel": "email", "conversation_id": int64(91), "body": "Following up", "confirm": true,
+	}); err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	if call := platform.calls[len(platform.calls)-1]; call.Tool != "contacts_reply" || call.Input["conversation_id"] != int64(91) {
+		t.Fatalf("reply call=%+v", call)
 	}
 }
 

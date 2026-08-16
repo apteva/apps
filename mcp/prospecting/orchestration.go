@@ -442,6 +442,14 @@ func containsAny(text string, values []string) bool {
 }
 
 func acceptCandidate(ctx *sdk.AppCtx, id int64, listIDs any) (map[string]any, error) {
+	return linkCandidateToCRM(ctx, id, listIDs, true)
+}
+
+func startCandidateOutreach(ctx *sdk.AppCtx, id int64, listIDs any) (map[string]any, error) {
+	return linkCandidateToCRM(ctx, id, listIDs, false)
+}
+
+func linkCandidateToCRM(ctx *sdk.AppCtx, id int64, listIDs any, markAccepted bool) (map[string]any, error) {
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil, errors.New("prospecting context unavailable")
 	}
@@ -450,6 +458,13 @@ func acceptCandidate(ctx *sdk.AppCtx, id int64, listIDs any) (map[string]any, er
 		return nil, err
 	} else if existing != nil {
 		candidate, _ := getCandidate(ctx.AppDB(), pid, id)
+		if markAccepted && candidate != nil && candidate.Status != "accepted" {
+			now := nowUTC()
+			if _, err := ctx.AppDB().Exec(`UPDATE candidates SET status='accepted',accepted_at=COALESCE(accepted_at,?),updated_at=? WHERE project_id=? AND id=?`, now, now, pid, id); err != nil {
+				return nil, err
+			}
+			candidate, _ = getCandidate(ctx.AppDB(), pid, id)
+		}
 		return map[string]any{"candidate": candidate, "handoff": existing, "idempotent": true}, nil
 	}
 	if err := requireOptionalApp(ctx, "crm"); err != nil {
@@ -502,8 +517,12 @@ func acceptCandidate(ctx *sdk.AppCtx, id int64, listIDs any) (map[string]any, er
 	}
 	warning := ""
 	var ignored map[string]any
-	activityBody := fmt.Sprintf("Accepted from Prospecting target profile %q. Fit %d/100, confidence %d/100. %s",
-		profile.Name, candidate.FitScore, candidate.ConfidenceScore, truncate(candidate.Summary, 800))
+	actionLabel := "Accepted from"
+	if !markAccepted {
+		actionLabel = "Outreach started from"
+	}
+	activityBody := fmt.Sprintf("%s Prospecting target profile %q. Fit %d/100, confidence %d/100. %s",
+		actionLabel, profile.Name, candidate.FitScore, candidate.ConfidenceScore, truncate(candidate.Summary, 800))
 	if err := ctx.PlatformAPI().CallAppResult("crm", "contacts_log_activity", map[string]any{
 		"contact_id": crmOut.Contact.ID,
 		"kind":       "note",
@@ -512,12 +531,21 @@ func acceptCandidate(ctx *sdk.AppCtx, id int64, listIDs any) (map[string]any, er
 	}, &ignored); err != nil {
 		warning = "contact was created, but qualification activity could not be logged: " + err.Error()
 	}
-	handoff, err := saveHandoff(ctx.AppDB(), pid, candidate.ID, crmOut.Contact.ID, kind, value, crmOut.WasCreated, warning)
+	var handoff *Handoff
+	if markAccepted {
+		handoff, err = saveHandoff(ctx.AppDB(), pid, candidate.ID, crmOut.Contact.ID, kind, value, crmOut.WasCreated, warning)
+	} else {
+		handoff, err = saveOutreachHandoff(ctx.AppDB(), pid, candidate.ID, crmOut.Contact.ID, kind, value, crmOut.WasCreated, warning)
+	}
 	if err != nil {
 		return nil, err
 	}
 	candidate, _ = getCandidate(ctx.AppDB(), pid, id)
-	ctx.EmitWithProject("prospecting.candidate.accepted", pid, map[string]any{
+	topic := "prospecting.candidate.accepted"
+	if !markAccepted {
+		topic = "prospecting.candidate.outreach_started"
+	}
+	ctx.EmitWithProject(topic, pid, map[string]any{
 		"candidate_id": id, "crm_contact_id": crmOut.Contact.ID, "was_created": crmOut.WasCreated,
 	})
 	return map[string]any{"candidate": candidate, "handoff": handoff, "idempotent": false}, nil

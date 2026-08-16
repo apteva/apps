@@ -102,6 +102,58 @@ interface Capabilities {
   crm: boolean;
 }
 
+interface CRMSender {
+  channel: string;
+  address: string;
+  verified: boolean;
+  sending_enabled: boolean;
+}
+
+interface CRMConversation {
+  id: number;
+  channel: string;
+  subject?: string;
+  status: string;
+  priority: string;
+  last_activity_at: string;
+}
+
+interface CRMActivity {
+  id: number;
+  kind: string;
+  body: string;
+  occurred_at: string;
+  conversation_id?: number;
+  message_status?: { status?: string; status_reason?: string };
+}
+
+interface WhatsAppTemplate {
+  id: number;
+  name: string;
+  body_text?: string;
+  provider_status?: string;
+  vars_schema?: Record<string, unknown>;
+}
+
+interface OutreachData {
+  linked: boolean;
+  error?: string;
+  crm_contact_id?: number;
+  context?: {
+    activities?: CRMActivity[];
+    conversations?: CRMConversation[];
+    opportunities?: Array<Record<string, unknown>>;
+  };
+  messaging?: {
+    available: boolean;
+    error?: string;
+    whatsapp_error?: string;
+    senders?: { senders?: CRMSender[]; count?: number };
+    whatsapp_session?: { active?: boolean; since?: string; last_inbound?: string };
+    whatsapp_templates?: { templates?: WhatsAppTemplate[]; count?: number };
+  };
+}
+
 type Tab = "overview" | "discover" | "candidates" | "settings";
 
 const API = "/api/apps/prospecting";
@@ -141,8 +193,9 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
   const [selectedCandidateId, setSelectedCandidateId] = useState(0);
   const [selectedEvidence, setSelectedEvidence] = useState<Evidence[]>([]);
   const [handoff, setHandoff] = useState<Record<string, unknown> | null>(null);
+  const [outreach, setOutreach] = useState<OutreachData | null>(null);
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("ready");
+  const [statusFilter, setStatusFilter] = useState("active");
   const [profileFilter, setProfileFilter] = useState(0);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -174,12 +227,13 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
       setCapabilities(capabilityData);
       setOverview(overviewData);
       setProfiles(profileData.profiles || []);
-      setCandidates(candidateData.candidates || []);
+      const loadedCandidates = candidateData.candidates || [];
+      setCandidates(loadedCandidates);
       setRuns(runData.runs || []);
       setExclusions(exclusionData.exclusions || []);
-      setSelectedCandidateId((current) => current && (candidateData.candidates || []).some((c: Candidate) => c.id === current)
+      setSelectedCandidateId((current) => current && loadedCandidates.some((c: Candidate) => c.id === current)
         ? current
-        : candidateData.candidates?.[0]?.id || 0);
+        : loadedCandidates[0]?.id || 0);
     } catch (error) {
       setMessage((error as Error).message);
     }
@@ -193,15 +247,23 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
   );
 
   const loadCandidateDetail = useCallback(async (id: number) => {
+    setOutreach(null);
     if (!id) {
       setSelectedEvidence([]);
       setHandoff(null);
+      setOutreach(null);
       return;
     }
     try {
       const data = await api(`/candidates/${id}`);
       setSelectedEvidence(data.evidence || []);
       setHandoff(data.handoff || null);
+      if (data.handoff) {
+        const outreachData = await api(`/candidates/${id}/outreach`).catch((error) => ({ linked: true, error: (error as Error).message }));
+        setOutreach(outreachData);
+      } else {
+        setOutreach({ linked: false });
+      }
     } catch (error) {
       setMessage((error as Error).message);
     }
@@ -231,7 +293,7 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
         <div className="px-5 lg:px-6 pt-4 pb-3 flex items-start gap-4">
           <div>
             <h1 className="text-lg font-semibold">Prospecting</h1>
-            <p className="text-xs text-text-muted">Seed, explore, and share a lead catalog. Web discovery and CRM handoff are optional.</p>
+            <p className="text-xs text-text-muted">Find, qualify, and contact leads. CRM handles email, SMS, and WhatsApp; calling comes later.</p>
           </div>
           <div className="ml-auto text-xs text-text-muted min-h-5 max-w-xl text-right">{busy ? "Working…" : message}</div>
           <button type="button" onClick={load} disabled={busy} className="px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50">
@@ -266,6 +328,7 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
             selected={selectedCandidate}
             evidence={selectedEvidence}
             handoff={handoff}
+            outreach={outreach}
             selectedId={selectedCandidateId}
             setSelectedId={setSelectedCandidateId}
             query={query}
@@ -314,8 +377,8 @@ function OverviewView({ overview, profiles, candidates, runs, capabilities, onDi
       <section className="border border-border rounded-lg p-5 flex items-center gap-5">
         <div>
           <h2 className="font-medium">Your standalone lead workspace</h2>
-          <p className="mt-1 text-sm text-text-muted">Add or import leads, review them here, and export a portable list. Optional integrations add discovery and CRM handoff.</p>
-          <div className="mt-2 flex gap-2 text-[11px]"><CapabilityBadge label="Web discovery" available={capabilities.web} /><CapabilityBadge label="CRM handoff" available={capabilities.crm} /></div>
+          <p className="mt-1 text-sm text-text-muted">Add or discover leads, qualify them, and start one-to-one outreach without leaving the workspace.</p>
+          <div className="mt-2 flex gap-2 text-[11px]"><CapabilityBadge label="Web discovery" available={capabilities.web} /><CapabilityBadge label="CRM outreach" available={capabilities.crm} /></div>
         </div>
         <button type="button" onClick={capabilities.web ? onDiscover : onCandidates} className="ml-auto px-4 py-2 text-sm bg-accent text-bg rounded font-medium">{capabilities.web ? "Discover companies" : "Seed leads"}</button>
       </section>
@@ -453,12 +516,13 @@ function DiscoverView({ profiles, runs, webAvailable, busy, api, onDone, onError
   );
 }
 
-function CandidatesView({ profiles, candidates, selected, evidence, handoff, selectedId, setSelectedId, query, setQuery, statusFilter, setStatusFilter, profileFilter, setProfileFilter, capabilities, projectId, busy, api, runAction }: {
+function CandidatesView({ profiles, candidates, selected, evidence, handoff, outreach, selectedId, setSelectedId, query, setQuery, statusFilter, setStatusFilter, profileFilter, setProfileFilter, capabilities, projectId, busy, api, runAction }: {
   profiles: Profile[];
   candidates: Candidate[];
   selected: Candidate | null;
   evidence: Evidence[];
   handoff: Record<string, unknown> | null;
+  outreach: OutreachData | null;
   selectedId: number;
   setSelectedId: (id: number) => void;
   query: string;
@@ -476,7 +540,7 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
   const [adding, setAdding] = useState(false);
   const qualifyReady = () => runAction(() => api("/qualify", {
     method: "POST",
-    body: JSON.stringify({ profile_id: profileFilter || undefined, status: statusFilter === "all" ? "ready" : statusFilter, limit: 10, max_pages: 5 }),
+    body: JSON.stringify({ profile_id: profileFilter || undefined, status: statusFilter === "all" || statusFilter === "active" ? "ready" : statusFilter, limit: 10, max_pages: 5 }),
   }), "Lead batch qualified from first-party websites without AI.");
   const exportLeads = (format: "csv" | "json") => {
     const params = new URLSearchParams({ project_id: projectId, format, status: statusFilter });
@@ -506,6 +570,7 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search leads" className={controlClass} />
           <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className={controlClass}>
+            <option value="active">Active leads</option>
             <option value="ready">Ready to review</option>
             <option value="researching">Researching</option>
             <option value="deferred">Deferred</option>
@@ -551,7 +616,7 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
           </aside>
           <section className="prospecting-workspace-detail min-h-0 overflow-auto">
             {selected ? (
-              <CandidateDetail candidate={selected} profile={profiles.find((profile) => profile.id === selected.profile_id)} evidence={evidence} handoff={handoff} capabilities={capabilities} busy={busy} api={api} runAction={runAction} />
+              <CandidateDetail candidate={selected} profile={profiles.find((profile) => profile.id === selected.profile_id)} evidence={evidence} handoff={handoff} outreach={outreach} capabilities={capabilities} busy={busy} api={api} runAction={runAction} />
             ) : <div className="h-full flex items-center justify-center"><Empty text="Select a lead from the working queue." /></div>}
           </section>
         </div>
@@ -572,11 +637,12 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
   );
 }
 
-function CandidateDetail({ candidate, profile, evidence, handoff, capabilities, busy, api, runAction }: {
+function CandidateDetail({ candidate, profile, evidence, handoff, outreach, capabilities, busy, api, runAction }: {
   candidate: Candidate;
   profile?: Profile;
   evidence: Evidence[];
   handoff: Record<string, unknown> | null;
+  outreach: OutreachData | null;
   capabilities: Capabilities;
   busy: boolean;
   api: (path: string, init?: RequestInit) => Promise<any>;
@@ -596,7 +662,6 @@ function CandidateDetail({ candidate, profile, evidence, handoff, capabilities, 
     const exclude = window.confirm("Also exclude this company from future discovery runs?");
     return runAction(() => api(`/candidates/${candidate.id}/reject`, { method: "POST", body: JSON.stringify({ reason, exclude_company: exclude }) }), "Candidate rejected.");
   };
-  const accept = () => runAction(() => api(`/candidates/${candidate.id}/accept`, { method: "POST", body: "{}" }), "Candidate accepted into CRM. No message was sent.");
   return (
     <div className="prospecting-full-width w-full p-5 space-y-5">
       <div className="flex flex-wrap items-start gap-3">
@@ -610,10 +675,9 @@ function CandidateDetail({ candidate, profile, evidence, handoff, capabilities, 
 		  <button type="button" onClick={research} disabled={busy || !capabilities.web || candidate.status === "accepted" || candidate.status === "rejected"} title={capabilities.web ? "Research with Web" : "Connect the optional Web app"} className={secondaryButton}>Research</button>
           <button type="button" onClick={defer} disabled={busy || candidate.status === "accepted"} className={secondaryButton}>Defer</button>
           <button type="button" onClick={reject} disabled={busy || candidate.status === "accepted"} className={secondaryButton}>Reject</button>
-          <button type="button" onClick={accept} disabled={busy || !capabilities.crm || candidate.status === "accepted" || (!candidate.email && !candidate.phone)} title={!capabilities.crm ? "Connect the optional CRM app to hand off this lead" : !candidate.email && !candidate.phone ? "Add an email or phone first" : "Writes to CRM; does not send a message"} className="px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium disabled:opacity-40">Send to CRM</button>
         </div>
       </div>
-      {handoff && <div className="rounded border border-green/40 bg-green/10 px-4 py-3 text-sm">Linked to CRM contact #{String(handoff.crm_contact_id)}. No message was sent.</div>}
+      <OutreachWorkspace candidate={candidate} handoff={handoff} outreach={outreach} capabilities={capabilities} busy={busy} api={api} runAction={runAction} />
       <section className="border border-border rounded-lg p-4 bg-bg-input/20">
         <div className="flex flex-wrap items-center gap-3"><h3 className="text-sm font-medium">Qualification</h3><Score value={candidate.fit_score} label="fit" /><Score value={candidate.confidence_score} label="confidence" />{candidate.eligibility && <Status value={candidate.eligibility} />}</div>
         {(candidate.location || candidate.employee_estimate || candidate.location_count > 0) && <div className="mt-3 text-xs text-text-muted">{candidate.location || "Location not found"}{candidate.employee_estimate ? ` · about ${candidate.employee_estimate} employees` : ""}{candidate.location_count > 0 ? ` · ${candidate.location_count} location${candidate.location_count === 1 ? "" : "s"}` : ""}</div>}
@@ -662,6 +726,128 @@ function CandidateDetail({ candidate, profile, evidence, handoff, capabilities, 
         )}
       </section>
     </div>
+  );
+}
+
+function OutreachWorkspace({ candidate, handoff, outreach, capabilities, busy, api, runAction }: {
+  candidate: Candidate;
+  handoff: Record<string, unknown> | null;
+  outreach: OutreachData | null;
+  capabilities: Capabilities;
+  busy: boolean;
+  api: (path: string, init?: RequestInit) => Promise<any>;
+  runAction: (action: () => Promise<unknown>, success: string) => Promise<void>;
+}) {
+  const senderRows = outreach?.messaging?.senders?.senders || [];
+  const senderChannels = new Set(senderRows.filter((sender) => sender.verified && sender.sending_enabled).map((sender) => sender.channel));
+  const availableChannels = [
+    candidate.email && senderChannels.has("email") ? "email" : "",
+    candidate.phone && senderChannels.has("sms") ? "sms" : "",
+    candidate.phone && senderChannels.has("whatsapp") ? "whatsapp" : "",
+  ].filter(Boolean);
+  const channelKey = availableChannels.join(",");
+  const [channel, setChannel] = useState("");
+  const [subject, setSubject] = useState("");
+  const [body, setBody] = useState("");
+  const [from, setFrom] = useState("");
+  const [conversationId, setConversationId] = useState(0);
+  const [templateId, setTemplateId] = useState(0);
+  const [templateVars, setTemplateVars] = useState("{}");
+  useEffect(() => {
+    setChannel((current) => availableChannels.includes(current) ? current : availableChannels[0] || "");
+  }, [candidate.id, channelKey]);
+  useEffect(() => {
+    setConversationId(0);
+    setFrom("");
+    setTemplateId(0);
+  }, [channel]);
+
+  if (!capabilities.crm) {
+    return <section className="border border-border rounded-lg p-4"><h3 className="text-sm font-medium">Outreach</h3><p className="mt-2 text-xs text-text-muted">Connect CRM to start email, SMS, or WhatsApp outreach. Prospecting never connects to Messaging directly.</p></section>;
+  }
+  if (!handoff) {
+    return (
+      <section className="border border-accent/40 rounded-lg p-4 flex flex-wrap items-center gap-4 bg-accent/5">
+        <div><h3 className="text-sm font-medium">Ready for outreach?</h3><p className="mt-1 text-xs text-text-muted">Create or link the CRM contact first. This step does not send a message.</p></div>
+        <button type="button" onClick={() => runAction(() => api(`/candidates/${candidate.id}/start-outreach`, { method: "POST", body: "{}" }), "Outreach started. The CRM contact is linked; no message was sent.")} disabled={busy || (!candidate.email && !candidate.phone)} className="ml-auto px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium disabled:opacity-40">Start outreach</button>
+      </section>
+    );
+  }
+  if (!outreach) {
+    return <section className="border border-border rounded-lg p-4 text-xs text-text-muted">Loading CRM outreach…</section>;
+  }
+
+  const messaging = outreach.messaging;
+  const conversations = outreach.context?.conversations || [];
+  const activities = outreach.context?.activities || [];
+  const channelConversations = conversations.filter((conversation) => conversation.channel === channel);
+  const channelSenders = senderRows.filter((sender) => sender.channel === channel && sender.verified && sender.sending_enabled);
+  const whatsappTemplates = outreach.messaging?.whatsapp_templates?.templates || [];
+  const whatsappSessionActive = outreach.messaging?.whatsapp_session?.active === true;
+  const whatsappNeedsTemplate = channel === "whatsapp" && !whatsappSessionActive;
+  const needsSubject = channel === "email" && conversationId === 0 && templateId === 0;
+  const canSend = !!channel && (!!body.trim() || templateId > 0) && (!needsSubject || !!subject.trim()) && (!whatsappNeedsTemplate || templateId > 0);
+  const send = () => {
+    let parsedVars: Record<string, unknown> | undefined;
+    if (templateId > 0 && templateVars.trim()) {
+      try {
+        parsedVars = JSON.parse(templateVars);
+      } catch {
+        window.alert("Template variables must be valid JSON.");
+        return;
+      }
+    }
+    const destination = channel === "email" ? candidate.email : candidate.phone;
+    if (!window.confirm(`Send this ${channel} message to ${destination} now? This is a real external send.`)) return;
+    const idempotencyKey = globalThis.crypto?.randomUUID?.() || `prospecting-${candidate.id}-${Date.now()}`;
+    return runAction(() => api(`/candidates/${candidate.id}/send`, {
+      method: "POST",
+      body: JSON.stringify({ channel, subject, body, from, conversation_id: conversationId || undefined, template_id: templateId || undefined, template_vars: parsedVars, idempotency_key: idempotencyKey, confirm: true }),
+    }), `${channel === "email" ? "Email" : channel === "sms" ? "SMS" : "WhatsApp"} sent through CRM.`).then(() => { setBody(""); setSubject(""); setTemplateId(0); });
+  };
+
+  return (
+    <section className="border border-border rounded-lg overflow-hidden">
+      <div className="px-4 py-3 border-b border-border flex flex-wrap items-center gap-2">
+        <div><h3 className="text-sm font-medium">Outreach</h3><p className="text-[11px] text-text-muted">CRM contact #{String(outreach.crm_contact_id || handoff.crm_contact_id)} · CRM records every message and reply</p></div>
+        <span className="ml-auto rounded bg-green/10 px-2 py-1 text-[10px] font-medium text-green">CRM linked</span>
+      </div>
+      {outreach.error ? <div className="p-4 text-xs text-red">{outreach.error}</div> : (
+        <div className="grid md:grid-cols-2">
+          <div className="p-4 space-y-3 border-b md:border-b-0 md:border-r border-border">
+            <h4 className="text-xs font-medium">Compose message</h4>
+            {!messaging?.available ? (
+              <div className="rounded border border-border bg-bg-input/40 p-3 text-xs"><div className="font-medium">CRM is connected, but Messaging is unavailable</div><p className="mt-1 text-text-muted">{messaging?.error || "Connect Messaging inside CRM to enable email, SMS, and WhatsApp."}</p></div>
+            ) : availableChannels.length === 0 ? (
+              <div className="rounded border border-border bg-bg-input/40 p-3 text-xs text-text-muted">No verified sender matches this lead’s email or phone channels. Configure senders in Messaging through CRM.</div>
+            ) : (
+              <>
+                <div className="grid sm:grid-cols-2 gap-2">
+                  <Field label="Channel"><select value={channel} onChange={(event) => setChannel(event.target.value)} className={controlClass}>{availableChannels.map((item) => <option key={item} value={item}>{item === "email" ? "Email" : item === "sms" ? "SMS" : "WhatsApp"}</option>)}</select></Field>
+                  <Field label="Sender"><select value={from} onChange={(event) => setFrom(event.target.value)} className={controlClass}><option value="">CRM default</option>{channelSenders.map((sender) => <option key={`${sender.channel}-${sender.address}`} value={sender.address}>{sender.address}</option>)}</select></Field>
+                </div>
+                {channelConversations.length > 0 && <Field label="Conversation"><select value={conversationId} onChange={(event) => setConversationId(Number(event.target.value))} className={controlClass}><option value={0}>Start a new conversation</option>{channelConversations.map((conversation) => <option key={conversation.id} value={conversation.id}>Reply to {conversation.subject || `${conversation.channel} conversation`} · {conversation.status}</option>)}</select></Field>}
+                {needsSubject && <Field label="Subject"><input value={subject} onChange={(event) => setSubject(event.target.value)} className={controlClass} /></Field>}
+                {channel === "whatsapp" && <div className="rounded border border-border bg-bg-input/40 p-3 text-xs">
+                  <div className="font-medium">{whatsappSessionActive ? "WhatsApp reply window is active" : "Approved template required"}</div>
+                  {!whatsappSessionActive && <p className="mt-1 text-text-muted">There is no active 24-hour reply session for this contact.</p>}
+                  {whatsappTemplates.length > 0 && <div className="mt-2"><select value={templateId} onChange={(event) => setTemplateId(Number(event.target.value))} className={controlClass}><option value={0}>{whatsappSessionActive ? "No template" : "Choose an approved template"}</option>{whatsappTemplates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></div>}
+                  {!whatsappSessionActive && whatsappTemplates.length === 0 && <p className="mt-2 text-red">No approved WhatsApp templates are available.</p>}
+                </div>}
+                {templateId > 0 && <Field label="Template variables" hint='JSON, for example {"name":"Alex"}'><textarea value={templateVars} onChange={(event) => setTemplateVars(event.target.value)} rows={3} className={`${controlClass} font-mono text-xs`} /></Field>}
+                <Field label={templateId > 0 ? "Additional message body" : "Message"} hint={templateId > 0 ? "Optional when using a template" : undefined}><textarea value={body} onChange={(event) => setBody(event.target.value)} rows={5} className={controlClass} /></Field>
+                <button type="button" onClick={send} disabled={busy || !canSend} className="px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium disabled:opacity-40">{conversationId ? "Send reply" : `Send ${channel}`}</button>
+                <p className="text-[10px] text-text-dim">A confirmation is always required. CRM applies suppression, threading, sender, and WhatsApp rules.</p>
+              </>
+            )}
+          </div>
+          <div className="min-h-48">
+            <div className="px-4 py-3 border-b border-border flex items-center"><h4 className="text-xs font-medium">CRM activity</h4><span className="ml-auto text-[10px] text-text-dim">{activities.length} recent</span></div>
+            {activities.length === 0 ? <Empty text="No outreach activity yet." /> : <ul className="divide-y divide-border max-h-96 overflow-auto">{activities.map((activity) => <li key={activity.id} className="px-4 py-3"><div className="flex items-center gap-2"><span className="text-[10px] uppercase tracking-wide text-text-dim">{activity.kind.replaceAll("_", " ")}</span>{activity.message_status?.status && <Status value={activity.message_status.status} />}</div><p className="mt-1 text-xs whitespace-pre-wrap">{activity.body}</p><div className="mt-1 text-[10px] text-text-dim">{dateLabel(activity.occurred_at)}</div></li>)}</ul>}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -735,8 +921,9 @@ function SettingsView({ profiles, exclusions, busy, api, runAction }: {
 			<li>Optional Web adds discovery and first-party page extraction; Google can fall back to DuckDuckGo when blocked.</li>
 			<li>Noise filtering, field extraction, workflow signals, eligibility, and scoring use fixed rules—not an AI model.</li>
 			<li>Prospecting owns candidates, evidence references, decisions, and scores.</li>
-            <li>Optional CRM receives only leads explicitly sent to it and provides duplicate-safe contact ownership.</li>
-            <li>Sending a lead to CRM never sends a message or creates an opportunity.</li>
+            <li>Optional CRM provides duplicate-safe contact ownership plus email, SMS, and WhatsApp through its Messaging binding.</li>
+            <li>Starting outreach only links the contact. Every real message requires a separate confirmation.</li>
+            <li>Prospecting does not call leads, run campaigns, or create opportunities.</li>
           </ul>
         </section>
         <section className="border border-border rounded-lg overflow-hidden">

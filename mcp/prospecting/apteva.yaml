@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: prospecting
 display_name: Prospecting
-version: 0.2.12
+version: 0.3.0
 description: |
   A standalone lead workspace for Apteva. Seed companies manually or in bulk,
   organize them with target profiles, explore and update the catalog, record
@@ -10,9 +10,10 @@ description: |
 
   Optional Web integration adds bounded company discovery, first-party page
   extraction, deterministic qualification, and cited research. Optional CRM
-  integration adds an explicit, duplicate-safe handoff for selected leads.
-  Prospecting never sends messages, runs campaigns, makes calls, creates
-  opportunities, or calls paid lead-data providers.
+  integration adds duplicate-safe contact linking plus explicitly confirmed
+  one-to-one email, SMS, and WhatsApp outreach through CRM's Messaging binding.
+  Prospecting never runs campaigns, makes calls, creates opportunities, or
+  calls paid lead-data providers.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/prospecting
@@ -34,14 +35,14 @@ requires:
       reason: Optional browser-backed company discovery and enrichment. Manual seed, import, exploration, and export work without it.
     - name: crm
       optional: true
-      reason: Optional duplicate-safe handoff for selected leads. Prospecting retains its own working catalog without CRM.
+      reason: Optional duplicate-safe contact linking and explicitly confirmed one-to-one outreach through CRM and its Messaging binding. Prospecting retains its own working catalog without CRM.
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - { name: prospecting_overview, description: "Summarize target profiles, runs, and candidate statuses for the current project." }
-    - { name: prospecting_capabilities, description: "Report whether optional Web discovery and CRM handoff are connected." }
+    - { name: prospecting_capabilities, description: "Report whether optional Web discovery and CRM-backed outreach are connected." }
     - { name: prospecting_profiles_create, description: "Create a target profile. Args: name, description?, industries?, locations?, employee_min?, employee_max?, target_titles?, keywords?." }
     - { name: prospecting_profiles_list, description: "List target profiles. Args: status? (active|archived|all)." }
     - { name: prospecting_profiles_get, description: "Get one target profile. Args: id." }
@@ -62,6 +63,9 @@ provides:
     - { name: prospecting_candidates_reject, description: "Reject a candidate. Args: id, reason?, exclude_company? (default false)." }
     - { name: prospecting_candidates_purge_rejected, description: "PERMANENT DELETE: remove every rejected candidate and its Prospecting evidence from the current project. Requires confirm=true." }
     - { name: prospecting_candidates_accept, description: "OPTIONAL REAL CRM WRITE: send a candidate to connected CRM and idempotently upsert it. Requires CRM plus email or phone. Args: id, list_ids?. Does not send a message or create an opportunity." }
+    - { name: prospecting_candidate_outreach_start, description: "OPTIONAL REAL CRM WRITE: create or link the CRM contact so one-to-one outreach can begin while the lead stays in Prospecting's active queue. Requires email or phone. Does not send a message. Args: id, list_ids?." }
+    - { name: prospecting_candidate_outreach_get, description: "Read the linked CRM contact's recent activities, conversations, opportunities, verified Messaging senders, and WhatsApp session/template state. Args: id. Read-only." }
+    - { name: prospecting_candidate_outreach_send, description: "REAL EXTERNAL SEND through CRM and its bound Messaging app. Sends email, SMS, or WhatsApp and records the CRM conversation. Requires confirm=true. Args: id, channel, body? or template_id, subject?, conversation_id?, from?, template_vars?, idempotency_key?, confirm." }
     - { name: prospecting_exclusions_list, description: "List excluded companies, domains, or people. Args: kind?, limit?." }
     - { name: prospecting_exclusions_remove, description: "Remove one exclusion. Args: id." }
   ui_panels:
@@ -75,7 +79,8 @@ provides:
       body_file: skills/how-to-use-prospecting.md
       description: |
         Teaches agents to seed, import, explore, update, and export a standalone
-        lead catalog, with optional Web discovery and optional CRM handoff.
+        lead catalog, with optional Web discovery and explicitly confirmed
+        one-to-one outreach through CRM.
       metadata:
         category: sales
   publishes:
@@ -85,13 +90,15 @@ provides:
     - { name: prospecting.candidate.researched, description: "A candidate received new Web research evidence." }
     - { name: prospecting.candidate.qualified, description: "A candidate was deterministically qualified from first-party Web evidence." }
     - { name: prospecting.candidate.accepted, description: "A candidate was handed to CRM." }
+    - { name: prospecting.candidate.outreach_started, description: "A candidate was linked to CRM for one-to-one outreach; no message was sent by this event." }
+    - { name: prospecting.candidate.contacted, description: "An explicitly confirmed email, SMS, or WhatsApp message was sent through CRM." }
     - { name: prospecting.candidate.rejected, description: "A candidate was rejected." }
 
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: prospecting/v0.2.12
+    ref: prospecting/v0.3.0
     entry: mcp/prospecting
   port: 8080
   health_check: /health

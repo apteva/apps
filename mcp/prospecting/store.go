@@ -377,7 +377,9 @@ func listCandidates(db *sql.DB, pid string, filter candidateFilter) ([]Candidate
 		where = append(where, "profile_id=?")
 		args = append(args, filter.ProfileID)
 	}
-	if filter.Status != "" && filter.Status != "all" {
+	if filter.Status == "active" {
+		where = append(where, "status!='rejected'")
+	} else if filter.Status != "" && filter.Status != "all" {
 		where = append(where, "status=?")
 		args = append(args, filter.Status)
 	}
@@ -702,6 +704,14 @@ func getHandoff(db *sql.DB, pid string, candidateID int64) (*Handoff, error) {
 }
 
 func saveHandoff(db *sql.DB, pid string, candidateID, crmContactID int64, kind, value string, wasCreated bool, warning string) (*Handoff, error) {
+	return saveHandoffMode(db, pid, candidateID, crmContactID, kind, value, wasCreated, warning, true)
+}
+
+func saveOutreachHandoff(db *sql.DB, pid string, candidateID, crmContactID int64, kind, value string, wasCreated bool, warning string) (*Handoff, error) {
+	return saveHandoffMode(db, pid, candidateID, crmContactID, kind, value, wasCreated, warning, false)
+}
+
+func saveHandoffMode(db *sql.DB, pid string, candidateID, crmContactID int64, kind, value string, wasCreated bool, warning string, markAccepted bool) (*Handoff, error) {
 	now := nowUTC()
 	created := 0
 	if wasCreated {
@@ -717,8 +727,12 @@ func saveHandoff(db *sql.DB, pid string, candidateID, crmContactID int64, kind, 
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec(`UPDATE candidates SET status='accepted',crm_contact_id=?,accepted_at=COALESCE(accepted_at,?),updated_at=? WHERE project_id=? AND id=?`,
-		crmContactID, now, now, pid, candidateID)
+	if markAccepted {
+		_, err = tx.Exec(`UPDATE candidates SET status='accepted',crm_contact_id=?,accepted_at=COALESCE(accepted_at,?),updated_at=? WHERE project_id=? AND id=?`,
+			crmContactID, now, now, pid, candidateID)
+	} else {
+		_, err = tx.Exec(`UPDATE candidates SET crm_contact_id=?,updated_at=? WHERE project_id=? AND id=?`, crmContactID, now, pid, candidateID)
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -1,8 +1,10 @@
 # Using Prospecting
 
 Prospecting is a standalone lead catalog. It can seed, organize, explore,
-update, decide, and export leads without Web or CRM. It does not send email,
-SMS, WhatsApp messages, or telephone calls.
+update, decide, and export leads without Web or CRM. When CRM is connected,
+it can also perform explicitly confirmed one-to-one email, SMS, and WhatsApp
+outreach through CRM's Messaging binding. It does not make telephone calls or
+run campaigns.
 
 ## Workflow
 
@@ -43,13 +45,29 @@ SMS, WhatsApp messages, or telephone calls.
    user explicitly wants the candidate retained there. Acceptance is a real
    CRM write, requires a valid email or phone, is idempotent, and never
    initiates outreach.
+13. When the user wants to contact a lead while keeping it in the active
+    Prospecting queue, call `prospecting_candidate_outreach_start`. This is a
+    real CRM write but does not send anything. Then use
+    `prospecting_candidate_outreach_get` to inspect recent CRM activity,
+    conversations, verified senders, and WhatsApp session/template state.
+14. Call `prospecting_candidate_outreach_send` only after the user explicitly
+    approves the exact external message, recipient, and channel. Pass
+    `confirm=true` plus a unique `idempotency_key`. New email conversations
+    require a subject. Replies should pass `conversation_id` so CRM preserves
+    threading. WhatsApp outside the 24-hour reply window requires an approved
+    template and any required `template_vars`.
+15. Never use a send to test configuration. Read sender state with
+    `prospecting_candidate_outreach_get`. Do not send bulk messages, create a
+    cadence, or contact a rejected lead.
 
 ## Ownership boundary
 
 - Prospecting owns target profiles, candidates, evidence references, scores,
   decisions, exclusions, and handoff references.
 - Optional Web owns raw browser research artifacts it creates.
-- Optional CRM owns contacts handed to it and their relationship history.
+- Optional CRM owns linked contacts, conversations, activities, suppression,
+  delivery rules, and relationship history. CRM delegates delivery to its
+  Messaging binding; Prospecting never connects to Messaging directly.
 
 Prospecting remains the working lead catalog. After a CRM handoff, use CRM tools
 for changes to the accepted contact record.

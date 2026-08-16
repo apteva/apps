@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.0
+
+- Add CRM-backed one-to-one email, SMS, and WhatsApp outreach without a direct Messaging dependency.
+- Keep leads in the active Prospecting queue when outreach starts while linking a duplicate-safe CRM contact.
+- Read verified sender availability, CRM conversations and activity, WhatsApp reply-window state, and approved templates through CRM.
+- Require an explicit confirmation for every real external send and use idempotency keys to prevent duplicate delivery.
+- Add an in-place composer and CRM activity timeline to the lead qualification workspace.
+- Continue to exclude Telephony, campaigns, and automatic outreach.
+
 ## v0.2.12
 
 - Make the queue/detail and Discover layouts independent of dashboard-generated Tailwind utilities.

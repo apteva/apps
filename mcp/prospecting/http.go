@@ -212,6 +212,27 @@ func (a *App) handleCandidateItem(w http.ResponseWriter, r *http.Request) {
 		body["id"] = id
 		out, err := a.toolCandidatesAccept(ctx, body)
 		respond(w, out, err)
+	case r.Method == http.MethodPost && action == "start-outreach":
+		body, err := decodeOptionalBody(r)
+		if err != nil {
+			writeError(w, err, http.StatusBadRequest)
+			return
+		}
+		body["id"] = id
+		out, err := a.toolCandidateOutreachStart(ctx, body)
+		respond(w, out, err)
+	case r.Method == http.MethodGet && action == "outreach":
+		out, err := a.toolCandidateOutreachGet(ctx, args)
+		respond(w, out, err)
+	case r.Method == http.MethodPost && action == "send":
+		body, err := decodeBody(r)
+		if err != nil {
+			writeError(w, err, http.StatusBadRequest)
+			return
+		}
+		body["id"] = id
+		out, err := a.toolCandidateOutreachSend(ctx, body)
+		respond(w, out, err)
 	default:
 		http.Error(w, "unsupported candidate operation", http.StatusMethodNotAllowed)
 	}
@@ -246,7 +267,7 @@ func respond(w http.ResponseWriter, out any, err error) {
 	if err != nil {
 		status := http.StatusBadRequest
 		message := strings.ToLower(err.Error())
-		if strings.Contains(message, "unavailable") || strings.Contains(message, "web search") || strings.Contains(message, "web research") || strings.Contains(message, "web qualification") || strings.Contains(message, "crm handoff") {
+		if strings.Contains(message, "unavailable") || strings.Contains(message, "web search") || strings.Contains(message, "web research") || strings.Contains(message, "web qualification") || strings.Contains(message, "crm handoff") || strings.Contains(message, "crm outreach") || strings.Contains(message, "crm message send") {
 			status = http.StatusServiceUnavailable
 		}
 		writeError(w, err, status)
