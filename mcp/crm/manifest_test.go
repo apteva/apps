@@ -128,4 +128,13 @@ func TestDiskManifestParsesAndMatchesEmbeddedSurface(t *testing.T) {
 	if len(disk.Provides.Publishes) != len(embedded.Provides.Publishes) {
 		t.Fatalf("event declaration drift: disk=%d embedded=%d", len(disk.Provides.Publishes), len(embedded.Provides.Publishes))
 	}
+	if len(disk.Provides.Skills) != len(embedded.Provides.Skills) {
+		t.Fatalf("skill declaration drift: disk=%d embedded=%d", len(disk.Provides.Skills), len(embedded.Provides.Skills))
+	}
+	for i := range disk.Provides.Skills {
+		if disk.Provides.Skills[i].Name != embedded.Provides.Skills[i].Name ||
+			disk.Provides.Skills[i].BodyFile != embedded.Provides.Skills[i].BodyFile {
+			t.Fatalf("skill declaration drift: disk=%+v embedded=%+v", disk.Provides.Skills[i], embedded.Provides.Skills[i])
+		}
+	}
 }

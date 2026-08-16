@@ -798,6 +798,23 @@ func callMessagingSend(ctx *sdk.AppCtx, args map[string]any) (map[string]any, er
 	return out, nil
 }
 
+func messagingSendResponseError(resp map[string]any) error {
+	status := strings.ToLower(strings.TrimSpace(anyString(resp["status"])))
+	switch status {
+	case "failed", "rejected", "bounced", "complained", "suppressed", "rendering_failed":
+		reason := strings.TrimSpace(anyString(resp["status_reason"]))
+		if reason == "" {
+			reason = "message was not accepted by the provider"
+		}
+		if id := int64FromAny(resp["id"]); id > 0 {
+			return fmt.Errorf("message %d status %s: %s", id, status, reason)
+		}
+		return fmt.Errorf("message status %s: %s", status, reason)
+	default:
+		return nil
+	}
+}
+
 func callMessagingTool(ctx *sdk.AppCtx, tool string, args map[string]any, out any) error {
 	if messagingBound(ctx) == nil {
 		return errors.New("messaging app not bound to CRM")
@@ -1506,9 +1523,20 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	}
 
 	resp, sendErr := callMessagingSend(ctx, sendArgs)
+	if sendErr == nil {
+		sendErr = messagingSendResponseError(resp)
+	}
 
 	if sendErr != nil {
 		if !isTest {
+			msgID := int64FromAny(resp["id"])
+			providerMsgID := strings.TrimSpace(anyString(resp["provider_message_id"]))
+			status := strings.TrimSpace(anyString(resp["status"]))
+			statusReason := strings.TrimSpace(anyString(resp["status_reason"]))
+			var convoID int64
+			if convo != nil {
+				convoID = convo.ID
+			}
 			_, _ = logMessageActivity(ctx.AppDB(), logMessageActivityInput{
 				ProjectID: pid,
 				ContactID: cid,
@@ -1516,9 +1544,16 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 				Body:      truncate(body, 4000),
 				Source:    "messaging",
 				SourceDetail: map[string]any{
-					"to":    addr.Address,
-					"error": sendErr.Error(),
+					"to":                  addr.Address,
+					"error":               sendErr.Error(),
+					"messaging_id":        msgID,
+					"provider_message_id": providerMsgID,
+					"status":              status,
+					"status_reason":       statusReason,
 				},
+				ConversationID:  convoID,
+				MessageIDHeader: providerMsgID,
+				MessagingID:     msgID,
 			})
 		}
 		return nil, fmt.Errorf("messaging.send_message: %w", sendErr)

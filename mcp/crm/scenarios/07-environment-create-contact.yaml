@@ -1,0 +1,36 @@
+name: environment-crm-create-contact
+description: |
+  Minimal Environment eval scenario for CRM.
+
+  An Environment is derived from an agent bound only to the CRM app. The eval spawns
+  the environment-agent, asks it to create one contact, and verifies from the
+  trajectory/goals that the agent used CRM to create and read the contact.
+
+provider: openai-codex
+
+agent:
+  name: crm-contact-agent
+  mode: autonomous
+  app_bindings:
+    - crm
+  directive: |
+    You manage customer contacts using the CRM app.
+
+    When asked to add a contact:
+      1. Create the contact with contacts_create.
+      2. Verify the contact exists using contacts_get or contacts_search.
+      3. Reply with the contact name and email.
+
+eval:
+  name: create and verify one CRM contact in an Environment
+  max_turns: 10
+  description: |
+    Create a CRM contact for Ada Lovelace at ada@example.com, then verify the
+    contact exists and tell me the result.
+  goals:
+    - The agent creates a contact in CRM for Ada Lovelace with email ada@example.com.
+    - The agent verifies the contact exists using CRM before replying.
+    - The agent confirms the created contact to the user.
+
+run_options:
+  use_environment: true

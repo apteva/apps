@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.24
+version: 0.8.25
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -55,15 +55,22 @@ requires:
       label: "Messaging (optional)"
       hint: "When bound, CRM gains Send/Reply tools and accepts inbound mail/SMS/WhatsApp at /inbound, auto-attaching to contact activity. Without it, CRM is a standalone contact store."
 provides:
+  skills:
+    - name: crm
+      description: Use CRM tools for contacts, customer conversations, lists, segments, leads, opportunities, pipelines, and messaging-related CRM work.
+      body_file: skills/crm/SKILL.md
+      metadata:
+        category: productivity
+        agent_plugins: "1.0.0"
   http_routes:
     - prefix: /
   mcp_tools:
     - name: contacts_search
       description: Filtered contact search.
     - name: contacts_get
-      description: Fetch one contact (snapshot only).
+      description: Authoritative current-state read with core fields, channels, tags, custom attributes, and active list memberships; excludes history and opportunities.
     - name: contacts_get_context
-      description: Snapshot + recent activities + tags + attributes.
+      description: Authoritative pre-flight read with complete current state plus bounded recent activities, conversations, and opportunities with truncation metadata.
     - name: contacts_create
       description: Create a contact with channels, tags, and attributes.
     - name: contacts_update
@@ -590,7 +597,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_get",
-			Description: "Fetch one contact (snapshot only). Args: id OR email OR phone.",
+			Description: "AUTHORITATIVE CURRENT-STATE READ. Returns core contact fields, all channels, tags, custom attributes, and active list memberships. It deliberately excludes historical activities/notes, conversations/messages, and opportunities; never interpret those as empty from this response. Use contacts_get_context when history or sales context matters. The response declares included and excluded resources. Args: id OR email OR phone.",
 			InputSchema: schemaObject(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"email": map[string]any{"type": "string"},
@@ -600,13 +607,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_get_context",
-			Description: "Snapshot + recent activities + tags + attributes + recent conversations — the agent's pre-flight read. Args: id OR email OR phone, activity_limit (default 10), conversation_limit (default 10).",
+			Description: "AUTHORITATIVE PRE-FLIGHT READ. Returns the complete current contact state from contacts_get plus bounded recent activities (including notes), conversations/messages, and opportunities. Inspect collection_info.<resource>.truncated before concluding that the returned history is complete. Args: id OR email OR phone, activity_limit (default 10, max 200), conversation_limit (default 10, max 200), opportunity_limit (default 20, max 200).",
 			InputSchema: schemaObject(map[string]any{
 				"id":                 map[string]any{"type": "integer"},
 				"email":              map[string]any{"type": "string"},
 				"phone":              map[string]any{"type": "string"},
-				"activity_limit":     map[string]any{"type": "integer"},
-				"conversation_limit": map[string]any{"type": "integer"},
+				"activity_limit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "default": 10},
+				"conversation_limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "default": 10},
+				"opportunity_limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
 			}, nil),
 			Handler: a.toolGetContext,
 		},
@@ -1370,12 +1378,13 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	if c == nil {
-		return map[string]any{"contact": nil, "found": false}, nil
+		return contactCurrentStateResponse(nil, nil, false), nil
 	}
-	if err := loadChannels(ctx.AppDB(), c); err != nil {
+	lists, err := loadContactCurrentState(ctx.AppDB(), pid, c)
+	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"contact": c, "found": true}, nil
+	return contactCurrentStateResponse(c, lists, true), nil
 }
 
 func (a *App) toolGetContext(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1383,52 +1392,157 @@ func (a *App) toolGetContext(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	activityLimit := boundedContactReadLimit(args, "activity_limit", 10)
+	conversationLimit := boundedContactReadLimit(args, "conversation_limit", 10)
+	opportunityLimit := boundedContactReadLimit(args, "opportunity_limit", 20)
 	c, err := lookupContact(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
 	if c == nil {
-		return map[string]any{"contact": nil, "found": false}, nil
+		return contactContextResponse(
+			nil, nil, nil, nil, nil, false,
+			activityLimit, 0, conversationLimit, 0, opportunityLimit, 0,
+		), nil
 	}
-	if err := loadChannels(ctx.AppDB(), c); err != nil {
-		return nil, err
-	}
-	if err := loadTags(ctx.AppDB(), c); err != nil {
-		return nil, err
-	}
-	if err := loadAttributes(ctx.AppDB(), c); err != nil {
-		return nil, err
-	}
-	limit := intArg(args, "activity_limit", 10)
-	activities, err := dbActivities(ctx.AppDB(), pid, c.ID, limit)
+	lists, err := loadContactCurrentState(ctx.AppDB(), pid, c)
 	if err != nil {
 		return nil, err
 	}
-	convoLimit := intArg(args, "conversation_limit", 10)
-	conversations, err := dbConversationsList(ctx.AppDB(), pid, c.ID, "", "", convoLimit)
+	activities, err := dbActivities(ctx.AppDB(), pid, c.ID, activityLimit)
 	if err != nil {
 		return nil, err
 	}
-	lists, err := dbListsForContact(ctx.AppDB(), pid, c.ID)
+	activityTotal, err := dbActivityCount(ctx.AppDB(), pid, c.ID)
 	if err != nil {
 		return nil, err
 	}
-	opportunities, _, err := dbOpportunitiesSearch(ctx.AppDB(), pid, map[string]any{
+	conversations, err := dbConversationsList(ctx.AppDB(), pid, c.ID, "", "", conversationLimit)
+	if err != nil {
+		return nil, err
+	}
+	conversationTotal, err := dbConversationCount(ctx.AppDB(), pid, c.ID)
+	if err != nil {
+		return nil, err
+	}
+	opportunities, opportunityTotal, err := dbOpportunitiesSearch(ctx.AppDB(), pid, map[string]any{
 		"contact_id": c.ID,
 		"status":     "all",
-		"limit":      20,
+		"limit":      opportunityLimit,
 	})
 	if err != nil {
 		return nil, err
 	}
+	return contactContextResponse(
+		c, lists, activities, conversations, opportunities, true,
+		activityLimit, activityTotal,
+		conversationLimit, conversationTotal,
+		opportunityLimit, opportunityTotal,
+	), nil
+}
+
+func loadContactCurrentState(db *sql.DB, pid string, c *Contact) ([]*List, error) {
+	if err := loadChannels(db, c); err != nil {
+		return nil, err
+	}
+	if err := loadTags(db, c); err != nil {
+		return nil, err
+	}
+	if err := loadAttributes(db, c); err != nil {
+		return nil, err
+	}
+	return dbListsForContact(db, pid, c.ID)
+}
+
+func contactCurrentStateResponse(c *Contact, lists []*List, found bool) map[string]any {
+	if lists == nil {
+		lists = []*List{}
+	}
+	return map[string]any{
+		"contact":  c,
+		"lists":    lists,
+		"found":    found,
+		"included": []string{"contact", "channels", "tags", "attributes", "lists"},
+		"excluded": []string{"activities", "conversations", "opportunities"},
+	}
+}
+
+func contactContextResponse(
+	c *Contact,
+	lists []*List,
+	activities []*Activity,
+	conversations []*Conversation,
+	opportunities []*Opportunity,
+	found bool,
+	activityLimit, activityTotal,
+	conversationLimit, conversationTotal,
+	opportunityLimit, opportunityTotal int,
+) map[string]any {
+	if lists == nil {
+		lists = []*List{}
+	}
+	if activities == nil {
+		activities = []*Activity{}
+	}
+	if conversations == nil {
+		conversations = []*Conversation{}
+	}
+	if opportunities == nil {
+		opportunities = []*Opportunity{}
+	}
 	return map[string]any{
 		"contact":       c,
+		"lists":         lists,
 		"activities":    activities,
 		"conversations": conversations,
-		"lists":         lists,
 		"opportunities": opportunities,
-		"found":         true,
-	}, nil
+		"found":         found,
+		"included":      []string{"contact", "channels", "tags", "attributes", "lists", "activities", "conversations", "opportunities"},
+		"excluded":      []string{},
+		"collection_info": map[string]any{
+			"activities":    collectionReadInfo(len(activities), activityTotal, activityLimit),
+			"conversations": collectionReadInfo(len(conversations), conversationTotal, conversationLimit),
+			"opportunities": collectionReadInfo(len(opportunities), opportunityTotal, opportunityLimit),
+		},
+	}
+}
+
+func collectionReadInfo(returned, total, limit int) map[string]any {
+	return map[string]any{
+		"returned":  returned,
+		"total":     total,
+		"limit":     limit,
+		"truncated": total > returned,
+	}
+}
+
+func boundedContactReadLimit(args map[string]any, key string, defaultValue int) int {
+	limit := intArg(args, key, defaultValue)
+	if limit <= 0 {
+		return defaultValue
+	}
+	if limit > 200 {
+		return 200
+	}
+	return limit
+}
+
+func dbActivityCount(db *sql.DB, pid string, contactID int64) (int, error) {
+	var total int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM contact_activities WHERE project_id = ? AND contact_id = ?`,
+		pid, contactID,
+	).Scan(&total)
+	return total, err
+}
+
+func dbConversationCount(db *sql.DB, pid string, contactID int64) (int, error) {
+	var total int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM contact_conversations WHERE project_id = ? AND contact_id = ?`,
+		pid, contactID,
+	).Scan(&total)
+	return total, err
 }
 
 func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {

@@ -19,6 +19,7 @@ type idempotentMessagingPlatform struct {
 	messagesByKey   map[string]map[string]any
 	createdMessages int
 	nextMessageID   int64
+	sendResponse    map[string]any
 }
 
 func newIdempotentMessagingPlatform() *idempotentMessagingPlatform {
@@ -56,6 +57,10 @@ func (p *idempotentMessagingPlatform) CallAppResult(appName, tool string, input 
 	case "suppression_check":
 		payload = map[string]any{"suppressed": false}
 	case "send_message":
+		if p.sendResponse != nil {
+			payload = p.sendResponse
+			break
+		}
 		key := strings.TrimSpace(strArg(input, "idempotency_key"))
 		if existing := p.messagesByKey[key]; existing != nil {
 			payload = existing
@@ -75,6 +80,66 @@ func (p *idempotentMessagingPlatform) CallAppResult(appName, tool string, input 
 		_ = json.Unmarshal(body, out)
 	}
 	return nil
+}
+
+func TestFailedMessagingResponseLogsSendFailure(t *testing.T) {
+	platform := newIdempotentMessagingPlatform()
+	platform.sendResponse = map[string]any{
+		"id":            int64(18506),
+		"status":        "failed",
+		"status_reason": "Twilio error 21408: SMS sending is not enabled for the Czech Republic (+420)",
+	}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	app := &App{}
+	contact := mustCreate(t, ctx, map[string]any{
+		"display_name": "Alice",
+		"channels": []any{
+			map[string]any{"kind": "phone", "value": "+420123456789", "is_primary": true},
+		},
+	})
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"id":      contact.ID,
+		"channel": channelSMS,
+		"body":    "Hello",
+		"from":    "+447380368854",
+	})
+	if err == nil || !strings.Contains(err.Error(), "message 18506 status failed") || !strings.Contains(err.Error(), "21408") {
+		t.Fatalf("error=%v, want failed Messaging status and provider reason", err)
+	}
+
+	var sentCount, failedCount int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM contact_activities
+		 WHERE project_id = 'test-proj' AND contact_id = ? AND kind = 'sms_sent'`,
+		contact.ID,
+	).Scan(&sentCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM contact_activities
+		 WHERE project_id = 'test-proj' AND contact_id = ? AND kind = 'sms_send_failed'`,
+		contact.ID,
+	).Scan(&failedCount); err != nil {
+		t.Fatal(err)
+	}
+	if sentCount != 0 || failedCount != 1 {
+		t.Fatalf("sms_sent=%d sms_send_failed=%d, want 0/1", sentCount, failedCount)
+	}
+
+	var sourceDetail string
+	var messagingID, conversationID int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COALESCE(source_detail, ''), COALESCE(messaging_id, 0), COALESCE(conversation_id, 0)
+		 FROM contact_activities
+		 WHERE project_id = 'test-proj' AND contact_id = ? AND kind = 'sms_send_failed'`,
+		contact.ID,
+	).Scan(&sourceDetail, &messagingID, &conversationID); err != nil {
+		t.Fatal(err)
+	}
+	if messagingID != 18506 || conversationID <= 0 || !strings.Contains(sourceDetail, `"status":"failed"`) || !strings.Contains(sourceDetail, "21408") {
+		t.Fatalf("source_detail=%s messaging_id=%d conversation_id=%d", sourceDetail, messagingID, conversationID)
+	}
 }
 
 func (p *idempotentMessagingPlatform) snapshot() (created int, calls []crmCallAppCall) {

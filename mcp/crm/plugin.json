@@ -1,0 +1,23 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "crm",
+  "version": "0.8.25",
+  "description": "CRM tools and operating guidance for contacts, customer conversations, lists, segments, leads, opportunities, pipelines, and messaging workflows.",
+  "author": {
+    "name": "Apteva",
+    "url": "https://apteva.com"
+  },
+  "homepage": "https://github.com/apteva/apps/tree/main/mcp/crm",
+  "repository": "https://github.com/apteva/apps",
+  "keywords": [
+    "crm",
+    "contacts",
+    "leads",
+    "pipeline"
+  ],
+  "extensions": {
+    "com.apteva": {
+      "manifest": "apteva.yaml"
+    }
+  }
+}

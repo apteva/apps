@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.8.24
+version: 0.8.25
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -34,15 +34,25 @@ requires:
       hint: "When bound, CRM gains Send/Reply tools and accepts inbound mail/SMS/WhatsApp at /inbound, auto-attaching to contact activity. Without it, CRM is a standalone contact store."
 
 provides:
+  # The same canonical Agent Skill is also discovered portably through
+  # plugin.json + skills/crm/SKILL.md. Declaring it here keeps every existing
+  # Apteva installation path compatible, including older servers.
+  skills:
+    - name: crm
+      description: Use CRM tools for contacts, customer conversations, lists, segments, leads, opportunities, pipelines, and messaging-related CRM work.
+      body_file: skills/crm/SKILL.md
+      metadata:
+        category: productivity
+        agent_plugins: "1.0.0"
   http_routes:
     - prefix: /
   mcp_tools:
     - name: contacts_search
       description: Filtered contact search over core fields including created_at/updated_at timestamps, attributes, and list predicates.
     - name: contacts_get
-      description: Fetch one contact (snapshot only).
+      description: Authoritative current-state read with core fields, channels, tags, custom attributes, and active list memberships; excludes history and opportunities.
     - name: contacts_get_context
-      description: Snapshot + recent activities + tags + attributes — the agent's pre-flight read.
+      description: Authoritative pre-flight read with complete current state plus bounded recent activities, conversations, and opportunities with truncation metadata.
     - name: contacts_create
       description: Create a contact with channels, tags, and attributes.
     - name: contacts_update
