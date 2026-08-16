@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.12
+
+- Make the queue/detail and Discover layouts independent of dashboard-generated Tailwind utilities.
+- Ensure the qualification workspace consumes every remaining desktop column instead of leaving a blank third column.
+- Cap the lead selector at a useful desktop width and give the remaining space to qualification.
+
 ## v0.2.11
 
 - Use the full desktop width across Overview, Discover, Leads, and Settings.

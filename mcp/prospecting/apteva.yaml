@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: prospecting
 display_name: Prospecting
-version: 0.2.11
+version: 0.2.12
 description: |
   A standalone lead workspace for Apteva. Seed companies manually or in bulk,
   organize them with target profiles, explore and update the catalog, record
@@ -91,7 +91,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: prospecting/v0.2.11
+    ref: prospecting/v0.2.12
     entry: mcp/prospecting
   port: 8080
   health_check: /health

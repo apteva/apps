@@ -226,6 +226,7 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
 
   return (
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
+      <style>{panelLayoutCSS}</style>
       <header className="shrink-0 border-b border-border">
         <div className="px-5 lg:px-6 pt-4 pb-3 flex items-start gap-4">
           <div>
@@ -302,7 +303,7 @@ function OverviewView({ overview, profiles, candidates, runs, capabilities, onDi
   const deferred = overview?.candidates?.deferred || 0;
   const recent = candidates.slice(0, 6);
   return (
-    <div className="w-full p-5 lg:p-6 space-y-5">
+    <div className="prospecting-full-width w-full p-5 lg:p-6 space-y-5">
       <section className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <Metric label="Active profiles" value={overview?.active_profiles || 0} />
         <Metric label="Ready to review" value={ready} accent />
@@ -393,8 +394,8 @@ function DiscoverView({ profiles, runs, webAvailable, busy, api, onDone, onError
     }
   };
   return (
-    <div className="w-full p-5 lg:p-6 grid grid-cols-1 lg:grid-cols-3 gap-5">
-      <section className="lg:col-span-2 border border-border rounded-lg p-5 space-y-5">
+    <div className="prospecting-full-width prospecting-discover-grid w-full p-5 lg:p-6 gap-5">
+      <section className="border border-border rounded-lg p-5 space-y-5">
         <div>
           <h2 className="font-medium">Discover companies</h2>
           <p className="mt-1 text-sm text-text-muted">Run a bounded browser-backed search with automatic provider fallback and deterministic noise filtering. No messages are sent.</p>
@@ -520,7 +521,7 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
         </div>
       </div>
       <div className="flex-1 min-h-0 p-4 lg:p-5 bg-bg-input/20">
-        <div className="h-full min-h-0 grid grid-cols-1 lg:grid-cols-3 border border-border rounded-lg overflow-hidden bg-bg">
+        <div className="prospecting-workspace-grid h-full min-h-0 border border-border rounded-lg overflow-hidden bg-bg">
           <aside className="min-h-0 flex flex-col border-b lg:border-b-0 lg:border-r border-border">
             <div className="shrink-0 px-4 py-3 border-b border-border flex items-center">
               <div>
@@ -548,7 +549,7 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
               )}
             </div>
           </aside>
-          <section className="lg:col-span-2 min-h-0 overflow-auto">
+          <section className="prospecting-workspace-detail min-h-0 overflow-auto">
             {selected ? (
               <CandidateDetail candidate={selected} profile={profiles.find((profile) => profile.id === selected.profile_id)} evidence={evidence} handoff={handoff} capabilities={capabilities} busy={busy} api={api} runAction={runAction} />
             ) : <div className="h-full flex items-center justify-center"><Empty text="Select a lead from the working queue." /></div>}
@@ -597,7 +598,7 @@ function CandidateDetail({ candidate, profile, evidence, handoff, capabilities, 
   };
   const accept = () => runAction(() => api(`/candidates/${candidate.id}/accept`, { method: "POST", body: "{}" }), "Candidate accepted into CRM. No message was sent.");
   return (
-    <div className="w-full p-5 space-y-5">
+    <div className="prospecting-full-width w-full p-5 space-y-5">
       <div className="flex flex-wrap items-start gap-3">
         <div>
           <div className="text-[10px] uppercase tracking-wide text-text-dim">Qualification workspace</div>
@@ -703,7 +704,7 @@ function SettingsView({ profiles, exclusions, busy, api, runAction }: {
     }, editingId ? "Target profile updated." : "Target profile created.");
   };
   return (
-    <div className="w-full p-5 lg:p-6 grid grid-cols-1 lg:grid-cols-2 gap-5">
+    <div className="prospecting-full-width w-full p-5 lg:p-6 grid grid-cols-1 lg:grid-cols-2 gap-5">
       <section className="border border-border rounded-lg overflow-hidden">
         <div className="px-4 py-3 border-b border-border flex items-center"><h2 className="text-sm font-medium">Target profiles</h2><button type="button" onClick={() => edit()} className="ml-auto text-xs text-accent">New profile</button></div>
         <div className="p-4 space-y-4">
@@ -867,3 +868,39 @@ function dateLabel(value?: string): string {
 
 const controlClass = "w-full bg-bg-input border border-border rounded px-2.5 py-1.5 text-sm outline-none focus:border-accent";
 const secondaryButton = "px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50";
+
+const panelLayoutCSS = `
+  .prospecting-full-width {
+    box-sizing: border-box;
+    width: 100% !important;
+    max-width: none !important;
+  }
+
+  .prospecting-discover-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  }
+
+  .prospecting-workspace-grid {
+    display: grid;
+    grid-template-columns: clamp(320px, 28vw, 520px) minmax(0, 1fr);
+  }
+
+  .prospecting-workspace-detail {
+    box-sizing: border-box;
+    min-width: 0;
+    width: 100%;
+    max-width: none;
+  }
+
+  @media (max-width: 1023px) {
+    .prospecting-discover-grid,
+    .prospecting-workspace-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .prospecting-workspace-grid {
+      grid-template-rows: minmax(260px, 42vh) minmax(0, 1fr);
+    }
+  }
+`;
