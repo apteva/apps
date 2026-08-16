@@ -801,13 +801,15 @@ type SearchFilters struct {
 	VideoCodec string
 	AudioCodec string
 	// Folder filters by storage folder. Empty = no filter.
-	// "/clips/" = exact-folder match. With Recursive=true, treated
-	// as a prefix so "/clips/" also matches "/clips/q3/", etc.
-	Folder    string
-	Recursive bool
-	Limit     int
-	Offset    int
-	OrderBy   string // duration_ms | created_at | updated_at
+	// "/clips/" is exact by default. FolderScope="subtree" treats it
+	// as a prefix so it also matches "/clips/q3/", etc. Recursive is
+	// retained for legacy callers and maps to the same subtree scope.
+	Folder      string
+	FolderScope string
+	Recursive   bool
+	Limit       int
+	Offset      int
+	OrderBy     string // duration_ms | created_at | updated_at
 	// AudienceRating filters by the column populated by the
 	// describer (v0.13.0+). Nil/empty = no filter (everything,
 	// including unrated). Multiple values OR'd: ["general","mature"]
@@ -815,6 +817,18 @@ type SearchFilters struct {
 	// status string when callers want "exclude adult" semantics.
 	AudienceRatingIn    []string
 	AudienceRatingNotIn []string
+}
+
+const (
+	folderScopeExact   = "exact"
+	folderScopeSubtree = "subtree"
+)
+
+func (f SearchFilters) effectiveFolderScope() string {
+	if f.FolderScope == folderScopeSubtree || f.Recursive {
+		return folderScopeSubtree
+	}
+	return folderScopeExact
 }
 
 type MediaFacetCounts struct {
@@ -837,10 +851,12 @@ type MediaFacetCounts struct {
 	} `json:"duration"`
 }
 
-// searchMedia returns rows matching f. Joins derivations once at the
-// end so each row has its thumbnail/waveform pointers.
-func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, error) {
-	clauses := []string{"project_id = ?", "probe_status = 'ok'"}
+// buildMediaSearchWhere is shared by the normal search and empty-result
+// diagnostics. Keeping one predicate builder guarantees that descendant
+// counts use precisely the same text, media, duration, aspect, rating,
+// dimension, and codec filters as the original request.
+func buildMediaSearchWhere(projectID string, f SearchFilters) ([]string, []any) {
+	clauses := []string{"m.project_id = ?", "m.probe_status = 'ok'"}
 	args := []any{projectID}
 	if q := mediaSearchContainsPattern(f.Q); q != "" {
 		clauses = append(clauses, `(LOWER(COALESCE(m.name, '')) LIKE ? ESCAPE '\'
@@ -916,12 +932,12 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		clauses = append(clauses, "m.audio_codec = ?")
 		args = append(args, f.AudioCodec)
 	}
-	// Folder filter — exact match by default, prefix LIKE when
-	// recursive=true. The trailing slash on storage's normalized
+	// Folder filter — exact match by default, prefix LIKE for subtree
+	// scope. The trailing slash on storage's normalized
 	// folders (e.g. "/clips/") makes the prefix match safe — it
 	// won't match "/clips-archive/".
 	if f.Folder != "" {
-		if f.Recursive {
+		if f.effectiveFolderScope() == folderScopeSubtree {
 			clauses = append(clauses, "m.folder LIKE ?")
 			args = append(args, f.Folder+"%")
 		} else {
@@ -947,6 +963,13 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 			args = append(args, r)
 		}
 	}
+	return clauses, args
+}
+
+// searchMedia returns rows matching f. Joins derivations once at the
+// end so each row has its thumbnail/waveform pointers.
+func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, error) {
+	clauses, args := buildMediaSearchWhere(projectID, f)
 
 	order := "created_at DESC"
 	switch f.OrderBy {
@@ -967,10 +990,6 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		offset = f.Offset
 	}
 
-	// Project-scope every clause to the m. alias since we now join.
-	for i, c := range clauses {
-		clauses[i] = strings.ReplaceAll(c, "project_id =", "m.project_id =")
-	}
 	query := `SELECT m.file_id, m.project_id, m.source_sha256, m.folder, m.name,
 		m.format_name, m.duration_ms, m.bitrate,
 		m.has_video, m.has_audio, m.is_image,
@@ -1016,11 +1035,120 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 	return out, nil
 }
 
+type MediaSearchEmptyDiagnostic struct {
+	EmptyReason            string
+	HasMatchingDescendants bool
+	DescendantMatchCount   int
+	SampleMatchingFolders  []string
+}
+
+func mediaSearchCount(db *sql.DB, projectID string, f SearchFilters, descendantsOnly bool) (int, error) {
+	clauses, args := buildMediaSearchWhere(projectID, f)
+	if descendantsOnly {
+		clauses = append(clauses, "m.folder <> ?")
+		args = append(args, f.Folder)
+	}
+	var count int
+	err := db.QueryRow(`SELECT COUNT(*) FROM media m WHERE `+strings.Join(clauses, " AND "), args...).Scan(&count)
+	return count, err
+}
+
+func mediaSearchSampleFolders(db *sql.DB, projectID string, f SearchFilters, limit int) ([]string, error) {
+	clauses, args := buildMediaSearchWhere(projectID, f)
+	clauses = append(clauses, "m.folder <> ?")
+	args = append(args, f.Folder, limit)
+	rows, err := db.Query(`SELECT DISTINCT m.folder FROM media m WHERE `+
+		strings.Join(clauses, " AND ")+` ORDER BY m.folder LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	folders := []string{}
+	for rows.Next() {
+		var folder string
+		if err := rows.Scan(&folder); err != nil {
+			return nil, err
+		}
+		folders = append(folders, folder)
+	}
+	return folders, rows.Err()
+}
+
+func mediaSearchFolderOnly(f SearchFilters, scope string) SearchFilters {
+	return SearchFilters{
+		Folder:      f.Folder,
+		FolderScope: scope,
+		Recursive:   scope == folderScopeSubtree,
+	}
+}
+
+// diagnoseEmptyExactMediaSearch is called only for the first empty page of
+// an exact-folder query. It never broadens the returned media rows; it only
+// explains whether the same filtered query would match descendants.
+func diagnoseEmptyExactMediaSearch(db *sql.DB, projectID string, f SearchFilters) (MediaSearchEmptyDiagnostic, error) {
+	diagnostic := MediaSearchEmptyDiagnostic{SampleMatchingFolders: []string{}}
+	descendantFilters := f
+	descendantFilters.FolderScope = folderScopeSubtree
+	descendantFilters.Recursive = true
+
+	descendantCount, err := mediaSearchCount(db, projectID, descendantFilters, true)
+	if err != nil {
+		return diagnostic, err
+	}
+	diagnostic.DescendantMatchCount = descendantCount
+	diagnostic.HasMatchingDescendants = descendantCount > 0
+	if descendantCount > 0 {
+		diagnostic.SampleMatchingFolders, err = mediaSearchSampleFolders(db, projectID, descendantFilters, 5)
+		if err != nil {
+			return diagnostic, err
+		}
+	}
+
+	exactAnyCount, err := mediaSearchCount(db, projectID, mediaSearchFolderOnly(f, folderScopeExact), false)
+	if err != nil {
+		return diagnostic, err
+	}
+	switch {
+	case exactAnyCount > 0:
+		diagnostic.EmptyReason = "filters_excluded_exact_folder_media"
+	case descendantCount > 0:
+		diagnostic.EmptyReason = "exact_folder_has_no_matching_media"
+	default:
+		subtreeAnyCount, countErr := mediaSearchCount(db, projectID, mediaSearchFolderOnly(f, folderScopeSubtree), false)
+		if countErr != nil {
+			return diagnostic, countErr
+		}
+		if subtreeAnyCount > 0 {
+			diagnostic.EmptyReason = "filters_excluded_subtree_media"
+		} else {
+			diagnostic.EmptyReason = "subtree_has_no_media"
+		}
+	}
+	return diagnostic, nil
+}
+
+func diagnoseEmptySubtreeMediaSearch(db *sql.DB, projectID string, f SearchFilters) (MediaSearchEmptyDiagnostic, error) {
+	diagnostic := MediaSearchEmptyDiagnostic{
+		HasMatchingDescendants: false,
+		SampleMatchingFolders:  []string{},
+	}
+	subtreeAnyCount, err := mediaSearchCount(db, projectID, mediaSearchFolderOnly(f, folderScopeSubtree), false)
+	if err != nil {
+		return diagnostic, err
+	}
+	if subtreeAnyCount > 0 {
+		diagnostic.EmptyReason = "filters_excluded_subtree_media"
+	} else {
+		diagnostic.EmptyReason = "subtree_has_no_media"
+	}
+	return diagnostic, nil
+}
+
 func mediaFacetCounts(db *sql.DB, projectID string, f SearchFilters) (MediaFacetCounts, error) {
 	clauses := []string{"project_id = ?", "probe_status = 'ok'"}
 	whereArgs := []any{projectID}
 	if f.Folder != "" {
-		if f.Recursive {
+		if f.effectiveFolderScope() == folderScopeSubtree {
 			clauses = append(clauses, "folder LIKE ?")
 			whereArgs = append(whereArgs, f.Folder+"%")
 		} else {

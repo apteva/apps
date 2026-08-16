@@ -107,7 +107,7 @@ provides:
     - name: media_get
       description: Fetch one media record by storage file_id (probe + derivation pointers). The returned url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads.
     - name: media_search
-      description: Search the catalog with q, filename, or title plus folder, media_type, aspect (portrait|landscape|square|reel|wide), duration, audience rating, dimensions, and codec filters. Returns compact discovery rows by default; call media_get for complete metadata and source URLs. Default limit 20, maximum 100; use next_cursor when has_more is true. detail and include_raw_probe are opt-in.
+      description: Search the catalog with q, filename, or title plus folder, folder_scope (exact|subtree), media_type, aspect (portrait|landscape|square|reel|wide), duration, audience rating, dimensions, and codec filters. exact is the default and searches only the supplied folder; subtree includes every descendant. Empty exact searches report matching descendants and an actionable retry rather than silently broadening. Returns compact discovery rows by default; call media_get for complete metadata and source URLs. Default limit 20, maximum 100; use next_cursor when has_more is true. detail and include_raw_probe are opt-in. recursive remains a compatibility alias for folder_scope.
     - name: media_list_folders
       description: List immediate child folders of `parent` that contain media. Args - parent (default "/"). Mirrors storage's files_list_folders semantics; only folders with at least one audio/video/image row appear.
     - name: media_create_folder

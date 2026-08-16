@@ -1,0 +1,52 @@
+name: folder-scope-retry
+description: |
+  Live-agent regression for namespace roots whose media lives only in
+  descendant session folders. The first exact search is intentionally
+  empty. The Media response must make the scope and matching descendants
+  clear enough that the agent retries the subtree instead of reporting a
+  false "no content available" result.
+
+timeout: 90s
+max_iterations: 6
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    config:
+      poll_interval_seconds: "1"
+  fixtures:
+    - app: storage
+      tool: files_upload
+      file: ./fixtures/sample-5s.mp4
+      args:
+        folder: "/ashley/november_2023/"
+        content_type: "video/mp4"
+
+directive: |
+  A manager asks whether the /ashley namespace contains any video that
+  could be considered for a social post. First call media_search with
+  folder="/ashley", folder_scope="exact", and media_type="video".
+  Interpret the complete tool response carefully and decide whether a
+  further search is needed. Report whether the namespace contains a video
+  and include the actual folder where you found evidence. Then stop.
+
+assert:
+  - tool_called: media_search
+  - http: GET /api/apps/media/media?folder=/ashley&folder_scope=exact&media_type=video
+    expect_status: 200
+    expect_count_at: media
+    expect_count: 0
+  - http: GET /api/apps/media/media?folder=/ashley&folder_scope=subtree&media_type=video
+    expect_status: 200
+    expect_count_at: media
+    expect_count: 1
+  - agent_response_contains: "november_2023"
+  - iterations_at_most: 6
+
+budget:
+  # The live runner includes Media's complete 29-tool schema in each model
+  # turn. Current observed use is ~36k tokens across the exact search, subtree
+  # retry, and final response; leave headroom for provider tokenization drift.
+  total_tokens: 50000
+  cost_usd: 0.20

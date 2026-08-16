@@ -217,13 +217,13 @@ func TestMediaSearchToolDescriptionGuidesTwoStepFlow(t *testing.T) {
 		}
 		found = true
 		description := strings.ToLower(tool.Description)
-		for _, term := range []string{"q", "compact", "media_get", "next_cursor", "default limit is 20"} {
+		for _, term := range []string{"q", "compact", "media_get", "next_cursor", "default limit is 20", "folder_scope", "exact", "subtree", "has_matching_descendants"} {
 			if !strings.Contains(description, term) {
 				t.Errorf("media_search description missing %q: %s", term, tool.Description)
 			}
 		}
 		properties := tool.InputSchema["properties"].(map[string]any)
-		for _, name := range []string{"q", "filename", "title", "cursor", "detail", "include_raw_probe"} {
+		for _, name := range []string{"q", "filename", "title", "folder_scope", "recursive", "cursor", "detail", "include_raw_probe"} {
 			if _, ok := properties[name]; !ok {
 				t.Errorf("media_search schema missing %q", name)
 			}

@@ -40,6 +40,118 @@ type MediaSearchThumbnail struct {
 	Height        int    `json:"height,omitempty"`
 }
 
+func resolveMediaSearchFolderScope(args map[string]any, folder string) (string, error) {
+	var scope string
+	scopeProvided := false
+	if raw, exists := args["folder_scope"]; exists {
+		var ok bool
+		scope, ok = raw.(string)
+		if !ok {
+			return "", errors.New("folder_scope must be a string")
+		}
+		scopeProvided = true
+	}
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scopeProvided && scope != folderScopeExact && scope != folderScopeSubtree {
+		return "", errors.New("folder_scope must be exact or subtree")
+	}
+
+	var recursive bool
+	recursiveProvided := false
+	if raw, exists := args["recursive"]; exists {
+		var ok bool
+		recursive, ok = boolArg(raw)
+		if !ok {
+			return "", errors.New("recursive must be a boolean")
+		}
+		recursiveProvided = true
+	}
+
+	if scopeProvided && recursiveProvided && (scope == folderScopeSubtree) != recursive {
+		return "", errors.New("folder_scope conflicts with recursive")
+	}
+	if scopeProvided {
+		if folder == "" {
+			return "", errors.New("folder_scope requires folder")
+		}
+		return scope, nil
+	}
+	if recursiveProvided && recursive {
+		return folderScopeSubtree, nil
+	}
+	return folderScopeExact, nil
+}
+
+func mediaSearchQueryEcho(f SearchFilters) map[string]any {
+	query := map[string]any{}
+	putString := func(name, value string) {
+		if value = strings.TrimSpace(value); value != "" {
+			query[name] = value
+		}
+	}
+	putString("q", f.Q)
+	putString("filename", f.Filename)
+	putString("title", f.Title)
+	if f.Folder != "" {
+		query["folder"] = f.Folder
+		query["folder_scope"] = f.effectiveFolderScope()
+	}
+	putString("media_type", f.MediaType)
+	putString("aspect", f.Aspect)
+	if f.DurationMinMs > 0 {
+		query["duration_min_ms"] = f.DurationMinMs
+	}
+	if f.DurationMaxMs > 0 {
+		query["duration_max_ms"] = f.DurationMaxMs
+	}
+	if f.HasVideo != nil {
+		query["has_video"] = *f.HasVideo
+	}
+	if f.HasAudio != nil {
+		query["has_audio"] = *f.HasAudio
+	}
+	if f.IsImage != nil {
+		query["is_image"] = *f.IsImage
+	}
+	if f.WidthMin > 0 {
+		query["width_min"] = f.WidthMin
+	}
+	if f.WidthMax > 0 {
+		query["width_max"] = f.WidthMax
+	}
+	putString("video_codec", f.VideoCodec)
+	putString("audio_codec", f.AudioCodec)
+	if len(f.AudienceRatingIn) > 0 {
+		query["audience_rating"] = append([]string(nil), f.AudienceRatingIn...)
+	}
+	if len(f.AudienceRatingNotIn) > 0 {
+		query["exclude_audience_rating"] = append([]string(nil), f.AudienceRatingNotIn...)
+	}
+	putString("order_by", f.OrderBy)
+	return query
+}
+
+func mediaSearchResponseMetadata(f SearchFilters, diagnostic *MediaSearchEmptyDiagnostic) map[string]any {
+	metadata := map[string]any{"query": mediaSearchQueryEcho(f)}
+	if f.Folder != "" {
+		metadata["folder_scope"] = f.effectiveFolderScope()
+	}
+	if diagnostic == nil {
+		return metadata
+	}
+	metadata["empty_reason"] = diagnostic.EmptyReason
+	metadata["has_matching_descendants"] = diagnostic.HasMatchingDescendants
+	metadata["descendant_match_count"] = diagnostic.DescendantMatchCount
+	metadata["sample_matching_folders"] = diagnostic.SampleMatchingFolders
+	if diagnostic.HasMatchingDescendants {
+		metadata["retry_recommended"] = map[string]any{
+			"folder":       f.Folder,
+			"folder_scope": folderScopeSubtree,
+		}
+	}
+	return metadata
+}
+
 func mediaSearchLimit(v any) int {
 	limit := int(int64Arg(v))
 	if limit <= 0 {
@@ -181,7 +293,7 @@ func projectMediaSearchRows(rows []MediaRow, files map[string]*StorageFile) []Me
 // page limit bounds row count; this second guard bounds unusually large titles,
 // filenames, URLs, or detail rows. The cursor advances only by rows actually
 // returned, so size truncation cannot silently skip candidates.
-func fitMediaSearchPage[T any](items []T, offset int, moreFromDB, storageUnavailable bool) (map[string]any, error) {
+func fitMediaSearchPage[T any](items []T, offset int, moreFromDB, storageUnavailable bool, metadata ...map[string]any) (map[string]any, error) {
 	if items == nil {
 		items = []T{}
 	}
@@ -194,6 +306,11 @@ func fitMediaSearchPage[T any](items []T, offset int, moreFromDB, storageUnavail
 			"media":    items[:n],
 			"returned": n,
 			"has_more": hasMore,
+		}
+		if len(metadata) > 0 {
+			for key, value := range metadata[0] {
+				response[key] = value
+			}
 		}
 		if hasMore {
 			response["next_cursor"] = encodeMediaSearchCursor(offset + n)

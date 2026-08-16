@@ -106,7 +106,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_get,             description: "Fetch one media record by storage file_id. The returned url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads." }
-    - { name: media_search,          description: "Compact catalog discovery with q/filename/title, folder, type, aspect, duration, rating, dimensions, and codec filters; call media_get for full details." }
+    - { name: media_search,          description: "Compact catalog discovery with q/filename/title, folder_scope exact|subtree, type, aspect, duration, rating, dimensions, and codec filters. Empty exact searches diagnose matching descendants; call media_get for full details." }
     - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
     - { name: media_create_folder,   description: "Create an empty folder in storage that media files can later land in. Idempotent. Args - path." }
     - { name: media_move,            description: "Move and/or rename a media file in storage. Media's row auto-updates via the file.updated event handler. Args - file_id, folder?, name?." }
@@ -458,13 +458,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_search",
-			Description: "Search the media catalog before calling media_get. Use q for a case-insensitive match across filename, title, description, and alt text; use filename or title for narrower matching. Results are compact discovery rows (file_id, filename/title, type, duration, dimensions, folder, thumbnail) by default. Filters include folder, media_type, aspect (portrait|landscape|square|reel|wide), duration, rating, dimensions, and codec. Call media_get with the chosen file_id for complete metadata and source URLs. Default limit is 20, maximum 100. If has_more is true, repeat the same filters with next_cursor. detail and include_raw_probe are exceptional opt-ins.",
+			Description: "Search the media catalog before calling media_get. Use q for a case-insensitive match across filename, title, description, and alt text; use filename or title for narrower matching. With folder, folder_scope='exact' (the default) searches only that folder; folder_scope='subtree' searches it and every descendant. Namespace roots such as /hgv, /ashley, /monika, /alexa, and /lily normally require subtree. An empty exact result does not prove its subtree is empty: inspect has_matching_descendants and retry_recommended. Results are compact discovery rows (file_id, filename/title, type, duration, dimensions, folder, thumbnail) by default. Filters include folder, media_type, aspect (portrait|landscape|square|reel|wide), duration, rating, dimensions, and codec. Call media_get with the chosen file_id for complete metadata and source URLs. Default limit is 20, maximum 100. If has_more is true, repeat the same filters with next_cursor. detail and include_raw_probe are exceptional opt-ins.",
 			InputSchema: schemaObject(map[string]any{
 				"q":               map[string]any{"type": "string", "description": "Case-insensitive contains match across filename, title, description, and alt text."},
 				"filename":        map[string]any{"type": "string", "description": "Case-insensitive contains match on the storage filename only."},
 				"title":           map[string]any{"type": "string", "description": "Case-insensitive contains match on the media title only."},
-				"folder":          map[string]any{"type": "string"},
-				"recursive":       map[string]any{"type": "boolean"},
+				"folder":          map[string]any{"type": "string", "description": "Storage folder to search. Normalized to leading and trailing slashes."},
+				"folder_scope":    map[string]any{"type": "string", "enum": []string{"exact", "subtree"}, "default": "exact", "description": "exact searches only files directly in folder; subtree searches folder and every descendant. Root namespaces with session subfolders normally need subtree."},
+				"recursive":       map[string]any{"type": "boolean", "description": "Deprecated compatibility alias: false maps to folder_scope=exact; true maps to folder_scope=subtree. Do not pass conflicting values."},
 				"media_type":      map[string]any{"type": "string", "enum": []string{"image", "video", "audio"}},
 				"aspect":          map[string]any{"type": "string", "enum": []string{"portrait", "landscape", "square", "reel", "wide"}},
 				"duration":        map[string]any{"type": "string", "enum": []string{"short", "medium", "long", "extended"}},
@@ -1285,9 +1286,11 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	f.AudioCodec, _ = args["audio_codec"].(string)
 	f.Folder, _ = args["folder"].(string)
 	f.Folder = normalizeFolderFilter(f.Folder)
-	if v, ok := boolArg(args["recursive"]); ok {
-		f.Recursive = v
+	f.FolderScope, err = resolveMediaSearchFolderScope(args, f.Folder)
+	if err != nil {
+		return nil, err
 	}
+	f.Recursive = f.FolderScope == folderScopeSubtree
 	pageLimit := mediaSearchLimit(args["limit"])
 	pageOffset, err := mediaSearchOffset(args)
 	if err != nil {
@@ -1303,6 +1306,20 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	var diagnostic *MediaSearchEmptyDiagnostic
+	if len(rows) == 0 && pageOffset == 0 && f.Folder != "" {
+		var d MediaSearchEmptyDiagnostic
+		if f.effectiveFolderScope() == folderScopeSubtree {
+			d, err = diagnoseEmptySubtreeMediaSearch(ctx.AppDB(), pid, f)
+		} else {
+			d, err = diagnoseEmptyExactMediaSearch(ctx.AppDB(), pid, f)
+		}
+		if err != nil {
+			return nil, err
+		}
+		diagnostic = &d
+	}
+	responseMetadata := mediaSearchResponseMetadata(f, diagnostic)
 	moreFromDB := len(rows) > pageLimit
 	if moreFromDB {
 		rows = rows[:pageLimit]
@@ -1319,9 +1336,9 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			// Compact discovery still works without Storage; only resolved
 			// thumbnail URLs may be absent.
 			compact = projectMediaSearchRows(rows, nil)
-			return fitMediaSearchPage(compact, pageOffset, moreFromDB, true)
+			return fitMediaSearchPage(compact, pageOffset, moreFromDB, true, responseMetadata)
 		}
-		return fitMediaSearchPage(compact, pageOffset, moreFromDB, false)
+		return fitMediaSearchPage(compact, pageOffset, moreFromDB, false, responseMetadata)
 	}
 
 	rows = sanitizeMediaToolRows(rows, includeRawProbe)
@@ -1334,9 +1351,9 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		for i := range rows {
 			rows[i].Derivations = nil
 		}
-		return fitMediaSearchPage(rows, pageOffset, moreFromDB, true)
+		return fitMediaSearchPage(rows, pageOffset, moreFromDB, true, responseMetadata)
 	}
-	return fitMediaSearchPage(enriched, pageOffset, moreFromDB, false)
+	return fitMediaSearchPage(enriched, pageOffset, moreFromDB, false, responseMetadata)
 }
 
 // toolListFolders mirrors storage's files_list_folders semantics —
@@ -1578,9 +1595,19 @@ func (a *App) handleMediaCollection(w http.ResponseWriter, r *http.Request) {
 	f.AudienceRatingNotIn = ratingFilterQuery(q["exclude_audience_rating"])
 	f.OrderBy = q.Get("order_by")
 	f.Folder = normalizeFolderFilter(q.Get("folder"))
-	if v := q.Get("recursive"); v != "" {
-		f.Recursive = v == "true" || v == "1"
+	scopeArgs := map[string]any{}
+	if v := q.Get("folder_scope"); v != "" {
+		scopeArgs["folder_scope"] = v
 	}
+	if _, exists := q["recursive"]; exists {
+		scopeArgs["recursive"] = q.Get("recursive")
+	}
+	f.FolderScope, err = resolveMediaSearchFolderScope(scopeArgs, f.Folder)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f.Recursive = f.FolderScope == folderScopeSubtree
 	rows, err := searchMedia(globalCtx.AppDB(), pid, f)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1601,9 +1628,19 @@ func (a *App) handleMediaFacets(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	f := SearchFilters{Folder: normalizeFolderFilter(q.Get("folder"))}
-	if v := q.Get("recursive"); v != "" {
-		f.Recursive = v == "true" || v == "1"
+	scopeArgs := map[string]any{}
+	if v := q.Get("folder_scope"); v != "" {
+		scopeArgs["folder_scope"] = v
 	}
+	if _, exists := q["recursive"]; exists {
+		scopeArgs["recursive"] = q.Get("recursive")
+	}
+	f.FolderScope, err = resolveMediaSearchFolderScope(scopeArgs, f.Folder)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f.Recursive = f.FolderScope == folderScopeSubtree
 	counts, err := mediaFacetCounts(globalCtx.AppDB(), pid, f)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
