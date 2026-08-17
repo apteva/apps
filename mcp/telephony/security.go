@@ -112,7 +112,7 @@ func (a *App) authorizeCallRequest(r *http.Request, row *callRow) error {
 		}
 		publicKey := strings.TrimSpace(creds.Fields["public_key"])
 		if publicKey == "" {
-			return nil
+			return errors.New("Telnyx connection has no public key for webhook verification")
 		}
 		return verifyTelnyxSignature(publicKey, r.Header.Get("Telnyx-Timestamp"), r.Header.Get("Telnyx-Signature-Ed25519"), body, time.Now())
 	}

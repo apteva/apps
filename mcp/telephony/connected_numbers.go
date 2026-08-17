@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,8 @@ const (
 	webhookDisabled      = "disabled"
 	webhookUnsupported   = "unsupported"
 	webhookUnknown       = "unknown"
+	webhookNotApplicable = "not_applicable"
+	routingDirectSIP     = "sip_direct"
 )
 
 type ownedNumber struct {
@@ -36,13 +39,15 @@ type ownedNumber struct {
 }
 
 type connectedRouteView struct {
-	ID            string `json:"id"`
-	AgentID       int64  `json:"agent_id"`
-	AgentName     string `json:"agent_name,omitempty"`
-	Enabled       bool   `json:"enabled"`
-	AnswerMode    string `json:"answer_mode"`
-	Voice         string `json:"voice,omitempty"`
-	RecordingMode string `json:"recording_mode"`
+	ID                  string `json:"id"`
+	AgentID             int64  `json:"agent_id"`
+	AgentName           string `json:"agent_name,omitempty"`
+	Enabled             bool   `json:"enabled"`
+	AnswerMode          string `json:"answer_mode"`
+	Voice               string `json:"voice,omitempty"`
+	RecordingMode       string `json:"recording_mode"`
+	Transport           string `json:"inbound_transport"`
+	TransportConfigured bool   `json:"transport_configured"`
 }
 
 type connectedNumberView struct {
@@ -69,13 +74,9 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	raw, err := listOwnedCarrierNumbers(ctx, provider)
+	owned, err := listOwnedCarrierNumbers(ctx, provider)
 	if err != nil {
 		return nil, err
-	}
-	owned, err := parseOwnedCarrierNumbers(provider.Slug, raw)
-	if err != nil {
-		return nil, fmt.Errorf("decode %s owned phone numbers: %w", provider.Slug, err)
 	}
 	routes, err := a.db().listRoutesForProjectConnection(projectID, provider.ConnID)
 	if err != nil {
@@ -149,14 +150,40 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
 		}
 		return numbers[i].PhoneNumber < numbers[j].PhoneNumber
 	})
+	directSIP := map[string]any{
+		"supported": provider.Slug == "twilio" || provider.Slug == "telnyx",
+		"enabled":   false,
+		"ready":     false,
+		"managed":   true,
+	}
+	if gateway := a.directSIPGateway(); gateway != nil {
+		directSIP = map[string]any{
+			"supported": true, "enabled": true, "ready": true, "available": true, "managed": true,
+			"endpoint": gateway.cfg.endpointURI(), "transport": gateway.cfg.Transport, "srtp": gateway.cfg.SRTPMode,
+		}
+	} else if provider.Slug == "twilio" || provider.Slug == "telnyx" {
+		cfg, configErr := a.resolveSIPGatewayConfig(ctx, true)
+		if configErr != nil {
+			directSIP["available"] = false
+			directSIP["reason"] = configErr.Error()
+		} else {
+			directSIP["available"] = true
+			directSIP["endpoint"] = cfg.endpointURI()
+			directSIP["transport"] = cfg.Transport
+			directSIP["srtp"] = cfg.SRTPMode
+		}
+	}
 	return map[string]any{
-		"provider": provider.Slug,
-		"count":    len(numbers),
-		"numbers":  numbers,
+		"provider":   provider.Slug,
+		"count":      len(numbers),
+		"numbers":    numbers,
+		"direct_sip": directSIP,
 	}, nil
 }
 
-func listOwnedCarrierNumbers(ctx *sdk.AppCtx, provider *numberProvider) (json.RawMessage, error) {
+const maxOwnedNumberPages = 100
+
+func listOwnedCarrierNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]ownedNumber, error) {
 	var tool string
 	var input map[string]any
 	switch provider.Slug {
@@ -164,18 +191,101 @@ func listOwnedCarrierNumbers(ctx *sdk.AppCtx, provider *numberProvider) (json.Ra
 		tool = "list_phone_numbers"
 		input = map[string]any{"PageSize": 1000}
 	case "telnyx":
-		tool = "list_phone_numbers"
-		input = map[string]any{"page[size]": 250}
+		return listPaginatedTelnyxNumbers(ctx, provider)
 	case "plivo":
-		tool = "list_owned_phone_numbers"
-		input = map[string]any{"limit": 20, "offset": 0}
+		return listPaginatedPlivoNumbers(ctx, provider)
 	case "vonage":
 		tool = "numbers_list"
 		input = map[string]any{"size": 100}
 	default:
 		return nil, fmt.Errorf("owned phone-number listing is unsupported for provider %s", provider.Slug)
 	}
-	return executeCarrierTool(ctx, provider.ConnID, tool, input)
+	raw, err := executeCarrierTool(ctx, provider.ConnID, tool, input)
+	if err != nil {
+		return nil, err
+	}
+	owned, err := parseOwnedCarrierNumbers(provider.Slug, raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s owned phone numbers: %w", provider.Slug, err)
+	}
+	return owned, nil
+}
+
+func listPaginatedTelnyxNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]ownedNumber, error) {
+	const pageSize = 250
+	var owned []ownedNumber
+	for page := 1; page <= maxOwnedNumberPages; page++ {
+		raw, err := executeCarrierTool(ctx, provider.ConnID, "list_phone_numbers", map[string]any{
+			"page[number]": page,
+			"page[size]":   pageSize,
+		})
+		if err != nil {
+			return nil, err
+		}
+		pageNumbers, err := parseOwnedCarrierNumbers("telnyx", raw)
+		if err != nil {
+			return nil, fmt.Errorf("decode Telnyx owned phone numbers page %d: %w", page, err)
+		}
+		owned = append(owned, pageNumbers...)
+
+		response, err := telnyxResponse(raw)
+		if err != nil {
+			return nil, err
+		}
+		itemCount := len(telnyxDataList(response))
+		meta, _ := response["meta"].(map[string]any)
+		totalPages := intValue(meta["total_pages"])
+		hasMore := itemCount == pageSize
+		if totalPages > 0 {
+			hasMore = page < totalPages
+		}
+		if hasMore && itemCount == 0 {
+			return nil, fmt.Errorf("Telnyx owned phone-number listing made no progress on page %d", page)
+		}
+		if !hasMore {
+			return owned, nil
+		}
+	}
+	return nil, fmt.Errorf("Telnyx owned phone-number listing exceeded %d pages", maxOwnedNumberPages)
+}
+
+func listPaginatedPlivoNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]ownedNumber, error) {
+	const pageSize = 20
+	var owned []ownedNumber
+	offset := 0
+	for page := 0; page < maxOwnedNumberPages; page++ {
+		raw, err := executeCarrierTool(ctx, provider.ConnID, "list_owned_phone_numbers", map[string]any{
+			"limit": pageSize, "offset": offset,
+		})
+		if err != nil {
+			return nil, err
+		}
+		pageNumbers, err := parseOwnedCarrierNumbers("plivo", raw)
+		if err != nil {
+			return nil, fmt.Errorf("decode Plivo owned phone numbers page %d: %w", page+1, err)
+		}
+		owned = append(owned, pageNumbers...)
+
+		var response map[string]any
+		if err := json.Unmarshal(raw, &response); err != nil {
+			return nil, fmt.Errorf("decode Plivo owned phone numbers page %d: %w", page+1, err)
+		}
+		itemCount := len(anyList(response["objects"]))
+		meta, _ := response["meta"].(map[string]any)
+		totalCount := intValue(meta["total_count"])
+		hasMore := itemCount == pageSize
+		if totalCount > 0 {
+			hasMore = offset+itemCount < totalCount
+		}
+		if hasMore && itemCount == 0 {
+			return nil, fmt.Errorf("Plivo owned phone-number listing made no progress at offset %d", offset)
+		}
+		if !hasMore {
+			return owned, nil
+		}
+		offset += itemCount
+	}
+	return nil, fmt.Errorf("Plivo owned phone-number listing exceeded %d pages", maxOwnedNumberPages)
 }
 
 func parseOwnedCarrierNumbers(provider string, raw json.RawMessage) ([]ownedNumber, error) {
@@ -219,6 +329,7 @@ func parseOwnedCarrierNumbers(provider string, raw json.RawMessage) ([]ownedNumb
 			number.VoiceMethod = stringValue(item["voice_method"])
 			number.StatusCallback = stringValue(item["status_callback"])
 			number.StatusMethod = stringValue(item["status_callback_method"])
+			number.ConnectionID = stringValue(item["trunk_sid"])
 		case "telnyx":
 			number.ProviderNumberID = stringValue(item["id"])
 			number.PhoneNumber = normalizedOwnedPhone(stringValue(item["phone_number"]))
@@ -273,13 +384,15 @@ func (a *App) connectedNumberView(ctx *sdk.AppCtx, provider string, number owned
 		return view
 	}
 	view.Route = &connectedRouteView{
-		ID:            route.ID,
-		AgentID:       route.AgentID,
-		AgentName:     agentName(route.AgentID),
-		Enabled:       route.Enabled,
-		AnswerMode:    firstNonEmpty(route.AnswerMode, answerModeAgent),
-		Voice:         route.AutoVoice,
-		RecordingMode: firstNonEmpty(route.RecordingMode, recordingModeInherit),
+		ID:                  route.ID,
+		AgentID:             route.AgentID,
+		AgentName:           agentName(route.AgentID),
+		Enabled:             route.Enabled,
+		AnswerMode:          firstNonEmpty(route.AnswerMode, answerModeAgent),
+		Voice:               route.AutoVoice,
+		RecordingMode:       firstNonEmpty(route.RecordingMode, recordingModeInherit),
+		Transport:           firstNonEmpty(route.InboundTransport, inboundTransportProgrammable),
+		TransportConfigured: route.TransportConfig != "",
 	}
 	if !route.Enabled {
 		view.RouteStatus = "disabled"
@@ -289,6 +402,50 @@ func (a *App) connectedNumberView(ctx *sdk.AppCtx, provider string, number owned
 		return view
 	}
 	view.RouteStatus = "enabled"
+	if route.InboundTransport == inboundTransportSIPDirect {
+		view.StatusCallbackState = webhookNotApplicable
+		switch {
+		case a.directSIPGateway() == nil:
+			view.VoiceWebhookStatus = webhookMissing
+			view.RoutingHealth = "degraded"
+			view.HealthMessage = "The direct SIP listener is not running."
+		case route.TransportConfig == "":
+			view.VoiceWebhookStatus = webhookNotConfigured
+			view.RoutingHealth = "degraded"
+			view.HealthMessage = "Direct SIP is selected but carrier routing has not been applied."
+		default:
+			var config directSIPProviderConfig
+			if json.Unmarshal([]byte(route.TransportConfig), &config) != nil || config.Provider != provider {
+				view.VoiceWebhookStatus = webhookMismatch
+				view.RoutingHealth = "degraded"
+				view.HealthMessage = "The saved direct SIP carrier configuration is invalid."
+				return view
+			}
+			expectedConnection := config.TrunkID
+			if provider == "telnyx" {
+				expectedConnection = config.FQDNConnectionID
+			}
+			switch {
+			case number.CarrierStatus == "not_found":
+				view.VoiceWebhookStatus = webhookMissing
+				view.RoutingHealth = "degraded"
+				view.HealthMessage = "The routed number was not found in the carrier account."
+			case number.ConnectionID == "":
+				view.VoiceWebhookStatus = webhookUnknown
+				view.RoutingHealth = "unverified"
+				view.HealthMessage = "Direct SIP is configured, but the carrier number response did not expose its current connection."
+			case number.ConnectionID != expectedConnection:
+				view.VoiceWebhookStatus = webhookMismatch
+				view.RoutingHealth = "degraded"
+				view.HealthMessage = "The carrier number is assigned to a different SIP connection."
+			default:
+				view.VoiceWebhookStatus = routingDirectSIP
+				view.RoutingHealth = "healthy"
+				view.HealthMessage = "Carrier calls are routed to the Telephony SIP gateway."
+			}
+		}
+		return view
+	}
 	view.VoiceWebhookStatus, view.StatusCallbackState, view.HealthMessage = a.routeWebhookHealth(ctx, provider, number, *route)
 	switch {
 	case view.VoiceWebhookStatus == webhookConfigured && view.StatusCallbackState == webhookConfigured:
@@ -307,6 +464,14 @@ func (a *App) routeWebhookHealth(ctx *sdk.AppCtx, provider string, number ownedN
 		return webhookURLState(number.VoiceURL, a.inboundRouteURL(route), number.VoiceMethod),
 			webhookURLState(number.StatusCallback, a.twilioRouteStatusURL(route), number.StatusMethod), ""
 	case "telnyx":
+		creds, err := ctx.PlatformAPI().GetConnectionCredentials(route.CarrierConnectionID)
+		if err != nil {
+			return webhookUnknown, webhookUnknown, "Could not verify the Telnyx webhook signing key."
+		}
+		publicKey, keyErr := decodeTelnyxSignatureValue(strings.TrimSpace(creds.Fields["public_key"]))
+		if keyErr != nil || len(publicKey) != ed25519.PublicKeySize {
+			return webhookMissing, webhookMissing, "A valid Telnyx webhook public key is required before this route can receive calls."
+		}
 		var config telnyxRouteConfig
 		if json.Unmarshal([]byte(route.PreviousVoiceURL), &config) != nil || config.ApplicationID == "" {
 			return webhookMissing, webhookMissing, "Telephony has no saved Telnyx application for this route."
@@ -347,8 +512,8 @@ func (a *App) routeWebhookHealth(ctx *sdk.AppCtx, provider string, number ownedN
 		if json.Unmarshal(raw, &application) != nil {
 			return webhookUnknown, webhookUnknown, "Could not decode the Plivo application."
 		}
-		return webhookURLState(stringValue(application["answer_url"]), a.inboundRouteURL(route), stringValue(application["answer_method"])),
-			webhookURLState(stringValue(application["hangup_url"]), a.plivoRouteStatusURL(route), stringValue(application["hangup_method"])), ""
+		return webhookURLState(stringValue(application["answer_url"]), plivoReliableCallbackURL(a.inboundRouteURL(route)), stringValue(application["answer_method"])),
+			webhookURLState(stringValue(application["hangup_url"]), plivoReliableCallbackURL(a.plivoRouteStatusURL(route)), stringValue(application["hangup_method"])), ""
 	default:
 		return webhookUnsupported, webhookUnsupported, "Inbound route verification is not supported for this provider."
 	}
@@ -480,7 +645,8 @@ func (c *callsDB) listRoutesForProjectConnection(project string, connectionID in
 	        COALESCE(answer_mode,'agent'), COALESCE(auto_directive,''), COALESCE(auto_voice,''),
 	        COALESCE(auto_greeting,''), secret,
 	        COALESCE(previous_voice_url,''), COALESCE(previous_status_callback,''), created_at, updated_at,
-	        COALESCE(recording_mode,'inherit')
+	        COALESCE(recording_mode,'inherit'), COALESCE(inbound_transport,'programmable_websocket'),
+	        COALESCE(transport_config,'')
 	        FROM inbound_routes
 	        WHERE project_id = ? AND carrier_connection_id = ?
 	        ORDER BY enabled DESC, updated_at DESC`, project, connectionID)
@@ -495,7 +661,8 @@ func (c *callsDB) listRoutesForProjectConnection(project string, connectionID in
 		if err := rows.Scan(&route.ID, &route.ProjectID, &route.CarrierSlug, &route.CarrierConnectionID, &route.PhoneNumber,
 			&route.PhoneNumberSID, &route.AgentID, &enabled, &route.HoldPrompt, &route.TimeoutSec,
 			&route.AnswerMode, &route.AutoDirective, &route.AutoVoice, &route.AutoGreeting, &route.Secret,
-			&route.PreviousVoiceURL, &route.PreviousStatusCallback, &route.CreatedAt, &route.UpdatedAt, &route.RecordingMode); err != nil {
+			&route.PreviousVoiceURL, &route.PreviousStatusCallback, &route.CreatedAt, &route.UpdatedAt, &route.RecordingMode,
+			&route.InboundTransport, &route.TransportConfig); err != nil {
 			return nil, err
 		}
 		route.Enabled = enabled != 0

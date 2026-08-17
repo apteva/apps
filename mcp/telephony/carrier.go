@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -202,7 +204,7 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		"stream_bidirectional_codec": "PCMU",
 		"timeout_secs":               req.TimeoutSec,
 		"time_limit_secs":            req.MaxDurationSec,
-		"command_id":                 req.CallID,
+		"command_id":                 telnyxCommandID(req.CallID, "place"),
 		"webhook_url":                c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
 		"webhook_url_method":         "POST",
 	}
@@ -238,6 +240,7 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 func (c *telnyxCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {
 	_, err := executeCarrierTool(ctx, c.connID, "hangup_call", map[string]any{
 		"call_control_id": row.CarrierSID,
+		"command_id":      telnyxCommandID(row.ID, "hangup"),
 	})
 	return err
 }
@@ -253,11 +256,11 @@ func (c *plivoCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrier
 	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
 		"from":          req.From,
 		"to":            req.To,
-		"answer_url":    c.app.plivoXMLURL(req.CallID, req.CallbackSecret, req.ProjectID),
+		"answer_url":    plivoReliableCallbackURL(c.app.plivoXMLURL(req.CallID, req.CallbackSecret, req.ProjectID)),
 		"answer_method": "POST",
-		"ring_url":      c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
+		"ring_url":      plivoReliableCallbackURL(c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID)),
 		"ring_method":   "POST",
-		"hangup_url":    c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
+		"hangup_url":    plivoReliableCallbackURL(c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID)),
 		"hangup_method": "POST",
 		"ring_timeout":  req.TimeoutSec,
 		"time_limit":    req.MaxDurationSec,
@@ -283,6 +286,11 @@ func (c *plivoCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {
 		"call_uuid": row.CarrierSID,
 	})
 	return err
+}
+
+func telnyxCommandID(callID, action string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(callID) + "\x00" + strings.TrimSpace(action)))
+	return hex.EncodeToString(sum[:16])
 }
 
 type vonageCarrier struct {

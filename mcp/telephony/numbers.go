@@ -987,6 +987,31 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 	switch path {
 	case "/numbers/connected":
 		result, err = a.connectedNumbers(ctx)
+	case "/numbers/transport":
+		var route *routeRow
+		route, err = a.setRouteTransport(ctx,
+			strings.TrimSpace(strArg(body, "route_id", "")),
+			strings.TrimSpace(strArg(body, "inbound_transport", "")), 0)
+		if err == nil && boolArg(body, "configure", true) {
+			err = a.configureRouteCarrier(ctx, route)
+		}
+		if err == nil {
+			result = map[string]any{
+				"ok": true, "route": routePublic(a, *route),
+				"carrier_configured": route.TransportConfig != "" || route.InboundTransport == inboundTransportProgrammable,
+			}
+		}
+	case "/numbers/answer-mode":
+		var route *routeRow
+		route, err = a.setRouteAnswerMode(ctx,
+			strings.TrimSpace(strArg(body, "route_id", "")),
+			strings.TrimSpace(strArg(body, "answer_mode", "")),
+			strings.TrimSpace(strArg(body, "directive", "")),
+			strings.TrimSpace(strArg(body, "voice", "")),
+			strings.TrimSpace(strArg(body, "greeting", "")))
+		if err == nil {
+			result = map[string]any{"ok": true, "route": routePublic(a, *route)}
+		}
 	case "/numbers/search":
 		result, err = a.searchNumberInventory(ctx, body)
 	case "/numbers/purchase":

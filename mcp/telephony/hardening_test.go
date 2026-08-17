@@ -28,15 +28,17 @@ import (
 
 type answerPlatform struct {
 	tk.BasePlatformClient
-	failCarrier         bool
-	spawned             []sdk.RealtimeSpawnRequest
-	killed              []string
-	integrationCalls    []integrationCall
-	integrationResponse map[string]json.RawMessage
-	credentials         *sdk.ConnectionCredentials
-	bindings            map[string]any
-	connection          *sdk.PlatformConnection
-	agents              map[int64]*sdk.PlatformAgent
+	failCarrier          bool
+	failTool             string
+	spawned              []sdk.RealtimeSpawnRequest
+	killed               []string
+	integrationCalls     []integrationCall
+	integrationResponse  map[string]json.RawMessage
+	integrationResponses map[string][]json.RawMessage
+	credentials          *sdk.ConnectionCredentials
+	bindings             map[string]any
+	connection           *sdk.PlatformConnection
+	agents               map[int64]*sdk.PlatformAgent
 }
 
 type integrationCall struct {
@@ -92,10 +94,15 @@ func (p *answerPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCred
 
 func (p *answerPlatform) ExecuteIntegrationTool(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	p.integrationCalls = append(p.integrationCalls, integrationCall{Tool: tool, Input: input})
-	if p.failCarrier {
+	if p.failCarrier || p.failTool == tool {
 		return &sdk.ExecuteResult{Success: false, Status: 409, Data: json.RawMessage(`{"message":"call ended"}`)}, nil
 	}
 	data := json.RawMessage(`{}`)
+	if responses := p.integrationResponses[tool]; len(responses) > 0 {
+		data = responses[0]
+		p.integrationResponses[tool] = responses[1:]
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: data}, nil
+	}
 	if response := p.integrationResponse[tool]; response != nil {
 		data = response
 	}
@@ -251,6 +258,20 @@ func TestVerifyTelnyxSignature(t *testing.T) {
 	}
 }
 
+func TestTelnyxCallbackRejectsMissingPublicKey(t *testing.T) {
+	platform := &answerPlatform{credentials: &sdk.ConnectionCredentials{
+		Slug: "telnyx", Fields: map[string]string{},
+	}}
+	a, _ := withTelephonyTestContext(t, platform)
+	row := &callRow{
+		ID: "telnyx-unsigned", CarrierSlug: "telnyx", CarrierConnectionID: 9, CallbackSecret: "secret",
+	}
+	req := httptest.NewRequest(http.MethodPost, "/webhook/status/telnyx-unsigned?token=secret", strings.NewReader(`{}`))
+	if err := a.authorizeCallRequest(req, row); err == nil || !strings.Contains(err.Error(), "public key") {
+		t.Fatalf("missing Telnyx public key error=%v", err)
+	}
+}
+
 func TestHardeningMigrationUpgradesPopulatedDatabase(t *testing.T) {
 	db, err := sql.Open("sqlite", "file:upgrade?mode=memory&cache=shared")
 	if err != nil {
@@ -389,7 +410,8 @@ func TestImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
 		t.Fatalf("spawn count=%d, want 1", len(platform.spawned))
 	}
 	spawn := platform.spawned[0]
-	if spawn.AgentID != route.AgentID || spawn.Directive != directiveWithCallContext(route.AutoDirective, call) || spawn.Voice != route.AutoVoice || spawn.InitialMessage != route.AutoGreeting {
+	if spawn.AgentID != route.AgentID || spawn.Directive != route.AutoDirective || spawn.Voice != route.AutoVoice || spawn.InitialMessage != route.AutoGreeting ||
+		spawn.CapabilityMode != sdk.RealtimeCapabilitiesInheritAgent || spawn.CallContext == nil || spawn.CallContext.CallID != call.ID {
 		t.Fatalf("unexpected realtime spawn: %+v", spawn)
 	}
 	if spawn.TurnDetection == nil || spawn.TurnDetection.Profile != "telephony" {
@@ -503,13 +525,14 @@ func TestTwilioImmediateInboundReturnsStreamInInitialResponse(t *testing.T) {
 		t.Fatalf("forwarding metadata not persisted: %+v", stored)
 	}
 	if len(platform.spawned) != 1 ||
-		!strings.Contains(platform.spawned[0].Directive, `"forwarded_from": "+34930494946"`) ||
-		!strings.Contains(platform.spawned[0].Directive, `"ingress_path": "forwarded"`) {
-		t.Fatalf("forwarding metadata missing from realtime directive: %+v", platform.spawned)
+		platform.spawned[0].CallContext == nil ||
+		platform.spawned[0].CallContext.ForwardedFrom != "+34930494946" ||
+		platform.spawned[0].CallContext.IngressPath != "forwarded" {
+		t.Fatalf("forwarding metadata missing from trusted realtime call context: %+v", platform.spawned)
 	}
 }
 
-func TestTwilioStreamErrorFailsCallAndKillsRealtimeThread(t *testing.T) {
+func TestTwilioStreamErrorPreservesCarrierStatusAndRealtimeThread(t *testing.T) {
 	platform := &answerPlatform{}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
 	previousCtx := globalCtx
@@ -536,11 +559,59 @@ func TestTwilioStreamErrorFailsCallAndKillsRealtimeThread(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	stored, err := a.db().findCall(call.ID)
-	if err != nil || stored.Status != "failed" || stored.ErrorMessage != "handshake rejected" {
+	if err != nil || stored.Status != "answered" || stored.ErrorMessage != "" {
 		t.Fatalf("stored call=%+v err=%v", stored, err)
 	}
-	if len(platform.killed) != 1 || platform.killed[0] != call.ThreadID {
+	if stored.MediaStatus != "error" || stored.MediaErrorMessage != "handshake rejected" ||
+		stored.MediaCloseCode != 1011 || stored.MediaDisconnectedAt == "" {
+		t.Fatalf("media state not persisted: %+v", stored)
+	}
+	if len(platform.killed) != 0 {
 		t.Fatalf("killed threads=%v", platform.killed)
+	}
+
+	if _, err := a.db().updateStatusWithFacts(call.ID, "completed", "", lifecycleFacts{
+		Source: "provider", OccurredAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = a.db().findCall(call.ID)
+	if err != nil || stored.Status != "completed" || stored.MediaStatus != "error" {
+		t.Fatalf("carrier completion did not win: call=%+v err=%v", stored, err)
+	}
+}
+
+func TestTwilioStreamErrorAfterCompletionDoesNotRegressCall(t *testing.T) {
+	platform := &answerPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	previousCtx := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previousCtx })
+	a := &App{installID: 42}
+	call := testCall("completed-stream-error", "completed")
+	call.Direction = "inbound"
+	call.ThreadID = "tel-" + call.ID
+	call.EndedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := a.db().insertCall(call); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		"CallSid": {call.CarrierSID}, "StreamEvent": {"stream-error"}, "StreamError": {"late transport error"},
+	}
+	fullURL := a.twilioStreamStatusURL(call.ID, call.CallbackSecret, call.ProjectID)
+	endpoint := strings.TrimPrefix(fullURL, a.publicAppURL())
+	req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	signTwilioTestRequest(t, a, req, form)
+	rec := httptest.NewRecorder()
+	a.handleTwilioStreamStatus(rec, req)
+
+	stored, err := a.db().findCall(call.ID)
+	if rec.Code != http.StatusNoContent || err != nil || stored.Status != "completed" ||
+		stored.MediaStatus != "error" || stored.MediaErrorMessage != "late transport error" {
+		t.Fatalf("status=%d call=%+v err=%v", rec.Code, stored, err)
+	}
+	if len(platform.killed) != 0 {
+		t.Fatalf("late media callback killed threads=%v", platform.killed)
 	}
 }
 
@@ -742,7 +813,7 @@ func TestCallCallbackTokenAndURLRedaction(t *testing.T) {
 	globalCtx = ctx
 	t.Cleanup(func() { globalCtx = previousCtx })
 	call := testCall("token", "in-progress")
-	call.CarrierSlug = "telnyx"
+	call.CarrierSlug = "vonage"
 	req := httptest.NewRequest(http.MethodPost, "/webhook/status/token?token=callback-secret", nil)
 	if err := (&App{}).authorizeCallRequest(req, &call); err != nil {
 		t.Fatalf("valid callback token rejected: %v", err)

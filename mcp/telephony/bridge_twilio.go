@@ -40,10 +40,8 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/gobwas/ws"
-	"github.com/gobwas/ws/wsutil"
 )
 
 // twilioFrame is the wire envelope for media frames coming from
@@ -208,42 +206,71 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	defer a.db().releaseMedia(callID)
 	bridgeURL, err := a.mediaBridgeURL(row)
 	if err != nil {
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "audio bridge unavailable", string(mediaCloseLegLocalError))
 		http.Error(w, "audio bridge unavailable", http.StatusBadGateway)
 		return
 	}
 
 	tw, _, _, err := ws.UpgradeHTTP(r, w)
 	if err != nil {
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "Twilio websocket upgrade failed", string(mediaCloseLegCarrier))
 		globalCtx.Logger().Warn("twilio ws upgrade", "err", err, "call", callID)
 		return
 	}
-	defer tw.Close()
-	defer a.finishMediaBridge(callID, "media-disconnected")
+	closeState := &websocketCloseState{}
+	twWriter := newWebSocketWriterPump(tw, ws.StateServerSide)
+	twCloser := newGracefulWebSocket(tw, twWriter)
+	defer func() {
+		code, reason := closeState.Details()
+		twCloser.Close(code, reason)
+	}()
 
 	// Open core's audio bridge WS using the URL stamped on the call row.
 	coreURL, err := url.Parse(bridgeURL)
 	if err != nil {
+		closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "invalid realtime bridge URL")
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "invalid realtime bridge URL", string(mediaCloseLegLocalError))
 		globalCtx.Logger().Warn("parse audio bridge url", "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
 	dialer := ws.Dialer{}
 	core, _, _, err := dialer.Dial(r.Context(), coreURL.String())
 	if err != nil {
+		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "core audio bridge rejected", string(mediaCloseLegCore))
 		globalCtx.Logger().Warn("dial core audio bridge", "err", err, "url", redactURL(coreURL.String()))
 		return
 	}
-	defer core.Close()
+	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
+	coreCloser := newGracefulWebSocket(core, coreWriter)
+	defer func() {
+		code, reason := closeState.Details()
+		coreCloser.Close(code, reason)
+	}()
 
 	globalCtx.Logger().Info("bridge up", "call", callID, "thread", row.ThreadID)
-	_ = a.db().updateStatus(callID, "in-progress", "")
+	_ = a.db().updateMediaStatus(callID, "connected", "", 0, "")
 	_ = a.db().clearStateExpiry(callID)
 
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	defer func() {
+		leg, code, reason := closeState.Cause()
+		a.finishMediaBridge(callID, leg, code, reason)
+	}()
+	go func() {
+		select {
+		case <-r.Context().Done():
+			closeState.SetLeg(mediaCloseLegRequest, ws.StatusGoingAway, "media request context canceled")
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	go func() {
 		<-ctx.Done()
-		_ = tw.Close()
-		_ = core.Close()
+		code, reason := closeState.Details()
+		twCloser.Close(code, reason)
+		coreCloser.Close(code, reason)
 	}()
 
 	// streamSid is learned from Twilio's "start" frame; until we have
@@ -255,7 +282,6 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	outputResampler := newPCMResampler(24000, 8000)
 	playback := newTwilioPlaybackTracker()
 	audioFrontend := newCarrierAudioFrontend(8000)
-	var coreWriteMu sync.Mutex
 	defer func() {
 		select {
 		case <-streamSidCh:
@@ -268,11 +294,14 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer cancel()
 		for {
-			data, op, err := wsutil.ReadClientData(tw)
+			data, op, err := readWebSocketData(tw, ws.StateServerSide, twWriter)
 			if err != nil {
+				code, reason := websocketCloseDetails(err)
+				closeState.SetLeg(mediaCloseLegCarrier, code, reason)
 				return
 			}
 			if len(data) > maxCarrierFrameBytes {
+				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusMessageTooBig, "Twilio media frame too large")
 				return
 			}
 			if op != ws.OpText || len(data) == 0 {
@@ -285,9 +314,11 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			switch f.Event {
 			case "start":
 				if f.Start == nil || f.Start.CallSID == "" {
+					closeState.SetLeg(mediaCloseLegCarrier, ws.StatusProtocolError, "Twilio start frame missing call SID")
 					return
 				}
 				if row.CarrierSID != "" && row.CarrierSID != f.Start.CallSID {
+					closeState.SetLeg(mediaCloseLegCarrier, ws.StatusPolicyViolation, "Twilio call SID mismatch")
 					return
 				}
 				if row.CarrierSID == "" {
@@ -316,14 +347,13 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				if len(pcm24) == 0 {
 					continue
 				}
-				coreWriteMu.Lock()
-				err = wsutil.WriteClientBinary(core, pcm16ToBytes(pcm24))
+				err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
 				if err == nil && localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
-					err = wsutil.WriteClientText(core, control)
+					err = coreWriter.Write(ws.OpText, control)
 				}
-				coreWriteMu.Unlock()
 				if err != nil {
+					closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "write caller audio to realtime bridge")
 					return
 				}
 				if localSpeechStarted {
@@ -340,13 +370,13 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				control, _ := json.Marshal(realtimeBridgeControl{
 					Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS,
 				})
-				coreWriteMu.Lock()
-				err := wsutil.WriteClientText(core, control)
-				coreWriteMu.Unlock()
+				err := coreWriter.Write(ws.OpText, control)
 				if err != nil {
+					closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "write playback progress to realtime bridge")
 					return
 				}
 			case "stop":
+				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusNormalClosure, "Twilio media stream stopped")
 				return
 			}
 		}
@@ -362,12 +392,10 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 
 	maxQueuedMS := 0
 	pacer := newTwilioAudioPacer(ctx, streamSID, playback, func(payload []byte) error {
-		if err := tw.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-			return err
-		}
-		return wsutil.WriteServerText(tw, payload)
+		return twWriter.Write(ws.OpText, payload)
 	}, func(err error) {
 		globalCtx.Logger().Warn("twilio media writer failed", "call", callID, "err", err)
+		closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "Twilio media writer failed")
 		cancel()
 	})
 	defer func() {
@@ -381,8 +409,10 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			return
 		default:
 		}
-		data, op, err := wsutil.ReadServerData(core)
+		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter)
 		if err != nil {
+			code, reason := websocketCloseDetails(err)
+			closeState.SetLeg(mediaCloseLegCore, code, reason)
 			return
 		}
 		if op == ws.OpText {
@@ -398,6 +428,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				interruptSource := audioFrontend.markInterrupt(control.Source)
 				clearedMS, err := pacer.clear(ctx)
 				if err != nil {
+					closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "clear Twilio playback")
 					return
 				}
 				globalCtx.Logger().Info("twilio playback cleared", "call", callID, "source", interruptSource, "queued_ms", clearedMS)
@@ -419,15 +450,15 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errTwilioPacerOverflow) {
 			globalCtx.Logger().Warn("twilio playback queue overflow", "call", callID, "item", frame.ItemID, "max_queued_ms", maxQueuedMS)
 			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.overflow", ItemID: frame.ItemID})
-			coreWriteMu.Lock()
-			err = wsutil.WriteClientText(core, control)
-			coreWriteMu.Unlock()
+			err = coreWriter.Write(ws.OpText, control)
 			if err != nil {
+				closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "report playback overflow to realtime bridge")
 				return
 			}
 			continue
 		}
 		if err != nil {
+			closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "queue Twilio playback")
 			return
 		}
 		if queuedMS > maxQueuedMS {

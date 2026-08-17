@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -54,12 +56,69 @@ func TestPlivoRouteConfigurationAndRestore(t *testing.T) {
 	if len(platform.integrationCalls) != 3 || platform.integrationCalls[1].Tool != "create_application" || platform.integrationCalls[2].Tool != "update_owned_phone_number" {
 		t.Fatalf("unexpected Plivo configuration calls: %#v", platform.integrationCalls)
 	}
+	createInput := platform.integrationCalls[1].Input
+	for _, field := range []string{"answer_url", "hangup_url"} {
+		value, _ := createInput[field].(string)
+		if !strings.Contains(value, "#ct=2000") || !strings.Contains(value, "rc=2") || !strings.Contains(value, "er=nearest") {
+			t.Fatalf("Plivo %s lacks callback resilience policy: %q", field, value)
+		}
+	}
 	platform.integrationCalls = nil
 	if err := a.disablePlivoRoute(ctx, stored); err != nil {
 		t.Fatal(err)
 	}
 	if len(platform.integrationCalls) != 2 || platform.integrationCalls[0].Input["app_id"] != "old-app" || platform.integrationCalls[1].Tool != "delete_application" {
 		t.Fatalf("Plivo route was not restored safely: %#v", platform.integrationCalls)
+	}
+}
+
+func TestTelnyxRouteRequiresSignedWebhooksAndSetsTimeout(t *testing.T) {
+	withoutKey := &answerPlatform{credentials: &sdk.ConnectionCredentials{
+		Slug: "telnyx", Fields: map[string]string{},
+	}}
+	a, ctx := withTelephonyTestContext(t, withoutKey)
+	route := routeRow{
+		ID: "route-telnyx-unsigned", ProjectID: "project-a", CarrierSlug: "telnyx", CarrierConnectionID: 9,
+		PhoneNumber: "+14155550101", AgentID: 7, Enabled: true, Secret: "route-secret",
+	}
+	if err := a.configureTelnyxRoute(ctx, &route); err == nil || !strings.Contains(err.Error(), "public key") {
+		t.Fatalf("unsigned Telnyx route error=%v", err)
+	}
+	if len(withoutKey.integrationCalls) != 0 {
+		t.Fatalf("carrier was modified before credential validation: %#v", withoutKey.integrationCalls)
+	}
+
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := &answerPlatform{
+		credentials: &sdk.ConnectionCredentials{
+			Slug: "telnyx", Fields: map[string]string{"public_key": base64.StdEncoding.EncodeToString(publicKey)},
+		},
+		integrationResponse: map[string]json.RawMessage{
+			"list_phone_numbers":              json.RawMessage(`{"data":[{"id":"number-id","phone_number":"+14155550101","connection_id":"old-app"}]}`),
+			"create_call_control_application": json.RawMessage(`{"data":{"id":"new-app"}}`),
+		},
+	}
+	a, ctx = withTelephonyTestContext(t, platform)
+	route.ID = "route-telnyx-signed"
+	if err := a.db().insertRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := a.db().findRoute(route.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.configureTelnyxRoute(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.integrationCalls) != 3 {
+		t.Fatalf("Telnyx configuration calls=%#v", platform.integrationCalls)
+	}
+	createInput := platform.integrationCalls[1].Input
+	if createInput["webhook_timeout_secs"] != 5 || createInput["webhook_api_version"] != "2" {
+		t.Fatalf("Telnyx webhook resilience settings=%#v", createInput)
 	}
 }
 
@@ -94,9 +153,11 @@ func TestPlivoImmediateInboundSpawnsRealtimeAndRecords(t *testing.T) {
 		t.Fatalf("inbound XML lacks realtime stream or recording: %s", response.Body.String())
 	}
 	if len(platform.spawned) != 1 ||
-		!strings.HasPrefix(platform.spawned[0].Directive, route.AutoDirective) ||
-		!strings.Contains(platform.spawned[0].Directive, `"direction": "inbound"`) ||
-		!strings.Contains(platform.spawned[0].Directive, `"from_number": "+14155550100"`) ||
+		platform.spawned[0].Directive != route.AutoDirective ||
+		platform.spawned[0].CapabilityMode != sdk.RealtimeCapabilitiesInheritAgent ||
+		platform.spawned[0].CallContext == nil ||
+		platform.spawned[0].CallContext.Direction != "inbound" ||
+		platform.spawned[0].CallContext.FromNumber != "+14155550100" ||
 		platform.spawned[0].TurnDetection == nil ||
 		platform.spawned[0].TurnDetection.Profile != "telephony" {
 		t.Fatalf("realtime thread was not spawned from route config: %#v", platform.spawned)
@@ -188,14 +249,17 @@ func TestProviderCarrierPlacementUsesParityCallbacksAndRecording(t *testing.T) {
 			t.Fatalf("place Telnyx call: result=%+v err=%v", result, err)
 		}
 		input := platform.integrationCalls[0].Input
-		if input["record"] != "record-from-answer" || input["record_channels"] != "dual" || input["webhook_url"] == "" {
+		if input["record"] != "record-from-answer" || input["record_channels"] != "dual" || input["webhook_url"] == "" || input["command_id"] == "" {
 			t.Fatalf("Telnyx call lacks recording or status callback parity: %#v", input)
 		}
-		if err := carrier.Hangup(ctx, &callRow{CarrierSID: result.CarrierSID}); err != nil {
+		if err := carrier.Hangup(ctx, &callRow{ID: "call-1", CarrierSID: result.CarrierSID}); err != nil {
 			t.Fatal(err)
 		}
 		if got := platform.integrationCalls[1].Tool; got != "hangup_call" {
 			t.Fatalf("Telnyx hangup used %q", got)
+		}
+		if hangupID := platform.integrationCalls[1].Input["command_id"]; hangupID == "" || hangupID == input["command_id"] {
+			t.Fatalf("Telnyx hangup command id is missing or reused: place=%#v hangup=%#v", input["command_id"], hangupID)
 		}
 	})
 
@@ -213,7 +277,8 @@ func TestProviderCarrierPlacementUsesParityCallbacksAndRecording(t *testing.T) {
 			t.Fatalf("place Plivo call: result=%+v err=%v", result, err)
 		}
 		input := platform.integrationCalls[0].Input
-		if input["ring_url"] == "" || input["ring_url"] != input["hangup_url"] || input["ring_method"] != "POST" {
+		ringURL, _ := input["ring_url"].(string)
+		if ringURL == "" || input["ring_url"] != input["hangup_url"] || input["ring_method"] != "POST" || !strings.Contains(ringURL, "rc=2") {
 			t.Fatalf("Plivo call lacks ring-time CallUUID callback: %#v", input)
 		}
 	})
@@ -234,17 +299,23 @@ func TestProviderInboundAnswerAndRejectCommands(t *testing.T) {
 			}
 			answer := platform.integrationCalls[0]
 			if provider == "telnyx" {
-				if answer.Tool != "answer_call" || answer.Input["record"] != "record-from-answer" || answer.Input["stream_url"] == "" {
+				if answer.Tool != "answer_call" || answer.Input["record"] != "record-from-answer" || answer.Input["stream_url"] == "" || answer.Input["command_id"] == "" {
 					t.Fatalf("Telnyx answer lacks realtime or recording controls: %#v", answer)
 				}
-			} else if answer.Tool != "update_call" || answer.Input["aleg_url"] == "" {
-				t.Fatalf("Plivo answer does not redirect to realtime XML: %#v", answer)
+			} else {
+				alegURL, _ := answer.Input["aleg_url"].(string)
+				if answer.Tool != "update_call" || !strings.Contains(alegURL, "rc=2") {
+					t.Fatalf("Plivo answer does not redirect to resilient realtime XML: %#v", answer)
+				}
 			}
 			if err := a.rejectInboundCarrierCall(ctx, &row); err != nil {
 				t.Fatal(err)
 			}
 			if got := platform.integrationCalls[1].Tool; got != map[string]string{"telnyx": "reject_call", "plivo": "hangup_call"}[provider] {
 				t.Fatalf("%s reject used %q", provider, got)
+			}
+			if provider == "telnyx" && platform.integrationCalls[1].Input["command_id"] == answer.Input["command_id"] {
+				t.Fatalf("Telnyx answer and reject reused command id: %#v", platform.integrationCalls)
 			}
 		})
 	}

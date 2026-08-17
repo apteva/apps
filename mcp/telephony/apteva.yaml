@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.1.21
+version: 0.2.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -57,14 +57,18 @@ provides:
     - { prefix: /recordings/ }
     - { prefix: /recording-settings }
     - { prefix: /numbers/ }
+    - { prefix: /softphone/ }
+    - { prefix: /softphone/media/, no_auth: true }
+    - { prefix: /peer/, no_auth: true }
   mcp_tools:
     - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, recording?, timeout_sec?, max_duration_sec?, idempotency_key?. Telephony spawns the realtime thread and bridges carrier audio into it." }
     - { name: telephony_answer_call,  description: "Answer a pending inbound call by spawning a realtime thread. Args: call_id, directive, voice?." }
     - { name: telephony_reject_call,  description: "Reject a pending inbound call. Args: call_id." }
-    - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent. Args: phone_number?, phone_number_id?, hold_prompt?, timeout_sec?, answer_mode?, directive?, voice?, greeting?." }
+    - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent. Args: phone_number?, phone_number_id?, hold_prompt?, timeout_sec?, answer_mode?, directive?, voice?, greeting?, inbound_transport?." }
     - { name: telephony_routes_set_answer_mode, description: "Configure agent-decided or immediate realtime answering for an inbound route." }
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
-    - { name: telephony_routes_configure_carrier, description: "Configure the carrier phone number webhook for an inbound route. Args: route_id." }
+    - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
+    - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route. Args: route_id." }
     - { name: telephony_routes_disable, description: "Disable an inbound route and restore its previous carrier webhook. Args: route_id." }
     - { name: telephony_routes_list,  description: "List inbound call routes." }
     - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
@@ -110,6 +114,10 @@ provides:
         from_number: string
         to_number: string
         status: string
+        carrier_status: string
+        media_status: string
+        media_error_message: string
+        media: object
         previous_status: string
         agent_id: integer
         route_id: string
@@ -176,5 +184,20 @@ db:
   driver: sqlite
   path: /data/telephony.db
   migrations: migrations/
+
+config_schema:
+  - { name: sip_transport, type: select, default: "tls", label: "SIP signaling transport", options: [tls, tcp, udp] }
+  - { name: sip_listen, type: text, default: "0.0.0.0:5061", label: "SIP listen address" }
+  - { name: sip_public_host, type: text, label: "SIP hostname override", description: "Optional. Defaults to the hostname from the Apteva public URL." }
+  - { name: sip_public_ip, type: text, label: "SIP public IPv4 override", description: "Optional. Defaults to the public IPv4 resolved from the SIP hostname." }
+  - { name: sip_tls_cert_file, type: text, label: "SIP TLS certificate override", description: "Optional. Telephony discovers standard Apteva and Let's Encrypt certificate paths." }
+  - { name: sip_tls_key_file, type: text, label: "SIP TLS key override", description: "Optional. Must be set with the certificate override." }
+  - { name: sip_allowed_cidrs, type: text, label: "Carrier CIDR override", description: "Optional. Defaults to maintained Twilio and Telnyx signaling and media networks." }
+  - { name: sip_rtp_bind_ip, type: text, default: "0.0.0.0", label: "RTP bind IPv4 address" }
+  - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }
+  - { name: sip_rtp_port_max, type: text, default: "20199", label: "Last RTP UDP port" }
+  - { name: sip_srtp, type: select, default: "preferred", label: "Media encryption", options: [required, preferred, disabled] }
+  - { name: sip_max_sessions, type: text, default: "100", label: "Maximum SIP sessions" }
+  - { name: sip_allow_insecure_signaling, type: toggle, default: "false", label: "Allow UDP or TCP signaling" }
 
 upgrade_policy: auto-patch

@@ -5,15 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gobwas/ws"
-	"github.com/gobwas/ws/wsutil"
 )
 
 const (
@@ -109,43 +106,72 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	defer a.db().releaseMedia(callID)
 	bridgeURL, err := a.mediaBridgeURL(row)
 	if err != nil {
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "audio bridge unavailable", string(mediaCloseLegLocalError))
 		http.Error(w, "audio bridge unavailable", http.StatusBadGateway)
 		return
 	}
 
 	carrier, _, _, err := ws.UpgradeHTTP(r, w)
 	if err != nil {
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, cfg.Provider+" websocket upgrade failed", string(mediaCloseLegCarrier))
 		globalCtx.Logger().Warn("carrier ws upgrade", "provider", cfg.Provider, "err", err, "call", callID)
 		return
 	}
-	defer carrier.Close()
-	defer a.finishMediaBridge(callID, "media-disconnected")
+	closeState := &websocketCloseState{}
+	carrierWriter := newWebSocketWriterPump(carrier, ws.StateServerSide)
+	carrierCloser := newGracefulWebSocket(carrier, carrierWriter)
+	defer func() {
+		code, reason := closeState.Details()
+		carrierCloser.Close(code, reason)
+	}()
 
 	coreURL, err := url.Parse(bridgeURL)
 	if err != nil {
+		closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "invalid realtime bridge URL")
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "invalid realtime bridge URL", string(mediaCloseLegLocalError))
 		globalCtx.Logger().Warn("parse audio bridge url", "provider", cfg.Provider, "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
 	dialer := ws.Dialer{}
 	core, _, _, err := dialer.Dial(r.Context(), coreURL.String())
 	if err != nil {
+		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "core audio bridge rejected", string(mediaCloseLegCore))
 		globalCtx.Logger().Warn("dial core audio bridge", "provider", cfg.Provider, "err", err, "url", redactURL(coreURL.String()))
 		return
 	}
-	defer core.Close()
+	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
+	coreCloser := newGracefulWebSocket(core, coreWriter)
+	defer func() {
+		code, reason := closeState.Details()
+		coreCloser.Close(code, reason)
+	}()
 
 	globalCtx.Logger().Info("bridge up", "provider", cfg.Provider, "call", callID, "thread", row.ThreadID)
-	if err := a.db().updateStatus(callID, "in-progress", ""); err != nil {
-		globalCtx.Logger().Warn("mark media in progress", "provider", cfg.Provider, "call", callID, "err", err)
+	if err := a.db().updateMediaStatus(callID, "connected", "", 0, ""); err != nil {
+		globalCtx.Logger().Warn("mark media connected", "provider", cfg.Provider, "call", callID, "err", err)
 	}
 	_ = a.db().clearStateExpiry(callID)
 
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	defer func() {
+		leg, code, reason := closeState.Cause()
+		a.finishMediaBridge(callID, leg, code, reason)
+	}()
+	go func() {
+		select {
+		case <-r.Context().Done():
+			closeState.SetLeg(mediaCloseLegRequest, ws.StatusGoingAway, "media request context canceled")
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	go func() {
 		<-ctx.Done()
-		_ = carrier.Close()
-		_ = core.Close()
+		code, reason := closeState.Details()
+		carrierCloser.Close(code, reason)
+		coreCloser.Close(code, reason)
 	}()
 
 	streamSidCh := make(chan string, 1)
@@ -153,16 +179,18 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	outputResampler := carrierOutputResampler(cfg.OutputCodec)
 	playback := newTwilioPlaybackTracker()
 	audioFrontend := newCarrierAudioFrontend(carrierCodecSampleRate(cfg.InputCodec))
-	var coreWriteMu sync.Mutex
 
 	go func() {
 		defer cancel()
 		for {
-			data, op, err := wsutil.ReadClientData(carrier)
+			data, op, err := readWebSocketData(carrier, ws.StateServerSide, carrierWriter)
 			if err != nil {
+				code, reason := websocketCloseDetails(err)
+				closeState.SetLeg(mediaCloseLegCarrier, code, reason)
 				return
 			}
 			if len(data) > maxCarrierFrameBytes {
+				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusMessageTooBig, cfg.Provider+" media frame too large")
 				return
 			}
 			if op != ws.OpText || len(data) == 0 {
@@ -176,6 +204,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			case "start":
 				if providerCallID := frameCallID(f); providerCallID != "" {
 					if row.CarrierSID != "" && row.CarrierSID != providerCallID {
+						closeState.SetLeg(mediaCloseLegCarrier, ws.StatusPolicyViolation, cfg.Provider+" call ID mismatch")
 						return
 					}
 					if row.CarrierSID == "" {
@@ -208,14 +237,13 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				if len(pcm24) == 0 {
 					continue
 				}
-				coreWriteMu.Lock()
-				err = wsutil.WriteClientBinary(core, pcm16ToBytes(pcm24))
+				err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
 				if err == nil && localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
-					err = wsutil.WriteClientText(core, control)
+					err = coreWriter.Write(ws.OpText, control)
 				}
-				coreWriteMu.Unlock()
 				if err != nil {
+					closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "write caller audio to realtime bridge")
 					return
 				}
 				if localSpeechStarted {
@@ -230,13 +258,13 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 					continue
 				}
 				control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS})
-				coreWriteMu.Lock()
-				err := wsutil.WriteClientText(core, control)
-				coreWriteMu.Unlock()
+				err := coreWriter.Write(ws.OpText, control)
 				if err != nil {
+					closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "write playback progress to realtime bridge")
 					return
 				}
 			case "stop":
+				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusNormalClosure, cfg.Provider+" media stream stopped")
 				return
 			}
 		}
@@ -256,19 +284,15 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	pacer := newJSONCarrierAudioPacer(ctx, sampleRate, cfg.OutputCodec, cfg.OutboundShape, streamSID, cfg.PlaybackMarks,
 		playback,
 		func(payload []byte) error {
-			if err := carrier.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-				return err
-			}
-			return wsutil.WriteServerText(carrier, payload)
+			return carrierWriter.Write(ws.OpText, payload)
 		},
 		func(progress twilioPlaybackProgress) error {
 			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS})
-			coreWriteMu.Lock()
-			defer coreWriteMu.Unlock()
-			return wsutil.WriteClientText(core, control)
+			return coreWriter.Write(ws.OpText, control)
 		},
 		func(err error) {
 			globalCtx.Logger().Warn("carrier media writer failed", "provider", cfg.Provider, "call", callID, "err", err)
+			closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, cfg.Provider+" media writer failed")
 			cancel()
 		},
 	)
@@ -283,8 +307,10 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			return
 		default:
 		}
-		data, op, err := wsutil.ReadServerData(core)
+		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter)
 		if err != nil {
+			code, reason := websocketCloseDetails(err)
+			closeState.SetLeg(mediaCloseLegCore, code, reason)
 			return
 		}
 		if op == ws.OpText {
@@ -301,6 +327,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				packetizer.clear()
 				clearedMS, err := pacer.clear(ctx)
 				if err != nil {
+					closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "clear carrier playback")
 					return
 				}
 				globalCtx.Logger().Info("carrier playback cleared", "provider", cfg.Provider, "call", callID, "source", interruptSource, "queued_ms", clearedMS)
@@ -324,15 +351,15 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		queuedMS, err := pacer.enqueue(ctx, packets)
 		if errors.Is(err, errCarrierPacerOverflow) {
 			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.overflow", ItemID: frame.ItemID})
-			coreWriteMu.Lock()
-			err = wsutil.WriteClientText(core, control)
-			coreWriteMu.Unlock()
+			err = coreWriter.Write(ws.OpText, control)
 			if err != nil {
+				closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "report playback overflow to realtime bridge")
 				return
 			}
 			continue
 		}
 		if err != nil {
+			closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "queue carrier playback")
 			return
 		}
 		if queuedMS > maxQueuedMS {
@@ -385,57 +412,88 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 	defer a.db().releaseMedia(callID)
 	bridgeURL, err := a.mediaBridgeURL(row)
 	if err != nil {
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "audio bridge unavailable", string(mediaCloseLegLocalError))
 		http.Error(w, "audio bridge unavailable", http.StatusBadGateway)
 		return
 	}
 
 	vonage, _, _, err := ws.UpgradeHTTP(r, w)
 	if err != nil {
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "Vonage websocket upgrade failed", string(mediaCloseLegCarrier))
 		globalCtx.Logger().Warn("vonage ws upgrade", "err", err, "call", callID)
 		return
 	}
-	defer vonage.Close()
-	defer a.finishMediaBridge(callID, "media-disconnected")
+	closeState := &websocketCloseState{}
+	vonageWriter := newWebSocketWriterPump(vonage, ws.StateServerSide)
+	vonageCloser := newGracefulWebSocket(vonage, vonageWriter)
+	defer func() {
+		code, reason := closeState.Details()
+		vonageCloser.Close(code, reason)
+	}()
 
 	coreURL, err := url.Parse(bridgeURL)
 	if err != nil {
+		closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "invalid realtime bridge URL")
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "invalid realtime bridge URL", string(mediaCloseLegLocalError))
 		globalCtx.Logger().Warn("parse audio bridge url", "provider", "vonage", "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
 	dialer := ws.Dialer{}
 	core, _, _, err := dialer.Dial(r.Context(), coreURL.String())
 	if err != nil {
+		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "core audio bridge rejected", string(mediaCloseLegCore))
 		globalCtx.Logger().Warn("dial core audio bridge", "provider", "vonage", "err", err, "url", redactURL(coreURL.String()))
 		return
 	}
-	defer core.Close()
+	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
+	coreCloser := newGracefulWebSocket(core, coreWriter)
+	defer func() {
+		code, reason := closeState.Details()
+		coreCloser.Close(code, reason)
+	}()
 
 	globalCtx.Logger().Info("bridge up", "provider", "vonage", "call", callID, "thread", row.ThreadID)
-	_ = a.db().updateStatus(callID, "in-progress", "")
+	_ = a.db().updateMediaStatus(callID, "connected", "", 0, "")
 	_ = a.db().clearStateExpiry(callID)
 
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	defer func() {
+		leg, code, reason := closeState.Cause()
+		a.finishMediaBridge(callID, leg, code, reason)
+	}()
+	go func() {
+		select {
+		case <-r.Context().Done():
+			closeState.SetLeg(mediaCloseLegRequest, ws.StatusGoingAway, "media request context canceled")
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	go func() {
 		<-ctx.Done()
-		_ = vonage.Close()
-		_ = core.Close()
+		code, reason := closeState.Details()
+		vonageCloser.Close(code, reason)
+		coreCloser.Close(code, reason)
 	}()
 
 	audioFrontend := newCarrierAudioFrontend(16000)
 	audioFrontend.mode = localBargeInOff
-	var coreWriteMu sync.Mutex
 	defer logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "vonage", carrierCodecL16_16, 0)
 
 	go func() {
 		defer cancel()
 		inputResampler := newPCMResampler(16000, 24000)
 		for {
-			data, op, err := wsutil.ReadClientData(vonage)
+			data, op, err := readWebSocketData(vonage, ws.StateServerSide, vonageWriter)
 			if err != nil {
+				code, reason := websocketCloseDetails(err)
+				closeState.SetLeg(mediaCloseLegCarrier, code, reason)
 				return
 			}
 			if len(data) > maxCarrierFrameBytes {
+				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusMessageTooBig, "Vonage media frame too large")
 				return
 			}
 			if op != ws.OpBinary || len(data) == 0 {
@@ -446,10 +504,9 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 			if len(pcm24) == 0 {
 				continue
 			}
-			coreWriteMu.Lock()
-			err = wsutil.WriteClientBinary(core, pcm16ToBytes(pcm24))
-			coreWriteMu.Unlock()
+			err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
 			if err != nil {
+				closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "write caller audio to realtime bridge")
 				return
 			}
 		}
@@ -462,8 +519,10 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 			return
 		default:
 		}
-		data, op, err := wsutil.ReadServerData(core)
+		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter)
 		if err != nil {
+			code, reason := websocketCloseDetails(err)
+			closeState.SetLeg(mediaCloseLegCore, code, reason)
 			return
 		}
 		if op == ws.OpText {
@@ -477,7 +536,9 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		pcm16 := outputResampler.Process(bytesToPCM16(data))
-		if err := writeVonageFrames(vonage, pcm16ToBytes(pcm16)); err != nil {
+		err = writeVonageFrames(vonageWriter, pcm16ToBytes(pcm16))
+		if err != nil {
+			closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "write realtime audio to Vonage")
 			return
 		}
 	}
@@ -647,12 +708,20 @@ func buildCarrierClear(shape, streamSID string) any {
 	}
 }
 
-func (a *App) finishMediaBridge(callID, status string) {
-	if status == "" {
-		status = "completed"
+func (a *App) finishMediaBridge(callID string, leg mediaCloseLeg, code ws.StatusCode, reason string) {
+	status := "disconnected"
+	errMsg := ""
+	if code == ws.StatusInternalServerError {
+		status = "error"
+		errMsg = reason
 	}
-	_ = a.db().updateStatus(callID, status, "media stream disconnected")
-	_ = a.db().setStateExpiry(callID, time.Now().UTC().Add(20*time.Second))
+	_ = a.db().updateMediaStatusWithLeg(callID, status, errMsg, int(code), reason, string(leg))
+	if status == "error" {
+		_ = a.db().setStateExpiry(callID, time.Now().UTC().Add(2*time.Minute))
+	} else {
+		_ = a.db().clearStateExpiry(callID)
+	}
+	globalCtx.Logger().Info("media bridge down", "call", callID, "leg", leg, "code", code, "reason", reason)
 }
 
 func upsample16to24(pcm16 []int16) []int16 {
@@ -663,14 +732,14 @@ func downsample24to16(pcm24 []int16) []int16 {
 	return resamplePCM(pcm24, 24000, 16000)
 }
 
-func writeVonageFrames(conn net.Conn, data []byte) error {
+func writeVonageFrames(writer *websocketWriterPump, data []byte) error {
 	const frameBytes = 640 // 20ms of PCM16 mono at 16kHz.
 	for len(data) > 0 {
 		n := frameBytes
 		if len(data) < n {
 			n = len(data)
 		}
-		if err := wsutil.WriteServerBinary(conn, data[:n]); err != nil {
+		if err := writer.Write(ws.OpBinary, data[:n]); err != nil {
 			return err
 		}
 		data = data[n:]

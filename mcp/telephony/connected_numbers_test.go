@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -160,6 +161,77 @@ func TestConnectedNumbersKeepsRouteWhenCarrierNumberIsMissing(t *testing.T) {
 	}, &route, func(int64) string { return "Reception" })
 	if view.Route == nil || view.CarrierStatus != "not_found" || view.RoutingHealth != "degraded" {
 		t.Fatalf("missing carrier number route was hidden: %#v", view)
+	}
+}
+
+func TestListOwnedCarrierNumbersPaginatesTelnyx(t *testing.T) {
+	firstPage := make([]map[string]any, 2)
+	for i := range firstPage {
+		firstPage[i] = map[string]any{
+			"id":           fmt.Sprintf("id-%d", i),
+			"phone_number": fmt.Sprintf("+1202555%04d", i),
+		}
+	}
+	firstRaw, err := json.Marshal(map[string]any{
+		"data": firstPage,
+		"meta": map[string]any{"total_pages": 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := &answerPlatform{
+		integrationResponse: map[string]json.RawMessage{},
+		integrationResponses: map[string][]json.RawMessage{
+			"list_phone_numbers": {
+				firstRaw,
+				json.RawMessage(`{"data":[{"id":"id-2","phone_number":"+12025550002"}],"meta":{"total_pages":2}}`),
+			},
+		},
+	}
+	_, ctx := withTelephonyTestContext(t, platform)
+	numbers, err := listOwnedCarrierNumbers(ctx, &numberProvider{Slug: "telnyx", ConnID: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(numbers) != 3 || len(platform.integrationCalls) != 2 {
+		t.Fatalf("numbers=%d calls=%#v", len(numbers), platform.integrationCalls)
+	}
+	if got := platform.integrationCalls[1].Input["page[number]"]; got != 2 {
+		t.Fatalf("second Telnyx page=%#v", got)
+	}
+}
+
+func TestListOwnedCarrierNumbersPaginatesPlivo(t *testing.T) {
+	firstPage := make([]map[string]any, 20)
+	for i := range firstPage {
+		firstPage[i] = map[string]any{"number": fmt.Sprintf("1202555%04d", i)}
+	}
+	firstRaw, err := json.Marshal(map[string]any{
+		"objects": firstPage,
+		"meta":    map[string]any{"limit": 20, "offset": 0, "total_count": 21},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := &answerPlatform{
+		integrationResponse: map[string]json.RawMessage{},
+		integrationResponses: map[string][]json.RawMessage{
+			"list_owned_phone_numbers": {
+				firstRaw,
+				json.RawMessage(`{"objects":[{"number":"12025550200"}],"meta":{"limit":20,"offset":20,"total_count":21}}`),
+			},
+		},
+	}
+	_, ctx := withTelephonyTestContext(t, platform)
+	numbers, err := listOwnedCarrierNumbers(ctx, &numberProvider{Slug: "plivo", ConnID: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(numbers) != 21 || len(platform.integrationCalls) != 2 {
+		t.Fatalf("numbers=%d calls=%#v", len(numbers), platform.integrationCalls)
+	}
+	if got := platform.integrationCalls[1].Input["offset"]; got != 20 {
+		t.Fatalf("second Plivo offset=%#v", got)
 	}
 }
 

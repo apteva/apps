@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -21,12 +22,14 @@ type fakeCoreAudioBridge struct {
 	conn     chan net.Conn
 	inbound  chan []byte
 	controls chan realtimeBridgeControl
+	closed   chan wsutil.ClosedError
 }
 
 func newFakeCoreAudioBridge(t *testing.T) (*fakeCoreAudioBridge, *httptest.Server) {
 	t.Helper()
 	bridge := &fakeCoreAudioBridge{
 		conn: make(chan net.Conn, 1), inbound: make(chan []byte, 64), controls: make(chan realtimeBridgeControl, 16),
+		closed: make(chan wsutil.ClosedError, 1),
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, _, _, err := ws.UpgradeHTTP(r, w)
@@ -38,6 +41,10 @@ func newFakeCoreAudioBridge(t *testing.T) (*fakeCoreAudioBridge, *httptest.Serve
 		for {
 			data, op, err := wsutil.ReadClientData(conn)
 			if err != nil {
+				var closed wsutil.ClosedError
+				if errors.As(err, &closed) {
+					bridge.closed <- closed
+				}
 				return
 			}
 			switch op {
@@ -297,6 +304,14 @@ func TestTwilioMediaBridgeFullDuplexAudioContinuity(t *testing.T) {
 	case <-handlerDone:
 	case <-time.After(time.Second):
 		t.Fatal("Telephony media handler did not stop")
+	}
+	select {
+	case closed := <-coreBridge.closed:
+		if closed.Code != ws.StatusNormalClosure {
+			t.Fatalf("Core close = code %d reason %q", closed.Code, closed.Reason)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Core did not receive a WebSocket close frame")
 	}
 }
 

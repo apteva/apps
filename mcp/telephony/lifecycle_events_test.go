@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -28,6 +29,17 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 	if !reflect.DeepEqual(diskTopics, embeddedTopics) {
 		t.Fatalf("published event declaration drift:\ndisk: %#v\nembedded: %#v", diskTopics, embeddedTopics)
 	}
+	diskTools := manifestToolNames(disk.Provides.MCPTools)
+	embeddedTools := manifestToolNames(embedded.Provides.MCPTools)
+	if !reflect.DeepEqual(diskTools, embeddedTools) {
+		t.Fatalf("MCP tool declaration drift:\ndisk: %#v\nembedded: %#v", diskTools, embeddedTools)
+	}
+	if !reflect.DeepEqual(disk.ConfigSchema, embedded.ConfigSchema) {
+		t.Fatalf("config schema declaration drift:\ndisk: %#v\nembedded: %#v", disk.ConfigSchema, embedded.ConfigSchema)
+	}
+	if !containsString(embeddedTools, "telephony_routes_set_transport") {
+		t.Fatal("direct SIP transport tool is not declared in the manifest")
+	}
 	want := []string{
 		"call.incoming", "call.initiated", "call.ringing", "call.answered",
 		"call.completed", "call.failed", "call.busy", "call.no_answer",
@@ -36,6 +48,14 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 	if !reflect.DeepEqual(embeddedTopics, want) {
 		t.Fatalf("published topics = %#v, want %#v", embeddedTopics, want)
 	}
+}
+
+func manifestToolNames(tools []sdk.MCPToolSpec) []string {
+	out := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		out = append(out, tool.Name)
+	}
+	return out
 }
 
 func publishedTopics(events []sdk.EventDecl) []string {
@@ -192,6 +212,107 @@ func TestTwilioCallbackCapturesProviderLifecycleFacts(t *testing.T) {
 	}
 	if normalizeCallStatus("queued") != "initiated" {
 		t.Fatal("Twilio queued status was not normalized to initiated")
+	}
+}
+
+func TestPlivoStreamCallbacksPreserveMediaHealth(t *testing.T) {
+	tests := []struct {
+		event     string
+		wantMedia string
+		wantError bool
+	}{
+		{event: "StartStream", wantMedia: "connected"},
+		{event: "StopStream", wantMedia: "disconnected"},
+		{event: "DroppedStream", wantMedia: "error", wantError: true},
+		{event: "DegradedStream", wantMedia: "degraded", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.event, func(t *testing.T) {
+			form := url.Values{
+				"Event":     {test.event},
+				"CallUUID":  {"call-uuid"},
+				"StreamID":  {"stream-id"},
+				"Timestamp": {"2026-07-28T10:00:00Z"},
+			}
+			req := httptest.NewRequest(http.MethodPost, "https://example.test/status", nil)
+			req.Form = form
+			req.PostForm = form
+			update := callbackUpdateFor("plivo", req)
+			if update.Status != "" || update.MediaStatus != test.wantMedia || update.CarrierSID != "call-uuid" {
+				t.Fatalf("callback update = %#v", update)
+			}
+			if (update.MediaError != "") != test.wantError {
+				t.Fatalf("callback media error=%q, wantError=%v", update.MediaError, test.wantError)
+			}
+			if update.Facts.ProviderEventID == "" || update.Facts.Source != "provider" {
+				t.Fatalf("callback facts = %#v", update.Facts)
+			}
+		})
+	}
+}
+
+func TestMediaErrorRemainsDiagnosticAfterDisconnectAndCarrierCompletion(t *testing.T) {
+	db := testCallsDB(t)
+	call := testCall("media-error-order", "in-progress")
+	if err := db.insertCall(call); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.updateMediaStatusWithLeg(call.ID, "error", "upstream reset", 1011, "transport failed", "core"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.updateMediaStatus(call.ID, "disconnected", "", 1000, "bridge complete"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.updateStatusWithFacts(call.ID, "completed", "", lifecycleFacts{
+		Source: "provider", OccurredAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.findCall(call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "completed" || stored.MediaStatus != "error" ||
+		stored.MediaErrorMessage != "upstream reset" || stored.MediaCloseCode != 1011 ||
+		stored.MediaCloseReason != "transport failed" || stored.MediaCloseLeg != "core" {
+		t.Fatalf("call state = %+v", stored)
+	}
+	payload := lifecycleEventPublic(*stored, "event-media-error", "call.completed", time.Now().UTC().Format(time.RFC3339Nano), lifecycleFacts{})
+	media, _ := payload["media"].(map[string]any)
+	if media["close_leg"] != "core" {
+		t.Fatalf("lifecycle media diagnostics = %#v", media)
+	}
+}
+
+func TestFirstNormalMediaCloseCauseSurvivesCarrierStopCallback(t *testing.T) {
+	db := testCallsDB(t)
+	call := testCall("media-close-order", "in-progress")
+	if err := db.insertCall(call); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.updateMediaStatusWithLeg(call.ID, "disconnected", "", 1000, "core bridge complete", "core"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.updateMediaStatusWithLeg(call.ID, "disconnected", "", 1000, "carrier stream stopped", "carrier"); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.findCall(call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.MediaCloseCode != 1000 || stored.MediaCloseReason != "core bridge complete" || stored.MediaCloseLeg != "core" {
+		t.Fatalf("first close cause was overwritten: %+v", stored)
+	}
+}
+
+func TestTelnyxStreamingFailureIsMediaOnly(t *testing.T) {
+	body := `{"data":{"id":"evt-stream","event_type":"streaming.failed","occurred_at":"2026-07-28T10:00:00Z","payload":{"call_control_id":"v3:test","hangup_cause":"websocket timeout"}}}`
+	req := httptest.NewRequest(http.MethodPost, "https://example.test/status", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	update := callbackUpdateFor("telnyx", req)
+	if update.Status != "" || update.MediaStatus != "error" ||
+		update.MediaError != "websocket timeout" || update.CarrierSID != "v3:test" {
+		t.Fatalf("callback update = %#v", update)
 	}
 }
 

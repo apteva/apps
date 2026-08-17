@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
@@ -44,8 +45,16 @@ func TestTwilioStreamTwiMLRecordingIsOptIn(t *testing.T) {
 
 func TestRecordingStorageDependencyIsOptional(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.1.21" {
-		t.Fatalf("manifest version=%q, want 0.1.21", manifest.Version)
+	diskBytes, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, err := sdk.ParseManifest(diskBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Version != disk.Version {
+		t.Fatalf("embedded manifest version=%q, disk version=%q", manifest.Version, disk.Version)
 	}
 	for _, dependency := range manifest.Requires.Apps {
 		if dependency.Name == "storage" {

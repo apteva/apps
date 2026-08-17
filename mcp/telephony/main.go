@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.21
+version: 0.2.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -89,6 +89,9 @@ provides:
     - { prefix: /recordings/ }
     - { prefix: /recording-settings }
     - { prefix: /numbers/ }
+    - { prefix: /softphone/ }
+    - { prefix: /softphone/media/, no_auth: true }
+    - { prefix: /peer/, no_auth: true }
   mcp_tools:
     - { name: telephony_place_call,   description: "Place an outbound voice call." }
     - { name: telephony_answer_call,  description: "Answer an inbound call by spawning a realtime thread." }
@@ -96,7 +99,8 @@ provides:
     - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent." }
     - { name: telephony_routes_set_answer_mode, description: "Configure agent-decided or immediate realtime answering for an inbound route." }
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
-    - { name: telephony_routes_configure_carrier, description: "Configure the carrier phone number webhook for an inbound route." }
+    - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
+    - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route." }
     - { name: telephony_routes_disable, description: "Disable an inbound route and restore the prior carrier webhook." }
     - { name: telephony_routes_list,  description: "List inbound call routes." }
     - { name: telephony_pending_calls, description: "List pending inbound calls." }
@@ -142,6 +146,10 @@ provides:
         from_number: string
         to_number: string
         status: string
+        carrier_status: string
+        media_status: string
+        media_error_message: string
+        media: object
         previous_status: string
         agent_id: integer
         route_id: string
@@ -206,23 +214,46 @@ db:
   driver: sqlite
   path: /data/telephony.db
   migrations: migrations/
+config_schema:
+  - { name: sip_transport, type: select, default: "tls", label: "SIP signaling transport", options: [tls, tcp, udp] }
+  - { name: sip_listen, type: text, default: "0.0.0.0:5061", label: "SIP listen address" }
+  - { name: sip_public_host, type: text, label: "SIP hostname override", description: "Optional. Defaults to the hostname from the Apteva public URL." }
+  - { name: sip_public_ip, type: text, label: "SIP public IPv4 override", description: "Optional. Defaults to the public IPv4 resolved from the SIP hostname." }
+  - { name: sip_tls_cert_file, type: text, label: "SIP TLS certificate override", description: "Optional. Telephony discovers standard Apteva and Let's Encrypt certificate paths." }
+  - { name: sip_tls_key_file, type: text, label: "SIP TLS key override", description: "Optional. Must be set with the certificate override." }
+  - { name: sip_allowed_cidrs, type: text, label: "Carrier CIDR override", description: "Optional. Defaults to maintained Twilio and Telnyx signaling and media networks." }
+  - { name: sip_rtp_bind_ip, type: text, default: "0.0.0.0", label: "RTP bind IPv4 address" }
+  - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }
+  - { name: sip_rtp_port_max, type: text, default: "20199", label: "Last RTP UDP port" }
+  - { name: sip_srtp, type: select, default: "preferred", label: "Media encryption", options: [required, preferred, disabled] }
+  - { name: sip_max_sessions, type: text, default: "100", label: "Maximum SIP sessions" }
+  - { name: sip_allow_insecure_signaling, type: toggle, default: "false", label: "Allow UDP or TCP signaling" }
 upgrade_policy: auto-patch
 `
 
 var globalCtx *sdk.AppCtx
 
-type App struct{ installID int64 }
+type App struct {
+	installID  int64
+	sip        sipRuntimeHolder
+	softphones softphoneRegistry
+}
 
 const (
-	answerModeAgent             = "agent"
-	answerModeRealtimeImmediate = "realtime_immediate"
-	defaultInboundGreeting      = "Greet the caller naturally, introduce yourself, and ask how you can help."
-	recordingModeOff            = "off"
-	recordingModeAlways         = "always"
-	recordingModeInherit        = "inherit"
-	recordingStorageCopy        = "copy_to_storage"
-	recordingStorageMove        = "copy_then_delete_provider"
-	recordingStorageProvider    = "provider_only"
+	answerModeAgent              = "agent"
+	answerModeRealtimeImmediate  = "realtime_immediate"
+	answerModeHumanBrowser       = "human_browser"
+	peerKindRealtime             = "realtime"
+	peerKindHuman                = "human"
+	defaultInboundGreeting       = "Greet the caller naturally, introduce yourself, and ask how you can help."
+	recordingModeOff             = "off"
+	recordingModeAlways          = "always"
+	recordingModeInherit         = "inherit"
+	recordingStorageCopy         = "copy_to_storage"
+	recordingStorageMove         = "copy_then_delete_provider"
+	recordingStorageProvider     = "provider_only"
+	inboundTransportProgrammable = "programmable_websocket"
+	inboundTransportSIPDirect    = "sip_direct"
 )
 
 func main() { sdk.Run(&App{}) }
@@ -249,20 +280,34 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.installID = identity.InstallID
 	if _, err := ctx.AppDB().Exec(`UPDATE calls SET media_active = 0,
-        status = CASE WHEN status IN ('answered','in-progress') THEN 'media-disconnected' ELSE status END,
-        state_expires_at = CASE WHEN status IN ('answered','in-progress') THEN ? ELSE state_expires_at END
-        WHERE media_active <> 0 OR status IN ('answered','in-progress')`,
+        media_status = CASE WHEN media_active <> 0 OR media_status IN ('connecting','connected') THEN 'disconnected' ELSE media_status END,
+        media_disconnected_at = CASE WHEN media_active <> 0 OR media_status IN ('connecting','connected') THEN ? ELSE media_disconnected_at END,
+        media_close_code = CASE WHEN media_active <> 0 OR media_status IN ('connecting','connected') THEN 1001 ELSE media_close_code END,
+        media_close_reason = CASE WHEN media_active <> 0 OR media_status IN ('connecting','connected') THEN 'telephony app restarted' ELSE media_close_reason END,
+        media_close_leg = CASE WHEN media_active <> 0 OR media_status IN ('connecting','connected') THEN 'local_error' ELSE media_close_leg END,
+        state_expires_at = CASE
+            WHEN status NOT IN ('completed','failed','no-answer','busy','canceled')
+             AND (media_active <> 0 OR media_status IN ('connecting','connected'))
+            THEN ? ELSE state_expires_at END
+        WHERE media_active <> 0 OR media_status IN ('connecting','connected')`,
+		time.Now().UTC().Format(time.RFC3339),
 		time.Now().UTC().Add(20*time.Second).Format(time.RFC3339)); err != nil {
 		return fmt.Errorf("reset stale media claims: %w", err)
 	}
 	_, _ = ctx.AppDB().Exec(`UPDATE recordings SET storage_status = 'failed',
         last_error = 'recording import interrupted by app restart', import_started_at = '',
         next_attempt_at = ? WHERE storage_status = 'importing'`, time.Now().UTC().Format(time.RFC3339))
+	if err := a.startSIPGateway(ctx); err != nil {
+		return fmt.Errorf("start direct SIP gateway: %w", err)
+	}
 	ctx.Logger().Info("telephony mounted")
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.stopSIPGateway()
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
@@ -315,6 +360,12 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/recording-settings", Handler: a.handleRecordingSettings},
 		// Provider-neutral phone-number discovery and confirmed purchase.
 		{Pattern: "/numbers/", Handler: a.handleNumbers},
+		// Browser softphone. /softphone/ is panel-authenticated; the operator's
+		// audio socket is token-gated in-path like the carrier /media/ routes,
+		// and /peer/ is the loopback endpoint the carrier bridge dials.
+		{Pattern: "/softphone/", Handler: a.handleSoftphoneAction},
+		{Pattern: "/softphone/media/", Handler: a.handleSoftphoneMedia, NoAuth: true},
+		{Pattern: "/peer/", Handler: a.handlePeerSocket, NoAuth: true},
 	}
 }
 
@@ -344,27 +395,28 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_routes_create",
-			Description: "Create an inbound route from a carrier phone number to the calling agent. After creating it, call telephony_routes_configure_carrier(route_id) to set provider routing. Args: phone_number? (defaults to bound connection phone_number), phone_number_id?, hold_prompt?, timeout_sec?, answer_mode? (agent|realtime_immediate), directive?, voice?, greeting?.",
+			Description: "Create an inbound route from a carrier phone number to the calling agent. After creating it, call telephony_routes_configure_carrier(route_id) to set provider routing. Args: phone_number? (defaults to bound connection phone_number), phone_number_id?, hold_prompt?, timeout_sec?, answer_mode? (agent|realtime_immediate|human_browser), directive?, voice?, greeting?.",
 			InputSchema: schemaObject(map[string]any{
-				"phone_number":     map[string]any{"type": "string", "description": "Inbound number in E.164. Defaults to bound carrier connection phone_number."},
-				"phone_number_id":  map[string]any{"type": "string", "description": "Optional provider phone-number resource ID; auto-discovered when omitted."},
-				"phone_number_sid": map[string]any{"type": "string", "description": "Legacy alias for phone_number_id."},
-				"hold_prompt":      map[string]any{"type": "string", "description": "Short prompt supported carriers play while the agent decides whether to answer."},
-				"timeout_sec":      map[string]any{"type": "integer", "description": "How long to wait before ending if no answer.", "default": 60, "minimum": 10, "maximum": 300},
-				"answer_mode":      map[string]any{"type": "string", "enum": []string{"agent", "realtime_immediate"}, "default": "agent", "description": "Agent emits an answer decision, or Telephony immediately starts the configured realtime thread."},
-				"directive":        map[string]any{"type": "string", "description": "Required system directive when answer_mode is realtime_immediate."},
-				"voice":            map[string]any{"type": "string", "description": "Optional realtime voice for immediate answering."},
-				"greeting":         map[string]any{"type": "string", "description": "Opening instruction spoken after the media bridge connects."},
-				"recording_mode":   map[string]any{"type": "string", "enum": []string{"inherit", "off", "always"}, "default": "inherit"},
+				"phone_number":      map[string]any{"type": "string", "description": "Inbound number in E.164. Defaults to bound carrier connection phone_number."},
+				"phone_number_id":   map[string]any{"type": "string", "description": "Optional provider phone-number resource ID; auto-discovered when omitted."},
+				"phone_number_sid":  map[string]any{"type": "string", "description": "Legacy alias for phone_number_id."},
+				"hold_prompt":       map[string]any{"type": "string", "description": "Short prompt supported carriers play while the agent decides whether to answer."},
+				"timeout_sec":       map[string]any{"type": "integer", "description": "How long to wait before ending if no answer.", "default": 60, "minimum": 10, "maximum": 300},
+				"answer_mode":       map[string]any{"type": "string", "enum": []string{"agent", "realtime_immediate", "human_browser"}, "default": "agent", "description": "Agent emits an answer decision, or Telephony immediately starts the configured realtime thread."},
+				"directive":         map[string]any{"type": "string", "description": "Required system directive when answer_mode is realtime_immediate."},
+				"voice":             map[string]any{"type": "string", "description": "Optional realtime voice for immediate answering."},
+				"greeting":          map[string]any{"type": "string", "description": "Opening instruction spoken after the media bridge connects."},
+				"recording_mode":    map[string]any{"type": "string", "enum": []string{"inherit", "off", "always"}, "default": "inherit"},
+				"inbound_transport": map[string]any{"type": "string", "enum": []string{inboundTransportProgrammable, inboundTransportSIPDirect}, "default": inboundTransportProgrammable},
 			}, nil),
 			HandlerCtx: a.toolRoutesCreate,
 		},
 		{
 			Name:        "telephony_routes_set_answer_mode",
-			Description: "Configure how an inbound route answers. agent preserves event-driven pickup. realtime_immediate starts the realtime thread as soon as the carrier webhook arrives and requires directive. Args: route_id, answer_mode, directive?, voice?, greeting?; changes apply to new calls.",
+			Description: "Configure how an inbound route answers. agent preserves event-driven pickup. realtime_immediate starts the realtime thread as soon as the carrier webhook arrives and requires directive. human_browser parks the call for an operator to answer in the Telephony panel and never involves an agent. Args: route_id, answer_mode, directive?, voice?, greeting?; changes apply to new calls.",
 			InputSchema: schemaObject(map[string]any{
 				"route_id":    map[string]any{"type": "string"},
-				"answer_mode": map[string]any{"type": "string", "enum": []string{"agent", "realtime_immediate"}},
+				"answer_mode": map[string]any{"type": "string", "enum": []string{"agent", "realtime_immediate", "human_browser"}},
 				"directive":   map[string]any{"type": "string"},
 				"voice":       map[string]any{"type": "string"},
 				"greeting":    map[string]any{"type": "string"},
@@ -381,8 +433,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx: a.toolRouteRecordingPolicy,
 		},
 		{
+			Name:        "telephony_routes_set_transport",
+			Description: "Select the inbound carrier transport for a route. programmable_websocket uses provider webhooks/media streaming; sip_direct sends SIP/RTP directly to this Telephony installation. Carrier configuration must be applied afterward with telephony_routes_configure_carrier.",
+			InputSchema: schemaObject(map[string]any{
+				"route_id":          map[string]any{"type": "string"},
+				"inbound_transport": map[string]any{"type": "string", "enum": []string{inboundTransportProgrammable, inboundTransportSIPDirect}},
+			}, []string{"route_id", "inbound_transport"}),
+			HandlerCtx: a.toolRoutesSetTransport,
+		},
+		{
 			Name:        "telephony_routes_configure_carrier",
-			Description: "Configure the bound carrier for an inbound route. Twilio updates the number webhook; Telnyx and Plivo create a dedicated voice application and assign the number. Args: route_id (required).",
+			Description: "Configure the bound carrier for an inbound route. Programmable transport configures provider webhooks/applications. Direct SIP configures a Twilio SIP trunk or Telnyx FQDN connection. Args: route_id (required).",
 			InputSchema: schemaObject(map[string]any{
 				"route_id": map[string]any{"type": "string", "description": "Route id returned by telephony_routes_create."},
 			}, []string{"route_id"}),
@@ -791,20 +852,23 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	threadID := "tel-" + callID
 	callbackSecret := newSecret()
 	now := time.Now().UTC()
-	effectiveDirective := directiveWithCallContext(directive, callRow{
+	spawnCall := callRow{
 		ID:          callID,
 		Direction:   "outbound",
 		CarrierSlug: carrierSlug,
 		ToNumber:    to,
 		FromNumber:  from,
 		IngressPath: "outbound",
-	})
+	}
+	effectiveDirective := strings.TrimSpace(directive)
 
 	rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
 		AgentID:                    agentID,
 		ThreadID:                   threadID,
 		Directive:                  effectiveDirective,
 		Voice:                      voice,
+		CapabilityMode:             sdk.RealtimeCapabilitiesInheritAgent,
+		CallContext:                realtimeCallContext(spawnCall),
 		TurnDetection:              telephonyTurnDetection(),
 		Ephemeral:                  true,
 		InitialMessage:             greeting,
@@ -828,7 +892,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	// connect their media WebSocket immediately after the API accepts
 	// the call, so the bridge route must already be able to resolve
 	// callID -> audio_bridge_url.
-	if err := a.db().insertCall(callRow{
+	row := callRow{
 		ID:                     callID,
 		ThreadID:               threadID,
 		Direction:              "outbound",
@@ -852,47 +916,93 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		RecordingChannels:      recordingPolicy.Channels,
 		RecordingStorageMode:   recordingPolicy.StorageMode,
 		RecordingRetentionDays: recordingPolicy.RetentionDays,
+		PeerKind:               peerKindRealtime,
+	}
+	if err := a.placeOutboundLeg(ctx, carrier, &row, timeout, maxDuration, func() {
+		_ = ctx.PlatformAPI().KillThread(agentID, threadID)
 	}); err != nil {
-		_ = ctx.PlatformAPI().KillThread(agentID, threadID)
-		return mcpError("persist call before carrier placement: " + err.Error()), nil
-	}
-
-	placed, err := carrier.Place(ctx, carrierPlaceRequest{
-		CallID:            callID,
-		CallbackSecret:    callbackSecret,
-		ProjectID:         projectID,
-		To:                to,
-		From:              from,
-		TimeoutSec:        timeout,
-		MaxDurationSec:    maxDuration,
-		AudioBridgeURL:    rt.AudioBridgeURL,
-		RecordingMode:     recordingMode,
-		RecordingChannels: recordingPolicy.Channels,
-	})
-	if err != nil {
-		_ = a.db().updateStatus(callID, "failed", err.Error())
-		_ = ctx.PlatformAPI().KillThread(agentID, threadID)
 		return mcpError(err.Error()), nil
-	}
-	if placed != nil && (placed.CarrierSID != "" || placed.CarrierRequestID != "") {
-		if err := a.db().updateCarrierIdentity(callID, placed.CarrierSID, placed.CarrierRequestID); err != nil {
-			if placed.CarrierSID != "" {
-				_ = carrier.Hangup(ctx, &callRow{CarrierSID: placed.CarrierSID})
-			}
-			_ = ctx.PlatformAPI().KillThread(agentID, threadID)
-			_ = a.db().updateStatus(callID, "failed", "persist carrier call id: "+err.Error())
-			return mcpError("persist carrier call id: " + err.Error()), nil
-		}
-	}
-	if err := a.db().updateStatus(callID, "initiated", ""); err != nil {
-		if placed != nil && placed.CarrierSID != "" {
-			_ = carrier.Hangup(ctx, &callRow{CarrierSID: placed.CarrierSID})
-		}
-		_ = ctx.PlatformAPI().KillThread(agentID, threadID)
-		return mcpError("persist call initiation: " + err.Error()), nil
 	}
 
 	return callToolResult(callID, threadID, to), nil
+}
+
+// placeOutboundLeg persists an outbound call and hands it to the carrier,
+// unwinding cleanly at each failure point. Shared by the realtime path
+// (toolPlaceCall) and the softphone path (placeHumanCall); the two differ only
+// in what the row's AudioBridgeURL points at and whether there is a thread to
+// kill on failure.
+//
+// onUnwind is invoked on every failure after the row exists. The realtime
+// caller passes a KillThread closure; the softphone caller passes nil, because
+// a human call has no thread.
+func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *callRow, timeout, maxDuration int, onUnwind func()) error {
+	unwind := func() {
+		if onUnwind != nil {
+			onUnwind()
+		}
+	}
+	if err := a.db().insertCall(*row); err != nil {
+		unwind()
+		return errors.New("persist call before carrier placement: " + err.Error())
+	}
+
+	placed, err := carrier.Place(ctx, carrierPlaceRequest{
+		CallID:            row.ID,
+		CallbackSecret:    row.CallbackSecret,
+		ProjectID:         row.ProjectID,
+		To:                row.ToNumber,
+		From:              row.FromNumber,
+		TimeoutSec:        timeout,
+		MaxDurationSec:    maxDuration,
+		AudioBridgeURL:    row.AudioBridgeURL,
+		RecordingMode:     row.RecordingMode,
+		RecordingChannels: row.RecordingChannels,
+	})
+	if err != nil {
+		_ = a.db().updateStatus(row.ID, "failed", err.Error())
+		unwind()
+		return err
+	}
+	if placed != nil && (placed.CarrierSID != "" || placed.CarrierRequestID != "") {
+		if err := a.db().updateCarrierIdentity(row.ID, placed.CarrierSID, placed.CarrierRequestID); err != nil {
+			if placed.CarrierSID != "" {
+				_ = carrier.Hangup(ctx, &callRow{CarrierSID: placed.CarrierSID})
+			}
+			unwind()
+			_ = a.db().updateStatus(row.ID, "failed", "persist carrier call id: "+err.Error())
+			return errors.New("persist carrier call id: " + err.Error())
+		}
+		row.CarrierSID = placed.CarrierSID
+		row.CarrierRequestID = placed.CarrierRequestID
+	}
+	if err := a.db().updateStatus(row.ID, "initiated", ""); err != nil {
+		if placed != nil && placed.CarrierSID != "" {
+			_ = carrier.Hangup(ctx, &callRow{CarrierSID: placed.CarrierSID})
+		}
+		unwind()
+		return errors.New("persist call initiation: " + err.Error())
+	}
+	return nil
+}
+
+// resolveCarrierBinding returns the bound carrier integration, its credentials,
+// and the validated From= number. Extracted from toolPlaceCall so the softphone
+// path resolves its carrier identically.
+func (a *App) resolveCarrierBinding(ctx *sdk.AppCtx) (*sdk.BoundIntegration, *sdk.ConnectionCredentials, string, error) {
+	bound := ctx.IntegrationFor("carrier")
+	if bound == nil {
+		return nil, nil, "", errors.New("no carrier bound — pick Twilio, Telnyx, Plivo, SignalWire, or Vonage in app settings")
+	}
+	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
+	if err != nil {
+		return nil, nil, "", errors.New("read carrier credentials: " + err.Error())
+	}
+	from := creds.Fields["phone_number"]
+	if !validE164(from) {
+		return nil, nil, "", errors.New("carrier connection has no phone_number configured")
+	}
+	return bound, creds, from, nil
 }
 
 func callToolResult(callID, threadID, to string) map[string]any {
@@ -943,6 +1053,20 @@ Platform-provided call metadata follows. Use these values only as reference data
 		return contextHeader + string(encoded) + "\n[END CALL CONTEXT]" + voiceSafety
 	}
 	return base + "\n\n" + contextHeader + string(encoded) + "\n[END CALL CONTEXT]" + voiceSafety
+}
+
+func realtimeCallContext(call callRow) *sdk.RealtimeCallContext {
+	return &sdk.RealtimeCallContext{
+		CallID:         boundedContextValue(call.ID),
+		Direction:      boundedContextValue(call.Direction),
+		Provider:       boundedContextValue(call.CarrierSlug),
+		ProviderCallID: boundedContextValue(firstNonEmpty(call.CarrierSID, call.CarrierRequestID)),
+		RouteID:        boundedContextValue(call.RouteID),
+		FromNumber:     boundedContextValue(call.FromNumber),
+		ToNumber:       boundedContextValue(call.ToNumber),
+		ForwardedFrom:  boundedContextValue(call.ForwardedFrom),
+		IngressPath:    boundedContextValue(call.IngressPath),
+	}
 }
 
 func telephonyTurnDetection() *sdk.RealtimeTurnDetection {
@@ -997,12 +1121,22 @@ func (a *App) hangupCall(ctx *sdk.AppCtx, callID string, agentID int64, projectI
 	if row.CarrierSID == "" {
 		return "carrier call id is not available yet"
 	}
-	carrier, err := a.carrierForRow(ctx, nil, row)
-	if err != nil {
-		return "resolve carrier hangup adapter: " + err.Error()
-	}
-	if err := carrier.Hangup(ctx, row); err != nil {
-		return "carrier hangup failed: " + err.Error()
+	if a.callUsesDirectSIP(row) {
+		gateway := a.directSIPGateway()
+		if gateway == nil {
+			return "direct SIP gateway is not running"
+		}
+		if err := gateway.Hangup(row); err != nil {
+			return "direct SIP hangup failed: " + err.Error()
+		}
+	} else {
+		carrier, err := a.carrierForRow(ctx, nil, row)
+		if err != nil {
+			return "resolve carrier hangup adapter: " + err.Error()
+		}
+		if err := carrier.Hangup(ctx, row); err != nil {
+			return "carrier hangup failed: " + err.Error()
+		}
 	}
 	if err := a.killCallThread(ctx, row); err != nil {
 		ctx.Logger().Warn("kill thread failed", "err", err)
@@ -1066,7 +1200,18 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 	if slug != "twilio" && slug != "telnyx" && slug != "plivo" {
 		return mcpError("inbound call routing is not implemented for provider " + slug), nil
 	}
-	if err := a.validatePublicEndpoint(); err != nil {
+	transport, err := normalizeInboundTransport(strArg(args, "inbound_transport", inboundTransportProgrammable))
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	if transport == inboundTransportSIPDirect {
+		if slug != "twilio" && slug != "telnyx" {
+			return mcpError("automatic direct SIP routing is not implemented for provider " + slug), nil
+		}
+		if err := a.ensureSIPGateway(ctx); err != nil {
+			return mcpError("prepare direct SIP: " + err.Error()), nil
+		}
+	} else if err := a.validatePublicEndpoint(); err != nil {
 		return mcpError(err.Error()), nil
 	}
 	projectID := currentProject(ctx)
@@ -1099,6 +1244,9 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
+	if recordingMode == recordingModeAlways && transport == inboundTransportSIPDirect {
+		return mcpError("provider-cloud recording is unavailable on direct SIP routes; set recording_mode to off or inherit"), nil
+	}
 	if recordingMode == recordingModeAlways && !providerSupportsRecording(slug) {
 		return mcpError("call recording is not implemented for provider " + slug), nil
 	}
@@ -1122,14 +1270,19 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 		CreatedAt:           now,
 		UpdatedAt:           now,
 		RecordingMode:       recordingMode,
+		InboundTransport:    transport,
 	}
 	if err := a.db().insertRoute(route); err != nil {
 		return mcpError("persist inbound route: " + err.Error()), nil
 	}
+	next := "Call telephony_routes_configure_carrier with route_id to set the carrier webhook."
+	if transport == inboundTransportSIPDirect {
+		next = "Call telephony_routes_configure_carrier with route_id to assign the carrier number to this installation's direct SIP endpoint."
+	}
 	return map[string]any{
 		"route":       routePublic(a, route),
 		"inbound_url": a.inboundRouteURL(route),
-		"next":        "Call telephony_routes_configure_carrier with route_id to set the carrier webhook.",
+		"next":        next,
 	}, nil
 }
 
@@ -1201,20 +1354,7 @@ func (a *App) toolRoutesConfigureCarrier(callerCtx context.Context, ctx *sdk.App
 	if !route.Enabled {
 		return mcpError("route is disabled"), nil
 	}
-	if err := a.validatePublicEndpoint(); err != nil {
-		return mcpError(err.Error()), nil
-	}
-	switch route.CarrierSlug {
-	case "twilio":
-		err = a.configureTwilioRoute(ctx, route)
-	case "telnyx":
-		err = a.configureTelnyxRoute(ctx, route)
-	case "plivo":
-		err = a.configurePlivoRoute(ctx, route)
-	default:
-		err = fmt.Errorf("carrier webhook configuration is not implemented for provider %s", route.CarrierSlug)
-	}
-	if err != nil {
+	if err := a.configureRouteCarrier(ctx, route); err != nil {
 		return mcpError(err.Error()), nil
 	}
 	return map[string]any{
@@ -1222,6 +1362,41 @@ func (a *App) toolRoutesConfigureCarrier(callerCtx context.Context, ctx *sdk.App
 		"route":       routePublic(a, *route),
 		"inbound_url": a.inboundRouteURL(*route),
 	}, nil
+}
+
+func (a *App) configureRouteCarrier(ctx *sdk.AppCtx, route *routeRow) error {
+	if route == nil {
+		return errors.New("route required")
+	}
+	if !route.Enabled {
+		return errors.New("route is disabled")
+	}
+	if firstNonEmpty(route.InboundTransport, inboundTransportProgrammable) == inboundTransportProgrammable {
+		if err := a.validatePublicEndpoint(); err != nil {
+			return err
+		}
+	}
+	var err error
+	if route.InboundTransport == inboundTransportSIPDirect {
+		err = a.configureDirectSIPCarrierRoute(ctx, route)
+	} else {
+		if route.TransportConfig != "" {
+			if err = a.deconfigureDirectSIPCarrierRoute(ctx, route); err != nil {
+				return err
+			}
+		}
+		switch route.CarrierSlug {
+		case "twilio":
+			err = a.configureTwilioRoute(ctx, route)
+		case "telnyx":
+			err = a.configureTelnyxRoute(ctx, route)
+		case "plivo":
+			err = a.configurePlivoRoute(ctx, route)
+		default:
+			err = fmt.Errorf("carrier webhook configuration is not implemented for provider %s", route.CarrierSlug)
+		}
+	}
+	return err
 }
 
 func (a *App) toolRoutesDisable(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1246,15 +1421,19 @@ func (a *App) toolRoutesDisable(callerCtx context.Context, ctx *sdk.AppCtx, args
 	if !route.Enabled {
 		return map[string]any{"ok": true, "route_id": route.ID, "already_disabled": true}, nil
 	}
-	switch route.CarrierSlug {
-	case "twilio":
-		err = a.disableTwilioRoute(ctx, route)
-	case "telnyx":
-		err = a.disableTelnyxRoute(ctx, route)
-	case "plivo":
-		err = a.disablePlivoRoute(ctx, route)
-	default:
-		err = fmt.Errorf("route cannot be safely disabled for provider %s", route.CarrierSlug)
+	if route.InboundTransport == inboundTransportSIPDirect {
+		err = a.deconfigureDirectSIPCarrierRoute(ctx, route)
+	} else {
+		switch route.CarrierSlug {
+		case "twilio":
+			err = a.disableTwilioRoute(ctx, route)
+		case "telnyx":
+			err = a.disableTelnyxRoute(ctx, route)
+		case "plivo":
+			err = a.disablePlivoRoute(ctx, route)
+		default:
+			err = fmt.Errorf("route cannot be safely disabled for provider %s", route.CarrierSlug)
+		}
 	}
 	if err != nil {
 		return mcpError(err.Error()), nil
@@ -1357,12 +1536,34 @@ func (a *App) answerCall(ctx *sdk.AppCtx, row *callRow, directive, voice, greeti
 		return "", fmt.Errorf("answer carrier call failed: %w", err)
 	}
 	if err := a.db().updateStatus(row.ID, "answered", ""); err != nil {
+		if a.callUsesDirectSIP(row) {
+			if gateway := a.directSIPGateway(); gateway != nil {
+				_ = gateway.Hangup(row)
+			}
+		}
 		return "", fmt.Errorf("persist answered status: %w", err)
+	}
+	if a.callUsesDirectSIP(row) {
+		gateway := a.directSIPGateway()
+		if gateway == nil {
+			return "", errors.New("direct SIP gateway stopped after answering")
+		}
+		if err := gateway.StartMedia(row); err != nil {
+			_ = gateway.Hangup(row)
+			_ = a.db().updateStatus(row.ID, "failed", "direct SIP media startup failed: "+err.Error())
+			return "", fmt.Errorf("start direct SIP media: %w", err)
+		}
 	}
 	return threadID, nil
 }
 
 func (a *App) prepareInboundRealtime(ctx *sdk.AppCtx, row *callRow, directive, voice, greeting string) (string, error) {
+	// A softphone-routed call bridges to an operator's browser, not to Core.
+	// Spawning a thread for it would strand the thread and leave the caller on
+	// a bridge nobody is listening to, so refuse rather than half-answer.
+	if row.PeerKind == peerKindHuman {
+		return "", errors.New("call is routed to the browser softphone; answer it from the Telephony panel")
+	}
 	if row.Status == "answered" || row.Status == "in-progress" {
 		return row.ThreadID, nil
 	}
@@ -1381,12 +1582,14 @@ func (a *App) prepareInboundRealtime(ctx *sdk.AppCtx, row *callRow, directive, v
 			return "", errors.New("call was already claimed")
 		}
 		threadID = "tel-" + row.ID
-		effectiveDirective := directiveWithCallContext(directive, *row)
+		effectiveDirective := strings.TrimSpace(directive)
 		rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
 			AgentID:                    row.AgentID,
 			ThreadID:                   threadID,
 			Directive:                  effectiveDirective,
 			Voice:                      voice,
+			CapabilityMode:             sdk.RealtimeCapabilitiesInheritAgent,
+			CallContext:                realtimeCallContext(*row),
 			TurnDetection:              telephonyTurnDetection(),
 			Ephemeral:                  true,
 			InitialMessage:             greeting,
@@ -1564,6 +1767,15 @@ func (a *App) findTelnyxPhoneNumber(ctx *sdk.AppCtx, route *routeRow) (string, s
 }
 
 func (a *App) configureTelnyxRoute(ctx *sdk.AppCtx, route *routeRow) error {
+	creds, err := ctx.PlatformAPI().GetConnectionCredentials(route.CarrierConnectionID)
+	if err != nil {
+		return fmt.Errorf("read Telnyx credentials: %w", err)
+	}
+	publicKey, err := decodeTelnyxSignatureValue(strings.TrimSpace(creds.Fields["public_key"]))
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return errors.New("Telnyx webhook public key is required and must be a valid Ed25519 key before configuring an inbound route")
+	}
+
 	phoneID, previousConnectionID, err := a.findTelnyxPhoneNumber(ctx, route)
 	if err != nil {
 		return fmt.Errorf("find Telnyx phone number: %w", err)
@@ -1593,10 +1805,11 @@ func (a *App) configureTelnyxRoute(ctx *sdk.AppCtx, route *routeRow) error {
 		return errors.New("Telnyx number has no previous connection to restore; assign it to the bound connection before configuring the route")
 	}
 	createdRaw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "create_call_control_application", map[string]any{
-		"application_name":    "Apteva inbound " + route.ID,
-		"webhook_event_url":   a.inboundRouteURL(*route),
-		"active":              true,
-		"webhook_api_version": "2",
+		"application_name":     "Apteva inbound " + route.ID,
+		"webhook_event_url":    a.inboundRouteURL(*route),
+		"active":               true,
+		"webhook_api_version":  "2",
+		"webhook_timeout_secs": 5,
 	})
 	if err != nil {
 		return fmt.Errorf("create Telnyx Call Control Application: %w", err)
@@ -1662,6 +1875,13 @@ func (a *App) disableTelnyxRoute(ctx *sdk.AppCtx, route *routeRow) error {
 }
 
 func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
+	if a.callUsesDirectSIP(row) {
+		gateway := a.directSIPGateway()
+		if gateway == nil {
+			return errors.New("direct SIP gateway is not running")
+		}
+		return gateway.Answer(row)
+	}
 	switch row.CarrierSlug {
 	case "twilio":
 		twiml := a.twilioStreamTwiML(row)
@@ -1672,6 +1892,7 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 	case "telnyx":
 		input := map[string]any{
 			"call_control_id":            row.CarrierSID,
+			"command_id":                 telnyxCommandID(row.ID, "answer"),
 			"stream_url":                 a.publicWSStreamURL("telnyx", row.ID, row.CallbackSecret),
 			"stream_track":               "inbound_track",
 			"stream_codec":               "PCMU",
@@ -1690,7 +1911,9 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 		return err
 	case "plivo":
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
-			"call_uuid": row.CarrierSID, "aleg_url": a.plivoXMLURL(row.ID, row.CallbackSecret, row.ProjectID), "aleg_method": "POST",
+			"call_uuid":   row.CarrierSID,
+			"aleg_url":    plivoReliableCallbackURL(a.plivoXMLURL(row.ID, row.CallbackSecret, row.ProjectID)),
+			"aleg_method": "POST",
 		})
 		return err
 	default:
@@ -1699,6 +1922,13 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 }
 
 func (a *App) rejectInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
+	if a.callUsesDirectSIP(row) {
+		gateway := a.directSIPGateway()
+		if gateway == nil {
+			return errors.New("direct SIP gateway is not running")
+		}
+		return gateway.Reject(row)
+	}
 	switch row.CarrierSlug {
 	case "twilio":
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
@@ -1708,6 +1938,7 @@ func (a *App) rejectInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 	case "telnyx":
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "reject_call", map[string]any{
 			"call_control_id": row.CarrierSID,
+			"command_id":      telnyxCommandID(row.ID, "reject"),
 		})
 		return err
 	case "plivo":
@@ -1729,7 +1960,13 @@ func (a *App) mediaBridgeURL(row *callRow) (string, error) {
 	if row == nil {
 		return "", errors.New("call unavailable")
 	}
-	if row.Status != "media-disconnected" {
+	// Human-peer calls bridge to this app's own loopback softphone endpoint.
+	// There is no Core thread behind them, so the renewal path below (which
+	// asks the platform for a fresh realtime bridge) must not run.
+	if row.PeerKind == peerKindHuman {
+		return a.peerLoopbackURL(row), nil
+	}
+	if row.MediaStatus != "disconnected" && row.MediaStatus != "error" {
 		return row.AudioBridgeURL, nil
 	}
 	if globalCtx == nil || globalCtx.PlatformAPI() == nil {
@@ -1795,6 +2032,30 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if update.MediaStatus != "" {
+		closeCode := 0
+		closeReason := update.MediaError
+		closeLeg := ""
+		if update.MediaStatus == "disconnected" {
+			closeCode = 1000
+			closeLeg = string(mediaCloseLegCarrier)
+		}
+		if update.MediaStatus == "error" {
+			closeCode = 1011
+			closeLeg = string(mediaCloseLegCarrier)
+		}
+		if err := a.db().updateMediaStatusWithLeg(callID, update.MediaStatus, update.MediaError, closeCode, closeReason, closeLeg); err != nil {
+			http.Error(w, "persist media status", http.StatusInternalServerError)
+			return
+		}
+		if update.MediaStatus == "connected" {
+			_ = a.db().clearStateExpiry(callID)
+		} else if update.MediaStatus == "disconnected" {
+			_ = a.db().clearStateExpiry(callID)
+		} else if update.MediaStatus == "error" {
+			_ = a.db().setStateExpiry(callID, time.Now().UTC().Add(2*time.Minute))
+		}
+	}
 	if update.Status != "" {
 		created, err := a.db().updateStatusWithFacts(callID, update.Status, update.Error, update.Facts)
 		if err != nil {
@@ -1842,23 +2103,21 @@ func (a *App) handleTwilioStreamStatus(w http.ResponseWriter, r *http.Request) {
 
 	switch strings.ToLower(strings.TrimSpace(r.FormValue("StreamEvent"))) {
 	case "stream-started":
-		_ = a.db().updateStatus(callID, "in-progress", "")
+		_ = a.db().updateMediaStatus(callID, "connected", "", 0, "")
 		_ = a.db().clearStateExpiry(callID)
 	case "stream-stopped":
-		_ = a.db().updateStatus(callID, "media-disconnected", "media stream stopped")
-		_ = a.db().setStateExpiry(callID, time.Now().UTC().Add(20*time.Second))
+		_ = a.db().updateMediaStatusWithLeg(callID, "disconnected", "", 1000, "Twilio media stream stopped", string(mediaCloseLegCarrier))
+		_ = a.db().clearStateExpiry(callID)
 	case "stream-error":
 		reason := strings.TrimSpace(r.FormValue("StreamError"))
 		if reason == "" {
 			reason = "Twilio media stream failed"
 		}
-		if err := a.db().updateStatus(callID, "failed", reason); err != nil {
+		if err := a.db().updateMediaStatusWithLeg(callID, "error", reason, 1011, reason, string(mediaCloseLegCarrier)); err != nil {
 			http.Error(w, "persist stream failure", http.StatusInternalServerError)
 			return
 		}
-		if globalCtx != nil {
-			_ = a.killCallThread(globalCtx.WithProject(row.ProjectID), row)
-		}
+		_ = a.db().setStateExpiry(callID, time.Now().UTC().Add(2*time.Minute))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -2052,6 +2311,7 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 		RecordingChannels:      recordingPolicy.Channels,
 		RecordingStorageMode:   recordingPolicy.StorageMode,
 		RecordingRetentionDays: recordingPolicy.RetentionDays,
+		PeerKind:               inboundPeerKind(route.AnswerMode),
 	}
 	msg := fmt.Sprintf(
 		"Incoming phone call. call_id=%s from=%s to=%s. To answer: call telephony_answer_call with call_id=%q and a directive for the realtime call thread. To decline: call telephony_reject_call with call_id=%q.",
@@ -2060,6 +2320,12 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 	if route.AnswerMode == answerModeRealtimeImmediate {
 		msg = fmt.Sprintf(
 			"Incoming phone call. call_id=%s from=%s to=%s. Telephony is immediately starting the route's configured realtime thread; this event is informational and does not require telephony_answer_call.",
+			callID, from, to,
+		)
+	}
+	if route.AnswerMode == answerModeHumanBrowser {
+		msg = fmt.Sprintf(
+			"Incoming phone call. call_id=%s from=%s to=%s. This number is routed to the browser softphone; an operator answers it from the Telephony panel. This event is informational and telephony_answer_call does not apply.",
 			callID, from, to,
 		)
 	}
@@ -2072,10 +2338,12 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 			globalCtx.Logger().Warn("publish incoming call lifecycle event", "call", stored.ID, "err", err)
 		}
 	}
-	// Immediate routes do not need the main agent to make a pickup decision.
-	// Leave their informational event in the durable outbox so answering stays
-	// on the carrier request's fast path; the lifecycle worker delivers it.
-	if globalCtx != nil && route.AnswerMode != answerModeRealtimeImmediate {
+	// Only agent-decided routes need the main agent woken to make a pickup
+	// decision. Immediate routes answer themselves, and human_browser routes
+	// are answered by an operator in the panel — both leave their informational
+	// event in the durable outbox for the lifecycle worker to deliver, keeping
+	// answering on the carrier request's fast path.
+	if globalCtx != nil && firstNonEmpty(route.AnswerMode, answerModeAgent) == answerModeAgent {
 		if err := a.deliverOutboxCall(globalCtx.WithProject(route.ProjectID), stored.ID); err != nil {
 			globalCtx.Logger().Warn("send incoming call event deferred", "route", route.ID, "agent", route.AgentID, "err", err)
 		}
@@ -2216,9 +2484,7 @@ func (a *App) verifyTelnyxInboundRequest(r *http.Request, route *routeRow, body 
 	}
 	publicKeyText := strings.TrimSpace(creds.Fields["public_key"])
 	if publicKeyText == "" {
-		// The route secret and dedicated application ID are still checked.
-		// Accounts should configure public_key to enable carrier signatures.
-		return nil
+		return errors.New("Telnyx connection has no public key for webhook verification")
 	}
 	return verifyTelnyxSignature(publicKeyText, r.Header.Get("Telnyx-Timestamp"), r.Header.Get("Telnyx-Signature-Ed25519"), body, time.Now())
 }
@@ -2533,6 +2799,7 @@ func routePublic(a *App, r routeRow) map[string]any {
 		"voice":                 r.AutoVoice,
 		"greeting":              r.AutoGreeting,
 		"recording_mode":        firstNonEmpty(r.RecordingMode, recordingModeInherit),
+		"inbound_transport":     firstNonEmpty(r.InboundTransport, inboundTransportProgrammable),
 		"created_at":            r.CreatedAt,
 		"updated_at":            r.UpdatedAt,
 	}
@@ -2542,19 +2809,25 @@ func callsPublic(rows []callRow) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, map[string]any{
-			"call_id":        r.ID,
-			"thread_id":      r.ThreadID,
-			"direction":      r.Direction,
-			"agent_id":       r.AgentID,
-			"route_id":       r.RouteID,
-			"carrier":        r.CarrierSlug,
-			"to":             r.ToNumber,
-			"from":           r.FromNumber,
-			"status":         r.Status,
-			"placed_at":      r.PlacedAt,
-			"answered_at":    r.AnsweredAt,
-			"duration":       callDuration(r),
-			"recording_mode": r.RecordingMode, "recording_count": r.RecordingCount,
+			"call_id":            r.ID,
+			"thread_id":          r.ThreadID,
+			"direction":          r.Direction,
+			"agent_id":           r.AgentID,
+			"route_id":           r.RouteID,
+			"carrier":            r.CarrierSlug,
+			"to":                 r.ToNumber,
+			"from":               r.FromNumber,
+			"status":             r.Status,
+			"carrier_status":     r.Status,
+			"media_status":       r.MediaStatus,
+			"media_error":        r.MediaErrorMessage,
+			"media_close_leg":    r.MediaCloseLeg,
+			"media_close_code":   r.MediaCloseCode,
+			"media_close_reason": r.MediaCloseReason,
+			"placed_at":          r.PlacedAt,
+			"answered_at":        r.AnsweredAt,
+			"duration":           callDuration(r),
+			"recording_mode":     r.RecordingMode, "recording_count": r.RecordingCount,
 			"recording_status": r.RecordingStatus,
 		})
 	}
@@ -2568,10 +2841,20 @@ func callsPanelPublic(rows []callRow) []map[string]any {
 			"id": r.ID, "thread_id": r.ThreadID, "carrier_sid": r.CarrierSID,
 			"direction": r.Direction, "to_number": r.ToNumber, "from_number": r.FromNumber,
 			"directive": r.Directive, "voice": r.Voice, "status": r.Status,
-			"placed_at": r.PlacedAt, "answered_at": r.AnsweredAt, "ended_at": r.EndedAt,
+			"carrier_status": r.Status, "media_status": r.MediaStatus,
+			"media_error_message": r.MediaErrorMessage,
+			"media_connected_at":  r.MediaConnectedAt, "media_disconnected_at": r.MediaDisconnectedAt,
+			"media_close_code": r.MediaCloseCode, "media_close_reason": r.MediaCloseReason,
+			"media_close_leg": r.MediaCloseLeg,
+			"placed_at":       r.PlacedAt, "answered_at": r.AnsweredAt, "ended_at": r.EndedAt,
 			"project_id": r.ProjectID, "error_message": r.ErrorMessage,
 			"recording_mode": r.RecordingMode, "recording_count": r.RecordingCount,
 			"recording_status": r.RecordingStatus,
+			// peer_kind lets the panel tell a softphone call (which it can
+			// answer and carry audio for) from an agent call (which it can only
+			// observe). peer_token is deliberately NOT exposed here — the
+			// browser receives a media URL only from an explicit answer/place.
+			"peer_kind": firstNonEmpty(r.PeerKind, peerKindRealtime),
 		})
 	}
 	return out
@@ -2690,7 +2973,7 @@ func normalizeCallStatus(status string) string {
 		return "failed"
 	case "busy", "failed", "canceled", "no-answer":
 		return strings.ToLower(strings.TrimSpace(status))
-	case "pending", "media-disconnected", "answering":
+	case "pending", "answering":
 		return strings.ToLower(strings.TrimSpace(status))
 	default:
 		return ""
@@ -2742,13 +3025,23 @@ func optionalStringArg(m map[string]any, key string) (string, bool) {
 	return strings.TrimSpace(v), ok
 }
 
+// inboundPeerKind maps a route's answer mode onto the peer that will sit on the
+// far side of the audio bridge. Only human_browser routes park for an operator;
+// everything else keeps the realtime default, including an empty answer mode.
+func inboundPeerKind(answerMode string) string {
+	if answerMode == answerModeHumanBrowser {
+		return peerKindHuman
+	}
+	return peerKindRealtime
+}
+
 func normalizeRouteAnswerConfig(mode, directive, voice, greeting string) (string, string, string, string, error) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	directive = strings.TrimSpace(directive)
 	voice = strings.TrimSpace(voice)
 	greeting = strings.TrimSpace(greeting)
-	if mode != answerModeAgent && mode != answerModeRealtimeImmediate {
-		return "", "", "", "", errors.New("answer_mode must be agent or realtime_immediate")
+	if mode != answerModeAgent && mode != answerModeRealtimeImmediate && mode != answerModeHumanBrowser {
+		return "", "", "", "", errors.New("answer_mode must be agent, realtime_immediate, or human_browser")
 	}
 	if len(directive) > 16000 {
 		return "", "", "", "", errors.New("directive must be at most 16000 characters")
@@ -2844,6 +3137,15 @@ type callRow struct {
 	ProviderSequence       int64
 	ProviderEventID        string
 	LifecycleRevision      int64
+	MediaStatus            string
+	MediaErrorMessage      string
+	MediaConnectedAt       string
+	MediaDisconnectedAt    string
+	MediaCloseCode         int
+	MediaCloseReason       string
+	MediaCloseLeg          string
+	PeerKind               string
+	PeerToken              string
 }
 
 type routeRow struct {
@@ -2867,6 +3169,8 @@ type routeRow struct {
 	CreatedAt              string
 	UpdatedAt              string
 	RecordingMode          string
+	InboundTransport       string
+	TransportConfig        string
 }
 
 type callsDB struct {
@@ -2890,7 +3194,12 @@ const callSelectColumns = `id, thread_id,
 	COALESCE(duration_seconds,0), COALESCE(talk_duration_seconds,0),
 	COALESCE(termination_cause,''), COALESCE(termination_code,''),
 	COALESCE(termination_initiator,''), COALESCE(provider_sequence,0),
-	COALESCE(provider_event_id,''), COALESCE(lifecycle_revision,0)`
+	COALESCE(provider_event_id,''), COALESCE(lifecycle_revision,0),
+	COALESCE(media_status,'idle'), COALESCE(media_error_message,''),
+	COALESCE(media_connected_at,''), COALESCE(media_disconnected_at,''),
+	COALESCE(media_close_code,0), COALESCE(media_close_reason,''),
+	COALESCE(media_close_leg,''),
+	COALESCE(peer_kind,'realtime'), COALESCE(peer_token,'')`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -2906,7 +3215,10 @@ func scanCall(row rowScanner) (*callRow, error) {
 		&r.RecordingCheckedAt, &r.UpdatedAt, &r.ProviderOccurredAt,
 		&r.DurationSeconds, &r.TalkDurationSeconds, &r.TerminationCause,
 		&r.TerminationCode, &r.TerminationInitiator, &r.ProviderSequence,
-		&r.ProviderEventID, &r.LifecycleRevision); err != nil {
+		&r.ProviderEventID, &r.LifecycleRevision, &r.MediaStatus,
+		&r.MediaErrorMessage, &r.MediaConnectedAt, &r.MediaDisconnectedAt,
+		&r.MediaCloseCode, &r.MediaCloseReason, &r.MediaCloseLeg,
+		&r.PeerKind, &r.PeerToken); err != nil {
 		return nil, err
 	}
 	return &r, nil
@@ -2918,14 +3230,16 @@ func (c *callsDB) insertCall(r callRow) error {
 		         carrier_slug, carrier_connection_id, callback_secret, to_number, from_number,
 		         forwarded_from, ingress_path, directive, voice, audio_bridge_url, status, placed_at, project_id,
 		         idempotency_key, state_expires_at, deadline_at, recording_mode,
-		         recording_channels, recording_storage_mode, recording_retention_days)
-		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		         recording_channels, recording_storage_mode, recording_retention_days,
+		         peer_kind, peer_token)
+		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.ThreadID, r.Direction, r.AgentID, r.RouteID, r.CarrierSID, r.CarrierRequestID,
 		r.CarrierSlug, r.CarrierConnectionID, r.CallbackSecret,
 		r.ToNumber, r.FromNumber, r.ForwardedFrom, r.IngressPath, r.Directive, r.Voice, r.AudioBridgeURL,
 		r.Status, r.PlacedAt, r.ProjectID, r.IdempotencyKey, r.StateExpiresAt, r.DeadlineAt,
 		firstNonEmpty(r.RecordingMode, recordingModeOff), firstNonEmpty(r.RecordingChannels, "dual"),
 		firstNonEmpty(r.RecordingStorageMode, recordingStorageCopy), r.RecordingRetentionDays,
+		firstNonEmpty(r.PeerKind, peerKindRealtime), r.PeerToken,
 	)
 	return err
 }
@@ -2996,13 +3310,11 @@ func canTransitionStatus(from, to string) bool {
 		return true
 	}
 	allowed := map[string]map[string]bool{
-		"pending":            {"answering": true},
-		"answering":          {"answered": true, "in-progress": true, "media-disconnected": true, "pending": true},
-		"initiated":          {"ringing": true, "answered": true, "in-progress": true, "media-disconnected": true},
-		"ringing":            {"answered": true, "in-progress": true, "media-disconnected": true},
-		"answered":           {"in-progress": true, "media-disconnected": true},
-		"in-progress":        {"media-disconnected": true},
-		"media-disconnected": {"in-progress": true},
+		"pending":   {"answering": true},
+		"answering": {"answered": true, "in-progress": true, "pending": true},
+		"initiated": {"ringing": true, "answered": true, "in-progress": true},
+		"ringing":   {"answered": true, "in-progress": true},
+		"answered":  {"in-progress": true},
 	}
 	return allowed[from][to]
 }
@@ -3016,6 +3328,43 @@ func (c *callsDB) claimPendingCall(id string, agentID int64, project string) (bo
 	}
 	n, err := res.RowsAffected()
 	return n == 1, err
+}
+
+// claimPendingCallForHuman is the softphone sibling of claimPendingCall. It
+// drops the agent_id predicate — a browser operator is not an agent — but keeps
+// the same atomic conditional UPDATE, so concurrent Answer clicks still resolve
+// to exactly one winner. claimPendingCall itself is deliberately left untouched
+// so the agent answer path keeps its agent scoping verbatim.
+func (c *callsDB) claimPendingCallForHuman(id, project string) (bool, error) {
+	res, err := c.db.Exec(`UPDATE calls SET status = 'answering'
+        WHERE id = ? AND direction = 'inbound' AND status = 'pending'
+          AND project_id = ? AND peer_kind = 'human'`,
+		id, project)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// attachHumanCall finishes a softphone answer claim: it stamps the loopback
+// bridge URL so the carrier bridge can dial the hub. Mirrors attachCall, minus
+// the thread/directive/voice fields that only exist for realtime peers.
+func (c *callsDB) attachHumanCall(id, bridgeURL, peerToken string) error {
+	res, err := c.db.Exec(`UPDATE calls SET audio_bridge_url = ?, peer_token = ?,
+	        thread_id = '', directive = '', voice = ''
+	        WHERE id = ? AND status = 'answering'`, bridgeURL, peerToken, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return errors.New("call answer claim was lost")
+	}
+	return nil
 }
 
 func (c *callsDB) releaseAnswerClaim(id string) error {
@@ -3048,7 +3397,7 @@ func (c *callsDB) attachCall(id, threadID, audioBridgeURL, directive, voice stri
 }
 
 func (c *callsDB) listActiveForAgent(agentID int64, project string) ([]callRow, error) {
-	return c.listWhere(`status IN ('initiated','ringing','in-progress','answered','pending','answering','media-disconnected')
+	return c.listWhere(`status IN ('initiated','ringing','in-progress','answered','pending','answering')
         AND agent_id = ? AND project_id = ? ORDER BY placed_at DESC`, agentID, project)
 }
 
@@ -3100,8 +3449,11 @@ func (c *callsDB) countOutboundSince(agentID int64, project string, since time.T
 }
 
 func (c *callsDB) claimMedia(id string) (bool, error) {
-	res, err := c.db.Exec(`UPDATE calls SET media_active = 1
-        WHERE id = ? AND media_active = 0 AND status NOT IN ('completed','failed','no-answer','busy','canceled')`, id)
+	res, err := c.db.Exec(`UPDATE calls SET media_active = 1, media_status = 'connecting',
+        media_error_message = '', media_close_code = 0, media_close_reason = '', media_close_leg = '',
+        media_disconnected_at = '', updated_at = ?
+        WHERE id = ? AND media_active = 0 AND status NOT IN ('completed','failed','no-answer','busy','canceled')`,
+		time.Now().UTC().Format(time.RFC3339Nano), id)
 	if err != nil {
 		return false, err
 	}
@@ -3111,6 +3463,55 @@ func (c *callsDB) claimMedia(id string) (bool, error) {
 
 func (c *callsDB) releaseMedia(id string) error {
 	_, err := c.db.Exec(`UPDATE calls SET media_active = 0 WHERE id = ?`, id)
+	return err
+}
+
+func (c *callsDB) updateMediaStatus(id, status, errMsg string, closeCode int, closeReason string) error {
+	return c.updateMediaStatusWithLeg(id, status, errMsg, closeCode, closeReason, "")
+}
+
+func (c *callsDB) updateMediaStatusWithLeg(id, status, errMsg string, closeCode int, closeReason, closeLeg string) error {
+	switch status {
+	case "idle", "connecting", "connected", "disconnected", "degraded", "error":
+	default:
+		return fmt.Errorf("invalid media status %q", status)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	active := status == "connecting" || status == "connected" || status == "degraded"
+	terminalMedia := status == "disconnected" || status == "error"
+	_, err := c.db.Exec(`UPDATE calls SET
+        media_status = CASE
+            WHEN media_status = 'error' AND ? = 'disconnected' THEN media_status
+            ELSE ?
+        END,
+        media_active = ?,
+        media_error_message = CASE
+            WHEN ? <> '' THEN ?
+            WHEN ? IN ('connecting','connected') THEN ''
+            ELSE media_error_message
+        END,
+		media_connected_at = CASE WHEN ? = 'connected' AND media_connected_at = '' THEN ? ELSE media_connected_at END,
+		media_disconnected_at = CASE
+		    WHEN media_status = 'error' AND ? = 'disconnected' THEN media_disconnected_at
+		    WHEN ? THEN ? ELSE media_disconnected_at
+		END,
+		media_close_code = CASE
+		    WHEN media_status IN ('error','disconnected') AND ? = 'disconnected' AND media_close_code <> 0 THEN media_close_code
+		    WHEN ? <> 0 THEN ? ELSE media_close_code
+		END,
+		media_close_reason = CASE
+		    WHEN media_status IN ('error','disconnected') AND ? = 'disconnected' AND media_close_reason <> '' THEN media_close_reason
+		    WHEN ? <> '' THEN ? ELSE media_close_reason
+		END,
+		media_close_leg = CASE
+		    WHEN media_status IN ('error','disconnected') AND ? = 'disconnected' AND media_close_leg <> '' THEN media_close_leg
+		    WHEN ? <> '' THEN ? ELSE media_close_leg
+		END,
+        updated_at = ?
+        WHERE id = ?`,
+		status, status, active, errMsg, errMsg, status,
+		status, now, status, terminalMedia, now, status, closeCode, closeCode,
+		status, closeReason, closeReason, status, closeLeg, closeLeg, now, id)
 	return err
 }
 
@@ -3133,12 +3534,13 @@ func (c *callsDB) insertRoute(r routeRow) error {
 	        (id, project_id, carrier_slug, carrier_connection_id, phone_number, phone_number_sid,
 	         agent_id, enabled, hold_prompt, timeout_sec, answer_mode, auto_directive, auto_voice,
 	         auto_greeting, secret, previous_voice_url, previous_status_callback, created_at, updated_at,
-	         recording_mode)
-	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	         recording_mode, inbound_transport, transport_config)
+	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.ProjectID, r.CarrierSlug, r.CarrierConnectionID, r.PhoneNumber, r.PhoneNumberSID,
 		r.AgentID, enabled, r.HoldPrompt, r.TimeoutSec, firstNonEmpty(r.AnswerMode, answerModeAgent),
 		r.AutoDirective, r.AutoVoice, r.AutoGreeting, r.Secret, r.PreviousVoiceURL, r.PreviousStatusCallback,
 		r.CreatedAt, r.UpdatedAt, firstNonEmpty(r.RecordingMode, recordingModeInherit),
+		firstNonEmpty(r.InboundTransport, inboundTransportProgrammable), r.TransportConfig,
 	)
 	return err
 }
@@ -3149,14 +3551,16 @@ func (c *callsDB) findRoute(id string) (*routeRow, error) {
 	        COALESCE(answer_mode,'agent'), COALESCE(auto_directive,''), COALESCE(auto_voice,''),
 	        COALESCE(auto_greeting,''), secret,
 	        COALESCE(previous_voice_url,''), COALESCE(previous_status_callback,''), created_at, updated_at,
-	        COALESCE(recording_mode,'inherit')
+	        COALESCE(recording_mode,'inherit'), COALESCE(inbound_transport,'programmable_websocket'),
+	        COALESCE(transport_config,'')
 	        FROM inbound_routes WHERE id = ?`, id)
 	var r routeRow
 	var enabled int
 	if err := row.Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.CarrierConnectionID, &r.PhoneNumber,
 		&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec,
 		&r.AnswerMode, &r.AutoDirective, &r.AutoVoice, &r.AutoGreeting, &r.Secret,
-		&r.PreviousVoiceURL, &r.PreviousStatusCallback, &r.CreatedAt, &r.UpdatedAt, &r.RecordingMode); err != nil {
+		&r.PreviousVoiceURL, &r.PreviousStatusCallback, &r.CreatedAt, &r.UpdatedAt, &r.RecordingMode,
+		&r.InboundTransport, &r.TransportConfig); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -3186,7 +3590,8 @@ func (c *callsDB) listRoutesForAgent(agentID int64, project string) ([]routeRow,
 	        COALESCE(answer_mode,'agent'), COALESCE(auto_directive,''), COALESCE(auto_voice,''),
 	        COALESCE(auto_greeting,''), secret,
 	        COALESCE(previous_voice_url,''), COALESCE(previous_status_callback,''), created_at, updated_at,
-	        COALESCE(recording_mode,'inherit')
+	        COALESCE(recording_mode,'inherit'), COALESCE(inbound_transport,'programmable_websocket'),
+	        COALESCE(transport_config,'')
 	        FROM inbound_routes WHERE agent_id = ? AND project_id = ? ORDER BY created_at DESC`, agentID, project)
 	if err != nil {
 		return nil, err
@@ -3199,7 +3604,8 @@ func (c *callsDB) listRoutesForAgent(agentID int64, project string) ([]routeRow,
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.CarrierConnectionID, &r.PhoneNumber,
 			&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec,
 			&r.AnswerMode, &r.AutoDirective, &r.AutoVoice, &r.AutoGreeting, &r.Secret,
-			&r.PreviousVoiceURL, &r.PreviousStatusCallback, &r.CreatedAt, &r.UpdatedAt, &r.RecordingMode); err != nil {
+			&r.PreviousVoiceURL, &r.PreviousStatusCallback, &r.CreatedAt, &r.UpdatedAt, &r.RecordingMode,
+			&r.InboundTransport, &r.TransportConfig); err != nil {
 			return nil, err
 		}
 		r.Enabled = enabled != 0

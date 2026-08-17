@@ -62,9 +62,9 @@ func (a *App) configurePlivoRoute(ctx *sdk.AppCtx, route *routeRow) error {
 	}
 	createdRaw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "create_application", map[string]any{
 		"app_name":      "Apteva-" + route.ID,
-		"answer_url":    a.inboundRouteURL(*route),
+		"answer_url":    plivoReliableCallbackURL(a.inboundRouteURL(*route)),
 		"answer_method": "POST",
-		"hangup_url":    a.plivoRouteStatusURL(*route),
+		"hangup_url":    plivoReliableCallbackURL(a.plivoRouteStatusURL(*route)),
 		"hangup_method": "POST",
 	})
 	if err != nil {
@@ -110,6 +110,10 @@ func (a *App) configurePlivoRoute(ctx *sdk.AppCtx, route *routeRow) error {
 	route.PhoneNumberSID = numberID
 	route.PreviousVoiceURL = string(configJSON)
 	return nil
+}
+
+func plivoReliableCallbackURL(raw string) string {
+	return strings.TrimSpace(raw) + "#ct=2000&rt=10000&tt=30000&rc=2&rp=ct,rt,5xx&er=nearest"
 }
 
 func (a *App) disablePlivoRoute(ctx *sdk.AppCtx, route *routeRow) error {
@@ -223,7 +227,7 @@ func (a *App) handlePlivoInboundWait(w http.ResponseWriter, r *http.Request, rou
 	}
 	w.Header().Set("Content-Type", "application/xml")
 	switch row.Status {
-	case "answered", "in-progress", "media-disconnected":
+	case "answered", "in-progress":
 		_, _ = w.Write([]byte(a.plivoStreamXML(row, xmlEscape(a.publicWSStreamURL("plivo", row.ID, row.CallbackSecret)))))
 	case "pending", "answering":
 		writePlivoWait(w, a.plivoWaitURL(*route, row.ID))

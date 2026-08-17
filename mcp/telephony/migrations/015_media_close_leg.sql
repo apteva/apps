@@ -1,0 +1,1 @@
+ALTER TABLE calls ADD COLUMN media_close_leg TEXT NOT NULL DEFAULT '';

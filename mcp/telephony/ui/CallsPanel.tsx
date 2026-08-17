@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { SoftphoneSession, type SoftphoneState } from "./softphone-audio";
 
 const API = "/api/apps/telephony";
 
@@ -26,6 +27,22 @@ interface RawCall {
   voice?: string;
   Status?: string;
   status?: string;
+  CarrierStatus?: string;
+  carrier_status?: string;
+  MediaStatus?: string;
+  media_status?: string;
+  MediaErrorMessage?: string;
+  media_error_message?: string;
+  MediaConnectedAt?: string;
+  media_connected_at?: string;
+  MediaDisconnectedAt?: string;
+  media_disconnected_at?: string;
+  MediaCloseCode?: number;
+  media_close_code?: number;
+  MediaCloseReason?: string;
+  media_close_reason?: string;
+  MediaCloseLeg?: string;
+  media_close_leg?: string;
   PlacedAt?: string;
   placed_at?: string;
   AnsweredAt?: string;
@@ -42,6 +59,10 @@ interface RawCall {
   recording_count?: number;
   RecordingStatus?: string;
   recording_status?: string;
+  Direction?: string;
+  direction?: string;
+  PeerKind?: string;
+  peer_kind?: string;
 }
 
 interface Call {
@@ -53,6 +74,14 @@ interface Call {
   directive: string;
   voice: string;
   status: string;
+  carrierStatus: string;
+  mediaStatus: string;
+  mediaErrorMessage: string;
+  mediaConnectedAt: string;
+  mediaDisconnectedAt: string;
+  mediaCloseCode: number;
+  mediaCloseReason: string;
+  mediaCloseLeg: string;
   placedAt: string;
   answeredAt: string;
   endedAt: string;
@@ -61,6 +90,8 @@ interface Call {
   recordingMode: string;
   recordingCount: number;
   recordingStatus: string;
+  direction: string;
+  peerKind: string;
 }
 
 interface RecordingSettings {
@@ -98,7 +129,7 @@ interface Recording {
 const LIVE_STATUSES = new Set(["initiated", "ringing", "in-progress", "answered"]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "no-answer", "busy", "canceled"]);
 const CALL_COLUMNS = "8rem minmax(0,1fr) minmax(0,1fr) 8rem 7rem 6rem 7rem";
-const CONNECTED_NUMBER_COLUMNS = "minmax(12rem,1.3fr) 7rem minmax(8rem,0.8fr) minmax(10rem,1fr) minmax(11rem,1fr) minmax(9rem,0.8fr) minmax(11rem,0.9fr)";
+const CONNECTED_NUMBER_COLUMNS = "minmax(12rem,1.3fr) 7rem minmax(8rem,0.8fr) minmax(10rem,1fr) minmax(11rem,1fr) minmax(9rem,0.8fr) minmax(12rem,1fr) minmax(11rem,0.9fr)";
 const NUMBER_COLUMNS = "10rem 7rem minmax(0,1fr) 9rem 9rem 9rem 9rem 7rem";
 const ADDRESS_COLUMNS = "10rem minmax(0,1fr) 8rem 9rem 12rem";
 const DETAILS_COLUMNS = "7.5rem minmax(0,1fr)";
@@ -139,6 +170,14 @@ function normalizeCall(row: RawCall): Call {
     directive: row.directive ?? row.Directive ?? "",
     voice: row.voice ?? row.Voice ?? "",
     status: row.status ?? row.Status ?? "",
+    carrierStatus: row.carrier_status ?? row.CarrierStatus ?? row.status ?? row.Status ?? "",
+    mediaStatus: row.media_status ?? row.MediaStatus ?? "idle",
+    mediaErrorMessage: row.media_error_message ?? row.MediaErrorMessage ?? "",
+    mediaConnectedAt: row.media_connected_at ?? row.MediaConnectedAt ?? "",
+    mediaDisconnectedAt: row.media_disconnected_at ?? row.MediaDisconnectedAt ?? "",
+    mediaCloseCode: row.media_close_code ?? row.MediaCloseCode ?? 0,
+    mediaCloseReason: row.media_close_reason ?? row.MediaCloseReason ?? "",
+    mediaCloseLeg: row.media_close_leg ?? row.MediaCloseLeg ?? "",
     placedAt: row.placed_at ?? row.PlacedAt ?? "",
     answeredAt: row.answered_at ?? row.AnsweredAt ?? "",
     endedAt: row.ended_at ?? row.EndedAt ?? "",
@@ -147,6 +186,8 @@ function normalizeCall(row: RawCall): Call {
     recordingMode: row.recording_mode ?? row.RecordingMode ?? "off",
     recordingCount: row.recording_count ?? row.RecordingCount ?? 0,
     recordingStatus: row.recording_status ?? row.RecordingStatus ?? "",
+    direction: row.direction ?? row.Direction ?? "outbound",
+    peerKind: row.peer_kind ?? row.PeerKind ?? "realtime",
   };
 }
 
@@ -155,6 +196,13 @@ function statusClass(status: string): string {
   if (status === "ringing" || status === "initiated") return "bg-info/10 text-info border-info/30";
   if (status === "failed" || status === "busy" || status === "no-answer") return "bg-error/10 text-error border-error/30";
   if (status === "canceled") return "bg-warn/10 text-warn border-warn/30";
+  return "bg-bg-muted text-text-muted border-border";
+}
+
+function mediaStatusClass(status: string): string {
+  if (status === "connected") return "bg-success/10 text-success border-success/30";
+  if (status === "connecting" || status === "degraded") return "bg-warn/10 text-warn border-warn/30";
+  if (status === "error") return "bg-error/10 text-error border-error/30";
   return "bg-bg-muted text-text-muted border-border";
 }
 
@@ -250,6 +298,20 @@ function RecordingPlayer({ recording }: { recording: Recording }) {
   );
 }
 
+// Audio level bar. RMS is compressed with a square root so ordinary speech
+// occupies most of the bar instead of hugging the low end.
+function LevelMeter({ label, value }: { label: string; value: number }) {
+  const percent = Math.min(100, Math.round(Math.sqrt(Math.max(0, value)) * 140));
+  return (
+    <div className="flex items-center gap-2">
+      <div className="text-xs text-text-muted" style={{ width: "3rem" }}>{label}</div>
+      <div className="flex-1 rounded bg-border/60 overflow-hidden" style={{ height: "0.375rem" }}>
+        <div className="h-full bg-accent" style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  );
+}
+
 function CallsView({ projectId }: NativePanelProps) {
   const layout = usePanelWidth();
   const [calls, setCalls] = useState<Call[]>([]);
@@ -261,6 +323,32 @@ function CallsView({ projectId }: NativePanelProps) {
   const [recordingSettings, setRecordingSettings] = useState<RecordingSettings | null>(null);
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [recordingBusy, setRecordingBusy] = useState("");
+
+  // ─── softphone ───────────────────────────────────────────────────
+  const [dialNumber, setDialNumber] = useState("");
+  const [softphoneCallId, setSoftphoneCallId] = useState("");
+  const [softphoneState, setSoftphoneState] = useState<SoftphoneState | "">("");
+  const [softphoneDetail, setSoftphoneDetail] = useState("");
+  const [muted, setMuted] = useState(false);
+  const [levels, setLevels] = useState<{ mic: number; speaker: number }>({ mic: 0, speaker: 0 });
+  const [softphoneBusy, setSoftphoneBusy] = useState(false);
+  const sessionRef = useRef<SoftphoneSession | null>(null);
+
+  const endSoftphone = useCallback(() => {
+    sessionRef.current?.stop();
+    sessionRef.current = null;
+    setSoftphoneCallId("");
+    setSoftphoneState("");
+    setMuted(false);
+    setLevels({ mic: 0, speaker: 0 });
+  }, []);
+
+  // The audio session owns a microphone and an AudioContext; unmounting the
+  // panel without releasing them would leave the mic indicator lit.
+  useEffect(() => () => {
+    sessionRef.current?.stop();
+    sessionRef.current = null;
+  }, []);
 
   const withProject = useCallback((path: string) => {
     if (!projectId) return `${API}${path}`;
@@ -321,10 +409,18 @@ function CallsView({ projectId }: NativePanelProps) {
     return () => window.clearInterval(timer);
   }, []);
 
+  // A ringing softphone call is only answerable while the carrier holds the
+  // caller, so poll fast whenever anything is live and fall back to the idle
+  // cadence otherwise.
+  const hasUrgentCall = useMemo(
+    () => calls.some((call) => call.status === "pending" || LIVE_STATUSES.has(call.status)),
+    [calls],
+  );
+
   useEffect(() => {
-    const timer = window.setInterval(loadCalls, 10000);
+    const timer = window.setInterval(loadCalls, hasUrgentCall ? 2000 : 10000);
     return () => window.clearInterval(timer);
-  }, [loadCalls]);
+  }, [loadCalls, hasUrgentCall]);
 
   const selected = useMemo(
     () => calls.find((call) => call.id === selectedId) ?? calls[0] ?? null,
@@ -362,6 +458,80 @@ function CallsView({ projectId }: NativePanelProps) {
     } finally {
       setEnding("");
     }
+  };
+
+  // Opens the operator's audio path for a call the server has already created.
+  // Both dialling out and answering an inbound call funnel through here, so the
+  // microphone is acquired in exactly one place.
+  const startAudio = async (session: { call_id: string; media_url: string }) => {
+    sessionRef.current?.stop();
+    const phone = new SoftphoneSession({
+      onState: (state, detail) => {
+        setSoftphoneState(state);
+        setSoftphoneDetail(detail ?? "");
+        if (state === "ended" || state === "error") {
+          sessionRef.current = null;
+          setSoftphoneCallId("");
+          setLevels({ mic: 0, speaker: 0 });
+          void loadCalls();
+        }
+      },
+      onLevels: (mic, speaker) => setLevels({ mic, speaker }),
+    });
+    sessionRef.current = phone;
+    setSoftphoneCallId(session.call_id);
+    setMuted(false);
+    // media_url is same-origin relative when the app cannot resolve its public
+    // URL (local dev); absolutise it so the WebSocket constructor accepts it.
+    const url = session.media_url.startsWith("ws")
+      ? session.media_url
+      : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${session.media_url}`;
+    await phone.start(url);
+    setSelectedId(session.call_id);
+    await loadCalls();
+  };
+
+  const placeSoftphoneCall = async () => {
+    const to = dialNumber.trim();
+    if (!to) return;
+    setSoftphoneBusy(true);
+    setStatus("");
+    try {
+      const session = await postJSON<{ call_id: string; media_url: string }>(
+        withProject("/softphone/place"), { to },
+      );
+      await startAudio(session);
+      setDialNumber("");
+      setStatus(`calling ${to}`);
+    } catch (e) {
+      setStatus((e as Error).message || "Call failed");
+      endSoftphone();
+    } finally {
+      setSoftphoneBusy(false);
+    }
+  };
+
+  const answerSoftphoneCall = async (call: Call) => {
+    setSoftphoneBusy(true);
+    setStatus("");
+    try {
+      const session = await postJSON<{ call_id: string; media_url: string }>(
+        withProject(`/softphone/answer/${encodeURIComponent(call.id)}`), {},
+      );
+      await startAudio(session);
+      setStatus(`connected to ${call.fromNumber || call.id}`);
+    } catch (e) {
+      setStatus((e as Error).message || "Answer failed");
+      endSoftphone();
+    } finally {
+      setSoftphoneBusy(false);
+    }
+  };
+
+  const toggleMute = () => {
+    const next = !muted;
+    sessionRef.current?.setMuted(next);
+    setMuted(next);
   };
 
   const toggleFutureRecording = async () => {
@@ -416,6 +586,27 @@ function CallsView({ projectId }: NativePanelProps) {
           </p>
         </div>
         <div className="text-xs text-text-muted truncate" style={{ maxWidth: "16rem" }}>{status}</div>
+        <form
+          className="flex items-center gap-2"
+          onSubmit={(event) => { event.preventDefault(); void placeSoftphoneCall(); }}
+        >
+          <input
+            type="tel"
+            value={dialNumber}
+            onChange={(event) => setDialNumber(event.target.value)}
+            placeholder="+14155551234"
+            aria-label="Number to call"
+            className="h-8 rounded border border-border bg-bg px-2 text-xs"
+            style={{ width: "10rem" }}
+          />
+          <button
+            type="submit"
+            disabled={softphoneBusy || !dialNumber.trim() || Boolean(softphoneCallId)}
+            className="h-8 px-3 rounded bg-accent text-bg text-xs font-medium disabled:opacity-40"
+          >
+            Call
+          </button>
+        </form>
         {recordingSettings ? (
           <label className={`h-8 flex items-center gap-2 px-2 border border-border rounded text-xs ${recordingSettings.recording_supported ? "cursor-pointer" : "opacity-50"}`} title={recordingSettings.recording_supported ? `Record future ${recordingSettings.carrier} calls` : `Recording is not yet available for ${recordingSettings.carrier}`}>
             <input
@@ -502,15 +693,52 @@ function CallsView({ projectId }: NativePanelProps) {
                   <div className="mt-1 text-lg font-semibold truncate">{selected.toNumber || selected.id}</div>
                   <div className="mt-1 text-xs text-text-muted truncate">{selected.threadId}</div>
                 </div>
+                {selected.peerKind === "human"
+                  && selected.direction === "inbound"
+                  && selected.status === "pending"
+                  && softphoneCallId !== selected.id ? (
+                  <button
+                    type="button"
+                    disabled={softphoneBusy}
+                    onClick={() => void answerSoftphoneCall(selected)}
+                    className="h-8 px-3 rounded bg-accent text-bg text-xs font-medium disabled:opacity-40"
+                  >
+                    Answer
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   disabled={!LIVE_STATUSES.has(selected.status) || ending === selected.id}
-                  onClick={() => hangup(selected)}
+                  onClick={() => { if (softphoneCallId === selected.id) endSoftphone(); void hangup(selected); }}
                   className="h-8 px-3 rounded bg-error text-bg text-xs font-medium disabled:opacity-40"
                 >
                   Hang up
                 </button>
               </div>
+
+              {softphoneCallId === selected.id ? (
+                <div className="rounded border border-border bg-bg-muted/50 p-3 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-xs font-medium">
+                      {softphoneState === "live" ? "On the call" : softphoneState === "connecting" ? "Connecting audio…" : "Audio ended"}
+                      {softphoneDetail ? <span className="text-text-muted"> — {softphoneDetail}</span> : null}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={toggleMute}
+                      disabled={softphoneState !== "live"}
+                      className={`h-8 px-3 rounded border text-xs disabled:opacity-40 ${muted ? "border-warn/40 bg-warn/10 text-warn" : "border-border hover:bg-bg-muted"}`}
+                    >
+                      {muted ? "Unmute" : "Mute"}
+                    </button>
+                  </div>
+                  <LevelMeter label="Mic" value={muted ? 0 : levels.mic} />
+                  <LevelMeter label="Caller" value={levels.speaker} />
+                  <p className="text-xs text-text-dim">
+                    Use headphones — speaker audio picked up by the microphone echoes back to the caller.
+                  </p>
+                </div>
+              ) : null}
 
               <dl className="grid gap-x-3 gap-y-3 text-sm" style={{ gridTemplateColumns: DETAILS_COLUMNS }}>
                 <dt className="text-text-dim">Status</dt>
@@ -519,6 +747,18 @@ function CallsView({ projectId }: NativePanelProps) {
                     {selected.status || "unknown"}
                   </span>
                 </dd>
+                <dt className="text-text-dim">Media</dt>
+                <dd>
+                  <span className={`inline-flex rounded border px-2 py-0.5 text-xs ${mediaStatusClass(selected.mediaStatus)}`}>
+                    {selected.mediaStatus || "idle"}
+                  </span>
+                </dd>
+                <dt className="text-text-dim">Media connected</dt>
+                <dd className="truncate">{selected.mediaConnectedAt || "-"}</dd>
+                <dt className="text-text-dim">Media ended</dt>
+                <dd className="truncate">{selected.mediaDisconnectedAt || (selected.mediaStatus === "connected" ? "live" : "-")}</dd>
+                <dt className="text-text-dim">Ended by</dt>
+                <dd className="truncate">{selected.mediaCloseLeg || "-"}</dd>
                 <dt className="text-text-dim">Duration</dt>
                 <dd className="tabular-nums">{duration(selected, now) || "-"}</dd>
                 <dt className="text-text-dim">Placed</dt>
@@ -584,6 +824,17 @@ function CallsView({ projectId }: NativePanelProps) {
                   {selected.errorMessage}
                 </div>
               ) : null}
+              {selected.mediaErrorMessage ? (
+                <div className="rounded border border-warn/30 bg-warn/10 p-3 text-sm text-warn">
+                  <div className="font-medium">Media bridge issue</div>
+                  <div className="mt-1 whitespace-pre-wrap">{selected.mediaErrorMessage}</div>
+                  {(selected.mediaCloseLeg || selected.mediaCloseCode || selected.mediaCloseReason) ? (
+                    <div className="mt-1 text-xs opacity-80">
+                      {[selected.mediaCloseLeg, selected.mediaCloseCode ? `Code ${selected.mediaCloseCode}` : "", selected.mediaCloseReason].filter(Boolean).join(" / ")}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="h-full flex items-center justify-center text-sm text-text-muted" style={{ minHeight: "14rem" }}>
@@ -637,6 +888,8 @@ interface ConnectedRoute {
   answer_mode: string;
   voice?: string;
   recording_mode: string;
+  inbound_transport: "programmable_websocket" | "sip_direct";
+  transport_configured: boolean;
 }
 
 interface ConnectedNumber {
@@ -658,6 +911,17 @@ interface ConnectedNumbersResponse {
   provider: string;
   count: number;
   numbers: ConnectedNumber[];
+  direct_sip?: {
+    supported?: boolean;
+    enabled: boolean;
+    ready: boolean;
+    available?: boolean;
+    managed?: boolean;
+    endpoint?: string;
+    transport?: string;
+    srtp?: string;
+    reason?: string;
+  };
 }
 
 interface ProviderAddress {
@@ -712,12 +976,14 @@ function healthLabel(value: string): string {
     case "disabled": return "Disabled";
     case "unsupported": return "Unsupported";
     case "unknown": return "Unverified";
+    case "sip_direct": return "Direct SIP";
+    case "not_applicable": return "N/A";
     default: return value || "Unknown";
   }
 }
 
 function healthClass(value: string): string {
-  if (value === "configured" || value === "healthy") return "border-success/30 bg-success/10 text-success";
+  if (value === "configured" || value === "healthy" || value === "sip_direct") return "border-success/30 bg-success/10 text-success";
   if (value === "mismatch" || value === "missing" || value === "degraded") return "border-error/30 bg-error/10 text-error";
   if (value === "unknown" || value === "unverified") return "border-warn/30 bg-warn/10 text-warn";
   return "border-border bg-bg-muted text-text-muted";
@@ -729,6 +995,11 @@ function NumbersView({ projectId }: NativePanelProps) {
   const [connectedProvider, setConnectedProvider] = useState("");
   const [connectedLoading, setConnectedLoading] = useState(false);
   const [connectedError, setConnectedError] = useState("");
+  const [directSIP, setDirectSIP] = useState<ConnectedNumbersResponse["direct_sip"]>();
+  const [transportDrafts, setTransportDrafts] = useState<Record<string, string>>({});
+  const [transportSaving, setTransportSaving] = useState("");
+  const [transportStatus, setTransportStatus] = useState("");
+  const [answerModeSaving, setAnswerModeSaving] = useState("");
   const [countries, setCountries] = useState("EE, AT");
   const [numberType, setNumberType] = useState("local");
   const [offers, setOffers] = useState<NumberOffer[]>([]);
@@ -759,10 +1030,17 @@ function NumbersView({ projectId }: NativePanelProps) {
       if (requestId !== connectedRequestRef.current) return;
       setConnectedProvider(data.provider || "");
       setConnectedNumbers(data.numbers ?? []);
+      setDirectSIP(data.direct_sip);
+      setTransportDrafts(Object.fromEntries(
+        (data.numbers ?? [])
+          .filter((number) => number.route)
+          .map((number) => [number.route!.id, number.route!.inbound_transport || "programmable_websocket"]),
+      ));
     } catch (e) {
       if (requestId !== connectedRequestRef.current) return;
       setConnectedNumbers([]);
       setConnectedProvider("");
+      setDirectSIP(undefined);
       setConnectedError((e as Error).message || "Could not load connected numbers");
     } finally {
       if (requestId === connectedRequestRef.current) setConnectedLoading(false);
@@ -859,6 +1137,49 @@ function NumbersView({ projectId }: NativePanelProps) {
     }
   };
 
+  const applyTransport = async (number: ConnectedNumber) => {
+    if (!number.route) return;
+    const routeId = number.route.id;
+    const transport = transportDrafts[routeId] || number.route.inbound_transport || "programmable_websocket";
+    setTransportSaving(routeId);
+    setTransportStatus("");
+    try {
+      await postJSON(endpoint("/numbers/transport"), {
+        route_id: routeId,
+        inbound_transport: transport,
+        configure: true,
+      });
+      setTransportStatus(`${number.phone_number} routing updated`);
+    } catch (e) {
+      setTransportStatus((e as Error).message || "Could not update inbound transport");
+    } finally {
+      await loadConnected();
+      setTransportSaving("");
+    }
+  };
+
+  // Flip an inbound number between agent answering and the browser softphone.
+  // Switching back restores plain `agent` mode rather than realtime_immediate,
+  // because we cannot know which directive the route previously wanted.
+  const toggleBrowserRinging = async (number: ConnectedNumber) => {
+    if (!number.route) return;
+    const routeId = number.route.id;
+    const next = number.route.answer_mode === "human_browser" ? "agent" : "human_browser";
+    setAnswerModeSaving(routeId);
+    setTransportStatus("");
+    try {
+      await postJSON(endpoint("/numbers/answer-mode"), { route_id: routeId, answer_mode: next });
+      setTransportStatus(next === "human_browser"
+        ? `${number.phone_number} now rings in the browser`
+        : `${number.phone_number} now routes to the agent`);
+    } catch (e) {
+      setTransportStatus((e as Error).message || "Could not update answer mode");
+    } finally {
+      await loadConnected();
+      setAnswerModeSaving("");
+    }
+  };
+
   return (
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
       <main className="min-h-0 flex-1 overflow-auto">
@@ -873,6 +1194,16 @@ function NumbersView({ projectId }: NativePanelProps) {
                     ? "Carrier numbers unavailable"
                     : `${connectedNumbers.length} number${connectedNumbers.length === 1 ? "" : "s"}${connectedProvider ? ` on ${connectedProvider}` : ""}`}
               </p>
+              {directSIP?.supported ? (
+                <p className="mt-0.5 truncate text-xs text-text-dim">
+                  {directSIP.ready
+                    ? `Direct SIP ready · ${directSIP.endpoint || "-"} · ${directSIP.srtp || "RTP"}`
+                    : directSIP.available
+                      ? `Direct SIP managed · starts when selected · ${directSIP.endpoint || "-"}`
+                      : `Direct SIP unavailable · ${directSIP.reason || "host preflight failed"}`}
+                </p>
+              ) : null}
+              {transportStatus ? <p className="mt-0.5 truncate text-xs text-text-muted">{transportStatus}</p> : null}
             </div>
             <button
               type="button"
@@ -899,7 +1230,7 @@ function NumbersView({ projectId }: NativePanelProps) {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <div style={{ minWidth: "76rem" }}>
+              <div style={{ minWidth: "90rem" }}>
                 <div className="grid gap-3 px-4 py-2 border-b border-border text-xs uppercase tracking-normal text-text-dim" style={{ gridTemplateColumns: CONNECTED_NUMBER_COLUMNS }}>
                   <div>Number</div>
                   <div>Provider</div>
@@ -907,6 +1238,7 @@ function NumbersView({ projectId }: NativePanelProps) {
                   <div>Route</div>
                   <div>Assigned agent</div>
                   <div>Mode</div>
+                  <div>Transport</div>
                   <div>Routing health</div>
                 </div>
                 {connectedNumbers.map((number) => (
@@ -945,9 +1277,45 @@ function NumbersView({ projectId }: NativePanelProps) {
                     </div>
                     <div className="min-w-0">
                       {number.route ? (
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          <select
+                            aria-label={`Inbound transport for ${number.phone_number}`}
+                            value={transportDrafts[number.route.id] || number.route.inbound_transport || "programmable_websocket"}
+                            onChange={(event) => setTransportDrafts((current) => ({ ...current, [number.route!.id]: event.target.value }))}
+                            disabled={transportSaving === number.route.id}
+                            className="h-8 min-w-0 flex-1 rounded border border-border bg-bg px-2 text-xs"
+                          >
+                            <option value="programmable_websocket">Voice API</option>
+                            {(number.provider === "twilio" || number.provider === "telnyx") ? (
+                              <option value="sip_direct" disabled={!directSIP?.available && !directSIP?.ready}>Direct SIP</option>
+                            ) : null}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => void applyTransport(number)}
+                            disabled={transportSaving === number.route.id
+                              || ((transportDrafts[number.route.id] || number.route.inbound_transport) === number.route.inbound_transport
+                                && (number.route.inbound_transport !== "sip_direct" || number.route.transport_configured))}
+                            className="h-8 shrink-0 rounded border border-border px-2 text-xs hover:bg-bg-muted disabled:opacity-40"
+                          >
+                            Apply
+                          </button>
+                        </div>
+                      ) : <span className="text-xs text-text-muted">-</span>}
+                    </div>
+                    <div className="min-w-0">
+                      {number.route ? (
                         <>
                           <div className="truncate capitalize">{number.route.answer_mode.replaceAll("_", " ")}</div>
                           <div className="truncate text-xs text-text-dim">{number.route.voice || "Default voice"}</div>
+                          <button
+                            type="button"
+                            disabled={answerModeSaving === number.route.id}
+                            onClick={() => void toggleBrowserRinging(number)}
+                            className="mt-1 h-7 rounded border border-border px-2 text-xs hover:bg-bg-muted disabled:opacity-40"
+                          >
+                            {number.route.answer_mode === "human_browser" ? "Route to agent" : "Ring in browser"}
+                          </button>
                         </>
                       ) : <span className="text-xs text-text-muted">-</span>}
                     </div>

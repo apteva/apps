@@ -252,6 +252,8 @@ func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts
 		"from_number":      call.FromNumber,
 		"to_number":        call.ToNumber,
 		"status":           eventStatus,
+		"carrier_status":   call.Status,
+		"media_status":     firstNonEmpty(call.MediaStatus, "idle"),
 		"previous_status":  facts.PreviousStatus,
 		"agent_id":         call.AgentID,
 		"route_id":         call.RouteID,
@@ -275,6 +277,21 @@ func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts
 	if call.ErrorMessage != "" {
 		payload["error_message"] = call.ErrorMessage
 	}
+	if call.MediaErrorMessage != "" {
+		payload["media_error_message"] = call.MediaErrorMessage
+	}
+	media := map[string]any{
+		"status": firstNonEmpty(call.MediaStatus, "idle"),
+	}
+	addOptionalString(media, "connected_at", call.MediaConnectedAt)
+	addOptionalString(media, "disconnected_at", call.MediaDisconnectedAt)
+	addOptionalString(media, "error_message", call.MediaErrorMessage)
+	addOptionalString(media, "close_reason", call.MediaCloseReason)
+	addOptionalString(media, "close_leg", call.MediaCloseLeg)
+	if call.MediaCloseCode != 0 {
+		media["close_code"] = call.MediaCloseCode
+	}
+	payload["media"] = media
 	termination := map[string]any{}
 	addOptionalString(termination, "cause", call.TerminationCause)
 	addOptionalString(termination, "code", call.TerminationCode)
@@ -662,15 +679,22 @@ func decodeLifecycleCursor(raw string) (lifecycleCursor, error) {
 }
 
 type callbackUpdate struct {
-	Status     string
-	Error      string
-	CarrierSID string
-	Facts      lifecycleFacts
+	Status      string
+	Error       string
+	MediaStatus string
+	MediaError  string
+	CarrierSID  string
+	Facts       lifecycleFacts
 }
 
 func callbackUpdateFor(carrier string, r *http.Request) callbackUpdate {
 	if carrier == "telnyx" {
 		return telnyxCallbackUpdate(r)
+	}
+	if carrier == "plivo" {
+		if update, ok := plivoStreamCallbackUpdate(r); ok {
+			return update
+		}
 	}
 	if strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "json") {
 		var body map[string]any
@@ -719,6 +743,54 @@ func callbackUpdateFor(carrier string, r *http.Request) callbackUpdate {
 	}
 }
 
+func plivoStreamCallbackUpdate(r *http.Request) (callbackUpdate, bool) {
+	event := strings.ToLower(strings.TrimSpace(r.FormValue("Event")))
+	mediaStatus := ""
+	errMsg := ""
+	switch event {
+	case "startstream":
+		mediaStatus = "connected"
+	case "stopstream":
+		mediaStatus = "disconnected"
+	case "droppedstream":
+		mediaStatus = "error"
+		errMsg = firstNonEmpty(
+			r.FormValue("ErrorMessage"),
+			r.FormValue("StatusReason"),
+			r.FormValue("Reason"),
+			"Plivo media stream dropped",
+		)
+	case "degradedstream":
+		mediaStatus = "degraded"
+		errMsg = firstNonEmpty(
+			r.FormValue("ErrorMessage"),
+			r.FormValue("StatusReason"),
+			r.FormValue("Reason"),
+			"Plivo media stream degraded",
+		)
+	default:
+		return callbackUpdate{}, false
+	}
+
+	callUUID := strings.TrimSpace(r.FormValue("CallUUID"))
+	streamID := strings.TrimSpace(r.FormValue("StreamID"))
+	timestamp := strings.TrimSpace(r.FormValue("Timestamp"))
+	eventID := firstNonEmpty(r.FormValue("EventUUID"), r.FormValue("EventId"))
+	if eventID == "" {
+		eventID = strings.Join([]string{streamID, event, timestamp}, ":")
+	}
+	return callbackUpdate{
+		MediaStatus: mediaStatus,
+		MediaError:  errMsg,
+		CarrierSID:  callUUID,
+		Facts: lifecycleFacts{
+			OccurredAt:      timestamp,
+			Source:          "provider",
+			ProviderEventID: strings.Trim(eventID, ":"),
+		},
+	}, true
+}
+
 func telnyxCallbackUpdate(r *http.Request) callbackUpdate {
 	var body struct {
 		Data struct {
@@ -737,8 +809,14 @@ func telnyxCallbackUpdate(r *http.Request) callbackUpdate {
 		return callbackUpdate{Error: "invalid Telnyx callback"}
 	}
 	status := telnyxStatusFromEvent(body.Data.EventType, body.Data.Payload.HangupCause)
+	mediaStatus := telnyxMediaStatusFromEvent(body.Data.EventType)
+	mediaError := ""
+	if mediaStatus == "error" {
+		mediaError = firstNonEmpty(body.Data.Payload.HangupCause, "Telnyx media stream failed")
+	}
 	return callbackUpdate{
 		Status: status, Error: providerCallbackError(status, "", body.Data.Payload.HangupCause, body.Data.Payload.HangupSource),
+		MediaStatus: mediaStatus, MediaError: mediaError,
 		CarrierSID: body.Data.Payload.CallControlID,
 		Facts: lifecycleFacts{
 			OccurredAt:           body.Data.OccurredAt,
@@ -769,14 +847,21 @@ func telnyxStatusFromEvent(eventType, hangupCause string) string {
 		return "ringing"
 	case "call.answered":
 		return "answered"
-	case "streaming.started", "call.streaming.started":
-		return "in-progress"
-	case "streaming.stopped", "call.streaming.stopped":
-		return "media-disconnected"
-	case "streaming.failed", "call.streaming.failed":
-		return "failed"
 	case "call.hangup":
 		return telnyxHangupStatus(hangupCause)
+	default:
+		return ""
+	}
+}
+
+func telnyxMediaStatusFromEvent(eventType string) string {
+	switch eventType {
+	case "streaming.started", "call.streaming.started":
+		return "connected"
+	case "streaming.stopped", "call.streaming.stopped":
+		return "disconnected"
+	case "streaming.failed", "call.streaming.failed":
+		return "error"
 	default:
 		return ""
 	}
