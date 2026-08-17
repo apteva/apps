@@ -1,0 +1,57 @@
+schema: apteva-app/v1
+
+name: a2a
+display_name: Agent to Agent
+version: 0.1.0
+description: |
+  Agent-to-agent communication. Lets agents in the same project message
+  each other and exchange request/reply tasks with A2A-protocol-compatible
+  semantics (submitted, working, input_required, completed, failed,
+  canceled). Every exchange is recorded in a durable task ledger. Local
+  delivery in this version; the same ledger is the substrate for
+  cross-server A2A (fleet tenants, external peers) in later versions.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/a2a
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [agents, a2a, communication, collaboration]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.instances.read
+    - platform.instances.write
+    - platform.threads.write
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: agent_send,  description: "Send a one-way message to another agent, or add a message to an existing task." }
+    - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event." }
+    - { name: agent_reply, description: "Reply to a task another agent sent you: completed, input_required, failed, or working." }
+    - { name: agent_tasks, description: "List your agent-to-agent tasks (sent and received)." }
+  publishes:
+    - { name: task.created, description: "An agent-to-agent task was created." }
+    - { name: task.updated, description: "An agent-to-agent task changed status." }
+  ui_panels:
+    - slot: project.page
+      label: Agent to Agent
+      icon: arrow-left-right
+      entry: /ui/A2APanel.mjs
+
+runtime:
+  kind: source
+  source: { repo: github.com/apteva/apps, ref: main, entry: mcp/a2a }
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/a2a.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
