@@ -298,6 +298,130 @@ function RecordingPlayer({ recording }: { recording: Recording }) {
   );
 }
 
+// Icons inherit color through currentColor from the surrounding text class, so
+// they follow the theme without any color utilities on the SVG itself.
+function PhoneIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z" />
+    </svg>
+  );
+}
+
+function BackspaceIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z" />
+      <line x1="18" y1="9" x2="12" y2="15" />
+      <line x1="12" y1="9" x2="18" y2="15" />
+    </svg>
+  );
+}
+
+const E164_RE = /^\+[1-9]\d{7,14}$/;
+
+// Accepts pasted numbers in any human formatting and reduces them to E.164
+// characters. "00" international prefixes become "+".
+function normalizeDialInput(raw: string): string {
+  let value = raw.replace(/[^\d+]/g, "");
+  if (value.startsWith("00")) value = "+" + value.slice(2);
+  value = value[0] === "+" ? "+" + value.slice(1).replace(/\+/g, "") : value.replace(/\+/g, "");
+  return value.slice(0, 16);
+}
+
+const KEYPAD_ROWS: string[][] = [
+  ["1", "2", "3"],
+  ["4", "5", "6"],
+  ["7", "8", "9"],
+  ["+", "0", "back"],
+];
+
+function Dialer({ value, onChange, onCall, busy, disabled, recent, status }: {
+  value: string;
+  onChange: (next: string) => void;
+  onCall: () => void;
+  busy: boolean;
+  disabled: boolean;
+  recent: { number: string; label: string }[];
+  status: string;
+}) {
+  const valid = E164_RE.test(value);
+  const press = (key: string) => {
+    if (key === "back") onChange(value.slice(0, -1));
+    else onChange(normalizeDialInput(value + key));
+  };
+  return (
+    <div className="p-4 space-y-4" style={{ maxWidth: "22rem", margin: "0 auto" }}>
+      <div>
+        <div className="text-xs text-text-dim">New call</div>
+        <form onSubmit={(event) => { event.preventDefault(); if (valid && !busy && !disabled) onCall(); }}>
+          <input
+            type="tel"
+            value={value}
+            autoFocus
+            onChange={(event) => onChange(normalizeDialInput(event.target.value))}
+            placeholder="+1 415 555 1234"
+            aria-label="Number to call"
+            className="mt-1 w-full rounded border border-border bg-bg px-3 text-center font-semibold tabular-nums"
+            style={{ height: "3rem", fontSize: "1.25rem", letterSpacing: "0.03em" }}
+          />
+        </form>
+        <div className="mt-1 text-xs text-text-muted text-center" style={{ minHeight: "1rem" }}>
+          {value && !valid ? "Enter a full international number starting with +" : status}
+        </div>
+      </div>
+
+      <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+        {KEYPAD_ROWS.flat().map((key) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => press(key)}
+            aria-label={key === "back" ? "Delete last digit" : `Dial ${key}`}
+            className="flex items-center justify-center rounded border border-border hover:bg-bg-muted font-medium"
+            style={{ height: "2.9rem", fontSize: "1.05rem" }}
+          >
+            {key === "back" ? <span className="text-text-muted"><BackspaceIcon /></span> : key}
+          </button>
+        ))}
+      </div>
+
+      <button
+        type="button"
+        disabled={!valid || busy || disabled}
+        onClick={onCall}
+        className="w-full flex items-center justify-center gap-2 rounded bg-accent text-bg text-sm font-medium disabled:opacity-40"
+        style={{ height: "2.9rem" }}
+      >
+        <PhoneIcon size={15} />
+        {busy ? "Calling…" : "Call"}
+      </button>
+      {disabled ? (
+        <p className="text-xs text-text-muted text-center">Finish the current call before starting another.</p>
+      ) : null}
+
+      {recent.length > 0 ? (
+        <div>
+          <div className="text-xs text-text-dim">Recent</div>
+          <div className="mt-1 space-y-1">
+            {recent.map((entry) => (
+              <button
+                key={entry.number}
+                type="button"
+                onClick={() => onChange(entry.number)}
+                className="w-full flex items-center justify-between gap-2 rounded border border-border/70 px-3 py-2 text-left hover:bg-bg-muted"
+              >
+                <span className="text-sm font-medium tabular-nums truncate">{entry.number}</span>
+                <span className="text-xs text-text-muted shrink-0">{entry.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 // Audio level bar. RMS is compressed with a square root so ordinary speech
 // occupies most of the bar instead of hugging the low end.
 function LevelMeter({ label, value }: { label: string; value: number }) {
@@ -326,6 +450,7 @@ function CallsView({ projectId }: NativePanelProps) {
 
   // ─── softphone ───────────────────────────────────────────────────
   const [dialNumber, setDialNumber] = useState("");
+  const [dialerOpen, setDialerOpen] = useState(false);
   const [softphoneCallId, setSoftphoneCallId] = useState("");
   const [softphoneState, setSoftphoneState] = useState<SoftphoneState | "">("");
   const [softphoneDetail, setSoftphoneDetail] = useState("");
@@ -440,10 +565,31 @@ function CallsView({ projectId }: NativePanelProps) {
     [calls],
   );
 
+  // Inbound softphone calls waiting for a person to pick up.
+  const ringing = useMemo(
+    () => calls.filter((call) =>
+      call.direction === "inbound" && call.peerKind === "human" && call.status === "pending"),
+    [calls],
+  );
+
+  // Redial shortcuts: the most recent distinct outbound destinations.
+  const recentNumbers = useMemo(() => {
+    const seen = new Set<string>();
+    const out: { number: string; label: string }[] = [];
+    for (const call of calls) {
+      if (call.direction !== "outbound" || !call.toNumber || seen.has(call.toNumber)) continue;
+      seen.add(call.toNumber);
+      out.push({ number: call.toNumber, label: relative(call.placedAt, now) || "" });
+      if (out.length === 4) break;
+    }
+    return out;
+  }, [calls, now]);
+
   const terminalCount = calls.length - activeCount;
 
   const hangup = async (call: Call) => {
-    if (!call || !LIVE_STATUSES.has(call.status)) return;
+    // "pending" is included so an operator can decline a ringing inbound call.
+    if (!call || (!LIVE_STATUSES.has(call.status) && call.status !== "pending")) return;
     setEnding(call.id);
     try {
       const res = await fetch(withProject(`/calls/${encodeURIComponent(call.id)}/hangup`), {
@@ -502,6 +648,7 @@ function CallsView({ projectId }: NativePanelProps) {
       );
       await startAudio(session);
       setDialNumber("");
+      setDialerOpen(false);
       setStatus(`calling ${to}`);
     } catch (e) {
       setStatus((e as Error).message || "Call failed");
@@ -586,27 +733,24 @@ function CallsView({ projectId }: NativePanelProps) {
           </p>
         </div>
         <div className="text-xs text-text-muted truncate" style={{ maxWidth: "16rem" }}>{status}</div>
-        <form
-          className="flex items-center gap-2"
-          onSubmit={(event) => { event.preventDefault(); void placeSoftphoneCall(); }}
-        >
-          <input
-            type="tel"
-            value={dialNumber}
-            onChange={(event) => setDialNumber(event.target.value)}
-            placeholder="+14155551234"
-            aria-label="Number to call"
-            className="h-8 rounded border border-border bg-bg px-2 text-xs"
-            style={{ width: "10rem" }}
-          />
+        {softphoneCallId && softphoneCallId !== selected?.id ? (
           <button
-            type="submit"
-            disabled={softphoneBusy || !dialNumber.trim() || Boolean(softphoneCallId)}
-            className="h-8 px-3 rounded bg-accent text-bg text-xs font-medium disabled:opacity-40"
+            type="button"
+            onClick={() => { setDialerOpen(false); setSelectedId(softphoneCallId); }}
+            className="h-8 px-3 rounded border border-success/30 bg-success/10 text-success text-xs font-medium flex items-center gap-2"
           >
-            Call
+            <PhoneIcon size={13} />
+            On a call — view
           </button>
-        </form>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => setDialerOpen((open) => !open)}
+          className={`h-8 px-3 rounded text-xs font-medium flex items-center gap-2 ${dialerOpen ? "border border-border hover:bg-bg-muted" : "bg-accent text-bg"}`}
+        >
+          <PhoneIcon size={13} />
+          {dialerOpen ? "Close dialer" : "New call"}
+        </button>
         {recordingSettings ? (
           <label className={`h-8 flex items-center gap-2 px-2 border border-border rounded text-xs ${recordingSettings.recording_supported ? "cursor-pointer" : "opacity-50"}`} title={recordingSettings.recording_supported ? `Record future ${recordingSettings.carrier} calls` : `Recording is not yet available for ${recordingSettings.carrier}`}>
             <input
@@ -627,6 +771,38 @@ function CallsView({ projectId }: NativePanelProps) {
           Refresh
         </button>
       </header>
+
+      {ringing.length > 0 ? (
+        <div className="shrink-0 border-b border-border px-4 py-2 space-y-2">
+          {ringing.map((call) => (
+            <div key={call.id} className="flex flex-wrap items-center gap-3 rounded border border-success/30 bg-success/10 px-3 py-2">
+              <span className="text-success flex items-center gap-2 text-sm font-medium">
+                <PhoneIcon size={15} />
+                Incoming call
+              </span>
+              <span className="text-sm tabular-nums font-semibold">{call.fromNumber || "unknown"}</span>
+              <span className="text-xs text-text-muted min-w-0 truncate">→ {call.toNumber}</span>
+              <span className="flex-1" />
+              <button
+                type="button"
+                disabled={softphoneBusy}
+                onClick={() => { setDialerOpen(false); void answerSoftphoneCall(call); }}
+                className="h-8 px-4 rounded bg-accent text-bg text-xs font-medium disabled:opacity-40"
+              >
+                Answer
+              </button>
+              <button
+                type="button"
+                disabled={ending === call.id}
+                onClick={() => void hangup(call)}
+                className="h-8 px-3 rounded border border-error/40 text-error text-xs disabled:opacity-40"
+              >
+                Decline
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       <main
         className="min-h-0 flex-1 grid"
@@ -685,7 +861,17 @@ function CallsView({ projectId }: NativePanelProps) {
         </section>
 
         <aside className="min-h-0 overflow-auto">
-          {selected ? (
+          {dialerOpen ? (
+            <Dialer
+              value={dialNumber}
+              onChange={setDialNumber}
+              onCall={() => void placeSoftphoneCall()}
+              busy={softphoneBusy}
+              disabled={Boolean(softphoneCallId)}
+              recent={recentNumbers}
+              status={softphoneCallId ? "" : "Calls from your browser using the bound carrier number."}
+            />
+          ) : selected ? (
             <div className="p-4 space-y-5">
               <div className="flex items-start gap-3">
                 <div className="min-w-0 flex-1">
@@ -719,9 +905,20 @@ function CallsView({ projectId }: NativePanelProps) {
               {softphoneCallId === selected.id ? (
                 <div className="rounded border border-border bg-bg-muted/50 p-3 space-y-3">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="text-xs font-medium">
-                      {softphoneState === "live" ? "On the call" : softphoneState === "connecting" ? "Connecting audio…" : "Audio ended"}
-                      {softphoneDetail ? <span className="text-text-muted"> — {softphoneDetail}</span> : null}
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={softphoneState === "live" ? "text-success" : "text-text-muted"}>
+                        <PhoneIcon size={15} />
+                      </span>
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium truncate">
+                          {softphoneState === "live" ? "On the call" : softphoneState === "connecting" ? "Connecting audio…" : "Audio ended"}
+                          {softphoneDetail ? <span className="text-text-muted"> — {softphoneDetail}</span> : null}
+                        </div>
+                        <div className="text-xs text-text-muted tabular-nums">
+                          {duration(selected, now) || "just started"}
+                          {selected.recordingMode === "always" ? <span className="text-error font-medium"> · REC</span> : null}
+                        </div>
+                      </div>
                     </div>
                     <button
                       type="button"
