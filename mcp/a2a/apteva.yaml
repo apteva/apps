@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: a2a
 display_name: Agent to Agent
-version: 0.1.0
+version: 0.2.0
 description: |
   Agent-to-agent communication. Lets agents in the same project message
   each other and exchange request/reply tasks with A2A-protocol-compatible
@@ -30,6 +30,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: agents_discover, description: "Discover agents you can message: peers in your project today; server/fleet/web scopes in later versions." }
     - { name: agent_send,  description: "Send a one-way message to another agent, or add a message to an existing task." }
     - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event." }
     - { name: agent_reply, description: "Reply to a task another agent sent you: completed, input_required, failed, or working." }

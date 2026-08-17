@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: a2a
 display_name: Agent to Agent
-version: 0.1.0
+version: 0.2.0
 description: |
   Agent-to-agent communication. Lets agents in the same project message
   each other and exchange request/reply tasks with A2A-protocol-compatible
@@ -60,6 +60,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: agents_discover, description: "Discover agents you can message: peers in your project today; server/fleet/web scopes in later versions." }
     - { name: agent_send,  description: "Send a one-way message to another agent, or add a message to an existing task." }
     - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event." }
     - { name: agent_reply, description: "Reply to a task another agent sent you: completed, input_required, failed, or working." }
@@ -130,14 +131,26 @@ func (a *App) HTTPRoutes() []sdk.Route {
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
+			Name: "agents_discover",
+			Description: "Discover agents you can message. Returns one entry per peer with an address to pass " +
+				"directly to agent_send/agent_ask. scope=project (default) lists the other agents in your project. " +
+				"Scopes server, fleet, and web are reserved for exposed cross-project agents, fleet tenants, and " +
+				"external A2A peers — they return empty until those phases ship.",
+			InputSchema: schemaObject(map[string]any{
+				"scope": map[string]any{"type": "string", "enum": []string{"project", "server", "fleet", "web", "all"},
+					"description": "Defaults to project."},
+			}, nil),
+			HandlerCtx: a.toolDiscover,
+		},
+		{
 			Name: "agent_send",
 			Description: "Send a one-way message to another agent in this project. No reply is expected. " +
-				"to is the target agent's numeric id — find ids with agents_list. " +
+				"to is the target agent's id or exact name — discover peers with agents_discover. " +
 				"Pass task_id to add a follow-up message to an existing a2a task instead of starting a new one " +
 				"(for example to answer a task that is input_required, or to continue a finished exchange). " +
 				"For work that needs an answer, use agent_ask instead.",
 			InputSchema: schemaObject(map[string]any{
-				"to":      map[string]any{"type": "string", "description": "Target agent id (numeric, from agents_list). Ignored when task_id is set."},
+				"to":      map[string]any{"type": "string", "description": "Target agent id or exact name (from agents_discover). Ignored when task_id is set."},
 				"message": map[string]any{"type": "string", "description": "Complete message for the other agent."},
 				"task_id": map[string]any{"type": "string", "description": "Existing a2a task id to append this message to."},
 			}, []string{"message"}),
@@ -147,9 +160,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "agent_ask",
 			Description: "Ask another agent in this project to do something. Creates an a2a task, delivers the request, " +
 				"and returns immediately with the task id. The reply arrives later as an [a2a] event — do not block or poll for it; " +
-				"continue other work or pace. to is the target agent's numeric id — find ids with agents_list.",
+				"continue other work or pace. to is the target agent's id or exact name — discover peers with agents_discover.",
 			InputSchema: schemaObject(map[string]any{
-				"to":      map[string]any{"type": "string", "description": "Target agent id (numeric, from agents_list)."},
+				"to":      map[string]any{"type": "string", "description": "Target agent id or exact name (from agents_discover)."},
 				"message": map[string]any{"type": "string", "description": "Complete, self-contained request: objective, constraints, and what a good answer looks like."},
 			}, []string{"to", "message"}),
 			HandlerCtx: a.toolAsk,
@@ -214,24 +227,61 @@ func identify(ctx context.Context, app *sdk.AppCtx) (*callIdentity, error) {
 
 // resolveTarget validates the destination agent: it must exist and be
 // in the caller's project (phase 1 policy — cross-project and remote
-// peers come with the exposure/peer-registry phases).
+// peers come with the exposure/peer-registry phases). to accepts a
+// numeric id, an "agent:<id>" address from agents_discover, or an
+// exact agent name (resolved via the platform's agent directory).
 func resolveTarget(app *sdk.AppCtx, from *callIdentity, to string) (*sdk.PlatformAgent, error) {
 	to = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(to), "agent:"))
 	id, err := strconv.ParseInt(to, 10, 64)
 	if err != nil || id <= 0 {
-		return nil, fmt.Errorf("to must be a numeric agent id (got %q) — find ids with agents_list", to)
+		resolved, err := resolveTargetByName(app, from, to)
+		if err != nil {
+			return nil, err
+		}
+		id = resolved
 	}
 	if id == from.AgentID {
 		return nil, errors.New("target is yourself — a2a is for messaging other agents; use your own threads for internal work")
 	}
 	agent, err := app.PlatformAPI().GetAgent(id)
 	if err != nil || agent == nil {
-		return nil, fmt.Errorf("agent %d not found — find valid ids with agents_list", id)
+		return nil, fmt.Errorf("agent %d not found — find peers with agents_discover", id)
 	}
 	if from.ProjectID != "" && agent.ProjectID != "" && agent.ProjectID != from.ProjectID {
 		return nil, fmt.Errorf("agent %d is not in your project — cross-project messaging is not enabled", id)
 	}
 	return agent, nil
+}
+
+// resolveTargetByName maps an exact (case-insensitive) agent name to an
+// id within the caller's project. Duplicate names are an error naming
+// the candidate ids rather than a silent pick.
+func resolveTargetByName(app *sdk.AppCtx, from *callIdentity, name string) (int64, error) {
+	if name == "" {
+		return 0, errors.New("to required — pass an agent id or exact name from agents_discover")
+	}
+	peers, err := sdk.ListAgentsVia(app.PlatformAPI(), from.ProjectID)
+	if err != nil {
+		return 0, fmt.Errorf("to must be a numeric agent id (got %q); name lookup unavailable: %v", name, err)
+	}
+	var matches []sdk.PlatformAgent
+	for _, peer := range peers {
+		if strings.EqualFold(strings.TrimSpace(peer.Name), name) {
+			matches = append(matches, peer)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return 0, fmt.Errorf("no agent named %q in your project — find peers with agents_discover", name)
+	case 1:
+		return matches[0].ID, nil
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, m := range matches {
+			ids = append(ids, strconv.FormatInt(m.ID, 10))
+		}
+		return 0, fmt.Errorf("agent name %q is ambiguous (ids %s) — pass the id instead", name, strings.Join(ids, ", "))
+	}
 }
 
 // checkLimits enforces the per-pair delivery rate limit and, for new
@@ -259,6 +309,65 @@ func checkLimits(app *sdk.AppCtx, from *callIdentity, toAgentID int64, newAsk bo
 }
 
 // --- tool handlers ----------------------------------------------------------
+
+// discoverEntry is the uniform peer shape agents_discover returns
+// across every scope: address goes straight into agent_send/agent_ask
+// unchanged, so locality stays an implementation detail.
+type discoverEntry struct {
+	ID      int64  `json:"id"`
+	Address string `json:"address"`
+	Name    string `json:"name"`
+	Online  bool   `json:"online"`
+	Mode    string `json:"mode,omitempty"`
+	Scope   string `json:"scope"`
+}
+
+func (a *App) toolDiscover(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	from, err := identify(ctx, app)
+	if err != nil {
+		return nil, err
+	}
+	scope := strings.TrimSpace(stringArg(args, "scope"))
+	if scope == "" {
+		scope = "project"
+	}
+	switch scope {
+	case "project", "all":
+	case "server", "fleet", "web":
+		return map[string]any{
+			"agents": []discoverEntry{},
+			"note":   fmt.Sprintf("scope %q is not available yet — exposed cross-project agents, fleet tenants, and external A2A peers arrive in later versions; use scope=project", scope),
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown scope %q — use project, server, fleet, web, or all", scope)
+	}
+	peers, err := sdk.ListAgentsVia(app.PlatformAPI(), from.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("agent discovery unavailable on this platform version: %v", err)
+	}
+	entries := make([]discoverEntry, 0, len(peers))
+	for _, peer := range peers {
+		if peer.ID == from.AgentID {
+			continue
+		}
+		entries = append(entries, discoverEntry{
+			ID:      peer.ID,
+			Address: "agent:" + strconv.FormatInt(peer.ID, 10),
+			Name:    peer.Name,
+			Online:  strings.EqualFold(peer.Status, "running"),
+			Mode:    peer.Mode,
+			Scope:   "project",
+		})
+	}
+	result := map[string]any{"agents": entries}
+	if scope == "all" {
+		result["note"] = "only project-scope peers are live; server, fleet, and web scopes arrive in later versions"
+	}
+	if len(entries) == 0 {
+		result["note"] = "no other agents in your project"
+	}
+	return result, nil
+}
 
 func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	from, err := identify(ctx, app)

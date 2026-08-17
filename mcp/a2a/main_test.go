@@ -21,6 +21,7 @@ type recordingPlatform struct {
 	threadEvents []capturedThreadEvent
 	failThread   bool // force SendThreadEvent to fail → main-thread fallback
 	failSend     bool // force SendEvent to fail
+	failList     bool // simulate a platform without the agent directory
 }
 
 type capturedEvent struct {
@@ -60,6 +61,19 @@ func (p *recordingPlatform) SendThreadEvent(target sdk.ThreadRef, message any) e
 	text, _ := message.(string)
 	p.threadEvents = append(p.threadEvents, capturedThreadEvent{Ref: target, Message: text})
 	return nil
+}
+
+func (p *recordingPlatform) ListAgents(projectID string) ([]sdk.PlatformAgent, error) {
+	if p.failList {
+		return nil, fmt.Errorf("directory unavailable")
+	}
+	var out []sdk.PlatformAgent
+	for _, a := range p.agents {
+		if projectID == "" || a.ProjectID == projectID {
+			out = append(out, *a)
+		}
+	}
+	return out, nil
 }
 
 func (p *recordingPlatform) lastEvent(t *testing.T) capturedEvent {
@@ -237,9 +251,9 @@ func TestGuards(t *testing.T) {
 		{"unknown agent", func() (any, error) {
 			return app.toolSend(callerCtx(41, ""), ctx, map[string]any{"to": "999", "message": "x"})
 		}, "not found"},
-		{"non-numeric target", func() (any, error) {
-			return app.toolSend(callerCtx(41, ""), ctx, map[string]any{"to": "CRM", "message": "x"})
-		}, "agents_list"},
+		{"unknown name target", func() (any, error) {
+			return app.toolSend(callerCtx(41, ""), ctx, map[string]any{"to": "No Such Agent", "message": "x"})
+		}, "agents_discover"},
 		{"cross project", func() (any, error) {
 			return app.toolSend(callerCtx(41, ""), ctx, map[string]any{"to": "77", "message": "x"})
 		}, "not in your project"},
@@ -374,5 +388,77 @@ func TestManifestMatchesYAML(t *testing.T) {
 	embeddedPerms := fmt.Sprint(embeddedM.Requires.Permissions)
 	if filePerms != embeddedPerms {
 		t.Fatalf("permission drift: apteva.yaml %s vs embedded %s", filePerms, embeddedPerms)
+	}
+}
+
+func TestDiscoverListsProjectPeers(t *testing.T) {
+	ctx, _ := newTestEnv(t)
+	app := &App{}
+	res := resultMap(t)(app.toolDiscover(callerCtx(41, ""), ctx, map[string]any{}))
+	entries := res["agents"].([]discoverEntry)
+	ids := map[int64]discoverEntry{}
+	for _, e := range entries {
+		ids[e.ID] = e
+	}
+	if _, self := ids[41]; self {
+		t.Fatal("discover included the caller itself")
+	}
+	if _, foreign := ids[77]; foreign {
+		t.Fatal("discover leaked another project's agent")
+	}
+	crm, ok := ids[42]
+	if !ok || crm.Address != "agent:42" || crm.Name != "CRM" || crm.Scope != "project" {
+		t.Fatalf("bad CRM entry: %+v", crm)
+	}
+
+	// Reserved scopes: empty with a note, never an error.
+	res = resultMap(t)(app.toolDiscover(callerCtx(41, ""), ctx, map[string]any{"scope": "fleet"}))
+	if len(res["agents"].([]discoverEntry)) != 0 || res["note"] == nil {
+		t.Fatalf("fleet scope should be empty with note, got %+v", res)
+	}
+	if _, err := app.toolDiscover(callerCtx(41, ""), ctx, map[string]any{"scope": "galaxy"}); err == nil {
+		t.Fatal("unknown scope accepted")
+	}
+}
+
+func TestSendByNameAndAmbiguity(t *testing.T) {
+	ctx, platform := newTestEnv(t)
+	app := &App{}
+
+	// Exact name, case-insensitive.
+	res := resultMap(t)(app.toolAsk(callerCtx(41, ""), ctx, map[string]any{
+		"to": "crm", "message": "By name please.",
+	}))
+	to := res["to"].(map[string]any)
+	if to["id"].(int64) != 42 {
+		t.Fatalf("name resolution sent to %v", to)
+	}
+
+	// Ambiguous name → error listing candidate ids.
+	platform.agents[44] = &sdk.PlatformAgent{ID: 44, Name: "CRM", ProjectID: testProject}
+	if _, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{
+		"to": "CRM", "message": "x",
+	}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous name err = %v", err)
+	}
+
+	// Unknown name → guidance toward agents_discover.
+	if _, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{
+		"to": "Nobody", "message": "x",
+	}); err == nil || !strings.Contains(err.Error(), "agents_discover") {
+		t.Fatalf("unknown name err = %v", err)
+	}
+
+	// Directory unavailable → ids still work, names fail with clear error.
+	platform.failList = true
+	if _, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{
+		"to": "crm", "message": "x",
+	}); err == nil || !strings.Contains(err.Error(), "name lookup unavailable") {
+		t.Fatalf("no-directory name err = %v", err)
+	}
+	if _, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{
+		"to": "42", "message": "id still fine",
+	}); err != nil {
+		t.Fatalf("id send with no directory failed: %v", err)
 	}
 }
