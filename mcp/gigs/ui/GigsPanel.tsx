@@ -522,8 +522,8 @@ function QueueTab({ projectId }: { projectId: string }) {
             <option value="offered,accepted">Assigned</option>
             <option value="submitted">Submitted</option>
             <option value="reviewed">Reviewed</option>
-            <option value="rejected,cancelled,expired">Closed without acceptance</option>
-            <option value="open,offered,accepted,submitted,reviewed,rejected,cancelled,expired">All</option>
+            <option value="cancelled,expired">Closed without acceptance</option>
+            <option value="open,offered,accepted,submitted,reviewed,cancelled,expired">All</option>
           </Field>
         </div>
         {err && <div className="m-3 p-3 rounded border border-red/30 bg-red/10 text-red text-sm">{err}</div>}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -152,9 +153,14 @@ func (a *App) gigTools() []sdk.Tool {
 		},
 		{
 			Name:        "gigs_list_open",
-			Description: "Filtered queue read returning lightweight gig summaries by default. Use gigs_status for one full record or include_details=true when full compositions and submissions are required. Args: status? (default 'open,offered,accepted'), worker_id?, template_id?, limit? (default 50), include_details? (default false). Returns {gigs}.",
+			Description: "Filtered queue read returning lightweight gig summaries by default. Use gigs_status for one full record or include_details=true when full compositions and submissions are required. Args: status? (comma-separated; one or more of open, offered, accepted, submitted, reviewed, cancelled, expired; default 'open,offered,accepted'), worker_id?, template_id?, limit? (default 50), include_details? (default false). There is no 'completed' status — work that was accepted is 'reviewed', and 'completed' is accepted as an alias for it. An unrecognised status is an error, never an empty list. Returns {gigs}.",
 			InputSchema: schemaObject(map[string]any{
-				"status":          map[string]any{"type": "string"},
+				"status": map[string]any{
+					"type": "string",
+					"description": "Comma-separated subset of: open, offered, accepted, submitted, reviewed, cancelled, expired. " +
+						"Defaults to 'open,offered,accepted'. Accepted work is 'reviewed'; 'completed'/'done' alias to it. " +
+						"Terminal states are reviewed, cancelled and expired.",
+				},
 				"worker_id":       map[string]any{"type": "integer"},
 				"template_id":     map[string]any{"type": "integer"},
 				"limit":           map[string]any{"type": "integer"},
@@ -801,16 +807,15 @@ func (a *App) toolGigsListOpen(ctx *sdk.AppCtx, args map[string]any) (any, error
 		}
 		return map[string]any{"gigs": items}, nil
 	}
-	statusFilter := strArg(args, "status")
-	if statusFilter == "" {
-		statusFilter = "open,offered,accepted"
+	statuses, err := parseGigStatusFilter(strArg(args, "status"))
+	if err != nil {
+		return nil, err
 	}
-	statuses := strings.Split(statusFilter, ",")
 	placeholders := make([]string, len(statuses))
 	qArgs := []any{pid}
 	for i, s := range statuses {
 		placeholders[i] = "?"
-		qArgs = append(qArgs, strings.TrimSpace(s))
+		qArgs = append(qArgs, s)
 	}
 	q := `SELECT id FROM gigs
 	      WHERE project_id=? AND status IN (` + strings.Join(placeholders, ",") + `)`
@@ -859,23 +864,68 @@ func (a *App) toolGigsListOpen(ctx *sdk.AppCtx, args map[string]any) (any, error
 	return map[string]any{"gigs": out}, nil
 }
 
-func listGigSummaries(db *sql.DB, pid, statusFilter string, workerID, templateID int64, limit int) ([]*gig, error) {
-	if statusFilter == "" {
-		statusFilter = "open,offered,accepted"
-	}
-	statuses := strings.Split(statusFilter, ",")
-	marks := make([]string, 0, len(statuses))
-	args := []any{pid}
-	for _, status := range statuses {
-		status = strings.TrimSpace(status)
+// ─── Gig status vocabulary ──────────────────────────────────────────
+
+// gigStatuses is the complete set of values this app ever writes to gigs.status.
+// Assignment rows and gig_events carry their own, wider vocabularies — see
+// migrations/001_init.sql. Notably there is no "completed": the terminal
+// accepted state is "reviewed" (gigs_accept_result), and "expired" is terminal
+// too (the deadline sweeper in lifecycle.go).
+var gigStatuses = []string{"open", "offered", "accepted", "submitted", "reviewed", "cancelled", "expired"}
+
+// defaultGigStatuses is the live-queue view callers get when they pass no filter.
+var defaultGigStatuses = []string{"open", "offered", "accepted"}
+
+// gigStatusAliases maps words callers reach for onto the status actually stored.
+// "completed" is the obvious term for work that was accepted, and asking for it
+// used to return an empty list indistinguishable from "no such work exists".
+var gigStatusAliases = map[string]string{
+	"complete":  "reviewed",
+	"completed": "reviewed",
+	"done":      "reviewed",
+}
+
+// parseGigStatusFilter resolves a comma-separated status filter into concrete
+// gigs.status values, applying aliases. Unknown values are rejected instead of
+// being handed to SQL, where they match nothing and read as a truthful "no
+// results" — the failure mode this guards against.
+func parseGigStatusFilter(statusFilter string) ([]string, error) {
+	statuses := make([]string, 0, len(gigStatuses))
+	seen := make(map[string]bool, len(gigStatuses))
+	for _, raw := range strings.Split(statusFilter, ",") {
+		status := strings.ToLower(strings.TrimSpace(raw))
 		if status == "" {
 			continue
 		}
+		if canonical, ok := gigStatusAliases[status]; ok {
+			status = canonical
+		}
+		if !slices.Contains(gigStatuses, status) {
+			return nil, fmt.Errorf(
+				"unknown gig status %q: valid values are %s (completed/complete/done are accepted as aliases for reviewed)",
+				strings.TrimSpace(raw), strings.Join(gigStatuses, ", "))
+		}
+		if !seen[status] {
+			seen[status] = true
+			statuses = append(statuses, status)
+		}
+	}
+	if len(statuses) == 0 {
+		return slices.Clone(defaultGigStatuses), nil
+	}
+	return statuses, nil
+}
+
+func listGigSummaries(db *sql.DB, pid, statusFilter string, workerID, templateID int64, limit int) ([]*gig, error) {
+	statuses, err := parseGigStatusFilter(statusFilter)
+	if err != nil {
+		return nil, err
+	}
+	marks := make([]string, 0, len(statuses))
+	args := []any{pid}
+	for _, status := range statuses {
 		marks = append(marks, "?")
 		args = append(args, status)
-	}
-	if len(marks) == 0 {
-		return []*gig{}, nil
 	}
 	q := `SELECT g.id,g.project_id,COALESCE(g.template_version_id,0),g.created_by,g.title,
 		COALESCE(g.deadline_at,''),COALESCE(g.priority,''),g.status,g.created_at,g.updated_at,

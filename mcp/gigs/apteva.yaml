@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.1.21
+version: 0.1.22
 description: |
   Agents delegate atomic work to human workers (CRM contacts) by
   composing reusable multi-modal instructions. Templates are saved
@@ -122,7 +122,11 @@ provides:
     - name: gigs_status
       description: Pre-flight read — gig + composition + assignments + submission.
     - name: gigs_list_open
-      description: Filtered lightweight queue read (status, worker, template, deadline); use gigs_status for full details.
+      description: >-
+        Filtered lightweight queue read (status, worker, template, deadline); use gigs_status for full details.
+        status takes a comma-separated subset of open, offered, accepted, submitted, reviewed, cancelled, expired
+        (default 'open,offered,accepted'). There is no 'completed' status — accepted work is 'reviewed', and
+        'completed' is accepted as an alias. Unknown values return an error rather than an empty list.
     - name: gigs_cancel
       description: Cancel an open, offered, or accepted gig; only workers originally notified are messaged.
     - name: gigs_extend_deadline

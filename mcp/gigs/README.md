@@ -1,4 +1,4 @@
-# Gigs (v0.1.21)
+# Gigs (v0.1.22)
 
 Agents delegate atomic work to human workers (CRM contacts) by composing
 reusable multi-modal instructions. Templates are saved instruction sets;
@@ -24,6 +24,32 @@ notes/files for that step; otherwise the worker page only shows the instruction.
 
 `result_schema`, `media_manifest`, `checklist`, and `variables` are
 **derived** from the composition — never hand-authored.
+
+## Gig status vocabulary
+
+A gig's `status` is exactly one of:
+
+| Status | Meaning |
+|---|---|
+| `open` | Dispatched, nobody offered it yet |
+| `offered` | Offered to one or more workers, not yet accepted |
+| `accepted` | A worker took it; work in progress |
+| `submitted` | Worker submitted; awaiting agent review |
+| `reviewed` | **Terminal.** Submission accepted via `gigs_accept_result` |
+| `cancelled` | **Terminal.** Cancelled via `gigs_cancel` |
+| `expired` | **Terminal.** Deadline elapsed without an accepted submission |
+
+**There is no `completed` status.** Work that was accepted is `reviewed`.
+`gigs_list_open` accepts `completed`, `complete`, and `done` as aliases for
+`reviewed` so the natural phrasing works, and rejects any other unknown value
+with an error rather than returning an empty list.
+
+`completed_at` is stamped on `reviewed` **and** `expired`, so it marks "reached
+a terminal state", not "succeeded" — filter on `status` when you mean success.
+
+`rejected` is not a gig status: rejecting a submission records it on the
+assignment and as a `gig_event`, and returns the gig to an earlier status
+(`submitted`, `accepted`, `offered`, or `open`).
 
 ## Hard deps
 

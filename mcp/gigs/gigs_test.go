@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -84,7 +85,7 @@ func seedAssignment(t *testing.T, ctx *sdk.AppCtx, gigID, workerID int64, status
 
 func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.1.21" {
+	if manifest.Version != "0.1.22" {
 		t.Fatalf("version=%q", manifest.Version)
 	}
 	var public []sdk.RouteSpec
@@ -354,5 +355,65 @@ func TestWorkerMultipartUploadIsBoundToAssignment(t *testing.T) {
 	}
 	if err := validateSubmissionAttachments(ctx.AppDB(), assignmentID, []int64{92}); err == nil {
 		t.Fatal("unrelated storage id accepted")
+	}
+}
+
+func TestGigStatusFilterAliasesCompletedAndRejectsUnknown(t *testing.T) {
+	ctx := testCtx(t)
+	reviewedID := seedGig(t, ctx, "project-a", "reviewed", "{}")
+	seedGig(t, ctx, "project-a", "open", "{}")
+
+	// "completed" is the word an agent reaches for when asking what work was
+	// finished. It must resolve to "reviewed" instead of matching nothing.
+	for _, filter := range []string{"completed", "complete", "done", "reviewed", " Completed "} {
+		got, err := listGigSummaries(ctx.AppDB(), "project-a", filter, 0, 0, 50)
+		if err != nil {
+			t.Fatalf("status=%q: %v", filter, err)
+		}
+		if len(got) != 1 || got[0].ID != reviewedID || got[0].Status != "reviewed" {
+			t.Fatalf("status=%q returned %d gigs, want only the reviewed gig", filter, len(got))
+		}
+	}
+
+	// An unknown status must fail loudly. Returning an empty list is
+	// indistinguishable from a truthful "no such work exists".
+	for _, filter := range []string{"banana", "open,banana"} {
+		got, err := listGigSummaries(ctx.AppDB(), "project-a", filter, 0, 0, 50)
+		if err == nil {
+			t.Fatalf("status=%q returned %d gigs, want an error", filter, len(got))
+		}
+		for _, want := range []string{"banana", "reviewed", "expired"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("status=%q error %q does not mention %q", filter, err, want)
+			}
+		}
+	}
+
+	// The documented default is the live queue, so terminal states stay out.
+	got, err := listGigSummaries(ctx.AppDB(), "project-a", "", 0, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Status != "open" {
+		t.Fatalf("default filter returned %d gigs, want only the open gig", len(got))
+	}
+}
+
+func TestParseGigStatusFilterNormalizesAndRoundTrips(t *testing.T) {
+	got, err := parseGigStatusFilter("open, OPEN ,completed,,submitted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"open", "reviewed", "submitted"}; !slices.Equal(got, want) {
+		t.Fatalf("parsed %v want %v", got, want)
+	}
+
+	// Every status the app writes must be queryable, so a future status added to
+	// the schema without updating gigStatuses fails here rather than in prod.
+	for _, status := range gigStatuses {
+		got, err := parseGigStatusFilter(status)
+		if err != nil || !slices.Equal(got, []string{status}) {
+			t.Fatalf("status %q did not round trip: %v (err %v)", status, got, err)
+		}
 	}
 }

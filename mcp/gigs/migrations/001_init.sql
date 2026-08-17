@@ -170,7 +170,10 @@ CREATE TABLE gigs (
   deadline_at                     TIMESTAMP,
   priority                        TEXT,
   status                          TEXT    NOT NULL,
-  -- open | offered | accepted | submitted | reviewed | rejected | cancelled | expired
+  -- open | offered | accepted | submitted | reviewed | cancelled | expired
+  -- Terminal: reviewed (accepted), cancelled, expired. There is no "completed" —
+  -- gigs_accept_result writes "reviewed". A rejected submission is recorded on the
+  -- assignment and as a gig_event; the gig itself falls back to an earlier status.
   result_json                     TEXT,                           -- validated submission, copied from gig_submissions on accept
   rejection_reason                TEXT,
   created_at                      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
