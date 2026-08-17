@@ -85,7 +85,7 @@ func seedAssignment(t *testing.T, ctx *sdk.AppCtx, gigID, workerID int64, status
 
 func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.1.22" {
+	if manifest.Version != "0.1.23" {
 		t.Fatalf("version=%q", manifest.Version)
 	}
 	var public []sdk.RouteSpec
