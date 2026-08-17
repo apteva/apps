@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: a2a
 display_name: Agent to Agent
-version: 0.2.0
+version: 0.2.1
 description: |
   Agent-to-agent communication. Lets agents in the same project message
   each other and exchange request/reply tasks with A2A-protocol-compatible
@@ -322,6 +322,41 @@ type discoverEntry struct {
 	Scope   string `json:"scope"`
 }
 
+// projectPeers lists the caller's project agents plus whether the
+// platform annotates a2a attachment. annotated is false on servers
+// older than the attachment annotation — detected via the caller's own
+// row: the caller invoked this app's tool, so its binding must exist;
+// a false flag there means the server never set it.
+func projectPeers(app *sdk.AppCtx, from *callIdentity) (peers []sdk.PlatformAgent, annotated bool, err error) {
+	peers, err = sdk.ListAgentsVia(app.PlatformAPI(), from.ProjectID)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, peer := range peers {
+		if peer.ID == from.AgentID && peer.AttachedToCaller {
+			annotated = true
+			break
+		}
+	}
+	return peers, annotated, nil
+}
+
+// peerReachable reports whether the target can use a2a tools (and so
+// reply). Unknown on old platforms — callers treat an error or
+// annotated=false as "assume reachable".
+func peerReachable(app *sdk.AppCtx, from *callIdentity, targetID int64) bool {
+	peers, annotated, err := projectPeers(app, from)
+	if err != nil || !annotated {
+		return true
+	}
+	for _, peer := range peers {
+		if peer.ID == targetID {
+			return peer.AttachedToCaller
+		}
+	}
+	return true
+}
+
 func (a *App) toolDiscover(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	from, err := identify(ctx, app)
 	if err != nil {
@@ -341,13 +376,21 @@ func (a *App) toolDiscover(ctx context.Context, app *sdk.AppCtx, args map[string
 	default:
 		return nil, fmt.Errorf("unknown scope %q — use project, server, fleet, web, or all", scope)
 	}
-	peers, err := sdk.ListAgentsVia(app.PlatformAPI(), from.ProjectID)
+	peers, annotated, err := projectPeers(app, from)
 	if err != nil {
 		return nil, fmt.Errorf("agent discovery unavailable on this platform version: %v", err)
 	}
 	entries := make([]discoverEntry, 0, len(peers))
+	hidden := 0
 	for _, peer := range peers {
 		if peer.ID == from.AgentID {
+			continue
+		}
+		// Only list peers that hold a2a tools themselves — an agent
+		// without them receives messages but can never reply. On
+		// platforms without the annotation, list everyone.
+		if annotated && !peer.AttachedToCaller {
+			hidden++
 			continue
 		}
 		entries = append(entries, discoverEntry{
@@ -360,11 +403,21 @@ func (a *App) toolDiscover(ctx context.Context, app *sdk.AppCtx, args map[string
 		})
 	}
 	result := map[string]any{"agents": entries}
-	if scope == "all" {
-		result["note"] = "only project-scope peers are live; server, fleet, and web scopes arrive in later versions"
+	var notes []string
+	if hidden > 0 {
+		notes = append(notes, fmt.Sprintf("%d project agent(s) without Agent to Agent attached are not listed — they could not reply; the operator can attach the app to include them", hidden))
 	}
-	if len(entries) == 0 {
-		result["note"] = "no other agents in your project"
+	if !annotated {
+		notes = append(notes, "this platform version does not report which agents hold a2a tools; peers listed here may be unable to reply")
+	}
+	if scope == "all" {
+		notes = append(notes, "only project-scope peers are live; server, fleet, and web scopes arrive in later versions")
+	}
+	if len(entries) == 0 && hidden == 0 {
+		notes = append(notes, "no other agents in your project")
+	}
+	if len(notes) > 0 {
+		result["note"] = strings.Join(notes, ". ")
 	}
 	return result, nil
 }
@@ -407,11 +460,15 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	}
 	_ = recordMessage(app.AppDB(), task.ID, from.AgentID, target.ID, message, "completed")
 	emitTask(app, "task.created", task)
+	note := "one-way message delivered; no reply is expected"
+	if !peerReachable(app, from, target.ID) {
+		note = "one-way message delivered; the target has no Agent to Agent tools attached and cannot reply"
+	}
 	return map[string]any{
 		"task_id":   task.ID,
 		"delivered": true,
 		"to":        map[string]any{"id": target.ID, "name": target.Name},
-		"note":      "one-way message delivered; no reply is expected",
+		"note":      note,
 	}, nil
 }
 
@@ -427,6 +484,9 @@ func (a *App) toolAsk(ctx context.Context, app *sdk.AppCtx, args map[string]any)
 	target, err := resolveTarget(app, from, stringArg(args, "to"))
 	if err != nil {
 		return nil, err
+	}
+	if !peerReachable(app, from, target.ID) {
+		return nil, fmt.Errorf("agent %d (%s) does not have Agent to Agent attached, so it can never reply to this request — use agent_send for a one-way message, or ask the operator to attach the app to that agent", target.ID, target.Name)
 	}
 	if err := checkLimits(app, from, target.ID, true); err != nil {
 		return nil, err
@@ -490,7 +550,7 @@ func (a *App) sendFollowUp(app *sdk.AppCtx, from *callIdentity, taskID int64, me
 		task.Status = statusAfter
 		emitTask(app, "task.updated", task)
 	}
-	if err := deliver(app, toID, formatFollowUpEvent(task, from, message)); err != nil {
+	if err := deliverToParticipant(app, task, toID, formatFollowUpEvent(task, from, message)); err != nil {
 		return nil, fmt.Errorf("agent %d could not be reached: %w", toID, err)
 	}
 	_ = recordMessage(app.AppDB(), task.ID, from.AgentID, toID, message, statusAfter)
@@ -552,11 +612,19 @@ func (a *App) toolReply(ctx context.Context, app *sdk.AppCtx, args map[string]an
 	if err := checkLimits(app, from, deliverTo, false); err != nil {
 		return nil, err
 	}
+	// First responder-side reply claims task ownership for its thread:
+	// later requester follow-ups route there instead of the responder's
+	// main. Main-to-main exchanges record "main" and behave as before.
+	if from.AgentID == task.ToAgentID && task.ToThreadID == "" && from.ThreadID != "" {
+		if err := setTaskResponderThread(app.AppDB(), from.ProjectID, task.ID, from.ThreadID); err == nil {
+			task.ToThreadID = from.ThreadID
+		}
+	}
 	if err := setTaskStatus(app.AppDB(), from.ProjectID, task.ID, status); err != nil {
 		return nil, err
 	}
 	task.Status = status
-	if err := deliverReply(app, task, from, deliverTo, message); err != nil {
+	if err := deliverToParticipant(app, task, deliverTo, formatReplyEvent(task, from, message)); err != nil {
 		return nil, fmt.Errorf("reply recorded but agent %d could not be reached: %w", deliverTo, err)
 	}
 	_ = recordMessage(app.AppDB(), task.ID, from.AgentID, deliverTo, message, status)
@@ -592,18 +660,25 @@ func deliver(app *sdk.AppCtx, toAgentID int64, event string) error {
 	return app.PlatformAPI().SendEvent(toAgentID, event)
 }
 
-// deliverReply routes a reply to the thread that asked when known,
-// falling back to the agent's main thread. Thread addressing is the
-// optional sdk.ThreadClient extension — absent it (older platform or
-// simple test double), main-thread delivery still works.
-func deliverReply(app *sdk.AppCtx, task *Task, from *callIdentity, toAgentID int64, message string) error {
-	event := formatReplyEvent(task, from, message)
-	if toAgentID == task.FromAgentID && task.FromThreadID != "" {
+// deliverToParticipant routes an event to whichever thread of the
+// receiving agent owns this task: the asking thread on the requester
+// side, the thread that first replied on the responder side. Falls
+// back to the agent's main thread when no thread is recorded, the
+// thread is gone (done/killed), or the platform lacks the optional
+// sdk.ThreadClient extension.
+func deliverToParticipant(app *sdk.AppCtx, task *Task, toAgentID int64, event string) error {
+	threadID := ""
+	switch toAgentID {
+	case task.FromAgentID:
+		threadID = task.FromThreadID
+	case task.ToAgentID:
+		threadID = task.ToThreadID
+	}
+	if threadID != "" {
 		if tc, ok := app.PlatformAPI().(sdk.ThreadClient); ok {
-			if err := tc.SendThreadEvent(sdk.ThreadRef{AgentID: task.FromAgentID, ThreadID: task.FromThreadID}, event); err == nil {
+			if err := tc.SendThreadEvent(sdk.ThreadRef{AgentID: toAgentID, ThreadID: threadID}, event); err == nil {
 				return nil
 			}
-			// Thread may be gone (done/killed) — main thread still owns the agent.
 		}
 	}
 	return app.PlatformAPI().SendEvent(toAgentID, event)

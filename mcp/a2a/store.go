@@ -20,6 +20,7 @@ type Task struct {
 	FromThreadID  string `json:"-"`
 	ToAgentID     int64  `json:"to_agent_id"`
 	ToAgentName   string `json:"to_agent_name,omitempty"`
+	ToThreadID    string `json:"-"`
 	CreatedAt     string `json:"created_at"`
 	UpdatedAt     string `json:"updated_at"`
 }
@@ -54,13 +55,13 @@ func createTask(db *sql.DB, t *Task) (*Task, error) {
 func getTask(db *sql.DB, projectID string, id int64) (*Task, error) {
 	row := db.QueryRow(`
 		SELECT id, project_id, kind, status, from_agent_id, from_agent_name, from_thread_id,
-		       to_agent_id, to_agent_name, created_at, updated_at
+		       to_agent_id, to_agent_name, COALESCE(to_thread_id,''), created_at, updated_at
 		FROM a2a_tasks
 		WHERE id = ? AND project_id = ?`,
 		id, projectID)
 	var t Task
 	err := row.Scan(&t.ID, &t.ProjectID, &t.Kind, &t.Status, &t.FromAgentID, &t.FromAgentName,
-		&t.FromThreadID, &t.ToAgentID, &t.ToAgentName, &t.CreatedAt, &t.UpdatedAt)
+		&t.FromThreadID, &t.ToAgentID, &t.ToAgentName, &t.ToThreadID, &t.CreatedAt, &t.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -68,6 +69,15 @@ func getTask(db *sql.DB, projectID string, id int64) (*Task, error) {
 		return nil, err
 	}
 	return &t, nil
+}
+
+// setTaskResponderThread records which responder-side thread owns the
+// task. Written once, on the responder's first reply.
+func setTaskResponderThread(db *sql.DB, projectID string, id int64, threadID string) error {
+	_, err := db.Exec(
+		`UPDATE a2a_tasks SET to_thread_id = ? WHERE id = ? AND project_id = ? AND COALESCE(to_thread_id,'') = ''`,
+		threadID, id, projectID)
+	return err
 }
 
 func setTaskStatus(db *sql.DB, projectID string, id int64, status string) error {
@@ -184,7 +194,7 @@ func listTasks(db *sql.DB, projectID string, f taskFilter) ([]*Task, error) {
 	args = append(args, limit)
 	rows, err := db.Query(`
 		SELECT id, project_id, kind, status, from_agent_id, from_agent_name, from_thread_id,
-		       to_agent_id, to_agent_name, created_at, updated_at
+		       to_agent_id, to_agent_name, COALESCE(to_thread_id,''), created_at, updated_at
 		FROM a2a_tasks
 		WHERE `+strings.Join(where, " AND ")+`
 		ORDER BY updated_at DESC, id DESC
@@ -197,7 +207,7 @@ func listTasks(db *sql.DB, projectID string, f taskFilter) ([]*Task, error) {
 	for rows.Next() {
 		var t Task
 		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Kind, &t.Status, &t.FromAgentID, &t.FromAgentName,
-			&t.FromThreadID, &t.ToAgentID, &t.ToAgentName, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			&t.FromThreadID, &t.ToAgentID, &t.ToAgentName, &t.ToThreadID, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &t)

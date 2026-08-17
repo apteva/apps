@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: a2a
 display_name: Agent to Agent
-version: 0.2.0
+version: 0.2.1
 description: |
   Agent-to-agent communication. Lets agents in the same project message
   each other and exchange request/reply tasks with A2A-protocol-compatible

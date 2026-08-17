@@ -22,6 +22,9 @@ type recordingPlatform struct {
 	failThread   bool // force SendThreadEvent to fail → main-thread fallback
 	failSend     bool // force SendEvent to fail
 	failList     bool // simulate a platform without the agent directory
+	// attached marks which agents the server reports as bound to the
+	// calling install. An empty map simulates a pre-annotation server.
+	attached map[int64]bool
 }
 
 type capturedEvent struct {
@@ -70,7 +73,9 @@ func (p *recordingPlatform) ListAgents(projectID string) ([]sdk.PlatformAgent, e
 	var out []sdk.PlatformAgent
 	for _, a := range p.agents {
 		if projectID == "" || a.ProjectID == projectID {
-			out = append(out, *a)
+			entry := *a
+			entry.AttachedToCaller = p.attached[a.ID]
+			out = append(out, entry)
 		}
 	}
 	return out, nil
@@ -88,12 +93,15 @@ const testProject = "proj-1"
 
 func newTestEnv(t *testing.T) (*sdk.AppCtx, *recordingPlatform) {
 	t.Helper()
-	platform := &recordingPlatform{agents: map[int64]*sdk.PlatformAgent{
-		41: {ID: 41, Name: "Research", ProjectID: testProject},
-		42: {ID: 42, Name: "CRM", ProjectID: testProject},
-		43: {ID: 43, Name: "Bystander", ProjectID: testProject},
-		77: {ID: 77, Name: "Elsewhere", ProjectID: "proj-other"},
-	}}
+	platform := &recordingPlatform{
+		agents: map[int64]*sdk.PlatformAgent{
+			41: {ID: 41, Name: "Research", ProjectID: testProject},
+			42: {ID: 42, Name: "CRM", ProjectID: testProject},
+			43: {ID: 43, Name: "Bystander", ProjectID: testProject},
+			77: {ID: 77, Name: "Elsewhere", ProjectID: "proj-other"},
+		},
+		attached: map[int64]bool{41: true, 42: true, 43: true},
+	}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject), tk.WithPlatform(platform))
 	return ctx, platform
 }
@@ -460,5 +468,92 @@ func TestSendByNameAndAmbiguity(t *testing.T) {
 		"to": "42", "message": "id still fine",
 	}); err != nil {
 		t.Fatalf("id send with no directory failed: %v", err)
+	}
+}
+
+func TestDiscoverHidesUnattachedPeers(t *testing.T) {
+	ctx, platform := newTestEnv(t)
+	app := &App{}
+	// Agent 45 is in the project but has no a2a tools attached.
+	platform.agents[45] = &sdk.PlatformAgent{ID: 45, Name: "NoTools", ProjectID: testProject}
+
+	res := resultMap(t)(app.toolDiscover(callerCtx(41, ""), ctx, map[string]any{}))
+	for _, e := range res["agents"].([]discoverEntry) {
+		if e.ID == 45 {
+			t.Fatal("discover listed an agent without a2a attached")
+		}
+	}
+	note, _ := res["note"].(string)
+	if !strings.Contains(note, "without Agent to Agent attached") {
+		t.Fatalf("hidden peers not surfaced in note: %q", note)
+	}
+
+	// agent_ask to it is rejected with actionable guidance…
+	if _, err := app.toolAsk(callerCtx(41, ""), ctx, map[string]any{
+		"to": "45", "message": "please respond",
+	}); err == nil || !strings.Contains(err.Error(), "can never reply") {
+		t.Fatalf("ask to unattached err = %v", err)
+	}
+	// …but a one-way agent_send still delivers, with a warning note.
+	res = resultMap(t)(app.toolSend(callerCtx(41, ""), ctx, map[string]any{
+		"to": "45", "message": "FYI only",
+	}))
+	if note, _ := res["note"].(string); !strings.Contains(note, "cannot reply") {
+		t.Fatalf("one-way send to unattached missing warning: %v", res)
+	}
+}
+
+func TestDiscoverListsEveryoneOnPreAnnotationPlatform(t *testing.T) {
+	ctx, platform := newTestEnv(t)
+	app := &App{}
+	platform.attached = map[int64]bool{} // server never sets the flag
+	res := resultMap(t)(app.toolDiscover(callerCtx(41, ""), ctx, map[string]any{}))
+	if len(res["agents"].([]discoverEntry)) != 2 {
+		t.Fatalf("pre-annotation discover should list all project peers: %+v", res)
+	}
+	note, _ := res["note"].(string)
+	if !strings.Contains(note, "does not report") {
+		t.Fatalf("missing compatibility note: %q", note)
+	}
+	// Asks stay allowed when reachability is unknown.
+	if _, err := app.toolAsk(callerCtx(41, ""), ctx, map[string]any{
+		"to": "42", "message": "still works",
+	}); err != nil {
+		t.Fatalf("ask on pre-annotation platform failed: %v", err)
+	}
+}
+
+func TestFollowUpRoutesToResponderThread(t *testing.T) {
+	ctx, platform := newTestEnv(t)
+	app := &App{}
+	res := resultMap(t)(app.toolAsk(callerCtx(41, "th-9"), ctx, map[string]any{
+		"to": "42", "message": "Big job please.",
+	}))
+	taskID := fmt.Sprint(res["task_id"].(int64))
+
+	// B's worker thread takes the task and asks a question.
+	resultMap(t)(app.toolReply(callerCtx(42, "worker-w"), ctx, map[string]any{
+		"task_id": taskID, "message": "Which format?", "status": "input_required",
+	}))
+	// A answers: the follow-up must land in B's worker-w, not B's main.
+	resultMap(t)(app.toolSend(callerCtx(41, "th-9"), ctx, map[string]any{
+		"task_id": taskID, "message": "CSV please.",
+	}))
+	last := platform.threadEvents[len(platform.threadEvents)-1]
+	if last.Ref.AgentID != 42 || last.Ref.ThreadID != "worker-w" {
+		t.Fatalf("follow-up routed to %+v, want agent 42 thread worker-w", last.Ref)
+	}
+	if !strings.Contains(last.Message, "CSV please.") {
+		t.Fatalf("follow-up content wrong: %s", last.Message)
+	}
+
+	// If the worker thread died, delivery falls back to B's main.
+	platform.failThread = true
+	resultMap(t)(app.toolSend(callerCtx(41, "th-9"), ctx, map[string]any{
+		"task_id": taskID, "message": "Still there?",
+	}))
+	ev := platform.lastEvent(t)
+	if ev.AgentID != 42 || !strings.Contains(ev.Message, "Still there?") {
+		t.Fatalf("worker-death fallback wrong: %+v", ev)
 	}
 }
