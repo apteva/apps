@@ -60,6 +60,11 @@ customer conversations, lists, segments, opportunities, and pipelines.
 - `contacts_send_message`, `contacts_reply`, and `contacts_send_test` create
   real external messages. Call them only when the user explicitly requests a
   send or a previously approved workflow requires it.
+- For free-form sends, pass `body` and omit `template_id`, `content_sid`,
+  `template_vars`, and every other unused optional field. Never manufacture
+  placeholders such as `template_id: 0`, `list_id: 0`, or empty strings/maps.
+- Supply `template_id` and `template_vars` only when intentionally sending an
+  approved template. A real template ID must be a positive integer.
 - Use `messaging_senders_list` for configuration checks. Never send a
   placeholder message merely to test whether a sender is configured.
 - Preserve returned delivery, threading, and deduplication information in the

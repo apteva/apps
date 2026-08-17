@@ -194,9 +194,27 @@ func TestMessageToolSchemasRequirePositiveIDAndContent(t *testing.T) {
 		if _, ok := properties["idempotency_key"]; !ok {
 			t.Fatalf("%s schema missing idempotency_key", tool.Name)
 		}
+		templateSchema, ok := properties["template_id"].(map[string]any)
+		if !ok || int64FromAny(templateSchema["minimum"]) != 0 {
+			t.Fatalf("%s template_id schema=%#v, want compatibility minimum 0", tool.Name, templateSchema)
+		}
 		anyOf, ok := tool.InputSchema["anyOf"].([]any)
 		if !ok || len(anyOf) != 3 {
 			t.Fatalf("%s anyOf=%#v, want body/template_id/content_sid alternatives", tool.Name, tool.InputSchema["anyOf"])
+		}
+		var templateBranch map[string]any
+		for _, rawBranch := range anyOf {
+			branch, _ := rawBranch.(map[string]any)
+			required, _ := branch["required"].([]string)
+			if len(required) == 1 && required[0] == "template_id" {
+				templateBranch = branch
+				break
+			}
+		}
+		branchProperties, _ := templateBranch["properties"].(map[string]any)
+		branchTemplate, _ := branchProperties["template_id"].(map[string]any)
+		if int64FromAny(branchTemplate["minimum"]) != 1 {
+			t.Fatalf("%s template-only branch=%#v, want minimum 1", tool.Name, templateBranch)
 		}
 	}
 	for name, found := range wanted {
@@ -219,6 +237,9 @@ func TestMessageToolDescriptionsWarnAboutExternalSideEffects(t *testing.T) {
 		wanted[tool.Name] = true
 		if !strings.Contains(tool.Description, "REAL EXTERNAL SEND") {
 			t.Fatalf("%s description lacks side-effect warning: %q", tool.Name, tool.Description)
+		}
+		if !strings.Contains(tool.Description, "OMIT") || !strings.Contains(tool.Description, "template_id") {
+			t.Fatalf("%s description lacks optional-field guidance: %q", tool.Name, tool.Description)
 		}
 		if tool.Name != "contacts_reply" && !strings.Contains(tool.Description, "messaging_senders_list") {
 			t.Fatalf("%s description lacks read-only configuration guidance: %q", tool.Name, tool.Description)

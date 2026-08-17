@@ -86,6 +86,7 @@ func TestPortableCRMSkillIsCanonicalAgentSkill(t *testing.T) {
 	}
 	for _, requiredGuidance := range []string{
 		"contacts_get", "contacts_get_context", "collection_info", "truncated",
+		"template_id: 0", "omit", "unused optional field",
 	} {
 		if !strings.Contains(parts[1], requiredGuidance) {
 			t.Errorf("SKILL.md missing contact-read guidance %q", requiredGuidance)

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.8.25
+version: 0.8.26
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -69,11 +69,11 @@ provides:
       description: Create or update an attribute definition.
     # Messaging-coupled tools — gate on the messaging dep being bound.
     - name: contacts_send_message
-      description: "REAL EXTERNAL SEND. Never use for sender/config testing; use messaging_senders_list. New standalone emails require a subject. Identical sends are automatically deduplicated for five minutes."
+      description: "REAL EXTERNAL SEND. For free-form messages, pass body and omit all unused template/optional fields; never generate zero or empty placeholders. Never use for sender/config testing; use messaging_senders_list. New standalone emails require a subject. Identical sends are automatically deduplicated for five minutes."
     - name: contacts_reply
-      description: "REAL EXTERNAL SEND. Reply on the contact's most-recent inbound conversation, preserve email threading, and deduplicate identical replies for five minutes."
+      description: "REAL EXTERNAL SEND. For free-form replies, pass body and omit all unused template/optional fields. Reply on the contact's most-recent inbound conversation, preserve email threading, and deduplicate identical replies for five minutes."
     - name: contacts_send_test
-      description: "REAL EXTERNAL SEND for an explicitly requested delivery test; not a configuration check. Logged as *_test_sent and deduplicated for five minutes."
+      description: "REAL EXTERNAL SEND for an explicitly requested delivery test; not a configuration check. Pass body and omit unused template/optional fields. Logged as *_test_sent and deduplicated for five minutes."
     - name: messaging_senders_list
       description: Read-only sender/configuration check. Use this instead of sending a placeholder message.
     - name: messaging_templates_list

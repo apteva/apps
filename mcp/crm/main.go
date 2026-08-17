@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.25
+version: 0.8.26
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -86,11 +86,11 @@ provides:
     - name: contacts_define_attribute
       description: Create or update an attribute definition.
     - name: contacts_send_message
-      description: Send a message via the messaging app; auto-logs to the activity timeline.
+      description: Real external send. For free-form messages, pass body and omit unused template and optional fields.
     - name: contacts_reply
-      description: Reply on the contact's most-recent inbound conversation.
+      description: Real external reply. For free-form replies, pass body and omit unused template and optional fields.
     - name: contacts_send_test
-      description: Send a test message; logged as *_test_sent.
+      description: Real external test send. Pass body and omit unused template and optional fields.
     - name: messaging_senders_list
       description: List verified senders from the bound Messaging app.
     - name: messaging_templates_list
@@ -713,7 +713,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		// Calling without messaging installed returns a clear error.
 		{
 			Name:        "contacts_send_message",
-			Description: "REAL EXTERNAL SEND: deliver a message to a contact via the bound Messaging app. Never call this to test availability or sender configuration; use messaging_senders_list for that. Auto-resolves channel + address, logs one activity, and links one conversation. New standalone emails require subject; replies should use contacts_reply or conversation_id. CRM automatically deduplicates identical sends for five minutes; a caller-supplied idempotency_key overrides that window. Sender precedence: from > list.default_sender > install default. Args: id (contact id), body? (required unless template_id/content_sid), channel? (email|sms|whatsapp), subject?, body_html?, from? (verified sender override), list_id?, conversation_id?, template_id?, template_vars? or vars?, idempotency_key?. For WhatsApp: call messaging_whatsapp_session_check first; if active=false, call messaging_templates_list and send with template_id/template_vars.",
+			Description: "REAL EXTERNAL SEND: deliver a message to a contact via the bound Messaging app. Never call this to test availability or sender configuration; use messaging_senders_list for that. For a free-form message, pass body and OMIT template_id, content_sid, template_vars, and other unused optional fields; never generate zero or empty placeholders. Auto-resolves channel + address, logs one activity, and links one conversation. New standalone emails require subject; replies should use contacts_reply or conversation_id. CRM automatically deduplicates identical sends for five minutes; a caller-supplied idempotency_key overrides that window. Sender precedence: from > list.default_sender > install default. Args: id (contact id), body? (required unless template_id/content_sid), channel? (email|sms|whatsapp), subject?, body_html?, from? (verified sender override), list_id?, conversation_id?, template_id?, template_vars? or vars?, idempotency_key?. For WhatsApp: call messaging_whatsapp_session_check first; if active=false, call messaging_templates_list and send with template_id/template_vars.",
 			InputSchema: messageInputSchema(map[string]any{
 				"id":              map[string]any{"type": "integer", "minimum": 1},
 				"body":            map[string]any{"type": "string"},
@@ -723,7 +723,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"from":            map[string]any{"type": "string"},
 				"list_id":         map[string]any{"type": "integer"},
 				"conversation_id": map[string]any{"type": "integer"},
-				"template_id":     map[string]any{"type": "integer", "minimum": 1},
+				"template_id":     map[string]any{"type": "integer", "minimum": 0},
 				"content_sid":     map[string]any{"type": "string"},
 				"template_vars":   map[string]any{"type": "object"},
 				"vars":            map[string]any{"type": "object"},
@@ -733,7 +733,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_reply",
-			Description: "REAL EXTERNAL SEND: reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Never use this to test configuration. Sets In-Reply-To/References for email and automatically deduplicates identical replies for five minutes unless idempotency_key is supplied. Sender precedence: from > list.default_sender > install default. Args: id, body? (required unless template_id/content_sid), conversation_id?, subject?, from?, list_id?, body_html?, template_id?, content_sid?, template_vars?, idempotency_key?. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars.",
+			Description: "REAL EXTERNAL SEND: reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Never use this to test configuration. For a free-form reply, pass body and OMIT template_id, content_sid, template_vars, and other unused optional fields; never generate zero or empty placeholders. Sets In-Reply-To/References for email and automatically deduplicates identical replies for five minutes unless idempotency_key is supplied. Sender precedence: from > list.default_sender > install default. Args: id, body? (required unless template_id/content_sid), conversation_id?, subject?, from?, list_id?, body_html?, template_id?, content_sid?, template_vars?, idempotency_key?. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars.",
 			InputSchema: messageInputSchema(map[string]any{
 				"id":              map[string]any{"type": "integer", "minimum": 1},
 				"body":            map[string]any{"type": "string"},
@@ -742,7 +742,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"from":            map[string]any{"type": "string"},
 				"list_id":         map[string]any{"type": "integer"},
 				"body_html":       map[string]any{"type": "string"},
-				"template_id":     map[string]any{"type": "integer", "minimum": 1},
+				"template_id":     map[string]any{"type": "integer", "minimum": 0},
 				"content_sid":     map[string]any{"type": "string"},
 				"template_vars":   map[string]any{"type": "object"},
 				"vars":            map[string]any{"type": "object"},
@@ -752,14 +752,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_send_test",
-			Description: "REAL EXTERNAL SEND to the contact: use only for an explicitly requested delivery test. This is not a sender/configuration check; use messaging_senders_list for that. Uses the same provider path as contacts_send_message, is automatically deduplicated for five minutes, and is logged as *_test_sent without a conversation. New test emails require subject.",
+			Description: "REAL EXTERNAL SEND to the contact: use only for an explicitly requested delivery test. This is not a sender/configuration check; use messaging_senders_list for that. For a free-form test, pass body and OMIT template_id, content_sid, template_vars, and other unused optional fields; never generate zero or empty placeholders. Uses the same provider path as contacts_send_message, is automatically deduplicated for five minutes, and is logged as *_test_sent without a conversation. New test emails require subject.",
 			InputSchema: messageInputSchema(map[string]any{
 				"id":              map[string]any{"type": "integer", "minimum": 1},
 				"body":            map[string]any{"type": "string"},
 				"channel":         map[string]any{"type": "string"},
 				"subject":         map[string]any{"type": "string"},
 				"from":            map[string]any{"type": "string"},
-				"template_id":     map[string]any{"type": "integer", "minimum": 1},
+				"template_id":     map[string]any{"type": "integer", "minimum": 0},
 				"content_sid":     map[string]any{"type": "string"},
 				"template_vars":   map[string]any{"type": "object"},
 				"idempotency_key": map[string]any{"type": "string"},

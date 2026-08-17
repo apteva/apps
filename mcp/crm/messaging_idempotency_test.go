@@ -175,6 +175,109 @@ func TestSendMessageRejectsSubjectlessStandaloneEmailBeforePlatformCalls(t *test
 	}
 }
 
+func TestFreeFormSendNormalizesOptionalPlaceholders(t *testing.T) {
+	platform := newIdempotentMessagingPlatform()
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	app := &App{}
+	contact := mustCreate(t, ctx, map[string]any{
+		"display_name": "Alice",
+		"channels": []any{
+			map[string]any{"kind": "phone", "value": "+12025550123", "is_primary": true},
+		},
+	})
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"id":            contact.ID,
+		"channel":       channelSMS,
+		"body":          "A real free-form message",
+		"from":          "+12025550100",
+		"template_id":   0,
+		"list_id":       0,
+		"subject":       "",
+		"body_html":     "",
+		"template_vars": map[string]any{"unused": "placeholder"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, calls := platform.snapshot()
+	if created != 1 {
+		t.Fatalf("messages created=%d, want 1", created)
+	}
+	var sent map[string]any
+	for _, call := range calls {
+		if call.Tool == "send_message" {
+			sent = call.Input
+			break
+		}
+	}
+	if sent == nil {
+		t.Fatal("Messaging send_message was not called")
+	}
+	for _, absent := range []string{"template_id", "list_id", "subject", "body_html", "vars", "template_vars"} {
+		if value, exists := sent[absent]; exists {
+			t.Errorf("Messaging input retained placeholder %s=%#v", absent, value)
+		}
+	}
+}
+
+func TestZeroTemplateIDWithoutMessageContentIsRejectedBeforePlatformCalls(t *testing.T) {
+	platform := &crmRecordingPlatform{}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	app := &App{}
+
+	_, err := app.toolSendMessage(ctx, map[string]any{"id": 1, "template_id": 0})
+	if err == nil || !strings.Contains(err.Error(), "body, template_id, or content_sid required") {
+		t.Fatalf("error=%v, want missing content", err)
+	}
+	if platform.whoAmICalls != 0 || platform.getInstanceCalls != 0 || len(platform.calls) != 0 {
+		t.Fatalf(
+			"platform calls before validation: whoami=%d get_instance=%d call_app=%d",
+			platform.whoAmICalls, platform.getInstanceCalls, len(platform.calls),
+		)
+	}
+}
+
+func TestIntentionalTemplateSendForwardsTemplateFields(t *testing.T) {
+	platform := newIdempotentMessagingPlatform()
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	app := &App{}
+	contact := mustCreate(t, ctx, map[string]any{
+		"display_name": "Alice",
+		"channels": []any{
+			map[string]any{"kind": "phone", "value": "+12025550123", "is_primary": true},
+		},
+	})
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"id":            contact.ID,
+		"channel":       channelWhatsApp,
+		"from":          "+12025550100",
+		"template_id":   42,
+		"template_vars": map[string]any{"first_name": "Alice"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, calls := platform.snapshot()
+	for _, call := range calls {
+		if call.Tool != "send_message" {
+			continue
+		}
+		if int64FromAny(call.Input["template_id"]) != 42 {
+			t.Fatalf("template_id=%#v, want 42", call.Input["template_id"])
+		}
+		vars, ok := call.Input["vars"].(map[string]any)
+		if !ok || vars["first_name"] != "Alice" {
+			t.Fatalf("vars=%#v, want intentional template variables", call.Input["vars"])
+		}
+		return
+	}
+	t.Fatal("Messaging send_message was not called")
+}
+
 func TestReplyRejectsUnknownConversationBeforePlatformCalls(t *testing.T) {
 	platform := &crmRecordingPlatform{}
 	ctx := newTestCtx(t, tk.WithPlatform(platform))

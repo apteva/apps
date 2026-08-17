@@ -1199,6 +1199,28 @@ func (a *App) toolSendTest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func positiveMessageInteger(raw any, field string) (int64, error) {
+	value, err := parseMessageInteger(raw, field)
+	if err != nil {
+		return 0, err
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", field)
+	}
+	return value, nil
+}
+
+func optionalPositiveMessageInteger(raw any, field string) (int64, error) {
+	value, err := parseMessageInteger(raw, field)
+	if err != nil {
+		return 0, err
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("%s must be a positive integer or omitted", field)
+	}
+	return value, nil
+}
+
+func parseMessageInteger(raw any, field string) (int64, error) {
 	var value int64
 	switch typed := raw.(type) {
 	case float64:
@@ -1224,9 +1246,6 @@ func positiveMessageInteger(raw any, field string) (int64, error) {
 		value = parsed
 	default:
 		return 0, fmt.Errorf("%s must be an integer", field)
-	}
-	if value <= 0 {
-		return 0, fmt.Errorf("%s must be a positive integer", field)
 	}
 	return value, nil
 }
@@ -1254,7 +1273,7 @@ func validateOutboundMessageArgs(args map[string]any) (int64, string, int64, str
 	}
 	templateID := int64(0)
 	if raw, exists := args["template_id"]; exists {
-		templateID, err = positiveMessageInteger(raw, "template_id")
+		templateID, err = optionalPositiveMessageInteger(raw, "template_id")
 		if err != nil {
 			return 0, "", 0, "", err
 		}
@@ -1421,10 +1440,12 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	if contentSID != "" {
 		sendArgs["content_sid"] = contentSID
 	}
-	if vars, ok := args["template_vars"].(map[string]any); ok {
-		sendArgs["vars"] = vars
-	} else if vars, ok := args["vars"].(map[string]any); ok {
-		sendArgs["vars"] = vars
+	if templateID > 0 || contentSID != "" {
+		if vars, ok := args["template_vars"].(map[string]any); ok && len(vars) > 0 {
+			sendArgs["vars"] = vars
+		} else if vars, ok := args["vars"].(map[string]any); ok && len(vars) > 0 {
+			sendArgs["vars"] = vars
+		}
 	}
 	if convoID := int64Arg(args, "conversation_id"); convoID > 0 {
 		sendArgs["conversation_id"] = convoID
