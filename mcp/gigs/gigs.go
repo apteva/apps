@@ -187,6 +187,22 @@ func (a *App) gigTools() []sdk.Tool {
 			Handler: a.toolGigsExtendDeadline,
 		},
 		{
+			Name:        "gigs_update",
+			Description: "Correct a live gig's title and/or vars — use after gigs_extend_deadline so a reschedule does not leave the title and vars stating the original date. vars is a patch: supplied keys win, untouched keys survive, an explicit null drops a key. The title is shown to the worker on their gig page, so keep it worker-facing. Refused once the gig is reviewed, cancelled or expired. Does NOT re-render an already dispatched composition, which is frozen at dispatch. Args: id, title?, vars?. Returns {gig}.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+				"title": map[string]any{
+					"type":        "string",
+					"description": "Replacement title. Shown to the worker on their gig page — avoid internal codenames.",
+				},
+				"vars": map[string]any{
+					"type":        "object",
+					"description": "Patch merged over the existing vars. Explicit null removes a key.",
+				},
+			}, []string{"id"}),
+			Handler: a.toolGigsUpdate,
+		},
+		{
 			Name:        "gigs_accept_result",
 			Description: "Accept a submitted result. Pass submission_id when a gig has multiple worker submissions; otherwise the latest active submission is used. Bumps that worker's accepted_count and logs to CRM. Args: id, submission_id?, notes?. Returns {gig}.",
 			InputSchema: schemaObject(map[string]any{
@@ -876,6 +892,11 @@ var gigStatuses = []string{"open", "offered", "accepted", "submitted", "reviewed
 // defaultGigStatuses is the live-queue view callers get when they pass no filter.
 var defaultGigStatuses = []string{"open", "offered", "accepted"}
 
+// gigTerminalGigStatuses are the states where the record is final. Editing a
+// gig's title or vars after that would rewrite history rather than correct a
+// live gig, so gigs_update refuses them.
+var gigTerminalStatuses = []string{"reviewed", "cancelled", "expired"}
+
 // gigStatusAliases maps words callers reach for onto the status actually stored.
 // "completed" is the obvious term for work that was accepted, and asking for it
 // used to return an empty list indistinguishable from "no such work exists".
@@ -1046,6 +1067,86 @@ func (a *App) toolGigsExtendDeadline(ctx *sdk.AppCtx, args map[string]any) (any,
 	}
 	g, _ := loadGig(ctx, pid, id)
 	return map[string]any{"gig": g}, nil
+}
+
+// toolGigsUpdate corrects a live gig's title and vars. Rescheduling used to
+// move deadline_at only, leaving the title and vars.recording_date stating the
+// original date — a self-contradictory record whose title is served to the
+// worker by handleWorkerGigJSON.
+//
+// Note this edits the gig's own fields only. A gig's composition is a frozen
+// snapshot taken at dispatch, so updating vars does NOT re-render already
+// dispatched instruction bodies.
+func (a *App) toolGigsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	rawTitle, hasTitle := args["title"]
+	rawVars, hasVars := args["vars"]
+	if !hasTitle && !hasVars {
+		return nil, errors.New("nothing to update: pass title and/or vars")
+	}
+
+	g, err := loadGig(ctx, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if g == nil {
+		return nil, errors.New("gig not found")
+	}
+	if slices.Contains(gigTerminalStatuses, g.Status) {
+		return nil, fmt.Errorf("cannot update gig in status %s", g.Status)
+	}
+
+	sets := []string{"updated_at=CURRENT_TIMESTAMP"}
+	qArgs := []any{}
+	if hasTitle {
+		title, ok := rawTitle.(string)
+		if !ok || strings.TrimSpace(title) == "" {
+			return nil, errors.New("title must be a non-empty string")
+		}
+		sets = append(sets, "title=?")
+		qArgs = append(qArgs, strings.TrimSpace(title))
+	}
+	if hasVars {
+		patch, ok := rawVars.(map[string]any)
+		if !ok {
+			return nil, errors.New("vars must be an object")
+		}
+		// Patch semantics: supplied keys win, untouched keys survive, and an
+		// explicit null drops a key. Replacing wholesale would silently lose
+		// the dispatch-time context a caller did not think to resend.
+		merged := map[string]any{}
+		for k, v := range g.Vars {
+			merged[k] = v
+		}
+		for k, v := range patch {
+			if v == nil {
+				delete(merged, k)
+				continue
+			}
+			merged[k] = v
+		}
+		sets = append(sets, "vars_json=?")
+		qArgs = append(qArgs, mustJSON(merged))
+	}
+	qArgs = append(qArgs, pid, id)
+
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE gigs SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND id=?`, qArgs...,
+	); err != nil {
+		return nil, err
+	}
+	out, err := loadGig(ctx, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"gig": out}, nil
 }
 
 func (a *App) toolGigsAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) {

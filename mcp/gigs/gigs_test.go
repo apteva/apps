@@ -85,7 +85,7 @@ func seedAssignment(t *testing.T, ctx *sdk.AppCtx, gigID, workerID int64, status
 
 func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.1.23" {
+	if manifest.Version != "0.1.24" {
 		t.Fatalf("version=%q", manifest.Version)
 	}
 	var public []sdk.RouteSpec
@@ -414,6 +414,87 @@ func TestParseGigStatusFilterNormalizesAndRoundTrips(t *testing.T) {
 		got, err := parseGigStatusFilter(status)
 		if err != nil || !slices.Equal(got, []string{status}) {
 			t.Fatalf("status %q did not round trip: %v (err %v)", status, got, err)
+		}
+	}
+}
+
+// Rescheduling used to move deadline_at only, leaving the title and vars
+// stating the original date — and the title is served to the worker.
+func TestGigsUpdateFixesRescheduledTitleAndVars(t *testing.T) {
+	ctx := testCtx(t)
+	app := &App{}
+	id := seedGig(t, ctx, "project-a", "offered", "{}")
+	if _, err := ctx.AppDB().Exec(`UPDATE gigs SET title=?, vars_json=? WHERE id=?`,
+		"HGV — Veronika — Aug 18 recording",
+		`{"recording_date":"2026-08-18","recording_window":"18:00-22:00 Moscow time","model":"Veronika"}`,
+		id); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolGigsUpdate(ctx, map[string]any{
+		"_project_id": "project-a",
+		"id":          id,
+		"title":       "Veronika — Aug 20 recording",
+		"vars": map[string]any{
+			"recording_date":   "2026-08-20",
+			"recording_window": nil,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := out.(map[string]any)["gig"].(*gig)
+	if g.Title != "Veronika — Aug 20 recording" {
+		t.Fatalf("title = %q", g.Title)
+	}
+	if g.Vars["recording_date"] != "2026-08-20" {
+		t.Fatalf("patched key = %v", g.Vars["recording_date"])
+	}
+	if _, ok := g.Vars["recording_window"]; ok {
+		t.Fatalf("explicit null did not drop the key: %v", g.Vars)
+	}
+	if g.Vars["model"] != "Veronika" {
+		t.Fatalf("untouched key was lost: %v", g.Vars)
+	}
+
+	// The worker payload must serve the corrected title, since that is the
+	// surface the reschedule bug leaked the stale one through.
+	if reloaded, err := loadGig(ctx, "project-a", id); err != nil {
+		t.Fatal(err)
+	} else if reloaded.Title != "Veronika — Aug 20 recording" {
+		t.Fatalf("persisted title = %q", reloaded.Title)
+	}
+}
+
+func TestGigsUpdateRefusesTerminalGigsAndBadInput(t *testing.T) {
+	ctx := testCtx(t)
+	app := &App{}
+
+	for _, status := range gigTerminalStatuses {
+		id := seedGig(t, ctx, "project-a", status, "{}")
+		_, err := app.toolGigsUpdate(ctx, map[string]any{
+			"_project_id": "project-a", "id": id, "title": "rewritten",
+		})
+		if err == nil || !strings.Contains(err.Error(), "cannot update gig in status "+status) {
+			t.Fatalf("status %s: expected refusal, got %v", status, err)
+		}
+	}
+
+	live := seedGig(t, ctx, "project-a", "open", "{}")
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"no fields", map[string]any{"id": live}, "nothing to update"},
+		{"empty title", map[string]any{"id": live, "title": "   "}, "non-empty string"},
+		{"vars not object", map[string]any{"id": live, "vars": "nope"}, "vars must be an object"},
+		{"missing id", map[string]any{"title": "x"}, "id required"},
+		{"unknown gig", map[string]any{"id": int64(99999), "title": "x"}, "gig not found"},
+	} {
+		tc.args["_project_id"] = "project-a"
+		if _, err := app.toolGigsUpdate(ctx, tc.args); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: expected %q, got %v", tc.name, tc.want, err)
 		}
 	}
 }

@@ -1,4 +1,4 @@
-# Gigs (v0.1.23)
+# Gigs (v0.1.24)
 
 Agents delegate atomic work to human workers (CRM contacts) by composing
 reusable multi-modal instructions. Templates are saved instruction sets;
@@ -24,6 +24,26 @@ notes/files for that step; otherwise the worker page only shows the instruction.
 
 `result_schema`, `media_manifest`, `checklist`, and `variables` are
 **derived** from the composition — never hand-authored.
+
+## Rescheduling a gig
+
+`gigs_extend_deadline` moves `deadline_at` and nothing else. If the title or
+`vars` mention the original date, follow it with `gigs_update` so the record
+does not contradict itself:
+
+```
+gigs_extend_deadline  id=11  deadline_at=2026-08-20T22:00:00+03:00
+gigs_update           id=11  title="Veronika — Aug 20 recording"  vars={"recording_date":"2026-08-20"}
+```
+
+This matters because the title is worker-facing — `handleWorkerGigJSON` serves
+it to the gig page the worker opens from their link, so a stale date (or an
+internal codename) is shown to them.
+
+`vars` is a patch: supplied keys win, untouched keys survive, an explicit
+`null` drops a key. `gigs_update` is refused once a gig is `reviewed`,
+`cancelled`, or `expired`, and it does **not** re-render an already dispatched
+composition — that snapshot is frozen at dispatch by design.
 
 ## Gig status vocabulary
 
