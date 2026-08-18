@@ -18,6 +18,12 @@ type fakeStreaming struct {
 	deleted     map[int64]bool
 	stopped     map[int64]bool
 	callsCreate int
+
+	// Signed-URL contract (streaming >= the signed-URL release).
+	signedReqs   []SignedURLReq
+	policy       map[int64]bool
+	signedErr    error // when set, SignedURL fails so the fallback path runs
+	policyCalled int
 }
 
 func newFakeStreaming() *fakeStreaming {
@@ -25,7 +31,47 @@ func newFakeStreaming() *fakeStreaming {
 		streams: map[int64]*StreamSnapshot{},
 		deleted: map[int64]bool{},
 		stopped: map[int64]bool{},
+		policy:  map[int64]bool{},
 	}
+}
+
+func (f *fakeStreaming) SignedURL(req SignedURLReq) (SignedURLResp, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.signedReqs = append(f.signedReqs, req)
+	if f.signedErr != nil {
+		return SignedURLResp{}, f.signedErr
+	}
+	if _, ok := f.streams[req.ID]; !ok {
+		return SignedURLResp{}, nil
+	}
+	// kind=heartbeat signs the viewer-heartbeat endpoint rather than a
+	// media file — streaming gates both through the same check, so a
+	// signed-URL stream needs a signed beat too.
+	if req.Kind == "heartbeat" {
+		return SignedURLResp{URL: "/api/apps/streaming/heartbeat/" + intToStr(req.ID) +
+			"?t=tok&exp=" + intToStr(int64(req.ExpiresInSeconds)) + "&sig=deadbeef"}, nil
+	}
+	ext := "index.m3u8"
+	if req.Kind == "mp4" {
+		ext = "record.mp4"
+	}
+	return SignedURLResp{URL: "/api/apps/streaming/streams/" + intToStr(req.ID) + "/" + ext +
+		"?exp=" + intToStr(int64(req.ExpiresInSeconds)) + "&sig=deadbeef"}, nil
+}
+
+func (f *fakeStreaming) SetURLPolicy(req URLPolicyReq) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.policyCalled++
+	f.policy[req.ID] = req.RequireSignedURLs
+	return nil
+}
+
+func (f *fakeStreaming) signedRequests() []SignedURLReq {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]SignedURLReq(nil), f.signedReqs...)
 }
 
 func (f *fakeStreaming) CreateStream(req CreateStreamReq) (CreateStreamResp, error) {
@@ -207,7 +253,7 @@ func TestCreate_AllocatesStreamAndReturnsURLs(t *testing.T) {
 	app, ctx, streaming, _, _ := newTestApp(t, false, false)
 	out, err := app.toolCreate(ctx, map[string]any{
 		"title":        "Q2 Roadmap Webinar",
-		"scheduled_at": "2026-06-01T15:00:00Z",
+		"scheduled_at": "2099-06-01T15:00:00Z",
 		"host_name":    "Alice",
 	})
 	if err != nil {
@@ -240,7 +286,7 @@ func TestCreate_AllocatesStreamAndReturnsURLs(t *testing.T) {
 	if len(slots) != 1 {
 		t.Fatalf("scheduled webinar should get one default slot, got %d", len(slots))
 	}
-	if slots[0].StartsAt != "2026-06-01T15:00:00Z" {
+	if slots[0].StartsAt != "2099-06-01T15:00:00Z" {
 		t.Errorf("slot starts_at=%q", slots[0].StartsAt)
 	}
 }
@@ -268,7 +314,7 @@ func TestRegister_CreatesContactWhenCRMBound(t *testing.T) {
 	app, ctx, _, crm, _ := newTestApp(t, true, false)
 	out, _ := app.toolCreate(ctx, map[string]any{
 		"title":        "Demo",
-		"scheduled_at": "2026-06-01T15:00:00Z",
+		"scheduled_at": "2099-06-01T15:00:00Z",
 	})
 	w := out.(map[string]any)["webinar"].(*Webinar)
 

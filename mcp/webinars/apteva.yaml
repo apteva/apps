@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: webinars
 display_name: Webinars
-version: 0.1.2
+version: 0.2.0
 description: |
   Live, scheduled, and on-demand webinars. Composes the streaming app
   for the pipe (RTMP→HLS+recording), CRM for the contact + activity
@@ -32,7 +32,7 @@ requires:
   apps:
     - name: streaming
       version: ">=0.1.0"
-      reason: allocates a stream per webinar; reads metrics + replay URL
+      reason: allocates a stream per webinar; reads metrics; mints signed playback + replay URLs
   integrations:
     - role: crm
       kind: app
@@ -53,21 +53,21 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: webinars_create,           description: "Create a webinar — title, scheduled_at, host_name, kind (live|scheduled|replay), duration_minutes. Allocates a stream via streaming.streams_create. Returns id, slug, registration_url, ingest_url (host's RTMP target), stream_key. Args: title, scheduled_at? (RFC3339), host_name?, kind? (default scheduled), duration_minutes? (default 60), description?." }
+    - { name: webinars_create,           description: "Create a webinar — title, scheduled_at, host_name, kind (live|scheduled|replay), duration_minutes. Allocates a stream via streaming.streams_create and locks it to signed playback URLs. Returns id, slug, registration_url, ingest_url (host's RTMP target), stream_key. Args: title, scheduled_at? (RFC3339), host_name?, kind? (default scheduled), duration_minutes? (default 60), description?, scheduling_mode? (single|multi|evergreen|replay, default single), timezone? (default UTC), slot_duration_minutes?, registration_policy?." }
     - { name: webinars_get,              description: "Full webinar with stream metrics + registrant + attendance counts. Args: id." }
     - { name: webinars_list,             description: "Filter by status (draft|scheduled|live|ended|cancelled), kind, scheduled_at_after, scheduled_at_before, limit (default 50). Args: status?, kind?, scheduled_at_after?, scheduled_at_before?, limit?." }
-    - { name: webinars_update,           description: "Patch — change title, scheduled_at, host_name, description, duration_minutes. Reschedules reminders if scheduled_at changes. Args: id, patch." }
-    - { name: webinars_delete,           description: "Cancel + tear down stream + delete registrants and attendance. Idempotent. Args: id." }
-    - { name: webinars_create_slot,      description: "Create one joinable slot for a webinar. Args: webinar_id, starts_at, ends_at?, timezone?, capacity?, status?." }
+    - { name: webinars_update,           description: "Patch — change title, scheduled_at, host_name, description, kind, duration_minutes, or status (only to \"cancelled\"). Every value is validated before it is written. Moving scheduled_at also moves the slot materialized from it and regenerates pending reminders from each registrant's own slot time. Args: id, patch." }
+    - { name: webinars_delete,           description: "Permanently delete the webinar + tear down its stream; registrants, attendance and engagement cascade away. To keep the record and stand down its reminders instead, patch status=cancelled via webinars_update. Idempotent. Args: id." }
+    - { name: webinars_create_slot,      description: "Create one joinable slot for a webinar. Args: webinar_id, starts_at, ends_at?, duration_minutes? (derives ends_at), timezone?, capacity?, status?." }
     - { name: webinars_list_slots,       description: "List slots for a webinar. Args: webinar_id, from?, to?, available_only?." }
-    - { name: webinars_register,         description: "Add a registrant. Creates a CRM contact if bound. Args: webinar_id, slot_id?, email, phone?, display_name?, source? (form|agent|import). Returns registrant + join_url." }
+    - { name: webinars_register,         description: "Add a registrant. Email is format-validated, phone must be E.164; both are normalized. Idempotent per webinar on email, or on phone for phone-only signups. Creates a CRM contact if bound. Rate-limited per webinar (source=import is exempt). Args: webinar_id, slot_id?, email, phone?, display_name?, source? (form|agent|import). Returns registrant + join_url." }
     - { name: webinars_list_registrants, description: "List registrants for a webinar with attendance status. Args: webinar_id, attended? (bool), limit? (default 100)." }
     - { name: webinars_send_reminder,    description: "Fire a reminder now (manual override of the scheduler). Args: id, channel? (email|sms|all, default all), audience? (all|registered|joined|no_show, default registered), body? (override default template)." }
-    - { name: webinars_define_offer,     description: "Script an offer to auto-show at offset_seconds from start. Args: id, offset_seconds, headline, body?, cta_label, cta_url, duration_seconds? (default 30)." }
-    - { name: webinars_post_offer,       description: "Push an ad-hoc offer to the live room right now (host console / agent-driven). Same shape as define_offer minus offset_seconds. Args: id, headline, body?, cta_label, cta_url, duration_seconds? (default 30)." }
+    - { name: webinars_define_offer,     description: "Script an offer to auto-show at offset_seconds from start. cta_url must be http or https. Args: id, offset_seconds, headline, body?, cta_label, cta_url, duration_seconds? (default 30)." }
+    - { name: webinars_post_offer,       description: "Push an ad-hoc offer to the live room right now (host console / agent-driven). Same shape as define_offer minus offset_seconds. cta_url must be http or https. Args: id, headline, body?, cta_label, cta_url, duration_seconds? (default 30)." }
     - { name: webinars_push_poll,        description: "Open a poll in the live room. Args: id, question, choices (string array), duration_seconds? (default 60)." }
-    - { name: webinars_publish_replay,   description: "Mark the recording as published replay. Args: id, expires_at? (RFC3339; null = no expiry). Returns replay_url + expires_at." }
-    - { name: webinars_get_engagement,   description: "Funnel report: registrations, joined_live, joined_replay, avg_watch_pct, peak_concurrent, offer_click_through, poll_response_rate. Args: id." }
+    - { name: webinars_publish_replay,   description: "Mark the recording as published replay. Replay media is served through signed URLs whose lifetime never outlives expires_at. Args: id, expires_at? (RFC3339; null = no expiry). Returns replay_url + expires_at." }
+    - { name: webinars_get_engagement,   description: "Funnel report: registrations, joined_live, joined_replay, avg_watch_pct, peak_concurrent, offer_click_through (share of registrants who clicked at least one offer), poll_response_rate. Args: id." }
     - { name: webinars_close,            description: "End the webinar — stop the stream, snapshot final attendance, mark status=ended. Idempotent. Args: id." }
   ui_panels: []
 
@@ -102,14 +102,41 @@ config_schema:
     type: text
     default: "24,1,0.25"
     label: Reminder lead times (comma-separated hours before start; 0.25 = 15 min)
+  - name: reminder_concurrency
+    type: number
+    default: "8"
+    label: Reminder dispatches in flight
+    description: Bounded worker pool for the reminder fan-out. Higher clears a big wave faster; 1 restores serial behaviour.
+  - name: reminder_batch_size
+    type: number
+    default: "500"
+    label: Reminder rows per scheduler batch
   - name: heartbeat_interval_s
     type: number
-    default: 10
+    default: "10"
     label: Live-room heartbeat cadence (seconds)
   - name: viewer_idle_seconds
     type: number
-    default: 30
+    default: "30"
     label: Viewer idle timeout for "still attending"
+  - name: registration_rate_limit_per_minute
+    type: number
+    default: "60"
+    label: Max registrations per webinar per minute
+    description: Abuse guard on the unauthenticated registration form. 0 disables it.
+  - name: live_signed_url_ttl_seconds
+    type: number
+    label: Live playback URL lifetime (seconds)
+    description: Defaults to the webinar's duration plus two hours, so no mid-webinar refresh is needed.
+  - name: replay_signed_url_ttl_seconds
+    type: number
+    label: Replay playback URL lifetime (seconds)
+    description: Never exceeds the time left on replay_expires_at. Defaults to 6 hours.
+  - name: retention_days
+    type: number
+    default: "180"
+    label: Retention for chat, clicks, attendance and reminder history (days)
+    description: 0 disables pruning.
   - name: default_sender_email
     type: text
     label: Default sender (email)

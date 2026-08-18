@@ -15,6 +15,36 @@ type streamingCaller interface {
 	DeleteStream(id int64) error
 	GetMetrics(id int64) (StreamMetrics, error)
 	ReplayURL(id int64) (ReplayURLs, error)
+
+	// SignedURL mints a short-lived playback URL carrying `exp` + an
+	// HMAC `sig`. Unlike the per-stream playback_token — which is
+	// static for the life of the stream — a signed URL stops working
+	// on its own, which is what makes replay expiry enforceable
+	// rather than decorative.
+	SignedURL(req SignedURLReq) (SignedURLResp, error)
+	// SetURLPolicy flips a stream to signed-URLs-only, so the raw
+	// `?t=<playback_token>` form stops being accepted for it.
+	SetURLPolicy(req URLPolicyReq) error
+}
+
+// SignedURLReq → streaming.streams_signed_url.
+type SignedURLReq struct {
+	ID               int64  `json:"id"`
+	ExpiresInSeconds int    `json:"expires_in_seconds"`
+	Kind             string `json:"kind"` // "hls" | "mp4" | "heartbeat"
+	ProjectID        string `json:"_project_id,omitempty"`
+}
+
+type SignedURLResp struct {
+	// URL is fully formed — host, path, exp and sig already applied.
+	URL string `json:"url"`
+}
+
+// URLPolicyReq → streaming.streams_set_url_policy.
+type URLPolicyReq struct {
+	ID                int64  `json:"id"`
+	RequireSignedURLs bool   `json:"require_signed_urls"`
+	ProjectID         string `json:"_project_id,omitempty"`
 }
 
 type CreateStreamReq struct {
@@ -128,4 +158,30 @@ func (p *platformStreamingCaller) ReplayURL(id int64) (ReplayURLs, error) {
 	err := p.ctx.PlatformAPI().CallAppResult("streaming", "streams_replay_url",
 		map[string]any{"id": id}, &out)
 	return out, err
+}
+
+func (p *platformStreamingCaller) SignedURL(req SignedURLReq) (SignedURLResp, error) {
+	args := map[string]any{
+		"id":                 req.ID,
+		"expires_in_seconds": req.ExpiresInSeconds,
+		"kind":               req.Kind,
+	}
+	if req.ProjectID != "" {
+		args["_project_id"] = req.ProjectID
+	}
+	var out SignedURLResp
+	err := p.ctx.PlatformAPI().CallAppResult("streaming", "streams_signed_url", args, &out)
+	return out, err
+}
+
+func (p *platformStreamingCaller) SetURLPolicy(req URLPolicyReq) error {
+	args := map[string]any{
+		"id":                  req.ID,
+		"require_signed_urls": req.RequireSignedURLs,
+	}
+	if req.ProjectID != "" {
+		args["_project_id"] = req.ProjectID
+	}
+	var out map[string]any
+	return p.ctx.PlatformAPI().CallAppResult("streaming", "streams_set_url_policy", args, &out)
 }

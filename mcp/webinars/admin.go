@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -135,6 +136,14 @@ func (a *App) handleAdminItem(w http.ResponseWriter, r *http.Request) {
 			body["webinar_id"] = id
 			out, err := a.toolRegister(globalCtx, body)
 			if err != nil {
+				// Same mapping as the public form: the per-webinar
+				// registration budget is enforced inside toolRegister,
+				// and a blanket 400 tells a retrying client nothing.
+				if errors.Is(err, errRegistrationRateLimited) {
+					w.Header().Set("Retry-After", "60")
+					httpErr(w, http.StatusTooManyRequests, err.Error())
+					return
+				}
 				httpErr(w, http.StatusBadRequest, err.Error())
 				return
 			}

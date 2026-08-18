@@ -1,0 +1,13 @@
+# `go build .` in this directory produces a binary named after the
+# directory. A 16MB compiled artifact was committed here once; keep it
+# out for good.
+#
+# The workspace root .gitignore enumerates one such entry per app, but
+# this app's line was missing and the root file is outside this app's
+# tree — so the rule lives here.
+/webinars
+
+# SQLite artifacts from local runs.
+*.db
+*.db-shm
+*.db-wal

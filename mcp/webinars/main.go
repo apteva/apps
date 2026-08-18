@@ -41,14 +41,17 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: webinars
 display_name: Webinars
-version: 0.1.2
+version: 0.2.0
 description: |
   Live, scheduled, and on-demand webinars on top of streaming + CRM
   + messaging.
 author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/webinars
 icon: /ui/icon.svg
 icon_style: monochrome
+tags: [webinars, video, live, funnel, attendance]
 scopes: [project, global]
+min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
@@ -57,7 +60,7 @@ requires:
   apps:
     - name: streaming
       version: ">=0.1.0"
-      reason: allocates a stream per webinar; reads metrics + replay URL
+      reason: allocates a stream per webinar; reads metrics; mints signed playback + replay URLs
   integrations:
     - role: crm
       kind: app
@@ -80,8 +83,8 @@ provides:
     - { name: webinars_create,           description: "Create a webinar; allocates a stream." }
     - { name: webinars_get,              description: "Snapshot + stream metrics + counts." }
     - { name: webinars_list,             description: "Filter by status/kind/scheduled-window." }
-    - { name: webinars_update,           description: "Patch fields; reschedules reminders if scheduled_at moves." }
-    - { name: webinars_delete,           description: "Cancel + tear down stream." }
+    - { name: webinars_update,           description: "Patch fields; reschedules reminders + the materialized slot if scheduled_at moves. status may only be patched to cancelled." }
+    - { name: webinars_delete,           description: "Permanently delete the webinar + tear down its stream. To keep the record, patch status=cancelled via webinars_update instead." }
     - { name: webinars_create_slot,      description: "Create one joinable webinar slot." }
     - { name: webinars_list_slots,       description: "List joinable webinar slots." }
     - { name: webinars_register,         description: "Add a registrant; CRM contact upsert when bound." }
@@ -102,6 +105,66 @@ db:
   driver: sqlite
   path: /data/webinars.db
   migrations: migrations/
+config_schema:
+  - name: registration_url_prefix
+    type: text
+    default: "/r"
+    label: Public registration path prefix
+  - name: live_room_url_prefix
+    type: text
+    default: "/live"
+    label: Public live-room path prefix
+  - name: replay_url_prefix
+    type: text
+    default: "/replay"
+    label: Public replay path prefix
+  - name: reminder_lead_hours
+    type: text
+    default: "24,1,0.25"
+    label: Reminder lead times (comma-separated hours before start; 0.25 = 15 min)
+  - name: reminder_concurrency
+    type: number
+    default: "8"
+    label: Reminder dispatches in flight
+    description: Bounded worker pool for the reminder fan-out. Higher clears a big wave faster; 1 restores serial behaviour.
+  - name: reminder_batch_size
+    type: number
+    default: "500"
+    label: Reminder rows per scheduler batch
+  - name: heartbeat_interval_s
+    type: number
+    default: "10"
+    label: Live-room heartbeat cadence (seconds)
+  - name: viewer_idle_seconds
+    type: number
+    default: "30"
+    label: Viewer idle timeout for "still attending"
+  - name: registration_rate_limit_per_minute
+    type: number
+    default: "60"
+    label: Max registrations per webinar per minute
+    description: Abuse guard on the unauthenticated registration form. 0 disables it.
+  - name: live_signed_url_ttl_seconds
+    type: number
+    label: Live playback URL lifetime (seconds)
+    description: Defaults to the webinar's duration plus two hours, so no mid-webinar refresh is needed.
+  - name: replay_signed_url_ttl_seconds
+    type: number
+    label: Replay playback URL lifetime (seconds)
+    description: Never exceeds the time left on replay_expires_at. Defaults to 6 hours.
+  - name: retention_days
+    type: number
+    default: "180"
+    label: Retention for chat, clicks, attendance and reminder history (days)
+    description: 0 disables pruning.
+  - name: default_sender_email
+    type: text
+    label: Default sender (email)
+    description: Used for reminder email blasts. Pick a verified sender from messaging.senders_list.
+  - name: default_sender_phone
+    type: text
+    label: Default sender (phone, E.164)
+    description: Used for reminder SMS blasts.
 upgrade_policy: auto-patch
 `
 
@@ -113,6 +176,35 @@ type App struct {
 	streamingCaller streamingCaller
 	crmCaller       crmCaller       // nil-safe when CRM unbound
 	messagingCaller messagingCaller // nil-safe when messaging unbound
+
+	// initOnce guards the in-memory state below. Tests construct App
+	// literals without going through OnMount, so every entry point that
+	// touches this state calls ensureState first.
+	initOnce sync.Once
+	// attendance batches live-room heartbeats; attendance-flush writes
+	// them. See attendance.go.
+	attendance *attendanceTracker
+	// registrations is the per-webinar registration abuse budget.
+	registrations *registrationLimiter
+
+	// lastPromoteSweep bounds the attendance-decay worker's promotion
+	// scan to rows touched since the previous tick.
+	sweepMu          sync.Mutex
+	lastPromoteSweep time.Time
+
+	// publicURL is one platform round-trip that used to happen per
+	// materialized row. Cached; see publicURL below.
+	publicURLMu  sync.Mutex
+	publicURLVal string
+	publicURLAt  time.Time
+}
+
+// ensureState lazily builds the in-memory trackers exactly once.
+func (a *App) ensureState() {
+	a.initOnce.Do(func() {
+		a.attendance = newAttendanceTracker()
+		a.registrations = newRegistrationLimiter()
+	})
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -127,6 +219,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("webinars requires a db block")
 	}
+	a.ensureState()
 	globalCtx = ctx
 	globalApp = a
 
@@ -145,10 +238,14 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// status=live row gets demoted to ended, since we lost the
 	// in-process schedulers.
 	if _, err := ctx.AppDB().Exec(
-		`UPDATE webinars SET status='ended', ended_at = CURRENT_TIMESTAMP
-		 WHERE status='live'`); err != nil {
+		`UPDATE webinars SET status='ended', ended_at = ?
+		 WHERE status='live'`, nowRFC3339()); err != nil {
 		return fmt.Errorf("reconcile: %w", err)
 	}
+
+	// Prime the public-URL cache so the first materialized page doesn't
+	// pay for the platform round-trip.
+	_ = a.publicURL(ctx)
 
 	ctx.Logger().Info("webinars mounted")
 	return nil
@@ -171,7 +268,9 @@ func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
 		{Name: "reminder-scheduler", Schedule: "@every 1m", Run: a.runReminderScheduler},
 		{Name: "offer-broadcaster", Schedule: "@every 5s", Run: a.runOfferBroadcaster},
+		{Name: "attendance-flush", Schedule: "@every 15s", Run: a.runAttendanceFlush},
 		{Name: "attendance-decay", Schedule: "@every 30s", Run: a.runAttendanceDecay},
+		{Name: "retention-prune", Schedule: "@every 6h", Run: a.runRetentionPrune},
 	}
 }
 
@@ -192,7 +291,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "webinars_create",
-			Description: "Create a webinar — allocates a stream via streaming.streams_create. Args: title, scheduled_at? (RFC3339), host_name?, kind? (live|scheduled|replay, default scheduled), duration_minutes? (default 60), description?.",
+			Description: "Create a webinar — allocates a stream via streaming.streams_create. Args: title, scheduled_at? (RFC3339), host_name?, kind? (live|scheduled|replay, default scheduled), duration_minutes? (default 60), description?, scheduling_mode? (single|multi|evergreen|replay, default single), timezone? (default UTC), slot_duration_minutes? (defaults to duration_minutes), registration_policy?.",
 			InputSchema: schemaObject(map[string]any{
 				"title":                 map[string]any{"type": "string"},
 				"scheduled_at":          map[string]any{"type": "string"},
@@ -227,7 +326,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "webinars_update",
-			Description: "Patch fields. Args: id, patch.",
+			Description: "Patch fields. Patch keys: title, host_name, description, kind, scheduled_at (RFC3339 or null), duration_minutes, status (only \"cancelled\"). Moving scheduled_at also moves the materialized slot and regenerates pending reminders. Args: id, patch.",
 			InputSchema: schemaObject(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"patch": map[string]any{"type": "object"},
@@ -236,20 +335,21 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "webinars_delete",
-			Description: "Cancel + tear down stream. Args: id.",
+			Description: "Permanently delete the webinar (registrants, attendance and engagement cascade) and tear down its stream. To keep the record, patch status=cancelled via webinars_update instead. Idempotent. Args: id.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolDelete,
 		},
 		{
 			Name:        "webinars_create_slot",
-			Description: "Create one joinable slot for a webinar. Args: webinar_id, starts_at (RFC3339), ends_at?, timezone?, capacity?, status?.",
+			Description: "Create one joinable slot for a webinar. Args: webinar_id, starts_at (RFC3339), ends_at?, duration_minutes? (used to derive ends_at; defaults to the webinar's slot_duration_minutes), timezone?, capacity?, status?.",
 			InputSchema: schemaObject(map[string]any{
-				"webinar_id": map[string]any{"type": "integer"},
-				"starts_at":  map[string]any{"type": "string"},
-				"ends_at":    map[string]any{"type": "string"},
-				"timezone":   map[string]any{"type": "string"},
-				"capacity":   map[string]any{"type": "integer"},
-				"status":     map[string]any{"type": "string"},
+				"webinar_id":       map[string]any{"type": "integer"},
+				"starts_at":        map[string]any{"type": "string"},
+				"ends_at":          map[string]any{"type": "string"},
+				"duration_minutes": map[string]any{"type": "integer"},
+				"timezone":         map[string]any{"type": "string"},
+				"capacity":         map[string]any{"type": "integer"},
+				"status":           map[string]any{"type": "string"},
 			}, []string{"webinar_id", "starts_at"}),
 			Handler: a.toolCreateSlot,
 		},
@@ -461,36 +561,64 @@ var (
 // ─── Tiny utilities ───────────────────────────────────────────────
 
 func intArg(args map[string]any, key string, def int) int {
-	if v, ok := args[key].(float64); ok {
-		return int(v)
-	}
-	if v, ok := args[key].(int); ok {
-		return v
-	}
-	if v, ok := args[key].(string); ok {
-		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-			return n
-		}
+	if n, ok := coerceInt64(args[key]); ok {
+		return int(n)
 	}
 	return def
 }
 
 func int64Arg(args map[string]any, key string) int64 {
-	switch v := args[key].(type) {
+	n, _ := coerceInt64(args[key])
+	return n
+}
+
+// coerceInt64 accepts every numeric shape a JSON-derived map can hold.
+//
+// Tool args and event payloads both arrive through JSON, but not always
+// through the same decoder: encoding/json gives float64 by default and
+// json.Number under UseNumber(), and an in-process emitter can hand back
+// the original int64. The stream lifecycle handlers used to type-assert
+// float64 only, so any other encoding silently produced 0 — an id of 0
+// short-circuits the handler and stops stream-lifecycle mirroring dead.
+func coerceInt64(v any) (int64, bool) {
+	switch t := v.(type) {
+	case nil:
+		return 0, false
 	case float64:
-		return int64(v)
+		return int64(t), true
+	case float32:
+		return int64(t), true
 	case int:
-		return int64(v)
+		return int64(t), true
+	case int32:
+		return int64(t), true
 	case int64:
-		return v
-	case string:
-		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-		if err != nil {
-			return 0
+		return t, true
+	case uint:
+		return int64(t), true
+	case uint32:
+		return int64(t), true
+	case uint64:
+		return int64(t), true
+	case json.Number:
+		if n, err := t.Int64(); err == nil {
+			return n, true
 		}
-		return n
+		if f, err := t.Float64(); err == nil {
+			return int64(f), true
+		}
+		return 0, false
+	case string:
+		s := strings.TrimSpace(t)
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return n, true
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return int64(f), true
+		}
+		return 0, false
 	}
-	return 0
+	return 0, false
 }
 
 func strArg(args map[string]any, key string) string {
@@ -580,17 +708,45 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// publicURLTTL / publicURLNegativeTTL bound how stale the cached
+// platform public URL may get. It changes about as often as the server
+// is reconfigured.
+const (
+	publicURLTTL         = 5 * time.Minute
+	publicURLNegativeTTL = 30 * time.Second
+)
+
 // publicURL returns the platform's public URL (Settings → Server),
 // minus trailing slash. Empty when unconfigured (dev/local).
+//
+// Cached: this is a platform HTTP round-trip, and materialize() calls it
+// for EVERY row — up to 200 calls for one webinars_list, 500 for one
+// webinars_list_registrants, plus one per live-room render. The mutex is
+// held across the refresh on purpose, so a burst collapses into a single
+// in-flight request.
 func (a *App) publicURL(ctx *sdk.AppCtx) string {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return ""
 	}
+	a.publicURLMu.Lock()
+	defer a.publicURLMu.Unlock()
+
+	ttl := publicURLTTL
+	if a.publicURLVal == "" {
+		ttl = publicURLNegativeTTL
+	}
+	if !a.publicURLAt.IsZero() && time.Since(a.publicURLAt) < ttl {
+		return a.publicURLVal
+	}
+
+	a.publicURLAt = time.Now()
 	id, err := ctx.PlatformAPI().WhoAmI()
 	if err != nil || id == nil {
+		a.publicURLVal = ""
 		return ""
 	}
-	return strings.TrimRight(id.PublicURL, "/")
+	a.publicURLVal = strings.TrimRight(id.PublicURL, "/")
+	return a.publicURLVal
 }
 
 // publicAppPath — base URL prefix viewers use to reach this sidecar.
@@ -655,10 +811,3 @@ func maxInt(a, b int) int {
 	}
 	return b
 }
-
-// silence unused imports during code-shuffling — strip me on cleanup.
-var (
-	_ = sync.Mutex{}
-	_ = time.Now
-	_ = errors.New
-)
