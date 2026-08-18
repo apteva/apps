@@ -693,3 +693,86 @@ func TestInboxItemsBroadcastToEveryUserScope(t *testing.T) {
 	default:
 	}
 }
+
+// ─── agent system conversations (inbox without an open chat) ─────────
+
+// TestAlertWithoutConversationAutoCreatesSystemConversation covers the
+// background-work case: an agent with NO open conversation raises an
+// alert and it must land in the inbox anyway, in a find-or-create
+// per-agent activity conversation — the agent-side mirror of
+// inbox_post's per-app conversations.
+func TestAlertWithoutConversationAutoCreatesSystemConversation(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+
+	out, err := app.toolAlert(callerCtx(41, "worker-3"), ctx, map[string]any{
+		"text": "disk almost full", "severity": "warn",
+	})
+	if err != nil {
+		t.Fatalf("alert without conversation: %v", err)
+	}
+	messageID := out.(map[string]any)["message_id"].(int64)
+	msg, _ := app.store.GetMessage(messageID)
+
+	conv, err := app.store.GetConversation(msg.ConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conv.Origin != "agent" || conv.ConversationKey != "agent:41:system" {
+		t.Fatalf("conversation = %+v, want the agent's system conversation", conv)
+	}
+
+	items, _ := app.store.Inbox(50)
+	found := false
+	for _, item := range items {
+		found = found || item.Message.ID == messageID
+	}
+	if !found {
+		t.Fatal("background alert missing from inbox")
+	}
+
+	// A second background item reuses the same conversation.
+	again, err := app.toolReport(callerCtx(41, ""), ctx, map[string]any{
+		"title": "Nightly", "summary": "done",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _ := app.store.GetMessage(again.(map[string]any)["message_id"].(int64))
+	if second.ConversationID != conv.ID {
+		t.Fatal("second background item should reuse the system conversation")
+	}
+	// No bogus pending delivery for the grouping key — it is not a
+	// transport address.
+	if _, err := app.store.DeliveryFor(messageID, conv.ConversationKey); err == nil {
+		t.Fatal("grouping key must not become a delivery target")
+	}
+}
+
+// The approval verdict still reaches the raising thread even when the
+// approval was born outside any conversation.
+func TestBackgroundApprovalRoundTrip(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+
+	out, err := app.toolRequestApproval(callerCtx(41, "worker-9"), ctx, map[string]any{
+		"title": "Rotate the credentials?",
+	})
+	if err != nil {
+		t.Fatalf("background approval: %v", err)
+	}
+	msg, _ := app.store.GetMessage(out.(map[string]any)["message_id"].(int64))
+	if _, err := app.resolveApproval(ctx, msg, "approve", "", 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.threadEvents) != 1 || platform.threadEvents[0].Ref.ThreadID != "worker-9" {
+		t.Fatalf("verdict routing = %+v, want thread worker-9", platform.threadEvents)
+	}
+}
+
+// conversations_send keeps requiring a conversation: a chat message
+// with no audience is a mis-used alert, not a send.
+func TestSendStillRequiresConversation(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	if _, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{"text": "hello?"}); err == nil {
+		t.Fatal("send without conversation_id must fail")
+	}
+}

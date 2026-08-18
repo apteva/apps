@@ -140,11 +140,16 @@ func (a *App) deliveryTargets(conv *Conversation, msg *Message) []string {
 	if msg.ComponentKind != "" {
 		targets = append(targets, "web:broadcast")
 	}
-	if conv.ConversationKey != "" && msg.ExternalSender == "" && conv.Origin != "app" {
-		// conversation_key is already "<adapter>:<binding>:<chat>" —
-		// a valid delivery target by construction. App-origin system
-		// conversations have an "app:" key that is not a transport.
-		targets = append(targets, conv.ConversationKey)
+	if conv.ConversationKey != "" && msg.ExternalSender == "" {
+		// conversation_key doubles as a delivery target only when a
+		// registered adapter owns its prefix ("telegram:…"). System
+		// conversations use grouping keys ("app:…", "agent:…") that no
+		// adapter claims, so they fall through here by construction.
+		if prefix, _, ok := strings.Cut(conv.ConversationKey, ":"); ok {
+			if _, transport := a.adapters.byID[prefix]; transport && prefix != "web" {
+				targets = append(targets, conv.ConversationKey)
+			}
+		}
 	}
 	return targets
 }

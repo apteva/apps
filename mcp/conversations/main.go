@@ -33,7 +33,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.2.1
+version: 0.2.2
 description: |
   One conversation system: internal dashboard chat, the inbox
   (approvals, reports, alerts, status), and external channels as
@@ -82,10 +82,10 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: conversations_send,             description: "Send a message into a conversation. Args: conversation_id, text, components?. The calling agent must be a participant; delivery fans out to every bound surface (dashboard SSE, external channels)." }
-    - { name: conversations_request_approval, description: "Ask the operator to approve something. Args: conversation_id, title, body?, actions? (default Approve/Deny). Renders as an actionable card in the conversation AND the inbox; the verdict comes back to this agent as an approval.result event." }
-    - { name: conversations_report,           description: "File a report. Args: conversation_id, title, summary, period?, sections?. Inbox-only: never shown in the chat transcript." }
-    - { name: conversations_alert,            description: "Raise an alert. Args: conversation_id, text, severity? (info|warn|error, default info). Shown in the inbox, severity-ranked." }
-    - { name: conversations_set_status,       description: "Set this agent's current status line. Args: conversation_id, text. Latest status wins; shown in the inbox status strip." }
+    - { name: conversations_request_approval, description: "Ask the operator to approve something. Args: title, body?, conversation_id? (omit to use your own activity conversation), actions? (default Approve/Deny). Renders as an actionable card in the conversation AND the inbox; the verdict comes back to this agent as an approval.result event." }
+    - { name: conversations_report,           description: "File a report. Args: title, summary, period?, sections?, conversation_id? (omit to use your own activity conversation). Inbox-only: never shown in the chat transcript." }
+    - { name: conversations_alert,            description: "Raise an alert. Args: text, severity? (info|warn|error, default info), conversation_id? (omit to use your own activity conversation). Shown in the inbox, severity-ranked." }
+    - { name: conversations_set_status,       description: "Set this agent's current status line. Args: text, conversation_id? (omit to use your own activity conversation). Latest status wins; shown in the inbox status strip." }
     - { name: conversations_list,             description: "List conversations this agent participates in. Args: limit?." }
     - { name: conversations_history,          description: "Read a conversation's transcript (inbox-only rows excluded). Args: conversation_id, since_id?, limit?." }
     - { name: inbox_post,                     description: "For sibling apps via CallAppResult: raise an inbox item without a conversation of your own. Args: kind (report|alert|approval), title, body?, severity?, actions?, callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
@@ -185,7 +185,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"conversation_id": map[string]any{"type": "string"},
 				"title":           map[string]any{"type": "string"},
 				"body":            map[string]any{"type": "string"},
-			}, []string{"conversation_id", "title"}),
+			}, []string{"title"}),
 			HandlerCtx: a.toolRequestApproval,
 		},
 		{
@@ -196,7 +196,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"title":           map[string]any{"type": "string"},
 				"summary":         map[string]any{"type": "string"},
 				"period":          map[string]any{"type": "string"},
-			}, []string{"conversation_id", "title", "summary"}),
+			}, []string{"title", "summary"}),
 			HandlerCtx: a.toolReport,
 		},
 		{
@@ -206,7 +206,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"conversation_id": map[string]any{"type": "string"},
 				"text":            map[string]any{"type": "string"},
 				"severity":        map[string]any{"type": "string", "enum": []string{"info", "warn", "error"}},
-			}, []string{"conversation_id", "text"}),
+			}, []string{"text"}),
 			HandlerCtx: a.toolAlert,
 		},
 		{
@@ -215,7 +215,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"text":            map[string]any{"type": "string"},
-			}, []string{"conversation_id", "text"}),
+			}, []string{"text"}),
 			HandlerCtx: a.toolSetStatus,
 		},
 		{
@@ -332,7 +332,7 @@ func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map
 	if body == "" {
 		body = title
 	}
-	conv, err := a.requireParticipant(from, conversationID)
+	conv, err := a.resolveInboxConversation(app, from, conversationID)
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +355,7 @@ func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if err != nil {
 		return nil, err
 	}
-	conv, err := a.requireParticipant(from, stringArg(args, "conversation_id"))
+	conv, err := a.resolveInboxConversation(app, from, stringArg(args, "conversation_id"))
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +383,7 @@ func (a *App) toolAlert(ctx context.Context, app *sdk.AppCtx, args map[string]an
 	if err != nil {
 		return nil, err
 	}
-	conv, err := a.requireParticipant(from, stringArg(args, "conversation_id"))
+	conv, err := a.resolveInboxConversation(app, from, stringArg(args, "conversation_id"))
 	if err != nil {
 		return nil, err
 	}
@@ -417,7 +417,7 @@ func (a *App) toolSetStatus(ctx context.Context, app *sdk.AppCtx, args map[strin
 	if err != nil {
 		return nil, err
 	}
-	conv, err := a.requireParticipant(from, stringArg(args, "conversation_id"))
+	conv, err := a.resolveInboxConversation(app, from, stringArg(args, "conversation_id"))
 	if err != nil {
 		return nil, err
 	}

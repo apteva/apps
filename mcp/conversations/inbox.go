@@ -418,3 +418,43 @@ func (s *store) CurrentStatuses() ([]CurrentStatus, error) {
 	}
 	return out, rows.Err()
 }
+
+// ─── agent system conversations ──────────────────────────────────────
+
+// agentSystemConversationKey names the per-agent system conversation
+// that receives inbox items raised OUTSIDE any open conversation — an
+// alert from a worker thread, a report from a schedule, an approval
+// from background work. Find-or-create keyed, exactly like inbox_post's
+// per-app conversations, so every agent has at most one.
+func agentSystemConversationKey(agentID int64) string {
+	return fmt.Sprintf("agent:%d:system", agentID)
+}
+
+// ensureAgentSystemConversation returns the calling agent's system
+// conversation, creating it on first use.
+func (a *App) ensureAgentSystemConversation(app *sdk.AppCtx, from *callIdentity) (*Conversation, error) {
+	title := "Agent activity"
+	if name := a.agentName(app, from.AgentID); name != "" {
+		title = name + " — activity"
+	}
+	return a.store.CreateConversation(CreateConversationInput{
+		ProjectID:       from.ProjectID,
+		LeadAgentID:     from.AgentID,
+		Title:           title,
+		Origin:          "agent",
+		ConversationKey: agentSystemConversationKey(from.AgentID),
+	})
+}
+
+// resolveInboxConversation is the shared entry for the inbox-kind tools
+// (alert/report/status/approval): an explicit conversation_id must pass
+// the participant check; an omitted one auto-targets the agent's system
+// conversation. conversations_send deliberately does NOT get this — a
+// chat message with no conversation has no audience, which means the
+// agent wanted an alert or a report, not a send.
+func (a *App) resolveInboxConversation(app *sdk.AppCtx, from *callIdentity, conversationID string) (*Conversation, error) {
+	if strings.TrimSpace(conversationID) != "" {
+		return a.requireParticipant(from, conversationID)
+	}
+	return a.ensureAgentSystemConversation(app, from)
+}
