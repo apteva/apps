@@ -136,6 +136,24 @@ const apiPost = <T,>(path: string, body: unknown) => apiSend<T>("POST", path, bo
 const apiPatch = <T,>(path: string, body: unknown) => apiSend<T>("PATCH", path, body);
 const apiDelete = <T,>(path: string) => apiSend<T>("DELETE", path);
 
+// useMediaQuery mirrors the dashboard hook of the same name — the
+// context column gates on JS matchMedia (1024px, the lg breakpoint)
+// because the compiled stylesheet only carries the responsive classes
+// the dashboard itself uses.
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(query).matches,
+  );
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const onChange = () => setMatches(mql.matches);
+    mql.addEventListener("change", onChange);
+    setMatches(mql.matches);
+    return () => mql.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
 function newClientMessageId(): string {
   return `panel-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -832,6 +850,103 @@ function DetailsDialog({
   );
 }
 
+// ─── context column ──────────────────────────────────────────────────
+
+// ContextColumn is the panel's counterpart to the dashboard chat
+// page's right-hand ConversationContextPanel — generic for now: the
+// conversation's facts and its participant roster, with Manage opening
+// the shared details dialog. App contributions / tool activity are the
+// dashboard's later, richer fill.
+function ContextColumn({
+  conversation,
+  agents,
+  onEnsureAgents,
+  onManage,
+  refreshHold,
+}: {
+  conversation: Conversation;
+  agents: AgentInfo[] | null;
+  onEnsureAgents: () => void;
+  onManage: () => void;
+  // While the details dialog is open we hold refreshes; when it closes
+  // the roster refetches so its edits show up immediately.
+  refreshHold: boolean;
+}) {
+  const [participants, setParticipants] = useState<ParticipantsInfo | null>(null);
+
+  useEffect(() => {
+    onEnsureAgents();
+  }, [onEnsureAgents]);
+
+  useEffect(() => {
+    if (refreshHold) return;
+    let cancelled = false;
+    apiGet<ParticipantsInfo>(`/participants?id=${encodeURIComponent(conversation.id)}`).then(
+      (info) => {
+        if (!cancelled) setParticipants(info);
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [conversation.id, refreshHold]);
+
+  const agentName = (id: number) => agents?.find((a) => a.id === id)?.name || `agent ${id}`;
+  const facts: Array<[string, string]> = [
+    ["Origin", conversation.origin],
+    ["Type", conversation.kind],
+    ["Created", relTime(conversation.created_at) || "—"],
+    ["Updated", relTime(conversation.updated_at) || "—"],
+  ];
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-bg">
+      <div className="flex h-10 shrink-0 items-center border-b border-border px-4">
+        <span className="text-xs font-semibold uppercase text-text-muted">Details</span>
+      </div>
+      <div className="flex-1 min-h-0 overflow-auto p-4 space-y-5">
+        <div>
+          <div className="mb-2 text-xs uppercase text-text-dim">Conversation</div>
+          <div className="space-y-1.5">
+            {facts.map(([label, value]) => (
+              <div key={label} className="flex items-center justify-between gap-2 text-xs">
+                <span className="text-text-muted">{label}</span>
+                <span className="text-text truncate">{value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div className="mb-2 text-xs uppercase text-text-dim">Participants</div>
+          {participants === null ? (
+            <p className="text-xs text-text-dim">Loading…</p>
+          ) : (
+            <div className="space-y-1.5">
+              {participants.agent_ids.map((id) => (
+                <div key={id} className="flex items-center gap-2 text-xs">
+                  <span className="min-w-0 flex-1 truncate text-text-muted">{agentName(id)}</span>
+                  {id === participants.lead_agent_id && (
+                    <span className="uppercase text-accent">lead</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={onManage}
+            className="mt-3 w-full rounded border border-border px-2 py-1.5 text-xs text-text-muted hover:text-text hover:bg-bg-input"
+          >
+            Manage conversation
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── transcript ──────────────────────────────────────────────────────
 
 function MessageRow({
@@ -1000,25 +1115,20 @@ function useConversationTransport(conversationID: string) {
 function ChatColumn({
   conversation,
   archived,
-  agents,
-  onEnsureAgents,
+  onOpenDetails,
   onActed,
-  onChanged,
   onRemoved,
 }: {
   conversation: Conversation;
   archived: boolean;
-  agents: AgentInfo[] | null;
-  onEnsureAgents: () => void;
+  onOpenDetails: () => void;
   onActed: () => void;
-  onChanged: () => void;
   onRemoved: () => void;
 }) {
   const { messages, bubble, connected, mergeMessages } = useConversationTransport(conversation.id);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
-  const [detailsOpen, setDetailsOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [archiveBusy, setArchiveBusy] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -1112,10 +1222,7 @@ function ChatColumn({
         {!archived && (
           <button
             type="button"
-            onClick={() => {
-              onEnsureAgents();
-              setDetailsOpen(true);
-            }}
+            onClick={onOpenDetails}
             className="shrink-0 inline-flex h-8 w-8 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text"
             aria-label="Conversation details"
             title="Details"
@@ -1252,15 +1359,6 @@ function ChatColumn({
           </form>
         </footer>
       )}
-
-      <DetailsDialog
-        open={detailsOpen}
-        conversation={conversation}
-        agents={agents}
-        onClose={() => setDetailsOpen(false)}
-        onChanged={onChanged}
-        onRemoved={onRemoved}
-      />
     </section>
   );
 }
@@ -1399,8 +1497,12 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
   const [selectedId, setSelectedId] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [agentsError, setAgentsError] = useState("");
+  // Same breakpoint the dashboard chat page uses for its right-hand
+  // context column.
+  const hasContextColumn = useMediaQuery("(min-width: 1024px)");
 
   const loadConversations = useCallback(async () => {
     try {
@@ -1456,6 +1558,18 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
     [conversations, selectedId],
   );
 
+  // Selection moved on — close the details dialog so its state can
+  // never be reused against the next conversation (the dashboard's
+  // ChatMain guards the same way).
+  useEffect(() => {
+    setDetailsOpen(false);
+  }, [selectedId]);
+
+  const openDetails = () => {
+    ensureAgents();
+    setDetailsOpen(true);
+  };
+
   const openConversation = (conversationID: string) => {
     setTab("chats");
     setSelectedId(conversationID);
@@ -1495,8 +1609,12 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
       {tab === "inbox" ? (
         <InboxTab onOpenConversation={openConversation} />
       ) : (
-        <main className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)]">
-          <aside className="border-r border-border min-h-0 flex flex-col">
+        <main
+          className={`flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[260px_minmax(0,1fr)] md:divide-x md:divide-border ${
+            hasContextColumn && selected ? "lg:grid-cols-[260px_minmax(0,1fr)_280px]" : ""
+          }`}
+        >
+          <aside className="min-h-0 flex flex-col">
             <div className="shrink-0 border-b border-border p-3 flex items-center gap-2">
               <button
                 type="button"
@@ -1589,10 +1707,8 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
             <ChatColumn
               conversation={selected}
               archived={showArchived}
-              agents={agents}
-              onEnsureAgents={ensureAgents}
+              onOpenDetails={openDetails}
               onActed={loadConversations}
-              onChanged={loadConversations}
               onRemoved={() => {
                 setSelectedId("");
                 loadConversations();
@@ -1605,6 +1721,17 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
               </span>
               <p className="text-sm">Select a conversation.</p>
             </section>
+          )}
+          {hasContextColumn && selected && (
+            <div className="h-full min-h-0 overflow-hidden">
+              <ContextColumn
+                conversation={selected}
+                agents={agents}
+                onEnsureAgents={ensureAgents}
+                onManage={openDetails}
+                refreshHold={detailsOpen}
+              />
+            </div>
           )}
         </main>
       )}
@@ -1625,6 +1752,20 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
           else loadConversations();
         }}
       />
+
+      {selected && (
+        <DetailsDialog
+          open={detailsOpen}
+          conversation={selected}
+          agents={agents}
+          onClose={() => setDetailsOpen(false)}
+          onChanged={loadConversations}
+          onRemoved={() => {
+            setSelectedId("");
+            loadConversations();
+          }}
+        />
+      )}
     </div>
   );
 }
