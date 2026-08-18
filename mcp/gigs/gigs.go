@@ -203,6 +203,18 @@ func (a *App) gigTools() []sdk.Tool {
 			Handler: a.toolGigsUpdate,
 		},
 		{
+			Name:        "gigs_delete",
+			Description: "Permanently delete a gig and its assignments, submissions, events and upload sessions. Irreversible — there is no archive and no undo; prefer gigs_cancel unless the gig was created by mistake. Finished gigs (reviewed, cancelled, expired) delete directly; a live gig needs force=true, which also revokes the worker's magic link. Storage files are left in place because instruction media is shared with the instruction library. Args: id, force? (default false). Returns {deleted, gig} where gig is the record as it was.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+				"force": map[string]any{
+					"type":        "boolean",
+					"description": "Delete a gig that is still open, offered, accepted or submitted. This strands the assigned worker's link.",
+				},
+			}, []string{"id"}),
+			Handler: a.toolGigsDelete,
+		},
+		{
 			Name:        "gigs_accept_result",
 			Description: "Accept a submitted result. Pass submission_id when a gig has multiple worker submissions; otherwise the latest active submission is used. Bumps that worker's accepted_count and logs to CRM. Args: id, submission_id?, notes?. Returns {gig}.",
 			InputSchema: schemaObject(map[string]any{
@@ -1147,6 +1159,84 @@ func (a *App) toolGigsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	return map[string]any{"gig": out}, nil
+}
+
+// toolGigsDelete permanently removes a gig and everything hanging off it.
+//
+// Children are deleted explicitly rather than leaning on ON DELETE CASCADE.
+// The cascade should fire — app-sdk opens the writer with foreign_keys(on) —
+// but that same file records pragmas silently no-opping in prod for months,
+// and a half-deleted gig would leave orphan rows pointing at a missing parent.
+// Explicit deletes also give the caller a count of what actually went.
+//
+// Storage files are deliberately left alone: instruction media belongs to the
+// instruction library and outlives any one gig, and storage deduplicates, so a
+// file this gig referenced may still be referenced elsewhere.
+func (a *App) toolGigsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+
+	g, err := loadGig(ctx, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if g == nil {
+		return nil, errors.New("gig not found")
+	}
+	// Deleting live work strands whichever worker is holding its magic link,
+	// so that needs saying out loud rather than happening by typo.
+	if !slices.Contains(gigTerminalStatuses, g.Status) && !boolArg(args, "force", false) {
+		return nil, fmt.Errorf(
+			"gig %d is %s, not finished — cancel it first, or pass force=true to delete live work and revoke the worker's link",
+			id, g.Status)
+	}
+
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	deleted := map[string]int64{}
+	del := func(label, q string, qArgs ...any) error {
+		res, err := tx.Exec(q, qArgs...)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		n, _ := res.RowsAffected()
+		deleted[label] = n
+		return nil
+	}
+
+	// Grandchildren first: these hang off gig_assignments, not off gigs.
+	for _, step := range []struct{ label, query string }{
+		{"upload_sessions", `DELETE FROM gig_upload_sessions WHERE assignment_id IN (SELECT id FROM gig_assignments WHERE gig_id=?)`},
+		{"submissions", `DELETE FROM gig_submissions WHERE assignment_id IN (SELECT id FROM gig_assignments WHERE gig_id=?)`},
+		{"assignments", `DELETE FROM gig_assignments WHERE gig_id=?`},
+		{"events", `DELETE FROM gig_events WHERE gig_id=?`},
+		{"instructions", `DELETE FROM gig_instructions WHERE gig_id=?`},
+	} {
+		if err := del(step.label, step.query, id); err != nil {
+			return nil, err
+		}
+	}
+	if err := del("gig", `DELETE FROM gigs WHERE id=? AND project_id=?`, id, pid); err != nil {
+		return nil, err
+	}
+	if deleted["gig"] == 0 {
+		return nil, errors.New("gig not found")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	// The caller loses the record entirely, so hand back what was destroyed.
+	return map[string]any{"deleted": deleted, "gig": g}, nil
 }
 
 func (a *App) toolGigsAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) {

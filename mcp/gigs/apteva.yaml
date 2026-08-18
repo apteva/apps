@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.1.24
+version: 0.1.25
 description: |
   Agents delegate atomic work to human workers (CRM contacts) by
   composing reusable multi-modal instructions. Templates are saved
@@ -131,6 +131,12 @@ provides:
       description: Cancel an open, offered, or accepted gig; only workers originally notified are messaged.
     - name: gigs_extend_deadline
       description: Push the deadline.
+    - name: gigs_delete
+      description: >-
+        Permanently delete a gig and its assignments, submissions, events and upload sessions. Irreversible —
+        there is no archive and no undo, so prefer gigs_cancel unless the gig was created by mistake. Finished
+        gigs delete directly; a live one needs force=true and strands the worker's link. Storage files are left
+        in place because instruction media is shared with the instruction library.
     - name: gigs_update
       description: >-
         Correct a live gig's title and/or vars. Pair with gigs_extend_deadline so a reschedule cannot leave

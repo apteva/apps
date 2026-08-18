@@ -1,4 +1,4 @@
-# Gigs (v0.1.24)
+# Gigs (v0.1.25)
 
 Agents delegate atomic work to human workers (CRM contacts) by composing
 reusable multi-modal instructions. Templates are saved instruction sets;
@@ -44,6 +44,26 @@ internal codename) is shown to them.
 `null` drops a key. `gigs_update` is refused once a gig is `reviewed`,
 `cancelled`, or `expired`, and it does **not** re-render an already dispatched
 composition — that snapshot is frozen at dispatch by design.
+
+## Deleting a gig
+
+`gigs_cancel` is the normal way to end work — the gig stays in the record as
+`cancelled`. `gigs_delete` is for gigs that should never have existed, and it
+is genuinely destructive:
+
+- Removes the gig plus its `gig_instructions`, `gig_assignments`,
+  `gig_submissions`, `gig_events` and `gig_upload_sessions` rows, in one
+  transaction. There is no archive and no undo.
+- Finished gigs (`reviewed`, `cancelled`, `expired`) delete directly. A live
+  gig needs `force=true`, which also strands the assigned worker's magic link.
+- **Storage files are left in place.** Instruction media belongs to the
+  instruction library and outlives any single gig, and storage deduplicates,
+  so a file this gig referenced may still be referenced elsewhere.
+- Returns `{deleted, gig}` — per-table row counts plus the gig record as it
+  was, since the caller loses it otherwise.
+
+Children are deleted explicitly rather than relying on `ON DELETE CASCADE`, so
+the result does not depend on the `foreign_keys` pragma being live.
 
 ## Gig status vocabulary
 

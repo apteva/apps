@@ -85,7 +85,7 @@ func seedAssignment(t *testing.T, ctx *sdk.AppCtx, gigID, workerID int64, status
 
 func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.1.24" {
+	if manifest.Version != "0.1.25" {
 		t.Fatalf("version=%q", manifest.Version)
 	}
 	var public []sdk.RouteSpec
@@ -496,5 +496,157 @@ func TestGigsUpdateRefusesTerminalGigsAndBadInput(t *testing.T) {
 		if _, err := app.toolGigsUpdate(ctx, tc.args); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: expected %q, got %v", tc.name, tc.want, err)
 		}
+	}
+}
+
+// A gig fans out across five child tables. Deleting one must not leave a row
+// behind pointing at a parent that no longer exists.
+func TestGigsDeleteRemovesGigAndLeavesNoOrphans(t *testing.T) {
+	ctx := testCtx(t)
+	app := &App{}
+	db := ctx.AppDB()
+
+	workerID := seedWorker(t, ctx, "project-a", 30)
+	id := seedGig(t, ctx, "project-a", "cancelled", "{}")
+	asgID := seedAssignment(t, ctx, id, workerID, "withdrawn", "direct", "delete-me-token")
+
+	// A second gig that must survive untouched — a delete scoped by IN (SELECT
+	// ... WHERE gig_id=?) is exactly the shape that can over-reach.
+	keepID := seedGig(t, ctx, "project-a", "open", "{}")
+	keepAsg := seedAssignment(t, ctx, keepID, workerID, "offered", "direct", "keep-me-token")
+
+	for _, seed := range []struct {
+		q    string
+		args []any
+	}{
+		{`INSERT INTO gig_instructions (gig_id,sort_order,instruction_kind,rendered_body_json) VALUES (?,0,'text','{}')`, []any{id}},
+		{`INSERT INTO gig_instructions (gig_id,sort_order,instruction_kind,rendered_body_json) VALUES (?,0,'text','{}')`, []any{keepID}},
+		{`INSERT INTO gig_submissions (assignment_id,payload_json) VALUES (?,'{}')`, []any{asgID}},
+		{`INSERT INTO gig_submissions (assignment_id,payload_json) VALUES (?,'{}')`, []any{keepAsg}},
+		{`INSERT INTO gig_events (project_id,gig_id,kind,actor) VALUES ('project-a',?,'created','agent')`, []any{id}},
+		{`INSERT INTO gig_events (project_id,gig_id,kind,actor) VALUES ('project-a',?,'created','agent')`, []any{keepID}},
+		{`INSERT INTO gig_upload_sessions (upload_id,assignment_id,project_id) VALUES ('up-gone',?,'project-a')`, []any{asgID}},
+		{`INSERT INTO gig_upload_sessions (upload_id,assignment_id,project_id) VALUES ('up-kept',?,'project-a')`, []any{keepAsg}},
+	} {
+		if _, err := db.Exec(seed.q, seed.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, err := app.toolGigsDelete(ctx, map[string]any{"_project_id": "project-a", "id": id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := out.(map[string]any)["deleted"].(map[string]int64)
+	for label, want := range map[string]int64{
+		"gig": 1, "assignments": 1, "submissions": 1, "events": 1,
+		"instructions": 1, "upload_sessions": 1,
+	} {
+		if counts[label] != want {
+			t.Fatalf("deleted[%s] = %d want %d (all: %v)", label, counts[label], want, counts)
+		}
+	}
+
+	// Nothing anywhere may still reference the deleted gig.
+	for _, probe := range []struct {
+		label, query string
+	}{
+		{"gigs", `SELECT COUNT(*) FROM gigs WHERE id=?`},
+		{"gig_instructions", `SELECT COUNT(*) FROM gig_instructions WHERE gig_id=?`},
+		{"gig_assignments", `SELECT COUNT(*) FROM gig_assignments WHERE gig_id=?`},
+		{"gig_events", `SELECT COUNT(*) FROM gig_events WHERE gig_id=?`},
+		{"gig_submissions", `SELECT COUNT(*) FROM gig_submissions WHERE assignment_id NOT IN (SELECT id FROM gig_assignments)`},
+		{"gig_upload_sessions", `SELECT COUNT(*) FROM gig_upload_sessions WHERE assignment_id NOT IN (SELECT id FROM gig_assignments)`},
+	} {
+		var n int
+		var err error
+		if strings.Contains(probe.query, "NOT IN") {
+			err = db.QueryRow(probe.query).Scan(&n)
+		} else {
+			err = db.QueryRow(probe.query, id).Scan(&n)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("%s still has %d orphaned row(s) after delete", probe.label, n)
+		}
+	}
+
+	// The bystander gig keeps every one of its own children.
+	for _, probe := range []struct {
+		label, query string
+	}{
+		{"gigs", `SELECT COUNT(*) FROM gigs WHERE id=?`},
+		{"gig_instructions", `SELECT COUNT(*) FROM gig_instructions WHERE gig_id=?`},
+		{"gig_assignments", `SELECT COUNT(*) FROM gig_assignments WHERE gig_id=?`},
+		{"gig_events", `SELECT COUNT(*) FROM gig_events WHERE gig_id=?`},
+	} {
+		var n int
+		if err := db.QueryRow(probe.query, keepID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Fatalf("bystander lost its %s rows (got %d)", probe.label, n)
+		}
+	}
+	var kept int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM gig_submissions WHERE assignment_id=?`, keepAsg).Scan(&kept); err != nil {
+		t.Fatal(err)
+	}
+	if kept != 1 {
+		t.Fatalf("bystander lost its submission (got %d)", kept)
+	}
+}
+
+func TestGigsDeleteGuardsLiveWorkUnlessForced(t *testing.T) {
+	ctx := testCtx(t)
+	app := &App{}
+
+	for _, status := range []string{"open", "offered", "accepted", "submitted"} {
+		id := seedGig(t, ctx, "project-a", status, "{}")
+		_, err := app.toolGigsDelete(ctx, map[string]any{"_project_id": "project-a", "id": id})
+		if err == nil || !strings.Contains(err.Error(), "not finished") {
+			t.Fatalf("status %s: expected a guard, got %v", status, err)
+		}
+		// force=true gets through.
+		if _, err := app.toolGigsDelete(ctx, map[string]any{
+			"_project_id": "project-a", "id": id, "force": true,
+		}); err != nil {
+			t.Fatalf("status %s with force: %v", status, err)
+		}
+		var n int
+		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM gigs WHERE id=?`, id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("status %s: force did not delete", status)
+		}
+	}
+
+	if _, err := app.toolGigsDelete(ctx, map[string]any{"_project_id": "project-a", "id": int64(98765)}); err == nil ||
+		!strings.Contains(err.Error(), "gig not found") {
+		t.Fatalf("unknown gig: %v", err)
+	}
+	if _, err := app.toolGigsDelete(ctx, map[string]any{"_project_id": "project-a"}); err == nil ||
+		!strings.Contains(err.Error(), "id required") {
+		t.Fatalf("missing id: %v", err)
+	}
+}
+
+// Cross-project deletion must not be possible.
+func TestGigsDeleteIsProjectScoped(t *testing.T) {
+	ctx := testCtx(t)
+	app := &App{}
+	other := seedGig(t, ctx, "project-b", "cancelled", "{}")
+	if _, err := app.toolGigsDelete(ctx, map[string]any{"_project_id": "project-a", "id": other}); err == nil {
+		t.Fatal("deleted a gig belonging to another project")
+	}
+	var n int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM gigs WHERE id=?`, other).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatal("other project's gig was destroyed")
 	}
 }
