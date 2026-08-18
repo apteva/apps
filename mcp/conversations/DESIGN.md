@@ -79,6 +79,22 @@ agree), and forwards an `approval.result` event to the owning agent's
 thread via the platform API. Writer, store, and forwarder stay in one
 process.
 
+## Streaming (v0.2.0)
+
+Ephemeral bubbles ride a named `stream` SSE channel, produced by a port
+of channel-chat's streamer. Two feeds: the platform telemetry bridge
+(`platform.telemetry.read` → llm.tool_chunk/tool.call/tool.result for
+chat-* threads) gives token-level text; without it the app emits
+acknowledgement/done phase frames around forward/reply — same bubble
+lifecycle, no token text. The panel renders either without knowing
+which. Frames never persist; the durable row always wins, and settled
+call ids are tombstoned so a late frame cannot resurrect a bubble.
+
+RELEASE DEPENDENCY: v0.2.0 requires an app-sdk release carrying
+TelemetryClient (>= the version that ships sdk/telemetry.go) and a
+server carrying /api/apps/callback/telemetry. On older platforms the
+app runs with phase-frame streaming only.
+
 ## Later phases (not in this repo yet)
 
 1. Server-side relay: the frozen per-agent `channels`/`agent-output`
@@ -87,8 +103,7 @@ process.
 3. One-time data migration of `channel_chat_*` rows (idempotent,
    refuses-to-guess — same discipline as the providers migration).
 4. Telegram adapter goes live (long-poll + webhook), then Slack.
-5. Token-stream partials via an AppBus bridge; v0 uses progress frames.
-6. Deprecate the `channels` sidecar and shrink `channel-chat`.
+5. Deprecate the `channels` sidecar and shrink `channel-chat`.
 
 ## Testing in isolation
 

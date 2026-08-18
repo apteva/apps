@@ -13,12 +13,51 @@ type hub struct {
 	nextID uint64
 	byConv map[string]map[uint64]chan Message
 	byUser map[string]map[uint64]chan Message
+	// frames — ephemeral streaming-bubble subscribers, per
+	// conversation. Deliberately a separate scope from messages: frames
+	// are never persisted, never backfilled, and a slow subscriber
+	// drops them without consequence.
+	frames map[string]map[uint64]chan StreamFrame
 }
 
 func newHub() *hub {
 	return &hub{
 		byConv: map[string]map[uint64]chan Message{},
 		byUser: map[string]map[uint64]chan Message{},
+		frames: map[string]map[uint64]chan StreamFrame{},
+	}
+}
+
+func (h *hub) subscribeFrames(conversationID string) (<-chan StreamFrame, func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nextID++
+	id := h.nextID
+	ch := make(chan StreamFrame, 64)
+	if h.frames[conversationID] == nil {
+		h.frames[conversationID] = map[uint64]chan StreamFrame{}
+	}
+	h.frames[conversationID][id] = ch
+	return ch, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if subs, ok := h.frames[conversationID]; ok {
+			delete(subs, id)
+			if len(subs) == 0 {
+				delete(h.frames, conversationID)
+			}
+		}
+	}
+}
+
+func (h *hub) publishStream(f StreamFrame) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, ch := range h.frames[f.ConversationID] {
+		select {
+		case ch <- f:
+		default: // ephemeral: drop, never block
+		}
 	}
 }
 

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -48,6 +50,14 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 // ─── conversations ───────────────────────────────────────────────────
 
+// chatListEntry decorates a conversation with the display data the
+// panel sidebar needs. Names come from the platform with a small
+// cache — never stored, so renames show up on the next refresh.
+type chatListEntry struct {
+	Conversation
+	LeadAgentName string `json:"lead_agent_name,omitempty"`
+}
+
 func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -57,10 +67,14 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if conversations == nil {
-			conversations = []Conversation{}
+		entries := make([]chatListEntry, 0, len(conversations))
+		for _, conv := range conversations {
+			entries = append(entries, chatListEntry{
+				Conversation:  conv,
+				LeadAgentName: a.agentName(a.appCtx(r), conv.LeadAgentID),
+			})
 		}
-		writeJSON(w, conversations)
+		writeJSON(w, entries)
 	case http.MethodPost:
 		var body struct {
 			AgentID   int64  `json:"agent_id"`
@@ -185,6 +199,11 @@ func (a *App) forwardToAgents(app *sdk.AppCtx, conv *Conversation, msg *Message)
 	if threadID := a.ensureConversationThread(app, conv); threadID != "" {
 		if tc, ok := app.PlatformAPI().(sdk.ThreadClient); ok {
 			if err := tc.SendThreadEvent(sdk.ThreadRef{AgentID: conv.LeadAgentID, ThreadID: threadID}, event); err == nil {
+				// Instant feedback: the thinking bubble appears the
+				// moment the agent has the message. The telemetry feed
+				// upgrades it to token text when the bridge is on; the
+				// durable reply settles it either way (see toolSend).
+				a.streamer.emitAck(conv.ID, threadID)
 				return
 			}
 		}
@@ -196,7 +215,9 @@ func (a *App) forwardToAgents(app *sdk.AppCtx, conv *Conversation, msg *Message)
 		}); sysErr == nil {
 			a.hub.publish(conv.ID, *sys)
 		}
+		return
 	}
+	a.streamer.emitAck(conv.ID, "")
 }
 
 // ─── SSE ─────────────────────────────────────────────────────────────
@@ -215,7 +236,8 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	conversationID := r.URL.Query().Get("chat_id")
 	var ch <-chan Message
-	var cancel func()
+	var frames <-chan StreamFrame
+	var cancel, cancelFrames func()
 	switch {
 	case conversationID != "":
 		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
@@ -229,6 +251,7 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		ch, cancel = a.hub.subscribeConversation(conversationID)
+		frames, cancelFrames = a.hub.subscribeFrames(conversationID)
 	case r.URL.Query().Get("scope") == "user":
 		ch, cancel = a.hub.subscribeUser(fmt.Sprint(requestUser(r)))
 	default:
@@ -236,12 +259,26 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cancel()
+	if cancelFrames != nil {
+		defer cancelFrames()
+	}
 	flusher.Flush()
 
+	if frames == nil {
+		frames = make(chan StreamFrame) // never fires for user scope
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case f := <-frames:
+			// Named event: the client's `stream` listener gets ephemeral
+			// bubbles; default-event listeners never see them.
+			encoded, err := json.Marshal(f)
+			if err == nil {
+				fmt.Fprintf(w, "event: stream\ndata: %s\n\n", encoded)
+				flusher.Flush()
+			}
 		case m, open := <-ch:
 			if !open {
 				return
@@ -379,4 +416,29 @@ func (a *App) handlePairing(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
 	}
+}
+
+// agentNameCache — 60s TTL, plenty for a sidebar label.
+var agentNameCache sync.Map // int64 → agentNameEntry
+
+type agentNameEntry struct {
+	name    string
+	fetched time.Time
+}
+
+func (a *App) agentName(app *sdk.AppCtx, agentID int64) string {
+	if app == nil || agentID == 0 {
+		return ""
+	}
+	if raw, ok := agentNameCache.Load(agentID); ok {
+		if entry := raw.(agentNameEntry); time.Since(entry.fetched) < time.Minute {
+			return entry.name
+		}
+	}
+	name := ""
+	if agent, err := app.PlatformAPI().GetAgent(agentID); err == nil && agent != nil {
+		name = agent.Name
+	}
+	agentNameCache.Store(agentID, agentNameEntry{name: name, fetched: time.Now()})
+	return name
 }

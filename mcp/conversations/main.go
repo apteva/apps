@@ -33,7 +33,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.1.0
+version: 0.2.0
 description: |
   One conversation system: internal dashboard chat, the inbox
   (approvals, reports, alerts, status), and external channels as
@@ -89,6 +89,11 @@ provides:
     - { name: conversations_list,             description: "List conversations this agent participates in. Args: limit?." }
     - { name: conversations_history,          description: "Read a conversation's transcript (inbox-only rows excluded). Args: conversation_id, since_id?, limit?." }
     - { name: inbox_post,                     description: "For sibling apps via CallAppResult: raise an inbox item without a conversation of your own. Args: kind (report|alert|approval), title, body?, severity?, actions?, callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
+  ui_panels:
+    - slot: project.page
+      label: Conversations
+      icon: message-circle
+      entry: /ui/ConversationsPanel.mjs
 
 runtime:
   kind: source
@@ -108,6 +113,9 @@ type App struct {
 	store    *store
 	hub      *hub
 	adapters *adapterRegistry
+	streamer *streamer
+	// telemetryStop cancels the bridge subscription on unmount.
+	telemetryStop func()
 }
 
 func main() { sdk.Run(&App{}) }
@@ -127,7 +135,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.store = newStore(ctx.AppDB())
 	a.hub = newHub()
 	a.adapters = newAdapterRegistry(a.hub)
+	a.streamer = newStreamer(a.hub)
 	mountedCtx = ctx
+	// Token-level streaming when the platform grants it; Stage-1 phase
+	// frames otherwise. The panel renders either without knowing which.
+	if a.runTelemetryFeed(ctx) {
+		ctx.Logger().Info("telemetry bridge active — token-level streaming on")
+	}
 	// Crash recovery: anything the ledger recorded but never confirmed
 	// goes out again. Adapters that are not configured (no binding)
 	// leave their rows pending rather than failing them — the binding
@@ -141,7 +155,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.telemetryStop != nil {
+		a.telemetryStop()
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
@@ -294,6 +313,8 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 		return nil, err
 	}
 	a.deliver(app, conv, msg)
+	// The durable reply supersedes any pending thinking bubble.
+	a.streamer.settleAck(conv.ID)
 	return map[string]any{"message_id": msg.ID, "conversation_id": conv.ID}, nil
 }
 
