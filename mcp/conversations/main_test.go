@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -774,5 +775,197 @@ func TestSendStillRequiresConversation(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
 	if _, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{"text": "hello?"}); err == nil {
 		t.Fatal("send without conversation_id must fail")
+	}
+}
+
+// ─── dashboard-parity HTTP surface ───────────────────────────────────
+
+// ListAgents overrides the Base stub so /agents has a directory to
+// serve — the shape the panel's pickers consume.
+func (p *recordingPlatform) ListAgents(projectID string) ([]sdk.PlatformAgent, error) {
+	return []sdk.PlatformAgent{
+		{ID: 41, Name: "Research", Status: "running", ProjectID: projectID},
+		{ID: 42, Name: "Ops", Status: "stopped", ProjectID: projectID},
+	}, nil
+}
+
+func doChats(t *testing.T, app *App, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader *strings.Reader
+	if body == "" {
+		reader = strings.NewReader("{}")
+	} else {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, target, reader)
+	req.Header.Set("X-Apteva-Subject-ID", "1")
+	rec := httptest.NewRecorder()
+	app.handleChats(rec, req)
+	return rec
+}
+
+func TestCreateRoomConversationViaHTTP(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	mountedCtx = ctx
+
+	rec := doChats(t, app, "POST", "/chats",
+		`{"agent_ids":[41,42,43],"lead_agent_id":42,"title":"War room","project_id":"proj-1"}`)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		ID          string `json:"id"`
+		Kind        string `json:"kind"`
+		LeadAgentID int64  `json:"lead_agent_id"`
+		Title       string `json:"title"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Kind != "room" || got.LeadAgentID != 42 || got.Title != "War room" {
+		t.Fatalf("created = %+v, want room led by 42", got)
+	}
+	for _, agentID := range []int64{41, 42, 43} {
+		ok, err := app.store.IsParticipantAgent(got.ID, agentID)
+		if err != nil || !ok {
+			t.Fatalf("agent %d not a participant (err=%v)", agentID, err)
+		}
+	}
+
+	// The original single-agent shape still works and stays direct.
+	rec = doChats(t, app, "POST", "/chats", `{"agent_id":41}`)
+	if rec.Code != 200 {
+		t.Fatalf("legacy create status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got.Kind != "direct" {
+		t.Fatalf("legacy create kind=%q err=%v, want direct", got.Kind, err)
+	}
+}
+
+func TestRenameArchiveUnarchiveDeleteViaHTTP(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+	msg, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "user", Content: "keep?"})
+	if err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+
+	// Rename.
+	rec := doChats(t, app, "PATCH", "/chats?id="+conv.ID, `{"title":"Renamed"}`)
+	if rec.Code != 200 {
+		t.Fatalf("rename status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if updated, _ := app.store.GetConversation(conv.ID); updated.Title != "Renamed" {
+		t.Fatalf("title=%q, want Renamed", updated.Title)
+	}
+	// Empty titles are refused, not silently stored.
+	if rec = doChats(t, app, "PATCH", "/chats?id="+conv.ID, `{"title":"  "}`); rec.Code != 400 {
+		t.Fatalf("blank rename status=%d, want 400", rec.Code)
+	}
+
+	// Archive: hidden from the active list and from GetConversation,
+	// visible in the archived list.
+	if rec = doChats(t, app, "PATCH", "/chats?id="+conv.ID, `{"archived":true}`); rec.Code != 200 {
+		t.Fatalf("archive status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := app.store.GetConversation(conv.ID); err == nil {
+		t.Fatal("archived conversation still visible to GetConversation")
+	}
+	if active, _ := app.store.ListConversationsForUser(1, 50); len(active) != 0 {
+		t.Fatalf("active list has %d rows, want 0", len(active))
+	}
+	archived, _ := app.store.ListArchivedForUser(1, 50)
+	if len(archived) != 1 || archived[0].ID != conv.ID {
+		t.Fatalf("archived list = %+v, want the conversation", archived)
+	}
+
+	// Unarchive restores it.
+	if rec = doChats(t, app, "PATCH", "/chats?id="+conv.ID, `{"archived":false}`); rec.Code != 200 {
+		t.Fatalf("unarchive status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := app.store.GetConversation(conv.ID); err != nil {
+		t.Fatalf("unarchived conversation not visible: %v", err)
+	}
+
+	// Delete removes the conversation and its messages.
+	if rec = doChats(t, app, "DELETE", "/chats?id="+conv.ID, ""); rec.Code != 200 {
+		t.Fatalf("delete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := app.store.getConversationAny(conv.ID); err == nil {
+		t.Fatal("deleted conversation still present")
+	}
+	if _, err := app.store.GetMessage(msg.ID); err == nil {
+		t.Fatal("deleted conversation's message still present")
+	}
+	if rec = doChats(t, app, "DELETE", "/chats?id="+conv.ID, ""); rec.Code == 200 {
+		t.Fatal("double delete must not report success")
+	}
+}
+
+func TestParticipantsEndpointGuardsLead(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+
+	do := func(method, target, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("X-Apteva-Subject-ID", "1")
+		rec := httptest.NewRecorder()
+		app.handleParticipants(rec, req)
+		return rec
+	}
+
+	rec := do("POST", "/participants?id="+conv.ID, `{"agent_id":55}`)
+	if rec.Code != 200 {
+		t.Fatalf("add status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var roster struct {
+		AgentIDs    []int64 `json:"agent_ids"`
+		LeadAgentID int64   `json:"lead_agent_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &roster); err != nil {
+		t.Fatalf("decode roster: %v", err)
+	}
+	if len(roster.AgentIDs) != 2 || roster.LeadAgentID != 41 {
+		t.Fatalf("roster = %+v, want [41 55] led by 41", roster)
+	}
+	if updated, _ := app.store.GetConversation(conv.ID); updated.Kind != "room" {
+		t.Fatalf("kind=%q after second agent, want room", updated.Kind)
+	}
+
+	// Removing the lead is refused; removing the other agent works and
+	// flips the kind back.
+	if rec = do("DELETE", "/participants?id="+conv.ID+"&agent_id=41", ""); rec.Code != 400 {
+		t.Fatalf("lead removal status=%d, want 400", rec.Code)
+	}
+	if rec = do("DELETE", "/participants?id="+conv.ID+"&agent_id=55", ""); rec.Code != 200 {
+		t.Fatalf("remove status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if updated, _ := app.store.GetConversation(conv.ID); updated.Kind != "direct" {
+		t.Fatalf("kind=%q after removal, want direct", updated.Kind)
+	}
+}
+
+func TestAgentsEndpointServesDirectory(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	mountedCtx = ctx
+
+	req := httptest.NewRequest("GET", "/agents?project_id=proj-1", nil)
+	rec := httptest.NewRecorder()
+	app.handleAgents(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var agents []struct {
+		ID     int64  `json:"id"`
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &agents); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(agents) != 2 || agents[0].Name != "Research" || agents[1].Status != "stopped" {
+		t.Fatalf("agents = %+v", agents)
 	}
 }

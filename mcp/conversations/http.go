@@ -20,6 +20,8 @@ import (
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/chats", Handler: a.handleChats},
+		{Pattern: "/participants", Handler: a.handleParticipants},
+		{Method: "GET", Pattern: "/agents", Handler: a.handleAgents},
 		{Pattern: "/messages", Handler: a.handleMessages},
 		{Method: "GET", Pattern: "/stream", Handler: a.handleStream},
 		{Method: "GET", Pattern: "/inbox", Handler: a.handleInbox},
@@ -62,7 +64,13 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		userID := requestUser(r)
-		conversations, err := a.store.ListConversationsForUser(userID, 100)
+		var conversations []Conversation
+		var err error
+		if r.URL.Query().Get("archived") == "1" {
+			conversations, err = a.store.ListArchivedForUser(userID, 100)
+		} else {
+			conversations, err = a.store.ListConversationsForUser(userID, 100)
+		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -76,27 +84,196 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, entries)
 	case http.MethodPost:
-		var body struct {
-			AgentID   int64  `json:"agent_id"`
-			ProjectID string `json:"project_id"`
-			Title     string `json:"title"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil || body.AgentID == 0 {
-			http.Error(w, "agent_id required", http.StatusBadRequest)
+		a.handleCreateChat(w, r)
+	case http.MethodPatch:
+		a.handleUpdateChat(w, r)
+	case http.MethodDelete:
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			http.Error(w, "id required", http.StatusBadRequest)
 			return
 		}
-		conv, err := a.store.CreateConversation(CreateConversationInput{
-			ProjectID: body.ProjectID, LeadAgentID: body.AgentID,
-			Title: body.Title, OwnerUserID: requestUser(r),
-		})
+		if err := a.store.DeleteConversation(id); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"deleted": true})
+	default:
+		http.Error(w, "GET, POST, PATCH or DELETE", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleCreateChat accepts both the original single-agent shape
+// ({agent_id}) and the dashboard-parity multi-agent shape
+// ({agent_ids: [...], lead_agent_id}). Extra agents become participant
+// rows; more than one flips kind to "room" (store recomputes).
+func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		AgentID     int64   `json:"agent_id"`
+		AgentIDs    []int64 `json:"agent_ids"`
+		LeadAgentID int64   `json:"lead_agent_id"`
+		ProjectID   string  `json:"project_id"`
+		Title       string  `json:"title"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	agents := body.AgentIDs
+	if len(agents) == 0 && body.AgentID != 0 {
+		agents = []int64{body.AgentID}
+	}
+	lead := body.LeadAgentID
+	if lead == 0 && len(agents) > 0 {
+		lead = agents[0]
+	}
+	if lead == 0 {
+		http.Error(w, "agent_id or agent_ids required", http.StatusBadRequest)
+		return
+	}
+	conv, err := a.store.CreateConversation(CreateConversationInput{
+		ProjectID: body.ProjectID, LeadAgentID: lead,
+		Title: body.Title, OwnerUserID: requestUser(r),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, agentID := range agents {
+		if agentID == lead || agentID == 0 {
+			continue
+		}
+		if err := a.store.AddAgentParticipant(conv.ID, agentID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	conv, _ = a.store.GetConversation(conv.ID)
+	writeJSON(w, chatListEntry{Conversation: *conv, LeadAgentName: a.agentName(a.appCtx(r), conv.LeadAgentID)})
+}
+
+func (a *App) handleUpdateChat(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	var body struct {
+		Title    *string `json:"title"`
+		Archived *bool   `json:"archived"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil || id == "" {
+		http.Error(w, "id and a title or archived field required", http.StatusBadRequest)
+		return
+	}
+	var conv *Conversation
+	var err error
+	if body.Title != nil {
+		title := strings.TrimSpace(*body.Title)
+		if title == "" {
+			http.Error(w, "title cannot be empty", http.StatusBadRequest)
+			return
+		}
+		if conv, err = a.store.UpdateConversationTitle(id, title); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if body.Archived != nil {
+		if conv, err = a.store.SetConversationArchived(id, *body.Archived); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if conv == nil {
+		http.Error(w, "title or archived field required", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, chatListEntry{Conversation: *conv, LeadAgentName: a.agentName(a.appCtx(r), conv.LeadAgentID)})
+}
+
+// handleParticipants manages the agent roster of one conversation.
+// The lead agent is fixed: removing it would orphan message forwarding,
+// so that returns 400 (dashboard parity — the lead has no remove link).
+func (a *App) handleParticipants(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	conv, err := a.store.GetConversation(id)
+	if err != nil {
+		http.Error(w, "conversation not found", http.StatusNotFound)
+		return
+	}
+	respond := func() {
+		ids, err := a.store.AgentParticipants(id)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, conv)
-	default:
-		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+		if ids == nil {
+			ids = []int64{}
+		}
+		writeJSON(w, map[string]any{"agent_ids": ids, "lead_agent_id": conv.LeadAgentID})
 	}
+	switch r.Method {
+	case http.MethodGet:
+		respond()
+	case http.MethodPost:
+		var body struct {
+			AgentID int64 `json:"agent_id"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&body); err != nil || body.AgentID == 0 {
+			http.Error(w, "agent_id required", http.StatusBadRequest)
+			return
+		}
+		if err := a.store.AddAgentParticipant(id, body.AgentID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		respond()
+	case http.MethodDelete:
+		agentID, _ := strconv.ParseInt(r.URL.Query().Get("agent_id"), 10, 64)
+		if agentID == 0 {
+			http.Error(w, "agent_id required", http.StatusBadRequest)
+			return
+		}
+		if agentID == conv.LeadAgentID {
+			http.Error(w, "cannot remove the lead agent", http.StatusBadRequest)
+			return
+		}
+		if err := a.store.RemoveAgentParticipant(id, agentID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		respond()
+	default:
+		http.Error(w, "GET, POST or DELETE", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleAgents serves the picker in the panel's new-conversation and
+// participants dialogs. Backed by the SDK's optional agent-directory
+// capability (authorized by platform.instances.read, which this app
+// already holds); older platforms get a clear error, not a guess.
+func (a *App) handleAgents(w http.ResponseWriter, r *http.Request) {
+	app := a.appCtx(r)
+	if app == nil {
+		http.Error(w, "platform unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	agents, err := sdk.ListAgentsVia(app.PlatformAPI(), r.URL.Query().Get("project_id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	type agentInfo struct {
+		ID     int64  `json:"id"`
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	}
+	out := make([]agentInfo, 0, len(agents))
+	for _, agent := range agents {
+		out = append(out, agentInfo{ID: agent.ID, Name: agent.Name, Status: agent.Status})
+	}
+	writeJSON(w, out)
 }
 
 // ─── messages ────────────────────────────────────────────────────────

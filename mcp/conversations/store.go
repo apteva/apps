@@ -245,6 +245,136 @@ func (s *store) AddAgentParticipant(conversationID string, agentID int64) error 
 	return err
 }
 
+func (s *store) RemoveAgentParticipant(conversationID string, agentID int64) error {
+	if _, err := s.db.Exec(`
+		DELETE FROM participants WHERE conversation_id = ? AND agent_id = ?`,
+		conversationID, agentID); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`
+		UPDATE conversations SET kind = CASE WHEN
+			(SELECT COUNT(*) FROM participants WHERE conversation_id = ? AND agent_id != 0) > 1
+			THEN 'room' ELSE 'direct' END,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`, conversationID, conversationID)
+	return err
+}
+
+func (s *store) AgentParticipants(conversationID string) ([]int64, error) {
+	rows, err := s.db.Query(`
+		SELECT agent_id FROM participants
+		WHERE conversation_id = ? AND agent_id != 0 ORDER BY added_at, agent_id`,
+		conversationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// getConversationAny fetches regardless of archive state — the
+// unarchive path has to be able to see the row GetConversation hides.
+func (s *store) getConversationAny(id string) (*Conversation, error) {
+	return scanConversation(s.db.QueryRow(
+		`SELECT `+conversationCols+` FROM conversations WHERE id = ?`, id))
+}
+
+func (s *store) UpdateConversationTitle(id, title string) (*Conversation, error) {
+	res, err := s.db.Exec(`
+		UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		title, id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("conversation not found")
+	}
+	return s.getConversationAny(id)
+}
+
+func (s *store) SetConversationArchived(id string, archived bool) (*Conversation, error) {
+	expr := "CURRENT_TIMESTAMP"
+	if !archived {
+		expr = "NULL"
+	}
+	res, err := s.db.Exec(`
+		UPDATE conversations SET archived_at = `+expr+`, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("conversation not found")
+	}
+	return s.getConversationAny(id)
+}
+
+func (s *store) ListArchivedForUser(userID int64, limit int) ([]Conversation, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+		SELECT DISTINCT `+prefixCols("c.", conversationCols)+`
+		FROM conversations c
+		LEFT JOIN participants p ON p.conversation_id = c.id
+		WHERE c.archived_at IS NOT NULL AND (c.owner_user_id = ? OR p.user_id = ? OR c.owner_user_id = 0)
+		ORDER BY c.updated_at DESC LIMIT ?`, userID, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Conversation
+	for rows.Next() {
+		c, err := scanConversation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+// DeleteConversation removes the conversation and every dependent row.
+// Children go explicitly — FK cascade depends on a pragma the SDK's DB
+// open may not set.
+func (s *store) DeleteConversation(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`
+		DELETE FROM deliveries WHERE message_id IN
+			(SELECT id FROM messages WHERE conversation_id = ?)`, id); err != nil {
+		return err
+	}
+	for _, q := range []string{
+		`DELETE FROM messages WHERE conversation_id = ?`,
+		`DELETE FROM participants WHERE conversation_id = ?`,
+		`DELETE FROM read_marks WHERE conversation_id = ?`,
+	} {
+		if _, err := tx.Exec(q, id); err != nil {
+			return err
+		}
+	}
+	res, err := tx.Exec(`DELETE FROM conversations WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("conversation not found")
+	}
+	return tx.Commit()
+}
+
 // ─── messages ────────────────────────────────────────────────────────
 
 // AppendMessage inserts a message. When ClientID is set and a row with

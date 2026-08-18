@@ -84,6 +84,17 @@ interface CurrentStatus {
   message: Message;
 }
 
+interface AgentInfo {
+  id: number;
+  name: string;
+  status: string;
+}
+
+interface ParticipantsInfo {
+  agent_ids: number[];
+  lead_agent_id: number;
+}
+
 // ─── fetch helpers ───────────────────────────────────────────────────
 
 async function apiGet<T>(path: string): Promise<T> {
@@ -92,16 +103,20 @@ async function apiGet<T>(path: string): Promise<T> {
   return res.json();
 }
 
-async function apiPost<T>(path: string, body: unknown): Promise<T> {
+async function apiSend<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${API}${path}`, {
-    method: "POST",
+    method,
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
+
+const apiPost = <T,>(path: string, body: unknown) => apiSend<T>("POST", path, body);
+const apiPatch = <T,>(path: string, body: unknown) => apiSend<T>("PATCH", path, body);
+const apiDelete = <T,>(path: string) => apiSend<T>("DELETE", path);
 
 function newClientMessageId(): string {
   return `panel-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -151,6 +166,12 @@ const GLYPH_CHECK = "M20 6 9 17l-5-5";
 const GLYPH_X = "M18 6 6 18 M6 6l12 12";
 const GLYPH_REPORT =
   "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8 M16 17H8 M10 9H8";
+const GLYPH_PLUS = "M12 5v14 M5 12h14";
+const GLYPH_MORE = "M12 12h.01 M19 12h.01 M5 12h.01";
+const GLYPH_ARCHIVE = "M21 8v13H3V8 M1 3h22v5H1z M10 12h4";
+const GLYPH_TRASH =
+  "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2";
+const GLYPH_RESTORE = "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5";
 
 // ─── typed cards ─────────────────────────────────────────────────────
 
@@ -329,6 +350,460 @@ function StreamingBubble({ text, phase }: { text: string; phase?: string }) {
   );
 }
 
+// ─── dialogs ─────────────────────────────────────────────────────────
+
+// Overlay is a lightweight port of the dashboard's Modal shell: same
+// blurred backdrop and card, Escape + click-outside close, no portal
+// (the panel already lives in the page document).
+function Overlay({
+  open,
+  onClose,
+  ariaLabel,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  ariaLabel: string;
+  children: React.ReactNode;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={ariaLabel}
+        className="relative bg-bg-card border border-border rounded-lg shadow-lg w-full max-w-md max-h-full overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// NewConversationDialog is the panel's port of the dashboard's
+// NewConversationModal: agent multi-select with filter, lead radio when
+// more than one, optional title.
+function NewConversationDialog({
+  open,
+  projectId,
+  agents,
+  agentsError,
+  onClose,
+  onCreated,
+}: {
+  open: boolean;
+  projectId: string;
+  agents: AgentInfo[] | null;
+  agentsError: string;
+  onClose: () => void;
+  onCreated: (conversation: Conversation) => void;
+}) {
+  const [selected, setSelected] = useState<number[]>([]);
+  const [leadId, setLeadId] = useState<number | null>(null);
+  const [title, setTitle] = useState("");
+  const [filter, setFilter] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const visible = useMemo(() => {
+    const list = agents ?? [];
+    const q = filter.trim().toLowerCase();
+    return q ? list.filter((a) => a.name.toLowerCase().includes(q)) : list;
+  }, [agents, filter]);
+
+  const reset = () => {
+    setSelected([]);
+    setLeadId(null);
+    setTitle("");
+    setFilter("");
+    setError("");
+  };
+
+  const close = () => {
+    if (saving) return;
+    reset();
+    onClose();
+  };
+
+  const toggle = (agentId: number) => {
+    setSelected((current) => {
+      const next = current.includes(agentId)
+        ? current.filter((id) => id !== agentId)
+        : [...current, agentId];
+      setLeadId((lead) => (next.length === 0 ? null : lead && next.includes(lead) ? lead : next[0]!));
+      return next;
+    });
+  };
+
+  const create = async () => {
+    if (selected.length === 0 || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const conversation = await apiPost<Conversation>("/chats", {
+        agent_ids: selected,
+        lead_agent_id: leadId ?? selected[0],
+        title: title.trim() || undefined,
+        project_id: projectId,
+      });
+      reset();
+      onCreated(conversation);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Overlay open={open} onClose={close} ariaLabel="New conversation">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <h2 className="text-sm font-semibold text-text">New conversation</h2>
+        <button
+          type="button"
+          onClick={close}
+          className="inline-flex h-8 w-8 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text"
+          aria-label="Close"
+        >
+          <Glyph d={GLYPH_X} size={14} />
+        </button>
+      </div>
+      <div className="space-y-4 overflow-auto p-4">
+        <label className="block">
+          <span className="mb-1 block text-xs uppercase text-text-muted">Title</span>
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Optional"
+            className="w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
+          />
+        </label>
+        <div>
+          <div className="mb-1 text-xs uppercase text-text-muted">Agents</div>
+          {agents === null && !agentsError ? (
+            <p className="text-xs text-text-dim">Loading agents…</p>
+          ) : agentsError ? (
+            <p className="text-xs text-error">{agentsError}</p>
+          ) : (agents ?? []).length === 0 ? (
+            <p className="text-xs text-text-dim">No agents in this project yet.</p>
+          ) : (
+            <>
+              <input
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="Search agents"
+                className="mb-2 w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
+              />
+              <div className="max-h-56 divide-y divide-border overflow-y-auto rounded border border-border">
+                {visible.map((agent) => {
+                  const checked = selected.includes(agent.id);
+                  return (
+                    <div key={agent.id} className="flex items-center gap-3 px-3 py-2 hover:bg-bg-input">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggle(agent.id)}
+                        className="h-4 w-4"
+                        aria-label={agent.name}
+                      />
+                      <button type="button" onClick={() => toggle(agent.id)} className="min-w-0 flex-1 text-left">
+                        <span className="block truncate text-sm text-text">{agent.name}</span>
+                        <span className="block text-xs text-text-muted">#{agent.id} · {agent.status}</span>
+                      </button>
+                      {selected.length > 1 && checked && (
+                        <label className="flex items-center gap-1 text-xs text-text-muted">
+                          <input
+                            type="radio"
+                            name="conversations-lead-agent"
+                            checked={leadId === agent.id}
+                            onChange={() => setLeadId(agent.id)}
+                          />
+                          lead
+                        </label>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+        {error && <p className="text-xs text-error">{error}</p>}
+      </div>
+      <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+        <button
+          type="button"
+          onClick={close}
+          className="rounded border border-border px-3 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={create}
+          disabled={selected.length === 0 || saving}
+          className="rounded bg-accent px-3 py-1.5 text-xs font-semibold text-bg disabled:opacity-40"
+        >
+          {saving ? "Creating…" : "Create"}
+        </button>
+      </div>
+    </Overlay>
+  );
+}
+
+// DetailsDialog ports the dashboard's ConversationDetails: rename,
+// participant roster (lead fixed), archive, and delete behind an
+// explicit confirm step.
+function DetailsDialog({
+  open,
+  conversation,
+  agents,
+  onClose,
+  onChanged,
+  onRemoved,
+}: {
+  open: boolean;
+  conversation: Conversation;
+  agents: AgentInfo[] | null;
+  onClose: () => void;
+  onChanged: () => void;
+  onRemoved: () => void;
+}) {
+  const [title, setTitle] = useState(conversation.title);
+  const [participants, setParticipants] = useState<ParticipantsInfo | null>(null);
+  const [addAgentId, setAddAgentId] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    setTitle(conversation.title);
+    setAddAgentId("");
+    setConfirmDelete(false);
+    setError("");
+    apiGet<ParticipantsInfo>(`/participants?id=${encodeURIComponent(conversation.id)}`).then(
+      setParticipants,
+      (err) => setError(err instanceof Error ? err.message : String(err)),
+    );
+  }, [open, conversation.id, conversation.title]);
+
+  const agentName = (id: number) =>
+    agents?.find((a) => a.id === id)?.name || `agent ${id}`;
+  const available = useMemo(
+    () => (agents ?? []).filter((a) => !(participants?.agent_ids ?? []).includes(a.id)),
+    [agents, participants],
+  );
+
+  const run = async (operation: () => Promise<void>) => {
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      await operation();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveTitle = () => {
+    const next = title.trim();
+    if (!next || next === conversation.title) return;
+    void run(async () => {
+      await apiPatch(`/chats?id=${encodeURIComponent(conversation.id)}`, { title: next });
+      onChanged();
+    });
+  };
+
+  const addParticipant = () => {
+    const id = Number(addAgentId);
+    if (!id) return;
+    void run(async () => {
+      const updated = await apiPost<ParticipantsInfo>(
+        `/participants?id=${encodeURIComponent(conversation.id)}`,
+        { agent_id: id },
+      );
+      setParticipants(updated);
+      setAddAgentId("");
+      onChanged();
+    });
+  };
+
+  const removeParticipant = (id: number) => {
+    void run(async () => {
+      const updated = await apiDelete<ParticipantsInfo>(
+        `/participants?id=${encodeURIComponent(conversation.id)}&agent_id=${id}`,
+      );
+      setParticipants(updated);
+      onChanged();
+    });
+  };
+
+  const archive = () => {
+    void run(async () => {
+      await apiPatch(`/chats?id=${encodeURIComponent(conversation.id)}`, { archived: true });
+      onClose();
+      onRemoved();
+    });
+  };
+
+  const remove = () => {
+    void run(async () => {
+      await apiDelete(`/chats?id=${encodeURIComponent(conversation.id)}`);
+      onClose();
+      onRemoved();
+    });
+  };
+
+  return (
+    <Overlay open={open} onClose={onClose} ariaLabel="Conversation details">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <h2 className="text-sm font-semibold text-text">Conversation details</h2>
+        <button
+          type="button"
+          onClick={onClose}
+          className="inline-flex h-8 w-8 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text"
+          aria-label="Close"
+        >
+          <Glyph d={GLYPH_X} size={14} />
+        </button>
+      </div>
+      <div className="space-y-4 overflow-auto p-4">
+        <div>
+          <div className="mb-1 text-xs uppercase text-text-muted">Title</div>
+          <div className="flex gap-2">
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") saveTitle();
+              }}
+              maxLength={120}
+              className="min-w-0 flex-1 rounded border border-border bg-bg-input px-2 py-1.5 text-sm text-text focus:border-accent focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={saveTitle}
+              disabled={saving || !title.trim() || title.trim() === conversation.title}
+              className="rounded border border-border px-2.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
+            >
+              Save
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <div className="mb-2 text-xs uppercase text-text-muted">Participants</div>
+          {participants === null ? (
+            <p className="text-xs text-text-dim">Loading…</p>
+          ) : (
+            <div className="space-y-1.5">
+              {participants.agent_ids.map((id) => (
+                <div key={id} className="flex items-center gap-2 text-sm">
+                  <span className="min-w-0 flex-1 truncate text-text-muted">{agentName(id)}</span>
+                  {id === participants.lead_agent_id ? (
+                    <span className="text-xs uppercase text-accent">lead</span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => removeParticipant(id)}
+                      disabled={saving}
+                      className="text-xs text-text-dim hover:text-error"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {available.length > 0 && (
+            <div className="mt-2 flex gap-2">
+              <select
+                value={addAgentId}
+                onChange={(e) => setAddAgentId(e.target.value)}
+                className="min-w-0 flex-1 rounded border border-border bg-bg-input px-2 py-1.5 text-xs text-text focus:border-accent focus:outline-none"
+              >
+                <option value="">Add an agent…</option>
+                {available.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={addParticipant}
+                disabled={!addAgentId || saving}
+                className="rounded border border-border px-2.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
+              >
+                Add
+              </button>
+            </div>
+          )}
+        </div>
+
+        {error && <p className="text-xs text-error">{error}</p>}
+      </div>
+      <div className="flex items-center gap-2 border-t border-border px-4 py-3">
+        <button
+          type="button"
+          onClick={archive}
+          disabled={saving}
+          className="inline-flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
+        >
+          <Glyph d={GLYPH_ARCHIVE} size={13} />
+          Archive
+        </button>
+        {confirmDelete ? (
+          <span className="ml-auto flex items-center gap-2">
+            <span className="text-xs text-text-muted">Delete permanently?</span>
+            <button
+              type="button"
+              onClick={remove}
+              disabled={saving}
+              className="rounded bg-error px-2.5 py-1.5 text-xs font-semibold text-bg disabled:opacity-40"
+            >
+              {saving ? "Deleting…" : "Delete"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(false)}
+              disabled={saving}
+              className="rounded border border-border px-2.5 py-1.5 text-xs text-text-muted hover:text-text"
+            >
+              Cancel
+            </button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setConfirmDelete(true)}
+            disabled={saving}
+            className="ml-auto inline-flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-error hover:bg-bg-input disabled:opacity-40"
+          >
+            <Glyph d={GLYPH_TRASH} size={13} />
+            Delete
+          </button>
+        )}
+      </div>
+    </Overlay>
+  );
+}
+
 // ─── transcript ──────────────────────────────────────────────────────
 
 function MessageRow({
@@ -496,16 +971,59 @@ function useConversationTransport(conversationID: string) {
 
 function ChatColumn({
   conversation,
+  archived,
+  agents,
+  onEnsureAgents,
   onActed,
+  onChanged,
+  onRemoved,
 }: {
   conversation: Conversation;
+  archived: boolean;
+  agents: AgentInfo[] | null;
+  onEnsureAgents: () => void;
   onActed: () => void;
+  onChanged: () => void;
+  onRemoved: () => void;
 }) {
   const { messages, bubble, connected, mergeMessages } = useConversationTransport(conversation.id);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [archiveBusy, setArchiveBusy] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setConfirmDelete(false);
+  }, [conversation.id]);
+
+  const setArchived = async (next: boolean) => {
+    if (archiveBusy) return;
+    setArchiveBusy(true);
+    try {
+      await apiPatch(`/chats?id=${encodeURIComponent(conversation.id)}`, { archived: next });
+      onRemoved();
+    } catch {
+      /* surfaced by the next list refresh */
+    } finally {
+      setArchiveBusy(false);
+    }
+  };
+
+  const deleteConversation = async () => {
+    if (archiveBusy) return;
+    setArchiveBusy(true);
+    try {
+      await apiDelete(`/chats?id=${encodeURIComponent(conversation.id)}`);
+      onRemoved();
+    } catch {
+      /* surfaced by the next list refresh */
+    } finally {
+      setArchiveBusy(false);
+    }
+  };
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
@@ -555,6 +1073,20 @@ function ChatColumn({
           className={`ml-auto shrink-0 w-2 h-2 rounded-full ${connected ? "bg-success" : "bg-border"}`}
           title={connected ? "Live" : "Reconnecting — the 5s poll keeps history current"}
         />
+        {!archived && (
+          <button
+            type="button"
+            onClick={() => {
+              onEnsureAgents();
+              setDetailsOpen(true);
+            }}
+            className="shrink-0 inline-flex h-8 w-8 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text"
+            aria-label="Conversation details"
+            title="Details"
+          >
+            <Glyph d={GLYPH_MORE} size={16} />
+          </button>
+        )}
       </div>
 
       <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-3">
@@ -576,33 +1108,89 @@ function ChatColumn({
         <div ref={bottomRef} />
       </div>
 
-      <footer className="shrink-0 border-t border-border p-3">
-        {sendError && <p className="mb-2 text-xs text-error">{sendError}</p>}
-        <div className="flex items-end gap-2">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                send();
-              }
-            }}
-            rows={2}
-            placeholder="Message the agent…"
-            className="flex-1 resize-none bg-bg-input border border-border rounded-md px-3 py-2 text-sm text-text focus:outline-none focus:border-accent"
-          />
-          <button
-            type="button"
-            onClick={send}
-            disabled={sending || !draft.trim()}
-            className="shrink-0 h-9 w-9 inline-flex items-center justify-center rounded-md bg-accent text-bg disabled:opacity-50"
-            aria-label="Send"
-          >
-            <Glyph d={GLYPH_SEND} size={16} />
-          </button>
-        </div>
-      </footer>
+      {archived ? (
+        <footer className="shrink-0 border-t border-border p-3 flex items-center gap-2">
+          <span className="text-xs text-text-muted">Archived conversation — read only.</span>
+          <span className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setArchived(false)}
+              disabled={archiveBusy}
+              className="inline-flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
+            >
+              <Glyph d={GLYPH_RESTORE} size={13} />
+              Unarchive
+            </button>
+            {confirmDelete ? (
+              <>
+                <button
+                  type="button"
+                  onClick={deleteConversation}
+                  disabled={archiveBusy}
+                  className="rounded bg-error px-2.5 py-1.5 text-xs font-semibold text-bg disabled:opacity-40"
+                >
+                  Confirm delete
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmDelete(false)}
+                  disabled={archiveBusy}
+                  className="rounded border border-border px-2.5 py-1.5 text-xs text-text-muted hover:text-text"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(true)}
+                disabled={archiveBusy}
+                className="inline-flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-error hover:bg-bg-input disabled:opacity-40"
+              >
+                <Glyph d={GLYPH_TRASH} size={13} />
+                Delete
+              </button>
+            )}
+          </span>
+        </footer>
+      ) : (
+        <footer className="shrink-0 border-t border-border p-3">
+          {sendError && <p className="mb-2 text-xs text-error">{sendError}</p>}
+          <div className="flex items-end gap-2">
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+              rows={2}
+              placeholder="Message the agent…"
+              className="flex-1 resize-none bg-bg-input border border-border rounded-md px-3 py-2 text-sm text-text focus:outline-none focus:border-accent"
+            />
+            <button
+              type="button"
+              onClick={send}
+              disabled={sending || !draft.trim()}
+              className="shrink-0 h-9 w-9 inline-flex items-center justify-center rounded-md bg-accent text-bg disabled:opacity-50"
+              aria-label="Send"
+            >
+              <Glyph d={GLYPH_SEND} size={16} />
+            </button>
+          </div>
+        </footer>
+      )}
+
+      <DetailsDialog
+        open={detailsOpen}
+        conversation={conversation}
+        agents={agents}
+        onClose={() => setDetailsOpen(false)}
+        onChanged={onChanged}
+        onRemoved={onRemoved}
+      />
     </section>
   );
 }
@@ -739,11 +1327,15 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [unread, setUnread] = useState<Map<string, number>>(new Map());
   const [selectedId, setSelectedId] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+  const [newOpen, setNewOpen] = useState(false);
+  const [agents, setAgents] = useState<AgentInfo[] | null>(null);
+  const [agentsError, setAgentsError] = useState("");
 
   const loadConversations = useCallback(async () => {
     try {
       const [chats, unreadEntries] = await Promise.all([
-        apiGet<Conversation[]>("/chats"),
+        apiGet<Conversation[]>(`/chats${showArchived ? "?archived=1" : ""}`),
         apiGet<UnreadEntry[]>("/unread-summary"),
       ]);
       const scoped = projectId
@@ -757,13 +1349,25 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
     } catch {
       /* transient */
     }
-  }, [projectId]);
+  }, [projectId, showArchived]);
 
   useEffect(() => {
     loadConversations();
     const interval = window.setInterval(loadConversations, 8000);
     return () => window.clearInterval(interval);
   }, [loadConversations]);
+
+  // Agent directory, fetched lazily the first time a dialog needs it.
+  const ensureAgents = useCallback(() => {
+    if (agents !== null) return;
+    apiGet<AgentInfo[]>(`/agents${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`).then(
+      (list) => {
+        setAgents(list);
+        setAgentsError("");
+      },
+      (err) => setAgentsError(err instanceof Error ? err.message : String(err)),
+    );
+  }, [agents, projectId]);
 
   // Opening a conversation marks it seen with the latest known id.
   useEffect(() => {
@@ -822,16 +1426,53 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
         <InboxTab onOpenConversation={openConversation} />
       ) : (
         <main className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)]">
-          <aside className="border-r border-border min-h-0 overflow-auto">
+          <aside className="border-r border-border min-h-0 flex flex-col">
+            <div className="shrink-0 border-b border-border p-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  ensureAgents();
+                  setNewOpen(true);
+                }}
+                className="inline-flex items-center gap-1.5 rounded bg-accent px-2.5 py-1.5 text-xs font-semibold text-bg"
+              >
+                <Glyph d={GLYPH_PLUS} size={13} />
+                New conversation
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowArchived((v) => !v);
+                  setSelectedId("");
+                }}
+                className={`ml-auto inline-flex h-8 w-8 items-center justify-center rounded ${
+                  showArchived
+                    ? "bg-bg-input text-text"
+                    : "text-text-muted hover:bg-bg-input hover:text-text"
+                }`}
+                aria-label="Archived conversations"
+                title={showArchived ? "Back to active conversations" : "Archived conversations"}
+              >
+                <Glyph d={GLYPH_ARCHIVE} size={15} />
+              </button>
+            </div>
+            {showArchived && (
+              <div className="shrink-0 border-b border-border px-3 py-1.5 text-xs text-text-muted">
+                Archived
+              </div>
+            )}
+            <div className="flex-1 min-h-0 overflow-auto">
             {conversations.length === 0 ? (
               <div className="p-6 text-sm text-text-muted flex flex-col items-center gap-3 text-center">
                 <span className="text-text-dim">
-                  <Glyph d={GLYPH_CHAT} size={28} />
+                  <Glyph d={showArchived ? GLYPH_ARCHIVE : GLYPH_CHAT} size={28} />
                 </span>
-                <p>No conversations yet.</p>
-                <p className="text-xs text-text-dim">
-                  Conversations appear when you message an agent or an external channel comes in.
-                </p>
+                <p>{showArchived ? "No archived conversations." : "No conversations yet."}</p>
+                {!showArchived && (
+                  <p className="text-xs text-text-dim">
+                    Start one with New conversation, or wait for an external channel to come in.
+                  </p>
+                )}
               </div>
             ) : (
               <ul className="divide-y divide-border">
@@ -872,9 +1513,21 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
                 })}
               </ul>
             )}
+            </div>
           </aside>
           {selected ? (
-            <ChatColumn conversation={selected} onActed={loadConversations} />
+            <ChatColumn
+              conversation={selected}
+              archived={showArchived}
+              agents={agents}
+              onEnsureAgents={ensureAgents}
+              onActed={loadConversations}
+              onChanged={loadConversations}
+              onRemoved={() => {
+                setSelectedId("");
+                loadConversations();
+              }}
+            />
           ) : (
             <section className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
               <span className="text-text-dim">
@@ -885,6 +1538,23 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
           )}
         </main>
       )}
+
+      <NewConversationDialog
+        open={newOpen}
+        projectId={projectId}
+        agents={agents}
+        agentsError={agentsError}
+        onClose={() => setNewOpen(false)}
+        onCreated={(conversation) => {
+          setNewOpen(false);
+          setSelectedId(conversation.id);
+          // Leaving archived view retriggers the load via the effect;
+          // calling loadConversations here too would race the stale
+          // archived query against the fresh one.
+          if (showArchived) setShowArchived(false);
+          else loadConversations();
+        }}
+      />
     </div>
   );
 }
