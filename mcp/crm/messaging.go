@@ -1048,8 +1048,8 @@ func (a *App) toolMessagingWhatsAppSessionCheck(ctx *sdk.AppCtx, args map[string
 }
 
 func (a *App) resolveWhatsAppSessionRecipient(ctx *sdk.AppCtx, pid string, args map[string]any) (string, error) {
-	if to := cleanMessagingAddress(strArg(args, "to")); to != "" {
-		return to, nil
+	if raw := strings.TrimSpace(strArg(args, "to")); raw != "" {
+		return whatsAppAddress("to", raw)
 	}
 	cid := int64Arg(args, "id")
 	if cid == 0 {
@@ -1069,14 +1069,18 @@ func (a *App) resolveWhatsAppSessionRecipient(ctx *sdk.AppCtx, pid string, args 
 	if err != nil {
 		return "", err
 	}
-	return cleanMessagingAddress(addr.Address), nil
+	return whatsAppAddress("contact WhatsApp address", addr.Address)
 }
 
 func (a *App) resolveWhatsAppSessionSender(ctx *sdk.AppCtx, pid, raw string) (string, error) {
-	if from := cleanMessagingAddress(raw); from != "" {
-		return from, nil
+	// An explicit from is caller input: a bad one is an error, not a
+	// reason to silently fall back to some other sender.
+	if strings.TrimSpace(raw) != "" {
+		return whatsAppAddress("from", raw)
 	}
-	if from := cleanMessagingAddress(defaultSenderForChannel(ctx, channelWhatsApp)); from != "" {
+	// Discovered senders are config, not caller input — skip any that
+	// aren't usable and keep looking rather than failing the call.
+	if from, err := whatsAppAddress("from", defaultSenderForChannel(ctx, channelWhatsApp)); err == nil {
 		return from, nil
 	}
 	var out struct {
@@ -1095,23 +1099,32 @@ func (a *App) resolveWhatsAppSessionSender(ctx *sdk.AppCtx, pid, raw string) (st
 		return "", err
 	}
 	for _, s := range out.Senders {
-		if s.Channel == channelWhatsApp && s.IsDefault && cleanMessagingAddress(s.Address) != "" {
-			return cleanMessagingAddress(s.Address), nil
+		if s.Channel != channelWhatsApp || !s.IsDefault {
+			continue
+		}
+		if from, err := whatsAppAddress("from", s.Address); err == nil {
+			return from, nil
 		}
 	}
 	for _, s := range out.Senders {
-		if s.Channel == channelWhatsApp && cleanMessagingAddress(s.Address) != "" {
-			return cleanMessagingAddress(s.Address), nil
+		if s.Channel != channelWhatsApp {
+			continue
+		}
+		if from, err := whatsAppAddress("from", s.Address); err == nil {
+			return from, nil
 		}
 	}
 	return "", errors.New("no verified WhatsApp sender found in bound Messaging app")
 }
 
 func (a *App) checkWhatsAppSession(ctx *sdk.AppCtx, pid, from, to string) (map[string]any, error) {
-	from = cleanMessagingAddress(from)
-	to = cleanMessagingAddress(to)
-	if from == "" || to == "" {
-		return nil, errors.New("from and to required")
+	from, err := whatsAppAddress("from", from)
+	if err != nil {
+		return nil, err
+	}
+	to, err = whatsAppAddress("to", to)
+	if err != nil {
+		return nil, err
 	}
 	since := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
 	var out struct {
@@ -1123,26 +1136,28 @@ func (a *App) checkWhatsAppSession(ctx *sdk.AppCtx, pid, from, to string) (map[s
 			CreatedAt        string   `json:"created_at"`
 		} `json:"messages"`
 	}
-	err := callMessagingTool(ctx, "message_list", map[string]any{
+	// Messaging filters `address` by exact SQL equality, so `to` has to
+	// already be in the canonical form Messaging stores (plain E.164) or
+	// the query matches nothing before we ever compare below.
+	if err := callMessagingTool(ctx, "message_list", map[string]any{
 		"_project_id": pid,
 		"direction":   "in",
 		"channel":     channelWhatsApp,
 		"address":     to,
 		"since":       since,
 		"limit":       50,
-	}, &out)
-	if err != nil {
+	}, &out); err != nil {
 		return nil, err
 	}
 	active := false
 	lastInbound := ""
 	for _, m := range out.Messages {
-		if cleanMessagingAddress(m.From) != to {
+		if waCompareAddress(m.From) != to {
 			continue
 		}
-		matched := cleanMessagingAddress(m.MatchedRecipient) == from
+		matched := waCompareAddress(m.MatchedRecipient) == from
 		for _, recipient := range m.To {
-			if cleanMessagingAddress(recipient) == from {
+			if waCompareAddress(recipient) == from {
 				matched = true
 				break
 			}
@@ -3176,64 +3191,25 @@ func (a *App) handleHTTPMessagingWhatsAppSession(w http.ResponseWriter, r *http.
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	from := cleanMessagingAddress(r.URL.Query().Get("from"))
-	to := cleanMessagingAddress(r.URL.Query().Get("to"))
-	if from == "" || to == "" {
-		httpErr(w, http.StatusBadRequest, "from and to required")
+	from, err := whatsAppAddress("from", r.URL.Query().Get("from"))
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	since := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
-	var out struct {
-		Messages []struct {
-			From             string   `json:"from"`
-			To               []string `json:"to"`
-			MatchedRecipient string   `json:"matched_recipient"`
-			ReceivedAt       string   `json:"received_at"`
-			CreatedAt        string   `json:"created_at"`
-		} `json:"messages"`
+	to, err := whatsAppAddress("to", r.URL.Query().Get("to"))
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	err = callMessagingTool(globalCtx, "message_list", map[string]any{
-		"_project_id": pid,
-		"direction":   "in",
-		"channel":     "whatsapp",
-		"address":     to,
-		"since":       since,
-		"limit":       50,
-	}, &out)
+	// Same implementation the MCP tool uses. This used to be a private
+	// copy of the lookup, which meant address-matching bugs had to be
+	// fixed twice and drifted in between.
+	res, err := a.checkWhatsAppSession(globalCtx, pid, from, to)
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	active := false
-	var lastInbound string
-	for _, m := range out.Messages {
-		if cleanMessagingAddress(m.From) != to {
-			continue
-		}
-		matched := cleanMessagingAddress(m.MatchedRecipient) == from
-		for _, recipient := range m.To {
-			if cleanMessagingAddress(recipient) == from {
-				matched = true
-				break
-			}
-		}
-		if matched {
-			active = true
-			if m.ReceivedAt != "" {
-				lastInbound = m.ReceivedAt
-			} else {
-				lastInbound = m.CreatedAt
-			}
-			break
-		}
-	}
-	httpJSON(w, map[string]any{
-		"active":       active,
-		"from":         from,
-		"to":           to,
-		"since":        since,
-		"last_inbound": lastInbound,
-	})
+	httpJSON(w, res)
 }
 
 func cleanMessagingAddress(s string) string {
@@ -3248,6 +3224,53 @@ func cleanMessagingAddress(s string) string {
 		return strings.ToLower(s)
 	}
 	return s
+}
+
+// looksLikeE164 reports whether s is a plain E.164 phone number: a
+// leading '+', a non-zero country digit, then digits only. Mirrors
+// the bound Messaging app's own check (looksLikeE164 there) so CRM
+// rejects exactly what Messaging would reject, one hop earlier and
+// with an error that names the expected format.
+func looksLikeE164(s string) bool {
+	if len(s) < 8 || len(s) > 16 || s[0] != '+' {
+		return false
+	}
+	if s[1] < '1' || s[1] > '9' {
+		return false
+	}
+	for i := 2; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// whatsAppAddress canonicalises a caller-supplied WhatsApp address and
+// enforces E.164 shape. Without the shape check a non-phone value like
+// "banana" flows into a message lookup that can only come back empty,
+// which the session check then reports as active:false — a wrong
+// answer dressed up as a legitimate one. Callers get a named error
+// instead.
+func whatsAppAddress(field, raw string) (string, error) {
+	if cleanMessagingAddress(raw) == "" {
+		return "", fmt.Errorf("%s required", field)
+	}
+	addr := waCompareAddress(raw)
+	if !looksLikeE164(addr) {
+		return "", fmt.Errorf("invalid %s %q (expected E.164, e.g. +15551234567)", field, raw)
+	}
+	return addr, nil
+}
+
+// waCompareAddress reduces a WhatsApp address to its canonical E.164
+// form for comparison. cleanMessagingAddress alone only trims and
+// strips a scheme prefix, so a valid number in a different notation
+// ("+1 555-123-4567") would not compare equal to the stored plain
+// form ("+15551234567"). Routing through canonicalParticipantAddress
+// drops the separators the same way contact channels are stored.
+func waCompareAddress(s string) string {
+	return canonicalParticipantAddress(channelWhatsApp, cleanMessagingAddress(s))
 }
 
 func (a *App) handleHTTPListConversations(w http.ResponseWriter, r *http.Request) {

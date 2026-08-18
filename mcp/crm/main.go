@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.26
+version: 0.8.27
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -3569,15 +3569,20 @@ func messageInputSchema(props map[string]any) map[string]any {
 
 // normaliseChannel applies the cheap normalisation rules — lowercase
 // emails, strip whitespace, hard-tighten phones to digits + leading +.
-// Real E.164 normalisation needs a phone library; for v0.1 we keep
-// what the agent / dashboard sends and just trim. v0.2 adds libphone.
+// This is shape-insensitive by design: "+1 555-123-4567" and
+// "+15551234567" both reduce to the latter, which is what makes stored
+// channels comparable against addresses handed back by other apps.
+// It does not validate country codes or number length; callers that
+// need that (see whatsAppAddress in messaging.go) layer an E.164 check
+// on top. Full libphonenumber validation would be heavier than
+// anything here currently warrants.
 func normaliseChannel(kind, value string) string {
 	value = strings.TrimSpace(value)
 	switch kind {
 	case "email":
 		return strings.ToLower(value)
 	case "phone":
-		// Keep only +, digits, spaces, dashes; collapse whitespace.
+		// Keep only + and digits; drop spaces, dashes, parens.
 		var b strings.Builder
 		for _, r := range value {
 			if r == '+' || (r >= '0' && r <= '9') {
