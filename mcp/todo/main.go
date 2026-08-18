@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: todo
 display_name: Todo
-version: 0.4.10
+version: 0.4.11
 description: Personal todo list — human-first, agent-helpful.
 author: Apteva
 icon: /ui/icon.svg
@@ -211,6 +211,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/list_groups", Handler: a.handleListGroups},
 		{Pattern: "/list_groups/", Handler: a.handleListGroupsItem},
 		{Pattern: "/todos", Handler: a.handleTodos},
+		{Pattern: "/summary", Handler: a.handleSummary},
 		{Pattern: "/todos/", Handler: a.handleTodosItem},
 		{Pattern: "/quick_add", Handler: a.handleQuickAdd},
 		{Pattern: "/tags", Handler: a.handleTags},
@@ -242,12 +243,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"title"}),
 			Handler: a.toolTodosCreate},
 		{Name: "todos_list",
-			Description: "List todos. Args: view? (inbox|today|upcoming|overdue|all|done; default 'today'), list_id? (numeric), tag? (name), limit? (default 200).",
+			Description: "List todos. Args: view? (inbox|today|upcoming|overdue|all|done; default 'today'), list_id? (numeric), tag? (name), limit? (default 200), tz_offset? (operator's UTC offset in minutes east, e.g. 120 for CEST; decides where 'today' ends, default UTC). A todo snoozed to later today stays in the today view.",
 			InputSchema: schemaObject(map[string]any{
-				"view":    map[string]any{"type": "string"},
-				"list_id": map[string]any{"type": "integer"},
-				"tag":     map[string]any{"type": "string"},
-				"limit":   map[string]any{"type": "integer"},
+				"view":      map[string]any{"type": "string"},
+				"list_id":   map[string]any{"type": "integer"},
+				"tag":       map[string]any{"type": "string"},
+				"limit":     map[string]any{"type": "integer"},
+				"tz_offset": map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolTodosList},
 		{Name: "todos_get",
@@ -825,11 +827,62 @@ func insertTodo(db *sql.DB, pid string, t *Todo) (*Todo, error) {
 	return getTodo(db, pid, id)
 }
 
-// listTodos resolves a view shorthand into a SQL query. Snoozed
-// todos hide from today/upcoming/overdue until snoozed_until passes.
+// plateAt is the instant a todo actually lands on the operator's
+// plate: its due date, pushed out by a snooze still in effect.
+// Snoozing rewrites due_at as well (see toolTodosSnooze), so the pair
+// normally agrees; taking the later of the two keeps a hand-set
+// snoozed_until honest.
+const plateAt = `max(due_at, COALESCE(NULLIF(snoozed_until, ''), due_at))`
+
+// dated excludes undated todos (the inbox) from the time-based views.
+const dated = `due_at IS NOT NULL AND due_at != ''`
+
+// dayBounds returns "now" and the end of the viewer's day, both as
+// RFC3339 UTC. tzOffsetMin is the viewer's offset east of UTC in
+// minutes (JS: -new Date().getTimezoneOffset()); 0 means the day
+// boundary is UTC midnight, which is only the operator's midnight for
+// operators in UTC.
+func dayBounds(now time.Time, tzOffsetMin int) (nowS, dayEnd string) {
+	if tzOffsetMin < -14*60 || tzOffsetMin > 14*60 {
+		tzOffsetMin = 0
+	}
+	zone := time.FixedZone("viewer", tzOffsetMin*60)
+	local := now.In(zone)
+	end := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, zone).Add(24 * time.Hour)
+	return now.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339)
+}
+
+// viewFilter resolves a view shorthand into a WHERE fragment. Shared
+// by listTodos and summariseTodos so a pill count can never describe a
+// different set of rows than the list it sits above.
+//
+// today and upcoming partition every dated open todo between them, and
+// today is a superset of overdue: a todo can be late, or waiting, but
+// never invisible in all three.
+func viewFilter(view, nowS, dayEnd string) (string, []any, error) {
+	switch view {
+	case "inbox":
+		return ` AND status = 'open' AND list_id IS NULL AND (due_at IS NULL OR due_at = '')`, nil, nil
+	case "today":
+		return ` AND status = 'open' AND ` + dated + ` AND ` + plateAt + ` < ?`, []any{dayEnd}, nil
+	case "overdue":
+		return ` AND status = 'open' AND ` + dated + ` AND ` + plateAt + ` < ?`, []any{nowS}, nil
+	case "upcoming":
+		return ` AND status = 'open' AND ` + dated + ` AND ` + plateAt + ` >= ?`, []any{dayEnd}, nil
+	case "done":
+		return ` AND status = 'done'`, nil, nil
+	case "all":
+		return ` AND status = 'open'`, nil, nil
+	}
+	return "", nil, fmt.Errorf("unknown view: %s", view)
+}
+
+// listTodos resolves a view shorthand into a SQL query. A snoozed todo
+// stays on the day its snooze expires, so snoozing to 11:00 keeps the
+// row in today rather than hiding it from every view until 11:00.
 // The all view is intentionally unbounded by default so the panel can
 // act as the general work ledger; callers can still pass limit > 0.
-func listTodos(db *sql.DB, pid, view string, listID *int64, tag string, limit int) ([]Todo, error) {
+func listTodos(db *sql.DB, pid, view string, listID *int64, tag string, limit, tzOffsetMin int) ([]Todo, error) {
 	if view == "" {
 		view = "today"
 	}
@@ -839,38 +892,17 @@ func listTodos(db *sql.DB, pid, view string, listID *int64, tag string, limit in
 		applyLimit = true
 	}
 
-	now := time.Now().UTC()
-	todayEnd := now.Truncate(24 * time.Hour).Add(24 * time.Hour).Format(time.RFC3339)
-	nowS := now.Format(time.RFC3339)
+	nowS, dayEnd := dayBounds(time.Now(), tzOffsetMin)
 
 	q := `SELECT ` + todoCols + ` FROM todos WHERE project_id = ?`
 	args := []any{pid}
 
-	switch view {
-	case "inbox":
-		q += ` AND status = 'open' AND list_id IS NULL AND (due_at IS NULL OR due_at = '')`
-	case "today":
-		q += ` AND status = 'open'
-		   AND (snoozed_until IS NULL OR snoozed_until = '' OR snoozed_until <= ?)
-		   AND due_at IS NOT NULL AND due_at != '' AND due_at < ?`
-		args = append(args, nowS, todayEnd)
-	case "overdue":
-		q += ` AND status = 'open'
-		   AND (snoozed_until IS NULL OR snoozed_until = '' OR snoozed_until <= ?)
-		   AND due_at IS NOT NULL AND due_at != '' AND due_at < ?`
-		args = append(args, nowS, nowS)
-	case "upcoming":
-		q += ` AND status = 'open'
-		   AND (snoozed_until IS NULL OR snoozed_until = '' OR snoozed_until <= ?)
-		   AND due_at IS NOT NULL AND due_at != '' AND due_at >= ?`
-		args = append(args, nowS, todayEnd)
-	case "done":
-		q += ` AND status = 'done'`
-	case "all":
-		q += ` AND status = 'open'`
-	default:
-		return nil, fmt.Errorf("unknown view: %s", view)
+	clause, clauseArgs, err := viewFilter(view, nowS, dayEnd)
+	if err != nil {
+		return nil, err
 	}
+	q += clause
+	args = append(args, clauseArgs...)
 
 	if listID != nil {
 		q += ` AND list_id = ?`
@@ -926,6 +958,39 @@ func listTodos(db *sql.DB, pid, view string, listID *int64, tag string, limit in
 	}
 	if err := hydrateTodoTags(db, pid, out); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// WorkSummary is the pill row above the list: how much is late, how
+// much is on today's plate (late work included, Todoist-style), how
+// much is still ahead. Counted server-side with viewFilter so each
+// number is exactly the number of rows its view returns.
+type WorkSummary struct {
+	Overdue int `json:"overdue"`
+	Today   int `json:"today"`
+	Future  int `json:"future"`
+}
+
+func summariseTodos(db *sql.DB, pid string, tzOffsetMin int) (*WorkSummary, error) {
+	nowS, dayEnd := dayBounds(time.Now(), tzOffsetMin)
+	out := &WorkSummary{}
+	for _, spec := range []struct {
+		view string
+		into *int
+	}{
+		{"overdue", &out.Overdue},
+		{"today", &out.Today},
+		{"upcoming", &out.Future},
+	} {
+		clause, args, err := viewFilter(spec.view, nowS, dayEnd)
+		if err != nil {
+			return nil, err
+		}
+		q := `SELECT COUNT(*) FROM todos WHERE project_id = ?` + clause
+		if err := db.QueryRow(q, append([]any{pid}, args...)...).Scan(spec.into); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -1201,6 +1266,30 @@ func (a *App) handleListsItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// tzOffsetParam reads the viewer's UTC offset in minutes east
+// (tz_offset=120 for CEST). Absent or unparseable means UTC.
+func tzOffsetParam(r *http.Request) int {
+	n, err := strconv.Atoi(r.URL.Query().Get("tz_offset"))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+func (a *App) handleSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET", 405)
+		return
+	}
+	ctx := mustCtx(r)
+	out, err := summariseTodos(ctx.AppDB(), projectScope(ctx), tzOffsetParam(r))
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, out)
+}
+
 func (a *App) handleTodos(w http.ResponseWriter, r *http.Request) {
 	ctx := mustCtx(r)
 	pid := projectScope(ctx)
@@ -1214,7 +1303,7 @@ func (a *App) handleTodos(w http.ResponseWriter, r *http.Request) {
 			n, _ := strconv.ParseInt(s, 10, 64)
 			ref = &n
 		}
-		out, err := listTodos(ctx.AppDB(), pid, view, ref, tag, limit)
+		out, err := listTodos(ctx.AppDB(), pid, view, ref, tag, limit, tzOffsetParam(r))
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -1691,7 +1780,7 @@ func (a *App) toolTodosList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if v := toInt64(args["list_id"]); v != 0 {
 		ref = &v
 	}
-	return listTodos(ctx.AppDB(), projectScope(ctx), view, ref, tag, limit)
+	return listTodos(ctx.AppDB(), projectScope(ctx), view, ref, tag, limit, int(toInt64(args["tz_offset"])))
 }
 
 func (a *App) toolTodosGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {

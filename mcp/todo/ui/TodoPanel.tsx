@@ -268,10 +268,15 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
 
   const loadSummary = useCallback(async () => {
     try {
-      const data = await apiRequest<Todo[]>(apiUrl("/todos?view=all"));
-      const items = data || [];
-      setAllOpenTodos(items);
-      setSummary(summarizeWork(items));
+      // Counts come from the server rather than from the view=all rows:
+      // the pills have to describe exactly the sets their views return,
+      // snooze and day boundary included.
+      const [items, counts] = await Promise.all([
+        apiRequest<Todo[]>(apiUrl("/todos?view=all")),
+        apiRequest<WorkSummary>(apiUrl("/summary")),
+      ]);
+      setAllOpenTodos(items || []);
+      setSummary(counts || { overdue: 0, today: 0, future: 0 });
     } catch (e) {
       setStatusMsg(errorMessage("Unable to load summary", e));
     }
@@ -746,22 +751,6 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
   );
 }
 
-function summarizeWork(todos: Todo[]): WorkSummary {
-  const now = new Date();
-  const tomorrow = new Date(now);
-  tomorrow.setHours(24, 0, 0, 0);
-  const out: WorkSummary = { overdue: 0, today: 0, future: 0 };
-  for (const t of todos) {
-    if (t.status !== "open" || !t.due_at) continue;
-    const due = new Date(t.due_at);
-    if (Number.isNaN(due.getTime())) continue;
-    if (due < now) out.overdue++;
-    else if (due < tomorrow) out.today++;
-    else out.future++;
-  }
-  return out;
-}
-
 function SummaryPills({
   summary, activeView, onSelect,
 }: {
@@ -786,7 +775,11 @@ function SummaryPills({
               ? item.tone
               : "border-border text-text-muted hover:text-text hover:bg-bg-card"
           }`}
-          title={`${item.label}: ${item.value}`}
+          title={
+            item.key === "today" && summary.overdue > 0
+              ? `Today: ${item.value} (includes ${summary.overdue} overdue)`
+              : `${item.label}: ${item.value}`
+          }
         >
           {item.label} {item.value}
         </button>

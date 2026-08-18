@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: todo
 display_name: Todo
-version: 0.4.10
+version: 0.4.11
 description: |
   Personal todo list — human-first counterpart to the agent mission
   board (`tasks`). Inbox / Today / Upcoming views, lists (the
@@ -32,7 +32,7 @@ provides:
   mcp_tools:
     - { name: todos_quick_add,   description: "Create a todo from a single natural-language line ('call the plumber tomorrow p1 #home'). Returns the parsed row." }
     - { name: todos_create,      description: "Create a todo with structured fields. Args: title, list_id?, priority?, due_at?, notes?, tags?, rrule?." }
-    - { name: todos_list,        description: "List todos. Args: view? (inbox|today|upcoming|overdue|all|done), list_id?, tag?, limit?." }
+    - { name: todos_list,        description: "List todos. Args: view? (inbox|today|upcoming|overdue|all|done), list_id?, tag?, limit?, tz_offset? (minutes east of UTC; sets where 'today' ends). Snoozed-to-later-today rows stay in the today view." }
     - { name: todos_get,         description: "Read a single todo. Args: id." }
     - { name: todos_update,      description: "Update a todo. Args: id, title?, notes?, priority?, due_at?, list_id?, rrule?, tags?." }
     - { name: todos_complete,    description: "Mark a todo as done. For recurring todos, rolls the next occurrence forward. Args: id." }
