@@ -2,9 +2,13 @@
   "name": "@apteva/apps-panels",
   "private": true,
   "description": "Frontend panel build deps for first-party Apteva apps. The panels themselves live under mcp/<app>/ui/*.tsx and are bundled by scripts/build-panels.ts. React + ui-kit are externalised; everything else (yaml round-trip, etc.) gets bundled into each panel that imports it.",
+  "scripts": {
+    "build:panels": "bun run scripts/build-panels.ts",
+    "verify:icons": "bun run scripts/verify-app-icons.ts"
+  },
   "dependencies": {
-    "hls.js": "^1.6.16",
-    "lucide-react": "^1.24.0",
+    "dompurify": "^3.4.13",
+    "marked": "^18.0.10",
     "recharts": "^3.8.1",
     "yaml": "^2.6.0"
   },

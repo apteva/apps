@@ -33,7 +33,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.3.2
+version: 0.4.0
 description: |
   One conversation system: internal dashboard chat, the inbox
   (approvals, reports, alerts, status), and external channels as
@@ -61,6 +61,7 @@ requires:
     - platform.instances.read
     - platform.instances.write
     - platform.threads.write
+    - platform.telemetry.read
     - platform.connections.read
     - platform.connections.execute
   integrations:

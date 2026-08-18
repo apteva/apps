@@ -18,8 +18,47 @@
 // `bun run scripts/build-panels.ts --app conversations`.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import createDOMPurify from "dompurify";
+import { marked } from "marked";
 
 const API = "/api/apps/conversations";
+
+// ─── markdown (the dashboard's safeMarkdown pipeline, bundled) ───────
+//
+// Agent messages are model-authored and may quote untrusted sources;
+// marked preserves raw HTML, so DOMPurify is the security boundary —
+// same options as the dashboard's renderSafeMarkdown.
+marked.setOptions({ breaks: true, gfm: true });
+
+const SANITIZE_OPTIONS = {
+  USE_PROFILES: { html: true },
+  FORBID_TAGS: ["base", "form", "iframe", "object", "embed", "style", "template"],
+  FORBID_ATTR: ["style", "srcdoc"],
+};
+
+let purifier: ReturnType<typeof createDOMPurify> | null = null;
+
+function renderSafeMarkdown(source: string): string {
+  const parsed = marked.parse(source, { async: false }) as string;
+  if (!purifier) purifier = createDOMPurify(window);
+  return purifier.isSupported ? purifier.sanitize(parsed, SANITIZE_OPTIONS) : "";
+}
+
+// closeOpenMarkdown closes unterminated bold/inline-code/fence/link
+// tokens so a partial mid-stream render doesn't flicker while the
+// closing pair is still arriving (dashboard ChatPanel's guard).
+function closeOpenMarkdown(s: string): string {
+  const fence = (s.match(/```/g) || []).length;
+  let out = s;
+  if (fence % 2 === 1) return out + "\n```";
+  const noFences = out.replace(/```[\s\S]*?```/g, "");
+  const ticks = (noFences.match(/`/g) || []).length;
+  if (ticks % 2 === 1) out += "`";
+  const bold = (out.match(/\*\*/g) || []).length;
+  if (bold % 2 === 1) out += "**";
+  if (/\[[^\]]*\]\([^)]*$/.test(out)) out += ")";
+  return out;
+}
 
 // ─── types (mirror the app's wire shapes) ────────────────────────────
 
@@ -352,35 +391,44 @@ function MessageCards({
   }
 }
 
-// ─── streaming bubble ────────────────────────────────────────────────
+// ─── streaming bubble + thinking (dashboard ChatPanel visuals) ───────
 
-// StreamingBubble renders the ephemeral frame state. Phase
-// "acknowledgement" shows the animated thinking indicator; any text
-// replaces it. RAF coalescing happens upstream in the frame handler.
-function StreamingBubble({ text, phase }: { text: string; phase?: string }) {
+// StreamingBubble renders in-progress token text exactly like the
+// dashboard: a full-width markdown message growing in place, with
+// half-open markdown tokens closed so the render doesn't flicker.
+function StreamingBubble({ text }: { text: string }) {
+  const html = useMemo(() => renderSafeMarkdown(closeOpenMarkdown(text)), [text]);
   return (
-    <div className="max-w-[85%] self-start rounded-md border border-border bg-bg-card px-3 py-2">
-      {text ? (
-        <p className="text-sm text-text whitespace-pre-wrap">
-          {text}
-          <span className="inline-block w-2 text-text-dim animate-pulse">▍</span>
-        </p>
-      ) : (
-        <div className="flex items-center gap-1.5 py-1" aria-label="Agent is thinking">
-          <span className="w-1.5 h-1.5 rounded-full bg-text-dim animate-pulse" />
-          <span
-            className="w-1.5 h-1.5 rounded-full bg-text-dim animate-pulse"
-            style={{ animationDelay: "150ms" }}
-          />
-          <span
-            className="w-1.5 h-1.5 rounded-full bg-text-dim animate-pulse"
-            style={{ animationDelay: "300ms" }}
-          />
-        </div>
-      )}
-      {phase === "acknowledgement" && !text ? (
-        <p className="mt-1 text-xs text-text-dim">thinking</p>
-      ) : null}
+    <div className="flex min-h-[42px] min-w-0 flex-col justify-center">
+      <div
+        className="chat-md text-text text-[15px] sm:text-sm break-words leading-relaxed"
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    </div>
+  );
+}
+
+// ThinkingMessagePlaceholder is the dashboard's thinking row — the
+// animated chat-thinking-dots (class from the dashboard stylesheet)
+// with the label, occupying transcript space like a message.
+function ThinkingMessagePlaceholder() {
+  return (
+    <div
+      className="grid min-h-[42px] min-w-0 grid-cols-[1.9rem_minmax(0,1fr)_auto] items-center gap-2 px-1 py-0.5"
+      role="status"
+      aria-live="polite"
+      aria-label="Thinking"
+    >
+      <span
+        className="chat-thinking-dots inline-flex h-7 w-7 shrink-0 items-center justify-center gap-1"
+        aria-hidden="true"
+      >
+        <span />
+        <span />
+        <span />
+      </span>
+      <span className="text-[13px] leading-5 text-text-muted">Thinking…</span>
+      <span className="h-4 w-4 shrink-0" aria-hidden="true" />
     </div>
   );
 }
@@ -949,6 +997,10 @@ function ContextColumn({
 
 // ─── transcript ──────────────────────────────────────────────────────
 
+// MessageRow uses the dashboard ChatPanel's role layouts:
+//   user   — right-aligned accent-tinted bubble, plain text
+//   agent  — full-width markdown (chat-md, the dashboard's own styles)
+//   system — centered status line
 function MessageRow({
   message,
   onAction,
@@ -956,29 +1008,46 @@ function MessageRow({
   message: Message;
   onAction: (messageId: number, actionId: string, note: string) => Promise<void>;
 }) {
+  const isMarkdown = message.role !== "user" && message.role !== "system" && !message.component_kind;
+  const html = useMemo(
+    () => (isMarkdown ? renderSafeMarkdown(message.content) : ""),
+    [isMarkdown, message.content],
+  );
+
   if (message.component_kind) {
     return (
-      <div className="max-w-[85%] self-start w-full">
+      <div className="w-full min-w-0">
         <MessageCards message={message} onAction={onAction} />
       </div>
     );
   }
   if (message.role === "system") {
     return (
-      <p className="self-center text-xs text-text-dim italic px-4 text-center">{message.content}</p>
+      <div className="text-center text-[10px] text-text-muted py-1 break-words">
+        {message.content}
+      </div>
     );
   }
-  const mine = message.role === "user";
+  if (message.role === "user") {
+    return (
+      <div className="flex justify-end min-w-0">
+        <div
+          className="bg-accent/15 border border-accent/30 rounded-xl rounded-br-sm px-3 py-2 max-w-[92%] sm:max-w-[80%] min-w-0"
+          title={relTime(message.created_at)}
+        >
+          <p className="text-text text-[15px] sm:text-sm leading-relaxed whitespace-pre-wrap break-words">
+            {message.content}
+          </p>
+        </div>
+      </div>
+    );
+  }
   return (
-    <div
-      className={`max-w-[85%] rounded-md px-3 py-2 ${
-        mine ? "self-end bg-accent text-bg" : "self-start border border-border bg-bg-card text-text"
-      }`}
-    >
-      <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-      <p className={`mt-1 text-xs ${mine ? "text-bg" : "text-text-dim"}`}>
-        {relTime(message.created_at)}
-      </p>
+    <div className="flex min-h-[42px] min-w-0 flex-col justify-center" title={relTime(message.created_at)}>
+      <div
+        className="chat-md text-text text-[15px] sm:text-sm break-words leading-relaxed"
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
     </div>
   );
 }
@@ -1245,7 +1314,12 @@ function ChatColumn({
             {messages.map((m) => (
               <MessageRow key={m.id} message={m} onAction={onAction} />
             ))}
-            {bubble && <StreamingBubble text={bubble.text} phase={bubble.phase} />}
+            {bubble &&
+              (bubble.text ? (
+                <StreamingBubble text={bubble.text} />
+              ) : (
+                <ThinkingMessagePlaceholder />
+              ))}
           </>
         )}
         <div ref={bottomRef} />
