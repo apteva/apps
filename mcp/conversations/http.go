@@ -264,14 +264,21 @@ func (a *App) handleAgents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	// attached = this agent holds our MCP (app_agent_bindings), i.e. it
+	// can actually reply with conversations_send. The panel scopes its
+	// pickers to attached agents; servers that predate the annotation
+	// report false for everyone, which the panel treats as "unknown"
+	// rather than "none".
 	type agentInfo struct {
-		ID     int64  `json:"id"`
-		Name   string `json:"name"`
-		Status string `json:"status"`
+		ID       int64  `json:"id"`
+		Name     string `json:"name"`
+		Status   string `json:"status"`
+		Attached bool   `json:"attached"`
 	}
 	out := make([]agentInfo, 0, len(agents))
 	for _, agent := range agents {
-		out = append(out, agentInfo{ID: agent.ID, Name: agent.Name, Status: agent.Status})
+		out = append(out, agentInfo{ID: agent.ID, Name: agent.Name, Status: agent.Status,
+			Attached: agent.AttachedToCaller})
 	}
 	writeJSON(w, out)
 }

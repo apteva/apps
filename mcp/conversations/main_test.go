@@ -781,10 +781,11 @@ func TestSendStillRequiresConversation(t *testing.T) {
 // ─── dashboard-parity HTTP surface ───────────────────────────────────
 
 // ListAgents overrides the Base stub so /agents has a directory to
-// serve — the shape the panel's pickers consume.
+// serve — the shape the panel's pickers consume. Agent 41 has this
+// app's MCP bound, 42 does not (the annotation the panel filters on).
 func (p *recordingPlatform) ListAgents(projectID string) ([]sdk.PlatformAgent, error) {
 	return []sdk.PlatformAgent{
-		{ID: 41, Name: "Research", Status: "running", ProjectID: projectID},
+		{ID: 41, Name: "Research", Status: "running", ProjectID: projectID, AttachedToCaller: true},
 		{ID: 42, Name: "Ops", Status: "stopped", ProjectID: projectID},
 	}, nil
 }
@@ -958,14 +959,20 @@ func TestAgentsEndpointServesDirectory(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	var agents []struct {
-		ID     int64  `json:"id"`
-		Name   string `json:"name"`
-		Status string `json:"status"`
+		ID       int64  `json:"id"`
+		Name     string `json:"name"`
+		Status   string `json:"status"`
+		Attached bool   `json:"attached"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &agents); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(agents) != 2 || agents[0].Name != "Research" || agents[1].Status != "stopped" {
 		t.Fatalf("agents = %+v", agents)
+	}
+	// The binding annotation must survive the trip — the panel scopes
+	// its pickers to attached agents.
+	if !agents[0].Attached || agents[1].Attached {
+		t.Fatalf("attached flags = %v/%v, want true/false", agents[0].Attached, agents[1].Attached)
 	}
 }

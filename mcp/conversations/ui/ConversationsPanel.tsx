@@ -88,6 +88,24 @@ interface AgentInfo {
   id: number;
   name: string;
   status: string;
+  attached: boolean;
+}
+
+// Pickers only offer agents that hold this app's MCP — an unattached
+// agent has no conversations_send and can never reply. When no agent
+// reports attached (an older server without the binding annotation, or
+// genuinely nothing bound) we cannot tell the two apart, so fall back
+// to the full list and let the dialog show a caveat instead of a
+// dead-end empty picker.
+function selectableAgents(agents: AgentInfo[] | null): {
+  list: AgentInfo[];
+  bindingKnown: boolean;
+} {
+  const all = agents ?? [];
+  const attached = all.filter((a) => a.attached);
+  return attached.length > 0
+    ? { list: attached, bindingKnown: true }
+    : { list: all, bindingKnown: false };
 }
 
 interface ParticipantsInfo {
@@ -159,7 +177,6 @@ const GLYPH_CHAT =
   "M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z";
 const GLYPH_INBOX =
   "M22 12h-6l-2 3h-4l-2-3H2 M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z";
-const GLYPH_SEND = "m22 2-7 20-4-9-9-4Z M22 2 11 13";
 const GLYPH_ALERT =
   "M12 9v4 M12 17h.01 M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z";
 const GLYPH_CHECK = "M20 6 9 17l-5-5";
@@ -416,11 +433,11 @@ function NewConversationDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
+  const { list: selectable, bindingKnown } = useMemo(() => selectableAgents(agents), [agents]);
   const visible = useMemo(() => {
-    const list = agents ?? [];
     const q = filter.trim().toLowerCase();
-    return q ? list.filter((a) => a.name.toLowerCase().includes(q)) : list;
-  }, [agents, filter]);
+    return q ? selectable.filter((a) => a.name.toLowerCase().includes(q)) : selectable;
+  }, [selectable, filter]);
 
   const reset = () => {
     setSelected([]);
@@ -495,10 +512,16 @@ function NewConversationDialog({
             <p className="text-xs text-text-dim">Loading agents…</p>
           ) : agentsError ? (
             <p className="text-xs text-error">{agentsError}</p>
-          ) : (agents ?? []).length === 0 ? (
+          ) : selectable.length === 0 ? (
             <p className="text-xs text-text-dim">No agents in this project yet.</p>
           ) : (
             <>
+              {!bindingKnown && (
+                <p className="mb-2 text-xs text-text-dim">
+                  None of these agents report the conversations app attached — an agent without it
+                  cannot reply here. Attach the app in the agent's settings first.
+                </p>
+              )}
               <input
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
@@ -601,8 +624,13 @@ function DetailsDialog({
 
   const agentName = (id: number) =>
     agents?.find((a) => a.id === id)?.name || `agent ${id}`;
+  // Same scoping as the new-conversation picker: only agents holding
+  // this app's MCP can participate usefully.
   const available = useMemo(
-    () => (agents ?? []).filter((a) => !(participants?.agent_ids ?? []).includes(a.id)),
+    () =>
+      selectableAgents(agents).list.filter(
+        (a) => !(participants?.agent_ids ?? []).includes(a.id),
+      ),
     [agents, participants],
   );
 
@@ -994,6 +1022,7 @@ function ChatColumn({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [archiveBusy, setArchiveBusy] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     setConfirmDelete(false);
@@ -1042,6 +1071,13 @@ function ChatColumn({
       });
       mergeMessages([row]);
       setDraft("");
+      // Reset the auto-grown textarea and restore focus — the same
+      // defensive refocus the dashboard composer does after a send.
+      const el = inputRef.current;
+      if (el) {
+        el.style.height = "auto";
+        el.focus();
+      }
     } catch (err) {
       setSendError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1154,32 +1190,66 @@ function ChatColumn({
           </span>
         </footer>
       ) : (
-        <footer className="shrink-0 border-t border-border p-3">
-          {sendError && <p className="mb-2 text-xs text-error">{sendError}</p>}
-          <div className="flex items-end gap-2">
+        // The composer is the dashboard ChatPanel's, verbatim classes
+        // included — those classes are already in the dashboard's
+        // compiled CSS, which is the stylesheet panels render under.
+        // Omitted relative to the dashboard: image attachments and
+        // voice (no app backend for either yet).
+        <footer className="chat-composer-safe shrink-0 px-2 pt-2 pb-2 sm:px-5">
+          {sendError && <p className="mx-1 mb-1 text-xs text-error">{sendError}</p>}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              send();
+            }}
+            className="flex min-h-[54px] items-center gap-1.5 rounded-lg border border-border bg-bg-card/95 px-2 py-1.5 shadow-lg backdrop-blur-sm transition-colors focus-within:border-accent/60 sm:min-h-[58px] sm:gap-3 sm:px-4 sm:py-2"
+          >
             <textarea
+              ref={inputRef}
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                const el = e.target as HTMLTextAreaElement;
+                el.style.height = "auto";
+                el.style.height = Math.min(el.scrollHeight, 144) + "px";
+              }}
               onKeyDown={(e) => {
+                // Enter sends, Shift+Enter newline — dashboard convention.
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   send();
                 }
               }}
-              rows={2}
-              placeholder="Message the agent…"
-              className="flex-1 resize-none bg-bg-input border border-border rounded-md px-3 py-2 text-sm text-text focus:outline-none focus:border-accent"
+              rows={1}
+              style={{ lineHeight: "20px", minHeight: "36px" }}
+              placeholder={connected ? "Message the agent…" : "Reconnecting — messages still send"}
+              className="block min-w-0 flex-1 resize-none bg-transparent py-2 text-base text-text placeholder:text-text-dim focus:outline-none sm:text-sm"
+              autoFocus={
+                typeof window !== "undefined" &&
+                window.matchMedia("(hover: hover) and (pointer: fine)").matches
+              }
             />
             <button
-              type="button"
-              onClick={send}
+              type="submit"
               disabled={sending || !draft.trim()}
-              className="shrink-0 h-9 w-9 inline-flex items-center justify-center rounded-md bg-accent text-bg disabled:opacity-50"
+              className="touch-target flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-accent text-bg transition-all disabled:cursor-not-allowed disabled:opacity-20 enabled:hover:bg-accent-hover enabled:active:scale-95 sm:h-9 sm:w-9"
               aria-label="Send"
+              title="Send (Enter)"
             >
-              <Glyph d={GLYPH_SEND} size={16} />
+              <svg
+                viewBox="0 0 20 20"
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M10 17V3" />
+                <path d="M5 8l5-5 5 5" />
+              </svg>
             </button>
-          </div>
+          </form>
         </footer>
       )}
 
