@@ -46,9 +46,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: streaming
 display_name: Streaming
-version: 0.1.1
+version: 0.2.0
 description: |
-  Live ingest + HLS packaging for sibling Apteva apps. v0.1 is fully
+  Live ingest + HLS packaging for sibling Apteva apps. Fully
   standalone: segments and recordings live on the sidecar's local
   data dir.
 author: Apteva
@@ -68,9 +68,11 @@ provides:
     - { name: streams_list,          description: "Filter by status, owner_app, owner_tag." }
     - { name: streams_stop,          description: "Graceful stop; finalize recording; emit stream.ended." }
     - { name: streams_delete,        description: "Tear down + delete segments + recording." }
-    - { name: streams_rotate_key,    description: "Generate new stream_key (kills active session)." }
+    - { name: streams_rotate_key,    description: "Generate new stream_key; optionally rotate playback_token + signing secret." }
     - { name: streams_get_metrics,   description: "Lightweight metrics for the dashboard polling lane." }
     - { name: streams_replay_url,    description: "Once status=ended, returns the replay URL." }
+    - { name: streams_signed_url,    description: "Expiring signed playback/replay URL." }
+    - { name: streams_set_url_policy, description: "Require expiring signed URLs for a stream." }
     - { name: streams_load_test,     description: "Synthetic load generator — simulate N concurrent viewers." }
 runtime:
   kind: source
@@ -92,6 +94,13 @@ type App struct {
 	runners   map[int64]*streamRunner
 	runnersMu sync.Mutex
 
+	// pending counts creates/rotations that have passed the
+	// max_concurrent_streams check but haven't registered their runner
+	// yet. Also guarded by runnersMu: the check and the reservation
+	// have to be ONE critical section or two concurrent creates both
+	// see room and the cap is exceeded.
+	pending int
+
 	// Port allocator backed by config rtmp_port_range. Initialized at
 	// OnMount.
 	ports *portAllocator
@@ -100,6 +109,20 @@ type App struct {
 	// persisted to streams.current_viewers + peak_viewers by the
 	// viewer-counter worker; per-cookie state is never persisted.
 	viewers *viewerTracker
+
+	// throttle rate-limits heartbeats per source IP so a client can't
+	// inflate the viewer counters by looping beats with fresh ids.
+	throttle *viewerThrottle
+
+	// playback caches the gating slice of each stream row so the media
+	// handlers don't queue behind the DB's single connection.
+	playback *playbackCache
+
+	// Cached platform identity — WhoAmI is an HTTP round-trip and the
+	// list paths would otherwise make two per row.
+	identityMu     sync.Mutex
+	identityURL    string
+	identityExpiry time.Time
 
 	// runnerFactory creates a streamRunner. Tests inject a fake that
 	// doesn't actually exec ffmpeg; production uses newFFmpegRunner.
@@ -139,16 +162,22 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 	a.runners = map[int64]*streamRunner{}
 	a.viewers = newViewerTracker()
+	a.throttle = newViewerThrottle()
+	a.playback = newPlaybackCache(playbackCacheTTL)
 	if a.runnerFactory == nil {
 		a.runnerFactory = newFFmpegRunner
 	}
 
 	// Reconciler: any row left as status=live across a restart is dead.
 	// Mark errored, free the port (free-list is fresh anyway).
+	// ended_at is written from Go as RFC3339 UTC — CURRENT_TIMESTAMP
+	// would put SQLite's "YYYY-MM-DD HH:MM:SS" into the same column the
+	// other paths fill with RFC3339, which breaks anyone parsing or
+	// lexically sorting it.
 	if _, err := ctx.AppDB().Exec(
 		`UPDATE streams
-		 SET status='errored', error='sidecar restarted; runner lost', ended_at = CURRENT_TIMESTAMP
-		 WHERE status='live' OR status='idle'`); err != nil {
+		 SET status='errored', error='sidecar restarted; runner lost', ended_at = ?
+		 WHERE status='live' OR status='idle'`, nowStamp()); err != nil {
 		return fmt.Errorf("reconcile: %w", err)
 	}
 
@@ -168,7 +197,7 @@ func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
 	}
 	a.runnersMu.Unlock()
 	for _, r := range runners {
-		_ = r.stop(5 * time.Second)
+		a.stopRunner(ctx, r)
 	}
 	return nil
 }
@@ -187,6 +216,13 @@ func (a *App) Workers() []sdk.Worker {
 			Name:     "runner-watchdog",
 			Schedule: "@every 5s",
 			Run:      a.runWatchdog,
+		},
+		{
+			// Enforces retention_days on terminal streams. Hourly is
+			// plenty for a day-granularity policy.
+			Name:     "retention-sweeper",
+			Schedule: "@every 1h",
+			Run:      a.runRetention,
 		},
 	}
 }
@@ -258,9 +294,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "streams_rotate_key",
-			Description: "Generate new stream_key (kills active session). Args: id.",
+			Description: "Generate new stream_key (kills the active session). Only for idle|live streams unless rotate_playback_token is set, which also rotates playback_token + the URL signing secret — that one works on ended streams too and instantly invalidates every outstanding playback/replay URL. Args: id, rotate_playback_token? (default false).",
 			InputSchema: schemaObject(map[string]any{
-				"id": map[string]any{"type": "integer"},
+				"id":                    map[string]any{"type": "integer"},
+				"rotate_playback_token": map[string]any{"type": "boolean"},
 			}, []string{"id"}),
 			Handler: a.toolRotateKey,
 		},
@@ -279,6 +316,25 @@ func (a *App) MCPTools() []sdk.Tool {
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			Handler: a.toolReplayURL,
+		},
+		{
+			Name:        "streams_signed_url",
+			Description: "Expiring signed playback URL. Returns {url} — fully formed, including the HMAC signature and (on global installs) project_id. Use for replay links a consumer app wants to expire. kind=heartbeat returns the signed viewer-heartbeat endpoint, which a stream with require_signed_urls=true also needs. Args: id, expires_in_seconds, kind? (hls|mp4|heartbeat, default hls).",
+			InputSchema: schemaObject(map[string]any{
+				"id":                 map[string]any{"type": "integer"},
+				"expires_in_seconds": map[string]any{"type": "integer"},
+				"kind":               map[string]any{"type": "string"},
+			}, []string{"id", "expires_in_seconds"}),
+			Handler: a.toolSignedURL,
+		},
+		{
+			Name:        "streams_set_url_policy",
+			Description: "Require expiring signed URLs for a stream. With require_signed_urls=true a bare ?t=<playback_token> stops working — every request must also carry a valid exp+sig pair from streams_signed_url. Args: id, require_signed_urls.",
+			InputSchema: schemaObject(map[string]any{
+				"id":                  map[string]any{"type": "integer"},
+				"require_signed_urls": map[string]any{"type": "boolean"},
+			}, []string{"id", "require_signed_urls"}),
+			Handler: a.toolSetURLPolicy,
 		},
 		{
 			Name:        "streams_load_test",
@@ -320,17 +376,22 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 // ─── Domain types ─────────────────────────────────────────────────
 
 type Stream struct {
-	ID                 int64   `json:"id"`
-	ProjectID          string  `json:"project_id,omitempty"`
-	Name               string  `json:"name"`
-	OwnerApp           string  `json:"owner_app,omitempty"`
-	OwnerTag           string  `json:"owner_tag,omitempty"`
-	IngestProtocol     string  `json:"ingest_protocol"`
-	IngestPort         int     `json:"ingest_port,omitempty"`
-	IngestURL          string  `json:"ingest_url,omitempty"`
-	StreamKey          string  `json:"stream_key,omitempty"`
-	PlaybackURL        string  `json:"playback_url,omitempty"`
-	PlaybackToken      string  `json:"playback_token,omitempty"`
+	ID             int64  `json:"id"`
+	ProjectID      string `json:"project_id,omitempty"`
+	Name           string `json:"name"`
+	OwnerApp       string `json:"owner_app,omitempty"`
+	OwnerTag       string `json:"owner_tag,omitempty"`
+	IngestProtocol string `json:"ingest_protocol"`
+	IngestPort     int    `json:"ingest_port,omitempty"`
+	IngestURL      string `json:"ingest_url,omitempty"`
+	StreamKey      string `json:"stream_key,omitempty"`
+	PlaybackURL    string `json:"playback_url,omitempty"`
+	HeartbeatURL   string `json:"heartbeat_url,omitempty"`
+	PlaybackToken  string `json:"playback_token,omitempty"`
+	// URLSigningSecret never leaves the sidecar — it's the HMAC key
+	// behind streams_signed_url. Callers get signed URLs, not keys.
+	URLSigningSecret   string  `json:"-"`
+	RequireSignedURLs  bool    `json:"require_signed_urls"`
 	Visibility         string  `json:"visibility"`
 	Status             string  `json:"status"`
 	Record             bool    `json:"record"`
@@ -347,6 +408,7 @@ type Stream struct {
 	CreatedAt          string  `json:"created_at"`
 	StartedAt          string  `json:"started_at,omitempty"`
 	EndedAt            string  `json:"ended_at,omitempty"`
+	PrunedAt           string  `json:"pruned_at,omitempty"`
 	Error              string  `json:"error,omitempty"`
 }
 
@@ -361,6 +423,14 @@ const (
 	EventKindErrored             = "errored"
 	EventKindRecordingFinalized  = "recording_finalized"
 	EventKindKeyRotated          = "key_rotated"
+	EventKindURLPolicyChanged    = "url_policy_changed"
+)
+
+// On-disk filenames inside a stream's data dir.
+const (
+	indexPlaylistFile  = "index.m3u8"  // live, rolling window
+	replayPlaylistFile = "replay.m3u8" // VOD, written at finalize
+	recordingFile      = "record.mp4"
 )
 
 // ─── Shared helpers ───────────────────────────────────────────────
@@ -394,13 +464,94 @@ func (a *App) hlsSegmentSeconds(ctx *sdk.AppCtx) int {
 	return 4
 }
 
+// hlsWindowSegments bounds the LIVE playlist.
+//
+// v0.1 defaulted to 0 (= -hls_list_size 0 = keep every entry), so the
+// manifest every viewer re-fetched every ~2s grew for the whole life
+// of the stream: a 2h stream at 4s segments is ~1800 entries / ~80KB,
+// which at scale is tens of MB/s of pure manifest traffic. A small
+// rolling window is what live HLS is supposed to look like; replay
+// comes from the VOD playlist finalize writes, not from the live one.
+// 0 still means unbounded for anyone who wants the old behavior.
 func (a *App) hlsWindowSegments(ctx *sdk.AppCtx) int {
 	if v := ctx.Config().Get("hls_window_segments"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			return n
 		}
 	}
-	return 0
+	return 10
+}
+
+// finalizeGrace is how long stop() waits for ffmpeg to close its
+// outputs before escalating to SIGTERM and then SIGKILL.
+//
+// v0.1 used a flat 7s (2s on the delete/rotate paths). `-movflags
+// +faststart` rewrites the ENTIRE mp4 on close to move the moov atom
+// to the front — a 2h 4Mbps recording is several GB and rewriting it
+// takes far longer than 7s on any disk, so the old grace SIGKILLed
+// ffmpeg mid-rewrite and truncated the recording. Streams that aren't
+// recording have nothing to flush and keep a short grace.
+func (a *App) finalizeGrace(ctx *sdk.AppCtx, record bool) time.Duration {
+	if !record {
+		return 5 * time.Second
+	}
+	n := 60
+	if ctx != nil {
+		if v := strings.TrimSpace(ctx.Config().Get("finalize_grace_seconds")); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil && parsed >= 5 && parsed <= 3600 {
+				n = parsed
+			}
+		}
+	}
+	return time.Duration(n) * time.Second
+}
+
+// stopRunner stops a runner with the right finalization grace and
+// returns its port to the pool.
+func (a *App) stopRunner(ctx *sdk.AppCtx, r *streamRunner) {
+	if r == nil {
+		return
+	}
+	_ = r.stop(a.finalizeGrace(ctx, r.record))
+	a.ports.release(r.port)
+}
+
+// ─── Concurrency slots ────────────────────────────────────────────
+//
+// v0.1 checked len(a.runners) against max_concurrent_streams in one
+// critical section and inserted the runner in another, with a port
+// allocation and an ffmpeg spawn in between — so two concurrent
+// creates both saw room and both started. reserveSlot books the slot
+// in the same critical section as the check.
+
+// reserveSlot books one concurrency slot, or reports the cap is full.
+// Every successful reservation MUST be matched by exactly one
+// commitRunner (success) or releaseSlot (failure).
+func (a *App) reserveSlot(maxC int) bool {
+	a.runnersMu.Lock()
+	defer a.runnersMu.Unlock()
+	if len(a.runners)+a.pending >= maxC {
+		return false
+	}
+	a.pending++
+	return true
+}
+
+func (a *App) releaseSlot() {
+	a.runnersMu.Lock()
+	if a.pending > 0 {
+		a.pending--
+	}
+	a.runnersMu.Unlock()
+}
+
+func (a *App) commitRunner(id int64, r *streamRunner) {
+	a.runnersMu.Lock()
+	if a.pending > 0 {
+		a.pending--
+	}
+	a.runners[id] = r
+	a.runnersMu.Unlock()
 }
 
 func (a *App) viewerIdleSeconds(ctx *sdk.AppCtx) int {
@@ -419,20 +570,38 @@ func (a *App) ffmpegPath(ctx *sdk.AppCtx) string {
 	return "ffmpeg"
 }
 
+// identityCacheTTL bounds how stale publicURL's cached answer can be.
+// The platform's public URL only changes when an operator edits
+// Settings → Server.
+const identityCacheTTL = 60 * time.Second
+
 // publicURL returns the base URL viewers use to reach this sidecar.
 // Resolved from the platform's PublicURL (settable via Settings →
 // Server) with a localhost fallback. The sidecar's actual listen port
 // is not on the public URL — apteva-server reverse-proxies under
 // /api/apps/streaming/.
+//
+// Cached: WhoAmI is an uncached HTTP round-trip to apteva-server and
+// materializeURLs calls this twice per stream, inside list loops. A
+// failed lookup is cached too — a platform that's briefly down
+// shouldn't turn every streams_list into N stalled round-trips; the
+// URLs just fall back to the relative prefix for a minute.
 func (a *App) publicURL(ctx *sdk.AppCtx) string {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return ""
 	}
-	id, err := ctx.PlatformAPI().WhoAmI()
-	if err != nil || id == nil {
-		return ""
+	a.identityMu.Lock()
+	defer a.identityMu.Unlock()
+	if !a.identityExpiry.IsZero() && time.Now().Before(a.identityExpiry) {
+		return a.identityURL
 	}
-	return strings.TrimRight(id.PublicURL, "/")
+	url := ""
+	if id, err := ctx.PlatformAPI().WhoAmI(); err == nil && id != nil {
+		url = strings.TrimRight(id.PublicURL, "/")
+	}
+	a.identityURL = url
+	a.identityExpiry = time.Now().Add(identityCacheTTL)
+	return url
 }
 
 // ─── Tiny utilities ───────────────────────────────────────────────
@@ -507,6 +676,31 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 	return out
 }
 
+// nowStamp is the ONE timestamp format this app writes: RFC3339 UTC.
+//
+// v0.1 mixed it with SQLite's CURRENT_TIMESTAMP ("2026-08-18
+// 09:00:00") in the same columns — started_at from Go, ended_at from
+// the watchdog and the OnMount reconciler from SQLite — so parsing or
+// lexically sorting those columns gave different answers depending on
+// which code path had run. Migration 002 normalizes the old rows.
+func nowStamp() string { return time.Now().UTC().Format(time.RFC3339) }
+
+// parseTimestamp accepts both formats v0.1 could have written, so
+// consumers of old rows (the retention sweeper) don't trip over a
+// pre-migration value.
+func parseTimestamp(v string) (time.Time, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
 // randomToken returns a URL-safe random string of at least 32 chars.
 func randomToken() string {
 	var b [24]byte
@@ -535,9 +729,9 @@ func emitStreamEvent(ctx *sdk.AppCtx, s *Stream, kind, body string, detail map[s
 		detailJSON = sql.NullString{String: string(raw), Valid: true}
 	}
 	if _, err := ctx.AppDB().Exec(
-		`INSERT INTO stream_events (project_id, stream_id, kind, body, source_detail)
-		 VALUES (?, ?, ?, ?, ?)`,
-		s.ProjectID, s.ID, kind, nullStr(body), detailJSON); err != nil {
+		`INSERT INTO stream_events (project_id, stream_id, kind, body, source_detail, occurred_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		s.ProjectID, s.ID, kind, nullStr(body), detailJSON, nowStamp()); err != nil {
 		ctx.Logger().Warn("emit stream event: db insert failed", "kind", kind, "err", err)
 	}
 	ctx.Emit("stream."+kind, map[string]any{

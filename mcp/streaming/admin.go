@@ -48,6 +48,12 @@ func (a *App) handleAdminStreams(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, "invalid json")
 			return
 		}
+		// A literal `null` body decodes to a nil map with no error, and
+		// assigning into a nil map panics — the load-test branch below
+		// already guarded this, the create branch didn't.
+		if body == nil {
+			body = map[string]any{}
+		}
 		body["_project_id"] = pid
 		out, err := a.toolCreate(globalCtx, body)
 		if err != nil {

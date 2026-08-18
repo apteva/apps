@@ -1,0 +1,6 @@
+# `go build .` here produces a binary named after the directory. A
+# 16MB Mach-O had been committed; it must never come back.
+/streaming
+
+# Local sidecar scratch (APTEVA_DATA_DIR when running by hand).
+/data/

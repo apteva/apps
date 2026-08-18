@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,10 +15,15 @@ import (
 // flips any orphaned status=live row to errored, so previously-leaked
 // ports are implicitly returned to the pool.
 type portAllocator struct {
-	mu       sync.Mutex
-	low      int
-	high     int
-	used     map[int]bool
+	mu   sync.Mutex
+	low  int
+	high int
+	used map[int]bool
+
+	// probe verifies a port is actually bindable before we hand it
+	// out. Swappable so tests don't depend on the machine's live
+	// listeners.
+	probe func(port int) error
 }
 
 func newPortAllocator(spec string) (*portAllocator, error) {
@@ -26,23 +32,61 @@ func newPortAllocator(spec string) (*portAllocator, error) {
 		return nil, err
 	}
 	return &portAllocator{
-		low:  low,
-		high: high,
-		used: map[int]bool{},
+		low:   low,
+		high:  high,
+		used:  map[int]bool{},
+		probe: probeTCPPort,
 	}, nil
 }
 
-// allocate returns the lowest free port in the range, or an error if
-// the range is exhausted. Idempotent across restarts because the
-// in-memory free-list is rebuilt fresh each boot.
+// probeTCPPort reports whether ffmpeg would be able to bind the port.
+// Same address ffmpeg listens on (0.0.0.0), so a conflict on any
+// interface shows up here.
+func probeTCPPort(port int) error {
+	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil {
+		return err
+	}
+	return ln.Close()
+}
+
+// allocate returns the lowest free, *bindable* port in the range.
+// Idempotent across restarts because the in-memory free-list is
+// rebuilt fresh each boot.
+//
+// v0.1 tracked only its own bookkeeping, so a port held by a stale
+// ffmpeg from a previous boot (or by anything else on the box) was
+// handed out anyway: streams_create returned a healthy-looking
+// ingest_url for an ffmpeg that had already died on bind, and the
+// failure only surfaced when the host's OBS refused to connect.
+//
+// Inherently a TOCTOU check — we close the probe listener before
+// ffmpeg binds — but it catches the persistent-occupant case, which
+// is the one that actually happens.
 func (p *portAllocator) allocate() (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	var lastErr error
+	blocked := 0
 	for port := p.low; port <= p.high; port++ {
-		if !p.used[port] {
-			p.used[port] = true
-			return port, nil
+		if p.used[port] {
+			continue
 		}
+		if p.probe != nil {
+			if err := p.probe(port); err != nil {
+				// Owned by something outside our bookkeeping. Skip it
+				// WITHOUT marking it used — it may free up later.
+				lastErr = err
+				blocked++
+				continue
+			}
+		}
+		p.used[port] = true
+		return port, nil
+	}
+	if blocked > 0 {
+		return 0, fmt.Errorf("no bindable port in rtmp range %d-%d (%d occupied by another process; last error: %v)",
+			p.low, p.high, blocked, lastErr)
 	}
 	return 0, fmt.Errorf("rtmp port range %d-%d exhausted", p.low, p.high)
 }

@@ -2,19 +2,24 @@ schema: apteva-app/v1
 
 name: streaming
 display_name: Streaming
-version: 0.1.1
+version: 0.2.0
 description: |
   Live ingest + HLS packaging for sibling Apteva apps. Owns RTMP ingest,
   ffmpeg-driven HLS segmentation, recording-to-mp4, viewer heartbeats,
-  signed-URL playback gating, and a built-in synthetic load generator
-  for capacity planning. Has no opinion about *why* a stream exists —
-  webinars, podcasts, demo days, hardware cameras all share one engine.
+  signed-URL playback gating, retention enforcement, and a built-in
+  synthetic load generator for capacity planning. Has no opinion about
+  *why* a stream exists — webinars, podcasts, demo days, hardware
+  cameras all share one engine.
 
-  v0.1 is fully standalone: segments and recordings live on the
-  sidecar's local data dir and are served directly from there. No
-  storage/media dependency yet — keeps the replay path local-only and
-  the deployment trivial. v0.2 adds optional storage upload + media
-  derivatives.
+  Fully standalone: segments and recordings live on the sidecar's
+  local data dir and are served directly from there. No storage/media
+  dependency — keeps the replay path local-only and the deployment
+  trivial. v0.3 adds optional storage upload + media derivatives.
+
+  v0.2 adds expiring HMAC-signed playback URLs (streams_signed_url +
+  streams_set_url_policy), a bounded live HLS window with a separate
+  VOD replay manifest, and a retention sweeper that finally enforces
+  retention_days.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/streaming
@@ -45,11 +50,15 @@ provides:
     - name: streams_delete
       description: "Tear down listener and delete segments + recording from disk. Idempotent. Args: id."
     - name: streams_rotate_key
-      description: "Generate new stream_key (kills the active session if any). For when a key leaks. Returns the new ingest_url + stream_key. Args: id."
+      description: "Generate new stream_key (kills the active session if any). For when a key leaks. Returns the new ingest_url + stream_key. Only idle|live streams can have their ingest key rotated; rotate_playback_token=true additionally mints a new playback_token + URL signing secret — that works in any status and instantly invalidates every playback/replay URL outstanding for the stream. Args: id, rotate_playback_token? (default false)."
     - name: streams_get_metrics
       description: "Lightweight metrics read for the dashboard polling lane: current_bitrate, current_fps, viewer_count, peak_viewers, total_viewer_seconds, uptime_seconds, dropped_frames. Args: id."
     - name: streams_replay_url
-      description: "Once status=ended: returns the playback URL for the recording (mp4) and/or the segments. Returns null when no recording was made or status != ended. Args: id."
+      description: "Once status=ended: returns the playback URL for the recording (mp4) and/or the VOD segment manifest (replay.m3u8). Returns available=false when status != ended. URLs come back signed with a 1h expiry if the stream requires signed URLs. Args: id."
+    - name: streams_signed_url
+      description: "Expiring signed playback URL. Returns {url} fully formed — HMAC signature over <stream_id>:<exp>, plus project_id on a global-scoped install. This is how a consumer app hands out a replay link that actually stops working. kind=heartbeat signs the viewer-heartbeat endpoint instead, which a require_signed_urls stream needs so viewer counting keeps working. Args: id, expires_in_seconds, kind? (hls|mp4|heartbeat, default hls)."
+    - name: streams_set_url_policy
+      description: "Require expiring signed URLs for a stream. With require_signed_urls=true a bare ?t=<playback_token> is rejected — every playback and heartbeat request must also carry a valid exp+sig from streams_signed_url. Args: id, require_signed_urls."
     - name: streams_load_test
       description: "Synthetic load generator. Spawns N goroutine 'viewers' against the playback URL, fetches manifest + segments, discards bytes. Reports p50/p95/p99 first-byte latency, served bitrate, refusals, http_5xx, segments_late. The agent uses this to bisect for the box's viewer ceiling. Args: id, viewers (default 50), duration_seconds (default 30, max 300)."
   ui_panels: []
@@ -81,9 +90,23 @@ config_schema:
     description: Lower = lower latency, higher request rate. 2-6 is sane.
   - name: hls_window_segments
     type: number
-    default: 0
+    default: 10
     label: Live window size (segments)
-    description: 0 = keep all segments (replay-from-segments). Otherwise trim to N most-recent.
+    description: >-
+      Entries in the LIVE playlist. Segments themselves are never deleted by
+      ffmpeg — replay is served from the VOD manifest (replay.m3u8) written at
+      finalize, and disk is reclaimed by retention_days. 0 = unbounded live
+      playlist (v0.1 behavior; grows for the whole stream and is re-fetched by
+      every viewer every few seconds).
+  - name: finalize_grace_seconds
+    type: number
+    default: 60
+    label: Recording finalize grace (seconds)
+    description: >-
+      How long to wait for ffmpeg to close its outputs on stop before
+      escalating to SIGKILL. `-movflags +faststart` rewrites the whole mp4 on
+      close, so a long recording needs a generous window or it gets truncated.
+      Streams with record=false always use a short grace.
   - name: viewer_idle_seconds
     type: number
     default: 30

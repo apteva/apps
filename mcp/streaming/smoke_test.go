@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,12 +58,19 @@ func TestSmokeLoadTest(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 	db.SetMaxOpenConns(1)
 
-	mig, err := os.ReadFile(filepath.Join("migrations", "001_init.sql"))
+	migrations, err := filepath.Glob(filepath.Join("migrations", "*.sql"))
 	if err != nil {
-		t.Fatalf("read migration: %v", err)
+		t.Fatalf("list migrations: %v", err)
 	}
-	if _, err := db.Exec(string(mig)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	sort.Strings(migrations)
+	for _, m := range migrations {
+		body, err := os.ReadFile(m)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", m, err)
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			t.Fatalf("apply migration %s: %v", m, err)
+		}
 	}
 
 	manifestBytes, err := os.ReadFile("apteva.yaml")
@@ -87,6 +95,9 @@ func TestSmokeLoadTest(t *testing.T) {
 
 	app := &App{
 		runners:       map[int64]*streamRunner{},
+		viewers:       newViewerTracker(),
+		throttle:      newViewerThrottle(),
+		playback:      newPlaybackCache(playbackCacheTTL),
 		runnerFactory: newFFmpegRunner,
 	}
 	pa, err := newPortAllocator(cfg.Get("rtmp_port_range"))
@@ -202,14 +213,19 @@ func TestSmokeLoadTest(t *testing.T) {
 	// Let one more segment land so the playlist isn't single-element.
 	time.Sleep(2 * time.Second)
 
-	// 4. Load test against the locally-served playback URL.
-	playbackURL := fmt.Sprintf("http://localhost:%d/streams/%d/index.m3u8?t=%s&project_id=smoke-proj",
-		httpPort, stream.ID, stream.PlaybackToken)
+	// 4. Load test against the locally-served playback URL. Built the
+	// same way streams_load_test builds it, so this exercises the real
+	// target-resolution path (loopback, sidecar's own route, project_id
+	// when the install is global-scoped).
+	playbackURL := app.loopbackPlaybackURL(stream, indexPlaylistFile)
 	t.Logf("playback_url %s", playbackURL)
 	t.Logf("load_test viewers=%d duration=%ds", viewers, durationSec)
 
 	startedAt := time.Now()
-	result := runLoadTest(appCtx, playbackURL, viewers, durationSec)
+	result, err := runLoadTest(appCtx, playbackURL, viewers, durationSec)
+	if err != nil {
+		t.Fatalf("load test: %v", err)
+	}
 	t.Logf("wall=%.1fs", time.Since(startedAt).Seconds())
 
 	pretty, _ := json.MarshalIndent(result, "", "  ")

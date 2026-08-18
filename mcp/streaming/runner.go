@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -47,8 +48,24 @@ type streamRunner struct {
 	// the first moment we know a publisher is actually pushing frames.
 	startedAt atomic.Int64 // unix nanos; zero before publisher push
 
+	// stopRequested records that WE asked ffmpeg to die. Without it
+	// there is no way to tell a signal we sent from an OOM-kill or a
+	// SIGSEGV, and v0.1 called every signal death graceful.
+	stopRequested atomic.Bool
+
 	doneOnce sync.Once
 	done     chan runnerExit
+
+	// scraped closes when the stderr reader has drained the pipe.
+	// os/exec requires that all pipe reads finish before Wait() is
+	// called; v0.1 raced them and lost the final stderr lines, which
+	// is exactly where the disconnect/error detail lives.
+	scraped chan struct{}
+
+	// exit memoizes the value read off done so repeat polls (the
+	// watchdog after stop(), say) don't see "still running" once the
+	// channel has been drained and closed.
+	exit atomic.Pointer[runnerExit]
 }
 
 type runnerOpts struct {
@@ -73,7 +90,7 @@ func newFFmpegRunner(opts runnerOpts) (*streamRunner, error) {
 		return nil, fmt.Errorf("mkdir %s: %w", opts.dataDir, err)
 	}
 
-	indexPath := filepath.Join(opts.dataDir, "index.m3u8")
+	indexPath := filepath.Join(opts.dataDir, indexPlaylistFile)
 	segPath := filepath.Join(opts.dataDir, "seg-%05d.ts")
 
 	args := []string{
@@ -86,12 +103,21 @@ func newFFmpegRunner(opts runnerOpts) (*streamRunner, error) {
 
 	// Branch 1 — HLS. -c copy: no transcode, whatever OBS pushes
 	// (typically H.264/AAC) goes straight to HLS.
+	//
+	// hls_list_size bounds the LIVE playlist to a rolling window so a
+	// long stream doesn't end up serving a manifest with thousands of
+	// entries to every viewer every couple of seconds. delete_segments
+	// is deliberately NOT in hls_flags: it never fired in v0.1 (which
+	// ran at list_size 0), and now that the window is finite it would
+	// delete exactly the segments replay needs. Segments stay on disk
+	// until the retention sweeper or streams_delete reclaims them, and
+	// finalize builds the full VOD manifest from them.
 	args = append(args,
 		"-c", "copy",
 		"-f", "hls",
 		"-hls_time", strconv.Itoa(opts.hlsTime),
 		"-hls_list_size", strconv.Itoa(opts.hlsWindow),
-		"-hls_flags", "independent_segments+program_date_time+append_list+delete_segments",
+		"-hls_flags", "independent_segments+program_date_time+append_list",
 		"-hls_segment_filename", segPath,
 		indexPath,
 	)
@@ -102,7 +128,7 @@ func newFFmpegRunner(opts runnerOpts) (*streamRunner, error) {
 			"-c", "copy",
 			"-movflags", "+faststart",
 			"-f", "mp4",
-			filepath.Join(opts.dataDir, "record.mp4"),
+			filepath.Join(opts.dataDir, recordingFile),
 		)
 	}
 
@@ -127,38 +153,67 @@ func newFFmpegRunner(opts runnerOpts) (*streamRunner, error) {
 		record:    opts.record,
 		cmd:       cmd,
 		done:      make(chan runnerExit, 1),
+		scraped:   make(chan struct{}),
 	}
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start ffmpeg: %w", err)
 	}
 
-	go r.scrape(stderr)
+	go func() {
+		r.scrape(stderr)
+		close(r.scraped)
+	}()
 	go r.wait()
 
 	return r, nil
 }
 
 // ffmpegProgressLine matches lines like:
-//   frame= 1234 fps= 30.0 q=-1.0 size=  12345kB time=00:00:41.16 bitrate=2456.7kbits/s drop=2 speed=1.00x
+//
+//	frame= 1234 fps= 30.0 q=-1.0 size=  12345kB time=00:00:41.16 bitrate=2456.7kbits/s drop=2 speed=1.00x
+//
 // We tolerate variable whitespace and missing fields.
 var (
-	rxFps      = regexp.MustCompile(`fps=\s*([0-9.]+)`)
-	rxBitrate  = regexp.MustCompile(`bitrate=\s*([0-9.]+)kbits/s`)
-	rxDrop     = regexp.MustCompile(`drop=\s*([0-9]+)`)
-	rxFrame    = regexp.MustCompile(`frame=\s*([0-9]+)`)
-	rxRes      = regexp.MustCompile(`Stream.*Video:.* ([0-9]{2,5})x([0-9]{2,5})`)
+	rxFps     = regexp.MustCompile(`fps=\s*([0-9.]+)`)
+	rxBitrate = regexp.MustCompile(`bitrate=\s*([0-9.]+)kbits/s`)
+	rxDrop    = regexp.MustCompile(`drop=\s*([0-9]+)`)
+	rxFrame   = regexp.MustCompile(`frame=\s*([0-9]+)`)
+	rxRes     = regexp.MustCompile(`Stream.*Video:.* ([0-9]{2,5})x([0-9]{2,5})`)
 )
 
 // scrape parses ffmpeg's stderr for periodic progress lines and the
 // initial Stream metadata. Updates the atomics; the watchdog and
-// metric tools read them. Closes when stderr EOFs.
-func (r *streamRunner) scrape(stderr io.ReadCloser) {
-	defer stderr.Close()
+// metric tools read them. Returns when stderr EOFs.
+//
+// Two things it must NOT do, both of which v0.1 got wrong:
+//
+//   - Close the pipe. os/exec closes it itself after Wait; closing it
+//     from here while ffmpeg is still writing kills the encode with
+//     SIGPIPE. (v0.1's `defer stderr.Close()` did exactly that
+//     whenever the scanner stopped early.)
+//   - Stop reading. ffmpeg blocks on a full stderr pipe, so if the
+//     scanner gives up (a token past the 1MB limit, say) we keep
+//     draining to io.Discard rather than leaving the encoder wedged.
+func (r *streamRunner) scrape(stderr io.Reader) {
 	scanner := bufio.NewScanner(stderr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// ffmpeg terminates its periodic stats lines with \r (it rewrites
+	// one status line in place) and only the non-progress messages with
+	// \n. A plain line scanner therefore holds every stats update
+	// hostage until some unrelated \n-terminated message flushes it,
+	// making the scraped bitrate/fps stale by up to a segment.
+	scanner.Split(splitLinesCR)
+	defer func() {
+		// Whatever ended the scan, drain the rest so ffmpeg never
+		// blocks writing to a full pipe.
+		_, _ = io.Copy(io.Discard, stderr)
+	}()
 	for scanner.Scan() {
 		line := scanner.Text()
+		if line == "" {
+			continue
+		}
 
 		// One-shot: pluck resolution from the first "Stream … Video:" line.
 		if r.resolution.Load() == nil {
@@ -191,38 +246,89 @@ func (r *streamRunner) scrape(stderr io.ReadCloser) {
 			// First progress line = publisher is live.
 			r.startedAt.Store(time.Now().UnixNano())
 		}
-		_ = rxFrame // reserved for v0.2 frame-count metric
+		_ = rxFrame // reserved for v0.3 frame-count metric
 	}
+}
+
+// splitLinesCR is a bufio.SplitFunc that breaks on \n OR \r, so
+// ffmpeg's in-place progress updates surface immediately. \r\n yields
+// an empty token for the \n, which the scrape loop skips.
+func splitLinesCR(data []byte, atEOF bool) (int, []byte, error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	for i, b := range data {
+		if b == '\n' || b == '\r' {
+			return i + 1, data[:i], nil
+		}
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil // ask for more
 }
 
 // wait blocks on the cmd, then signals done exactly once.
 func (r *streamRunner) wait() {
-	err := r.cmd.Wait()
+	// os/exec: "Wait will not return until all reads from the pipe have
+	// completed". Reading the pipe concurrently with Wait races the
+	// close and drops the tail of stderr.
+	if r.scraped != nil {
+		<-r.scraped
+	}
+	err := classifyExit(r.cmd.Wait(), r.stopRequested.Load())
 	r.doneOnce.Do(func() {
-		// Distinguish "ffmpeg exited because we asked" from real errors.
-		// On signal-induced exit (SIGINT from stop()), Wait returns
-		// *exec.ExitError with ExitCode() == -1 on Unix. The runner's
-		// stop() path treats that as graceful, so map ExitError-with-
-		// signal to nil here.
-		if err != nil {
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				if exitErr.ExitCode() == -1 || exitErr.ExitCode() == 255 {
-					// Killed by signal we sent — graceful.
-					err = nil
-				}
-			}
-		}
 		r.done <- runnerExit{err: err}
 		close(r.done)
 	})
+}
+
+// classifyExit maps cmd.Wait()'s error to the runner's exit error.
+//
+// v0.1 mapped ANY signal death to "graceful" (`ExitCode() == -1 || ==
+// 255 → err = nil`) because the runner kept no record of whether we
+// were the ones who asked ffmpeg to stop. An OOM-kill or a SIGSEGV
+// mid-webinar was therefore persisted as a clean `ended` stream with
+// an empty error column. Only a stop WE requested is graceful;
+// everything else keeps — and names — the signal.
+func classifyExit(err error, stopRequested bool) error {
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return err
+	}
+	sig := syscall.Signal(0)
+	if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		sig = ws.Signal()
+	}
+	code := exitErr.ExitCode()
+	if stopRequested {
+		// SIGINT/SIGTERM/SIGKILL from stop(), or ffmpeg's own "exit 255
+		// when interrupted" convention.
+		if sig != 0 || code == -1 || code == 255 {
+			return nil
+		}
+		return err
+	}
+	if sig != 0 {
+		return fmt.Errorf("ffmpeg killed by signal %d (%s)", int(sig), sig.String())
+	}
+	return err
 }
 
 // stop sends SIGINT to give ffmpeg a chance to flush the recording
 // (writing the moov atom for fast-start mp4 requires graceful exit),
 // waits up to grace, then SIGTERMs and finally SIGKILLs.
 // Returns whatever the runner's exit reported.
+//
+// grace comes from App.finalizeGrace: generous for recording streams
+// (+faststart rewrites the entire file on close), short otherwise.
 func (r *streamRunner) stop(grace time.Duration) error {
+	// Mark first: whatever signal lands from here on is one we asked
+	// for, and classifyExit reads this flag.
+	r.stopRequested.Store(true)
 	if r.cmd == nil || r.cmd.Process == nil {
 		return nil
 	}
@@ -232,28 +338,28 @@ func (r *streamRunner) stop(grace time.Duration) error {
 
 	select {
 	case ex := <-r.done:
-		return ex.err
+		return r.consumeExit(ex).err
 	case <-time.After(grace):
 	}
 	_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGTERM)
 	select {
 	case ex := <-r.done:
-		return ex.err
+		return r.consumeExit(ex).err
 	case <-time.After(2 * time.Second):
 	}
 	_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
 	ex := <-r.done
-	return ex.err
+	return r.consumeExit(ex).err
 }
 
 // metrics returns a snapshot of the current scraped values.
 type runnerMetrics struct {
-	BitrateKbps    int
-	FPS            float64
-	Resolution     string
-	DroppedFrames  int
-	UptimeSeconds  int
-	HasPublisher   bool
+	BitrateKbps   int
+	FPS           float64
+	Resolution    string
+	DroppedFrames int
+	UptimeSeconds int
+	HasPublisher  bool
 }
 
 func (r *streamRunner) metrics() runnerMetrics {
@@ -272,43 +378,106 @@ func (r *streamRunner) metrics() runnerMetrics {
 	return m
 }
 
-// isAlive returns true if the runner's done channel hasn't fired yet.
-// Non-blocking check; safe for the watchdog's periodic poll.
-func (r *streamRunner) isAlive() bool {
-	select {
-	case <-r.done:
-		return false
-	default:
-		return true
+// consumeExit memoizes the first exit value read off done and returns
+// the memoized one thereafter. Without it, whoever reads the channel
+// first (usually stop()) consumes the only copy and every later
+// observer — tryReadExit, another stop() — sees a closed, empty
+// channel.
+//
+// (v0.1's isAlive() lived here too. It read the done channel and threw
+// the exit error away, so calling it once turned a crashed stream into
+// a silently-ended one. Nothing referenced it; it's gone.)
+func (r *streamRunner) consumeExit(ex runnerExit) runnerExit {
+	r.exit.CompareAndSwap(nil, &ex)
+	if p := r.exit.Load(); p != nil {
+		return *p
 	}
+	return ex
 }
 
 // tryReadExit returns the exit info if the runner has finished, else
-// (nil, false). Non-blocking.
+// (zero, false). Non-blocking.
+//
+// v0.1 inverted the closed-channel case: `ok == false` (channel closed
+// AND already drained) was returned as "not finished", so a runner
+// whose exit had been consumed elsewhere looked alive forever and the
+// watchdog never cleaned it up.
 func (r *streamRunner) tryReadExit() (runnerExit, bool) {
+	if p := r.exit.Load(); p != nil {
+		return *p, true
+	}
 	select {
 	case ex, ok := <-r.done:
 		if !ok {
-			return runnerExit{}, false
+			// Closed and drained with nothing memoized — the process is
+			// gone either way.
+			return runnerExit{}, true
 		}
-		return ex, true
+		return r.consumeExit(ex), true
 	default:
 		return runnerExit{}, false
 	}
 }
 
 // recordingAvailable returns true if the runner was configured to
-// record AND the file is non-empty on disk.
+// record AND a *complete* mp4 is on disk.
 func (r *streamRunner) recordingAvailable() bool {
 	if !r.record {
 		return false
 	}
-	path := filepath.Join(r.dataDir, "record.mp4")
-	st, err := os.Stat(path)
+	return mp4HasMoov(filepath.Join(r.dataDir, recordingFile))
+}
+
+// mp4HasMoov reports whether path is a complete mp4 — i.e. it carries
+// a top-level `moov` atom.
+//
+// ffmpeg writes moov only when the output is closed cleanly (and with
+// -movflags +faststart it rewrites the whole file to move moov to the
+// front), so a SIGKILLed encode leaves ftyp + a partial mdat and
+// nothing else. v0.1 accepted any non-empty file, which meant a
+// truncated, unplayable recording was persisted as "finalized" and
+// handed to viewers as the replay.
+func mp4HasMoov(path string) bool {
+	f, err := os.Open(path)
 	if err != nil {
 		return false
 	}
-	return st.Size() > 0
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() < 8 {
+		return false
+	}
+
+	var off int64
+	var hdr [16]byte
+	// A sane mp4 has a handful of top-level boxes; the bound keeps a
+	// corrupt file from turning this into a long walk.
+	for i := 0; i < 64; i++ {
+		if n, err := f.ReadAt(hdr[:8], off); err != nil || n < 8 {
+			return false
+		}
+		size := int64(binary.BigEndian.Uint32(hdr[:4]))
+		if string(hdr[4:8]) == "moov" {
+			return true
+		}
+		switch size {
+		case 1: // 64-bit largesize follows the type
+			if n, err := f.ReadAt(hdr[8:16], off+8); err != nil || n < 8 {
+				return false
+			}
+			size = int64(binary.BigEndian.Uint64(hdr[8:16]))
+		case 0: // box runs to EOF — nothing can follow it
+			return false
+		}
+		if size < 8 {
+			return false
+		}
+		off += size
+		if off >= st.Size() {
+			return false
+		}
+	}
+	return false
 }
 
 // run-time guard: we use exec.Command + SysProcAttr.Setpgid which is
