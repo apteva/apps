@@ -1,0 +1,695 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
+)
+
+// recordingPlatform captures everything the app pushes at the platform:
+// agent events (the approval round-trip), thread events, and sibling-app
+// callbacks (inbox_post's callback_tool).
+type recordingPlatform struct {
+	tk.BasePlatformClient
+	events       []capturedEvent
+	threadEvents []capturedThreadEvent
+	appCalls     []capturedAppCall
+	spawns       []sdk.ThreadSpawnRequest
+	failSend     bool
+	failSpawn    bool
+}
+
+type capturedEvent struct {
+	AgentID int64
+	Message string
+}
+
+type capturedThreadEvent struct {
+	Ref     sdk.ThreadRef
+	Message string
+}
+
+type capturedAppCall struct {
+	App   string
+	Tool  string
+	Input map[string]any
+}
+
+func (p *recordingPlatform) SendEvent(instanceID int64, message string) error {
+	if p.failSend {
+		return fmt.Errorf("agent %d offline", instanceID)
+	}
+	p.events = append(p.events, capturedEvent{AgentID: instanceID, Message: message})
+	return nil
+}
+
+func (p *recordingPlatform) SendThreadEvent(target sdk.ThreadRef, message any) error {
+	text, _ := message.(string)
+	p.threadEvents = append(p.threadEvents, capturedThreadEvent{Ref: target, Message: text})
+	return nil
+}
+
+func (p *recordingPlatform) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.ThreadSpawnResult, error) {
+	if p.failSpawn {
+		return nil, fmt.Errorf("agent %d not running", req.AgentID)
+	}
+	p.spawns = append(p.spawns, req)
+	return &sdk.ThreadSpawnResult{Status: "created",
+		Thread: sdk.ThreadRef{AgentID: req.AgentID, ThreadID: req.ThreadID}}, nil
+}
+
+func (p *recordingPlatform) KillThread(agentID int64, threadID string) error { return nil }
+
+func (p *recordingPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	p.appCalls = append(p.appCalls, capturedAppCall{App: app, Tool: tool, Input: input})
+	return nil
+}
+
+const testProject = "proj-1"
+
+func newTestEnv(t *testing.T) (*App, *sdk.AppCtx, *recordingPlatform) {
+	t.Helper()
+	platform := &recordingPlatform{}
+	spawnedThreads = sync.Map{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject), tk.WithPlatform(platform))
+	app := &App{}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatalf("OnMount: %v", err)
+	}
+	return app, ctx, platform
+}
+
+func callerCtx(agentID int64, threadID string) context.Context {
+	return sdk.WithCaller(context.Background(), &sdk.Caller{
+		AgentID: agentID, ThreadID: threadID, ProjectID: testProject,
+	})
+}
+
+func mkConversation(t *testing.T, app *App, agentID int64) *Conversation {
+	t.Helper()
+	conv, err := app.store.CreateConversation(CreateConversationInput{
+		ProjectID: testProject, LeadAgentID: agentID, Title: "Test", OwnerUserID: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	return conv
+}
+
+// ─── identity & participation ────────────────────────────────────────
+
+func TestToolsFailClosedWithoutCaller(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+
+	// The SDK treats a nil caller as full access for back-compat; a
+	// conversation store must not — a toolless context writes nothing.
+	_, err := app.toolSend(context.Background(), ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "hello",
+	})
+	if err == nil {
+		t.Fatal("expected caller identity to be required")
+	}
+}
+
+func TestNonParticipantCannotWrite(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+
+	if _, err := app.toolSend(callerCtx(99, ""), ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "intruding",
+	}); err == nil {
+		t.Fatal("expected participant check to refuse agent 99")
+	}
+}
+
+// ─── messages & idempotency ──────────────────────────────────────────
+
+func TestIdempotentUserMessages(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+
+	first, inserted, err := app.store.AppendMessageIdempotent(&Message{
+		ConversationID: conv.ID, Role: "user", Content: "hi", UserID: 1, ClientID: "c-1",
+	})
+	if err != nil || !inserted {
+		t.Fatalf("first append: inserted=%v err=%v", inserted, err)
+	}
+	second, inserted, err := app.store.AppendMessageIdempotent(&Message{
+		ConversationID: conv.ID, Role: "user", Content: "hi", UserID: 1, ClientID: "c-1",
+	})
+	if err != nil {
+		t.Fatalf("retry append: %v", err)
+	}
+	// A retried send (network blip, remount) must resolve to the same
+	// row, never a duplicate bubble.
+	if inserted || second.ID != first.ID {
+		t.Fatalf("retry produced a new row: first=%d second=%d inserted=%v", first.ID, second.ID, inserted)
+	}
+}
+
+// ─── inbox semantics ─────────────────────────────────────────────────
+
+func TestReportsAreInboxOnly(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+
+	if _, err := app.toolReport(callerCtx(41, ""), ctx, map[string]any{
+		"conversation_id": conv.ID, "title": "Weekly", "summary": "All good",
+	}); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if _, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "plain message",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	transcript, err := app.store.Transcript(conv.ID, 0, 50)
+	if err != nil {
+		t.Fatalf("transcript: %v", err)
+	}
+	for _, m := range transcript {
+		if m.ComponentKind == kindReport {
+			t.Fatal("report leaked into the chat transcript")
+		}
+	}
+
+	items, err := app.store.Inbox(50)
+	if err != nil {
+		t.Fatalf("inbox: %v", err)
+	}
+	foundReport := false
+	for _, item := range items {
+		if item.Message.ComponentKind == kindReport {
+			foundReport = true
+		}
+		if item.Message.ComponentKind == "" {
+			t.Fatal("plain message leaked into the inbox")
+		}
+	}
+	if !foundReport {
+		t.Fatal("report missing from inbox")
+	}
+}
+
+func TestInboxPriorityOrdering(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	from := callerCtx(41, "")
+
+	// Deliberately created in reverse-priority order: the newest row is
+	// the lowest priority, so ordering by recency alone would fail.
+	if _, err := app.toolAlert(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "disk almost full", "severity": "warn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolAlert(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "provider down", "severity": "error",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolRequestApproval(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "title": "Spend $50 on ads?",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolReport(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "title": "Weekly", "summary": "fine",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := app.store.Inbox(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	for _, item := range items {
+		kinds = append(kinds, item.Message.ComponentKind+"/"+item.Message.Severity)
+	}
+	want := []string{"approval/", "alert/error", "alert/warn", "report/"}
+	if strings.Join(kinds, ",") != strings.Join(want, ",") {
+		t.Fatalf("inbox order = %v, want %v", kinds, want)
+	}
+}
+
+// ─── the approval round-trip ─────────────────────────────────────────
+
+func TestApprovalRoundTripForwardsToAgentThread(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+
+	out, err := app.toolRequestApproval(callerCtx(41, "thread-9"), ctx, map[string]any{
+		"conversation_id": conv.ID, "title": "Send the campaign?",
+	})
+	if err != nil {
+		t.Fatalf("request approval: %v", err)
+	}
+	messageID := out.(map[string]any)["message_id"].(int64)
+
+	msg, err := app.store.GetMessage(messageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := app.resolveApproval(ctx, msg, "approve", "go ahead", 1)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if cardStatus(updated) != "approve" {
+		t.Fatalf("card status = %q, want approve", cardStatus(updated))
+	}
+	// The verdict must land on the thread that asked.
+	if len(platform.threadEvents) != 1 {
+		t.Fatalf("thread events = %d, want 1", len(platform.threadEvents))
+	}
+	ev := platform.threadEvents[0]
+	if ev.Ref.AgentID != 41 || ev.Ref.ThreadID != "thread-9" {
+		t.Fatalf("forwarded to %+v, want agent 41 thread-9", ev.Ref)
+	}
+	if !strings.Contains(ev.Message, "action=approve") || !strings.Contains(ev.Message, "go ahead") {
+		t.Fatalf("event payload missing verdict/note: %q", ev.Message)
+	}
+
+	// Second action on a resolved card must be refused, not re-forwarded.
+	if _, err := app.resolveApproval(ctx, updated, "deny", "", 1); err == nil {
+		t.Fatal("expected already-resolved refusal")
+	}
+	// Resolved approvals leave the pending inbox view.
+	items, _ := app.store.Inbox(50)
+	for _, item := range items {
+		if item.Message.ID == messageID {
+			t.Fatal("resolved approval still listed in inbox")
+		}
+	}
+}
+
+// ─── sibling apps (inbox_post) ───────────────────────────────────────
+
+func TestInboxPostCallbackReachesPostingApp(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+
+	out, err := app.toolInboxPost(context.Background(), ctx, map[string]any{
+		"kind": "approval", "title": "Renew certificate?",
+		"source_app": "certs", "callback_tool": "certs_renew_decision",
+	})
+	if err != nil {
+		t.Fatalf("inbox_post: %v", err)
+	}
+	messageID := out.(map[string]any)["message_id"].(int64)
+
+	msg, err := app.store.GetMessage(messageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.resolveApproval(ctx, msg, "approve", "", 1); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	// The verdict goes back into the POSTING app, not an agent thread.
+	if len(platform.appCalls) != 1 {
+		t.Fatalf("app calls = %d, want 1", len(platform.appCalls))
+	}
+	call := platform.appCalls[0]
+	if call.App != "certs" || call.Tool != "certs_renew_decision" {
+		t.Fatalf("callback went to %s/%s", call.App, call.Tool)
+	}
+	if call.Input["action_id"] != "approve" {
+		t.Fatalf("callback action = %v", call.Input["action_id"])
+	}
+	if len(platform.events) != 0 {
+		t.Fatal("inbox_post approval must not forward to an agent")
+	}
+
+	// Repeated posts from the same app group into one system conversation.
+	again, err := app.toolInboxPost(context.Background(), ctx, map[string]any{
+		"kind": "alert", "title": "Cert expiring", "source_app": "certs", "severity": "warn",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := app.store.GetMessage(messageID)
+	second, _ := app.store.GetMessage(again.(map[string]any)["message_id"].(int64))
+	if first.ConversationID != second.ConversationID {
+		t.Fatal("inbox_post items from one app should share the system conversation")
+	}
+}
+
+// ─── delivery ledger ─────────────────────────────────────────────────
+
+func TestUnconfiguredExternalTargetStaysPendingAndRedelivers(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	// An external-origin conversation whose key routes to the (stub,
+	// unconfigured) telegram adapter.
+	conv, err := app.store.CreateConversation(CreateConversationInput{
+		ProjectID: testProject, LeadAgentID: 41, OwnerUserID: 1,
+		Origin: "telegram", ConversationKey: "telegram:bind1:555",
+		ExternalIdentity: "telegram:12345", ExternalName: "Marco",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "reply to telegram",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID := out.(map[string]any)["message_id"].(int64)
+
+	// Web delivered; telegram pending (adapter unconfigured), never
+	// failed — the binding may appear later.
+	webDelivery, err := app.store.DeliveryFor(messageID, "web:user:1")
+	if err != nil || webDelivery.Status != "delivered" {
+		t.Fatalf("web delivery = %+v err=%v, want delivered", webDelivery, err)
+	}
+	tgDelivery, err := app.store.DeliveryFor(messageID, "telegram:bind1:555")
+	if err != nil || tgDelivery.Status != "pending" {
+		t.Fatalf("telegram delivery = %+v err=%v, want pending", tgDelivery, err)
+	}
+
+	// Mount-time replay picks the pending row up again (and, with the
+	// adapter still unconfigured, leaves it pending — never lost, never
+	// dead-lettered).
+	redelivered, err := app.redeliverPending(ctx)
+	if err != nil {
+		t.Fatalf("redeliver: %v", err)
+	}
+	if redelivered != 1 {
+		t.Fatalf("redelivered = %d, want 1", redelivered)
+	}
+	tgDelivery, _ = app.store.DeliveryFor(messageID, "telegram:bind1:555")
+	if tgDelivery.Status != "pending" || tgDelivery.Attempts < 2 {
+		t.Fatalf("after replay: %+v, want pending with attempts>=2", tgDelivery)
+	}
+}
+
+// ─── pairing ─────────────────────────────────────────────────────────
+
+func TestPairingGateForUnknownSenders(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+
+	code, approved, err := app.store.EnsurePairing("telegram", "telegram:777", "Stranger")
+	if err != nil || approved {
+		t.Fatalf("first contact: code=%q approved=%v err=%v", code, approved, err)
+	}
+	if len(code) != 8 {
+		t.Fatalf("code %q, want 8 chars", code)
+	}
+	// Re-contact re-uses the live code — a stranger cannot mint codes.
+	code2, approved, err := app.store.EnsurePairing("telegram", "telegram:777", "Stranger")
+	if err != nil || approved || code2 != code {
+		t.Fatalf("re-contact: code=%q (want %q) approved=%v err=%v", code2, code, approved, err)
+	}
+
+	if err := app.store.ApprovePairing(code); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	_, approved, err = app.store.EnsurePairing("telegram", "telegram:777", "Stranger")
+	if err != nil || !approved {
+		t.Fatalf("post-approval contact: approved=%v err=%v", approved, err)
+	}
+	// Unknown code is a refusal, not a silent success.
+	if err := app.store.ApprovePairing("NOPE1234"); err == nil {
+		t.Fatal("expected unknown-code refusal")
+	}
+}
+
+// ─── HTTP surface ────────────────────────────────────────────────────
+
+func TestUserMessageForwardFailureIsLoud(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	platform.failSend = true
+	platform.failSpawn = true
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+
+	req := httptest.NewRequest("POST", "/messages?chat_id="+conv.ID,
+		strings.NewReader(`{"content":"are you there?"}`))
+	req.Header.Set("X-Apteva-Subject-ID", "1")
+	rec := httptest.NewRecorder()
+	app.handleMessages(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The user's row persists AND a visible system row explains the
+	// failure — never an indefinite quiet.
+	transcript, _ := app.store.Transcript(conv.ID, 0, 10)
+	if len(transcript) != 2 {
+		t.Fatalf("transcript rows = %d, want user + system notice", len(transcript))
+	}
+	if transcript[1].Role != "system" || !strings.Contains(transcript[1].Content, "could not reach") {
+		t.Fatalf("expected loud failure notice, got %+v", transcript[1])
+	}
+}
+
+// ─── thread-per-conversation (channel-chat parity) ───────────────────
+
+func postUserMessage(t *testing.T, app *App, conv *Conversation, content string) {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/messages?chat_id="+conv.ID,
+		strings.NewReader(`{"content":"`+content+`"}`))
+	req.Header.Set("X-Apteva-Subject-ID", "1")
+	rec := httptest.NewRecorder()
+	app.handleMessages(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("post status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFirstMessageSpawnsConversationThread(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+
+	postUserMessage(t, app, conv, "hello")
+
+	if len(platform.spawns) != 1 {
+		t.Fatalf("spawns = %d, want 1", len(platform.spawns))
+	}
+	spawn := platform.spawns[0]
+	// channel-chat's naming convention, so thread identities survive the
+	// eventual data migration.
+	if spawn.ThreadID != "chat-"+conv.ID || spawn.AgentID != 41 {
+		t.Fatalf("spawned %s on agent %d, want chat-%s on 41", spawn.ThreadID, spawn.AgentID, conv.ID)
+	}
+	// The suffix must carry the reply contract and the conversation id;
+	// composition with main's directive happens core-side.
+	if !strings.Contains(spawn.DirectiveSuffix, conv.ID) ||
+		!strings.Contains(spawn.DirectiveSuffix, "conversations_send") {
+		t.Fatalf("directive suffix missing reply contract: %q", spawn.DirectiveSuffix)
+	}
+	// MCP nil → the platform fills the agent's spawnable set server-side.
+	if spawn.MCP != nil {
+		t.Fatalf("MCP should be nil (platform default), got %v", spawn.MCP)
+	}
+
+	// The event went to the conversation thread, not main.
+	if len(platform.events) != 0 {
+		t.Fatalf("SendEvent(main) called %d times, want 0", len(platform.events))
+	}
+	if len(platform.threadEvents) != 1 || platform.threadEvents[0].Ref.ThreadID != "chat-"+conv.ID {
+		t.Fatalf("thread events = %+v, want one on chat-%s", platform.threadEvents, conv.ID)
+	}
+
+	// The thread id persists on the conversation row.
+	stored, err := app.store.GetConversation(conv.ID)
+	if err != nil || stored.ThreadID != "chat-"+conv.ID {
+		t.Fatalf("stored thread = %q err=%v, want chat-%s", stored.ThreadID, err, conv.ID)
+	}
+}
+
+func TestSecondMessageReusesThreadWithoutRespawn(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+
+	postUserMessage(t, app, conv, "one")
+	postUserMessage(t, app, conv, "two")
+
+	// Unchanged suffix hash → the per-process cache skips the second
+	// spawn round-trip; both events still land on the thread.
+	if len(platform.spawns) != 1 {
+		t.Fatalf("spawns = %d, want 1 (cache should absorb the second)", len(platform.spawns))
+	}
+	if len(platform.threadEvents) != 2 {
+		t.Fatalf("thread events = %d, want 2", len(platform.threadEvents))
+	}
+}
+
+func TestSpawnFailureFallsBackToMainThread(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	platform.failSpawn = true
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+
+	postUserMessage(t, app, conv, "agent is stopped")
+
+	// A stopped agent must never lose a message: delivery degrades to
+	// the main thread via SendEvent.
+	if len(platform.events) != 1 {
+		t.Fatalf("SendEvent calls = %d, want 1 (main-thread fallback)", len(platform.events))
+	}
+	if len(platform.threadEvents) != 0 {
+		t.Fatalf("thread events = %d, want 0", len(platform.threadEvents))
+	}
+	// Failure is not cached: the agent coming back means the NEXT
+	// message spawns the thread.
+	platform.failSpawn = false
+	postUserMessage(t, app, conv, "agent is back")
+	if len(platform.spawns) != 1 || len(platform.threadEvents) != 1 {
+		t.Fatalf("recovery: spawns=%d threadEvents=%d, want 1/1",
+			len(platform.spawns), len(platform.threadEvents))
+	}
+}
+
+// ─── dismissal, statuses, broadcast ──────────────────────────────────
+
+func TestDismissRemovesFromInboxKeepsHistory(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+
+	out, err := app.toolAlert(callerCtx(41, ""), ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "low disk", "severity": "warn",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID := out.(map[string]any)["message_id"].(int64)
+
+	if _, err := app.DismissMessage(messageID); err != nil {
+		t.Fatalf("dismiss: %v", err)
+	}
+	items, _ := app.store.Inbox(50)
+	for _, item := range items {
+		if item.Message.ID == messageID {
+			t.Fatal("dismissed alert still in inbox")
+		}
+	}
+	// History keeps the row — dismissal hides, never deletes.
+	transcript, _ := app.store.Transcript(conv.ID, 0, 50)
+	found := false
+	for _, m := range transcript {
+		found = found || m.ID == messageID
+	}
+	if !found {
+		t.Fatal("dismissal deleted the message from history")
+	}
+	// Repeat dismissal is idempotent-ish (already-dismissed card just
+	// rewrites the flag); a plain message is refused.
+	plain, _ := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "user", Content: "hi"})
+	if _, err := app.DismissMessage(plain.ID); err == nil {
+		t.Fatal("plain message must not be dismissable")
+	}
+}
+
+func TestPendingApprovalsCannotBeDismissed(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+
+	out, err := app.toolRequestApproval(callerCtx(41, ""), ctx, map[string]any{
+		"conversation_id": conv.ID, "title": "Delete everything?",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID := out.(map[string]any)["message_id"].(int64)
+
+	// Silently hiding a pending question would strand the asking agent.
+	if _, err := app.DismissMessage(messageID); err == nil {
+		t.Fatal("pending approval must not be dismissable")
+	}
+	// Resolved ones may be dismissed.
+	msg, _ := app.store.GetMessage(messageID)
+	if _, err := app.resolveApproval(ctx, msg, "deny", "", 1); err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := app.store.GetMessage(messageID)
+	if _, err := app.DismissMessage(resolved.ID); err != nil {
+		t.Fatalf("resolved approval should be dismissable: %v", err)
+	}
+}
+
+func TestCurrentStatusesLatestPerAgent(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv41 := mkConversation(t, app, 41)
+	conv42 := mkConversation(t, app, 42)
+
+	for _, status := range []struct {
+		ctx  context.Context
+		conv *Conversation
+		text string
+	}{
+		{callerCtx(41, ""), conv41, "researching"},
+		{callerCtx(42, ""), conv42, "idle"},
+		{callerCtx(41, ""), conv41, "writing the report"},
+	} {
+		if _, err := app.toolSetStatus(status.ctx, ctx, map[string]any{
+			"conversation_id": status.conv.ID, "text": status.text,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	statuses, err := app.store.CurrentStatuses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(statuses) != 2 {
+		t.Fatalf("statuses = %d, want one per agent", len(statuses))
+	}
+	byAgent := map[int64]string{}
+	for _, s := range statuses {
+		byAgent[s.AgentID] = s.Message.Content
+	}
+	// Latest wins — agent 41's earlier "researching" is history.
+	if byAgent[41] != "writing the report" || byAgent[42] != "idle" {
+		t.Fatalf("statuses = %v", byAgent)
+	}
+}
+
+func TestInboxItemsBroadcastToEveryUserScope(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+
+	// A user who owns nothing, subscribed to their bell stream.
+	ch, cancel := app.hub.subscribeUser("7")
+	defer cancel()
+
+	// inbox_post creates an ownerless system conversation — the exact
+	// shape that used to deliver to "web:user:0" and ping nobody.
+	if _, err := app.toolInboxPost(context.Background(), ctx, map[string]any{
+		"kind": "alert", "title": "Backup failed", "severity": "error", "source_app": "backup",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case m := <-ch:
+		if m.ComponentKind != kindAlert {
+			t.Fatalf("received %q, want the alert", m.ComponentKind)
+		}
+	default:
+		t.Fatal("inbox item did not reach a non-owner user scope")
+	}
+
+	// Plain conversation traffic must NOT broadcast — only the owner's
+	// scope and the conversation panel see it.
+	conv := mkConversation(t, app, 41) // owner user 1
+	if _, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "private chatter",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case m := <-ch:
+		t.Fatalf("plain message leaked to another user's bell: %q", m.Content)
+	default:
+	}
+}
