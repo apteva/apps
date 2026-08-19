@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"html"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -82,8 +83,19 @@ func (a *App) serveSigningDocument(w http.ResponseWriter, session *SigningSessio
 }
 
 func (a *App) completeSigningHTTP(w http.ResponseWriter, r *http.Request, token string) {
-	if err := r.ParseMultipartForm(1 << 20); err != nil {
-		renderSigningMessage(w, http.StatusBadRequest, "The submitted form is too large.")
+	// The signing page posts a plain urlencoded form; multipart is
+	// accepted too for future drawn-signature uploads. ParseMultipartForm
+	// alone rejected urlencoded bodies, so no browser submit ever worked.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	var err error
+	if mediaType == "multipart/form-data" {
+		err = r.ParseMultipartForm(1 << 20)
+	} else {
+		err = r.ParseForm()
+	}
+	if err != nil {
+		renderSigningMessage(w, http.StatusBadRequest, "The submitted form could not be read or is too large.")
 		return
 	}
 	if r.FormValue("consent") != "on" {

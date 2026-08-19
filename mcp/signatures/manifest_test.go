@@ -11,7 +11,7 @@ func TestManifestAndRuntimeToolsMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse manifest: %v", err)
 	}
-	if m.Name != "signatures" || m.Version != "0.1.1" {
+	if m.Name != "signatures" || m.Version != "0.1.2" {
 		t.Fatalf("unexpected identity: %s %s", m.Name, m.Version)
 	}
 	if len(m.Scopes) != 1 || m.Scopes[0] != "project" {
