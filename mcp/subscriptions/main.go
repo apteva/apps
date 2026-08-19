@@ -552,6 +552,9 @@ func runSubscriptionLifecycle(ctx *sdk.AppCtx, now time.Time) error {
 	if err := dbSeedTrialAttempts(ctx.AppDB(), pid, now, 100); err != nil {
 		return err
 	}
+	if err := dbSeedLegacyTrialBackfillAttempts(ctx.AppDB(), pid, now, 100); err != nil {
+		return err
+	}
 	if err := dbSeedRenewalAttempts(ctx.AppDB(), pid, now, 100); err != nil {
 		return err
 	}
@@ -659,7 +662,13 @@ func processTrialEnd(ctx *sdk.AppCtx, attempt *LifecycleAttempt, now time.Time) 
 		return firstErr(err, errors.New("subscription not found"))
 	}
 	if sub.Status != "trialing" {
-		return dbCloseLifecycleAttempt(ctx.AppDB(), attempt, now)
+		legacy, legacyErr := isLegacyStrandedTrial(ctx.AppDB(), sub)
+		if legacyErr != nil {
+			return legacyErr
+		}
+		if !legacy {
+			return dbCloseLifecycleAttempt(ctx.AppDB(), attempt, now)
+		}
 	}
 	meta := mapFromAny(sub.Metadata)
 	behavior := sub.TrialEndBehavior
@@ -1049,6 +1058,41 @@ func dbSeedTrialAttempts(db *sql.DB, pid string, now time.Time, limit int) error
 	return err
 }
 
+func dbSeedLegacyTrialBackfillAttempts(db *sql.DB, pid string, now time.Time, limit int) error {
+	// Trials that expired under pre-v0.3.1 workers were moved straight to
+	// past_due with no cycle, no lifecycle attempt, and no cycle_due event,
+	// leaving them invisible to collection. Seed the missing trial_end
+	// attempt so the normal processor can create the due cycle.
+	nowStr := now.UTC().Format(time.RFC3339)
+	_, err := db.Exec(`INSERT OR IGNORE INTO subscription_lifecycle_attempts
+		(project_id,subscription_id,action,effective_at,status,next_attempt_at)
+		SELECT s.project_id,s.id,'trial_end',s.trial_end,'pending',?
+		FROM subscriptions s
+		WHERE s.project_id=? AND s.status='past_due'
+		  AND s.trial_end IS NOT NULL AND s.trial_end<=?
+		  AND json_extract(s.metadata,'$.trial_ended_at') IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM subscription_cycles c
+		                   WHERE c.project_id=s.project_id AND c.subscription_id=s.id)
+		  AND NOT EXISTS (SELECT 1 FROM subscription_lifecycle_attempts a
+		                   WHERE a.project_id=s.project_id AND a.subscription_id=s.id AND a.action='trial_end')
+		ORDER BY s.trial_end,s.id LIMIT ?`, nowStr, pid, nowStr, limit)
+	return err
+}
+
+// isLegacyStrandedTrial reports whether a past_due subscription is a trial the
+// pre-v0.3.1 worker expired without ever creating a cycle, so its trial_end
+// attempt must run even though the subscription is no longer trialing.
+func isLegacyStrandedTrial(db *sql.DB, sub *Subscription) (bool, error) {
+	if sub.Status != "past_due" || strings.TrimSpace(strArg(mapFromAny(sub.Metadata), "trial_ended_at")) == "" {
+		return false, nil
+	}
+	var cycles int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM subscription_cycles WHERE project_id=? AND subscription_id=?`, sub.ProjectID, sub.ID).Scan(&cycles); err != nil {
+		return false, err
+	}
+	return cycles == 0, nil
+}
+
 func dbClaimLifecycleAttempts(db *sql.DB, pid string, now time.Time, limit int) ([]*LifecycleAttempt, error) {
 	nowStr := now.UTC().Format(time.RFC3339)
 	rows, err := db.Query(`SELECT id FROM subscription_lifecycle_attempts
@@ -1197,7 +1241,10 @@ func dbCompleteLifecycleAttempt(ctx *sdk.AppCtx, attempt *LifecycleAttempt, sub 
 	}
 	nowStr := now.UTC().Format(time.RFC3339)
 	meta := mapFromAny(sub.Metadata)
-	meta["trial_ended_at"] = nowStr
+	// Keep the original timestamp when backfilling a legacy stranded trial.
+	if strings.TrimSpace(strArg(meta, "trial_ended_at")) == "" {
+		meta["trial_ended_at"] = nowStr
+	}
 	if targetStatus == "past_due" || targetStatus == "paused" {
 		meta["past_due_since"] = nowStr
 	}

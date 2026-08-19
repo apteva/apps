@@ -386,6 +386,91 @@ func TestCollectibleTrialCreatesPendingCycleWithoutCommerceCalls(t *testing.T) {
 	}
 }
 
+func TestLegacyStrandedTrialIsBackfilledWithCycleAndCycleDue(t *testing.T) {
+	pf := &noCommercePlatform{}
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithPlatform(pf), tk.WithEmitter(rec))
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	trialEnd := now.AddDate(0, -2, 0)
+	sub := newCollectibleTrial(t, ctx, "proj-test", "stranded@example.com", trialEnd)
+
+	// Reproduce what pre-v0.3.1 workers left behind: past_due with
+	// trial_ended_at/past_due_since stamped but no cycle, no lifecycle
+	// attempt, and no cycle_due ever published. Grace was configured and
+	// has long since elapsed.
+	legacyEndedAt := trialEnd.Format(time.RFC3339)
+	if _, err := ctx.AppDB().Exec(`UPDATE subscriptions SET status='past_due',
+		metadata=json_set(metadata,'$.trial_ended_at',?,'$.past_due_since',?,'$.unpaid_grace_days',7)
+		WHERE id=?`, legacyEndedAt, legacyEndedAt, sub.ID); err != nil {
+		t.Fatal(err)
+	}
+	rec.Reset()
+
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dbSubscriptionGet(ctx.AppDB(), "proj-test", sub.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "past_due" {
+		t.Fatalf("status=%s, want past_due (grace sweep must not end a just-backfilled trial)", got.Status)
+	}
+	if len(got.Cycles) != 1 || got.Cycles[0].PaymentStatus != "pending" || got.Cycles[0].TotalCents != 2900 {
+		t.Fatalf("unexpected backfilled cycle: %+v", got.Cycles)
+	}
+	if !strings.HasPrefix(got.Cycles[0].PeriodStart, trialEnd.Format("2006-01-02")) {
+		t.Fatalf("cycle period_start=%s, want the original trial_end day %s", got.Cycles[0].PeriodStart, legacyEndedAt)
+	}
+	meta := mapFromAny(got.Metadata)
+	if meta["trial_ended_at"] != legacyEndedAt {
+		t.Fatalf("trial_ended_at=%v, want original %s preserved", meta["trial_ended_at"], legacyEndedAt)
+	}
+	if since, _ := parseTime(strArg(meta, "past_due_since")); !since.Equal(now) {
+		t.Fatalf("past_due_since=%v, want reset to backfill time %v", meta["past_due_since"], now)
+	}
+	if events := rec.EventsByTopic("subscription.cycle_due"); len(events) != 1 {
+		t.Fatalf("cycle_due events=%d, want 1", len(events))
+	}
+	if pf.Calls != 0 {
+		t.Fatalf("backfill made %d cross-app commerce calls", pf.Calls)
+	}
+
+	if err := runSubscriptionLifecycle(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = dbSubscriptionGet(ctx.AppDB(), "proj-test", sub.ID, true)
+	if len(got.Cycles) != 1 || len(rec.EventsByTopic("subscription.cycle_due")) != 1 {
+		t.Fatalf("repeat worker duplicated backfill: cycles=%d events=%d", len(got.Cycles), len(rec.EventsByTopic("subscription.cycle_due")))
+	}
+}
+
+func TestPastDueWithoutTrialHistoryIsNotBackfilled(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithEmitter(rec))
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	sub := newCollectibleTrial(t, ctx, "proj-test", "nontrial@example.com", now.AddDate(0, -1, 0))
+	// past_due for some non-trial reason: no trial_ended_at marker.
+	if _, err := ctx.AppDB().Exec(`UPDATE subscriptions SET status='past_due' WHERE id=?`, sub.ID); err != nil {
+		t.Fatal(err)
+	}
+	rec.Reset()
+
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dbSubscriptionGet(ctx.AppDB(), "proj-test", sub.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "past_due" || len(got.Cycles) != 0 {
+		t.Fatalf("subscription was touched: status=%s cycles=%d", got.Status, len(got.Cycles))
+	}
+	if events := rec.EventsByTopic("subscription.cycle_due"); len(events) != 0 {
+		t.Fatalf("cycle_due events=%d, want 0", len(events))
+	}
+}
+
 func TestActiveRenewalCreatesOnePendingCycleWithoutCommerceCalls(t *testing.T) {
 	pf := &noCommercePlatform{}
 	rec := tk.NewEmitRecorder()
