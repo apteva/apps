@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -146,6 +147,18 @@ func allowSignerPost(r *http.Request) bool {
 	return site == "" || site == "same-origin" || site == "none"
 }
 
+// pageQuery keeps project-scoped install resolution working across the
+// page's own relative links (iframe document, complete/decline posts):
+// those drop the incoming query string, so the project_id the platform
+// proxy needs must be re-attached to every URL the page emits.
+func pageQuery(session *SigningSession) string {
+	pid := strings.TrimSpace(session.Envelope.ProjectID)
+	if pid == "" {
+		return ""
+	}
+	return "?project_id=" + url.QueryEscape(pid)
+}
+
 func renderSigningPage(w http.ResponseWriter, token string, session *SigningSession) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -180,11 +193,12 @@ func renderSigningPage(w http.ResponseWriter, token string, session *SigningSess
 	if session.Recipient.Role == "signer" {
 		actionLabel = "Sign document"
 	}
+	q := pageQuery(session)
 	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>%s</title>
 <style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f6f8;color:#172033}header{padding:18px 24px;background:#fff;border-bottom:1px solid #dde1e7}header h1{font-size:18px;margin:0 0 4px}header p{margin:0;color:#667085;font-size:13px}.layout{display:grid;grid-template-columns:minmax(0,1fr)360px;gap:16px;padding:16px;height:calc(100vh - 86px);box-sizing:border-box}iframe{width:100%%;height:100%%;border:1px solid #d0d5dd;border-radius:10px;background:#fff}.panel{background:#fff;border:1px solid #d0d5dd;border-radius:10px;padding:18px;overflow:auto}.panel h2{font-size:15px;margin:0 0 14px}label{display:block;font-size:12px;color:#475467;margin:0 0 12px;text-transform:capitalize}input[type=text]{box-sizing:border-box;width:100%%;margin-top:5px;padding:10px;border:1px solid #c8ced8;border-radius:7px;font-size:14px}.check{display:flex;align-items:flex-start;gap:8px;text-transform:none;line-height:1.4}.check input{margin-top:2px}.actions{display:grid;gap:8px;margin-top:16px}button{border:0;border-radius:7px;padding:11px;font-weight:600;cursor:pointer}.primary{background:#2457d6;color:#fff}.decline{background:#fff;color:#b42318;border:1px solid #f0b4ad}.message{padding:10px;background:#f8fafc;border-radius:7px;font-size:13px;color:#475467;margin-bottom:14px}@media(max-width:850px){.layout{grid-template-columns:1fr;height:auto}iframe{height:60vh}}</style></head><body>
-<header><h1>%s</h1><p>From %s · For %s · Expires %s</p></header><main class="layout"><iframe src="./%s/document" title="Document"></iframe><section class="panel">%s<h2>Your fields</h2><form method="post" action="./%s/complete">%s%s<label class="check"><input type="checkbox" name="consent" required> I consent to use an electronic signature and confirm that the information I submit is accurate.</label><div class="actions"><button class="primary" type="submit">%s</button></div></form><form method="post" action="./%s/decline"><label>Reason (optional)<input type="text" name="reason" maxlength="1000"></label><button class="decline" type="submit">Decline</button></form></section></main></body></html>`,
-		html.EscapeString(session.Envelope.Title), html.EscapeString(session.Envelope.Title), html.EscapeString(session.Envelope.SenderName), html.EscapeString(session.Recipient.Name), html.EscapeString(session.Envelope.ExpiresAt), token,
-		optionalMessage(session.Envelope.Message), token, legalName, fields.String(), actionLabel, token)
+<header><h1>%s</h1><p>From %s · For %s · Expires %s</p></header><main class="layout"><iframe src="./%s/document%s" title="Document"></iframe><section class="panel">%s<h2>Your fields</h2><form method="post" action="./%s/complete%s">%s%s<label class="check"><input type="checkbox" name="consent" required> I consent to use an electronic signature and confirm that the information I submit is accurate.</label><div class="actions"><button class="primary" type="submit">%s</button></div></form><form method="post" action="./%s/decline%s"><label>Reason (optional)<input type="text" name="reason" maxlength="1000"></label><button class="decline" type="submit">Decline</button></form></section></main></body></html>`,
+		html.EscapeString(session.Envelope.Title), html.EscapeString(session.Envelope.Title), html.EscapeString(session.Envelope.SenderName), html.EscapeString(session.Recipient.Name), html.EscapeString(session.Envelope.ExpiresAt), token, q,
+		optionalMessage(session.Envelope.Message), token, q, legalName, fields.String(), actionLabel, token, q)
 }
 
 func optionalMessage(message string) string {

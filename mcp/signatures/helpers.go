@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -95,7 +96,14 @@ func signingURL(ctx *sdk.AppCtx, token string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return base + "/sign/" + token, nil
+	// project_id lets the platform's anonymous no_auth resolver find a
+	// project-scoped install; without it the proxy only matches
+	// global-scoped installs and the link 401s before reaching the app.
+	u := base + "/sign/" + token
+	if pid := strings.TrimSpace(ctx.CurrentProject()); pid != "" {
+		u += "?project_id=" + url.QueryEscape(pid)
+	}
+	return u, nil
 }
 
 func requestCtx(r *http.Request) *sdk.AppCtx {
