@@ -698,7 +698,11 @@ func completeRecipient(db *sql.DB, token, legalName string, values map[int64]str
 		if field.Required && value == "" {
 			return nil, nil, nil, false, fmt.Errorf("field %d (%s) is required", field.ID, field.Label)
 		}
-		if len(value) > 2000 {
+		if field.FieldType == "signature" && strings.HasPrefix(value, drawnSignaturePrefix) {
+			if err := validateDrawnSignature(value); err != nil {
+				return nil, nil, nil, false, fmt.Errorf("field %d: %w", field.ID, err)
+			}
+		} else if len(value) > 2000 {
 			return nil, nil, nil, false, fmt.Errorf("field %d value is too long", field.ID)
 		}
 		prepared[field.ID] = value

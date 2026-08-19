@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"mime"
@@ -25,6 +26,10 @@ func (a *App) handleSigning(w http.ResponseWriter, r *http.Request) {
 	action := ""
 	if len(parts) > 1 {
 		action = parts[1]
+	}
+	if token == "assets" && r.Method == http.MethodGet {
+		serveSigningAsset(w, r, action)
+		return
 	}
 	session, err := sessionByToken(globalCtx.AppDB(), token)
 	if err != nil {
@@ -86,11 +91,13 @@ func (a *App) completeSigningHTTP(w http.ResponseWriter, r *http.Request, token 
 	// The signing page posts a plain urlencoded form; multipart is
 	// accepted too for future drawn-signature uploads. ParseMultipartForm
 	// alone rejected urlencoded bodies, so no browser submit ever worked.
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	// 2MB bounds a urlencoded drawn-signature PNG (512KB decoded, ~1.3×
+	// base64 + URL-escaping inflation) with room to spare.
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	var err error
 	if mediaType == "multipart/form-data" {
-		err = r.ParseMultipartForm(1 << 20)
+		err = r.ParseMultipartForm(2 << 20)
 	} else {
 		err = r.ParseForm()
 	}
@@ -171,31 +178,74 @@ func pageQuery(session *SigningSession) string {
 	return "?project_id=" + url.QueryEscape(pid)
 }
 
+// signingPayload is embedded as JSON for ui/sign.js, which renders the
+// PDF pages and overlays this recipient's field boxes at their real
+// positions. Coordinates are the normalized top-left fractions the
+// sender placed at draft time.
+type signingPayload struct {
+	DocURL    string                `json:"doc_url"`
+	Recipient signingPayloadSigner  `json:"recipient"`
+	Fields    []signingPayloadField `json:"fields"`
+}
+
+type signingPayloadSigner struct {
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
+type signingPayloadField struct {
+	ID       int64   `json:"id"`
+	Type     string  `json:"type"`
+	Page     int     `json:"page"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	Width    float64 `json:"width"`
+	Height   float64 `json:"height"`
+	Label    string  `json:"label"`
+	Required bool    `json:"required"`
+}
+
 func renderSigningPage(w http.ResponseWriter, token string, session *SigningSession) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; worker-src 'self' blob:; connect-src 'self'; img-src 'self' data: blob:; frame-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'")
+	q := pageQuery(session)
+	payload := signingPayload{
+		DocURL:    "./" + token + "/document" + q,
+		Recipient: signingPayloadSigner{Name: session.Recipient.Name, Role: session.Recipient.Role},
+	}
 	var fields strings.Builder
 	for _, field := range session.Fields {
 		label := field.Label
 		if label == "" {
 			label = strings.ReplaceAll(field.FieldType, "_", " ")
 		}
+		payload.Fields = append(payload.Fields, signingPayloadField{
+			ID: field.ID, Type: field.FieldType, Page: field.Page,
+			X: field.X, Y: field.Y, Width: field.Width, Height: field.Height,
+			Label: label, Required: field.Required,
+		})
 		required := ""
 		if field.Required {
 			required = " required"
 		}
 		name := fmt.Sprintf("field_%d", field.ID)
+		attrs := fmt.Sprintf(` data-field-id="%d" data-field-type="%s"`, field.ID, html.EscapeString(field.FieldType))
 		switch field.FieldType {
 		case "date_signed":
-			fields.WriteString(`<label>` + html.EscapeString(label) + `<input type="text" value="Set automatically when submitted" disabled></label>`)
+			fields.WriteString(`<label` + attrs + `>` + html.EscapeString(label) + `<input type="text" value="Set automatically when submitted" disabled></label>`)
 		case "checkbox":
-			fields.WriteString(`<label class="check"><input type="checkbox" name="` + name + `"` + required + `> ` + html.EscapeString(label) + `</label>`)
+			fields.WriteString(`<label class="check"` + attrs + `><input type="checkbox" name="` + name + `"` + required + `> ` + html.EscapeString(label) + `</label>`)
 		case "signature":
-			fields.WriteString(`<label>` + html.EscapeString(label) + `<input type="text" name="` + name + `" placeholder="Type your signature" maxlength="300"` + required + `></label>`)
+			fields.WriteString(`<label` + attrs + `>` + html.EscapeString(label) + `<input type="text" name="` + name + `" placeholder="Type your signature" maxlength="300"` + required + `></label>`)
 		default:
-			fields.WriteString(`<label>` + html.EscapeString(label) + `<input type="text" name="` + name + `" maxlength="2000"` + required + `></label>`)
+			fields.WriteString(`<label` + attrs + `>` + html.EscapeString(label) + `<input type="text" name="` + name + `" maxlength="2000"` + required + `></label>`)
 		}
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		http.Error(w, "unable to render signing page", http.StatusInternalServerError)
+		return
 	}
 	legalName := ""
 	if session.Recipient.Role == "signer" {
@@ -205,12 +255,13 @@ func renderSigningPage(w http.ResponseWriter, token string, session *SigningSess
 	if session.Recipient.Role == "signer" {
 		actionLabel = "Sign document"
 	}
-	q := pageQuery(session)
 	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>%s</title>
-<style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f6f8;color:#172033}header{padding:18px 24px;background:#fff;border-bottom:1px solid #dde1e7}header h1{font-size:18px;margin:0 0 4px}header p{margin:0;color:#667085;font-size:13px}.layout{display:grid;grid-template-columns:minmax(0,1fr)360px;gap:16px;padding:16px;height:calc(100vh - 86px);box-sizing:border-box}iframe{width:100%%;height:100%%;border:1px solid #d0d5dd;border-radius:10px;background:#fff}.panel{background:#fff;border:1px solid #d0d5dd;border-radius:10px;padding:18px;overflow:auto}.panel h2{font-size:15px;margin:0 0 14px}label{display:block;font-size:12px;color:#475467;margin:0 0 12px;text-transform:capitalize}input[type=text]{box-sizing:border-box;width:100%%;margin-top:5px;padding:10px;border:1px solid #c8ced8;border-radius:7px;font-size:14px}.check{display:flex;align-items:flex-start;gap:8px;text-transform:none;line-height:1.4}.check input{margin-top:2px}.actions{display:grid;gap:8px;margin-top:16px}button{border:0;border-radius:7px;padding:11px;font-weight:600;cursor:pointer}.primary{background:#2457d6;color:#fff}.decline{background:#fff;color:#b42318;border:1px solid #f0b4ad}.message{padding:10px;background:#f8fafc;border-radius:7px;font-size:13px;color:#475467;margin-bottom:14px}@media(max-width:850px){.layout{grid-template-columns:1fr;height:auto}iframe{height:60vh}}</style></head><body>
-<header><h1>%s</h1><p>From %s · For %s · Expires %s</p></header><main class="layout"><iframe src="./%s/document%s" title="Document"></iframe><section class="panel">%s<h2>Your fields</h2><form method="post" action="./%s/complete%s">%s%s<label class="check"><input type="checkbox" name="consent" required> I consent to use an electronic signature and confirm that the information I submit is accurate.</label><div class="actions"><button class="primary" type="submit">%s</button></div></form><form method="post" action="./%s/decline%s"><label>Reason (optional)<input type="text" name="reason" maxlength="1000"></label><button class="decline" type="submit">Decline</button></form></section></main></body></html>`,
+<style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f6f8;color:#172033}header{padding:18px 24px;background:#fff;border-bottom:1px solid #dde1e7}header h1{font-size:18px;margin:0 0 4px}header p{margin:0;color:#667085;font-size:13px}.layout{display:grid;grid-template-columns:minmax(0,1fr)360px;gap:16px;padding:16px;height:calc(100vh - 86px);box-sizing:border-box}iframe{width:100%%;height:100%%;border:1px solid #d0d5dd;border-radius:10px;background:#fff}.docwrap{overflow:auto;border:1px solid #d0d5dd;border-radius:10px;background:#e9edf2;padding:14px}.docwrap noscript iframe{height:75vh}.pdfpage{position:relative;margin:0 auto 14px;box-shadow:0 2px 10px #10182821;background:#fff}.pdfpage canvas{display:block;width:100%%;height:100%%}.fieldbox{position:absolute;border:2px solid #2457d6;background:#2457d61a;border-radius:4px;cursor:pointer;display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:12px;color:#1d4ed8;font-weight:600;transition:box-shadow .15s}.fieldbox.done{border-color:#12805c;background:#12805c14;color:#0f6e4f}.fieldbox.focus{box-shadow:0 0 0 3px #2457d64d}.fieldbox img{max-width:100%%;max-height:100%%}.fieldbox .sigtext{font-family:"Snell Roundhand","Segoe Script",cursive;font-size:16px}.panel{background:#fff;border:1px solid #d0d5dd;border-radius:10px;padding:18px;overflow:auto}.panel h2{font-size:15px;margin:0 0 14px}label{display:block;font-size:12px;color:#475467;margin:0 0 12px;text-transform:capitalize}input[type=text]{box-sizing:border-box;width:100%%;margin-top:5px;padding:10px;border:1px solid #c8ced8;border-radius:7px;font-size:14px}.check{display:flex;align-items:flex-start;gap:8px;text-transform:none;line-height:1.4}.check input{margin-top:2px}.actions{display:grid;gap:8px;margin-top:16px}button{border:0;border-radius:7px;padding:11px;font-weight:600;cursor:pointer}.primary{background:#2457d6;color:#fff}.decline{background:#fff;color:#b42318;border:1px solid #f0b4ad}.message{padding:10px;background:#f8fafc;border-radius:7px;font-size:13px;color:#475467;margin-bottom:14px}.sigtabs{display:flex;gap:6px;margin:5px 0 6px}.sigtabs button{padding:5px 12px;font-size:12px;font-weight:600;border:1px solid #c8ced8;background:#fff;color:#475467;border-radius:6px}.sigtabs button.on{background:#2457d6;color:#fff;border-color:#2457d6}.sigpad{width:100%%;border:1px dashed #94a3b8;border-radius:7px;background:#fff;touch-action:none;display:block}.sigpadrow{display:flex;justify-content:space-between;align-items:center;margin-top:4px}.sigpadrow button{padding:4px 10px;font-size:11px;border:1px solid #c8ced8;background:#fff;color:#475467;border-radius:6px}.hint{font-size:11px;color:#94a3b8;margin-top:3px;text-transform:none}@media(max-width:850px){.layout{grid-template-columns:1fr;height:auto}.docwrap{max-height:65vh}}</style></head><body>
+<header><h1>%s</h1><p>From %s · For %s · Expires %s</p></header><main class="layout"><div class="docwrap" id="doc"><noscript><iframe src="./%s/document%s" title="Document"></iframe></noscript></div><section class="panel">%s<h2>Your fields</h2><form method="post" action="./%s/complete%s" id="signform">%s%s<label class="check"><input type="checkbox" name="consent" required> I consent to use an electronic signature and confirm that the information I submit is accurate.</label><div class="actions"><button class="primary" type="submit">%s</button></div></form><form method="post" action="./%s/decline%s"><label>Reason (optional)<input type="text" name="reason" maxlength="1000"></label><button class="decline" type="submit">Decline</button></form></section></main>
+<script type="application/json" id="signing-data">%s</script>
+<script type="module" src="./assets/sign.js%s"></script></body></html>`,
 		html.EscapeString(session.Envelope.Title), html.EscapeString(session.Envelope.Title), html.EscapeString(session.Envelope.SenderName), html.EscapeString(session.Recipient.Name), html.EscapeString(session.Envelope.ExpiresAt), token, q,
-		optionalMessage(session.Envelope.Message), token, q, legalName, fields.String(), actionLabel, token, q)
+		optionalMessage(session.Envelope.Message), token, q, legalName, fields.String(), actionLabel, token, q, payloadJSON, q)
 }
 
 func optionalMessage(message string) string {

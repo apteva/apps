@@ -2,14 +2,23 @@
 
 Simple electronic signatures for PDFs stored in Apteva Storage.
 
-## What v0.1 does
+## What v0.2 does
 
-- Creates one-document envelopes from a Storage `file_id`.
+- Creates one-document envelopes from a Storage PDF — picked or uploaded
+  straight from the dashboard panel.
 - Supports ordered signers and approvers.
+- Visual field placement: the panel renders the PDF (vendored pdf.js) and
+  fields are dragged/resized on the page; coordinates stay normalized 0–1.
+- The signing page renders the document with each recipient's field boxes
+  overlaid at their real positions; typed values preview live in the box.
+- Signature fields offer Type or Draw; drawn signatures submit as PNG data
+  URLs and are stamped as images into the completed PDF.
 - Places typed signature, initials, date, text, and checkbox values on the PDF.
-- Activates secure, recipient-specific signing links.
+- Activates secure, recipient-specific signing links (`?project_id=` is part
+  of the link — anonymous no_auth routing resolves the install from it).
 - Sends invitations and reminders when the optional Messaging app is bound.
-- Saves the completed PDF and JSON audit summary back to Storage.
+- Saves the completed PDF and JSON audit summary back to Storage; drawn
+  signatures are recorded in the audit JSON as their SHA-256, not raw bytes.
 - Preserves source and completed SHA-256 hashes and an append-only audit trail.
 
 Storage is the only required app. Messaging is optional. Manual mode returns a

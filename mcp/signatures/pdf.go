@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +36,14 @@ func renderCompletedPDF(source []byte, env *Envelope, recipients []Recipient, va
 		dim := dims[value.Page-1]
 		x := value.X * dim.Width
 		y := (1 - value.Y - value.Height) * dim.Height
+		if img, ok := drawnSignatureImage(value.ValueText); ok {
+			wm, err := imageFieldWatermark(img, value.Width*dim.Width, value.Height*dim.Height, x, y)
+			if err != nil {
+				return nil, fmt.Errorf("prepare drawn field %d: %w", value.ID, err)
+			}
+			watermarks[value.Page] = append(watermarks[value.Page], wm)
+			continue
+		}
 		fontSize := value.Height * dim.Height * 0.55
 		if fontSize < 8 {
 			fontSize = 8
@@ -96,6 +106,60 @@ func renderCompletedPDF(source []byte, env *Envelope, recipients []Recipient, va
 		return nil, err
 	}
 	return out, nil
+}
+
+const drawnSignaturePrefix = "data:image/png;base64,"
+
+// maxDrawnSignatureBytes bounds the decoded PNG a signer may submit.
+const maxDrawnSignatureBytes = 512 * 1024
+
+// drawnSignatureImage decodes a signing-pad value. Only PNG data URLs
+// produced by the signing page's draw pad qualify; anything else is
+// treated as typed text.
+func drawnSignatureImage(value string) ([]byte, bool) {
+	if !strings.HasPrefix(value, drawnSignaturePrefix) {
+		return nil, false
+	}
+	raw, err := base64.StdEncoding.DecodeString(value[len(drawnSignaturePrefix):])
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+// validateDrawnSignature vets a submitted draw-pad value: bounded size
+// and an actually decodable PNG header.
+func validateDrawnSignature(value string) error {
+	raw, ok := drawnSignatureImage(value)
+	if !ok {
+		return errors.New("drawn signature must be a PNG data URL")
+	}
+	if len(raw) > maxDrawnSignatureBytes {
+		return fmt.Errorf("drawn signature exceeds %d bytes", maxDrawnSignatureBytes)
+	}
+	if _, err := png.DecodeConfig(bytes.NewReader(raw)); err != nil {
+		return fmt.Errorf("drawn signature is not a valid PNG: %w", err)
+	}
+	return nil
+}
+
+// imageFieldWatermark stamps a drawn signature PNG into its field box:
+// scaled to fit (abs scale = points per image pixel), anchored at the
+// box's bottom-left like the text stamps.
+func imageFieldWatermark(img []byte, boxW, boxH, x, y float64) (*model.Watermark, error) {
+	cfg, err := png.DecodeConfig(bytes.NewReader(img))
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Width < 1 || cfg.Height < 1 {
+		return nil, errors.New("empty signature image")
+	}
+	scale := boxW / float64(cfg.Width)
+	if h := boxH / float64(cfg.Height); h < scale {
+		scale = h
+	}
+	desc := fmt.Sprintf("pos:bl, off:%.2f %.2f, scale:%.5f abs, rot:0", x, y, scale)
+	return api.ImageWatermarkForReader(bytes.NewReader(img), desc, true, false, types.POINTS)
 }
 
 func completionCertificate(env *Envelope, recipients []Recipient) ([]byte, error) {
@@ -187,11 +251,21 @@ func finalizeEnvelope(ctx *sdk.AppCtx, env *Envelope) (*Envelope, error) {
 	evidenceEnvelope.Status = "completed"
 	evidenceEnvelope.CompletedAt = nowUTC()
 	evidenceEnvelope.CompletedSHA256 = completedHash
+	// Drawn signatures are large PNG data URLs; the evidence JSON
+	// records their hash instead of megabytes of base64. The image
+	// itself is preserved inside the completed PDF.
+	auditValues := make([]completionValue, len(values))
+	copy(auditValues, values)
+	for i := range auditValues {
+		if raw, ok := drawnSignatureImage(auditValues[i].ValueText); ok {
+			auditValues[i].ValueText = "drawn-signature-png sha256:" + bytesHash(raw)
+		}
+	}
 	auditBody, err := json.MarshalIndent(map[string]any{
 		"schema":                   "apteva-signatures-evidence/v1",
 		"envelope":                 &evidenceEnvelope,
 		"recipients":               recipients,
-		"field_values":             values,
+		"field_values":             auditValues,
 		"events":                   audit,
 		"completed_sha256":         completedHash,
 		"generated_at":             nowUTC(),
