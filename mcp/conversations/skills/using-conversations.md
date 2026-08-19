@@ -26,16 +26,37 @@ answer. When showing a specific supported entity, attach the matching
 component card in the SAME send call as the text — never a second
 component-only message.
 
-## The inbox — one global output surface
+## Where inbox items live: list, reuse, create
 
-Alerts, reports, and status are the agent's single operator-output
-surface, owned by the main thread. Worker threads report results back
-to main; main decides what becomes a global alert, report, or status.
-The exception is approvals: request one from the thread that owns the
-gated work, because the verdict returns to the asking thread.
+Every alert, report, and approval needs a `conversation_id` — there is
+no default bucket. The flow:
 
-For background work with no chat open, omit `conversation_id` and the
-item lands in your own activity conversation, ringing the inbox:
+1. **Reuse first.** If the item belongs to work an existing
+   conversation asked for, use that conversation's id. Otherwise
+   search your own conversations: `conversations_list` with `query`
+   ("reports", "infra").
+2. **Create deliberately.** No fit? `conversations_create` with a
+   short, stable topic title: "Reports", "Infra monitoring", an
+   incident name like "Certificate renewal — shop.example.com".
+   Creation is title-idempotent: the same title always returns the
+   same conversation, so reusing a title is safe and correct.
+3. **Titles name ongoing topics, never events.** Do not put
+   timestamps, ids, counters, or per-item detail in a title —
+   "Alert 2026-08-19" creates junk; "Infra monitoring" accumulates a
+   history. One topic, one conversation, forever.
+
+Keep one standing "Reports" conversation for periodic reports.
+Incidents get their own named conversation so the operator can reply
+into it and the dialogue stays on-topic.
+
+## The inbox kinds — one global output surface
+
+Alerts and reports are the agent's single operator-output surface,
+owned by the main thread: worker threads report results back to main,
+and main decides what becomes a global alert or report. The exception
+is approvals — request one from the thread that owns the gated work,
+because the verdict returns to the asking thread. (Agent status lives
+in the status app, not here.)
 
 - `conversations_alert` — a genuinely urgent or materially important
   problem: what broke, its impact, the next action. Severity honestly:
@@ -48,14 +69,6 @@ item lands in your own activity conversation, ringing the inbox:
   timing; otherwise at most one unsolicited report per day, and only
   when meaningful work occurred. Reports are inbox-only and never
   clutter the transcript.
-- `conversations_set_status` — the agent's compact mutable summary.
-  Latest wins; it never appears in chat. Use it for work that is
-  multi-step, long-running, or blocked — at meaningful phase changes,
-  at most once per phase. Name the work unit, not the wait: "Customer
-  update publication", not "Waiting for approval". Skip status for
-  brief answers, read-only lookups, retries, planning, or merely
-  sleeping until the next cycle — but a due recurring monitor cycle
-  ends with exactly one completed status even when nothing changed.
 - `conversations_request_approval` — only when work cannot continue
   without a human decision: state the exact decision, why, and the
   consequence of approving or denying.

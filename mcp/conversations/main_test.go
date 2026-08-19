@@ -619,44 +619,6 @@ func TestPendingApprovalsCannotBeDismissed(t *testing.T) {
 	}
 }
 
-func TestCurrentStatusesLatestPerAgent(t *testing.T) {
-	app, ctx, _ := newTestEnv(t)
-	conv41 := mkConversation(t, app, 41)
-	conv42 := mkConversation(t, app, 42)
-
-	for _, status := range []struct {
-		ctx  context.Context
-		conv *Conversation
-		text string
-	}{
-		{callerCtx(41, ""), conv41, "researching"},
-		{callerCtx(42, ""), conv42, "idle"},
-		{callerCtx(41, ""), conv41, "writing the report"},
-	} {
-		if _, err := app.toolSetStatus(status.ctx, ctx, map[string]any{
-			"conversation_id": status.conv.ID, "text": status.text,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	statuses, err := app.store.CurrentStatuses()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(statuses) != 2 {
-		t.Fatalf("statuses = %d, want one per agent", len(statuses))
-	}
-	byAgent := map[int64]string{}
-	for _, s := range statuses {
-		byAgent[s.AgentID] = s.Message.Content
-	}
-	// Latest wins — agent 41's earlier "researching" is history.
-	if byAgent[41] != "writing the report" || byAgent[42] != "idle" {
-		t.Fatalf("statuses = %v", byAgent)
-	}
-}
-
 func TestInboxItemsBroadcastToEveryUserScope(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
 
@@ -697,55 +659,68 @@ func TestInboxItemsBroadcastToEveryUserScope(t *testing.T) {
 
 // ─── agent system conversations (inbox without an open chat) ─────────
 
-// TestAlertWithoutConversationAutoCreatesSystemConversation covers the
-// background-work case: an agent with NO open conversation raises an
-// alert and it must land in the inbox anyway, in a find-or-create
-// per-agent activity conversation — the agent-side mirror of
-// inbox_post's per-app conversations.
-func TestAlertWithoutConversationAutoCreatesSystemConversation(t *testing.T) {
+// The 0.5.0 contract: no hidden fallback bucket. Background items
+// require an explicit conversation; the agent lists (with query) or
+// creates one, and create is title-idempotent so stable titles
+// converge instead of sprawling.
+func TestCreateListAlertFlow(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
+	from := callerCtx(41, "worker-3")
 
-	out, err := app.toolAlert(callerCtx(41, "worker-3"), ctx, map[string]any{
+	// Omitting the conversation is an error that teaches the flow.
+	if _, err := app.toolAlert(from, ctx, map[string]any{
 		"text": "disk almost full", "severity": "warn",
+	}); err == nil || !strings.Contains(err.Error(), "conversations_create") {
+		t.Fatalf("err = %v, want teaching error", err)
+	}
+
+	// Create a topical conversation, then alert into it.
+	created, err := app.toolCreate(from, ctx, map[string]any{"title": "Infra monitoring"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	convID := created.(map[string]any)["conversation_id"].(string)
+	if created.(map[string]any)["created"] != true {
+		t.Fatal("first create should report created=true")
+	}
+	out, err := app.toolAlert(from, ctx, map[string]any{
+		"conversation_id": convID, "text": "disk almost full", "severity": "warn",
 	})
 	if err != nil {
-		t.Fatalf("alert without conversation: %v", err)
+		t.Fatalf("alert: %v", err)
 	}
 	messageID := out.(map[string]any)["message_id"].(int64)
-	msg, _ := app.store.GetMessage(messageID)
-
-	conv, err := app.store.GetConversation(msg.ConversationID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if conv.Origin != "agent" || conv.ConversationKey != "agent:41:system" {
-		t.Fatalf("conversation = %+v, want the agent's system conversation", conv)
-	}
-
 	items, _ := app.store.Inbox(50)
 	found := false
 	for _, item := range items {
 		found = found || item.Message.ID == messageID
 	}
 	if !found {
-		t.Fatal("background alert missing from inbox")
+		t.Fatal("alert missing from inbox")
 	}
 
-	// A second background item reuses the same conversation.
-	again, err := app.toolReport(callerCtx(41, ""), ctx, map[string]any{
-		"title": "Nightly", "summary": "done",
-	})
+	// Same title, different case, different thread: the same
+	// conversation comes back — the anti-sprawl guarantee.
+	again, err := app.toolCreate(callerCtx(41, "main"), ctx, map[string]any{"title": "infra MONITORING"})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("second create: %v", err)
 	}
-	second, _ := app.store.GetMessage(again.(map[string]any)["message_id"].(int64))
-	if second.ConversationID != conv.ID {
-		t.Fatal("second background item should reuse the system conversation")
+	if again.(map[string]any)["conversation_id"].(string) != convID ||
+		again.(map[string]any)["created"] != false {
+		t.Fatalf("second create = %+v, want reuse of %s", again, convID)
 	}
-	// No bogus pending delivery for the grouping key — it is not a
-	// transport address.
-	if _, err := app.store.DeliveryFor(messageID, conv.ConversationKey); err == nil {
-		t.Fatal("grouping key must not become a delivery target")
+
+	// list with query finds it; an unrelated query does not.
+	listed, err := app.toolList(from, ctx, map[string]any{"query": "infra"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	matches := listed.(map[string]any)["conversations"].([]Conversation)
+	if len(matches) != 1 || matches[0].ID != convID {
+		t.Fatalf("query match = %+v, want the monitoring conversation", matches)
+	}
+	if listed, _ = app.toolList(from, ctx, map[string]any{"query": "zzz-nope"}); len(listed.(map[string]any)["conversations"].([]Conversation)) != 0 {
+		t.Fatal("unrelated query must match nothing")
 	}
 }
 
@@ -754,8 +729,13 @@ func TestAlertWithoutConversationAutoCreatesSystemConversation(t *testing.T) {
 func TestBackgroundApprovalRoundTrip(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
 
+	created, err := app.toolCreate(callerCtx(41, "worker-9"), ctx, map[string]any{"title": "Credential rotation"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
 	out, err := app.toolRequestApproval(callerCtx(41, "worker-9"), ctx, map[string]any{
-		"title": "Rotate the credentials?",
+		"conversation_id": created.(map[string]any)["conversation_id"].(string),
+		"title":           "Rotate the credentials?",
 	})
 	if err != nil {
 		t.Fatalf("background approval: %v", err)
@@ -978,47 +958,16 @@ func TestAgentsEndpointServesDirectory(t *testing.T) {
 }
 
 // Observed live: main called inbox_post (its description read like
-// exactly what a background thread wants) and minted an
-// "Inbox: unknown-app" conversation with agent_id 0. Agent callers
-// must take the agent surface instead — the same routing as the
-// conversations_* tools.
-func TestInboxPostFromAgentRoutesToActivityConversation(t *testing.T) {
+// exactly what a background thread wants). With no fallback bucket in
+// 0.5.0 the call is refused with the flow spelled out.
+func TestInboxPostFromAgentIsRefused(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
-
-	out, err := app.toolInboxPost(callerCtx(576, "main"), ctx, map[string]any{
+	_, err := app.toolInboxPost(callerCtx(576, "main"), ctx, map[string]any{
 		"kind": "alert", "severity": "error",
 		"title": "Backup failed", "body": "rsync exit 23 on build-server",
 	})
-	if err != nil {
-		t.Fatalf("inbox_post as agent: %v", err)
-	}
-	messageID := out.(map[string]any)["message_id"].(int64)
-	msg, err := app.store.GetMessage(messageID)
-	if err != nil {
-		t.Fatalf("get message: %v", err)
-	}
-	if msg.AgentID != 576 || msg.Severity != "error" || msg.ComponentKind != kindAlert {
-		t.Fatalf("message = %+v, want agent-attributed error alert", msg)
-	}
-	conv, err := app.store.GetConversation(msg.ConversationID)
-	if err != nil {
-		t.Fatalf("get conversation: %v", err)
-	}
-	if conv.ConversationKey != agentSystemConversationKey(576) {
-		t.Fatalf("landed in %q (key %q), want the agent's activity conversation",
-			conv.ID, conv.ConversationKey)
-	}
-	// A second agent-raised item reuses the same conversation — no
-	// per-item conversation sprawl.
-	out2, err := app.toolInboxPost(callerCtx(576, "worker-1"), ctx, map[string]any{
-		"kind": "report", "title": "Weekly digest", "body": "3 deploys, 0 incidents",
-	})
-	if err != nil {
-		t.Fatalf("second inbox_post: %v", err)
-	}
-	msg2, _ := app.store.GetMessage(out2.(map[string]any)["message_id"].(int64))
-	if msg2.ConversationID != conv.ID {
-		t.Fatalf("report landed in %q, want reuse of %q", msg2.ConversationID, conv.ID)
+	if err == nil || !strings.Contains(err.Error(), "conversations_create") {
+		t.Fatalf("err = %v, want refusal teaching the agent tools", err)
 	}
 }
 

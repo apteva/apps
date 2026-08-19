@@ -290,31 +290,11 @@ func (a *App) toolInboxPost(ctx context.Context, app *sdk.AppCtx, args map[strin
 	}
 
 	// An AGENT that reaches for inbox_post (the gateway exposes every
-	// tool, and this one's description reads exactly like what a
-	// background thread wants) gets the agent surface: the same
-	// routing as the conversations_* tools, so the item lands in its
-	// activity conversation, correctly attributed — never in a
-	// per-app inbox under a made-up app name. Observed live: main
-	// raised an alert via inbox_post and minted "Inbox: unknown-app".
+	// tool) is refused with the flow spelled out — there is no
+	// fallback bucket to route into anymore, and silently picking a
+	// conversation for the agent would reintroduce one.
 	if caller != nil && caller.AgentID != 0 {
-		switch kind {
-		case kindAlert:
-			return a.toolAlert(ctx, app, map[string]any{
-				"text": body, "severity": stringArg(args, "severity"),
-			})
-		case kindReport:
-			return a.toolReport(ctx, app, map[string]any{
-				"title": title, "summary": body,
-			})
-		case kindApproval:
-			delegated := map[string]any{"title": title, "body": body}
-			if actions, ok := args["actions"]; ok {
-				delegated["actions"] = actions
-			}
-			return a.toolRequestApproval(ctx, app, delegated)
-		default:
-			return nil, fmt.Errorf("invalid kind %q (report|alert|approval)", kind)
-		}
+		return nil, errors.New("inbox_post is the sibling-app surface — agents raise items with conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one)")
 	}
 
 	// App callers arrive without an agent id; the posting app
@@ -416,74 +396,6 @@ func (a *App) DismissMessage(messageID int64) (*Message, error) {
 	return a.store.UpdateMessageComponents(m.ID, updated)
 }
 
-// ─── current statuses ────────────────────────────────────────────────
-
-type CurrentStatus struct {
-	AgentID int64   `json:"agent_id"`
-	Message Message `json:"message"`
-}
-
-// CurrentStatuses returns the latest status line per agent — the strip
-// the dashboard shows. Latest wins; older status rows stay in the table
-// as history but never surface here.
-func (s *store) CurrentStatuses() ([]CurrentStatus, error) {
-	rows, err := s.db.Query(`
-		SELECT ` + messageCols + ` FROM messages
-		WHERE component_kind = 'status' AND id IN (
-			SELECT MAX(id) FROM messages WHERE component_kind = 'status' GROUP BY agent_id
-		)
-		ORDER BY agent_id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []CurrentStatus{}
-	for rows.Next() {
-		m, err := scanMessage(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, CurrentStatus{AgentID: m.AgentID, Message: *m})
-	}
-	return out, rows.Err()
-}
-
-// ─── agent system conversations ──────────────────────────────────────
-
-// agentSystemConversationKey names the per-agent system conversation
-// that receives inbox items raised OUTSIDE any open conversation — an
-// alert from a worker thread, a report from a schedule, an approval
-// from background work. Find-or-create keyed, exactly like inbox_post's
-// per-app conversations, so every agent has at most one.
-func agentSystemConversationKey(agentID int64) string {
-	return fmt.Sprintf("agent:%d:system", agentID)
-}
-
-// ensureAgentSystemConversation returns the calling agent's system
-// conversation, creating it on first use.
-func (a *App) ensureAgentSystemConversation(app *sdk.AppCtx, from *callIdentity) (*Conversation, error) {
-	title := "Agent activity"
-	if name := a.agentName(app, from.AgentID); name != "" {
-		title = name + " — activity"
-	}
-	return a.store.CreateConversation(CreateConversationInput{
-		ProjectID:       from.ProjectID,
-		LeadAgentID:     from.AgentID,
-		Title:           title,
-		Origin:          "agent",
-		ConversationKey: agentSystemConversationKey(from.AgentID),
-	})
-}
-
-// resolveInboxConversation is the shared entry for the inbox-kind tools
-// (alert/report/status/approval): an explicit conversation_id must pass
-// the participant check; an omitted one auto-targets the agent's system
-// conversation. conversations_send deliberately does NOT get this — a
-// chat message with no conversation has no audience, which means the
-// agent wanted an alert or a report, not a send.
-func (a *App) resolveInboxConversation(app *sdk.AppCtx, from *callIdentity, conversationID string) (*Conversation, error) {
-	if strings.TrimSpace(conversationID) != "" {
-		return a.requireParticipant(from, conversationID)
-	}
-	return a.ensureAgentSystemConversation(app, from)
-}
+// Agent status left this app in 0.5.0 — one status per agent is the
+// status app's domain. Legacy 'status'-kind message rows remain inert
+// history; nothing writes or queries them anymore.

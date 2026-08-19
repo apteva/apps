@@ -118,11 +118,6 @@ interface UnreadEntry {
   unread: number;
 }
 
-interface CurrentStatus {
-  agent_id: number;
-  message: Message;
-}
-
 interface AgentInfo {
   id: number;
   name: string;
@@ -1562,17 +1557,12 @@ function InboxTab({
   onOpenConversation: (conversationID: string) => void;
 }) {
   const [items, setItems] = useState<InboxItem[]>([]);
-  const [statuses, setStatuses] = useState<CurrentStatus[]>([]);
   const [note, setNote] = useState("");
 
   const load = useCallback(async () => {
     try {
-      const [inbox, current] = await Promise.all([
-        apiGet<InboxItem[]>("/inbox?limit=100"),
-        apiGet<CurrentStatus[]>("/current-statuses"),
-      ]);
+      const inbox = await apiGet<InboxItem[]>("/inbox?limit=100");
       setItems(inbox);
-      setStatuses(current);
       setNote(`${inbox.length} item${inbox.length === 1 ? "" : "s"}`);
     } catch (err) {
       setNote(err instanceof Error ? err.message : String(err));
@@ -1601,19 +1591,6 @@ function InboxTab({
 
   return (
     <div className="flex-1 min-h-0 flex flex-col">
-      {statuses.length > 0 && (
-        <div className="shrink-0 border-b border-border px-4 py-2 flex flex-wrap gap-2">
-          {statuses.map((s) => (
-            <span
-              key={s.agent_id}
-              className="text-xs px-2 py-1 rounded bg-bg-card border border-border text-text-muted"
-              title={`agent ${s.agent_id}`}
-            >
-              {s.message.content}
-            </span>
-          ))}
-        </div>
-      )}
       <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-3">
         {items.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">

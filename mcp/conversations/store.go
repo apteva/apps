@@ -217,6 +217,26 @@ func (s *store) ListConversationsForUser(userID int64, limit int) ([]Conversatio
 	return out, rows.Err()
 }
 
+// FindAgentConversationByTitle backs conversations_create's title
+// idempotency: an exact (case-insensitive) title match among the
+// agent's unarchived conversations, newest activity first. Nil when
+// none matches — that is not an error.
+func (s *store) FindAgentConversationByTitle(agentID int64, title string) (*Conversation, error) {
+	c, err := scanConversation(s.db.QueryRow(`
+		SELECT DISTINCT `+prefixCols("c.", conversationCols)+`
+		FROM conversations c
+		JOIN participants p ON p.conversation_id = c.id
+		WHERE c.archived_at IS NULL AND p.agent_id = ? AND lower(c.title) = lower(?)
+		ORDER BY c.updated_at DESC LIMIT 1`, agentID, title))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
 func (s *store) IsParticipantAgent(conversationID string, agentID int64) (bool, error) {
 	var one int
 	err := s.db.QueryRow(`

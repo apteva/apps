@@ -33,7 +33,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.4.3
+version: 0.5.0
 description: |
   One conversation system: internal dashboard chat, the inbox
   (approvals, reports, alerts, status), and external channels as
@@ -82,14 +82,14 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: conversations_send,             description: "Send a message into a conversation. Args: conversation_id, text, components?. The calling agent must be a participant; delivery fans out to every bound surface (dashboard SSE, external channels)." }
-    - { name: conversations_request_approval, description: "Ask the operator to approve something. Args: title, body?, conversation_id? (omit to use your own activity conversation), actions? (default Approve/Deny). Renders as an actionable card in the conversation AND the inbox; the verdict comes back to this agent as an approval.result event." }
-    - { name: conversations_report,           description: "File a report. Args: title, summary, period?, sections?, conversation_id? (omit to use your own activity conversation). Inbox-only: never shown in the chat transcript." }
-    - { name: conversations_alert,            description: "Raise an alert. Args: text, severity? (info|warn|error, default info), conversation_id? (omit to use your own activity conversation). Shown in the inbox, severity-ranked." }
-    - { name: conversations_set_status,       description: "Set this agent's current status line. Args: text, conversation_id? (omit to use your own activity conversation). Latest status wins; shown in the inbox status strip." }
-    - { name: conversations_list,             description: "List conversations this agent participates in. Args: limit?." }
+    - { name: conversations_send,             description: "Send a message into a conversation. Args: conversation_id, text, components?. The calling agent must be a participant; delivery fans out to every bound surface (dashboard SSE, external channels). Never creates conversations." }
+    - { name: conversations_request_approval, description: "Ask the operator to approve something. Args: conversation_id (required - list or create a conversation first), title, body?, actions? (default Approve/Deny). Renders as an actionable card in the conversation AND the inbox; the verdict comes back to this agent as an approval.result event." }
+    - { name: conversations_report,           description: "File a report. Args: conversation_id (required - keep one standing conversation such as Reports and reuse it), title, summary, period?, sections?. Inbox-only: never shown in the chat transcript." }
+    - { name: conversations_alert,            description: "Raise an alert. Args: conversation_id (required - reuse the conversation the problem belongs to, or create a topical one), text, severity? (info|warn|error, default info). Shown in the inbox, severity-ranked." }
+    - { name: conversations_create,           description: "Create a conversation led by this agent for an ongoing topic. Args: title. Title-idempotent per agent: an existing conversation with the same title is returned with created=false. Titles name ongoing topics - never put timestamps, ids, or per-item detail in them." }
+    - { name: conversations_list,             description: "List conversations this agent participates in. Args: limit?, query? (case-insensitive title filter - search before creating)." }
     - { name: conversations_history,          description: "Read a conversation's transcript (inbox-only rows excluded). Args: conversation_id, since_id?, limit?." }
-    - { name: inbox_post,                     description: "INTERNAL - sibling-app entry point via CallAppResult; agents must use conversations_alert / conversations_report / conversations_request_approval instead (agent calls are auto-routed there). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
+    - { name: inbox_post,                     description: "INTERNAL - sibling-app entry point via CallAppResult; agent calls are refused. Agents use conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
   ui_panels:
     - slot: project.page
       label: Conversations
@@ -101,10 +101,11 @@ provides:
       command: /conversations
       body_file: skills/using-conversations.md
       description: |
-        Reply discipline (acknowledge, work, one final outcome), the
-        four inbox kinds and their cadence, main-thread output
-        ownership, the approval round-trip, status rules, and room
-        etiquette. Load before messaging people or raising inbox items.
+        Reply discipline (acknowledge, work, one final outcome), where
+        inbox items live (list, reuse, create with stable topic
+        titles), alert/report cadence, main-thread output ownership,
+        the approval round-trip, and room etiquette. Load before
+        messaging people or raising inbox items.
       metadata:
         category: communication
         icon: message-circle
@@ -193,50 +194,60 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "conversations_request_approval",
-			Description: "Ask the operator to approve something. The card is actionable in the conversation, the " +
-				"inbox, and any bound external channel; the verdict returns to you as an approval.result event.",
+			Description: "Ask the operator to approve something. Requires conversation_id — find one with " +
+				"conversations_list or create one with conversations_create. The card is actionable in the " +
+				"conversation, the inbox, and any bound external channel; the verdict returns to you as an " +
+				"approval.result event.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"title":           map[string]any{"type": "string"},
 				"body":            map[string]any{"type": "string"},
-			}, []string{"title"}),
+			}, []string{"conversation_id", "title"}),
 			HandlerCtx: a.toolRequestApproval,
 		},
 		{
-			Name:        "conversations_report",
-			Description: "File a report. Inbox-only: shown in the inbox, never in the chat transcript.",
+			Name: "conversations_report",
+			Description: "File a report. Requires conversation_id — keep one standing conversation (e.g. " +
+				"\"Reports\") via conversations_create and reuse it. Inbox-only: shown in the inbox, never in " +
+				"the chat transcript.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"title":           map[string]any{"type": "string"},
 				"summary":         map[string]any{"type": "string"},
 				"period":          map[string]any{"type": "string"},
-			}, []string{"title", "summary"}),
+			}, []string{"conversation_id", "title", "summary"}),
 			HandlerCtx: a.toolReport,
 		},
 		{
-			Name:        "conversations_alert",
-			Description: "Raise an alert (info|warn|error). Severity-ranked in the inbox.",
+			Name: "conversations_alert",
+			Description: "Raise an alert (info|warn|error), severity-ranked in the inbox. Requires " +
+				"conversation_id — reuse the conversation the problem belongs to (conversations_list) or " +
+				"create a topical one (conversations_create).",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"text":            map[string]any{"type": "string"},
 				"severity":        map[string]any{"type": "string", "enum": []string{"info", "warn", "error"}},
-			}, []string{"text"}),
+			}, []string{"conversation_id", "text"}),
 			HandlerCtx: a.toolAlert,
 		},
 		{
-			Name:        "conversations_set_status",
-			Description: "Set this agent's current status line. Latest wins.",
+			Name: "conversations_create",
+			Description: "Create a conversation you lead, for an ongoing topic (\"Reports\", " +
+				"\"Infra monitoring\", an incident name). Title-idempotent: if you already have a conversation " +
+				"with this title it is returned with created=false, so reusing a stable title never duplicates. " +
+				"Titles name ongoing topics — never put timestamps, ids, or per-item detail in them.",
 			InputSchema: schemaObject(map[string]any{
-				"conversation_id": map[string]any{"type": "string"},
-				"text":            map[string]any{"type": "string"},
-			}, []string{"text"}),
-			HandlerCtx: a.toolSetStatus,
+				"title": map[string]any{"type": "string"},
+			}, []string{"title"}),
+			HandlerCtx: a.toolCreate,
 		},
 		{
-			Name:        "conversations_list",
-			Description: "List conversations this agent participates in.",
+			Name: "conversations_list",
+			Description: "List conversations this agent participates in. Pass query to filter by title " +
+				"(case-insensitive substring) — search before creating.",
 			InputSchema: schemaObject(map[string]any{
 				"limit": map[string]any{"type": "integer"},
+				"query": map[string]any{"type": "string"},
 			}, nil),
 			HandlerCtx: a.toolList,
 		},
@@ -252,9 +263,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "inbox_post",
-			Description: "INTERNAL sibling-app entry point (CallAppResult) — not for agents. Agents raise items with " +
-				"conversations_alert, conversations_report, or conversations_request_approval; agent calls to this " +
-				"tool are auto-routed there. With callback_tool set, inbox actions call back into the posting app.",
+			Description: "INTERNAL sibling-app entry point (CallAppResult) — not for agents; agent calls are " +
+				"refused. Agents raise items with conversations_alert, conversations_report, or " +
+				"conversations_request_approval into a conversation (conversations_list to find one, " +
+				"conversations_create to make one). With callback_tool set, inbox actions call back into the " +
+				"posting app.",
 			InputSchema: schemaObject(map[string]any{
 				"kind":          map[string]any{"type": "string", "enum": []string{"report", "alert", "approval"}},
 				"title":         map[string]any{"type": "string"},
@@ -285,6 +298,17 @@ func requireAgentCaller(ctx context.Context) (*callIdentity, error) {
 		return nil, errors.New("caller identity required: this tool must be called by an agent")
 	}
 	return &callIdentity{AgentID: caller.AgentID, ThreadID: caller.ThreadID, ProjectID: caller.ProjectID}, nil
+}
+
+// requireConversationArg reads the mandatory conversation_id. The
+// item tools have no fallback bucket — an agent must say where the
+// item lives, and the error teaches the flow when it doesn't.
+func (a *App) requireConversationArg(from *callIdentity, args map[string]any) (*Conversation, error) {
+	conversationID := strings.TrimSpace(stringArg(args, "conversation_id"))
+	if conversationID == "" {
+		return nil, errors.New("conversation_id required — find a conversation with conversations_list (query filters by title) or create a topical one with conversations_create")
+	}
+	return a.requireParticipant(from, conversationID)
 }
 
 // requireParticipant loads the conversation and verifies the calling
@@ -338,7 +362,6 @@ func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map
 	if err != nil {
 		return nil, err
 	}
-	conversationID, _ := args["conversation_id"].(string)
 	title := strings.TrimSpace(stringArg(args, "title"))
 	body := strings.TrimSpace(stringArg(args, "body"))
 	if title == "" {
@@ -347,7 +370,7 @@ func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map
 	if body == "" {
 		body = title
 	}
-	conv, err := a.resolveInboxConversation(app, from, conversationID)
+	conv, err := a.requireConversationArg(from, args)
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +393,7 @@ func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if err != nil {
 		return nil, err
 	}
-	conv, err := a.resolveInboxConversation(app, from, stringArg(args, "conversation_id"))
+	conv, err := a.requireConversationArg(from, args)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +421,7 @@ func (a *App) toolAlert(ctx context.Context, app *sdk.AppCtx, args map[string]an
 	if err != nil {
 		return nil, err
 	}
-	conv, err := a.resolveInboxConversation(app, from, stringArg(args, "conversation_id"))
+	conv, err := a.requireConversationArg(from, args)
 	if err != nil {
 		return nil, err
 	}
@@ -427,30 +450,35 @@ func (a *App) toolAlert(ctx context.Context, app *sdk.AppCtx, args map[string]an
 	return map[string]any{"message_id": msg.ID}, nil
 }
 
-func (a *App) toolSetStatus(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+// toolCreate is the deliberate conversation-creation surface — the
+// replacement for the removed hardcoded activity bucket. It is
+// title-idempotent per agent so the laziest calling pattern
+// (create("Reports") before every report) converges on one
+// conversation instead of sprawling.
+func (a *App) toolCreate(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
 	from, err := requireAgentCaller(ctx)
 	if err != nil {
 		return nil, err
 	}
-	conv, err := a.resolveInboxConversation(app, from, stringArg(args, "conversation_id"))
-	if err != nil {
+	title := strings.TrimSpace(stringArg(args, "title"))
+	if title == "" {
+		return nil, errors.New("title required")
+	}
+	if existing, err := a.store.FindAgentConversationByTitle(from.AgentID, title); err != nil {
 		return nil, err
+	} else if existing != nil {
+		return map[string]any{"conversation_id": existing.ID, "title": existing.Title, "created": false}, nil
 	}
-	text := strings.TrimSpace(stringArg(args, "text"))
-	if text == "" {
-		return nil, errors.New("text required")
-	}
-	msg, err := a.store.AppendMessage(&Message{
-		ConversationID: conv.ID, Role: "agent", Content: text,
-		AgentID: from.AgentID, ThreadID: from.ThreadID,
-		ComponentKind: kindStatus, InboxOnly: true,
-		Components: []Component{{App: appName, Name: "status-card", Props: map[string]any{"text": text}}},
+	conv, err := a.store.CreateConversation(CreateConversationInput{
+		ProjectID:   from.ProjectID,
+		LeadAgentID: from.AgentID,
+		Title:       title,
+		Origin:      "agent",
 	})
 	if err != nil {
 		return nil, err
 	}
-	a.deliver(app, conv, msg)
-	return map[string]any{"message_id": msg.ID}, nil
+	return map[string]any{"conversation_id": conv.ID, "title": conv.Title, "created": true}, nil
 }
 
 func (a *App) toolList(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -462,6 +490,15 @@ func (a *App) toolList(ctx context.Context, _ *sdk.AppCtx, args map[string]any) 
 	conversations, err := a.store.ListConversationsForAgent(from.AgentID, limit)
 	if err != nil {
 		return nil, err
+	}
+	if query := strings.ToLower(strings.TrimSpace(stringArg(args, "query"))); query != "" {
+		filtered := conversations[:0]
+		for _, c := range conversations {
+			if strings.Contains(strings.ToLower(c.Title), query) {
+				filtered = append(filtered, c)
+			}
+		}
+		conversations = filtered
 	}
 	return map[string]any{"conversations": conversations}, nil
 }

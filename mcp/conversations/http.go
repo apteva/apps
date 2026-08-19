@@ -27,7 +27,6 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/inbox", Handler: a.handleInbox},
 		{Method: "POST", Pattern: "/message-action", Handler: a.handleMessageAction},
 		{Method: "POST", Pattern: "/message-dismiss", Handler: a.handleMessageDismiss},
-		{Method: "GET", Pattern: "/current-statuses", Handler: a.handleCurrentStatuses},
 		{Method: "POST", Pattern: "/seen", Handler: a.handleSeen},
 		{Method: "GET", Pattern: "/unread-summary", Handler: a.handleUnreadSummary},
 		{Pattern: "/pairing", Handler: a.handlePairing},
@@ -534,15 +533,6 @@ func (a *App) handleMessageDismiss(w http.ResponseWriter, r *http.Request) {
 		a.deliver(a.appCtx(r), conv, updated)
 	}
 	writeJSON(w, map[string]any{"message": updated, "dismissed": true})
-}
-
-func (a *App) handleCurrentStatuses(w http.ResponseWriter, r *http.Request) {
-	statuses, err := a.store.CurrentStatuses()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, statuses)
 }
 
 func (a *App) handleSeen(w http.ResponseWriter, r *http.Request) {
