@@ -203,9 +203,13 @@ async function boot(payload) {
     clearBtn.textContent = "Clear";
     padRow.append(hint, clearBtn);
 
-    input.insertAdjacentElement("afterend", pad);
-    pad.insertAdjacentElement("afterend", padRow);
-    input.insertAdjacentElement("beforebegin", tabs);
+    // The whole control must live OUTSIDE the <label>: a label forwards
+    // clicks to its first labelable descendant, and with buttons inside
+    // that descendant became the Type button — so tapping Draw (or the
+    // pad itself) immediately snapped the control back to Type.
+    const wrap = document.createElement("div");
+    label.insertAdjacentElement("afterend", wrap);
+    wrap.append(tabs, input, pad, padRow);
 
     const ctx = pad.getContext("2d");
     let drawing = false;
