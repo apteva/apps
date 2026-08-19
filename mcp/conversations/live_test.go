@@ -346,3 +346,97 @@ func TestLive_CodexReportFlow(t *testing.T) {
 	}
 	t.Logf("report visible in inbox and transcript (%s)", item.Message.ConversationID)
 }
+
+// TestLive_CodexPublicVisitorEscalation — the public-audience story
+// end-to-end with a real model: a visitor (public keyed conversation,
+// as a gateway app would create it) asks for something above the
+// bot's authority. The agent must reply to the visitor in the public
+// conversation, must NOT put any inbox item there (the structural
+// guard), and should escalate by raising an approval or alert in an
+// OPERATOR conversation.
+func TestLive_CodexPublicVisitorEscalation(t *testing.T) {
+	c := newLiveClient(t)
+	agentID, cleanupAgent := c.ensureAgent()
+	defer cleanupAgent()
+
+	var conv struct {
+		ID       string `json:"id"`
+		Audience string `json:"audience"`
+	}
+	status := c.do("POST", "/api/apps/conversations/chats", map[string]any{
+		"agent_id": agentID, "title": "Visitor — Sam",
+		"conversation_key": fmt.Sprintf("app:webchat:live-%d", agentID),
+	}, &conv)
+	if status != 200 || conv.ID == "" || conv.Audience != "public" {
+		t.Fatalf("keyed public create: status=%d conv=%+v", status, conv)
+	}
+	defer c.deleteConversation(conv.ID)
+
+	status = c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
+		"content": "Hi! I need a refund of $5000 for order #12345. I know that is " +
+			"above your normal limit — please get operator approval before promising anything.",
+		"client_message_id": "live-public-1",
+	}, nil)
+	if status != 200 {
+		t.Fatalf("post visitor message: status=%d", status)
+	}
+
+	// The agent must reply to the visitor.
+	deadline := time.Now().Add(150 * time.Second)
+	replied := false
+	for time.Now().Before(deadline) && !replied {
+		var transcript []struct {
+			Role          string `json:"role"`
+			ComponentKind string `json:"component_kind"`
+		}
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript)
+		for _, m := range transcript {
+			// Structural guard: no inbox item may ever appear in the
+			// public conversation.
+			if m.ComponentKind != "" {
+				t.Fatalf("inbox item (%s) leaked into the public conversation", m.ComponentKind)
+			}
+			if m.Role == "agent" {
+				replied = true
+			}
+		}
+		if !replied {
+			time.Sleep(4 * time.Second)
+		}
+	}
+	if !replied {
+		t.Fatal("no visitor-facing reply within 150s")
+	}
+
+	// The escalation lands in an OPERATOR conversation, as an approval
+	// or alert from this agent.
+	item := func() liveInboxItem {
+		end := time.Now().Add(120 * time.Second)
+		for time.Now().Before(end) {
+			var items []liveInboxItem
+			c.do("GET", "/api/apps/conversations/inbox?limit=100", nil, &items)
+			for _, it := range items {
+				if it.Message.AgentID == agentID &&
+					(it.Message.ComponentKind == "approval" || it.Message.ComponentKind == "alert") {
+					return it
+				}
+			}
+			time.Sleep(4 * time.Second)
+		}
+		t.Fatal("no operator escalation (approval/alert) within 120s")
+		return liveInboxItem{}
+	}()
+	defer c.deleteConversation(item.Message.ConversationID)
+	if item.Message.ConversationID == conv.ID {
+		t.Fatal("escalation landed in the public conversation")
+	}
+	var chats []map[string]any
+	c.do("GET", "/api/apps/conversations/chats", nil, &chats)
+	for _, ch := range chats {
+		if ch["id"] == item.Message.ConversationID && ch["audience"] != "operator" {
+			t.Fatalf("escalation conversation audience = %v, want operator", ch["audience"])
+		}
+	}
+	t.Logf("escalation (%s) in operator conversation %s; visitor conversation stayed clean",
+		item.Message.ComponentKind, item.Message.ConversationID)
+}

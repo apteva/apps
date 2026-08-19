@@ -197,3 +197,42 @@ func TestSidecar_HTTPSurface(t *testing.T) {
 		t.Fatalf("inbox after dismiss = %v (status %d), want empty", inbox, resp.Status)
 	}
 }
+
+// Public audience (0.6.0) through the real binary: keyed creation is
+// public find-or-create, inbox kinds are refused via real JSON-RPC,
+// and replying still works.
+func TestSidecar_PublicConversationFlow(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(itProject))
+
+	create := func() map[string]any {
+		var conv map[string]any
+		if resp := sc.POST("/chats", map[string]any{
+			"agent_id": 41, "title": "Visitor", "conversation_key": "app:webchat:v-1",
+		}, &conv); resp.Status != 200 {
+			t.Fatalf("keyed create: %d %s", resp.Status, resp.Body)
+		}
+		return conv
+	}
+	conv := create()
+	convID, _ := conv["id"].(string)
+	if conv["audience"] != "public" || convID == "" {
+		t.Fatalf("keyed create = %v, want public", conv)
+	}
+	if again := create(); again["id"] != convID {
+		t.Fatalf("keyed create minted a duplicate: %v vs %v", again["id"], convID)
+	}
+
+	msg := mcpErr(t, sc, "conversations_alert", map[string]any{
+		"conversation_id": convID, "text": "internal", "severity": "error",
+	}, 41)
+	if !strings.Contains(msg, "operator conversation") {
+		t.Fatalf("alert into public = %q, want operator-conversation refusal", msg)
+	}
+
+	sent := sc.MCPAs("conversations_send", map[string]any{
+		"conversation_id": convID, "text": "Happy to help!",
+	}, 41, "chat-"+convID, itProject)
+	if _, ok := sent["message_id"]; !ok {
+		t.Fatalf("send into public conversation = %v", sent)
+	}
+}
