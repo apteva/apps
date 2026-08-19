@@ -278,15 +278,7 @@ func formatApprovalResult(messageID int64, actionID, note string) string {
 func inboxConversationKey(sourceApp string) string { return "app:" + sourceApp + ":inbox" }
 
 func (a *App) toolInboxPost(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	// Callers are sibling apps through the platform proxy; the platform
-	// stamps the app identity. For v0 the posting app self-declares via
-	// source_app when the header is absent (standalone/testing).
 	caller := sdk.CallerFrom(ctx)
-	sourceApp := stringArg(args, "source_app")
-	if sourceApp == "" {
-		sourceApp = "unknown-app"
-	}
-
 	kind := stringArg(args, "kind")
 	title := strings.TrimSpace(stringArg(args, "title"))
 	body := strings.TrimSpace(stringArg(args, "body"))
@@ -295,6 +287,43 @@ func (a *App) toolInboxPost(ctx context.Context, app *sdk.AppCtx, args map[strin
 	}
 	if body == "" {
 		body = title
+	}
+
+	// An AGENT that reaches for inbox_post (the gateway exposes every
+	// tool, and this one's description reads exactly like what a
+	// background thread wants) gets the agent surface: the same
+	// routing as the conversations_* tools, so the item lands in its
+	// activity conversation, correctly attributed — never in a
+	// per-app inbox under a made-up app name. Observed live: main
+	// raised an alert via inbox_post and minted "Inbox: unknown-app".
+	if caller != nil && caller.AgentID != 0 {
+		switch kind {
+		case kindAlert:
+			return a.toolAlert(ctx, app, map[string]any{
+				"text": body, "severity": stringArg(args, "severity"),
+			})
+		case kindReport:
+			return a.toolReport(ctx, app, map[string]any{
+				"title": title, "summary": body,
+			})
+		case kindApproval:
+			delegated := map[string]any{"title": title, "body": body}
+			if actions, ok := args["actions"]; ok {
+				delegated["actions"] = actions
+			}
+			return a.toolRequestApproval(ctx, app, delegated)
+		default:
+			return nil, fmt.Errorf("invalid kind %q (report|alert|approval)", kind)
+		}
+	}
+
+	// App callers arrive without an agent id; the posting app
+	// self-declares via source_app (the platform does not yet stamp
+	// app identity on inter-app calls). Refuse anonymity rather than
+	// invent an "unknown-app" bucket.
+	sourceApp := stringArg(args, "source_app")
+	if sourceApp == "" {
+		return nil, errors.New("source_app required (calling app's name)")
 	}
 
 	agentID := int64(intArg(args, "agent_id", 0))

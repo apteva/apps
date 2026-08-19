@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.4.2
+version: 0.4.3
 description: |
   One conversation system: internal dashboard chat, the inbox
   (approvals, reports, alerts, status), and external channels as
@@ -58,7 +58,7 @@ provides:
     - { name: conversations_set_status,       description: "Set this agent's current status line. Args: text, conversation_id? (omit to use your own activity conversation). Latest status wins; shown in the inbox status strip." }
     - { name: conversations_list,             description: "List conversations this agent participates in. Args: limit?." }
     - { name: conversations_history,          description: "Read a conversation's transcript (inbox-only rows excluded). Args: conversation_id, since_id?, limit?." }
-    - { name: inbox_post,                     description: "For sibling apps via CallAppResult: raise an inbox item without a conversation of your own. Args: kind (report|alert|approval), title, body?, severity?, actions?, callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
+    - { name: inbox_post,                     description: "INTERNAL - sibling-app entry point via CallAppResult; agents must use conversations_alert / conversations_report / conversations_request_approval instead (agent calls are auto-routed there). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
   ui_panels:
     - slot: project.page
       label: Conversations

@@ -976,3 +976,60 @@ func TestAgentsEndpointServesDirectory(t *testing.T) {
 		t.Fatalf("attached flags = %v/%v, want true/false", agents[0].Attached, agents[1].Attached)
 	}
 }
+
+// Observed live: main called inbox_post (its description read like
+// exactly what a background thread wants) and minted an
+// "Inbox: unknown-app" conversation with agent_id 0. Agent callers
+// must take the agent surface instead — the same routing as the
+// conversations_* tools.
+func TestInboxPostFromAgentRoutesToActivityConversation(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+
+	out, err := app.toolInboxPost(callerCtx(576, "main"), ctx, map[string]any{
+		"kind": "alert", "severity": "error",
+		"title": "Backup failed", "body": "rsync exit 23 on build-server",
+	})
+	if err != nil {
+		t.Fatalf("inbox_post as agent: %v", err)
+	}
+	messageID := out.(map[string]any)["message_id"].(int64)
+	msg, err := app.store.GetMessage(messageID)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	if msg.AgentID != 576 || msg.Severity != "error" || msg.ComponentKind != kindAlert {
+		t.Fatalf("message = %+v, want agent-attributed error alert", msg)
+	}
+	conv, err := app.store.GetConversation(msg.ConversationID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if conv.ConversationKey != agentSystemConversationKey(576) {
+		t.Fatalf("landed in %q (key %q), want the agent's activity conversation",
+			conv.ID, conv.ConversationKey)
+	}
+	// A second agent-raised item reuses the same conversation — no
+	// per-item conversation sprawl.
+	out2, err := app.toolInboxPost(callerCtx(576, "worker-1"), ctx, map[string]any{
+		"kind": "report", "title": "Weekly digest", "body": "3 deploys, 0 incidents",
+	})
+	if err != nil {
+		t.Fatalf("second inbox_post: %v", err)
+	}
+	msg2, _ := app.store.GetMessage(out2.(map[string]any)["message_id"].(int64))
+	if msg2.ConversationID != conv.ID {
+		t.Fatalf("report landed in %q, want reuse of %q", msg2.ConversationID, conv.ID)
+	}
+}
+
+// App callers (no agent id) must self-identify — anonymity minted
+// "unknown-app" buckets before.
+func TestInboxPostWithoutSourceAppRejected(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	_, err := app.toolInboxPost(context.Background(), ctx, map[string]any{
+		"kind": "alert", "title": "anon",
+	})
+	if err == nil || !strings.Contains(err.Error(), "source_app") {
+		t.Fatalf("err = %v, want source_app requirement", err)
+	}
+}

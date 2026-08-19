@@ -1681,21 +1681,24 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [agentsError, setAgentsError] = useState("");
+  const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
   // Same breakpoint the dashboard chat page uses for its right-hand
   // context column.
   const hasContextColumn = useMediaQuery("(min-width: 1024px)");
 
   const loadConversations = useCallback(async () => {
     try {
-      const [chats, unreadEntries] = await Promise.all([
+      const [chats, unreadEntries, inbox] = await Promise.all([
         apiGet<Conversation[]>(`/chats${showArchived ? "?archived=1" : ""}`),
         apiGet<UnreadEntry[]>("/unread-summary"),
+        apiGet<InboxItem[]>("/inbox?limit=100"),
       ]);
       const scoped = projectId
         ? chats.filter((c) => !c.project_id || c.project_id === projectId)
         : chats;
       setConversations(scoped);
       setUnread(new Map(unreadEntries.map((e) => [e.conversation_id, e.unread])));
+      setInboxItems(inbox);
       setSelectedId((current) =>
         current && scoped.some((c) => c.id === current) ? current : (scoped[0]?.id ?? ""),
       );
@@ -1722,7 +1725,11 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
     );
   }, [agents, projectId]);
 
-  // Opening a conversation marks it seen with the latest known id.
+  // Viewing a conversation marks it seen. Depends on `unread` (not
+  // just the selection) so it also fires when the summary loads after
+  // auto-selection and when new rows land while the conversation is
+  // open — with only [selectedId] the closure read a stale empty map
+  // and unread counts never cleared.
   useEffect(() => {
     if (!selectedId) return;
     const entryUnread = unread.get(selectedId) ?? 0;
@@ -1731,13 +1738,46 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
       () => loadConversations(),
       () => {},
     );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId]);
+  }, [selectedId, unread, loadConversations]);
 
   const selected = useMemo(
     () => conversations.find((c) => c.id === selectedId) ?? null,
     [conversations, selectedId],
   );
+
+  // Pending inbox items become attention markers: a severity dot on
+  // the conversation row and a count badge on the Inbox tab. Ranks:
+  // error alert > warn alert > approval > info alert; reports count
+  // in the badge but never earn a dot.
+  const attentionByConv = useMemo(() => {
+    const rank = (m: Message) =>
+      m.component_kind === "alert" && m.severity === "error"
+        ? 4
+        : m.component_kind === "alert" && m.severity === "warn"
+          ? 3
+          : m.component_kind === "approval"
+            ? 2
+            : m.component_kind === "alert"
+              ? 1
+              : 0;
+    const map = new Map<string, number>();
+    for (const item of inboxItems) {
+      const r = rank(item.message);
+      if (r === 0) continue;
+      const prev = map.get(item.message.conversation_id) ?? 0;
+      if (r > prev) map.set(item.message.conversation_id, r);
+    }
+    return map;
+  }, [inboxItems]);
+  const inboxHasError = useMemo(
+    () =>
+      inboxItems.some(
+        (i) => i.message.component_kind === "alert" && i.message.severity === "error",
+      ),
+    [inboxItems],
+  );
+  const attentionDotClass = (r: number) =>
+    r >= 4 ? "bg-error" : r === 3 ? "bg-warn" : r === 2 ? "bg-accent" : "bg-info";
 
   // Selection moved on — close the details dialog so its state can
   // never be reused against the next conversation (the dashboard's
@@ -1782,6 +1822,13 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
             >
               <Glyph d={entry.glyph} size={14} />
               {entry.label}
+              {entry.id === "inbox" && inboxItems.length > 0 && (
+                <span
+                  className={`text-xs px-1.5 py-0.5 rounded-full text-bg ${inboxHasError ? "bg-error" : "bg-accent"}`}
+                >
+                  {inboxItems.length}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -1855,6 +1902,12 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
                         className={`w-full text-left px-4 py-3 hover:bg-bg-input ${c.id === selectedId ? "bg-bg-input" : ""}`}
                       >
                         <div className="flex items-center gap-2">
+                          {(attentionByConv.get(c.id) ?? 0) > 0 && (
+                            <span
+                              className={`w-2 h-2 rounded-full shrink-0 ${attentionDotClass(attentionByConv.get(c.id) ?? 0)}`}
+                              title="Pending inbox item"
+                            />
+                          )}
                           <span className="text-sm font-medium text-text truncate">{c.title}</span>
                           {unreadCount > 0 && c.id !== selectedId && (
                             <span className="ml-auto shrink-0 text-xs px-1.5 py-0.5 rounded-full bg-accent text-bg">
