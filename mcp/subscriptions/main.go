@@ -296,7 +296,7 @@ func (a *App) toolSubscriptionsCreate(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("subscription.created", map[string]any{"subscription_id": sub.ID, "kind": sub.Kind, "status": sub.Status})
+	ctx.Emit("subscription.created", subscriptionEventPayload(ctx.AppDB(), sub))
 	for _, discount := range sub.Discounts {
 		ctx.Emit("subscription.discount.created", map[string]any{"subscription_id": sub.ID, "subscription_item_id": discount.SubscriptionItemID, "discount_id": discount.ID})
 	}
@@ -351,7 +351,7 @@ func (a *App) toolSubscriptionsUpdateStatus(ctx *sdk.AppCtx, args map[string]any
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("subscription.updated", map[string]any{"subscription_id": sub.ID, "status": sub.Status})
+	emitSubscriptionUpdated(ctx, sub)
 	emitSubscriptionLifecycle(ctx, sub)
 	return map[string]any{"subscription": sub}, nil
 }
@@ -366,7 +366,7 @@ func (a *App) toolSubscriptionsUpdateMetadata(ctx *sdk.AppCtx, args map[string]a
 		return nil, err
 	}
 	if changed {
-		ctx.Emit("subscription.updated", map[string]any{"subscription_id": sub.ID, "status": sub.Status})
+		emitSubscriptionUpdated(ctx, sub)
 	}
 	return map[string]any{"subscription": sub, "changed": changed}, nil
 }
@@ -380,7 +380,7 @@ func (a *App) toolSubscriptionsCancel(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("subscription.cancelled", map[string]any{"subscription_id": sub.ID})
+	ctx.Emit("subscription.cancelled", subscriptionEventPayload(ctx.AppDB(), sub))
 	return map[string]any{"subscription": sub}, nil
 }
 
@@ -394,7 +394,7 @@ func (a *App) toolSubscriptionsResume(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	if changed {
-		ctx.Emit("subscription.resumed", map[string]any{"subscription_id": sub.ID, "status": sub.Status})
+		ctx.Emit("subscription.resumed", subscriptionEventPayload(ctx.AppDB(), sub))
 	}
 	return map[string]any{"subscription": sub, "changed": changed}, nil
 }
@@ -409,6 +409,7 @@ func (a *App) toolSubscriptionItemsCreate(ctx *sdk.AppCtx, args map[string]any) 
 		return nil, err
 	}
 	ctx.Emit("subscription.item.created", map[string]any{"subscription_id": item.SubscriptionID, "subscription_item_id": item.ID, "billing_scheme": item.BillingScheme, "meter_key": item.MeterKey})
+	emitSubscriptionUpdatedByID(ctx, pid, item.SubscriptionID)
 	return map[string]any{"item": item}, nil
 }
 
@@ -437,6 +438,7 @@ func (a *App) toolSubscriptionItemsUpdate(ctx *sdk.AppCtx, args map[string]any) 
 	if err != nil {
 		return nil, err
 	}
+	emitSubscriptionUpdatedByID(ctx, pid, item.SubscriptionID)
 	return map[string]any{"item": item}, nil
 }
 
@@ -522,23 +524,69 @@ func (a *App) toolSubscriptionsInvoiceCreate(ctx *sdk.AppCtx, args map[string]an
 	return map[string]any{"subscription": sub, "prepared": prepared, "invoice": invOut["invoice"]}, nil
 }
 
+// subscriptionRecurringAmounts mirrors the metrics computation: active flat
+// items only, raw per-interval sum plus the monthly-normalized equivalent.
+func subscriptionRecurringAmounts(db *sql.DB, sub *Subscription) (recurringCents, mrrCents int64) {
+	if db == nil || sub == nil {
+		return 0, 0
+	}
+	var amount float64
+	if err := db.QueryRow(`SELECT COALESCE(SUM(unit_amount_cents * quantity), 0) FROM subscription_items
+		WHERE subscription_id=? AND status='active' AND billing_scheme='flat'`, sub.ID).Scan(&amount); err != nil {
+		return 0, 0
+	}
+	return int64(math.Round(amount)), monthlyNormalizedCents(amount, sub.Interval, sub.IntervalCount)
+}
+
+func subscriptionEventPayload(db *sql.DB, sub *Subscription) map[string]any {
+	recurring, mrr := subscriptionRecurringAmounts(db, sub)
+	return map[string]any{
+		"id":                     sub.ID,
+		"subscription_id":        sub.ID,
+		"status":                 sub.Status,
+		"customer_id":            sub.CustomerID,
+		"customer_email":         sub.CustomerEmail,
+		"kind":                   sub.Kind,
+		"source":                 sub.Source,
+		"source_ref":             sub.SourceRef,
+		"currency":               sub.Currency,
+		"interval":               sub.Interval,
+		"interval_count":         sub.IntervalCount,
+		"recurring_amount_cents": recurring,
+		"mrr_cents":              mrr,
+		"trial_start":            sub.TrialStart,
+		"trial_end":              sub.TrialEnd,
+		"metadata":               mapFromAny(sub.Metadata),
+	}
+}
+
 func emitSubscriptionLifecycle(ctx *sdk.AppCtx, sub *Subscription) {
 	if ctx == nil || sub == nil || !validSubStatus[sub.Status] {
 		return
 	}
-	ctx.Emit("subscription."+sub.Status, map[string]any{
-		"id":              sub.ID,
-		"subscription_id": sub.ID,
-		"status":          sub.Status,
-		"customer_id":     sub.CustomerID,
-		"customer_email":  sub.CustomerEmail,
-		"kind":            sub.Kind,
-		"source":          sub.Source,
-		"source_ref":      sub.SourceRef,
-		"trial_start":     sub.TrialStart,
-		"trial_end":       sub.TrialEnd,
-		"metadata":        mapFromAny(sub.Metadata),
-	})
+	ctx.Emit("subscription."+sub.Status, subscriptionEventPayload(ctx.AppDB(), sub))
+}
+
+func emitSubscriptionUpdated(ctx *sdk.AppCtx, sub *Subscription) {
+	if ctx == nil || sub == nil {
+		return
+	}
+	ctx.Emit("subscription.updated", subscriptionEventPayload(ctx.AppDB(), sub))
+}
+
+// emitSubscriptionUpdatedByID reloads the subscription so item-level writes
+// surface the new recurring amount on the stream. The write already
+// succeeded, so a reload failure only logs — it must not fail the tool.
+func emitSubscriptionUpdatedByID(ctx *sdk.AppCtx, pid string, subID int64) {
+	if ctx == nil {
+		return
+	}
+	sub, err := dbSubscriptionGet(ctx.AppDB(), pid, subID, false)
+	if err != nil || sub == nil {
+		ctx.Logger().Warn("emit subscription.updated: reload failed", "subscription_id", subID, "err", err)
+		return
+	}
+	emitSubscriptionUpdated(ctx, sub)
 }
 
 func runSubscriptionLifecycle(ctx *sdk.AppCtx, now time.Time) error {

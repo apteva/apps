@@ -424,6 +424,7 @@ func applySubscriptionChange(ctx *sdk.AppCtx, changeID int64, now time.Time) (*S
 		"change_id": change.ID, "subscription_id": change.SubscriptionID, "source_app": change.SourceApp,
 		"source_ref": change.SourceRef, "effective_at": change.EffectiveMode, "proration": mapFromAny(change.Proration),
 	})
+	emitSubscriptionUpdatedByID(ctx, pid, change.SubscriptionID)
 	return change, nil
 }
 

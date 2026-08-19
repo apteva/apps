@@ -471,6 +471,133 @@ func TestPastDueWithoutTrialHistoryIsNotBackfilled(t *testing.T) {
 	}
 }
 
+func TestLifecycleEventsCarryRecurringAmounts(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithEmitter(rec))
+	app := &App{}
+
+	created, err := app.toolSubscriptionsCreate(ctx, map[string]any{
+		"customer_email": "money@example.com", "kind": "saas", "status": "active",
+		"currency": "USD", "interval": "year",
+		"items": []any{
+			map[string]any{"title": "Annual plan", "quantity": 1, "unit_amount_cents": 12000, "currency": "USD"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := created.(map[string]any)["subscription"].(*Subscription)
+	events := rec.EventsByTopic("subscription.created")
+	if len(events) != 1 {
+		t.Fatalf("subscription.created events=%d, want 1", len(events))
+	}
+	data, ok := events[0].Data.(map[string]any)
+	if !ok {
+		t.Fatalf("event data type=%T", events[0].Data)
+	}
+	if data["currency"] != "USD" || data["interval"] != "year" || data["interval_count"] != int64(1) {
+		t.Fatalf("created payload missing recurrence fields: %+v", data)
+	}
+	if data["recurring_amount_cents"] != int64(12000) || data["mrr_cents"] != int64(1000) {
+		t.Fatalf("created payload amounts wrong: %+v", data)
+	}
+
+	rec.Reset()
+	if _, err := app.toolSubscriptionsUpdateStatus(ctx, map[string]any{"id": sub.ID, "status": "past_due"}); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := rec.EventsByTopic("subscription.past_due")
+	if len(lifecycle) != 1 {
+		t.Fatalf("subscription.past_due events=%d, want 1", len(lifecycle))
+	}
+	ldata, ok := lifecycle[0].Data.(map[string]any)
+	if !ok {
+		t.Fatalf("event data type=%T", lifecycle[0].Data)
+	}
+	if ldata["recurring_amount_cents"] != int64(12000) || ldata["mrr_cents"] != int64(1000) || ldata["currency"] != "USD" {
+		t.Fatalf("lifecycle payload amounts wrong: %+v", ldata)
+	}
+}
+
+func TestItemWritesEmitSubscriptionUpdatedWithAmounts(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithEmitter(rec))
+	app := &App{}
+	sub, err := dbSubscriptionCreate(ctx, "proj-test", map[string]any{
+		"customer_email": "items@example.com", "currency": "USD", "interval": "month",
+		"items": []any{map[string]any{"title": "Base", "quantity": 1, "unit_amount_cents": 1000, "currency": "USD"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Reset()
+
+	out, err := app.toolSubscriptionItemsCreate(ctx, map[string]any{
+		"subscription_id": sub.ID, "title": "Addon", "quantity": 1, "unit_amount_cents": 500, "currency": "USD",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := out.(map[string]any)["item"].(*SubItem)
+	updated := rec.EventsByTopic("subscription.updated")
+	if len(updated) != 1 {
+		t.Fatalf("subscription.updated after item create=%d, want 1", len(updated))
+	}
+	data := updated[0].Data.(map[string]any)
+	if data["recurring_amount_cents"] != int64(1500) || data["mrr_cents"] != int64(1500) {
+		t.Fatalf("amounts after item add: %+v", data)
+	}
+
+	rec.Reset()
+	if _, err := app.toolSubscriptionItemsCancel(ctx, map[string]any{"id": item.ID, "reason": "downgrade"}); err != nil {
+		t.Fatal(err)
+	}
+	updated = rec.EventsByTopic("subscription.updated")
+	if len(updated) != 1 {
+		t.Fatalf("subscription.updated after item cancel=%d, want 1", len(updated))
+	}
+	data = updated[0].Data.(map[string]any)
+	if data["recurring_amount_cents"] != int64(1000) || data["mrr_cents"] != int64(1000) {
+		t.Fatalf("amounts after item cancel: %+v", data)
+	}
+}
+
+func TestAppliedChangeEmitsSubscriptionUpdatedWithNewAmount(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-change-amounts"), tk.WithEmitter(rec))
+	now := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
+	sub, err := dbSubscriptionCreate(ctx, "proj-change-amounts", map[string]any{
+		"currency": "USD", "interval": "month",
+		"items": []any{map[string]any{"catalog_product_id": 1, "catalog_price_id": 10, "title": "Basic", "quantity": 1, "unit_amount_cents": 1000, "currency": "USD"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, _, err := dbSubscriptionChangeCreate(ctx.AppDB(), "proj-change-amounts", map[string]any{
+		"subscription_id": sub.ID, "idempotency_key": "upgrade-amount", "defer_apply": true,
+		"items": []any{map[string]any{"catalog_product_id": 1, "catalog_price_id": 11, "title": "Pro", "quantity": 1, "unit_amount_cents": 3000, "currency": "USD"}},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Reset()
+
+	if _, err := applySubscriptionChange(ctx, change.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.EventsByTopic("subscription.change.applied"); len(got) != 1 {
+		t.Fatalf("change.applied events=%d, want 1", len(got))
+	}
+	updated := rec.EventsByTopic("subscription.updated")
+	if len(updated) != 1 {
+		t.Fatalf("subscription.updated after change apply=%d, want 1", len(updated))
+	}
+	data := updated[0].Data.(map[string]any)
+	if data["recurring_amount_cents"] != int64(3000) || data["mrr_cents"] != int64(3000) {
+		t.Fatalf("amounts after change apply: %+v", data)
+	}
+}
+
 func TestActiveRenewalCreatesOnePendingCycleWithoutCommerceCalls(t *testing.T) {
 	pf := &noCommercePlatform{}
 	rec := tk.NewEmitRecorder()
