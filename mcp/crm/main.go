@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.27
+version: 0.8.28
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -282,44 +282,93 @@ provides:
         stage_id: integer
         archived: boolean
     - name: opportunity.created
-      description: An opportunity was created for a contact.
+      description: >-
+        An opportunity was created for a contact. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure.
       payload:
         opportunity_id: integer
         contact_id: integer
         pipeline_id: integer
         stage_id: integer
         status: string
+        title: string
+        stage_category: string
+        value: number
+        currency: string
+        stage_probability: number
     - name: opportunity.updated
-      description: An opportunity was updated.
+      description: >-
+        An opportunity was updated. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure.
       payload:
         opportunity_id: integer
         contact_id: integer
         pipeline_id: integer
         stage_id: integer
         status: string
+        title: string
+        stage_category: string
+        value: number
+        currency: string
+        stage_probability: number
     - name: opportunity.stage.changed
-      description: An opportunity moved to another pipeline stage.
+      description: >-
+        An opportunity moved to another pipeline stage. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
       payload:
         opportunity_id: integer
         contact_id: integer
-        previous_stage_id: integer
+        pipeline_id: integer
         stage_id: integer
-    - name: opportunity.status.changed
-      description: An opportunity changed status.
-      payload:
-        opportunity_id: integer
-        contact_id: integer
         status: string
+        title: string
+        stage_category: string
+        value: number
+        currency: string
+        stage_probability: number
+        previous_stage_id: integer
+    - name: opportunity.status.changed
+      description: >-
+        An opportunity changed status. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
+        pipeline_id: integer
+        stage_id: integer
+        status: string
+        title: string
+        stage_category: string
+        value: number
+        currency: string
+        stage_probability: number
+        previous_stage_id: integer
     - name: opportunity.won
-      description: An opportunity was marked won.
+      description: >-
+        An opportunity was marked won. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
       payload:
         opportunity_id: integer
         contact_id: integer
+        pipeline_id: integer
+        stage_id: integer
+        status: string
+        title: string
+        stage_category: string
+        value: number
+        currency: string
+        stage_probability: number
+        previous_stage_id: integer
     - name: opportunity.lost
-      description: An opportunity was marked lost.
+      description: >-
+        An opportunity was marked lost. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
       payload:
         opportunity_id: integer
         contact_id: integer
+        pipeline_id: integer
+        stage_id: integer
+        status: string
+        title: string
+        stage_category: string
+        value: number
+        currency: string
+        stage_probability: number
+        previous_stage_id: integer
 runtime:
   kind: source
   source:

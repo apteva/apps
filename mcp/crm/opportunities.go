@@ -75,9 +75,15 @@ type Opportunity struct {
 	PipelineName  string `json:"pipeline_name,omitempty"`
 	StageName     string `json:"stage_name,omitempty"`
 	StageCategory string `json:"stage_category,omitempty"`
-	ContactName   string `json:"contact_name,omitempty"`
-	ContactEmail  string `json:"contact_email,omitempty"`
-	ContactPhone  string `json:"contact_phone,omitempty"`
+	// StageProbability is the probability configured on the stage this
+	// opportunity currently sits in. There is no per-opportunity
+	// probability column, so this is a pipeline-level forecast weight,
+	// not a per-deal override — named accordingly so consumers don't
+	// read it as one.
+	StageProbability *float64 `json:"stage_probability,omitempty"`
+	ContactName      string   `json:"contact_name,omitempty"`
+	ContactEmail     string   `json:"contact_email,omitempty"`
+	ContactPhone     string   `json:"contact_phone,omitempty"`
 }
 
 type OpportunityStageHistory struct {
@@ -693,7 +699,7 @@ func opportunitySelectSQL() string {
 			COALESCE(o.source_site,''), COALESCE(o.sender_identity,''), COALESCE(o.owner,''),
 			COALESCE(o.expected_close_date,''), COALESCE(o.closed_at,''), COALESCE(o.lost_reason,''),
 			o.created_at, o.updated_at, COALESCE(o.archived_at,''),
-			p.name, s.name, s.category,
+			p.name, s.name, s.category, s.probability,
 			COALESCE(c.display_name,''), COALESCE(c.primary_email,''), COALESCE(c.primary_phone,'')
 		FROM crm_opportunities o
 		JOIN crm_pipelines p ON p.project_id = o.project_id AND p.id = o.pipeline_id
@@ -703,14 +709,14 @@ func opportunitySelectSQL() string {
 
 func scanOpportunity(row interface{ Scan(...any) error }) (*Opportunity, error) {
 	o := &Opportunity{}
-	var value sql.NullFloat64
+	var value, stageProbability sql.NullFloat64
 	err := row.Scan(
 		&o.ID, &o.ProjectID, &o.ContactID, &o.PipelineID, &o.StageID,
 		&o.Title, &o.Status, &value, &o.Currency,
 		&o.OfferKey, &o.OfferName, &o.Source, &o.SourceSite, &o.SenderIdentity, &o.Owner,
 		&o.ExpectedCloseDate, &o.ClosedAt, &o.LostReason,
 		&o.CreatedAt, &o.UpdatedAt, &o.ArchivedAt,
-		&o.PipelineName, &o.StageName, &o.StageCategory,
+		&o.PipelineName, &o.StageName, &o.StageCategory, &stageProbability,
 		&o.ContactName, &o.ContactEmail, &o.ContactPhone,
 	)
 	if err != nil {
@@ -718,6 +724,9 @@ func scanOpportunity(row interface{ Scan(...any) error }) (*Opportunity, error) 
 	}
 	if value.Valid {
 		o.Value = &value.Float64
+	}
+	if stageProbability.Valid {
+		o.StageProbability = &stageProbability.Float64
 	}
 	return o, nil
 }
@@ -989,6 +998,25 @@ func emitOpportunity(ctx *sdk.AppCtx, topic string, o *Opportunity, previousStag
 		"pipeline_id":    o.PipelineID,
 		"stage_id":       o.StageID,
 		"status":         o.Status,
+		"title":          o.Title,
+		// stage_category (open|won|lost) rides along because the record
+		// already carries it from the stage join — it saves every
+		// consumer a stage lookup just to tell whether the deal is live.
+		"stage_category": o.StageCategory,
+	}
+	// value, currency and stage_probability are genuinely optional:
+	// an opportunity may carry no amount and a stage may have no
+	// probability configured. Omit them rather than zero-filling — a
+	// consumer summing pipeline value has to be able to tell "no amount
+	// recorded" from "worth nothing".
+	if o.Value != nil {
+		payload["value"] = *o.Value
+	}
+	if o.Currency != "" {
+		payload["currency"] = o.Currency
+	}
+	if o.StageProbability != nil {
+		payload["stage_probability"] = *o.StageProbability
 	}
 	if previousStageID != 0 {
 		payload["previous_stage_id"] = previousStageID
