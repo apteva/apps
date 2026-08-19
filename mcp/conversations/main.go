@@ -33,7 +33,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.6.2
+version: 0.7.0
 description: |
   One conversation system: internal dashboard chat, the inbox
   (approvals, reports, alerts, status), and external channels as
@@ -95,6 +95,17 @@ provides:
       label: Conversations
       icon: message-circle
       entry: /ui/ConversationsPanel.mjs
+
+  ui_components:
+    - name: inbox-overview
+      label: Inbox
+      description: Pending approvals, alerts, and reports from agents.
+      entry: /ui/InboxWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
 
   skills:
     - name: using-conversations
