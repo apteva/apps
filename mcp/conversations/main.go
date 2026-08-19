@@ -33,7 +33,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.5.4
+version: 0.6.0
 description: |
   One conversation system: internal dashboard chat, the inbox
   (approvals, reports, alerts, status), and external channels as
@@ -83,9 +83,9 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: conversations_send,             description: "Send a message into a conversation. Args: conversation_id, text, components?. The calling agent must be a participant; delivery fans out to every bound surface (dashboard SSE, external channels). Never creates conversations." }
-    - { name: conversations_request_approval, description: "Ask the operator to approve something. Args: conversation_id (required - list or create a conversation first), title, body?, actions? (default Approve/Deny). Renders as an actionable card in the conversation AND the inbox; the verdict comes back to this agent as an approval.result event." }
-    - { name: conversations_report,           description: "File a report. Args: conversation_id (required - keep one standing conversation such as Reports and reuse it), title, summary, period?, sections?. Shown in its conversation AND the inbox." }
-    - { name: conversations_alert,            description: "Raise an alert. Args: conversation_id (required - reuse the conversation the problem belongs to, or create a topical one), text, severity? (info|warn|error, default info). Shown in the inbox, severity-ranked." }
+    - { name: conversations_request_approval, description: "Ask the operator to approve something. Refused in public (visitor) conversations - raise it in an operator conversation instead. Args: conversation_id (required - list or create a conversation first), title, body?, actions? (default Approve/Deny). Renders as an actionable card in the conversation AND the inbox; the verdict comes back to this agent as an approval.result event." }
+    - { name: conversations_report,           description: "File a report. Refused in public (visitor) conversations. Args: conversation_id (required - keep one standing conversation such as Reports and reuse it), title, summary, period?, sections?. Shown in its conversation AND the inbox." }
+    - { name: conversations_alert,            description: "Raise an alert. Refused in public (visitor) conversations - raise it in an operator conversation instead. Args: conversation_id (required - reuse the conversation the problem belongs to, or create a topical one), text, severity? (info|warn|error, default info). Shown in the inbox, severity-ranked." }
     - { name: conversations_create,           description: "Create a conversation led by this agent for an ongoing topic. Args: title. Title-idempotent per agent: an existing conversation with the same title is returned with created=false. Titles name ongoing topics - never put timestamps, ids, or per-item detail in them." }
     - { name: conversations_list,             description: "List conversations this agent participates in. Args: limit?, query? (case-insensitive title filter - search before creating)." }
     - { name: conversations_history,          description: "Read a conversation's transcript. Args: conversation_id, since_id?, limit?." }
@@ -299,6 +299,19 @@ func requireAgentCaller(ctx context.Context) (*callIdentity, error) {
 	return &callIdentity{AgentID: caller.AgentID, ThreadID: caller.ThreadID, ProjectID: caller.ProjectID}, nil
 }
 
+// requireOperatorAudience is the structural guard behind the skill's
+// rule: inbox-kind items never land in front of a public audience. A
+// site visitor must not see approvals about backups or error alerts —
+// those belong in an operator conversation that references the public
+// one.
+func requireOperatorAudience(conv *Conversation, kind string) error {
+	if conv.Audience == "public" {
+		return fmt.Errorf("%s refused: %q is a public (visitor) conversation — raise the %s in an operator conversation (conversations_list / conversations_create) and reference conversation %s there; reply to the visitor with conversations_send only",
+			kind, conv.Title, kind, conv.ID)
+	}
+	return nil
+}
+
 // requireConversationArg reads the mandatory conversation_id. The
 // item tools have no fallback bucket — an agent must say where the
 // item lives, and the error teaches the flow when it doesn't.
@@ -373,6 +386,9 @@ func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map
 	if err != nil {
 		return nil, err
 	}
+	if err := requireOperatorAudience(conv, "approval"); err != nil {
+		return nil, err
+	}
 	msg, err := a.store.AppendMessage(&Message{
 		ConversationID: conv.ID, Role: "agent",
 		Content: "Approval requested: " + title,
@@ -394,6 +410,9 @@ func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	}
 	conv, err := a.requireConversationArg(from, args)
 	if err != nil {
+		return nil, err
+	}
+	if err := requireOperatorAudience(conv, "report"); err != nil {
 		return nil, err
 	}
 	title := strings.TrimSpace(stringArg(args, "title"))
@@ -422,6 +441,9 @@ func (a *App) toolAlert(ctx context.Context, app *sdk.AppCtx, args map[string]an
 	}
 	conv, err := a.requireConversationArg(from, args)
 	if err != nil {
+		return nil, err
+	}
+	if err := requireOperatorAudience(conv, "alert"); err != nil {
 		return nil, err
 	}
 	text := strings.TrimSpace(stringArg(args, "text"))

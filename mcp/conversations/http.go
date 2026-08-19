@@ -113,6 +113,13 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		LeadAgentID int64   `json:"lead_agent_id"`
 		ProjectID   string  `json:"project_id"`
 		Title       string  `json:"title"`
+		// ConversationKey makes creation find-or-create (one
+		// conversation per external identity) — the surface gateway
+		// apps use for public site chats: key "app:<gateway>:<visitor>",
+		// post messages, subscribe /stream. Audience defaults to
+		// "public" when a key is given, "operator" otherwise.
+		ConversationKey string `json:"conversation_key"`
+		Audience        string `json:"audience"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -130,9 +137,27 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "agent_id or agent_ids required", http.StatusBadRequest)
 		return
 	}
+	audience := body.Audience
+	switch audience {
+	case "":
+		if body.ConversationKey != "" {
+			audience = "public"
+		} else {
+			audience = "operator"
+		}
+	case "public", "operator":
+	default:
+		http.Error(w, "audience must be public or operator", http.StatusBadRequest)
+		return
+	}
+	origin := ""
+	if body.ConversationKey != "" {
+		origin = "app"
+	}
 	conv, err := a.store.CreateConversation(CreateConversationInput{
 		ProjectID: body.ProjectID, LeadAgentID: lead,
 		Title: body.Title, OwnerUserID: requestUser(r),
+		ConversationKey: body.ConversationKey, Audience: audience, Origin: origin,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

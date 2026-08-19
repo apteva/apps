@@ -34,6 +34,10 @@ type Conversation struct {
 	Kind            string    `json:"kind"`   // direct | room
 	Origin          string    `json:"origin"` // web | telegram | slack | app
 	ConversationKey string    `json:"conversation_key,omitempty"`
+	// Audience: "operator" (dashboard, agent topics, operator channels)
+	// or "public" (end users behind a gateway). Inbox-kind tools refuse
+	// public conversations.
+	Audience string `json:"audience"`
 	ThreadID        string    `json:"thread_id,omitempty"`
 	OwnerUserID     int64     `json:"owner_user_id,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
@@ -92,6 +96,8 @@ type CreateConversationInput struct {
 	// (inbound Telegram etc.). Optional.
 	ExternalIdentity string
 	ExternalName     string
+	// Audience: '' → operator. See Conversation.Audience.
+	Audience string
 }
 
 func (s *store) CreateConversation(in CreateConversationInput) (*Conversation, error) {
@@ -104,6 +110,9 @@ func (s *store) CreateConversation(in CreateConversationInput) (*Conversation, e
 	if in.Title == "" {
 		in.Title = "Chat"
 	}
+	if in.Audience == "" {
+		in.Audience = "operator"
+	}
 	// External identities are find-or-create: one conversation per key.
 	if in.ConversationKey != "" {
 		if existing, err := s.ConversationByKey(in.ConversationKey); err == nil {
@@ -112,9 +121,9 @@ func (s *store) CreateConversation(in CreateConversationInput) (*Conversation, e
 	}
 	id := newConversationID()
 	_, err := s.db.Exec(`
-		INSERT INTO conversations (id, project_id, lead_agent_id, title, kind, origin, conversation_key, owner_user_id)
-		VALUES (?, ?, ?, ?, 'direct', ?, ?, ?)`,
-		id, in.ProjectID, in.LeadAgentID, in.Title, in.Origin, in.ConversationKey, in.OwnerUserID)
+		INSERT INTO conversations (id, project_id, lead_agent_id, title, kind, origin, conversation_key, audience, owner_user_id)
+		VALUES (?, ?, ?, ?, 'direct', ?, ?, ?, ?)`,
+		id, in.ProjectID, in.LeadAgentID, in.Title, in.Origin, in.ConversationKey, in.Audience, in.OwnerUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -140,13 +149,13 @@ func (s *store) CreateConversation(in CreateConversationInput) (*Conversation, e
 	return s.GetConversation(id)
 }
 
-const conversationCols = `id, project_id, lead_agent_id, title, kind, origin, conversation_key, thread_id, owner_user_id, created_at, updated_at`
+const conversationCols = `id, project_id, lead_agent_id, title, kind, origin, conversation_key, audience, thread_id, owner_user_id, created_at, updated_at`
 
 func scanConversation(row interface{ Scan(...any) error }) (*Conversation, error) {
 	var c Conversation
 	var created, updated string
 	if err := row.Scan(&c.ID, &c.ProjectID, &c.LeadAgentID, &c.Title, &c.Kind, &c.Origin,
-		&c.ConversationKey, &c.ThreadID, &c.OwnerUserID, &created, &updated); err != nil {
+		&c.ConversationKey, &c.Audience, &c.ThreadID, &c.OwnerUserID, &created, &updated); err != nil {
 		return nil, err
 	}
 	c.CreatedAt, _ = parseSQLiteTime(created)

@@ -86,6 +86,18 @@ means do not do it — adjust or stop; never re-ask the same question
 hoping for a different answer. The operator's note on the verdict is
 them talking to you: honor it.
 
+## Public conversations
+
+A conversation marked audience "public" is a product's end user — a
+site chatbot visitor, not an operator. There you only ever reply, with
+`conversations_send`: courteous, on-topic, nothing internal. Alerts,
+reports, and approvals are structurally refused in public
+conversations. When a visitor request needs operator attention (a
+refund over the limit, a decision, an incident), raise the approval or
+alert in an OPERATOR conversation and mention the public conversation
+id in it, then tell the visitor you are checking — the operator
+decides in the inbox, and you relay the outcome.
+
 ## Reading context
 
 - `conversations_history` — the transcript, for joining mid-way or

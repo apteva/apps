@@ -77,6 +77,7 @@ interface Conversation {
   title: string;
   kind: "direct" | "room";
   origin: string;
+  audience?: string;
   updated_at: string;
 }
 
@@ -241,6 +242,17 @@ const GLYPH_ARCHIVE = "M21 8v13H3V8 M1 3h22v5H1z M10 12h4";
 const GLYPH_TRASH =
   "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2";
 const GLYPH_RESTORE = "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5";
+
+// PublicTag marks conversations whose human side is a product's end
+// users (site chatbot visitors behind a gateway) rather than
+// operators. Inbox items are structurally refused there.
+function PublicTag() {
+  return (
+    <span className="px-1.5 py-0.5 rounded text-xs bg-accent/15 border border-accent/30 text-accent shrink-0">
+      public
+    </span>
+  );
+}
 
 // ─── typed cards ─────────────────────────────────────────────────────
 
@@ -937,6 +949,7 @@ function ContextColumn({
 
   const agentName = (id: number) => agents?.find((a) => a.id === id)?.name || `agent ${id}`;
   const facts: Array<[string, string]> = [
+    ["Audience", conversation.audience === "public" ? "public (visitors)" : "operator"],
     ["Origin", conversation.origin],
     ["Type", conversation.kind],
     ["Created", relTime(conversation.created_at) || "—"],
@@ -1380,7 +1393,10 @@ function ChatColumn({
     <section className="min-h-0 flex-1 flex flex-col">
       <div className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
         <div className="min-w-0">
-          <h2 className="text-sm font-semibold text-text truncate">{conversation.title}</h2>
+          <div className="flex items-center gap-2 min-w-0">
+            <h2 className="text-sm font-semibold text-text truncate">{conversation.title}</h2>
+            {conversation.audience === "public" && <PublicTag />}
+          </div>
           <p className="text-xs text-text-muted truncate">
             {conversation.lead_agent_name || `agent ${conversation.lead_agent_id}`}
             {conversation.origin !== "web" ? ` · via ${conversation.origin}` : ""}
@@ -1904,7 +1920,8 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
                           <span className="truncate">
                             {c.lead_agent_name || `agent ${c.lead_agent_id}`}
                           </span>
-                          {c.origin !== "web" && (
+                          {c.audience === "public" && <PublicTag />}
+                          {c.origin !== "web" && c.origin !== "app" && (
                             <span className="px-1.5 py-0.5 rounded bg-bg border border-border">
                               {c.origin}
                             </span>

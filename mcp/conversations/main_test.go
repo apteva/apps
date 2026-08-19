@@ -988,3 +988,83 @@ func TestInboxPostWithoutSourceAppRejected(t *testing.T) {
 		t.Fatalf("err = %v, want source_app requirement", err)
 	}
 }
+
+// ─── public audience (0.6.0) ─────────────────────────────────────────
+
+// Inbox-kind items are structurally refused in public conversations —
+// a site visitor must never see approvals or error alerts. Replying
+// stays allowed; that is the whole point of the conversation.
+func TestPublicConversationRefusesInboxKinds(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv, err := app.store.CreateConversation(CreateConversationInput{
+		ProjectID: testProject, LeadAgentID: 41, Title: "Visitor chat",
+		ConversationKey: "app:webchat:visitor-1", Origin: "app", Audience: "public",
+	})
+	if err != nil {
+		t.Fatalf("create public conversation: %v", err)
+	}
+	from := callerCtx(41, "chat-"+conv.ID)
+
+	for tool, call := range map[string]func() (any, error){
+		"alert": func() (any, error) {
+			return app.toolAlert(from, ctx, map[string]any{
+				"conversation_id": conv.ID, "text": "internal detail", "severity": "error"})
+		},
+		"report": func() (any, error) {
+			return app.toolReport(from, ctx, map[string]any{
+				"conversation_id": conv.ID, "title": "Weekly", "summary": "internal"})
+		},
+		"approval": func() (any, error) {
+			return app.toolRequestApproval(from, ctx, map[string]any{
+				"conversation_id": conv.ID, "title": "Delete data?"})
+		},
+	} {
+		if _, err := call(); err == nil || !strings.Contains(err.Error(), "operator conversation") {
+			t.Fatalf("%s into public conversation: err = %v, want operator-conversation refusal", tool, err)
+		}
+	}
+
+	if _, err := app.toolSend(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "Happy to help!",
+	}); err != nil {
+		t.Fatalf("send into public conversation must work: %v", err)
+	}
+}
+
+// POST /chats with a conversation_key is find-or-create (one
+// conversation per visitor) and defaults the audience to public;
+// agent-side conversations_create stays operator.
+func TestCreateChatWithKeyIsPublicFindOrCreate(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	mountedCtx = ctx
+
+	create := func() map[string]any {
+		rec := doChats(t, app, "POST", "/chats",
+			`{"agent_id":41,"title":"Visitor 7","conversation_key":"app:webchat:visitor-7"}`)
+		if rec.Code != 200 {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var got map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	first := create()
+	if first["audience"] != "public" || first["origin"] != "app" {
+		t.Fatalf("keyed create = %v, want public/app", first)
+	}
+	second := create()
+	if second["id"] != first["id"] {
+		t.Fatalf("keyed create minted a second conversation: %v vs %v", second["id"], first["id"])
+	}
+
+	created, err := app.toolCreate(callerCtx(41, "main"), ctx, map[string]any{"title": "Ops topic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv, _ := app.store.GetConversation(created.(map[string]any)["conversation_id"].(string))
+	if conv.Audience != "operator" {
+		t.Fatalf("agent-created audience = %q, want operator", conv.Audience)
+	}
+}
