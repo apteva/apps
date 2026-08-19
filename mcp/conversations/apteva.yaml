@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.4.1
+version: 0.4.2
 description: |
   One conversation system: internal dashboard chat, the inbox
   (approvals, reports, alerts, status), and external channels as
@@ -64,6 +64,19 @@ provides:
       label: Conversations
       icon: message-circle
       entry: /ui/ConversationsPanel.mjs
+
+  skills:
+    - name: using-conversations
+      command: /conversations
+      body_file: skills/using-conversations.md
+      description: |
+        Reply discipline (acknowledge, work, one final outcome), the
+        four inbox kinds and their cadence, main-thread output
+        ownership, the approval round-trip, status rules, and room
+        etiquette. Load before messaging people or raising inbox items.
+      metadata:
+        category: communication
+        icon: message-circle
 
 runtime:
   kind: source
