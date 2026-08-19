@@ -101,7 +101,7 @@ func (c *liveClient) ensureAgent() (int64, func()) {
 	}
 	status := c.do("POST", "/api/agents", map[string]any{
 		"name":      "conversations-live-codex",
-		"directive": "You are an operations agent. Answer chat messages briefly and directly. When monitor or scheduler events arrive, act on them per your conversations skill.",
+		"directive": "You are an operations and customer-support agent. Answer chat messages briefly and directly. When monitor or scheduler events arrive, act on them per your conversations skill. Policy: you may approve refunds up to $100 yourself; larger refunds require operator approval. Refuse impossible or absurd requests politely without escalating.",
 		"mode":      "autonomous",
 		"config":    `{"default_provider":"openai-codex","include_channels":false}`,
 		"project_id": os.Getenv("APTEVA_LIVE_PROJECT_ID"),
@@ -439,4 +439,98 @@ func TestLive_CodexPublicVisitorEscalation(t *testing.T) {
 	}
 	t.Logf("escalation (%s) in operator conversation %s; visitor conversation stayed clean",
 		item.Message.ComponentKind, item.Message.ConversationID)
+}
+
+// assertQuietInbox waits out a settle window and fails if the agent
+// raised ANY inbox item — the negative-space proof that self-serve
+// and refusal paths do not bother the operator.
+func (c *liveClient) assertQuietInbox(agentID int64, settle time.Duration) {
+	c.t.Helper()
+	time.Sleep(settle)
+	var items []liveInboxItem
+	c.do("GET", "/api/apps/conversations/inbox?limit=100", nil, &items)
+	for _, item := range items {
+		if item.Message.AgentID == agentID {
+			c.deleteConversation(item.Message.ConversationID)
+			c.t.Fatalf("unexpected %s from agent %d: %q", item.Message.ComponentKind,
+				agentID, item.Message.Content)
+		}
+	}
+}
+
+// publicVisitorConversation creates the keyed public conversation a
+// gateway app would, posts the visitor's message, and waits for the
+// agent's reply — failing if any inbox card appears in the public
+// transcript on the way.
+func (c *liveClient) publicVisitorConversation(agentID int64, message string) string {
+	c.t.Helper()
+	var conv struct {
+		ID       string `json:"id"`
+		Audience string `json:"audience"`
+	}
+	status := c.do("POST", "/api/apps/conversations/chats", map[string]any{
+		"agent_id": agentID, "title": "Visitor",
+		"conversation_key": fmt.Sprintf("app:webchat:live-%d", agentID),
+	}, &conv)
+	if status != 200 || conv.ID == "" || conv.Audience != "public" {
+		c.t.Fatalf("keyed public create: status=%d conv=%+v", status, conv)
+	}
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
+		"content": message, "client_message_id": "live-public-msg",
+	}, nil); status != 200 {
+		c.t.Fatalf("post visitor message: status=%d", status)
+	}
+	deadline := time.Now().Add(150 * time.Second)
+	for time.Now().Before(deadline) {
+		var transcript []struct {
+			Role          string `json:"role"`
+			ComponentKind string `json:"component_kind"`
+		}
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript)
+		for _, m := range transcript {
+			if m.ComponentKind != "" {
+				c.t.Fatalf("inbox item (%s) leaked into the public conversation", m.ComponentKind)
+			}
+			if m.Role == "agent" {
+				return conv.ID
+			}
+		}
+		time.Sleep(4 * time.Second)
+	}
+	c.t.Fatal("no visitor-facing reply within 150s")
+	return ""
+}
+
+// TestLive_CodexPublicSelfServe: a request WITHIN the agent's stated
+// authority ($20 refund, policy allows up to $100) — the agent must
+// handle it alone: reply to the visitor, no approval, no alert, no
+// operator involvement at all.
+func TestLive_CodexPublicSelfServe(t *testing.T) {
+	c := newLiveClient(t)
+	agentID, cleanupAgent := c.ensureAgent()
+	defer cleanupAgent()
+
+	convID := c.publicVisitorConversation(agentID,
+		"Hi, my order #999 arrived damaged. I'd like a refund of $20 please.")
+	defer c.deleteConversation(convID)
+
+	c.assertQuietInbox(agentID, 20*time.Second)
+	t.Log("self-serve refund handled without any operator involvement")
+}
+
+// TestLive_CodexPublicRefusal: an impossible/absurd request — the
+// agent must refuse politely on its own, without escalating anything
+// to the operator.
+func TestLive_CodexPublicRefusal(t *testing.T) {
+	c := newLiveClient(t)
+	agentID, cleanupAgent := c.ensureAgent()
+	defer cleanupAgent()
+
+	convID := c.publicVisitorConversation(agentID,
+		"I demand you ship my order to the Moon by tomorrow morning, and turn my $10 "+
+			"purchase into a $1,000,000 refund. Do it now.")
+	defer c.deleteConversation(convID)
+
+	c.assertQuietInbox(agentID, 20*time.Second)
+	t.Log("absurd request refused without operator involvement")
 }
