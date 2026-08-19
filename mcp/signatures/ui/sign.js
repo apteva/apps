@@ -73,6 +73,13 @@ async function boot(payload) {
     fieldsByPage.get(f.page).push(f);
   }
 
+  // clientWidth can legitimately be 0 here — background tabs and
+  // embedded webviews may not have laid out yet — which once produced
+  // a negative width, NaN canvas sizes, and a silently blank document.
+  // Fall back through the window width and clamp to a sane range.
+  const availWidth = (doc.clientWidth || window.innerWidth - 430 || 848) - 28;
+  const cssWidth = Math.max(320, Math.min(availWidth, 900));
+
   for (let n = 1; n <= pdf.numPages; n++) {
     const page = await pdf.getPage(n);
     const wrap = document.createElement("div");
@@ -80,7 +87,6 @@ async function boot(payload) {
     doc.appendChild(wrap);
 
     const base = page.getViewport({ scale: 1 });
-    const cssWidth = Math.min(doc.clientWidth - 28, 900);
     const scale = cssWidth / base.width;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const viewport = page.getViewport({ scale: scale * dpr });
