@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.26
+version: 0.1.33
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -1462,6 +1462,9 @@ func emitBill(ctx *sdk.AppCtx, topic string, b *Bill) {
 		"status":                b.Status,
 		"total_cents":           b.TotalCents,
 		"currency":              b.Currency,
+		"category":              b.Category,
+		"due_date":              b.DueDate,
+		"paid_at":               b.PaidAt,
 	})
 }
 

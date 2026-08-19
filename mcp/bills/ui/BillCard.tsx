@@ -2,7 +2,7 @@
 // InvoiceCard. Status pill colours align with the panel's tone map.
 
 import { useEffect, useState } from "react";
-import { Card, CardHeader, DataList } from "@apteva/ui-kit";
+import { AppCardHeader, Card, DataList } from "@apteva/ui-kit";
 
 interface BillMeta {
   id: number;
@@ -146,14 +146,14 @@ export default function BillCard({ bill_id, projectId, preview }: Props) {
   if (missing) {
     return (
       <Card>
-        <CardHeader title="Bill unavailable" subtitle={`#${bill_id}`} />
+        <AppCardHeader title="Bill unavailable" subtitle={`#${bill_id}`} />
       </Card>
     );
   }
   if (!meta) {
     return (
       <Card>
-        <CardHeader title="Loading bill…" subtitle={`#${bill_id}`} />
+        <AppCardHeader title="Loading bill…" subtitle={`#${bill_id}`} />
       </Card>
     );
   }
@@ -174,7 +174,7 @@ export default function BillCard({ bill_id, projectId, preview }: Props) {
 
   return (
     <Card>
-      <CardHeader
+      <AppCardHeader
         title={title}
         subtitle={subtitle}
         right={

@@ -3,7 +3,7 @@
 // outstanding owed.
 
 import { useEffect, useState } from "react";
-import { Card, CardHeader, DataList } from "@apteva/ui-kit";
+import { AppCardHeader, Card, DataList } from "@apteva/ui-kit";
 
 interface Vendor {
   id: number;
@@ -149,14 +149,14 @@ export default function VendorCard({ vendor_id, projectId, preview }: Props) {
   if (missing) {
     return (
       <Card>
-        <CardHeader title="Vendor unavailable" subtitle={`#${vendor_id}`} />
+        <AppCardHeader title="Vendor unavailable" subtitle={`#${vendor_id}`} />
       </Card>
     );
   }
   if (!data) {
     return (
       <Card>
-        <CardHeader title="Loading vendor…" subtitle={`#${vendor_id}`} />
+        <AppCardHeader title="Loading vendor…" subtitle={`#${vendor_id}`} />
       </Card>
     );
   }
@@ -182,7 +182,7 @@ export default function VendorCard({ vendor_id, projectId, preview }: Props) {
 
   return (
     <Card>
-      <CardHeader
+      <AppCardHeader
         title={v.name}
         subtitle={subtitle}
         right={
