@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 func (a *App) handleSigning(w http.ResponseWriter, r *http.Request) {
@@ -205,6 +207,17 @@ type signingPayloadField struct {
 	Required bool    `json:"required"`
 }
 
+// appVersion tags asset URLs so browsers refetch sign.js and the pdf.js
+// vendor files after an app upgrade instead of serving a stale cache
+// entry for up to the assets' max-age.
+var appVersion = func() string {
+	m, err := sdk.ParseManifest([]byte(manifestYAML))
+	if err != nil || m == nil {
+		return "dev"
+	}
+	return m.Version
+}()
+
 func renderSigningPage(w http.ResponseWriter, token string, session *SigningSession) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -261,7 +274,18 @@ func renderSigningPage(w http.ResponseWriter, token string, session *SigningSess
 <script type="application/json" id="signing-data">%s</script>
 <script type="module" src="./assets/sign.js%s"></script></body></html>`,
 		html.EscapeString(session.Envelope.Title), html.EscapeString(session.Envelope.Title), html.EscapeString(session.Envelope.SenderName), html.EscapeString(session.Recipient.Name), html.EscapeString(session.Envelope.ExpiresAt), token, q,
-		optionalMessage(session.Envelope.Message), token, q, legalName, fields.String(), actionLabel, token, q, payloadJSON, q)
+		optionalMessage(session.Envelope.Message), token, q, legalName, fields.String(), actionLabel, token, q, payloadJSON, assetQuery(q))
+}
+
+// assetQuery appends the version cache-buster to the page query for
+// asset URLs. sign.js reads its own URL's query and forwards it to the
+// pdf.js imports, so the buster propagates automatically.
+func assetQuery(q string) string {
+	v := "v=" + url.QueryEscape(appVersion)
+	if q == "" {
+		return "?" + v
+	}
+	return q + "&" + v
 }
 
 func optionalMessage(message string) string {
