@@ -60,27 +60,37 @@ type streamer struct {
 	mu       sync.Mutex
 	buffers  map[string]*streamState
 	lastEmit map[string]string
+	// pendingAcks maps conversation → the outstanding ack frame's call
+	// id. Ack ids are unique per emission (ackSeq): providers like
+	// Gemini reuse call ids across responses, and the panel tombstones
+	// settled ids — a constant id would suppress every bubble after
+	// the first reply.
+	pendingAcks map[string]string
+	ackSeq      uint64
 }
 
 func newStreamer(h *hub) *streamer {
 	return &streamer{
-		hub:      h,
-		buffers:  map[string]*streamState{},
-		lastEmit: map[string]string{},
+		hub:         h,
+		buffers:     map[string]*streamState{},
+		lastEmit:    map[string]string{},
+		pendingAcks: map[string]string{},
 	}
 }
 
 // visibleConversationTool: which tool calls stream into a bubble.
 // conversations_send is this app's own surface; the channels_* names
 // keep the streamer correct once the server relay (migration phase 1)
-// forwards legacy-shaped calls.
+// forwards legacy-shaped calls. Matched by suffix because the MCP
+// gateway prefixes tool names with the app name — telemetry reports
+// "conversations_conversations_send", not the bare name.
 func visibleConversationTool(name string) bool {
-	switch name {
-	case "conversations_send", "channels_send", "channels_respond":
-		return true
-	default:
-		return false
+	for _, base := range []string{"conversations_send", "channels_send", "channels_respond"} {
+		if name == base || strings.HasSuffix(name, "_"+base) {
+			return true
+		}
 	}
+	return false
 }
 
 // conversationForThread maps "chat-conv-<hex>" → "conv-<hex>". Empty
@@ -240,24 +250,35 @@ func (s *streamer) onToolEnd(agentID int64, threadID, conversationID, dataJSON s
 
 // ─── Stage-1 phase frames (fallback + instant feedback) ──────────────
 
-// ackCallID is the synthetic call id for the acknowledgement bubble
-// shown between "user message forwarded" and "agent reply landed".
-// One per conversation: a newer forward replaces the bubble, and the
-// durable reply drops it.
-func ackCallID(conversationID string) string { return "ack-" + conversationID }
-
+// emitAck publishes the acknowledgement bubble shown between "user
+// message forwarded" and "agent reply landed". Each emission mints a
+// fresh call id and records it as the conversation's pending ack.
 func (s *streamer) emitAck(conversationID, threadID string) {
+	s.mu.Lock()
+	s.ackSeq++
+	id := "ack-" + conversationID + "-" + strconv.FormatUint(s.ackSeq, 10)
+	s.pendingAcks[conversationID] = id
+	s.mu.Unlock()
 	s.hub.publishStream(StreamFrame{
 		Type: "stream", ConversationID: conversationID, ThreadID: threadID,
-		CallID: ackCallID(conversationID), Phase: "acknowledgement",
+		CallID: id, Phase: "acknowledgement",
 		CreatedAt: time.Now(),
 	})
 }
 
+// settleAck settles the conversation's outstanding ack, if any. A
+// no-op when nothing is pending — durable rows land for many reasons.
 func (s *streamer) settleAck(conversationID string) {
+	s.mu.Lock()
+	id := s.pendingAcks[conversationID]
+	delete(s.pendingAcks, conversationID)
+	s.mu.Unlock()
+	if id == "" {
+		return
+	}
 	s.hub.publishStream(StreamFrame{
 		Type: "stream", ConversationID: conversationID,
-		CallID: ackCallID(conversationID), Done: true, CreatedAt: time.Now(),
+		CallID: id, Done: true, CreatedAt: time.Now(),
 	})
 }
 

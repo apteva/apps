@@ -177,3 +177,65 @@ func TestStreamerScopesCallIDsByAgentAndThread(t *testing.T) {
 		}
 	}
 }
+
+// The MCP gateway prefixes tool names with the app name — telemetry
+// reports "conversations_conversations_send". The live-probe of
+// 2026-08-19 showed exactly that name; bare-name matching dropped
+// every frame.
+func TestStreamerAcceptsGatewayPrefixedToolNames(t *testing.T) {
+	h := newHub()
+	s := newStreamer(h)
+	ch, cancel := h.subscribeFrames("conv-1")
+	defer cancel()
+
+	s.Ingest("llm.tool_chunk", 41, "chat-conv-1",
+		`{"tool":"conversations_conversations_send","id":"gemini_1","chunk":"{\"conversation_id\":\"conv-1\",\"text\":\"streamed\"}"}`,
+		time.Now())
+
+	select {
+	case f := <-ch:
+		if f.Text != "streamed" {
+			t.Fatalf("text = %q", f.Text)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prefixed tool name produced no frame")
+	}
+}
+
+// Ack ids must be unique per emission: the panel tombstones settled
+// ids, so a constant per-conversation id would suppress the thinking
+// bubble for every message after the first.
+func TestAckIDsUniquePerEmission(t *testing.T) {
+	h := newHub()
+	s := newStreamer(h)
+	ch, cancel := h.subscribeFrames("conv-1")
+	defer cancel()
+
+	s.emitAck("conv-1", "chat-conv-1")
+	s.settleAck("conv-1")
+	s.emitAck("conv-1", "chat-conv-1")
+	s.settleAck("conv-1")
+
+	var frames []StreamFrame
+	for len(frames) < 4 {
+		select {
+		case f := <-ch:
+			frames = append(frames, f)
+		case <-time.After(time.Second):
+			t.Fatalf("frames = %d, want 4", len(frames))
+		}
+	}
+	if frames[0].CallID == frames[2].CallID {
+		t.Fatalf("ack ids reused: %q", frames[0].CallID)
+	}
+	if frames[1].CallID != frames[0].CallID || frames[3].CallID != frames[2].CallID {
+		t.Fatal("settle frames must target their own ack ids")
+	}
+	// Settling with nothing pending publishes nothing.
+	s.settleAck("conv-1")
+	select {
+	case f := <-ch:
+		t.Fatalf("unexpected frame after empty settle: %+v", f)
+	case <-time.After(100 * time.Millisecond):
+	}
+}

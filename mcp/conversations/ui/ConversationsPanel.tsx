@@ -399,7 +399,7 @@ function MessageCards({
 function StreamingBubble({ text }: { text: string }) {
   const html = useMemo(() => renderSafeMarkdown(closeOpenMarkdown(text)), [text]);
   return (
-    <div className="flex min-h-[42px] min-w-0 flex-col justify-center">
+    <div className="flex min-h-[42px] min-w-0 flex-col justify-center shrink-0">
       <div
         className="chat-md text-text text-[15px] sm:text-sm break-words leading-relaxed"
         dangerouslySetInnerHTML={{ __html: html }}
@@ -414,7 +414,7 @@ function StreamingBubble({ text }: { text: string }) {
 function ThinkingMessagePlaceholder() {
   return (
     <div
-      className="grid min-h-[42px] min-w-0 grid-cols-[1.9rem_minmax(0,1fr)_auto] items-center gap-2 px-1 py-0.5"
+      className="grid min-h-[42px] min-w-0 shrink-0 grid-cols-[1.9rem_minmax(0,1fr)_auto] items-center gap-2 px-1 py-0.5"
       role="status"
       aria-live="polite"
       aria-label="Thinking"
@@ -1016,21 +1016,21 @@ function MessageRow({
 
   if (message.component_kind) {
     return (
-      <div className="w-full min-w-0">
+      <div className="w-full min-w-0 shrink-0">
         <MessageCards message={message} onAction={onAction} />
       </div>
     );
   }
   if (message.role === "system") {
     return (
-      <div className="text-center text-[10px] text-text-muted py-1 break-words">
+      <div className="shrink-0 text-center text-[10px] text-text-muted py-1 break-words">
         {message.content}
       </div>
     );
   }
   if (message.role === "user") {
     return (
-      <div className="flex justify-end min-w-0">
+      <div className="flex justify-end min-w-0 shrink-0">
         <div
           className="bg-accent/15 border border-accent/30 rounded-xl rounded-br-sm px-3 py-2 max-w-[92%] sm:max-w-[80%] min-w-0"
           title={relTime(message.created_at)}
@@ -1043,7 +1043,7 @@ function MessageRow({
     );
   }
   return (
-    <div className="flex min-h-[42px] min-w-0 flex-col justify-center" title={relTime(message.created_at)}>
+    <div className="flex min-h-[42px] min-w-0 flex-col justify-center shrink-0" title={relTime(message.created_at)}>
       <div
         className="chat-md text-text text-[15px] sm:text-sm break-words leading-relaxed"
         dangerouslySetInnerHTML={{ __html: html }}
@@ -1058,55 +1058,156 @@ interface StreamBubbleState {
   phase?: string;
 }
 
+// Stream-frame lifecycle constants and helpers — a faithful port of
+// the dashboard's chatConnections manager (state/chatConnections.ts):
+// same TTLs, same normalization, same suppression rules.
+const SETTLED_STREAM_TTL_MS = 30_000;
+const STREAM_DONE_GRACE_MS = 1500;
+const SETTLED_STREAM_MAX = 20;
+
+function normalizeStreamText(value: string): string {
+  return value.replace(/\r\n/g, "\n").trim();
+}
+
 function useConversationTransport(conversationID: string) {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [bubble, setBubble] = useState<StreamBubbleState | null>(null);
+  const [bubble, setBubbleState] = useState<StreamBubbleState | null>(null);
   const [connected, setConnected] = useState(false);
   const highestSeenRef = useRef(0);
-  // Tombstones: calls whose durable row already landed. A late stream
-  // frame for a settled call must never resurrect a bubble — the exact
-  // race the dashboard's chatConnections guards against.
-  const settledCallsRef = useRef<Set<string>>(new Set());
-  const recentAgentTextsRef = useRef<string[]>([]);
+  // Message rows and stream frames travel over two independent SSE
+  // channels; either can outrun the other. Short-lived tombstones
+  // (NOT permanent — providers like Gemini reuse call ids across
+  // responses) plus recent-agent-message matching keep a late frame
+  // from resurrecting a settled bubble. Same scheme, constants, and
+  // pruning as the dashboard's chatConnections.
+  const settledCallsRef = useRef<Map<string, number>>(new Map());
+  const recentAgentRef = useRef<Array<{ content: string; settledAt: number }>>([]);
+  const bubbleRef = useRef<StreamBubbleState | null>(null);
+  const clearTimerRef = useRef(0);
   const pendingFrameRef = useRef<StreamFrame | null>(null);
   const rafRef = useRef(0);
 
-  const mergeMessages = useCallback((incoming: Message[]) => {
-    if (incoming.length === 0) return;
-    setMessages((current) => {
-      const byId = new Map<number, Message>(current.map((m) => [m.id, m]));
-      for (const m of incoming) {
-        byId.set(m.id, m);
-        if (m.id > highestSeenRef.current) highestSeenRef.current = m.id;
-        if (m.role === "agent" && !m.component_kind) {
-          recentAgentTextsRef.current = [m.content, ...recentAgentTextsRef.current].slice(0, 5);
-          // Any durable agent row settles the pending bubble.
-          setBubble(null);
-        }
-      }
-      return [...byId.values()].sort((a, b) => a.id - b.id);
-    });
+  const setBubble = useCallback((next: StreamBubbleState | null) => {
+    bubbleRef.current = next;
+    setBubbleState(next);
   }, []);
 
-  const applyFrame = useCallback((frame: StreamFrame) => {
-    if (frame.done) {
-      settledCallsRef.current.add(frame.call_id);
-      setBubble((current) => (current && current.callId === frame.call_id ? null : current));
-      return;
+  const cancelStreamClear = useCallback(() => {
+    if (clearTimerRef.current) {
+      window.clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = 0;
     }
-    if (settledCallsRef.current.has(frame.call_id)) return;
-    // A frame whose full text already matches a recently landed agent
-    // message is the race losing: the row beat the frame. Skip it.
-    if (frame.text && recentAgentTextsRef.current.includes(frame.text)) return;
-    setBubble({ callId: frame.call_id, text: frame.text, phase: frame.phase });
   }, []);
+
+  const pruneSettled = useCallback(() => {
+    const cutoff = Date.now() - SETTLED_STREAM_TTL_MS;
+    for (const [callId, settledAt] of settledCallsRef.current) {
+      if (settledAt < cutoff) settledCallsRef.current.delete(callId);
+    }
+    recentAgentRef.current = recentAgentRef.current
+      .filter((m) => m.settledAt >= cutoff)
+      .slice(-SETTLED_STREAM_MAX);
+    if (settledCallsRef.current.size > SETTLED_STREAM_MAX) {
+      const overflow = settledCallsRef.current.size - SETTLED_STREAM_MAX;
+      for (const callId of [...settledCallsRef.current.keys()].slice(0, overflow)) {
+        settledCallsRef.current.delete(callId);
+      }
+    }
+  }, []);
+
+  const rememberSettled = useCallback(
+    (callId: string) => {
+      if (!callId) return;
+      settledCallsRef.current.set(callId, Date.now());
+      pruneSettled();
+    },
+    [pruneSettled],
+  );
+
+  const mergeMessages = useCallback(
+    (incoming: Message[]) => {
+      if (incoming.length === 0) return;
+      let sawAgentRow = false;
+      for (const m of incoming) {
+        if (m.role === "agent" && !m.component_kind) {
+          sawAgentRow = true;
+          const normalized = normalizeStreamText(m.content);
+          if (normalized) {
+            recentAgentRef.current.push({ content: normalized, settledAt: Date.now() });
+            pruneSettled();
+          }
+        }
+      }
+      // A durable agent row settles the streaming bubble: remember its
+      // call id before clearing so the parallel stream channel cannot
+      // resurrect the same text (donor: chatConnections.onmessage).
+      if (sawAgentRow) {
+        if (bubbleRef.current?.callId) rememberSettled(bubbleRef.current.callId);
+        cancelStreamClear();
+        setBubble(null);
+      }
+      setMessages((current) => {
+        const byId = new Map<number, Message>(current.map((m) => [m.id, m]));
+        for (const m of incoming) {
+          byId.set(m.id, m);
+          if (m.id > highestSeenRef.current) highestSeenRef.current = m.id;
+        }
+        return [...byId.values()].sort((a, b) => a.id - b.id);
+      });
+    },
+    [cancelStreamClear, pruneSettled, rememberSettled, setBubble],
+  );
+
+  const applyFrame = useCallback(
+    (frame: StreamFrame) => {
+      pruneSettled();
+      if (frame.call_id && settledCallsRef.current.has(frame.call_id)) return;
+      if (
+        !frame.done &&
+        frame.text &&
+        (() => {
+          const normalized = normalizeStreamText(frame.text);
+          return (
+            normalized !== "" &&
+            recentAgentRef.current.some((m) => m.content.startsWith(normalized))
+          );
+        })()
+      ) {
+        // The durable row already carries this text — the frame lost
+        // the race. Settle its call so its later frames stay quiet.
+        rememberSettled(frame.call_id);
+        return;
+      }
+      if (frame.done) {
+        // Normally the durable row clears the bubble first. An orphan
+        // done (suppressed duplicate — no row coming) clears after a
+        // short grace so the final text doesn't blink out mid-read.
+        const current = bubbleRef.current;
+        if (!current || (frame.call_id && current.callId !== frame.call_id)) return;
+        rememberSettled(frame.call_id);
+        cancelStreamClear();
+        clearTimerRef.current = window.setTimeout(() => {
+          clearTimerRef.current = 0;
+          const active = bubbleRef.current;
+          if (!active || (frame.call_id && active.callId !== frame.call_id)) return;
+          setBubble(null);
+        }, STREAM_DONE_GRACE_MS);
+        return;
+      }
+      cancelStreamClear();
+      setBubble({ callId: frame.call_id, text: frame.text, phase: frame.phase });
+    },
+    [cancelStreamClear, pruneSettled, rememberSettled, setBubble],
+  );
 
   // SSE: default events = durable rows, named `stream` events =
   // ephemeral frames (RAF-coalesced so token bursts don't thrash React).
   useEffect(() => {
     if (!conversationID) return;
     highestSeenRef.current = 0;
-    settledCallsRef.current = new Set();
+    settledCallsRef.current = new Map();
+    recentAgentRef.current = [];
+    cancelStreamClear();
     setMessages([]);
     setBubble(null);
 
@@ -1146,6 +1247,11 @@ function useConversationTransport(conversationID: string) {
       });
       es.onerror = () => {
         setConnected(false);
+        // Drop any in-progress bubble on disconnect — the next thing
+        // shown should be the durable row after reconnect, not a
+        // stale partial (donor: chatConnections.onerror).
+        cancelStreamClear();
+        setBubble(null);
         if (es && es.readyState === EventSource.CLOSED) {
           window.clearTimeout(reconnectTimer);
           reconnectTimer = window.setTimeout(connect, 2000);
@@ -1173,10 +1279,11 @@ function useConversationTransport(conversationID: string) {
       cancelled = true;
       window.clearTimeout(reconnectTimer);
       window.clearInterval(poll);
+      cancelStreamClear();
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (es) es.close();
     };
-  }, [conversationID, mergeMessages, applyFrame]);
+  }, [conversationID, mergeMessages, applyFrame, cancelStreamClear, setBubble]);
 
   return { messages, bubble, connected, mergeMessages };
 }
