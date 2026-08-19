@@ -127,6 +127,12 @@ func (a *App) Workers() []sdk.Worker {
 		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
 			return a.recoverPlanChanges(ctx)
 		},
+	}, {
+		Name:     "trial-reminder",
+		Schedule: "@every 10m",
+		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+			return a.runTrialReminders(ctx)
+		},
 	}}
 }
 
@@ -2957,6 +2963,18 @@ func (a *App) handleSubscriptionCycleDue(ctx *sdk.AppCtx, event sdk.Event) error
 	_ = recordEvent(ctx.AppDB(), pid, acct.ID, "subscription.cycle_billed", "subscription", map[string]any{
 		"subscription_id": subID, "cycle_id": cycleID, "invoice_id": invoiceID,
 	})
+	// Automatically collected cycles store the collection attempt, not a
+	// link, so only manual-collection cycles (and auto-collection
+	// fallbacks without a reusable payment method) produce an email.
+	if finalOp, opErr := dbCommerceOperationGet(ctx.AppDB(), pid, op.ID); opErr == nil && finalOp != nil {
+		if url := strArg(mapFromAny(finalOp.PaymentLink), "url"); url != "" {
+			amount := ""
+			if cents := int64Arg(prepared, "total_cents"); cents > 0 {
+				amount = formatAmountCents(cents, strArg(prepared, "currency"))
+			}
+			a.sendPaymentLinkEmail(ctx, pid, acct, invoiceID, url, amount, periodStart, periodEnd)
+		}
+	}
 	return nil
 }
 
@@ -3163,6 +3181,9 @@ func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
 	_ = recordEvent(ctx.AppDB(), pid, op.AccountID, "invoice.paid", "billing", map[string]any{
 		"subscription_id": op.SubscriptionID, "cycle_id": op.CycleID, "invoice_id": invoiceID,
 	})
+	if acct, acctErr := dbAccountGet(ctx.AppDB(), pid, op.AccountID); acctErr == nil {
+		a.sendReceiptEmail(ctx, pid, acct, invoice)
+	}
 	return nil
 }
 
@@ -3297,6 +3318,13 @@ func (a *App) handleInvoiceCollectionFailed(ctx *sdk.AppCtx, event sdk.Event) er
 	}
 	if op.CheckoutID != "" {
 		_ = dbCheckoutSetStatus(ctx.AppDB(), pid, op.CheckoutID, "payment_failed", eventName)
+	}
+	// Voided and refunded invoices are operator actions, not failed
+	// customer payments, so only genuine collection failures notify.
+	if eventName == "invoice.payment_failed" || eventName == "invoice.payment_action_required" {
+		if acct, acctErr := dbAccountGet(ctx.AppDB(), pid, op.AccountID); acctErr == nil {
+			a.sendPaymentFailedEmail(ctx, pid, acct, invoiceID, eventName, strArg(mapFromAny(op.PaymentLink), "url"))
+		}
 	}
 	return dbCommerceOperationFail(ctx.AppDB(), pid, op.ID, "failed_payment", eventName)
 }

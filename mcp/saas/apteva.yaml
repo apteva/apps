@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.8.2
+version: 0.9.0
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -17,6 +17,10 @@ description: |
   automatic collection or invoice links while Billing owns payment execution.
   v0.8.1 makes automatic collection the default for new paid plans while
   preserving the invoice behavior of plans created before the upgrade.
+  v0.9.0 adds transactional email through the optional messaging app:
+  payment-link delivery, payment receipts, failed-payment notices, and a
+  trial-ending reminder sweep. All sends are best-effort — installs
+  without messaging keep collecting payments unchanged.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
@@ -67,6 +71,7 @@ requires:
     - name: auth
       optional: false
     - name: messaging
+      reason: transactional email — payment links, receipts, failed-payment notices, and trial-ending reminders; sends are best-effort and never block collection
       optional: true
     - name: analytics
       optional: true

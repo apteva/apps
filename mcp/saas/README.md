@@ -271,3 +271,25 @@ backfill explicitly.
 An `invoice.paid` event activates access only after Billing confirms that the
 invoice status is actually `paid`. Partial payments update the reporting
 projection but leave the subscription and account payment state unchanged.
+
+## Transactional Email
+
+When the optional messaging app is installed, SaaS emails the account owner
+at four points: the hosted payment link when a manual-collection cycle (or an
+automatic-collection fallback without a reusable payment method) creates one,
+a receipt when an invoice is paid, a failed-payment notice on
+`invoice.payment_failed` and `invoice.payment_action_required` (voided and
+refunded invoices are operator actions and stay silent), and a trial-ending
+reminder swept every 10 minutes for active accounts whose `trial_ends_at`
+falls within the next 48 hours.
+
+Every send is best-effort. Delivery goes through `messaging.send_message`
+with an idempotency key, outcomes are recorded as `notification.sent` or
+`notification.failed` account events, and a failure never blocks payment
+collection or activation. Installs without messaging behave exactly as
+before. The sender address is whatever default email sender is configured
+in messaging; SaaS does not pass `from`.
+
+The trial reminder marks `trial_reminder_sent_at` in account metadata once
+delivered; failed attempts are throttled to one per six hours until the
+window closes.
