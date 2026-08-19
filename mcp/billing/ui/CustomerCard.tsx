@@ -3,24 +3,11 @@
 
 import { useEffect, useState } from "react";
 import {
+  AppCardHeader,
   Card,
-  CardHeader,
   DataList,
   StatusPill,
-  type CardVendor,
 } from "@apteva/ui-kit";
-
-const billingLogo = (
-  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden>
-    <path d="M6 2h12a1 1 0 0 1 1 1v18l-3-1.8-3 1.8-3-1.8-3 1.8-3-1.8V3a1 1 0 0 1 1-1zm3 6h6V6H9v2zm0 4h6v-2H9v2zm0 4h4v-2H9v2z" />
-  </svg>
-);
-
-const billingVendor: CardVendor = {
-  name: "Billing",
-  logo: billingLogo,
-  color: { light: "#047857", dark: "#6ee7b7" },
-};
 
 interface Customer {
   id: number;
@@ -176,8 +163,7 @@ export default function CustomerCard({
   if (missing) {
     return (
       <Card>
-        <CardHeader
-          vendor={billingVendor}
+        <AppCardHeader
           title={`Customer #${customer_id}`}
           status={{ label: "missing", variant: "muted" }}
         />
@@ -187,8 +173,7 @@ export default function CustomerCard({
   if (!data) {
     return (
       <Card>
-        <CardHeader
-          vendor={billingVendor}
+        <AppCardHeader
           title={`Customer #${customer_id}`}
           status={{ label: "loading", variant: "muted" }}
         />
@@ -206,8 +191,7 @@ export default function CustomerCard({
 
   return (
     <Card>
-      <CardHeader
-        vendor={billingVendor}
+      <AppCardHeader
         title={c.name}
         subtitle={subtitle || `Customer #${c.id}`}
         status={{

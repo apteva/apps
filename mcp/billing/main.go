@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.12.3
+version: 0.12.4
 description: |
   Customers, invoices, payments, and reusable customer payment methods.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -123,7 +123,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.11.0",
+		"version", "0.12.4",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -1363,14 +1363,23 @@ func emitInvoice(ctx *sdk.AppCtx, topic string, inv *Invoice) {
 	if ctx == nil || inv == nil {
 		return
 	}
-	ctx.EmitWithProject(topic, inv.ProjectID, map[string]any{
+	payload := map[string]any{
 		"id":          inv.ID,
 		"customer_id": inv.CustomerID,
 		"number":      inv.Number,
 		"status":      inv.Status,
 		"total_cents": inv.TotalCents,
 		"currency":    inv.Currency,
-	})
+	}
+	// Billing stays product-agnostic: source apps stamp linkage (e.g.
+	// subscription_id, cycle_id, source) into invoice metadata at create
+	// time, and consumers read it off the event — this is what lets a
+	// revenue listener tell a subscription-cycle invoice from a one-off
+	// without a read-time join.
+	if meta := string(inv.Metadata); meta != "" && meta != "{}" && meta != "null" {
+		payload["metadata"] = inv.Metadata
+	}
+	ctx.EmitWithProject(topic, inv.ProjectID, payload)
 }
 
 // ─── HTTP handlers ──────────────────────────────────────────────────

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.12.3
+version: 0.12.4
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -25,6 +25,9 @@ description: |
   v0.12.2 uses Stripe's current hosted-page Checkout Session UI mode.
   v0.12.3 adds deferred Elements configuration and invoice PaymentIntents,
   allowing product apps to render payment fields before creating a customer.
+  v0.12.4 passes invoice metadata through on invoice.* events so consumers
+  can attribute revenue by source (e.g. subscription-cycle vs one-off)
+  without a read-time join; Billing stays product-agnostic.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/billing
