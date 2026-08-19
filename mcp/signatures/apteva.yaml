@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: signatures
 display_name: Signatures
-version: 0.2.0
+version: 0.2.1
 description: |
   Send PDFs for simple electronic signature. Create an envelope from a
   Storage file, add ordered recipients and fields, share secure signing

@@ -507,7 +507,9 @@ function FieldEditor({ projectId, envelope, recipients, fields, setFields, onSav
       canvas.height = Math.floor(viewport.height);
       const cssHeight = Math.floor(base.height * scale);
       setPageSize({ width: cssWidth, height: cssHeight });
-      await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+      // intent "print" renders in one pass without requestAnimationFrame
+      // chunking — rAF throttling in background tabs left renders hanging.
+      await page.render({ canvasContext: canvas.getContext("2d"), viewport, intent: "print" }).promise;
     })();
     return () => { cancelled = true; };
   }, [pageNum, numPages]);

@@ -24,6 +24,10 @@ function pageQuery() {
   return new URL(import.meta.url).search || "";
 }
 
+function withTimeout(promise, ms, message) {
+  return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))]);
+}
+
 function fallbackIframe() {
   const payload = JSON.parse(dataEl.textContent);
   doc.innerHTML = "";
@@ -39,6 +43,23 @@ async function boot(payload) {
   const pdfjs = await import(new URL("./pdf.min.mjs" + q, import.meta.url).href);
   pdfjs.GlobalWorkerOptions.workerSrc = new URL("./pdf.worker.min.mjs" + q, import.meta.url).href;
 
+  const boxes = new Map(); // field id -> box element
+  const inputs = new Map(); // field id -> {input, type}
+
+  // Wire the form first: the Type/Draw controls and live previews must
+  // not wait on page rendering (a slow PDF should never block signing).
+  for (const label of document.querySelectorAll("label[data-field-id]")) {
+    const id = Number(label.dataset.fieldId);
+    const type = label.dataset.fieldType;
+    const input = label.querySelector("input");
+    if (!input) continue;
+    inputs.set(id, { input, type, label: label });
+    if (type === "signature") enhanceSignature(id, label, input);
+    input.addEventListener("input", () => paint(id));
+    input.addEventListener("focus", () => highlight(id, true));
+    input.addEventListener("blur", () => highlight(id, false));
+  }
+
   const bytes = await fetch(payload.doc_url, { credentials: "same-origin" }).then((r) => {
     if (!r.ok) throw new Error("document fetch failed: " + r.status);
     return r.arrayBuffer();
@@ -52,7 +73,6 @@ async function boot(payload) {
     fieldsByPage.get(f.page).push(f);
   }
 
-  const boxes = new Map(); // field id -> box element
   for (let n = 1; n <= pdf.numPages; n++) {
     const page = await pdf.getPage(n);
     const wrap = document.createElement("div");
@@ -71,7 +91,23 @@ async function boot(payload) {
     wrap.style.width = cssWidth + "px";
     wrap.style.height = Math.floor(base.height * scale) + "px";
     wrap.appendChild(canvas);
-    await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+    try {
+      // intent "print" renders in one pass without requestAnimationFrame
+      // chunking — rAF is throttled to a standstill in background tabs
+      // and embedded webviews, which left multi-chunk pages hanging.
+      await withTimeout(
+        page.render({ canvasContext: canvas.getContext("2d"), viewport, intent: "print" }).promise,
+        20000,
+        "page " + n + " render timed out",
+      );
+    } catch (err) {
+      console.error("signing page: page", n, "failed to render:", err);
+      canvas.remove();
+      const note = document.createElement("div");
+      note.style.cssText = "display:flex;align-items:center;justify-content:center;height:100%;color:#94a3b8;font-size:13px";
+      note.textContent = "Page " + n + " preview unavailable";
+      wrap.appendChild(note);
+    }
 
     for (const f of fieldsByPage.get(n) || []) {
       const box = document.createElement("div");
@@ -86,20 +122,7 @@ async function boot(payload) {
       wrap.appendChild(box);
       boxes.set(f.id, box);
     }
-  }
-
-  const inputs = new Map(); // field id -> {input, type}
-  for (const label of document.querySelectorAll("label[data-field-id]")) {
-    const id = Number(label.dataset.fieldId);
-    const type = label.dataset.fieldType;
-    const input = label.querySelector("input");
-    if (!input) continue;
-    inputs.set(id, { input, type, label: label });
-    if (type === "signature") enhanceSignature(id, label, input);
-    input.addEventListener("input", () => paint(id));
-    input.addEventListener("focus", () => highlight(id, true));
-    input.addEventListener("blur", () => highlight(id, false));
-    paint(id);
+    for (const f of fieldsByPage.get(n) || []) paint(f.id);
   }
 
   function focusField(f) {
