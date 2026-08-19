@@ -1,4 +1,4 @@
-# Gigs (v0.1.25)
+# Gigs (v0.1.26)
 
 Agents delegate atomic work to human workers (CRM contacts) by composing
 reusable multi-modal instructions. Templates are saved instruction sets;
@@ -44,6 +44,15 @@ internal codename) is shown to them.
 `null` drops a key. `gigs_update` is refused once a gig is `reviewed`,
 `cancelled`, or `expired`, and it does **not** re-render an already dispatched
 composition — that snapshot is frozen at dispatch by design.
+
+## Home widget
+
+`gig-queue` (`ui/GigQueueWidget.tsx`) is a `dashboard.home` widget: submissions
+awaiting review, work in flight with deadline urgency pills, and optionally
+recent outcomes. Half size shows counts plus the three most urgent rows; full
+size shows each enabled section. It refreshes live on the app's `gig.*` events
+and reads the same `/gigs` summaries the panel uses — no widget-specific
+backend. Sections and the recent-outcome limit are per-instance settings.
 
 ## Deleting a gig
 

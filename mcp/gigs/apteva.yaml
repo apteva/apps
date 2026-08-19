@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.1.25
+version: 0.1.26
 description: |
   Agents delegate atomic work to human workers (CRM contacts) by
   composing reusable multi-modal instructions. Templates are saved
@@ -153,6 +153,39 @@ provides:
       label: Gigs
       icon: clipboard
       entry: /ui/GigsPanel.mjs
+  ui_components:
+    - name: gig-queue
+      label: Gigs
+      description: Submissions awaiting review, work in flight, and deadlines at risk.
+      entry: /ui/GigQueueWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [gig.created, gig.offered, gig.accepted, gig.declined, gig.submitted, gig.reviewed, gig.rejected, gig.cancelled, gig.expired]
+      settings_schema:
+        type: object
+        properties:
+          show_review:
+            type: boolean
+            title: Needs review
+            default: true
+          show_inflight:
+            type: boolean
+            title: In flight
+            default: true
+          show_recent:
+            type: boolean
+            title: Recent outcomes
+            default: false
+          recent_limit:
+            type: integer
+            title: Recent limit
+            description: Maximum recent outcomes displayed in this widget.
+            default: 4
+            minimum: 1
+            maximum: 12
   workers:
     - name: lifecycle
       schedule: "@every 5m"
