@@ -1651,7 +1651,7 @@ function InboxTab({
 export default function ConversationsPanel({ projectId }: NativePanelProps) {
   const [tab, setTab] = useState<"chats" | "inbox">("chats");
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [unread, setUnread] = useState<Map<string, number>>(new Map());
+  const [unread, setUnread] = useState<Map<string, UnreadEntry>>(new Map());
   const [selectedId, setSelectedId] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
@@ -1674,7 +1674,7 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
         ? chats.filter((c) => !c.project_id || c.project_id === projectId)
         : chats;
       setConversations(scoped);
-      setUnread(new Map(unreadEntries.map((e) => [e.conversation_id, e.unread])));
+      setUnread(new Map(unreadEntries.map((e) => [e.conversation_id, e])));
       setInboxItems(inbox);
       setSelectedId((current) =>
         current && scoped.some((c) => c.id === current) ? current : (scoped[0]?.id ?? ""),
@@ -1709,9 +1709,13 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
   // and unread counts never cleared.
   useEffect(() => {
     if (!selectedId) return;
-    const entryUnread = unread.get(selectedId) ?? 0;
-    if (entryUnread === 0) return;
-    apiPost(`/seen`, { chat_id: selectedId, last_seen_id: Number.MAX_SAFE_INTEGER >> 1 }).then(
+    const entry = unread.get(selectedId);
+    if (!entry || entry.unread === 0) return;
+    // Mark up to the latest KNOWN id. (The previous sentinel,
+    // Number.MAX_SAFE_INTEGER >> 1, is -1 in JS — bitwise ops coerce
+    // to 32-bit — so every mark stored -1 and nothing ever read as
+    // seen.)
+    apiPost(`/seen`, { chat_id: selectedId, last_seen_id: entry.latest_id }).then(
       () => loadConversations(),
       () => {},
     );
@@ -1870,13 +1874,17 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
             ) : (
               <ul className="divide-y divide-border">
                 {conversations.map((c) => {
-                  const unreadCount = unread.get(c.id) ?? 0;
+                  const unreadCount = unread.get(c.id)?.unread ?? 0;
                   return (
                     <li key={c.id}>
                       <button
                         type="button"
                         onClick={() => setSelectedId(c.id)}
-                        className={`w-full text-left px-4 py-3 hover:bg-bg-input ${c.id === selectedId ? "bg-bg-input" : ""}`}
+                        className={`w-full text-left px-4 py-3 border-l-2 transition-colors ${
+                          c.id === selectedId
+                            ? "border-accent bg-bg-hover"
+                            : "border-transparent hover:bg-bg-hover"
+                        }`}
                       >
                         <div className="flex items-center gap-2">
                           {(attentionByConv.get(c.id) ?? 0) > 0 && (
