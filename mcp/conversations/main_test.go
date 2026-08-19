@@ -157,7 +157,7 @@ func TestIdempotentUserMessages(t *testing.T) {
 
 // ─── inbox semantics ─────────────────────────────────────────────────
 
-func TestReportsAreInboxOnly(t *testing.T) {
+func TestReportsAppearInTranscriptAndInbox(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
 	conv := mkConversation(t, app, 41)
 
@@ -172,14 +172,20 @@ func TestReportsAreInboxOnly(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
+	// 0.5.1: a report is visible in the conversation it lives in — a
+	// "Reports" conversation hiding its own reports reads as broken.
 	transcript, err := app.store.Transcript(conv.ID, 0, 50)
 	if err != nil {
 		t.Fatalf("transcript: %v", err)
 	}
+	reportInTranscript := false
 	for _, m := range transcript {
 		if m.ComponentKind == kindReport {
-			t.Fatal("report leaked into the chat transcript")
+			reportInTranscript = true
 		}
+	}
+	if !reportInTranscript {
+		t.Fatal("report missing from its conversation's transcript")
 	}
 
 	items, err := app.store.Inbox(50)

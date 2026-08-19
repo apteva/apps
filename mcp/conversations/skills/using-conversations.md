@@ -67,8 +67,8 @@ in the status app, not here.)
   outcomes, evidence or metrics, blockers, next steps. Never a receipt
   for each action or an unchanged check. Follow the directive's report
   timing; otherwise at most one unsolicited report per day, and only
-  when meaningful work occurred. Reports are inbox-only and never
-  clutter the transcript.
+  when meaningful work occurred. Reports appear in their conversation
+  and in the inbox.
 - `conversations_request_approval` — only when work cannot continue
   without a human decision: state the exact decision, why, and the
   consequence of approving or denying.
@@ -88,8 +88,8 @@ them talking to you: honor it.
 
 ## Reading context
 
-- `conversations_history` — the transcript (inbox-only rows excluded),
-  for joining mid-way or recalling what was said.
+- `conversations_history` — the transcript, for joining mid-way or
+  recalling what was said.
 - `conversations_list` — the conversations you participate in.
 
 ## Rooms and external channels

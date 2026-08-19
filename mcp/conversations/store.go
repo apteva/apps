@@ -473,8 +473,9 @@ func (s *store) messageByClientID(conversationID, clientID string) (*Message, er
 		WHERE conversation_id = ? AND client_message_id = ?`, conversationID, clientID))
 }
 
-// Transcript excludes inbox-only rows — that is the entire mechanism by
-// which reports live in the inbox but never clutter chat.
+// Transcript excludes inbox-only rows. Since 0.5.1 nothing new sets
+// the flag — items are visible in the conversation they live in — but
+// the filter stays so legacy inbox-only rows keep their old behavior.
 func (s *store) Transcript(conversationID string, sinceID int64, limit int) ([]Message, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100

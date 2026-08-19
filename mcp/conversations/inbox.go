@@ -325,7 +325,11 @@ func (a *App) toolInboxPost(ctx context.Context, app *sdk.AppCtx, args map[strin
 	msg := &Message{
 		ConversationID: conv.ID, Role: "system", Content: title,
 		SourceApp: sourceApp, CallbackTool: stringArg(args, "callback_tool"),
-		InboxOnly: true,
+		// InboxOnly is deliberately NOT set (0.5.1): an item must be
+		// visible in the transcript of the conversation it lives in —
+		// a "Reports" conversation whose reports are hidden from its
+		// own transcript reads as broken. The inbox surfaces items by
+		// component_kind regardless.
 	}
 	switch kind {
 	case kindApproval:

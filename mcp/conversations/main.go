@@ -33,7 +33,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.5.0
+version: 0.5.1
 description: |
   One conversation system: internal dashboard chat, the inbox
   (approvals, reports, alerts, status), and external channels as
@@ -84,11 +84,11 @@ provides:
   mcp_tools:
     - { name: conversations_send,             description: "Send a message into a conversation. Args: conversation_id, text, components?. The calling agent must be a participant; delivery fans out to every bound surface (dashboard SSE, external channels). Never creates conversations." }
     - { name: conversations_request_approval, description: "Ask the operator to approve something. Args: conversation_id (required - list or create a conversation first), title, body?, actions? (default Approve/Deny). Renders as an actionable card in the conversation AND the inbox; the verdict comes back to this agent as an approval.result event." }
-    - { name: conversations_report,           description: "File a report. Args: conversation_id (required - keep one standing conversation such as Reports and reuse it), title, summary, period?, sections?. Inbox-only: never shown in the chat transcript." }
+    - { name: conversations_report,           description: "File a report. Args: conversation_id (required - keep one standing conversation such as Reports and reuse it), title, summary, period?, sections?. Shown in its conversation AND the inbox." }
     - { name: conversations_alert,            description: "Raise an alert. Args: conversation_id (required - reuse the conversation the problem belongs to, or create a topical one), text, severity? (info|warn|error, default info). Shown in the inbox, severity-ranked." }
     - { name: conversations_create,           description: "Create a conversation led by this agent for an ongoing topic. Args: title. Title-idempotent per agent: an existing conversation with the same title is returned with created=false. Titles name ongoing topics - never put timestamps, ids, or per-item detail in them." }
     - { name: conversations_list,             description: "List conversations this agent participates in. Args: limit?, query? (case-insensitive title filter - search before creating)." }
-    - { name: conversations_history,          description: "Read a conversation's transcript (inbox-only rows excluded). Args: conversation_id, since_id?, limit?." }
+    - { name: conversations_history,          description: "Read a conversation's transcript. Args: conversation_id, since_id?, limit?." }
     - { name: inbox_post,                     description: "INTERNAL - sibling-app entry point via CallAppResult; agent calls are refused. Agents use conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
   ui_panels:
     - slot: project.page
@@ -208,8 +208,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "conversations_report",
 			Description: "File a report. Requires conversation_id — keep one standing conversation (e.g. " +
-				"\"Reports\") via conversations_create and reuse it. Inbox-only: shown in the inbox, never in " +
-				"the chat transcript.",
+				"\"Reports\") via conversations_create and reuse it. Shown in its conversation and the inbox.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"title":           map[string]any{"type": "string"},
@@ -253,7 +252,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "conversations_history",
-			Description: "Read a conversation transcript. Inbox-only rows (reports) are excluded.",
+			Description: "Read a conversation transcript.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"since_id":        map[string]any{"type": "integer"},
@@ -406,7 +405,7 @@ func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]a
 		ConversationID: conv.ID, Role: "agent",
 		Content: "Report: " + title,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
-		ComponentKind: kindReport, InboxOnly: true,
+		ComponentKind: kindReport,
 		Components: []Component{reportCard(title, summary, stringArg(args, "period"))},
 	})
 	if err != nil {
