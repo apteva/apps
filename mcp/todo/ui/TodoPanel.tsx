@@ -154,6 +154,35 @@ interface WorkSummary {
 type View = "inbox" | "today" | "upcoming" | "overdue" | "all" | "done";
 type PanelMode = "tasks" | "calendar";
 type CalendarTab = "heatmap" | "month" | "day";
+type TaskOrder = "due" | "group";
+
+type TaskOrderByView = Record<View, TaskOrder>;
+
+const DEFAULT_TASK_ORDER: TaskOrderByView = {
+  inbox: "due",
+  today: "due",
+  upcoming: "due",
+  overdue: "due",
+  all: "group",
+  done: "group",
+};
+
+const TASK_ORDER_STORAGE_KEY = "apteva.todo.task-order.v1";
+
+function loadTaskOrder(): TaskOrderByView {
+  if (typeof window === "undefined") return DEFAULT_TASK_ORDER;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(TASK_ORDER_STORAGE_KEY) || "{}") as Partial<TaskOrderByView>;
+    return Object.fromEntries(
+      Object.entries(DEFAULT_TASK_ORDER).map(([key, fallback]) => [
+        key,
+        saved[key as View] === "group" || saved[key as View] === "due" ? saved[key as View] : fallback,
+      ]),
+    ) as TaskOrderByView;
+  } catch {
+    return DEFAULT_TASK_ORDER;
+  }
+}
 
 const VIEWS: { key: View; label: string }[] = [
   { key: "inbox",    label: "Inbox" },
@@ -177,6 +206,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
   const [view, setView] = useState<View>("today");
   const [mode, setMode] = useState<PanelMode>("tasks");
   const [pickedList, setPickedList] = useState<number | null>(null);
+  const [pickedGroup, setPickedGroup] = useState<number | null>(null);
   const [pickedTag, setPickedTag] = useState<string | null>(null);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [allOpenTodos, setAllOpenTodos] = useState<Todo[]>([]);
@@ -191,6 +221,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
   const [calendarList, setCalendarList] = useState<number | "all">("all");
   const [calendarIncludeDone, setCalendarIncludeDone] = useState(false);
   const [calendarTab, setCalendarTab] = useState<CalendarTab>("heatmap");
+  const [taskOrderByView, setTaskOrderByView] = useState<TaskOrderByView>(loadTaskOrder);
   const [quick, setQuick] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
   const [loadError, setLoadError] = useState("");
@@ -205,6 +236,14 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
   const todoLoadSequence = useRef(0);
   const refreshTimer = useRef<number | null>(null);
   const pendingRefresh = useRef({ todos: false, lists: false, groups: false });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(TASK_ORDER_STORAGE_KEY, JSON.stringify(taskOrderByView));
+    } catch {
+      // Storage can be unavailable in privacy-restricted embeds; ordering still works for this session.
+    }
+  }, [taskOrderByView]);
 
   const apiUrl = useCallback((path: string) => {
     return todoApiUrl(path, projectId);
@@ -490,6 +529,57 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
   const toggleGroup = (id: number) =>
     setCollapsedGroups((s) => ({ ...s, [id]: !s[id] }));
 
+  const listByID = useMemo(() => new Map(lists.map((list) => [list.id, list])), [lists]);
+  const groupByID = useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups]);
+  const visibleTodos = useMemo(() => {
+    if (!pickedGroup) return todos;
+    return todos.filter((todo) => {
+      const list = todo.list_id ? listByID.get(todo.list_id) : undefined;
+      return list?.group_id === pickedGroup;
+    });
+  }, [listByID, pickedGroup, todos]);
+  const groupedTodoSections = useMemo(
+    () => groupTodosByHierarchy(visibleTodos, lists, groups),
+    [groups, lists, visibleTodos],
+  );
+  const taskOrder = taskOrderByView[view];
+  const aggregateView = mode === "tasks" && !pickedList && view !== "inbox";
+
+  const setTaskOrder = (next: TaskOrder) => {
+    setTaskOrderByView((current) => ({ ...current, [view]: next }));
+  };
+
+  const renderTodoRow = (todo: Todo, showLocation: boolean) => {
+    const list = todo.list_id ? listByID.get(todo.list_id) : undefined;
+    const group = list?.group_id ? groupByID.get(list.group_id) : undefined;
+    return (
+      <TodoRow
+        key={todo.id}
+        t={todo}
+        list={list}
+        listGroup={group}
+        showLocation={showLocation}
+        settling={settlingTodos[todo.id]}
+        onToggle={() => toggle(todo)}
+        onSnooze={(key) => snooze(todo, key)}
+        onEdit={() => setEditing(todo)}
+        onDelete={() => remove(todo)}
+        onTagClick={(tag) => setPickedTag(tag)}
+        onGroupClick={(groupID) => {
+          setMode("tasks");
+          setPickedList(null);
+          setPickedGroup(groupID);
+        }}
+        onListClick={(listID) => {
+          setMode("tasks");
+          setPickedGroup(null);
+          setPickedList(listID);
+          setView("all");
+        }}
+      />
+    );
+  };
+
   const headerLabel = useMemo(() => {
     if (mode === "calendar") return "Calendar";
     const parts: string[] = [];
@@ -500,9 +590,13 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
       const v = VIEWS.find((x) => x.key === view);
       if (v) parts.push(v.label);
     }
+    if (pickedGroup) {
+      const group = groups.find((candidate) => candidate.id === pickedGroup);
+      if (group) parts.push(group.name);
+    }
     if (pickedTag) parts.push(`@${pickedTag}`);
     return parts.join(" · ") || "Today";
-  }, [mode, view, pickedList, pickedTag, lists]);
+  }, [groups, lists, mode, pickedGroup, pickedList, pickedTag, view]);
 
   return (
     <div className="h-full flex w-full overflow-hidden">
@@ -510,7 +604,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
         {VIEWS.map((v) => (
           <button
             key={v.key}
-            onClick={() => { setMode("tasks"); setView(v.key); setPickedList(null); }}
+            onClick={() => { setMode("tasks"); setView(v.key); setPickedList(null); setPickedGroup(null); }}
             className={`text-left px-2 py-1 rounded ${
               mode === "tasks" && view === v.key && !pickedList
                 ? "bg-bg-card text-text"
@@ -570,7 +664,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
             list={l}
             groups={groups}
             active={mode === "tasks" && pickedList === l.id}
-            onClick={() => { setMode("tasks"); setPickedList(l.id); setView("all"); }}
+            onClick={() => { setMode("tasks"); setPickedList(l.id); setPickedGroup(null); setView("all"); }}
             onUpdate={(fields) => updateList(l.id, fields)}
             onDelete={() => deleteList(l.id)}
           />
@@ -597,7 +691,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
                   groups={groups}
                   nested
                   active={mode === "tasks" && pickedList === l.id}
-                  onClick={() => { setMode("tasks"); setPickedList(l.id); setView("all"); }}
+                  onClick={() => { setMode("tasks"); setPickedList(l.id); setPickedGroup(null); setView("all"); }}
                   onUpdate={(fields) => updateList(l.id, fields)}
                   onDelete={() => deleteList(l.id)}
                 />
@@ -630,6 +724,15 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
       <main className="flex-1 flex flex-col min-w-0">
         <header className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
           <div className="text-text font-medium">{headerLabel}</div>
+          {pickedGroup && (
+            <button
+              onClick={() => setPickedGroup(null)}
+              className="text-text-dim hover:text-text text-xs"
+              title="Clear group filter"
+            >
+              clear group ×
+            </button>
+          )}
           {pickedTag && (
             <button
               onClick={() => setPickedTag(null)}
@@ -642,9 +745,23 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
           <SummaryPills
             summary={summary}
             activeView={mode === "tasks" ? view : undefined}
-            onSelect={(next) => { setMode("tasks"); setView(next); setPickedList(null); }}
+            onSelect={(next) => { setMode("tasks"); setView(next); setPickedList(null); setPickedGroup(null); }}
           />
-          <span className="ml-auto text-text-dim text-xs" aria-live="polite">{statusMsg}</span>
+          {aggregateView && (
+            <label className="ml-auto flex items-center gap-1.5 text-xs text-text-dim">
+              <span>Order</span>
+              <select
+                value={taskOrder}
+                onChange={(event) => setTaskOrder(event.target.value as TaskOrder)}
+                className="h-6 rounded border border-border bg-bg-input px-1.5 text-xs text-text-muted hover:text-text"
+                aria-label="Order todos"
+              >
+                <option value="due">Due date</option>
+                <option value="group">Group</option>
+              </select>
+            </label>
+          )}
+          <span className={`${aggregateView ? "" : "ml-auto"} text-text-dim text-xs`} aria-live="polite">{statusMsg}</span>
         </header>
 
         <form onSubmit={submitQuick} className="px-4 py-3 border-b border-border flex gap-2">
@@ -705,29 +822,43 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
               onIncludeDoneChange={setCalendarIncludeDone}
               onEditTodo={setEditing}
             />
-          ) : loadingTodos && todos.length === 0 ? (
+          ) : loadingTodos && visibleTodos.length === 0 ? (
             <div className="py-12 text-center text-text-muted text-sm" aria-live="polite">
               Loading todos…
             </div>
-          ) : loadError && todos.length === 0 ? null : todos.length === 0 ? (
+          ) : loadError && visibleTodos.length === 0 ? null : visibleTodos.length === 0 ? (
             <div className="py-12 text-center text-text-muted text-sm">
               Nothing here.
             </div>
+          ) : aggregateView && taskOrder === "group" ? (
+            <div className="flex flex-col gap-4">
+              {groupedTodoSections.map((section) => (
+                <section key={section.key} className="overflow-hidden rounded-md border border-border/60 bg-bg-card/20">
+                  <div className="flex items-center gap-2 border-b border-border/60 bg-bg-input/35 px-3 py-2 text-xs font-medium uppercase tracking-wide text-text-muted">
+                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: section.color }} />
+                    <span className="min-w-0 flex-1 truncate">{section.label}</span>
+                    <span className="text-text-dim">{section.count}</span>
+                  </div>
+                  {section.buckets.map((bucket) => (
+                    <div key={bucket.key}>
+                      {section.kind !== "inbox" && (
+                        <div className="flex items-center gap-2 border-b border-border/40 px-3 py-1.5 text-xs text-text-dim">
+                          <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: bucket.color }} />
+                          <span className="min-w-0 flex-1 truncate">{bucket.label}</span>
+                          <span>{bucket.todos.length}</span>
+                        </div>
+                      )}
+                      <ul className="flex flex-col px-1">
+                        {bucket.todos.map((todo) => renderTodoRow(todo, false))}
+                      </ul>
+                    </div>
+                  ))}
+                </section>
+              ))}
+            </div>
           ) : (
             <ul className="flex flex-col">
-              {todos.map((t) => (
-                <TodoRow
-                  key={t.id}
-                  t={t}
-                  list={lists.find((l) => l.id === t.list_id)}
-                  settling={settlingTodos[t.id]}
-                  onToggle={() => toggle(t)}
-                  onSnooze={(k) => snooze(t, k)}
-                  onEdit={() => setEditing(t)}
-                  onDelete={() => remove(t)}
-                  onTagClick={(tag) => setPickedTag(tag)}
-                />
-              ))}
+              {visibleTodos.map((todo) => renderTodoRow(todo, aggregateView))}
             </ul>
           )}
         </div>
@@ -1170,6 +1301,86 @@ function groupTodosByList(todos: Todo[], listByID: Map<number, List>) {
   return Array.from(grouped.values());
 }
 
+interface TodoListBucket {
+  key: string;
+  label: string;
+  color: string;
+  todos: Todo[];
+}
+
+interface TodoGroupSection {
+  key: string;
+  kind: "group" | "ungrouped" | "inbox";
+  label: string;
+  color: string;
+  count: number;
+  buckets: TodoListBucket[];
+}
+
+function groupTodosByHierarchy(todos: Todo[], lists: List[], groups: ListGroup[]): TodoGroupSection[] {
+  const todosByList = new Map<number | "inbox", Todo[]>();
+  for (const todo of todos) {
+    const key = todo.list_id ?? "inbox";
+    const bucket = todosByList.get(key);
+    if (bucket) bucket.push(todo);
+    else todosByList.set(key, [todo]);
+  }
+
+  const sections: TodoGroupSection[] = [];
+  for (const group of groups) {
+    const buckets = lists
+      .filter((list) => list.group_id === group.id && (todosByList.get(list.id)?.length || 0) > 0)
+      .map((list) => ({
+        key: `list:${list.id}`,
+        label: list.name,
+        color: list.color,
+        todos: todosByList.get(list.id) || [],
+      }));
+    if (buckets.length === 0) continue;
+    sections.push({
+      key: `group:${group.id}`,
+      kind: "group",
+      label: group.name,
+      color: group.color,
+      count: buckets.reduce((sum, bucket) => sum + bucket.todos.length, 0),
+      buckets,
+    });
+  }
+
+  const ungroupedBuckets = lists
+    .filter((list) => !list.group_id && (todosByList.get(list.id)?.length || 0) > 0)
+    .map((list) => ({
+      key: `list:${list.id}`,
+      label: list.name,
+      color: list.color,
+      todos: todosByList.get(list.id) || [],
+    }));
+  if (ungroupedBuckets.length > 0) {
+    sections.push({
+      key: "ungrouped",
+      kind: "ungrouped",
+      label: "Ungrouped lists",
+      color: "#6b7280",
+      count: ungroupedBuckets.reduce((sum, bucket) => sum + bucket.todos.length, 0),
+      buckets: ungroupedBuckets,
+    });
+  }
+
+  const inboxTodos = todosByList.get("inbox") || [];
+  if (inboxTodos.length > 0) {
+    sections.push({
+      key: "inbox",
+      kind: "inbox",
+      label: "Inbox",
+      color: "#6b7280",
+      count: inboxTodos.length,
+      buckets: [{ key: "inbox", label: "Inbox", color: "#6b7280", todos: inboxTodos }],
+    });
+  }
+
+  return sections;
+}
+
 function startOfMonth(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), 1);
 }
@@ -1275,16 +1486,21 @@ function formatTime(dueAt?: string): string {
 }
 
 function TodoRow({
-  t, list, settling, onToggle, onSnooze, onEdit, onDelete, onTagClick,
+  t, list, listGroup, showLocation, settling, onToggle, onSnooze, onEdit, onDelete,
+  onTagClick, onGroupClick, onListClick,
 }: {
   t: Todo;
   list?: List;
+  listGroup?: ListGroup;
+  showLocation: boolean;
   settling?: "complete" | "uncomplete";
   onToggle: () => void;
   onSnooze: (k: string) => void;
   onEdit: () => void;
   onDelete: () => void;
   onTagClick: (tag: string) => void;
+  onGroupClick: (groupID: number) => void;
+  onListClick: (listID: number) => void;
 }) {
   const due = t.due_at ? new Date(t.due_at) : null;
   const overdue = due && t.status === "open" && due < new Date();
@@ -1339,10 +1555,35 @@ function TodoRow({
               {formatDue(due)}
             </span>
           )}
-          {list && (
-            <span className="flex items-center gap-1 min-w-0">
-              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: list.color }} />
-              <span className="truncate">{list.name}</span>
+          {showLocation && (
+            <span className="flex min-w-0 items-center gap-1">
+              {listGroup && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => onGroupClick(listGroup.id)}
+                    className="flex min-w-0 items-center gap-1 text-text-dim transition-colors hover:text-text"
+                    title={`Filter by group: ${listGroup.name}`}
+                  >
+                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: listGroup.color }} />
+                    <span className="truncate">{listGroup.name}</span>
+                  </button>
+                  <span className="text-text-dim/60">›</span>
+                </>
+              )}
+              {list ? (
+                <button
+                  type="button"
+                  onClick={() => onListClick(list.id)}
+                  className="flex min-w-0 items-center gap-1 text-text-muted transition-colors hover:text-text"
+                  title={`Open list: ${list.name}`}
+                >
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: list.color }} />
+                  <span className="truncate">{list.name}</span>
+                </button>
+              ) : (
+                <span className="text-text-muted">Inbox</span>
+              )}
             </span>
           )}
           {t.tags.map((tag) => (
