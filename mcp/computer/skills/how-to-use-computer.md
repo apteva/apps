@@ -166,6 +166,11 @@ click/key sequences:
   `select_option` fails.
 - Pass the control's SoM `label` or a CSS `selector`, then the desired
   `text`/`value`; for several options use `texts`/`values`.
+- Custom button comboboxes are opened and inspected automatically. If the
+  requested option is unavailable, Computer returns a typed unsuccessful
+  result with `control_kind`, `menu_open`, `current_value`, and
+  `visible_options`; do not retry an option that is absent and
+  `recoverable=false`.
 - For multiselects, use `mode="replace"` to set the exact selection,
   `mode="add"` to add, `mode="remove"` to unselect, or `mode="toggle"`
   only when the requested final state is genuinely a toggle.
@@ -183,12 +188,19 @@ click/key sequences:
   `target_id` plus `expected_name`; an accessible name derived from a
   `<label>` is not an `aria-label` CSS attribute. Computer converts ISO dates
   for confidently detected masked text fields and returns requested/actual
-  values, `format_hint`, placeholder, and browser validity.
+  values, `format_hint`, placeholder, and browser validity. A mask that
+  reverts the normal setter gets one trusted-key fallback; a remaining
+  rejection includes associated semantic `recovery_targets` such as its
+  Choose date button.
 - If the page shows separate date and time fields, set them separately with
   their own current semantic target. Use a combined date-time value only when
   the page has one actual datetime field. If direct entry is rejected, refresh
   SoM and choose the visible calendar `role=gridcell` with its current
-  `target_id` and `expected_name`.
+  `target_id` and `expected_name`. Calendar-grid clicks return the rendered
+  field value and a compact `som_revision` immediately.
+- If `expected_name` differs from the target's accessible name, use the
+  returned `suggested_retry` only after confirming that its full name and role
+  describe the intended control. The mismatch never dispatches a click.
 
 Examples:
 

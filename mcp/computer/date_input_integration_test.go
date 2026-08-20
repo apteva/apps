@@ -123,6 +123,26 @@ Current SoM: %s`, mustJSON(targets))
 	if stringValue(setOut["temporal_requested_value"]) != "2026-08-01" || stringValue(setOut["temporal_normalized_value"]) != "08/01/2026" || stringValue(setOut["temporal_format_hint"]) != "mm/dd/yyyy" {
 		t.Fatalf("temporal diagnostics incomplete: %v", setOut)
 	}
+	displayedFormatOut := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID, "action": "set_temporal", "target_id": decision.TargetID,
+		"expected_name": decision.ExpectedName, "value": "08/01/2026",
+	})
+	if !boolFromAny(displayedFormatOut["temporal_verified"]) || stringValue(displayedFormatOut["temporal_actual_value"]) != "08/01/2026" {
+		t.Fatalf("display-format masked date was rejected: %v", displayedFormatOut)
+	}
+
+	shot = sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID, "action": "screenshot", "include_som": true,
+	})
+	targets = mapsFromAny(shot["som"])
+	trusted := findMapByString(t, targets, "accessible_name", "Insights comparison date")
+	trustedOut := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID, "action": "set_temporal", "target_id": stringValue(trusted["id"]),
+		"expected_name": "Insights comparison date", "value": "2026-08-15",
+	})
+	if !boolFromAny(trustedOut["temporal_verified"]) || stringValue(trustedOut["temporal_actual_value"]) != "08/15/2026" || stringValue(trustedOut["temporal_strategy"]) != "trusted_key_events" {
+		t.Fatalf("trusted-key masked date fallback failed: %v", trustedOut)
+	}
 
 	shot = sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID, "action": "screenshot", "include_som": true,
@@ -147,6 +167,14 @@ Current SoM: %s`, mustJSON(targets))
 	if stringValue(failure["temporal_requested_value"]) != "2026-08-20" || stringValue(failure["temporal_actual_value"]) != "" || stringValue(failure["temporal_placeholder"]) != "mm/dd/yyyy" {
 		t.Fatalf("failure discarded readback metadata: %v", failure)
 	}
+	if revision, ok := numericValue(failure["som_revision"]); !ok || revision < 1 {
+		t.Fatalf("temporal failure omitted semantic revision: %v", failure)
+	}
+	recovery := mapsFromAny(failure["recovery_targets"])
+	chooseEnd := findMapByString(t, recovery, "accessible_name", "Choose date for Insights end date")
+	if stringValue(chooseEnd["id"]) == "" || stringValue(chooseEnd["role"]) != "button" {
+		t.Fatalf("temporal failure omitted associated calendar recovery target: %v", failure)
+	}
 
 	shot = sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID, "action": "screenshot", "include_som": true,
@@ -170,10 +198,13 @@ Current SoM: %s`, mustJSON(failure), mustJSON(targets))
 			t.Fatalf("model selected the wrong date-grid target: decision=%+v day=%v", clickDecision, day)
 		}
 	}
-	sc.MCP("computer_use", map[string]any{
+	calendarOut := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID, "action": "click", "target_id": clickDecision.TargetID,
 		"expected_name": clickDecision.ExpectedName, "expected_role": clickDecision.ExpectedRole,
 	})
+	if stringValue(calendarOut["rendered_value"]) != "08/20/2026" {
+		t.Fatalf("calendar click did not return immediate rendered date value: %v", calendarOut)
+	}
 	finalShot := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID, "action": "screenshot", "include_som": true,
 	})
@@ -189,8 +220,9 @@ func controlledMaskedDateDataURL() string {
 <html lang="en-US"><meta charset="utf-8"><title>Controlled masked date range</title>
 <style>body{font:18px system-ui;margin:32px}.row{margin:18px 0}label{display:block;margin-bottom:6px}input{font:inherit;padding:9px;width:220px}.grid{display:grid;grid-template-columns:repeat(7,92px);gap:5px;margin-top:24px}[role=gridcell]{font:inherit;padding:8px 3px}</style>
 <h1>Insights custom range</h1>
-<div class="row"><label for="start">Insights start date</label><input id="start" type="text" placeholder="mm/dd/yyyy" pattern="[0-9]{2}/[0-9]{2}/[0-9]{4}" inputmode="numeric"></div>
-<div class="row"><label for="end">Insights end date</label><input id="end" type="text" placeholder="mm/dd/yyyy" pattern="[0-9]{2}/[0-9]{2}/[0-9]{4}" inputmode="numeric"></div>
+<div class="row"><label for="start">Insights start date</label><input id="start" type="text" placeholder="mm/dd/yyyy" pattern="[0-9]{2}/[0-9]{2}/[0-9]{4}" inputmode="numeric"><button type="button" aria-label="Choose date for Insights start date">Choose date</button></div>
+<div class="row"><label for="trusted">Insights comparison date</label><input id="trusted" type="text" placeholder="mm/dd/yyyy" pattern="[0-9]{2}/[0-9]{2}/[0-9]{4}" inputmode="numeric"><button type="button" aria-label="Choose date for Insights comparison date">Choose date</button></div>
+<div class="row"><label for="end">Insights end date</label><input id="end" type="text" placeholder="mm/dd/yyyy" pattern="[0-9]{2}/[0-9]{2}/[0-9]{4}" inputmode="numeric"><button type="button" aria-label="Choose date for Insights end date">Choose date</button></div>
 <div class="grid" role="grid" aria-label="August 2026 calendar">
   <button role="gridcell" aria-label="August 1, 2026" data-value="08/01/2026">1</button>
   <button role="gridcell" aria-label="August 20, 2026" data-value="08/20/2026">20</button>
@@ -201,9 +233,12 @@ func controlledMaskedDateDataURL() string {
 // application state owns each displayed value and updates only from input
 // events. The end field deliberately rejects direct writes so the semantic
 // calendar fallback is exercised too.
-const values={start:'',end:''};
-function render(){start.value=values.start;end.value=values.end;state.textContent=JSON.stringify(values)}
+const values={start:'',trusted:'',end:''};
+function render(){start.value=values.start;trusted.value=values.trusted;end.value=values.end;state.textContent=JSON.stringify(values)}
 start.addEventListener('input',()=>{if(/^\d{2}\/\d{2}\/\d{4}$/.test(start.value))values.start=start.value;queueMicrotask(render)});
+let trustedKeySeen=false;
+trusted.addEventListener('keydown',()=>{trustedKeySeen=true});
+trusted.addEventListener('input',(event)=>{if(event.isTrusted&&trustedKeySeen)values.trusted=trusted.value;trustedKeySeen=false;queueMicrotask(render)});
 end.addEventListener('input',()=>queueMicrotask(render));
 for(const cell of document.querySelectorAll('[role=gridcell]'))cell.addEventListener('click',()=>{values.end=cell.dataset.value;render()});
 render();

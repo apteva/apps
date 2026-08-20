@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
@@ -510,6 +511,53 @@ func TestComputerAppBrowserbaseSelectOption(t *testing.T) {
 	runComputerAppBrowserSelectOption(t, "browserbase")
 }
 
+type comboboxLLMAssessment struct {
+	Decision        string `json:"decision"`
+	RequestedOption string `json:"requested_option"`
+	CurrentValue    string `json:"current_value"`
+	Reason          string `json:"reason"`
+}
+
+// TestLLMCustomComboboxUnavailableLive proves that a real model can use the
+// typed custom-combobox failure to stop instead of retrying or inventing a
+// hidden Monthly option when the open menu exposes only Daily.
+func TestLLMCustomComboboxUnavailableLive(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_LLM_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_LLM_TESTS=1")
+	}
+	if _, err := exec.LookPath("codex"); err != nil {
+		t.Skip("codex CLI is required")
+	}
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action": "open", "backend": "local", "url": selectOptionFixtureDataURL(),
+		"viewport": map[string]any{"width": 1000, "height": 700},
+	})
+	sessionID := stringValue(open["session_id"])
+	if sessionID == "" {
+		t.Fatalf("open returned no session id: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	failure := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID, "action": "select_option",
+		"selector": "#aggregation-combobox", "text": "Monthly",
+	})
+	shot := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID, "action": "screenshot", "include_som": true,
+	})
+	prompt := fmt.Sprintf(`You requested Monthly from an aggregation combobox. Decide whether to retry that option or stop and report it unavailable. Trust the typed Computer result and current semantic state; do not invent hidden options, use raw coordinates, or close the menu.
+Computer result: %s
+Current SoM: %s`, mustJSON(failure), mustJSON(shot["som"]))
+	var assessment comboboxLLMAssessment
+	callComputerLLM(t, decodeScreenshot(t, shot), prompt,
+		`{"type":"object","additionalProperties":false,"properties":{"decision":{"type":"string","enum":["stop","retry"]},"requested_option":{"type":"string"},"current_value":{"type":"string"},"reason":{"type":"string"}},"required":["decision","requested_option","current_value","reason"]}`,
+		&assessment)
+	if assessment.Decision != "stop" || assessment.RequestedOption != "Monthly" || assessment.CurrentValue != "Daily" {
+		t.Fatalf("model did not use typed combobox state: %+v failure=%v", assessment, failure)
+	}
+	t.Logf("LLM respected unavailable custom option: %+v", assessment)
+}
+
 // TestComputerAppBrowserbasePublicMultiSelectOption verifies select_option on
 // a public WAI-ARIA APG multiselect listbox. This keeps coverage for real
 // role=listbox/aria-multiselectable markup, not just the local fixture.
@@ -599,6 +647,25 @@ func runComputerAppBrowserSelectOption(t *testing.T, backend string) {
 	}
 	if got := stringValue(out["select_control_text"]); got != "VIP" {
 		t.Fatalf("custom combobox: want control text VIP, got %q out=%v", got, out)
+	}
+
+	out = sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "select_option",
+		"selector":   "#aggregation-combobox",
+		"text":       "Monthly",
+	})
+	if boolFromAny(out["success"]) || stringValue(out["error_code"]) != "custom_combobox_option_unavailable" {
+		t.Fatalf("unavailable custom option was not typed: %v", out)
+	}
+	if stringValue(out["control_kind"]) != "button_combobox" || !boolFromAny(out["menu_open"]) || boolFromAny(out["option_available"]) {
+		t.Fatalf("custom combobox state incomplete: %v", out)
+	}
+	if stringValue(out["requested_option"]) != "Monthly" || stringValue(out["current_value"]) != "Daily" || !containsString(stringSliceValue(out["visible_options"]), "Daily") {
+		t.Fatalf("custom combobox option inventory incomplete: %v", out)
+	}
+	if revision, ok := numericValue(out["som_revision"]); !ok || revision < 1 {
+		t.Fatalf("custom combobox failure omitted semantic revision: %v", out)
 	}
 }
 
@@ -1163,8 +1230,10 @@ func selectOptionFixtureDataURL() string {
   body { font: 20px system-ui, sans-serif; margin: 0; padding: 40px; }
   label { display: block; margin: 18px 0 6px; }
   select, button { font: inherit; padding: 8px 12px; min-width: 240px; }
-  #tier-listbox { display: none; position: absolute; left: 40px; top: 300px; padding: 8px; border: 1px solid #333; background: white; }
-  #tier-listbox.open { display: block; }
+  #tier-listbox, #aggregation-listbox { display: none; position: absolute; left: 40px; padding: 8px; border: 1px solid #333; background: white; }
+  #tier-listbox { top: 300px; }
+  #aggregation-listbox { top: 410px; }
+  #tier-listbox.open, #aggregation-listbox.open { display: block; }
   [role=option] { padding: 8px 12px; cursor: pointer; }
   [role=option][aria-selected=true] { background: #cdeafe; }
 </style>
@@ -1189,11 +1258,18 @@ func selectOptionFixtureDataURL() string {
   <div role="option" data-value="members" aria-selected="false">Paid members</div>
   <div role="option" data-value="vip" aria-selected="false">VIP</div>
 </div>
+<label>Aggregation period</label>
+<button id="aggregation-combobox" type="button" role="combobox" aria-label="Dropdown to select aggregation period" aria-expanded="false" aria-haspopup="listbox">Daily</button>
+<div id="aggregation-listbox" role="listbox">
+  <div role="option" data-value="daily" aria-selected="true">Daily</div>
+</div>
 <script>
 const tier = document.getElementById("tier");
 const colors = document.getElementById("colors");
 const combo = document.getElementById("tier-combobox");
 const list = document.getElementById("tier-listbox");
+const aggregation = document.getElementById("aggregation-combobox");
+const aggregationList = document.getElementById("aggregation-listbox");
 function sync(extra) {
   const p = new URLSearchParams(location.hash.slice(1));
   p.set("tier", tier.value);
@@ -1207,6 +1283,11 @@ combo.addEventListener("click", () => {
   const open = combo.getAttribute("aria-expanded") === "true";
   combo.setAttribute("aria-expanded", open ? "false" : "true");
   list.classList.toggle("open", !open);
+});
+aggregation.addEventListener("click", () => {
+  const open = aggregation.getAttribute("aria-expanded") === "true";
+  aggregation.setAttribute("aria-expanded", open ? "false" : "true");
+  aggregationList.classList.toggle("open", !open);
 });
 for (const opt of list.querySelectorAll("[role=option]")) {
   opt.addEventListener("click", () => {

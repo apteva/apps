@@ -616,7 +616,7 @@ func (c *Computer) selectOption(action computer.Action) (selectinput.Result, err
 		Values: action.Values,
 		Mode:   action.Mode,
 	})
-	if err == nil {
+	if err == nil || res.Selector != "" || res.ErrorCode != "" {
 		c.setLastSelectResult(&res)
 	}
 	return res, err
@@ -688,6 +688,7 @@ func cloneSelectResult(res *selectinput.Result) *selectinput.Result {
 		return nil
 	}
 	clone := *res
+	clone.RequestedOptions = append([]string(nil), res.RequestedOptions...)
 	clone.Matched = append([]string(nil), res.Matched...)
 	clone.Selected = append([]string(nil), res.Selected...)
 	clone.Options = append([]selectinput.Option(nil), res.Options...)

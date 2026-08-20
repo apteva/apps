@@ -589,8 +589,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. For any click that saves, submits, publishes, deletes, sends, pays, or navigates, pass expected_text with the intended accessible name so the name and loading state are verified atomically. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates that resolve to consequential controls require expected_text exactly matching the live accessible name. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
 				"For an operation outcome, prefer action=wait_for with declarative URL, text, selector, or semantic-target conditions; it ignores unrelated background requests and embedded frames. To verify navigation away from a known current URL, use type=url_changed and value=<the URL before the action>; use url_equals only when value is the desired destination. Use action=wait_for_stable only when the whole page must become quiet. A wait timeout returns timed_out=true and observed signals; it never means an earlier click or edit failed. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
-				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. " +
-				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native or masked date/time fields, use action=set_temporal with a current target_id (preferred), label, or selector plus an ISO value such as 2026-07-01 or a time such as 11:00 AM. Computer converts ISO dates when placeholder/pattern/locale makes the displayed format clear and reports requested, actual, format_hint, and validity. If direct entry is rejected, use a fresh screenshot and choose the desired visible role=gridcell by target_id and expected_name; never guess an aria-label CSS selector from the accessible name. If the UI shows separate date and time fields, call set_temporal separately on each field. " +
+				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. Custom button comboboxes are opened and inspected automatically. An unavailable option returns error_code, control_kind, menu_open, current_value, visible_options, recoverable=false, and a refreshed som_revision instead of a generic backend error. " +
+				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native or masked date/time fields, use action=set_temporal with a current target_id (preferred), label, or selector plus an ISO value such as 2026-07-01 or a time such as 11:00 AM. Computer converts ISO dates when placeholder/pattern/locale makes the displayed format clear and reports requested, actual, format_hint, and validity. A detected text mask gets one trusted-key fallback after setter reversion. If direct entry is still rejected, use returned recovery_targets or choose the desired visible role=gridcell by target_id and expected_name; never guess an aria-label CSS selector from the accessible name. Calendar-grid clicks return changed rendered values with the compact semantic observation. If the UI shows separate date and time fields, call set_temporal separately on each field. " +
 				"If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). " +
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, screenshots return semantic scroll_regions. When more than one region can scroll, pass target_id for the intended region and optionally expected_name/expected_role. Scroll reports the region that actually moved, before/after offsets, moved, wrong_target, at_start/at_end, and newly revealed controls. amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
@@ -2198,6 +2198,39 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		act.Label = 0
 	}
 	if err := resolveStableActionTarget(sess, &act); err != nil {
+		var mismatch *stableTargetMismatchError
+		if errors.As(err, &mismatch) {
+			actualName := firstNonEmpty(mismatch.Target.AccessibleName, mismatch.Target.Text)
+			code := "expected_name_mismatch"
+			providedKey := "provided_name"
+			actualKey := "actual_accessible_name"
+			retryKey := "expected_name"
+			if mismatch.Field == "role" {
+				code = "expected_role_mismatch"
+				providedKey = "provided_role"
+				actualKey = "actual_role"
+				retryKey = "expected_role"
+			}
+			retry := map[string]any{
+				"action":        action,
+				"target_id":     mismatch.Target.ID,
+				"som_revision":  sess.somRevision,
+				"expected_name": actualName,
+			}
+			if mismatch.Target.Role != "" {
+				retry["expected_role"] = mismatch.Target.Role
+			}
+			retry[retryKey] = mismatch.Actual
+			return map[string]any{
+				"session_id": id, "success": false, "failed": true, "status": "rejected",
+				"action_completed": false, "error_code": code,
+				"target_id": mismatch.Target.ID, "som_revision": sess.somRevision,
+				providedKey: mismatch.Provided, actualKey: mismatch.Actual,
+				"target_role": mismatch.Target.Role, "visible_text": mismatch.Target.Text,
+				"suggested_retry": retry,
+				"text":            "The semantic guard rejected the supplied expectation. Retry only if the returned accessible name and role match the intended control.",
+			}, nil
+		}
 		return nil, computerUseFailure("stale_or_mismatched_target", id, sess, action, err.Error(),
 			"Take a fresh screenshot and use its current target_id/som_revision or scroll_regions entry.", err)
 	}
@@ -2314,6 +2347,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if action == "set_temporal" {
 			if result := temporalResultFor(sess.comp); result != nil && result.ErrorCode != "" {
 				markSemanticSnapshotDirty(sess, action)
+				observationDelta, observeErr := refreshSemanticObservation(sess)
 				a.recordSessionNavigation(ctx, id, sess)
 				afterURL := currentURL(sess.comp)
 				payload := a.sessionActionPayload(id, sess, act, args)
@@ -2322,6 +2356,11 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 				payload["failed"] = true
 				payload["action_completed"] = false
 				mergeTemporalResultPayload(payload, result)
+				mergeSemanticObservationPayload(payload, sess, observationDelta)
+				mergeTemporalRecoveryPayload(payload, result, sess.comp)
+				if observeErr != nil {
+					payload["observation_error"] = observeErr.Error()
+				}
 				emitEvent(ctx, "session.action", payload)
 				out := map[string]any{
 					"session_id": id, "current_url": afterURL,
@@ -2332,6 +2371,49 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 					"next_step": "Retry set_temporal using the returned format_hint, or take a fresh semantic screenshot and choose a current date-grid target_id.",
 				}
 				mergeTemporalResultPayload(out, result)
+				mergeSemanticObservationPayload(out, sess, observationDelta)
+				mergeTemporalRecoveryPayload(out, result, sess.comp)
+				if observeErr != nil {
+					out["observation_error"] = observeErr.Error()
+				}
+				return out, nil
+			}
+		}
+		// Custom comboboxes can legitimately open and reveal a constrained
+		// option set without finding the requested value. Preserve that live
+		// state as a typed unsuccessful observation instead of collapsing it
+		// into the same generic backend error as a missing native option.
+		if action == "select_option" {
+			if result := selectResultFor(sess.comp); result != nil && result.ErrorCode != "" {
+				markSemanticSnapshotDirty(sess, action)
+				observationDelta, observeErr := refreshSemanticObservation(sess)
+				a.recordSessionNavigation(ctx, id, sess)
+				afterURL := currentURL(sess.comp)
+				payload := a.sessionActionPayload(id, sess, act, args)
+				payload["success"] = false
+				payload["status"] = "rejected"
+				payload["failed"] = true
+				payload["action_completed"] = false
+				payload["error_code"] = result.ErrorCode
+				mergeSelectResultPayload(payload, result)
+				mergeSemanticObservationPayload(payload, sess, observationDelta)
+				if observeErr != nil {
+					payload["observation_error"] = observeErr.Error()
+				}
+				emitEvent(ctx, "session.action", payload)
+				out := map[string]any{
+					"session_id": id, "current_url": afterURL,
+					"screenshot_url":       sessionResourceURL(ctx, id, "screenshot"),
+					"screenshot_available": true, "post_action_screenshot": "not_embedded",
+					"success": false, "failed": true, "status": "rejected", "action_completed": false,
+					"error_code": result.ErrorCode,
+					"text":       "The requested option is not available in the resolved control. Inspect control_kind, menu_open, current_value, and visible_options before deciding whether to retry.",
+				}
+				mergeSelectResultPayload(out, result)
+				mergeSemanticObservationPayload(out, sess, observationDelta)
+				if observeErr != nil {
+					out["observation_error"] = observeErr.Error()
+				}
 				return out, nil
 			}
 		}
@@ -2358,6 +2440,10 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	markSemanticSnapshotDirty(sess, action)
 	observation := observationArg(args, action)
+	if observation == "none" && !rawArgPresent(args, "observation") &&
+		(action == "click" || action == "double_click") && strings.EqualFold(act.ExpectedRole, "gridcell") {
+		observation = "som_delta"
+	}
 	var observationDelta map[string]any
 	if action != "screenshot" && observation != "none" {
 		observeAnnotate := observation == "som_delta" || annotateArg(args, true)
@@ -2428,6 +2514,8 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	mergeScrollResultPayload(payload, scrollResult)
 	if observationDelta != nil {
 		payload["som_delta"] = observationDelta
+		payload["som_revision"] = sess.somRevision
+		mergeRenderedControlValues(payload, observationDelta)
 	}
 	mergeScreenshotRecoveryPayload(payload, recovery)
 	mergeTabFollowPayload(payload, tabEvent)
@@ -2488,6 +2576,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if action == "screenshot" && !screenshotSkipped && annotate {
 		out["som_delta"] = setOfMarkDelta(sess)
+		out["som_revision"] = sess.somRevision
 		out["scroll_regions"] = scrollRegionsFor(sess.comp)
 		if targets := safetySetOfMarkFor(sess.comp); len(targets) > 0 {
 			out["safety_targets"] = targets
@@ -2495,6 +2584,8 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if observationDelta != nil {
 		out["som_delta"] = observationDelta
+		out["som_revision"] = sess.somRevision
+		mergeRenderedControlValues(out, observationDelta)
 		out["scroll_regions"] = scrollRegionsFor(sess.comp)
 		if targets := safetySetOfMarkFor(sess.comp); len(targets) > 0 {
 			out["safety_targets"] = targets
@@ -2960,11 +3051,25 @@ func mergeSelectResultPayload(payload map[string]any, result *selectinput.Result
 		return
 	}
 	payload["select_kind"] = result.Kind
+	if result.ControlKind != "" {
+		payload["select_control_kind"] = result.ControlKind
+		payload["control_kind"] = result.ControlKind
+	}
 	payload["select_mode"] = result.Mode
 	payload["select_multiple"] = result.Multiple
+	if len(result.RequestedOptions) == 1 {
+		payload["requested_option"] = result.RequestedOptions[0]
+	} else if len(result.RequestedOptions) > 1 {
+		payload["requested_options"] = result.RequestedOptions
+	}
 	if result.ControlText != "" {
 		payload["select_control_text"] = result.ControlText
 	}
+	payload["previous_value"] = result.PreviousValue
+	payload["current_value"] = result.CurrentValue
+	payload["menu_open"] = result.MenuOpen
+	payload["option_available"] = result.OptionAvailable
+	payload["recoverable"] = result.Recoverable
 	if len(result.Matched) > 0 {
 		payload["select_matched"] = result.Matched
 	}
@@ -2973,6 +3078,69 @@ func mergeSelectResultPayload(payload map[string]any, result *selectinput.Result
 	}
 	if len(result.Options) > 0 {
 		payload["select_options"] = result.Options
+		visible := make([]string, 0, len(result.Options))
+		for _, option := range result.Options {
+			if option.Visible {
+				visible = append(visible, option.Text)
+			}
+		}
+		payload["visible_options"] = visible
+	}
+	if result.ErrorCode != "" {
+		payload["select_error_code"] = result.ErrorCode
+	}
+	if result.ErrorMessage != "" {
+		payload["select_error"] = result.ErrorMessage
+	}
+}
+
+func refreshSemanticObservation(sess *session) (map[string]any, error) {
+	if sess == nil || sess.comp == nil {
+		return nil, errors.New("browser session is unavailable")
+	}
+	if _, err := screenshotWithOptions(sess.comp, true); err != nil {
+		return nil, err
+	}
+	return setOfMarkDelta(sess), nil
+}
+
+func mergeSemanticObservationPayload(payload map[string]any, sess *session, delta map[string]any) {
+	if payload == nil || sess == nil || delta == nil {
+		return
+	}
+	payload["som_delta"] = delta
+	payload["som_revision"] = sess.somRevision
+	payload["scroll_regions"] = scrollRegionsFor(sess.comp)
+	if added, ok := delta["added"]; ok {
+		payload["revealed_targets"] = added
+	}
+	mergeRenderedControlValues(payload, delta)
+}
+
+func mergeRenderedControlValues(payload map[string]any, delta map[string]any) {
+	if payload == nil || delta == nil {
+		return
+	}
+	changed, ok := delta["changed"].([]backends.SetOfMarkTarget)
+	if !ok {
+		return
+	}
+	values := make([]map[string]any, 0)
+	for _, target := range changed {
+		if target.CurrentValue == nil {
+			continue
+		}
+		values = append(values, map[string]any{
+			"target_id": target.ID, "accessible_name": firstNonEmpty(target.AccessibleName, target.Text),
+			"role": target.Role, "value": *target.CurrentValue,
+		})
+	}
+	if len(values) == 0 {
+		return
+	}
+	payload["rendered_values"] = values
+	if len(values) == 1 {
+		payload["rendered_value"] = values[0]["value"]
 	}
 }
 
@@ -3006,6 +3174,9 @@ func mergeTemporalResultPayload(payload map[string]any, result *temporalinput.Re
 	payload["temporal_requested_value"] = result.RequestedValue
 	payload["temporal_normalized_value"] = result.NormalizedValue
 	payload["temporal_actual_value"] = result.ActualValue
+	payload["previous_value"] = result.PreviousValue
+	payload["current_value"] = result.ActualValue
+	payload["rendered_value"] = result.ActualValue
 	payload["temporal_verified"] = result.Verified
 	payload["temporal_date_like"] = result.DateLike
 	payload["temporal_validity"] = result.Validity
@@ -3035,6 +3206,41 @@ func mergeTemporalResultPayload(payload map[string]any, result *temporalinput.Re
 	}
 	if result.InputType != "" {
 		payload["temporal_input_type"] = result.InputType
+	}
+	if len(result.RecoveryTargets) > 0 {
+		payload["temporal_recovery_targets"] = result.RecoveryTargets
+	}
+}
+
+func mergeTemporalRecoveryPayload(payload map[string]any, result *temporalinput.Result, comp backends.Computer) {
+	if payload == nil || result == nil || len(result.RecoveryTargets) == 0 {
+		return
+	}
+	all := setOfMarkFor(comp)
+	matched := make([]backends.SetOfMarkTarget, 0, len(result.RecoveryTargets))
+	seen := map[string]bool{}
+	for _, recovery := range result.RecoveryTargets {
+		for _, target := range all {
+			actual := firstNonEmpty(target.AccessibleName, target.Text)
+			if !strings.EqualFold(strings.TrimSpace(actual), strings.TrimSpace(recovery.Name)) {
+				continue
+			}
+			if recovery.Role != "" && target.Role != "" && !strings.EqualFold(recovery.Role, target.Role) {
+				continue
+			}
+			if !seen[target.ID] {
+				resolved := target
+				if resolved.Role == "" {
+					resolved.Role = recovery.Role
+				}
+				matched = append(matched, resolved)
+				seen[target.ID] = true
+			}
+		}
+	}
+	if len(matched) > 0 {
+		payload["recovery_targets"] = matched
+		payload["next_step"] = "Use a current recovery_targets target_id with action=click and its exact accessible_name, then choose the desired semantic date gridcell."
 	}
 }
 
@@ -3170,17 +3376,34 @@ func resolveStableActionTarget(sess *session, action *backends.Action) error {
 	if action.ExpectedName != "" {
 		actual := firstNonEmpty(target.AccessibleName, target.Text)
 		if !strings.EqualFold(strings.TrimSpace(action.ExpectedName), strings.TrimSpace(actual)) {
-			return fmt.Errorf("expected target name %q but current target is %q", action.ExpectedName, actual)
+			return &stableTargetMismatchError{Field: "name", Provided: action.ExpectedName, Actual: actual, Target: *target}
 		}
 	}
 	if action.ExpectedRole != "" && !strings.EqualFold(strings.TrimSpace(action.ExpectedRole), strings.TrimSpace(target.Role)) {
-		return fmt.Errorf("expected target role %q but current target is %q", action.ExpectedRole, target.Role)
+		return &stableTargetMismatchError{Field: "role", Provided: action.ExpectedRole, Actual: target.Role, Target: *target}
+	}
+	if action.ExpectedRole == "" {
+		action.ExpectedRole = target.Role
 	}
 	action.Label = target.Label
 	if action.Type == "scroll" {
 		action.TargetID = ""
 	} // scroll the target's nearest semantic ancestor
 	return nil
+}
+
+type stableTargetMismatchError struct {
+	Field    string
+	Provided string
+	Actual   string
+	Target   backends.SetOfMarkTarget
+}
+
+func (e *stableTargetMismatchError) Error() string {
+	if e == nil {
+		return "semantic target mismatch"
+	}
+	return fmt.Sprintf("expected target %s %q but current target is %q", e.Field, e.Provided, e.Actual)
 }
 
 // setOfMarkDelta returns only semantic/geometry changes since the previous
@@ -3286,7 +3509,7 @@ func observationArg(args map[string]any, action string) string {
 	switch action {
 	case "batch":
 		return "screenshot"
-	case "scroll", "wait_for", "wait_for_stable":
+	case "scroll", "wait_for", "wait_for_stable", "select_option", "set_checked", "set_text", "set_temporal":
 		return "som_delta"
 	default:
 		return "none"

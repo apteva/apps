@@ -5,12 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 
 	"github.com/apteva/apps/mcp/computer/internal/browser/domselector"
 )
+
+type RecoveryTarget struct {
+	Name     string `json:"name"`
+	Role     string `json:"role,omitempty"`
+	Selector string `json:"selector,omitempty"`
+}
 
 type Target struct {
 	Selector string
@@ -42,25 +49,26 @@ type Validity struct {
 }
 
 type Result struct {
-	Kind            string   `json:"kind"`
-	Selector        string   `json:"selector,omitempty"`
-	Label           string   `json:"label,omitempty"`
-	InputType       string   `json:"input_type,omitempty"`
-	Placeholder     string   `json:"placeholder,omitempty"`
-	Pattern         string   `json:"pattern,omitempty"`
-	FormatHint      string   `json:"format_hint,omitempty"`
-	DateLike        bool     `json:"date_like"`
-	RequestedValue  string   `json:"requested_value"`
-	NormalizedValue string   `json:"normalized_value"`
-	PreviousValue   string   `json:"previous_value"`
-	ActualValue     string   `json:"actual_value"`
-	Value           string   `json:"value"` // compatibility alias for actual_value
-	Changed         bool     `json:"changed"`
-	Verified        bool     `json:"verified"`
-	Strategy        string   `json:"strategy,omitempty"`
-	Validity        Validity `json:"validity"`
-	ErrorCode       string   `json:"error_code,omitempty"`
-	ErrorMessage    string   `json:"error_message,omitempty"`
+	Kind            string           `json:"kind"`
+	Selector        string           `json:"selector,omitempty"`
+	Label           string           `json:"label,omitempty"`
+	InputType       string           `json:"input_type,omitempty"`
+	Placeholder     string           `json:"placeholder,omitempty"`
+	Pattern         string           `json:"pattern,omitempty"`
+	FormatHint      string           `json:"format_hint,omitempty"`
+	DateLike        bool             `json:"date_like"`
+	RequestedValue  string           `json:"requested_value"`
+	NormalizedValue string           `json:"normalized_value"`
+	PreviousValue   string           `json:"previous_value"`
+	ActualValue     string           `json:"actual_value"`
+	Value           string           `json:"value"` // compatibility alias for actual_value
+	Changed         bool             `json:"changed"`
+	Verified        bool             `json:"verified"`
+	Strategy        string           `json:"strategy,omitempty"`
+	Validity        Validity         `json:"validity"`
+	ErrorCode       string           `json:"error_code,omitempty"`
+	ErrorMessage    string           `json:"error_message,omitempty"`
+	RecoveryTargets []RecoveryTarget `json:"recovery_targets,omitempty"`
 }
 
 func Set(ctx context.Context, target Target, req Request) (Result, error) {
@@ -72,6 +80,7 @@ func Set(ctx context.Context, target Target, req Request) (Result, error) {
 	js := fmt.Sprintf(`(async function(target, req) {
   req = { Value: String(req.Value ?? req.value ?? '') };
   function norm(s) { return String(s || '').replace(/\s+/g, ' ').trim(); }
+  function lower(s) { return norm(s).toLowerCase(); }
 %s
   function associatedLabel(el) {
     if (!el) return '';
@@ -218,6 +227,26 @@ func Set(ctx context.Context, target Target, req Request) (Result, error) {
       custom_error: !!v.customError, message: norm(el.validationMessage)
     };
   }
+	function visible(node) {
+	  if (!node || !node.getBoundingClientRect) return false;
+	  var r=node.getBoundingClientRect(),style=(node.ownerDocument.defaultView||window).getComputedStyle(node);
+	  return r.width>=1&&r.height>=1&&style.display!=='none'&&style.visibility!=='hidden';
+	}
+	function recoveryTargets(el) {
+	  var out=[],seen=new Set(),root=el;
+	  for (var depth=0; root && depth<4; depth++,root=root.parentElement) {
+		var nodes=root.querySelectorAll ? root.querySelectorAll('button,[role="button"]') : [];
+		for (var i=0;i<nodes.length;i++) {
+		  var node=nodes[i],name=labelFor(node)||norm(node.innerText||node.textContent),low=name.toLowerCase();
+		  var popup=lower(node.getAttribute&&node.getAttribute('aria-haspopup'));
+		  if (!name||!visible(node)||seen.has(node)||(!/\b(date|calendar|choose|picker)\b/.test(low)&&popup!=='dialog'&&popup!=='grid')) continue;
+		  seen.add(node);out.push({name:name,role:lower(node.getAttribute&&node.getAttribute('role'))||'button',selector:cssPath(node)});
+		  if(out.length>=6)return out;
+		}
+		if(out.length)return out;
+	  }
+	  return out;
+	}
   var el = resolveTarget();
   if (el && el.selectorError) return {error:'set_temporal: invalid selector: ' + el.selectorError};
   if (!el) return {error:'set_temporal: target not found'};
@@ -242,6 +271,7 @@ func Set(ctx context.Context, target Target, req Request) (Result, error) {
       requested_value: req.Value, normalized_value: value, previous_value: previous,
       actual_value: actual, value: actual, changed: previous !== actual,
       verified: verified, strategy: strategy, validity: validityFor(el),
+	  recovery_targets: recoveryTargets(el),
       error_code: errorCode || '', error_message: errorMessage || '', error: errorMessage || ''
     };
   }
@@ -296,6 +326,14 @@ func Set(ctx context.Context, target Target, req Request) (Result, error) {
 		return Result{}, err
 	}
 	if out.Error != "" {
+		if shouldUseTrustedTextFallback(out.Result) {
+			fallback := out.Result
+			if retryErr := trustedTextFallback(ctx, &fallback); retryErr == nil && fallback.Verified {
+				return fallback, nil
+			} else if retryErr == nil {
+				out.Result = fallback
+			}
+		}
 		if out.Result.ErrorMessage == "" {
 			out.Result.ErrorMessage = out.Error
 		}
@@ -308,4 +346,87 @@ func Set(ctx context.Context, target Target, req Request) (Result, error) {
 		return out.Result, errors.New(out.Result.ErrorMessage)
 	}
 	return out.Result, nil
+}
+
+func shouldUseTrustedTextFallback(result Result) bool {
+	return result.ErrorCode == "value_mismatch" && result.DateLike && result.Kind == "date_text" &&
+		result.Selector != "" && result.NormalizedValue != ""
+}
+
+// trustedTextFallback is deliberately narrow: it runs only after a detected
+// date-like text mask reverted the standards-based native-setter path. Real
+// CDP key events exercise React/mask key handlers without changing native date
+// inputs or ordinary agent typing behavior.
+func trustedTextFallback(ctx context.Context, result *Result) error {
+	if result == nil {
+		return errors.New("nil temporal result")
+	}
+	selectorJSON, _ := json.Marshal(result.Selector)
+	focusJS := fmt.Sprintf(`(function(){
+	  var el=document.querySelector(%s);if(!el||!("value" in el))return false;
+	  el.focus();if(typeof el.select==="function")el.select();
+	  else if(typeof el.setSelectionRange==="function")el.setSelectionRange(0,String(el.value||"").length);
+	  return true;
+	})()`, string(selectorJSON))
+	var focused bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(focusJS, &focused)); err != nil {
+		return err
+	}
+	if !focused {
+		return errors.New("temporal fallback target not found")
+	}
+	if err := chromedp.Run(ctx, chromedp.KeyEvent(result.NormalizedValue)); err != nil {
+		return err
+	}
+	timer := time.NewTimer(100 * time.Millisecond)
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	}
+	readJS := fmt.Sprintf(`(async function(){
+	  function norm(s){return String(s||"").replace(/\s+/g," ").trim();}
+	  var el=document.querySelector(%s);if(!el)return {actual:"",validity:{valid:false},missing:true};
+	  el.dispatchEvent(new Event("change",{bubbles:true,composed:true}));
+	  try{el.blur();}catch(e){}
+	  await new Promise(function(resolve){requestAnimationFrame(function(){requestAnimationFrame(resolve);});});
+	  var v=el.validity;
+	  return {actual:String(el.value||""),validity:v?{
+		valid:!!v.valid,bad_input:!!v.badInput,pattern_mismatch:!!v.patternMismatch,
+		type_mismatch:!!v.typeMismatch,range_underflow:!!v.rangeUnderflow,range_overflow:!!v.rangeOverflow,
+		step_mismatch:!!v.stepMismatch,too_long:!!v.tooLong,too_short:!!v.tooShort,
+		value_missing:!!v.valueMissing,custom_error:!!v.customError,message:norm(el.validationMessage)
+	  }:{valid:true}};
+	})()`, string(selectorJSON))
+	var readback struct {
+		Actual   string   `json:"actual"`
+		Validity Validity `json:"validity"`
+		Missing  bool     `json:"missing"`
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(readJS, &readback, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+		return p.WithAwaitPromise(true)
+	})); err != nil {
+		return err
+	}
+	if readback.Missing {
+		return errors.New("temporal fallback target disappeared")
+	}
+	result.Strategy = "trusted_key_events"
+	result.ActualValue = readback.Actual
+	result.Value = readback.Actual
+	result.Changed = result.PreviousValue != readback.Actual
+	result.Validity = readback.Validity
+	result.Verified = readback.Actual == result.NormalizedValue && readback.Validity.Valid
+	if result.Verified {
+		result.ErrorCode = ""
+		result.ErrorMessage = ""
+		return nil
+	}
+	result.ErrorCode = "value_mismatch"
+	if readback.Actual == result.NormalizedValue && !readback.Validity.Valid {
+		result.ErrorCode = "invalid_value"
+	}
+	result.ErrorMessage = "set_temporal: trusted key fallback did not produce an accepted value"
+	return nil
 }

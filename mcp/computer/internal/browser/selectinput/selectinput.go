@@ -35,14 +35,23 @@ type Option struct {
 }
 
 type Result struct {
-	Kind        string   `json:"kind"`
-	Selector    string   `json:"selector,omitempty"`
-	Multiple    bool     `json:"multiple,omitempty"`
-	Mode        string   `json:"mode"`
-	Matched     []string `json:"matched,omitempty"`
-	Selected    []string `json:"selected,omitempty"`
-	Options     []Option `json:"options,omitempty"`
-	ControlText string   `json:"control_text,omitempty"`
+	Kind             string   `json:"kind"`
+	ControlKind      string   `json:"control_kind,omitempty"`
+	Selector         string   `json:"selector,omitempty"`
+	Multiple         bool     `json:"multiple,omitempty"`
+	Mode             string   `json:"mode"`
+	RequestedOptions []string `json:"requested_options,omitempty"`
+	Matched          []string `json:"matched,omitempty"`
+	Selected         []string `json:"selected,omitempty"`
+	Options          []Option `json:"options,omitempty"`
+	ControlText      string   `json:"control_text,omitempty"`
+	PreviousValue    string   `json:"previous_value,omitempty"`
+	CurrentValue     string   `json:"current_value,omitempty"`
+	MenuOpen         bool     `json:"menu_open,omitempty"`
+	OptionAvailable  bool     `json:"option_available"`
+	Recoverable      bool     `json:"recoverable,omitempty"`
+	ErrorCode        string   `json:"error_code,omitempty"`
+	ErrorMessage     string   `json:"error_message,omitempty"`
 }
 
 func Select(ctx context.Context, target Target, req Request) (Result, error) {
@@ -108,6 +117,18 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
       values: (req.Values || []).map(function(v) { return String(v || ''); }).filter(Boolean)
     };
   }
+	function requestedOptions() {
+	  return (req.Texts || []).map(norm).filter(Boolean).concat((req.Values || []).map(function(v) { return String(v || ''); }).filter(Boolean));
+	}
+	function controlKind(control) {
+	  var tag = String(control && control.tagName || '').toLowerCase();
+	  var role = lower(control && control.getAttribute && control.getAttribute('role'));
+	  if (tag === 'select') return 'native_select';
+	  if (tag === 'button' && role === 'combobox') return 'button_combobox';
+	  if (role === 'combobox') return tag ? tag + '_combobox' : 'custom_combobox';
+	  if (role === 'listbox') return tag ? tag + '_listbox' : 'custom_listbox';
+	  return tag ? tag + '_custom' : 'custom_control';
+	}
   function optionMatches(opt, keys) {
     var text = lower(optionText(opt));
     var value = String(opt.value || opt.getAttribute('data-value') || opt.getAttribute('value') || '');
@@ -125,6 +146,8 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
     var keys = requestKeys();
     var mode = lower(req.Mode || 'replace');
     var options = Array.prototype.slice.call(sel.options || []);
+	var previous = options.filter(function(o) { return o.selected; }).map(selectedOptionLabel).join(', ');
+	var requested = requestedOptions();
     var matched = [];
     var found = new Set();
     for (var i = 0; i < options.length; i++) {
@@ -133,9 +156,12 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
         found.add(i);
       }
     }
-    var wanted = (keys.texts.length + keys.values.length);
+	var wanted = Math.max(keys.texts.length, keys.values.length);
     if (matched.length === 0 || matched.length < wanted) {
-      return {error: 'select_option: option not found', kind:'native', options: options.map(function(o) {
+	  return {error: 'select_option: option not found', error_code:'native_select_option_unavailable',
+		kind:'native', control_kind:'native_select', mode:mode, selector:cssPath(sel),
+		requested_options:requested, previous_value:previous, current_value:previous,
+		menu_open:false, option_available:false, recoverable:false, options: options.map(function(o) {
         return {text: selectedOptionLabel(o), value: String(o.value || ''), selected: !!o.selected, visible: true};
       })};
     }
@@ -156,8 +182,12 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
     sel.dispatchEvent(new Event('input', {bubbles:true}));
     sel.dispatchEvent(new Event('change', {bubbles:true}));
     return {
-      ok: true, kind: 'native', multiple: !!sel.multiple, mode: mode, matched: matched,
+	  ok: true, kind: 'native', control_kind:'native_select', selector:cssPath(sel),
+	  multiple: !!sel.multiple, mode: mode, requested_options:requested, matched: matched,
       selected: options.filter(function(o) { return o.selected; }).map(selectedOptionLabel),
+	  previous_value:previous,
+	  current_value:options.filter(function(o) { return o.selected; }).map(selectedOptionLabel).join(', '),
+	  menu_open:false, option_available:true,
       options: options.map(function(o) {
         return {text: selectedOptionLabel(o), value: String(o.value || ''), selected: !!o.selected, visible: true};
       })
@@ -185,19 +215,32 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
     var mode = lower(req.Mode || 'replace');
     var keys = requestKeys();
     var matched = [];
-    var wanted = (keys.texts.length + keys.values.length);
+	var wanted = Math.max(keys.texts.length, keys.values.length);
+	var previous = norm(control.value || control.textContent || '');
+	var requested = requestedOptions();
+	var kind = controlKind(control);
+	var selector = cssPath(control);
     if (control.getAttribute && control.getAttribute('aria-expanded') !== 'true') {
       eventClick(control);
     } else if (!customOptions().length) {
       eventClick(control);
     }
     var opts = await waitForOptions();
+	var menuOpen = (control.getAttribute && control.getAttribute('aria-expanded') === 'true') || opts.length > 0;
     if (!opts.length) {
-      return {error:'select_option: no visible role=option/menuitem nodes after opening control', kind:'custom', control_text:norm(control.textContent || '')};
+	  return {error:'select_option: no visible role=option/menuitem nodes after opening control',
+		error_code:'custom_combobox_menu_unavailable', kind:'custom', control_kind:kind,
+		selector:selector, mode:mode, requested_options:requested, control_text:norm(control.textContent || ''),
+		previous_value:previous, current_value:norm(control.value || control.textContent || ''),
+		menu_open:menuOpen, option_available:false, recoverable:true};
     }
     var candidates = opts.filter(function(o) { return optionMatches(o, keys); });
     if (candidates.length === 0 || candidates.length < wanted) {
-      return {error:'select_option: option not found', kind:'custom', control_text:norm(control.textContent || ''), options: opts.map(function(o) {
+	  return {error:'select_option: option not found', error_code:'custom_combobox_option_unavailable',
+		kind:'custom', control_kind:kind, selector:selector, mode:mode, requested_options:requested,
+		control_text:norm(control.textContent || ''), previous_value:previous,
+		current_value:norm(control.value || control.textContent || ''), menu_open:menuOpen,
+		option_available:false, recoverable:false, options: opts.map(function(o) {
         return {text: optionLabel(o), value: String(o.getAttribute('data-value') || o.getAttribute('value') || ''), selected: selectedLike(o), visible: true};
       })};
     }
@@ -227,8 +270,12 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
     await new Promise(function(r) { setTimeout(r, 150); });
     var after = customOptions();
     return {
-      ok: true, kind: 'custom', multiple: candidates.length > 1, mode: mode,
+	  ok: true, kind: 'custom', control_kind:kind, selector:selector,
+	  multiple: candidates.length > 1, mode: mode, requested_options:requested,
       matched: matched, control_text: norm(control.textContent || ''),
+	  previous_value:previous, current_value:norm(control.value || control.textContent || ''),
+	  menu_open:(control.getAttribute && control.getAttribute('aria-expanded') === 'true') || after.length > 0,
+	  option_available:true,
       selected: after.filter(selectedLike).map(optionLabel),
       options: after.map(function(o) {
         return {text: optionLabel(o), value: String(o.getAttribute('data-value') || o.getAttribute('value') || ''), selected: selectedLike(o), visible: true};
@@ -241,7 +288,7 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
   var result = targetEl.tagName && targetEl.tagName.toLowerCase() === 'select'
     ? nativeSelect(targetEl)
     : await customSelect(targetEl);
-  if (result && result.ok) result.selector = cssPath(targetEl);
+	if (result && !result.selector) result.selector = cssPath(targetEl);
   return result;
 })(%s, %s)`, domselector.UniqueCSSPathFunction, string(targetJSON), string(reqJSON))
 
@@ -256,6 +303,9 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
 		return Result{}, err
 	}
 	if out.Error != "" {
+		if out.Result.ErrorMessage == "" {
+			out.Result.ErrorMessage = out.Error
+		}
 		return out.Result, errors.New(out.Error)
 	}
 	if !out.OK {

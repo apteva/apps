@@ -2272,6 +2272,56 @@ func TestComputerUseSemanticScrollFeedbackAndStableRevision(t *testing.T) {
 	}
 }
 
+func TestComputerUseExpectedNameMismatchReturnsSafeRetry(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1000, Height: 600},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		url:     "https://example.com/insights",
+		somTargets: []backends.SetOfMarkTarget{{
+			ID: "som_paid_status", Label: 5, Tag: "button", Role: "button", Text: "Paid status",
+			AccessibleName: "Paid membership broken down by status such as paid, retrying payment, trial, and gifted",
+		}},
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	opened, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := opened.(map[string]any)["session_id"].(string)
+	shot, err := app.toolComputerUse(ctx, map[string]any{"session_id": id, "action": "screenshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := shot.(map[string]any)["som_revision"].(int)
+	fake.actionOnlyCalls = nil
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": id, "action": "click", "target_id": "som_paid_status",
+		"som_revision": revision, "expected_name": "Paid status",
+	})
+	if err != nil {
+		t.Fatalf("name mismatch should be a structured rejection: %v", err)
+	}
+	m := out.(map[string]any)
+	if m["error_code"] != "expected_name_mismatch" || m["provided_name"] != "Paid status" {
+		t.Fatalf("name mismatch metadata=%v", m)
+	}
+	want := "Paid membership broken down by status such as paid, retrying payment, trial, and gifted"
+	if m["actual_accessible_name"] != want || m["target_id"] != "som_paid_status" {
+		t.Fatalf("actual target metadata=%v", m)
+	}
+	retry, ok := m["suggested_retry"].(map[string]any)
+	if !ok || retry["expected_name"] != want || retry["target_id"] != "som_paid_status" || retry["som_revision"] != revision {
+		t.Fatalf("suggested retry=%v", m["suggested_retry"])
+	}
+	if len(fake.actionOnlyCalls) != 0 {
+		t.Fatalf("guard mismatch dispatched browser action: %+v", fake.actionOnlyCalls)
+	}
+}
+
 func TestComputerUseReportsScreenshotRecoveryMetadata(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
