@@ -67,6 +67,14 @@ type streamer struct {
 	// the first reply.
 	pendingAcks map[string]string
 	ackSeq      uint64
+	onFrame     func(StreamFrame)
+}
+
+func (s *streamer) publish(frame StreamFrame) {
+	s.hub.publishStream(frame)
+	if s.onFrame != nil {
+		s.onFrame(frame)
+	}
 }
 
 func newStreamer(h *hub) *streamer {
@@ -171,7 +179,7 @@ func (s *streamer) onChunk(agentID int64, threadID, conversationID, dataJSON str
 	if !changed {
 		return
 	}
-	s.hub.publishStream(StreamFrame{
+	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, ThreadID: threadID,
 		CallID: callID, Text: text, CreatedAt: ts,
 	})
@@ -213,7 +221,7 @@ func (s *streamer) onFinalArgs(agentID int64, threadID, conversationID, dataJSON
 	if !changed {
 		return
 	}
-	s.hub.publishStream(StreamFrame{
+	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, ThreadID: threadID,
 		CallID: callID, Text: text, CreatedAt: ts,
 	})
@@ -242,7 +250,7 @@ func (s *streamer) onToolEnd(agentID int64, threadID, conversationID, dataJSON s
 	delete(s.buffers, key)
 	delete(s.lastEmit, key)
 	s.mu.Unlock()
-	s.hub.publishStream(StreamFrame{
+	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, ThreadID: threadID,
 		CallID: callID, Done: true, CreatedAt: ts,
 	})
@@ -259,7 +267,7 @@ func (s *streamer) emitAck(conversationID, threadID string) {
 	id := "ack-" + conversationID + "-" + strconv.FormatUint(s.ackSeq, 10)
 	s.pendingAcks[conversationID] = id
 	s.mu.Unlock()
-	s.hub.publishStream(StreamFrame{
+	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, ThreadID: threadID,
 		CallID: id, Phase: "acknowledgement",
 		CreatedAt: time.Now(),
@@ -276,7 +284,7 @@ func (s *streamer) settleAck(conversationID string) {
 	if id == "" {
 		return
 	}
-	s.hub.publishStream(StreamFrame{
+	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID,
 		CallID: id, Done: true, CreatedAt: time.Now(),
 	})

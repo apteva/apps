@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -23,6 +24,7 @@ type telegramTestAPI struct {
 	botName       string
 	setNames      []string
 	failSetName   bool
+	failFeedback  bool
 }
 
 func telegramResult(data string) *sdk.ExecuteResult {
@@ -32,7 +34,7 @@ func telegramResult(data string) *sdk.ExecuteResult {
 func configureTelegramTestPlatform(p *recordingPlatform) *telegramTestAPI {
 	api := &telegramTestAPI{nextMessageID: 700, botName: "Apteva Conversations"}
 	p.identity = &sdk.InstallIdentity{
-		AppName: appName, Version: "0.11.0", InstallID: 77, ProjectID: "",
+		AppName: appName, Version: "0.12.0", InstallID: 77, ProjectID: "",
 		PublicURL: "https://agents.example.test",
 		Bindings: map[string]any{telegramIntegrationRole: map[string]any{
 			"ids": []any{float64(testTelegramConnectionID)}, "default_id": float64(testTelegramConnectionID),
@@ -62,6 +64,11 @@ func configureTelegramTestPlatform(p *recordingPlatform) *telegramTestAPI {
 			return telegramResult(fmt.Sprintf(`{"ok":true,"result":{"url":%q,"pending_update_count":0}}`, api.webhookURL)), nil
 		case "delete_webhook":
 			api.webhookURL = ""
+			return telegramResult(`{"ok":true,"result":true}`), nil
+		case "send_chat_action", "send_message_draft":
+			if api.failFeedback {
+				return nil, errors.New("Telegram feedback operation unavailable")
+			}
 			return telegramResult(`{"ok":true,"result":true}`), nil
 		case "answer_callback_query", "edit_message_text":
 			return telegramResult(`{"ok":true,"result":true}`), nil
@@ -779,6 +786,142 @@ func TestTelegramNameFailureDoesNotBreakRoutingConfiguration(t *testing.T) {
 	}
 	if policy, err := app.store.GetTransportIntakePolicy(telegramTransport, testTelegramConnectionID); err != nil || policy.DefaultAgentID != 41 {
 		t.Fatalf("routing was not saved: policy=%+v err=%v", policy, err)
+	}
+}
+
+func telegramCallsByTool(platform *recordingPlatform, tool string) []capturedIntegrationCall {
+	out := []capturedIntegrationCall{}
+	for _, call := range platform.capturedIntegrationCalls() {
+		if call.Tool == tool {
+			out = append(out, call)
+		}
+	}
+	return out
+}
+
+func TestTelegramResponseFeedbackStreamsPrivateDraftAndStopsCleanly(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	configureTelegramTestPlatform(platform)
+	cfg := enableTelegramForTest(t, app, platform)
+	conv := mkConversation(t, app, 41)
+	binding, err := app.store.CreateTelegramBinding(TelegramBinding{
+		ID: "tgb-feedback-private", ConnectionID: testTelegramConnectionID,
+		ProjectID: testProject, ConversationID: conv.ID, ChatID: "12345",
+		ChatType: "private", AccessMode: "invite", AllowedUserIDs: []int64{12345},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.telegramFeedback.flushEvery = 10 * time.Millisecond
+	app.telegramFeedback.typingEvery = 20 * time.Millisecond
+	app.telegramFeedback.draftEvery = 40 * time.Millisecond
+	app.telegramFeedback.timeout = time.Second
+
+	app.telegramFeedback.Start(ctx, cfg, binding)
+	app.streamer.Ingest("llm.tool_chunk", 41, "chat-"+conv.ID,
+		`{"tool":"conversations_conversations_send","id":"draft-call","chunk":"{\"conversation_id\":\"`+conv.ID+`\",\"text\":\"Hello from the agent\"}"}`,
+		time.Now())
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		drafts := telegramCallsByTool(platform, "send_message_draft")
+		if len(drafts) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	app.telegramFeedback.CompleteBinding(binding.ID)
+
+	typing := telegramCallsByTool(platform, "send_chat_action")
+	drafts := telegramCallsByTool(platform, "send_message_draft")
+	if len(typing) == 0 || typing[0].Input["action"] != "typing" {
+		t.Fatalf("typing calls = %+v", typing)
+	}
+	if len(drafts) < 2 || drafts[0].Input["text"] != "" || drafts[len(drafts)-1].Input["text"] != "Hello from the agent" {
+		t.Fatalf("draft calls = %+v", drafts)
+	}
+	firstID, _ := drafts[0].Input["draft_id"].(int64)
+	lastID, _ := drafts[len(drafts)-1].Input["draft_id"].(int64)
+	chatID, _ := drafts[0].Input["chat_id"].(int64)
+	if firstID <= 0 || lastID != firstID || chatID != 12345 {
+		t.Fatalf("draft identity first=%d last=%d chat=%d", firstID, lastID, chatID)
+	}
+	settledCount := len(platform.capturedIntegrationCalls())
+	time.Sleep(60 * time.Millisecond)
+	if got := len(platform.capturedIntegrationCalls()); got != settledCount {
+		t.Fatalf("feedback continued after final message: calls %d -> %d", settledCount, got)
+	}
+}
+
+func TestTelegramResponseFeedbackUsesTypingForGroupsAndHonorsOff(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	configureTelegramTestPlatform(platform)
+	cfg := enableTelegramForTest(t, app, platform)
+	conv := mkConversation(t, app, 41)
+	binding := &TelegramBinding{ID: "tgb-feedback-group", ConnectionID: testTelegramConnectionID,
+		ProjectID: testProject, ConversationID: conv.ID, ChatID: "-10055", ChatType: "supergroup"}
+
+	before := len(platform.capturedIntegrationCalls())
+	app.telegramFeedback.Start(ctx, cfg, binding)
+	app.telegramFeedback.CompleteBinding(binding.ID)
+	calls := platform.capturedIntegrationCalls()[before:]
+	if len(calls) != 1 || calls[0].Tool != "send_chat_action" {
+		t.Fatalf("group feedback calls = %+v", calls)
+	}
+
+	cfg.ResponseFeedback = telegramFeedbackOff
+	before = len(platform.capturedIntegrationCalls())
+	app.telegramFeedback.Start(ctx, cfg, binding)
+	if got := len(platform.capturedIntegrationCalls()); got != before {
+		t.Fatalf("off feedback made %d call(s)", got-before)
+	}
+}
+
+func TestTelegramResponseFeedbackSettingValidation(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	configureTelegramTestPlatform(platform)
+	enableTelegramForTest(t, app, platform)
+
+	req := httptest.NewRequest(http.MethodPatch, "/telegram-connections", strings.NewReader(`{"connection_id":9,"response_feedback":"typing"}`))
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleTelegramConnections(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set feedback: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	cfg, _ := app.store.GetTelegramConnection(testTelegramConnectionID)
+	if cfg.ResponseFeedback != telegramFeedbackTyping {
+		t.Fatalf("response feedback = %q", cfg.ResponseFeedback)
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/telegram-connections", strings.NewReader(`{"connection_id":9,"response_feedback":"noisy"}`))
+	authorizeTestRequest(req)
+	rec = httptest.NewRecorder()
+	app.handleTelegramConnections(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid feedback: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTelegramResponseFeedbackFailureDoesNotBlockInboundDelivery(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	api := configureTelegramTestPlatform(platform)
+	cfg := enableTelegramForTest(t, app, platform)
+	conv := mkConversation(t, app, 41)
+	bindTelegramForTest(t, app, conv, "12345", nil)
+	api.failFeedback = true
+
+	body := `{"update_id":901,"message":{"message_id":81,"from":{"id":12345},"chat":{"id":12345,"type":"private"},"text":"still deliver this"}}`
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK {
+		t.Fatalf("feedback failure blocked webhook: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	transcript, err := app.store.Transcript(conv.ID, 0, 10)
+	if err != nil || len(transcript) != 1 || transcript[0].Content != "still deliver this" {
+		t.Fatalf("inbound transcript = %+v err=%v", transcript, err)
+	}
+	if len(platform.spawns) != 1 {
+		t.Fatalf("inbound message was not forwarded to the agent: spawns=%+v", platform.spawns)
 	}
 }
 

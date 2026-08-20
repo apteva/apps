@@ -25,6 +25,7 @@ type recordingPlatform struct {
 	spawns             []sdk.ThreadSpawnRequest
 	identity           *sdk.InstallIdentity
 	connections        map[int64]*sdk.PlatformConnection
+	integrationMu      sync.Mutex
 	integrationCalls   []capturedIntegrationCall
 	integrationHandler func(int64, string, map[string]any) (*sdk.ExecuteResult, error)
 	failSend           bool
@@ -69,11 +70,19 @@ func (p *recordingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, er
 }
 
 func (p *recordingPlatform) ExecuteIntegrationTool(connectionID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	p.integrationMu.Lock()
 	p.integrationCalls = append(p.integrationCalls, capturedIntegrationCall{ConnectionID: connectionID, Tool: tool, Input: input})
+	p.integrationMu.Unlock()
 	if p.integrationHandler != nil {
 		return p.integrationHandler(connectionID, tool, input)
 	}
 	return nil, fmt.Errorf("integration tool %s unavailable", tool)
+}
+
+func (p *recordingPlatform) capturedIntegrationCalls() []capturedIntegrationCall {
+	p.integrationMu.Lock()
+	defer p.integrationMu.Unlock()
+	return append([]capturedIntegrationCall(nil), p.integrationCalls...)
 }
 
 func (p *recordingPlatform) SendEvent(instanceID int64, message string) error {
@@ -117,6 +126,7 @@ func newTestEnv(t *testing.T) (*App, *sdk.AppCtx, *recordingPlatform) {
 	if err := app.OnMount(ctx); err != nil {
 		t.Fatalf("OnMount: %v", err)
 	}
+	t.Cleanup(func() { _ = app.OnUnmount(ctx) })
 	return app, ctx, platform
 }
 

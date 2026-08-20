@@ -32,7 +32,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.11.0
+version: 0.12.0
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, status). Inbox items are messages — an
@@ -46,6 +46,8 @@ description: |
   credentials or asking operators for numeric Telegram IDs. When one
   agent owns every route, the bot can use that agent's display name;
   shared routing automatically restores the original bot identity.
+  Telegram response feedback supports native live drafts in private
+  chats, typing-only feedback, or an operator-controlled off mode.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/conversations
 icon: /ui/icon.svg
@@ -53,7 +55,7 @@ icon_style: monochrome
 tags: [chat, inbox, channels, approvals, notifications]
 
 scopes: [global]
-min_apteva_version: "0.15.1"
+min_apteva_version: "0.15.2"
 
 requires:
   permissions:
@@ -140,10 +142,11 @@ upgrade_policy: auto-patch
 `
 
 type App struct {
-	store    *store
-	hub      *hub
-	adapters *adapterRegistry
-	streamer *streamer
+	store            *store
+	hub              *hub
+	adapters         *adapterRegistry
+	streamer         *streamer
+	telegramFeedback *telegramFeedbackManager
 	// telemetryStop cancels the bridge subscription on unmount.
 	telemetryStop func()
 }
@@ -166,6 +169,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.hub = newHub()
 	a.adapters = newAdapterRegistry(a, a.hub)
 	a.streamer = newStreamer(a.hub)
+	a.telegramFeedback = newTelegramFeedbackManager(a)
+	a.streamer.onFrame = a.telegramFeedback.OnFrame
 	mountedCtx = ctx
 	// Token-level streaming when the platform grants it; Stage-1 phase
 	// frames otherwise. The panel renders either without knowing which.
@@ -186,6 +191,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 func (a *App) OnUnmount(*sdk.AppCtx) error {
 	if a.telemetryStop != nil {
 		a.telemetryStop()
+	}
+	if a.telegramFeedback != nil {
+		a.telegramFeedback.Close()
 	}
 	return nil
 }
