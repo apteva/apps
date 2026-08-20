@@ -4,8 +4,8 @@ package main
 //
 // An adapter delivers messages to one internal surface. `web` (the SSE
 // hub) is always configured; agent and sibling-app callbacks provide the
-// durable approval-result paths. External transports deliberately do not
-// ship in this release; they can be added behind this seam later.
+// durable approval-result paths. Telegram implements the first external
+// transport through a platform-managed integration connection.
 
 import (
 	"encoding/base64"
@@ -29,11 +29,12 @@ type adapterRegistry struct {
 	byID map[string]adapter
 }
 
-func newAdapterRegistry(_ *App, h *hub) *adapterRegistry {
+func newAdapterRegistry(app *App, h *hub) *adapterRegistry {
 	r := &adapterRegistry{byID: map[string]adapter{}}
 	r.register(&webAdapter{hub: h})
 	r.register(&agentAdapter{})
 	r.register(&appCallbackAdapter{})
+	r.register(&telegramAdapter{app: app})
 	return r
 }
 
@@ -151,7 +152,13 @@ func approvalDeliveryTarget(m *Message) string {
 // to, then attempts each one. Called after every append; also the
 // replay path on mount (redeliverPending) for crash recovery.
 func (a *App) deliver(app *sdk.AppCtx, conv *Conversation, msg *Message) {
-	for _, target := range a.deliveryTargets(conv, msg) {
+	targets, err := a.deliveryTargets(conv, msg)
+	if err != nil {
+		if app != nil {
+			app.Logger().Warn("delivery target lookup failed", "message", msg.ID, "err", err)
+		}
+	}
+	for _, target := range targets {
 		if err := a.store.EnsureDelivery(msg.ID, target); err != nil {
 			if app != nil {
 				app.Logger().Warn("delivery enqueue failed", "message", msg.ID, "target", target, "err", err)
@@ -165,7 +172,10 @@ func (a *App) deliver(app *sdk.AppCtx, conv *Conversation, msg *Message) {
 // appendAndDeliver is the only production append path. Message and initial
 // outbox rows commit atomically; immediate dispatch happens after commit.
 func (a *App) appendAndDeliver(app *sdk.AppCtx, conv *Conversation, msg *Message) (*Message, bool, error) {
-	targets := a.deliveryTargets(conv, msg)
+	targets, err := a.deliveryTargets(conv, msg)
+	if err != nil {
+		return nil, false, err
+	}
 	stored, inserted, err := a.store.AppendMessageWithDeliveries(msg, targets)
 	if err != nil || !inserted {
 		return stored, inserted, err
@@ -182,7 +192,7 @@ func (a *App) appendAndDeliver(app *sdk.AppCtx, conv *Conversation, msg *Message
 //   - EVERY user-scope stream for inbox items — the bell must ring for
 //     the operator whoever owns the source conversation, and inbox_post
 //     system conversations have no owner at all (this was the user-0 bug)
-func (a *App) deliveryTargets(conv *Conversation, msg *Message) []string {
+func (a *App) deliveryTargets(conv *Conversation, msg *Message) ([]string, error) {
 	targets := []string{"web:conv"}
 	if conv.OwnerUserID != 0 {
 		targets = append(targets, "web:user:"+fmt.Sprint(conv.OwnerUserID))
@@ -190,7 +200,19 @@ func (a *App) deliveryTargets(conv *Conversation, msg *Message) []string {
 	if msg.ComponentKind != "" {
 		targets = append(targets, "web:project")
 	}
-	return targets
+	// Do not echo a Telegram user's inbound update back into Telegram. Every
+	// other durable message fans out to each chat explicitly bound to this
+	// conversation.
+	if !strings.HasPrefix(msg.ExternalSender, "telegram:") {
+		bindings, err := a.store.TelegramBindingsForConversation(conv.ID)
+		if err != nil {
+			return targets, err
+		}
+		for _, binding := range bindings {
+			targets = append(targets, "telegram:"+binding.ID)
+		}
+	}
+	return targets, nil
 }
 
 func (a *App) attemptDelivery(app *sdk.AppCtx, target string, conv *Conversation, msg *Message) {

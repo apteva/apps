@@ -19,12 +19,16 @@ import (
 // callbacks (inbox_post's callback_tool).
 type recordingPlatform struct {
 	tk.BasePlatformClient
-	events       []capturedEvent
-	threadEvents []capturedThreadEvent
-	appCalls     []capturedAppCall
-	spawns       []sdk.ThreadSpawnRequest
-	failSend     bool
-	failSpawn    bool
+	events             []capturedEvent
+	threadEvents       []capturedThreadEvent
+	appCalls           []capturedAppCall
+	spawns             []sdk.ThreadSpawnRequest
+	identity           *sdk.InstallIdentity
+	connections        map[int64]*sdk.PlatformConnection
+	integrationCalls   []capturedIntegrationCall
+	integrationHandler func(int64, string, map[string]any) (*sdk.ExecuteResult, error)
+	failSend           bool
+	failSpawn          bool
 }
 
 type capturedEvent struct {
@@ -41,6 +45,35 @@ type capturedAppCall struct {
 	App   string
 	Tool  string
 	Input map[string]any
+}
+
+type capturedIntegrationCall struct {
+	ConnectionID int64
+	Tool         string
+	Input        map[string]any
+}
+
+func (p *recordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+	if p.identity == nil {
+		return &sdk.InstallIdentity{AppName: appName, Version: "test", ProjectID: testProject, Bindings: map[string]any{}}, nil
+	}
+	return p.identity, nil
+}
+
+func (p *recordingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	if conn := p.connections[id]; conn != nil {
+		copy := *conn
+		return &copy, nil
+	}
+	return nil, fmt.Errorf("connection %d not found", id)
+}
+
+func (p *recordingPlatform) ExecuteIntegrationTool(connectionID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	p.integrationCalls = append(p.integrationCalls, capturedIntegrationCall{ConnectionID: connectionID, Tool: tool, Input: input})
+	if p.integrationHandler != nil {
+		return p.integrationHandler(connectionID, tool, input)
+	}
+	return nil, fmt.Errorf("integration tool %s unavailable", tool)
 }
 
 func (p *recordingPlatform) SendEvent(instanceID int64, message string) error {

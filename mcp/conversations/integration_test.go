@@ -16,8 +16,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	tk "github.com/apteva/app-sdk/testkit"
@@ -57,6 +60,65 @@ func mcpErr(t *testing.T, sc *tk.Sidecar, tool string, args map[string]any, agen
 		t.Fatalf("%s: expected a tool error, got success", tool)
 	}
 	return out.Error.Message
+}
+
+type telegramGatewayFixture struct {
+	mu            sync.Mutex
+	webhookURL    string
+	webhookSecret string
+	sent          []map[string]any
+	nextMessageID int64
+}
+
+func spawnTelegramHTTPTestSidecar(t *testing.T) (*tk.Sidecar, *telegramGatewayFixture) {
+	t.Helper()
+	fixture := &telegramGatewayFixture{nextMessageID: 900}
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/whoami":
+			_, _ = w.Write([]byte(`{"app_name":"conversations","version":"0.9.0","install_id":77,"project_id":"","public_url":"https://agents.example.test","bindings":{"telegram_bot":{"ids":[9],"default_id":9}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/connections/9":
+			_, _ = w.Write([]byte(`{"id":9,"app_slug":"telegram","name":"Test bot","status":"active","project_id":"test-proj"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/agents":
+			_, _ = w.Write([]byte(`[{"id":41,"name":"Test","status":"running","project_id":"test-proj","attached_to_caller":true}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/callback/integrations/9/execute":
+			var body struct {
+				Tool  string         `json:"tool"`
+				Input map[string]any `json:"input"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			var data json.RawMessage
+			switch body.Tool {
+			case "get_me":
+				data = json.RawMessage(`{"ok":true,"result":{"id":998877,"username":"sidecar_test_bot"}}`)
+			case "set_webhook":
+				fixture.webhookURL, _ = body.Input["url"].(string)
+				fixture.webhookSecret, _ = body.Input["secret_token"].(string)
+				data = json.RawMessage(`{"ok":true,"result":true}`)
+			case "send_message":
+				fixture.sent = append(fixture.sent, body.Input)
+				fixture.nextMessageID++
+				data = json.RawMessage(fmt.Sprintf(`{"ok":true,"result":{"message_id":%d}}`, fixture.nextMessageID))
+			case "edit_message_text", "answer_callback_query":
+				data = json.RawMessage(`{"ok":true,"result":true}`)
+			default:
+				http.Error(w, "unexpected tool", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "status": 200, "data": data})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/apps/callback/threads/"):
+			_, _ = w.Write([]byte(`{"status":"created","thread":{"agent_id":41,"thread_id":"chat-test"}}`))
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/apps/callback/agents/"):
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			http.Error(w, "offline", http.StatusBadGateway)
+		}
+	}))
+	t.Cleanup(gateway.Close)
+	return tk.SpawnSidecar(t, ".", tk.WithProjectID(itProject), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL)), fixture
 }
 
 const itProject = "test-proj"
@@ -254,5 +316,63 @@ func TestSidecar_PublicConversationFlow(t *testing.T) {
 	}, 41, "chat-"+convID, itProject)
 	if _, ok := sent["message_id"]; !ok {
 		t.Fatalf("send into public conversation = %v", sent)
+	}
+}
+
+func TestSidecar_TelegramConnectionWebhookAndOutboundFlow(t *testing.T) {
+	sc, fixture := spawnTelegramHTTPTestSidecar(t)
+
+	var conv map[string]any
+	if resp := itHTTP(sc, http.MethodPost, "/chats", map[string]any{
+		"agent_id": 41, "title": "Telegram support", "project_id": itProject,
+	}, &conv); resp.Status != http.StatusOK {
+		t.Fatalf("create chat: %d %s", resp.Status, resp.Body)
+	}
+	convID, _ := conv["id"].(string)
+	var enabled map[string]any
+	if resp := itHTTP(sc, http.MethodPost, "/telegram-connections", map[string]any{"connection_id": 9}, &enabled); resp.Status != http.StatusOK {
+		t.Fatalf("enable Telegram: %d %s", resp.Status, resp.Body)
+	}
+	var binding map[string]any
+	if resp := itHTTP(sc, http.MethodPost, "/telegram-bindings", map[string]any{
+		"connection_id": 9, "conversation_id": convID, "chat_id": "12345",
+	}, &binding); resp.Status != http.StatusOK {
+		t.Fatalf("bind Telegram: %d %s", resp.Status, resp.Body)
+	}
+
+	fixture.mu.Lock()
+	webhookURL, webhookSecret := fixture.webhookURL, fixture.webhookSecret
+	fixture.mu.Unlock()
+	parsed, err := url.Parse(webhookURL)
+	if err != nil || webhookSecret == "" {
+		t.Fatalf("captured webhook url=%q secret-set=%t err=%v", webhookURL, webhookSecret != "", err)
+	}
+	key := path.Base(parsed.Path)
+	payload := `{"update_id":501,"message":{"message_id":77,"from":{"id":12345,"username":"operator"},"chat":{"id":12345,"type":"private"},"text":"real sidecar inbound"}}`
+	req, _ := http.NewRequest(http.MethodPost, sc.URL()+"/telegram-webhook/"+key, strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Telegram-Bot-Api-Secret-Token", webhookSecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Telegram webhook: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Telegram webhook status=%d", resp.StatusCode)
+	}
+
+	var transcript []map[string]any
+	if got := itHTTP(sc, http.MethodGet, "/messages?chat_id="+convID, nil, &transcript); got.Status != http.StatusOK {
+		t.Fatalf("transcript: %d %s", got.Status, got.Body)
+	}
+	if len(transcript) == 0 || transcript[0]["content"] != "real sidecar inbound" {
+		t.Fatalf("Telegram transcript = %+v", transcript)
+	}
+
+	sc.MCPAs("send", map[string]any{"conversation_id": convID, "text": "real sidecar outbound"}, 41, "main", itProject)
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if len(fixture.sent) != 1 || fixture.sent[0]["chat_id"] != "12345" || fixture.sent[0]["text"] != "real sidecar outbound" {
+		t.Fatalf("Telegram outbound = %+v", fixture.sent)
 	}
 }

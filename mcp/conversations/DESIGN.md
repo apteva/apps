@@ -1,9 +1,9 @@
 # conversations — design
 
 One app owning the replacement conversation surfaces: internal dashboard
-chat and the inbox (approvals / reports / alerts / status). External
-transports such as Telegram and Slack are deliberately deferred; the data
-model keeps a transport seam without shipping an adapter. Developed in
+chat, the inbox (approvals / reports / alerts / status), and Telegram as an
+optional connection-backed transport. Slack and other transports remain
+behind the same adapter seam for later releases. Developed in
 parallel with — and without touching — apteva-server's built-in
 `channel-chat` and the deprecated `channels` sidecar. Both are donors;
 neither is modified.
@@ -17,10 +17,10 @@ Splitting inbox from conversations would mean mirrored stores, duplicated
 unread bookkeeping, and a cross-app hop inside the approval round-trip —
 the single most valuable behavior in the system.
 
-Future external transports will not be conversation *types*. The retained
-`origin`, `conversation_key`, external participant, and adapter seams let a
-later transport release bind an ordinary conversation without changing the
-core room, approval, or inbox model.
+External transports are not conversation *types*. A Telegram chat is an
+explicit binding to an ordinary conversation. The bot token stays in a
+platform integration connection; Conversations stores the connection id,
+chat route, webhook verification secret, and external participant identity.
 
 ## Model
 
@@ -36,6 +36,10 @@ core room, approval, or inbox model.
   implicitly.
 - `deliveries` — the ledger. One row per (message, target); pending rows
   are redelivered on mount (crash-safe sends, the Hermes pattern).
+- `telegram_connections` / `telegram_bindings` — one verified webhook per
+  bot connection and explicit project-scoped chat-to-conversation routes.
+- `telegram_updates` / `telegram_message_links` / `telegram_action_tokens`
+  — inbound deduplication, provider message editing, and opaque callbacks.
 
 ## Surfaces
 
@@ -46,10 +50,12 @@ core room, approval, or inbox model.
   callback tool invoked on action. This makes the app the platform's
   notification provider; no other app needs its own inbox.
 - **HTTP** (dashboard): /chats /messages /stream (SSE) /inbox
-  /message-action /seen. (Reserved prefixes /health /manifest
+  /message-action /seen /telegram-connections /telegram-bindings, plus the
+  secret-verified /telegram-webhook/*. (Reserved prefixes /health /manifest
   /mcp /events /ui/ are avoided — guarded by a test.)
-- **Adapters**: `web` (the SSE hub) is the only adapter in this release.
-  External adapters are reserved for a later transport-focused milestone.
+- **Adapters**: `web` (the SSE hub), authenticated agent/app callbacks, and
+  `telegram`. Telegram executes Bot API tools through the bound platform
+  connection; raw bot credentials never enter app config or SQLite.
 
 ## Thread-per-conversation
 
@@ -72,7 +78,8 @@ true in-place drift correction.
 ## Approval round-trip
 
 message-action mutates the card in place, publishes the updated row to
-every current surface (one row — transcript and inbox widget agree), and
+every current surface (one row — transcript, inbox widget, and Telegram
+message agree), and
 forwards an `approval.result` event to the owning agent's
 thread via the platform API. Writer, store, and forwarder stay in one
 process.
@@ -100,7 +107,7 @@ app runs with phase-frame streaming only.
 2. Dual-write from `channel-chat`, then flip dashboard reads.
 3. One-time data migration of `channel_chat_*` rows (idempotent,
    refuses-to-guess — same discipline as the providers migration).
-4. Telegram adapter goes live (long-poll + webhook), then Slack.
+4. Add Slack and other transports through the same connection-backed seam.
 5. Deprecate the `channels` sidecar and shrink `channel-chat`.
 
 ## Testing in isolation

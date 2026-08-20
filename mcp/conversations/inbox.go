@@ -175,6 +175,10 @@ func dismissed(m *Message) bool {
 // applyInboxAction resolves a pending approval card in place. Returns
 // the updated components and the recorded verdict.
 func applyInboxAction(m *Message, actionID, note string, userID int64) ([]Component, map[string]any, error) {
+	return applyInboxActionActor(m, actionID, note, userID, "")
+}
+
+func applyInboxActionActor(m *Message, actionID, note string, userID int64, externalActor string) ([]Component, map[string]any, error) {
 	if m.ComponentKind != kindApproval {
 		return nil, nil, fmt.Errorf("message %d is not actionable", m.ID)
 	}
@@ -196,7 +200,12 @@ func applyInboxAction(m *Message, actionID, note string, userID int64) ([]Compon
 			props[k] = v
 		}
 		props["status"] = actionID
-		props["resolved_by"] = userID
+		if userID > 0 {
+			props["resolved_by"] = userID
+		}
+		if externalActor != "" {
+			props["resolved_by_external"] = externalActor
+		}
 		props["resolved_at"] = time.Now().UTC().Format(time.RFC3339)
 		if note != "" {
 			props["note"] = note
@@ -240,7 +249,18 @@ func actionAllowed(c Component, actionID string) bool {
 //   - inbox_post approvals with a callback_tool call back into the
 //     posting app via the platform (CallAppResult) instead.
 func (a *App) resolveApproval(app *sdk.AppCtx, m *Message, actionID, note string, userID int64) (*Message, error) {
-	updatedComponents, _, err := applyInboxAction(m, actionID, note, userID)
+	return a.resolveApprovalActor(app, m, actionID, note, userID, "")
+}
+
+func (a *App) resolveApprovalExternal(app *sdk.AppCtx, m *Message, actionID, note, externalActor string) (*Message, error) {
+	if strings.TrimSpace(externalActor) == "" {
+		return nil, errors.New("external approval actor required")
+	}
+	return a.resolveApprovalActor(app, m, actionID, note, 0, externalActor)
+}
+
+func (a *App) resolveApprovalActor(app *sdk.AppCtx, m *Message, actionID, note string, userID int64, externalActor string) (*Message, error) {
+	updatedComponents, _, err := applyInboxActionActor(m, actionID, note, userID, externalActor)
 	if err != nil {
 		return nil, err
 	}

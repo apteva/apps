@@ -32,7 +32,7 @@ type Conversation struct {
 	LeadAgentID     int64  `json:"lead_agent_id"`
 	Title           string `json:"title"`
 	Kind            string `json:"kind"`   // direct | room
-	Origin          string `json:"origin"` // web | agent | app (external transports are future)
+	Origin          string `json:"origin"` // web | agent | app; transports are separate bindings
 	ConversationKey string `json:"conversation_key,omitempty"`
 	// Audience: "operator" (dashboard, agent topics, operator channels)
 	// or "public" (end users behind a gateway). Inbox-kind tools refuse
@@ -105,8 +105,8 @@ type CreateConversationInput struct {
 	Origin          string // '' → web
 	ConversationKey string
 	OwnerUserID     int64
-	// ExternalIdentity optionally adds a gateway-supplied participant at
-	// creation time. Transport adapters are a future release.
+	// ExternalIdentity optionally adds a gateway- or transport-supplied
+	// participant at creation time.
 	ExternalIdentity string
 	ExternalName     string
 	// Audience: '' → operator. See Conversation.Audience.

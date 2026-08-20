@@ -7,8 +7,8 @@ package main
 // The organizing rule: inbox items ARE messages. An agent's approval
 // request is a typed card inside its conversation; the inbox is a
 // priority-ordered query over those rows; acting on a card anywhere
-// mutates the one row every surface renders. External transports are
-// deliberately deferred until the internal replacement is proven.
+// mutates the one row every surface renders. Telegram is an optional
+// transport backed by platform-managed integration connections.
 //
 // Developed in parallel with apteva-server's built-in channel-chat and
 // the deprecated channels sidecar. Both are donors; neither is
@@ -32,7 +32,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.8.0
+version: 0.9.0
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, status). Inbox items are messages — an
@@ -40,7 +40,9 @@ description: |
   the inbox is a priority-ordered view over those rows, so acting on
   a card anywhere updates every surface at once. Other apps raise
   inbox items via inbox_post; deliveries go through a crash-safe
-  ledger. External transports are intentionally deferred.
+  ledger. Telegram bots connect through platform-managed integration
+  connections; explicit chat bindings route messages without exposing
+  bot credentials to the app.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/conversations
 icon: /ui/icon.svg
@@ -58,10 +60,22 @@ requires:
     - platform.instances.write
     - platform.threads.write
     - platform.telemetry.read
+    - platform.connections.read
+    - platform.connections.execute
+  integrations:
+    - role: telegram_bot
+      kind: integration
+      mode: multiple
+      compatible_slugs: [telegram]
+      required: false
+      label: "Telegram bots (optional)"
+      hint: "Bind the Telegram integration connections Conversations may use for project chat routes."
 
 provides:
   http_routes:
     - prefix: /
+    - prefix: /telegram-webhook/
+      no_auth: true
   mcp_tools:
     - { name: send,             description: "Send a message into a conversation. Args: conversation_id, text, components?, attachments?. The calling agent must be a participant; delivery fans out to every bound surface. Never creates conversations." }
     - { name: request_approval, description: "Ask the operator to approve something. Refused in public conversations. Args: conversation_id, title, body?, actions? (default Approve/Deny). The verdict comes back as an approval.result event." }
@@ -91,6 +105,8 @@ provides:
   workers:
     - name: delivery-retry
       schedule: "@every 10s"
+    - name: telegram-maintenance
+      schedule: "@every 1h"
 
   skills:
     - name: using-conversations
@@ -100,7 +116,7 @@ provides:
         Reply discipline (acknowledge, work, one final outcome), where
         inbox items live (list, reuse, create with stable topic
         titles), alert/report cadence, main-thread output ownership,
-        the approval round-trip, and room etiquette. Load before
+        the approval round-trip, Telegram routing, and room etiquette. Load before
         messaging people or raising inbox items.
       metadata:
         category: communication
@@ -172,14 +188,23 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{
-		Name:     "delivery-retry",
-		Schedule: "@every 10s",
-		Run: func(_ context.Context, app *sdk.AppCtx) error {
-			_, err := a.redeliverPending(app)
-			return err
+	return []sdk.Worker{
+		{
+			Name:     "delivery-retry",
+			Schedule: "@every 10s",
+			Run: func(_ context.Context, app *sdk.AppCtx) error {
+				_, err := a.redeliverPending(app)
+				return err
+			},
 		},
-	}}
+		{
+			Name:     "telegram-maintenance",
+			Schedule: "@every 1h",
+			Run: func(_ context.Context, _ *sdk.AppCtx) error {
+				return a.store.PruneTelegramState()
+			},
+		},
+	}
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 

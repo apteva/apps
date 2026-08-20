@@ -149,6 +149,29 @@ interface ParticipantsInfo {
   lead_agent_id: number;
 }
 
+interface TelegramConnectionView {
+  connection_id: number;
+  name: string;
+  status: string;
+  project_id: string;
+  enabled: boolean;
+  bot_id?: string;
+  bot_username?: string;
+  webhook_url?: string;
+}
+
+interface TelegramBindingView {
+  id: string;
+  connection_id: number;
+  project_id: string;
+  conversation_id: string;
+  conversation_title?: string;
+  audience?: string;
+  chat_id: string;
+  allowed_user_ids: number[];
+  created_at: string;
+}
+
 // ─── fetch helpers ───────────────────────────────────────────────────
 
 function scopedPath(path: string, projectId: string): string {
@@ -508,6 +531,7 @@ function NewConversationDialog({
   const [selected, setSelected] = useState<number[]>([]);
   const [leadId, setLeadId] = useState<number | null>(null);
   const [title, setTitle] = useState("");
+  const [audience, setAudience] = useState<"operator" | "public">("operator");
   const [filter, setFilter] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -522,6 +546,7 @@ function NewConversationDialog({
     setSelected([]);
     setLeadId(null);
     setTitle("");
+    setAudience("operator");
     setFilter("");
     setError("");
   };
@@ -551,6 +576,7 @@ function NewConversationDialog({
         agent_ids: selected,
         lead_agent_id: leadId ?? selected[0],
         title: title.trim() || undefined,
+        audience,
         project_id: projectId,
       }, projectId);
       reset();
@@ -584,6 +610,17 @@ function NewConversationDialog({
             placeholder="Optional"
             className="w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
           />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-xs uppercase text-text-muted">Audience</span>
+          <select
+            value={audience}
+            onChange={(e) => setAudience(e.target.value as "operator" | "public")}
+            className="w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
+          >
+            <option value="operator">Operator — approvals and internal inbox items allowed</option>
+            <option value="public">Public visitor — replies only, no internal inbox items</option>
+          </select>
         </label>
         <div>
           <div className="mb-1 text-xs uppercase text-text-muted">Agents</div>
@@ -1673,10 +1710,279 @@ function InboxTab({
   );
 }
 
+// ─── Telegram transport tab ─────────────────────────────────────────
+
+function TelegramTab({
+  projectId,
+  conversations,
+}: {
+  projectId: string;
+  conversations: Conversation[];
+}) {
+  const [connections, setConnections] = useState<TelegramConnectionView[]>([]);
+  const [bindings, setBindings] = useState<TelegramBindingView[]>([]);
+  const [connectionId, setConnectionId] = useState("");
+  const [conversationId, setConversationId] = useState("");
+  const [chatId, setChatId] = useState("");
+  const [allowedUsers, setAllowedUsers] = useState("");
+  const [busy, setBusy] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const [connectionResult, bindingResult] = await Promise.all([
+        apiGet<{ connections: TelegramConnectionView[] }>("/telegram-connections", projectId),
+        apiGet<{ bindings: TelegramBindingView[] }>("/telegram-bindings", projectId),
+      ]);
+      setConnections(connectionResult.connections ?? []);
+      setBindings(bindingResult.bindings ?? []);
+      setConnectionId((current) =>
+        current && connectionResult.connections.some((item) => item.enabled && String(item.connection_id) === current)
+          ? current
+          : String(connectionResult.connections.find((item) => item.enabled)?.connection_id ?? ""),
+      );
+      setConversationId((current) =>
+        current && conversations.some((item) => item.id === current)
+          ? current
+          : (conversations[0]?.id ?? ""),
+      );
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : String(err));
+    }
+  }, [projectId, conversations]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const enable = async (id: number) => {
+    setBusy(`enable-${id}`);
+    setNotice("");
+    try {
+      const enabled = await apiPost<TelegramConnectionView>(
+        "/telegram-connections",
+        { connection_id: id },
+        projectId,
+      );
+      setNotice(
+        enabled.bot_username
+          ? `Webhook active for @${enabled.bot_username}.`
+          : "Telegram webhook active.",
+      );
+      await load();
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const createBinding = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!connectionId || !conversationId || !chatId.trim()) return;
+    setBusy("bind");
+    setNotice("");
+    const parsedAllowed = allowedUsers
+      .split(",")
+      .map((value) => Number(value.trim()))
+      .filter((value) => Number.isSafeInteger(value) && value > 0);
+    try {
+      await apiPost(
+        "/telegram-bindings",
+        {
+          connection_id: Number(connectionId),
+          conversation_id: conversationId,
+          chat_id: chatId.trim(),
+          allowed_user_ids: parsedAllowed,
+        },
+        projectId,
+      );
+      setChatId("");
+      setAllowedUsers("");
+      setNotice("Telegram chat bound to the conversation.");
+      await load();
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const removeBinding = async (id: string) => {
+    setBusy(`delete-${id}`);
+    setNotice("");
+    try {
+      await apiDelete(`/telegram-bindings?id=${encodeURIComponent(id)}`, projectId);
+      setNotice("Telegram chat disconnected.");
+      await load();
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const enabledConnections = connections.filter((connection) => connection.enabled);
+
+  return (
+    <div className="flex-1 min-h-0 overflow-auto p-4">
+      <div className="mx-auto max-w-3xl flex flex-col gap-4">
+        <section className="rounded-md border border-border bg-bg-card p-4">
+          <h2 className="text-sm font-semibold text-text">Telegram bots</h2>
+          <p className="mt-1 text-xs text-text-muted">
+            Bot tokens stay in platform integration connections. Conversations stores only webhook and chat routing metadata.
+          </p>
+          <p className="mt-1 text-xs text-text-dim">
+            Telegram permits one webhook per bot. Enabling it here replaces any webhook currently configured for that bot.
+          </p>
+          {connections.length === 0 ? (
+            <div className="mt-4 rounded border border-border bg-bg px-3 py-2 text-xs text-text-muted">
+              No Telegram connection is bound to this app. Add or select a Telegram integration connection in the app installation settings first.
+            </div>
+          ) : (
+            <div className="mt-4 flex flex-col gap-2">
+              {connections.map((connection) => (
+                <div key={connection.connection_id} className="rounded border border-border bg-bg px-3 py-2 flex items-center gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm text-text truncate">
+                      {connection.bot_username ? `@${connection.bot_username}` : connection.name}
+                    </p>
+                    <p className="text-xs text-text-dim truncate">
+                      {connection.enabled ? "Webhook active" : "Connection ready; webhook not enabled"}
+                    </p>
+                  </div>
+                  <span className={`ml-auto h-2 w-2 rounded-full ${connection.enabled ? "bg-success" : "bg-warn"}`} />
+                  {!connection.enabled && (
+                    <button
+                      type="button"
+                      onClick={() => enable(connection.connection_id)}
+                      disabled={busy !== ""}
+                      className="rounded bg-accent px-2.5 py-1.5 text-xs font-semibold text-bg disabled:opacity-40"
+                    >
+                      {busy === `enable-${connection.connection_id}` ? "Enabling…" : "Enable webhook"}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="rounded-md border border-border bg-bg-card p-4">
+          <h2 className="text-sm font-semibold text-text">Bind a Telegram chat</h2>
+          <p className="mt-1 text-xs text-text-muted">
+            Each numeric chat ID maps to one existing conversation. Unknown Telegram chats are ignored.
+          </p>
+          <form onSubmit={createBinding} className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="text-xs text-text-muted flex flex-col gap-1">
+              Bot connection
+              <select
+                value={connectionId}
+                onChange={(event) => setConnectionId(event.target.value)}
+                className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"
+              >
+                <option value="">Select an enabled bot</option>
+                {enabledConnections.map((connection) => (
+                  <option key={connection.connection_id} value={connection.connection_id}>
+                    {connection.bot_username ? `@${connection.bot_username}` : connection.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs text-text-muted flex flex-col gap-1">
+              Conversation
+              <select
+                value={conversationId}
+                onChange={(event) => setConversationId(event.target.value)}
+                className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"
+              >
+                <option value="">Select a conversation</option>
+                {conversations.map((conversation) => (
+                  <option key={conversation.id} value={conversation.id}>
+                    {conversation.title} ({conversation.audience === "public" ? "public" : "operator"})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs text-text-muted flex flex-col gap-1">
+              Telegram chat ID
+              <input
+                value={chatId}
+                onChange={(event) => setChatId(event.target.value)}
+                placeholder="123456789 or -100…"
+                className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text placeholder:text-text-dim"
+              />
+            </label>
+            <label className="text-xs text-text-muted flex flex-col gap-1">
+              Allowed user IDs
+              <input
+                value={allowedUsers}
+                onChange={(event) => setAllowedUsers(event.target.value)}
+                placeholder="Optional for public chats"
+                className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text placeholder:text-text-dim"
+              />
+              <span className="text-text-dim">Comma-separated. Required for operator groups; private operator chats default to the chat ID.</span>
+            </label>
+            <div className="sm:col-span-2 flex justify-end">
+              <button
+                type="submit"
+                disabled={busy !== "" || !connectionId || !conversationId || !chatId.trim()}
+                className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40"
+              >
+                {busy === "bind" ? "Binding…" : "Bind chat"}
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <section className="rounded-md border border-border bg-bg-card p-4">
+          <h2 className="text-sm font-semibold text-text">Active chat routes</h2>
+          {bindings.length === 0 ? (
+            <p className="mt-3 text-xs text-text-muted">No Telegram chats are bound in this project.</p>
+          ) : (
+            <div className="mt-3 flex flex-col gap-2">
+              {bindings.map((binding) => {
+                const connection = connections.find((item) => item.connection_id === binding.connection_id);
+                return (
+                  <div key={binding.id} className="rounded border border-border bg-bg px-3 py-2 flex items-center gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm text-text truncate">{binding.conversation_title || binding.conversation_id}</p>
+                      <p className="text-xs text-text-dim truncate">
+                        {connection?.bot_username ? `@${connection.bot_username}` : connection?.name || `connection ${binding.connection_id}`}
+                        {` · chat ${binding.chat_id} · ${binding.audience || "operator"}`}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeBinding(binding.id)}
+                      disabled={busy !== ""}
+                      className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-error disabled:opacity-40"
+                      aria-label="Disconnect Telegram chat"
+                      title="Disconnect Telegram chat"
+                    >
+                      <Glyph d={GLYPH_TRASH} size={14} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        {notice && (
+          <div className="rounded border border-border bg-bg px-3 py-2 text-xs text-text-muted" role="status">
+            {notice}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── root panel ──────────────────────────────────────────────────────
 
 export default function ConversationsPanel({ projectId }: NativePanelProps) {
-  const [tab, setTab] = useState<"chats" | "inbox">("chats");
+  const [tab, setTab] = useState<"chats" | "inbox" | "telegram">("chats");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [unread, setUnread] = useState<Map<string, UnreadEntry>>(new Map());
   const [selectedId, setSelectedId] = useState("");
@@ -1809,13 +2115,14 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
       <header className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
         <div>
           <h1 className="text-sm font-semibold">Conversations</h1>
-          <p className="text-xs text-text-muted">Chat with agents; approvals and reports in one inbox.</p>
+          <p className="text-xs text-text-muted">Chat, inbox, and optional Telegram delivery in one durable system.</p>
         </div>
         <nav className="ml-auto flex items-center gap-1">
           {(
             [
               { id: "chats", label: "Chats", glyph: GLYPH_CHAT },
               { id: "inbox", label: "Inbox", glyph: GLYPH_INBOX },
+              { id: "telegram", label: "Telegram", glyph: GLYPH_CHAT },
             ] as const
           ).map((entry) => (
             <button
@@ -1844,6 +2151,8 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
 
       {tab === "inbox" ? (
         <InboxTab onOpenConversation={openConversation} projectId={projectId} />
+      ) : tab === "telegram" ? (
+        <TelegramTab projectId={projectId} conversations={conversations.filter((item) => !item.project_id || item.project_id === projectId)} />
       ) : (
         <main
           className={`flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[260px_minmax(0,1fr)] md:divide-x md:divide-border ${

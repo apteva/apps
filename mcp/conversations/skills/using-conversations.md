@@ -104,11 +104,14 @@ decides in the inbox, and you relay the outcome.
   recalling what was said.
 - `conversations_list` — the conversations you participate in.
 
-## Rooms and future transports
+## Rooms and Telegram
 
 A conversation can hold several agents: user messages are forwarded to
 the lead; any participant may send. If you are not the lead, contribute
 when addressed or when your expertise is the point — do not echo the
-lead. External transports are not included in this release. When adapters
-are added later, they will bind ordinary conversations and agents will
-continue replying with `conversations_send`.
+lead. Telegram chats are explicit bindings to ordinary conversations; agents
+continue replying with `conversations_send`. Do not ask for bot tokens or
+Telegram credentials—the operator manages those in a platform integration
+connection. Public Telegram conversations keep the same rule as public web
+conversations: reply to the visitor, never place approvals or internal alerts
+in front of them.

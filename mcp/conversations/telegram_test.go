@@ -1,0 +1,364 @@
+package main
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+)
+
+const testTelegramConnectionID int64 = 9
+
+type telegramTestAPI struct {
+	nextMessageID int64
+	failSend      bool
+}
+
+func telegramResult(data string) *sdk.ExecuteResult {
+	return &sdk.ExecuteResult{Success: true, Status: http.StatusOK, Data: json.RawMessage(data)}
+}
+
+func configureTelegramTestPlatform(p *recordingPlatform) *telegramTestAPI {
+	api := &telegramTestAPI{nextMessageID: 700}
+	p.identity = &sdk.InstallIdentity{
+		AppName: appName, Version: "0.9.0", InstallID: 77, ProjectID: "",
+		PublicURL: "https://agents.example.test",
+		Bindings: map[string]any{telegramIntegrationRole: map[string]any{
+			"ids": []any{float64(testTelegramConnectionID)}, "default_id": float64(testTelegramConnectionID),
+		}},
+	}
+	p.connections = map[int64]*sdk.PlatformConnection{
+		testTelegramConnectionID: {ID: testTelegramConnectionID, AppSlug: "telegram", Name: "Support bot", Status: "active", ProjectID: testProject},
+	}
+	p.integrationHandler = func(connectionID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+		if connectionID != testTelegramConnectionID {
+			return nil, fmt.Errorf("unexpected connection %d", connectionID)
+		}
+		switch tool {
+		case "get_me":
+			return telegramResult(`{"ok":true,"result":{"id":998877,"username":"apteva_test_bot"}}`), nil
+		case "set_webhook", "answer_callback_query", "edit_message_text":
+			return telegramResult(`{"ok":true,"result":true}`), nil
+		case "send_message":
+			if api.failSend {
+				return nil, errors.New("temporary Telegram outage")
+			}
+			api.nextMessageID++
+			return telegramResult(fmt.Sprintf(`{"ok":true,"result":{"message_id":%d}}`, api.nextMessageID)), nil
+		default:
+			return nil, fmt.Errorf("unexpected Telegram tool %s", tool)
+		}
+	}
+	return api
+}
+
+func enableTelegramForTest(t *testing.T, app *App, platform *recordingPlatform) *TelegramConnectionConfig {
+	t.Helper()
+	if platform.integrationHandler == nil {
+		configureTelegramTestPlatform(platform)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/telegram-connections", strings.NewReader(`{"connection_id":9}`))
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleTelegramConnections(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable Telegram: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "webhook_secret") || strings.Contains(rec.Body.String(), "botToken") {
+		t.Fatalf("enable response leaked a secret: %s", rec.Body.String())
+	}
+	cfg, err := app.store.GetTelegramConnection(testTelegramConnectionID)
+	if err != nil {
+		t.Fatalf("Telegram connection config: %v", err)
+	}
+	return cfg
+}
+
+func bindTelegramForTest(t *testing.T, app *App, conv *Conversation, chatID string, allowed []int64) *TelegramBinding {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{
+		"connection_id": testTelegramConnectionID, "conversation_id": conv.ID,
+		"chat_id": chatID, "allowed_user_ids": allowed,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/telegram-bindings", strings.NewReader(string(body)))
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleTelegramBindings(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bind Telegram: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var binding TelegramBinding
+	if err := json.NewDecoder(rec.Body).Decode(&binding); err != nil || binding.ID == "" {
+		t.Fatalf("decode binding: %+v err=%v", binding, err)
+	}
+	return &binding
+}
+
+func postTelegramUpdate(app *App, cfg *TelegramConnectionConfig, secret, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/telegram-webhook/"+cfg.WebhookKey, strings.NewReader(body))
+	req.Header.Set("X-Telegram-Bot-Api-Secret-Token", secret)
+	rec := httptest.NewRecorder()
+	app.handleTelegramWebhook(rec, req)
+	return rec
+}
+
+func TestTelegramManifestUsesMultiplePlatformConnectionsAndSecretWebhook(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	var telegramDepFound bool
+	for _, dep := range manifest.Requires.Integrations {
+		if dep.Role == telegramIntegrationRole {
+			telegramDepFound = dep.Kind == "integration" && dep.Mode == "multiple" && !dep.Required &&
+				len(dep.CompatibleSlugs) == 1 && dep.CompatibleSlugs[0] == "telegram"
+		}
+	}
+	if !telegramDepFound {
+		t.Fatalf("Telegram integration dependency = %+v", manifest.Requires.Integrations)
+	}
+	permissions := map[sdk.Permission]bool{}
+	for _, permission := range manifest.Requires.Permissions {
+		permissions[permission] = true
+	}
+	if !permissions[sdk.PermConnectionsRead] || !permissions[sdk.PermConnectionsExecute] {
+		t.Fatalf("Telegram connection permissions = %+v", manifest.Requires.Permissions)
+	}
+	var webhookNoAuth bool
+	for _, route := range (&App{}).HTTPRoutes() {
+		if route.Pattern == "/telegram-webhook/" {
+			webhookNoAuth = route.NoAuth
+		}
+	}
+	if !webhookNoAuth {
+		t.Fatal("Telegram webhook route is not explicitly no_auth")
+	}
+}
+
+func TestTelegramEnableUsesBoundConnectionAndHidesSecrets(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	cfg := enableTelegramForTest(t, app, platform)
+	if cfg.BotUsername != "apteva_test_bot" || cfg.BotID != "998877" {
+		t.Fatalf("bot profile = %+v", cfg)
+	}
+	if cfg.WebhookSecret == "" || cfg.WebhookKey == "" || !strings.HasPrefix(cfg.WebhookURL, "https://agents.example.test/") {
+		t.Fatalf("webhook config = %+v", cfg)
+	}
+	if len(platform.integrationCalls) != 2 || platform.integrationCalls[0].Tool != "get_me" || platform.integrationCalls[1].Tool != "set_webhook" {
+		t.Fatalf("integration calls = %+v", platform.integrationCalls)
+	}
+	setInput := platform.integrationCalls[1].Input
+	if setInput["secret_token"] != cfg.WebhookSecret || setInput["url"] != cfg.WebhookURL {
+		t.Fatalf("set_webhook input = %+v", setInput)
+	}
+}
+
+func TestTelegramBindingDefaultsPrivateOperatorAllowlistAndScopesProject(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	enableTelegramForTest(t, app, platform)
+	conv := mkConversation(t, app, 41)
+	binding := bindTelegramForTest(t, app, conv, "12345", nil)
+	if len(binding.AllowedUserIDs) != 1 || binding.AllowedUserIDs[0] != 12345 {
+		t.Fatalf("private operator allowlist = %v", binding.AllowedUserIDs)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/telegram-bindings", nil)
+	req.Header.Set("X-User-ID", "1")
+	req.Header.Set("X-Apteva-Project-ID", "other-project")
+	rec := httptest.NewRecorder()
+	app.handleTelegramBindings(rec, req)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), binding.ID) {
+		t.Fatalf("cross-project binding leak: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTelegramWebhookAuthenticatesDeduplicatesAndDoesNotEcho(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	cfg := enableTelegramForTest(t, app, platform)
+	conv := mkConversation(t, app, 41)
+	binding := bindTelegramForTest(t, app, conv, "12345", nil)
+
+	body := `{"update_id":81,"message":{"message_id":31,"from":{"id":12345,"username":"operator"},"chat":{"id":12345,"type":"private"},"text":"hello from Telegram"}}`
+	if rec := postTelegramUpdate(app, cfg, "wrong", body); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong secret status=%d", rec.Code)
+	}
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK {
+		t.Fatalf("valid webhook status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "duplicate") {
+		t.Fatalf("duplicate webhook status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	transcript, err := app.store.Transcript(conv.ID, 0, 100)
+	if err != nil || len(transcript) != 1 {
+		t.Fatalf("transcript = %+v err=%v", transcript, err)
+	}
+	if transcript[0].Content != "hello from Telegram" || transcript[0].ExternalSender != "telegram:9:12345" {
+		t.Fatalf("inbound message = %+v", transcript[0])
+	}
+	if _, err := app.store.DeliveryFor(transcript[0].ID, "telegram:"+binding.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("inbound Telegram message was echoed to Telegram: %v", err)
+	}
+	for _, call := range platform.integrationCalls {
+		if call.Tool == "send_message" {
+			t.Fatalf("inbound update echoed through send_message: %+v", call)
+		}
+	}
+}
+
+func TestTelegramOperatorRejectsUnlistedSender(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	cfg := enableTelegramForTest(t, app, platform)
+	conv := mkConversation(t, app, 41)
+	bindTelegramForTest(t, app, conv, "12345", nil)
+	body := `{"update_id":82,"message":{"message_id":32,"from":{"id":999},"chat":{"id":12345,"type":"private"},"text":"intrusion"}}`
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	transcript, _ := app.store.Transcript(conv.ID, 0, 100)
+	if len(transcript) != 0 {
+		t.Fatalf("unlisted sender wrote messages: %+v", transcript)
+	}
+}
+
+func TestTelegramWebhookStopsWhenConnectionIsUnbound(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	cfg := enableTelegramForTest(t, app, platform)
+	conv := mkConversation(t, app, 41)
+	bindTelegramForTest(t, app, conv, "12345", nil)
+	platform.identity.Bindings = map[string]any{}
+	body := `{"update_id":84,"message":{"message_id":34,"from":{"id":12345},"chat":{"id":12345,"type":"private"},"text":"must be ignored"}}`
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	transcript, _ := app.store.Transcript(conv.ID, 0, 100)
+	if len(transcript) != 0 {
+		t.Fatalf("unbound Telegram connection still wrote messages: %+v", transcript)
+	}
+}
+
+func TestTelegramPublicBindingAcceptsExternalSenderWithoutOperatorAllowlist(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	cfg := enableTelegramForTest(t, app, platform)
+	conv, err := app.store.CreateConversation(CreateConversationInput{
+		ProjectID: testProject, LeadAgentID: 41, Title: "Public Telegram", OwnerUserID: 1, Audience: "public",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := bindTelegramForTest(t, app, conv, "-10055", nil)
+	if len(binding.AllowedUserIDs) != 0 || binding.Audience != "public" {
+		t.Fatalf("public binding = %+v", binding)
+	}
+	body := `{"update_id":83,"message":{"message_id":33,"from":{"id":777,"username":"visitor"},"chat":{"id":-10055,"type":"group"},"text":"public question"}}`
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	transcript, _ := app.store.Transcript(conv.ID, 0, 100)
+	if len(transcript) != 1 || transcript[0].ExternalSender != "telegram:9:777" {
+		t.Fatalf("public transcript = %+v", transcript)
+	}
+}
+
+func TestTelegramOutboundApprovalCallbackEditsOneMessage(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	api := configureTelegramTestPlatform(platform)
+	cfg := enableTelegramForTest(t, app, platform)
+	conv := mkConversation(t, app, 41)
+	binding := bindTelegramForTest(t, app, conv, "12345", nil)
+
+	if _, err := app.toolRequestApproval(callerCtx(41, "ops"), ctx, map[string]any{
+		"conversation_id": conv.ID, "title": "Deploy now?",
+	}); err != nil {
+		t.Fatalf("request approval: %v", err)
+	}
+	transcript, _ := app.store.Transcript(conv.ID, 0, 100)
+	if len(transcript) != 1 || transcript[0].ComponentKind != kindApproval {
+		t.Fatalf("approval transcript = %+v", transcript)
+	}
+	link, err := app.store.GetTelegramMessageLink(binding.ID, transcript[0].ID)
+	if err != nil {
+		t.Fatalf("Telegram link: %v", err)
+	}
+	var callbackData string
+	for _, call := range platform.integrationCalls {
+		if call.Tool != "send_message" {
+			continue
+		}
+		markup, _ := call.Input["reply_markup"].(map[string]any)
+		rows, _ := markup["inline_keyboard"].([][]map[string]string)
+		if len(rows) > 0 && len(rows[0]) > 0 {
+			callbackData = rows[0][0]["callback_data"]
+		}
+	}
+	if !strings.HasPrefix(callbackData, "cv:") {
+		t.Fatalf("callback data = %q", callbackData)
+	}
+	other := mkConversation(t, app, 41)
+	bindTelegramForTest(t, app, other, "22222", nil)
+	crossBody := fmt.Sprintf(`{"update_id":89,"callback_query":{"id":"cb-cross","from":{"id":22222},"message":{"message_id":%d,"chat":{"id":22222,"type":"private"}},"data":%q}}`, link.TelegramMessageID, callbackData)
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, crossBody); rec.Code != http.StatusOK {
+		t.Fatalf("cross-chat callback status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	stillPending, _ := app.store.GetMessage(transcript[0].ID)
+	if stillPending.ActionStatus != "pending" {
+		t.Fatalf("cross-chat callback resolved approval: %q", stillPending.ActionStatus)
+	}
+	body := fmt.Sprintf(`{"update_id":90,"callback_query":{"id":"cb-1","from":{"id":12345,"username":"operator"},"message":{"message_id":%d,"chat":{"id":12345,"type":"private"}},"data":%q}}`, link.TelegramMessageID, callbackData)
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK {
+		t.Fatalf("callback status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	updated, _ := app.store.GetMessage(transcript[0].ID)
+	if updated.ActionStatus != "approve" {
+		t.Fatalf("approval status = %q", updated.ActionStatus)
+	}
+	if got, _ := updated.Components[0].Props["resolved_by_external"].(string); got != "telegram:9:12345" {
+		t.Fatalf("resolved external actor = %q", got)
+	}
+	if len(platform.threadEvents) != 1 || !strings.Contains(platform.threadEvents[0].Message, "action=approve") {
+		t.Fatalf("approval result events = %+v", platform.threadEvents)
+	}
+	tools := []string{}
+	for _, call := range platform.integrationCalls {
+		tools = append(tools, call.Tool)
+	}
+	if !strings.Contains(strings.Join(tools, ","), "edit_message_text") || !strings.Contains(strings.Join(tools, ","), "answer_callback_query") {
+		t.Fatalf("Telegram callback calls = %v", tools)
+	}
+	if api.nextMessageID != link.TelegramMessageID {
+		t.Fatalf("approval resolution sent a duplicate Telegram message: next=%d link=%d", api.nextMessageID, link.TelegramMessageID)
+	}
+}
+
+func TestTelegramDeliveryFailureRetriesThroughOutbox(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	api := configureTelegramTestPlatform(platform)
+	enableTelegramForTest(t, app, platform)
+	conv := mkConversation(t, app, 41)
+	binding := bindTelegramForTest(t, app, conv, "12345", nil)
+	api.failSend = true
+	result, err := app.toolSend(callerCtx(41, "main"), ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "retry me",
+	})
+	if err != nil {
+		t.Fatalf("toolSend: %v", err)
+	}
+	messageID, _ := result.(map[string]any)["message_id"].(int64)
+	delivery, err := app.store.DeliveryFor(messageID, "telegram:"+binding.ID)
+	if err != nil || delivery.Status != "pending" || delivery.Attempts != 1 {
+		t.Fatalf("failed delivery = %+v err=%v", delivery, err)
+	}
+	api.failSend = false
+	if _, err := app.store.db.Exec(`UPDATE deliveries SET next_attempt_at=CURRENT_TIMESTAMP WHERE id=?`, delivery.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.redeliverPending(ctx); err != nil {
+		t.Fatalf("redeliver: %v", err)
+	}
+	delivery, _ = app.store.DeliveryFor(messageID, "telegram:"+binding.ID)
+	if delivery.Status != "delivered" || delivery.Attempts != 2 {
+		t.Fatalf("retried delivery = %+v", delivery)
+	}
+}
