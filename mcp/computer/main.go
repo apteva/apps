@@ -55,11 +55,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.77
+version: 0.7.78
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.77 adds reliable
-  controlled and masked date entry, structured input diagnostics, semantic
-  calendar grids, and preserves all previous browser safeguards.
+  Watch, steer, and replay hosted browser sessions. v0.7.78 adds typed custom
+  combobox results, trusted masked-input recovery, compact post-action state,
+  retryable semantic guards, and preserves all previous browser safeguards.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
