@@ -459,7 +459,8 @@ func dbSaleGetByCheckout(db *sql.DB, pid string, checkoutID int64) (*Sale, error
 
 func dbSaleItems(db *sql.DB, pid string, saleID int64) ([]*SaleItem, error) {
 	rows, err := db.Query(`SELECT id, sale_id, variant_id, listing_id, inventory_item_id, catalog_product_id,
-		catalog_price_id, sku, title_snapshot, unit_amount_cents, currency, quantity, requires_shipping, metadata_json
+		catalog_price_id, sku, title_snapshot, unit_amount_cents, currency, quantity, requires_shipping, metadata_json,
+		unit_cost_cents, cost_currency, cost_source, COALESCE(cost_captured_at,'')
 		FROM commerce_sale_items WHERE project_id=? AND sale_id=? ORDER BY id`, pid, saleID)
 	if err != nil {
 		return nil, err
@@ -472,7 +473,8 @@ func dbSaleItems(db *sql.DB, pid string, saleID int64) ([]*SaleItem, error) {
 		var shipping int
 		var metadata string
 		if err := rows.Scan(&item.ID, &item.SaleID, &variantID, &listingID, &inventoryID, &productID,
-			&priceID, &item.SKU, &item.TitleSnapshot, &item.UnitAmountCents, &item.Currency, &item.Quantity, &shipping, &metadata); err != nil {
+			&priceID, &item.SKU, &item.TitleSnapshot, &item.UnitAmountCents, &item.Currency, &item.Quantity, &shipping, &metadata,
+			&item.UnitCostCents, &item.CostCurrency, &item.CostSource, &item.CostCapturedAt); err != nil {
 			return nil, err
 		}
 		item.VariantID = ptrIfValid(variantID)

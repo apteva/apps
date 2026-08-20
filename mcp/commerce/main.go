@@ -50,11 +50,13 @@ func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
 		{Name: "provider-dispatch-reconcile", Schedule: "@every 30s", Run: a.reconcileProviderDispatches},
 		{Name: "provider-source-sync", Schedule: "@every 15m", Run: a.reconcileProviderSources},
+		{Name: "sale-financial-reconcile", Schedule: "@every 5m", Run: a.reconcileSaleFinancials},
 	}
 }
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{
 		{Topic: "invoice.paid", Handler: a.handleInvoicePaid},
+		{Topic: "invoice.refunded", Handler: a.handleInvoiceFinancialChanged},
 		{Topic: "checkout.paid", Handler: a.handleCheckoutPaid},
 		{Topic: "checkout.expired", Handler: a.handleCheckoutExpired},
 		{Topic: "inventory.reservation.expired", Handler: a.handleInventoryReservationExpired},
@@ -123,8 +125,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "commerce_checkout_pay", Description: "Submit the backing Checkout session using the store payment configuration and create a Commerce sale record. Args: checkout_id.", InputSchema: schemaObject(map[string]any{"checkout_id": typ("integer")}, []string{"checkout_id"}), Handler: a.toolCheckoutPay},
 		{Name: "commerce_checkout_status", Description: "Return the browser-safe checkout status for a storefront session. Args: store_id, session_token.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "session_token": typ("string")}, []string{"store_id", "session_token"}), Handler: a.toolCheckoutStatus},
 		{Name: "commerce_checkout_mark_paid", Description: "Mark a sale paid after Billing confirms payment; commits inventory reservations and creates an Orders record when available. Args: sale_id.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer")}, []string{"sale_id"}), Handler: a.toolCheckoutMarkPaid},
-		{Name: "commerce_sales_list", Description: "List sales. Args: store_id?, status?, payment_status?, limit?.", InputSchema: schemaObject(salesFilterProps(), nil), Handler: a.toolSalesList},
+		{Name: "commerce_sales_list", Description: "List sales, including profitability totals and completeness. Args: store_id?, status?, payment_status?, profitability_status?, limit?.", InputSchema: schemaObject(salesFilterProps(), nil), Handler: a.toolSalesList},
 		{Name: "commerce_sales_get", Description: "Fetch one sale. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolSalesGet},
+		{Name: "commerce_sale_financials_record", Description: "Idempotently record an exact sale cost, fee, refund, or signed adjustment. Args: sale_id, kind, amount_cents, idempotency_key, currency?, source?, external_id?, occurred_at?, metadata?.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer"), "kind": map[string]any{"type": "string", "enum": []any{"shipping_cost", "payment_fee", "refund", "adjustment", "product_cost_adjustment"}}, "amount_cents": typ("integer"), "idempotency_key": typ("string"), "currency": typ("string"), "source": typ("string"), "external_id": typ("string"), "occurred_at": typ("string"), "metadata": typ("object")}, []string{"sale_id", "kind", "amount_cents", "idempotency_key"}), Handler: a.toolSaleFinancialsRecord},
+		{Name: "commerce_sale_financials_list", Description: "List the immutable financial events behind a sale's profitability totals. Args: sale_id.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer")}, []string{"sale_id"}), Handler: a.toolSaleFinancialsList},
+		{Name: "commerce_sale_financials_reconcile", Description: "Reconcile a sale's refunds and exact payment fee fields from its Billing invoice, then recompute profitability. Args: sale_id.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer")}, []string{"sale_id"}), Handler: a.toolSaleFinancialsReconcile},
+		{Name: "commerce_profitability_report", Description: "Summarize paid-sale revenue, refunds, product cost, shipping cost, payment fees, and contribution profit. Args: store_id?, currency?, since?, until?. Refuses to combine currencies.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "currency": typ("string"), "since": typ("string"), "until": typ("string")}, nil), Handler: a.toolProfitabilityReport},
 		{Name: "commerce_providers_list", Description: "List supplier provider connections and store policies. Args: store_id?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, nil), Handler: a.toolProvidersList},
 		{Name: "commerce_provider_policy_set", Description: "Set a store's provider policy. Args: store_id, connection_id, enabled?, fulfillment_mode?, margin_bps?, settings?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "connection_id": typ("integer"), "enabled": typ("boolean"), "fulfillment_mode": typ("string"), "margin_bps": typ("integer"), "settings": typ("object")}, []string{"store_id", "connection_id"}), Handler: a.toolProviderPolicySet},
 		{Name: "commerce_provider_catalog", Description: "Browse a bound provider using provider-specific input. Args: store_id, connection_id, provider_input?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "connection_id": typ("integer"), "provider_input": typ("object")}, []string{"store_id", "connection_id"}), Handler: a.toolProviderCatalog},
@@ -272,32 +278,42 @@ type CheckoutSession struct {
 }
 
 type Sale struct {
-	ID                int64          `json:"id"`
-	StoreID           int64          `json:"store_id"`
-	CartID            *int64         `json:"cart_id,omitempty"`
-	CheckoutID        *int64         `json:"checkout_id,omitempty"`
-	CheckoutSessionID *int64         `json:"checkout_session_id,omitempty"`
-	InvoiceID         *int64         `json:"invoice_id,omitempty"`
-	InvoiceNumber     string         `json:"invoice_number"`
-	OrderID           *int64         `json:"order_id,omitempty"`
-	Status            string         `json:"status"`
-	PaymentStatus     string         `json:"payment_status"`
-	FulfillmentStatus string         `json:"fulfillment_status"`
-	SubtotalCents     int64          `json:"subtotal_cents"`
-	DiscountCents     int64          `json:"discount_cents"`
-	TaxCents          int64          `json:"tax_cents"`
-	ShippingCents     int64          `json:"shipping_cents"`
-	TotalCents        int64          `json:"total_cents"`
-	Currency          string         `json:"currency"`
-	CustomerEmail     string         `json:"customer_email"`
-	CustomerName      string         `json:"customer_name"`
-	ShippingAddress   map[string]any `json:"shipping_address,omitempty"`
-	BillingAddress    map[string]any `json:"billing_address,omitempty"`
-	ProcessingError   string         `json:"processing_error,omitempty"`
-	Items             []*SaleItem    `json:"items,omitempty"`
-	CreatedAt         string         `json:"created_at"`
-	UpdatedAt         string         `json:"updated_at"`
-	PaidAt            string         `json:"paid_at,omitempty"`
+	ID                      int64          `json:"id"`
+	StoreID                 int64          `json:"store_id"`
+	CartID                  *int64         `json:"cart_id,omitempty"`
+	CheckoutID              *int64         `json:"checkout_id,omitempty"`
+	CheckoutSessionID       *int64         `json:"checkout_session_id,omitempty"`
+	InvoiceID               *int64         `json:"invoice_id,omitempty"`
+	InvoiceNumber           string         `json:"invoice_number"`
+	OrderID                 *int64         `json:"order_id,omitempty"`
+	Status                  string         `json:"status"`
+	PaymentStatus           string         `json:"payment_status"`
+	FulfillmentStatus       string         `json:"fulfillment_status"`
+	SubtotalCents           int64          `json:"subtotal_cents"`
+	DiscountCents           int64          `json:"discount_cents"`
+	TaxCents                int64          `json:"tax_cents"`
+	ShippingCents           int64          `json:"shipping_cents"`
+	ShippingRevenueCents    int64          `json:"shipping_revenue_cents"`
+	TotalCents              int64          `json:"total_cents"`
+	ProductCostCents        int64          `json:"product_cost_cents"`
+	ShippingCostCents       int64          `json:"shipping_cost_cents"`
+	PaymentFeeCents         int64          `json:"payment_fee_cents"`
+	RefundedCents           int64          `json:"refunded_cents"`
+	NetRevenueCents         int64          `json:"net_revenue_cents"`
+	GrossProfitCents        int64          `json:"gross_profit_cents"`
+	ContributionProfitCents int64          `json:"contribution_profit_cents"`
+	ProfitabilityStatus     string         `json:"profitability_status"`
+	FinancialsUpdatedAt     string         `json:"financials_updated_at,omitempty"`
+	Currency                string         `json:"currency"`
+	CustomerEmail           string         `json:"customer_email"`
+	CustomerName            string         `json:"customer_name"`
+	ShippingAddress         map[string]any `json:"shipping_address,omitempty"`
+	BillingAddress          map[string]any `json:"billing_address,omitempty"`
+	ProcessingError         string         `json:"processing_error,omitempty"`
+	Items                   []*SaleItem    `json:"items,omitempty"`
+	CreatedAt               string         `json:"created_at"`
+	UpdatedAt               string         `json:"updated_at"`
+	PaidAt                  string         `json:"paid_at,omitempty"`
 }
 
 type SaleItem struct {
@@ -311,6 +327,10 @@ type SaleItem struct {
 	SKU              string         `json:"sku"`
 	TitleSnapshot    string         `json:"title_snapshot"`
 	UnitAmountCents  int64          `json:"unit_amount_cents"`
+	UnitCostCents    int64          `json:"unit_cost_cents"`
+	CostCurrency     string         `json:"cost_currency,omitempty"`
+	CostSource       string         `json:"cost_source,omitempty"`
+	CostCapturedAt   string         `json:"cost_captured_at,omitempty"`
 	Currency         string         `json:"currency"`
 	Quantity         float64        `json:"quantity"`
 	RequiresShipping bool           `json:"requires_shipping"`
@@ -1669,6 +1689,13 @@ func (a *App) completePaidSale(ctx *sdk.AppCtx, sale *Sale, trustedBillingEvent 
 			ctx.Emit("commerce.sale.processing_failed", map[string]any{"sale_id": sale.ID, "error": message})
 			return nil, errors.New(message)
 		}
+		if err := a.reconcileSaleBilling(ctx, pid, sale); err != nil {
+			ctx.Logger().Info("sale financial reconciliation deferred", "sale_id", sale.ID, "error", err.Error())
+		}
+		refreshed, err := dbSaleGet(ctx.AppDB(), pid, sale.ID)
+		if err == nil && refreshed != nil {
+			return refreshed, nil
+		}
 		return sale, nil
 	}
 	if sale.InvoiceID == nil || *sale.InvoiceID == 0 {
@@ -1771,6 +1798,11 @@ func (a *App) completePaidSale(ctx *sdk.AppCtx, sale *Sale, trustedBillingEvent 
 		_ = dbSaleSetProcessingError(ctx.AppDB(), pid, completed.ID, message)
 		ctx.Emit("commerce.sale.processing_failed", map[string]any{"sale_id": completed.ID, "error": message})
 		return nil, errors.New(message)
+	}
+	if err := a.reconcileSaleBilling(ctx, pid, completed); err != nil {
+		ctx.Logger().Info("sale financial reconciliation deferred", "sale_id", completed.ID, "error", err.Error())
+	} else if refreshed, refreshErr := dbSaleGet(ctx.AppDB(), pid, completed.ID); refreshErr == nil && refreshed != nil {
+		completed = refreshed
 	}
 	ctx.Emit("commerce.sale.paid", map[string]any{"sale_id": completed.ID, "store_id": completed.StoreID})
 	return completed, nil
@@ -2645,7 +2677,13 @@ func dbCheckoutInvoice(db *sql.DB, pid string, id, invoiceID int64, invoiceNumbe
 
 func dbSaleCreateFromCheckout(db *sql.DB, pid string, ch *CheckoutSession) (*Sale, error) {
 	if existing, err := dbSaleGetByCheckout(db, pid, ch.ID); err != nil || existing != nil {
-		return existing, err
+		if err != nil || existing == nil {
+			return existing, err
+		}
+		if err := dbRecomputeSaleProfitability(db, pid, existing.ID); err != nil {
+			return nil, err
+		}
+		return dbSaleGet(db, pid, existing.ID)
 	}
 	cart, err := dbCartGet(db, pid, ch.CartID, true)
 	if err != nil || cart == nil {
@@ -2658,6 +2696,7 @@ func dbSaleCreateFromCheckout(db *sql.DB, pid string, ch *CheckoutSession) (*Sal
 		item    *CartItem
 		variant *Variant
 		listing *Listing
+		source  *VariantSource
 	}
 	snapshots := make([]snapshot, 0, len(cart.Items))
 	for _, item := range cart.Items {
@@ -2669,8 +2708,16 @@ func dbSaleCreateFromCheckout(db *sql.DB, pid string, ch *CheckoutSession) (*Sal
 		if err != nil || listing == nil {
 			return nil, firstErr(err, errors.New("listing missing while snapshotting sale"))
 		}
-		snapshots = append(snapshots, snapshot{item: item, variant: variant, listing: listing})
+		source, err := dbVariantSourceByVariant(db, pid, item.VariantID)
+		if errors.Is(err, sql.ErrNoRows) {
+			source, err = nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load variant source while snapshotting sale: %w", err)
+		}
+		snapshots = append(snapshots, snapshot{item: item, variant: variant, listing: listing, source: source})
 	}
+	capturedAt := time.Now().UTC().Format(time.RFC3339)
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -2679,28 +2726,51 @@ func dbSaleCreateFromCheckout(db *sql.DB, pid string, ch *CheckoutSession) (*Sal
 	res, err := tx.Exec(`INSERT INTO commerce_sales
 		(project_id, store_id, cart_id, checkout_id, checkout_session_id, invoice_id, invoice_number, status, payment_status,
 		subtotal_cents, discount_cents, tax_cents, shipping_cents, total_cents, currency, customer_email, customer_name,
-		shipping_address_json, billing_address_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'awaiting_payment', 'unpaid', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		shipping_address_json, billing_address_json, shipping_revenue_cents)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'awaiting_payment', 'unpaid', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pid, ch.StoreID, cart.ID, ch.ID, nullableInt(ptrValue(ch.CheckoutSessionID)), nullableInt(ptrValue(ch.InvoiceID)), ch.InvoiceNumber,
 		cart.SubtotalCents, cart.DiscountCents, cart.TaxCents, cart.ShippingCents, cart.TotalCents, cart.Currency, ch.CustomerEmail, ch.CustomerName,
-		jsonText(ch.ShippingAddress, "{}"), jsonText(ch.BillingAddress, "{}"))
+		jsonText(ch.ShippingAddress, "{}"), jsonText(ch.BillingAddress, "{}"), cart.ShippingCents)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
 	for _, snapshot := range snapshots {
 		item, variant, listing := snapshot.item, snapshot.variant, snapshot.listing
+		var unitCost int64
+		var costCurrency, costSource string
+		var costCaptured any
+		if snapshot.source != nil {
+			unitCost = snapshot.source.UnitCostCents
+			costCurrency = strings.ToUpper(snapshot.source.Currency)
+			costSource = snapshot.source.ProviderSlug
+			costCaptured = capturedAt
+		}
 		if _, err := tx.Exec(`INSERT INTO commerce_sale_items
 			(project_id, sale_id, variant_id, listing_id, inventory_item_id, catalog_product_id, catalog_price_id,
-			sku, title_snapshot, unit_amount_cents, currency, quantity, requires_shipping, metadata_json)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			sku, title_snapshot, unit_amount_cents, currency, quantity, requires_shipping, metadata_json,
+			unit_cost_cents, cost_currency, cost_source, cost_captured_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			pid, id, item.VariantID, item.ListingID, nullablePtrInt(item.InventoryItemID), nullablePtrInt(listing.CatalogProductID),
 			nullablePtrInt(item.CatalogPriceID), item.SKU, item.TitleSnapshot, item.UnitAmountCents, item.Currency, item.Quantity,
-			boolToInt(variant.RequiresShipping), jsonText(map[string]any{"commerce_cart_item_id": item.ID}, "{}")); err != nil {
+			boolToInt(variant.RequiresShipping), jsonText(map[string]any{"commerce_cart_item_id": item.ID}, "{}"),
+			unitCost, costCurrency, costSource, costCaptured); err != nil {
+			return nil, err
+		}
+	}
+	if shippingCost, metadata, ok := quotedProviderShippingCost(cart.Metadata, cart.Currency); ok {
+		if _, err := tx.Exec(`INSERT INTO commerce_sale_financial_events
+			(project_id, sale_id, kind, amount_cents, currency, source, idempotency_key, metadata_json, occurred_at)
+			VALUES (?, ?, ?, ?, ?, 'checkout_quote', ?, ?, ?)
+			ON CONFLICT(project_id, idempotency_key) DO NOTHING`, pid, id, financialKindShippingCost,
+			shippingCost, cart.Currency, fmt.Sprintf("checkout:%d:provider_shipping", ch.ID), jsonText(metadata, "{}"), capturedAt); err != nil {
 			return nil, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	if err := dbRecomputeSaleProfitability(db, pid, id); err != nil {
 		return nil, err
 	}
 	return dbSaleGet(db, pid, id)
@@ -2722,7 +2792,7 @@ func dbSaleGet(db *sql.DB, pid string, id int64) (*Sale, error) {
 func dbSalesList(db *sql.DB, pid string, args map[string]any) ([]*Sale, error) {
 	where := []string{"project_id=?"}
 	vals := []any{pid}
-	for _, k := range []string{"status", "payment_status"} {
+	for _, k := range []string{"status", "payment_status", "profitability_status"} {
 		if v := strArg(args, k); v != "" {
 			where = append(where, k+"=?")
 			vals = append(vals, v)
@@ -2772,8 +2842,11 @@ func cartSelect() string {
 
 func saleSelect() string {
 	return `SELECT id, store_id, cart_id, checkout_id, checkout_session_id, invoice_id, invoice_number, order_id, status, payment_status, fulfillment_status,
-		subtotal_cents, discount_cents, tax_cents, shipping_cents, total_cents, currency, customer_email, customer_name,
-		shipping_address_json, billing_address_json, processing_error, created_at, updated_at, COALESCE(paid_at,'') FROM commerce_sales`
+		subtotal_cents, discount_cents, tax_cents, shipping_cents, shipping_revenue_cents, total_cents,
+		product_cost_cents, shipping_cost_cents, payment_fee_cents, refunded_cents, net_revenue_cents,
+		gross_profit_cents, contribution_profit_cents, profitability_status, COALESCE(financials_updated_at,''),
+		currency, customer_email, customer_name, shipping_address_json, billing_address_json, processing_error,
+		created_at, updated_at, COALESCE(paid_at,'') FROM commerce_sales`
 }
 
 type scanner interface{ Scan(dest ...any) error }
@@ -2843,7 +2916,10 @@ func scanSale(s scanner) (*Sale, error) {
 	var shipping, billing string
 	if err := s.Scan(&sale.ID, &sale.StoreID, &cartID, &checkoutID, &checkoutSessionID, &invoiceID, &sale.InvoiceNumber, &orderID,
 		&sale.Status, &sale.PaymentStatus, &sale.FulfillmentStatus, &sale.SubtotalCents, &sale.DiscountCents, &sale.TaxCents,
-		&sale.ShippingCents, &sale.TotalCents, &sale.Currency, &sale.CustomerEmail, &sale.CustomerName,
+		&sale.ShippingCents, &sale.ShippingRevenueCents, &sale.TotalCents, &sale.ProductCostCents, &sale.ShippingCostCents,
+		&sale.PaymentFeeCents, &sale.RefundedCents, &sale.NetRevenueCents, &sale.GrossProfitCents,
+		&sale.ContributionProfitCents, &sale.ProfitabilityStatus, &sale.FinancialsUpdatedAt,
+		&sale.Currency, &sale.CustomerEmail, &sale.CustomerName,
 		&shipping, &billing, &sale.ProcessingError, &sale.CreatedAt, &sale.UpdatedAt, &sale.PaidAt); err != nil {
 		return nil, err
 	}
@@ -3264,7 +3340,7 @@ func collectionProps() map[string]any {
 	return map[string]any{"store_id": typ("integer"), "store_slug": typ("string"), "handle": typ("string"), "title": typ("string"), "description_html": typ("string"), "status": typ("string"), "sort_order": typ("integer"), "metadata": typ("object")}
 }
 func salesFilterProps() map[string]any {
-	return map[string]any{"store_id": typ("integer"), "status": typ("string"), "payment_status": typ("string"), "limit": typ("integer")}
+	return map[string]any{"store_id": typ("integer"), "status": typ("string"), "payment_status": typ("string"), "profitability_status": typ("string"), "limit": typ("integer")}
 }
 
 func httpJSON(w http.ResponseWriter, v any) {

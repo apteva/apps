@@ -286,12 +286,15 @@ func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
 		pid = ctx.CurrentProject()
 	}
 	invoiceID := intArg(event.Data, "id")
-	if pid == "" || invoiceID == 0 || strArg(event.Data, "status") != "paid" {
+	if pid == "" || invoiceID == 0 {
 		return nil
 	}
 	sale, err := dbSaleGetByInvoice(ctx.AppDB(), pid, invoiceID)
-	if err != nil || sale == nil || sale.PaymentStatus == "paid" && sale.Status == "paid" {
+	if err != nil || sale == nil {
 		return err
+	}
+	if strArg(event.Data, "status") != "paid" || sale.PaymentStatus == "paid" && sale.Status == "paid" {
+		return a.reconcileSaleBilling(ctx.WithProject(pid), pid, sale)
 	}
 	_, err = a.completePaidSale(ctx.WithProject(pid), sale, true)
 	return err
