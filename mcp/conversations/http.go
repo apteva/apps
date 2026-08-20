@@ -547,11 +547,11 @@ func (a *App) appCtx(_ *http.Request) *sdk.AppCtx { return mountedCtx }
 var mountedCtx *sdk.AppCtx
 
 // forwardToAgents delivers an inbound message to the lead agent on the
-// conversation's OWN thread — spawned lazily via ensureConversationThread
-// (channel-chat parity: main's context never mixes with conversation
-// context). Every failure degrades to the main thread, and a total
-// delivery failure is loud: a system row lands in the conversation
-// instead of an indefinite quiet.
+// conversation's OWN thread. The first event is queued atomically by
+// SpawnThread; later events use SendThreadEvent. An unacknowledged atomic
+// event is not resent through another route because that could duplicate a
+// message core actually persisted. It remains visibly failed and can be
+// retried with the same stable event id.
 func (a *App) forwardToAgents(app *sdk.AppCtx, conv *Conversation, msg *Message, requested []int64) {
 	if app == nil {
 		return
@@ -565,14 +565,28 @@ func (a *App) forwardToAgents(app *sdk.AppCtx, conv *Conversation, msg *Message,
 	}
 	for _, agentID := range targets {
 		event := a.agentEventPayload(conv, msg, agentID, targets)
-		threadID := a.ensureConversationThreadForAgent(app, conv, agentID)
-		forwardErr := fmt.Errorf("thread unavailable")
-		if threadID != "" {
+		initialEvent := sdk.ThreadEvent{
+			ID:      conversationThreadEventID(conv.ID, msg.ID, agentID),
+			Message: event,
+		}
+		threadID, initialDelivered, spawnErr := a.ensureConversationThreadForAgent(app, conv, agentID, &initialEvent)
+		forwardErr := spawnErr
+		if forwardErr == nil && initialDelivered {
+			// The spawn receipt proves core persisted this event. Sending it
+			// again here would reintroduce both the race and a duplicate.
+			forwardErr = nil
+		} else if forwardErr == nil && threadID != "" {
 			if tc, ok := app.PlatformAPI().(sdk.ThreadClient); ok {
 				forwardErr = tc.SendThreadEvent(sdk.ThreadRef{AgentID: agentID, ThreadID: threadID}, event)
+			} else {
+				forwardErr = fmt.Errorf("platform does not support threads")
 			}
 		}
-		if forwardErr != nil {
+		// A spawn transport failure means no thread route was established;
+		// preserve the existing main-thread fallback. A successful spawn
+		// without an event receipt is intentionally not rerouted because
+		// its delivery outcome is ambiguous and the retry id is durable.
+		if forwardErr != nil && threadID == "" {
 			fallback := "[chat] " + msg.Content
 			if len(msg.Attachments) > 0 {
 				fallback += fmt.Sprintf("\n(%d attachment(s) are available in conversation %s)", len(msg.Attachments), conv.ID)

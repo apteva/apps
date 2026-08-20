@@ -90,13 +90,16 @@ conversation's context and reply contract; composition with the agent's
 main directive happens core-side. MCP is left nil so the platform
 supplies the agent's spawnable set. Spawn is idempotent; a changed
 suffix re-spawns (the sidecar-visible approximation of channel-chat's
-drift update). Every failure — stopped agent, no ThreadClient, spawn
-error — degrades to the main thread via SendEvent and is retried on the
-next message; a message is never lost to a thread problem.
+drift update). The first inbound message is an idempotent initial event
+inside that same spawn request, so Core persists it before starting the
+thread. Conversations requires an accepted-or-duplicate event receipt;
+later messages use `SendThreadEvent`. A spawn transport failure degrades
+to the main thread. A successful spawn without a receipt is surfaced as
+a visible delivery failure and is not rerouted, because its outcome is
+ambiguous and a second route could duplicate a message Core persisted.
 
-Known parity gaps that need SDK additions (not app work): atomic
-spawn-with-first-event, and an UpdateThread/ThreadTools surface for
-true in-place drift correction.
+The remaining parity gap that needs an SDK addition is an
+UpdateThread/ThreadTools surface for true in-place drift correction.
 
 ## Approval round-trip
 

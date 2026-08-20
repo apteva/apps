@@ -19,17 +19,19 @@ import (
 // callbacks (inbox_post's callback_tool).
 type recordingPlatform struct {
 	tk.BasePlatformClient
-	events             []capturedEvent
-	threadEvents       []capturedThreadEvent
-	appCalls           []capturedAppCall
-	spawns             []sdk.ThreadSpawnRequest
-	identity           *sdk.InstallIdentity
-	connections        map[int64]*sdk.PlatformConnection
-	integrationMu      sync.Mutex
-	integrationCalls   []capturedIntegrationCall
-	integrationHandler func(int64, string, map[string]any) (*sdk.ExecuteResult, error)
-	failSend           bool
-	failSpawn          bool
+	events                []capturedEvent
+	threadEvents          []capturedThreadEvent
+	appCalls              []capturedAppCall
+	spawns                []sdk.ThreadSpawnRequest
+	identity              *sdk.InstallIdentity
+	connections           map[int64]*sdk.PlatformConnection
+	integrationMu         sync.Mutex
+	integrationCalls      []capturedIntegrationCall
+	integrationHandler    func(int64, string, map[string]any) (*sdk.ExecuteResult, error)
+	failSend              bool
+	failSpawn             bool
+	duplicateSpawnReceipt bool
+	omitSpawnReceipt      bool
 }
 
 type capturedEvent struct {
@@ -104,8 +106,18 @@ func (p *recordingPlatform) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.Thread
 		return nil, fmt.Errorf("agent %d not running", req.AgentID)
 	}
 	p.spawns = append(p.spawns, req)
-	return &sdk.ThreadSpawnResult{Status: "created",
-		Thread: sdk.ThreadRef{AgentID: req.AgentID, ThreadID: req.ThreadID}}, nil
+	result := &sdk.ThreadSpawnResult{Status: "created",
+		Thread: sdk.ThreadRef{AgentID: req.AgentID, ThreadID: req.ThreadID}}
+	if !p.omitSpawnReceipt {
+		for _, event := range req.Events {
+			if p.duplicateSpawnReceipt {
+				result.Events.Duplicates = append(result.Events.Duplicates, event.ID)
+			} else {
+				result.Events.Accepted = append(result.Events.Accepted, event.ID)
+			}
+		}
+	}
+	return result, nil
 }
 
 func (p *recordingPlatform) KillThread(agentID int64, threadID string) error { return nil }
@@ -500,12 +512,20 @@ func TestFirstMessageSpawnsConversationThread(t *testing.T) {
 		t.Fatalf("MCP should be nil (platform default), got %v", spawn.MCP)
 	}
 
-	// The event went to the conversation thread, not main.
+	// The initial event was included in the atomic spawn, not sent in a
+	// second request and not sent to main.
 	if len(platform.events) != 0 {
 		t.Fatalf("SendEvent(main) called %d times, want 0", len(platform.events))
 	}
-	if len(platform.threadEvents) != 1 || platform.threadEvents[0].Ref.ThreadID != "chat-"+conv.ID {
-		t.Fatalf("thread events = %+v, want one on chat-%s", platform.threadEvents, conv.ID)
+	if len(platform.threadEvents) != 0 {
+		t.Fatalf("thread events = %+v, want none after atomic spawn", platform.threadEvents)
+	}
+	if len(spawn.Events) != 1 {
+		t.Fatalf("spawn events = %+v, want one initial event", spawn.Events)
+	}
+	wantEventID := fmt.Sprintf("conversation:%s:message:1:agent:41", conv.ID)
+	if spawn.Events[0].ID != wantEventID || spawn.Events[0].Message != "[chat] hello" {
+		t.Fatalf("initial event = %+v, want id=%q message=%q", spawn.Events[0], wantEventID, "[chat] hello")
 	}
 
 	// The thread id persists on the conversation row.
@@ -524,12 +544,51 @@ func TestSecondMessageReusesThreadWithoutRespawn(t *testing.T) {
 	postUserMessage(t, app, conv, "two")
 
 	// Unchanged suffix hash → the per-process cache skips the second
-	// spawn round-trip; both events still land on the thread.
+	// spawn round-trip; only the later event needs SendThreadEvent because
+	// the first one was part of the spawn.
 	if len(platform.spawns) != 1 {
 		t.Fatalf("spawns = %d, want 1 (cache should absorb the second)", len(platform.spawns))
 	}
-	if len(platform.threadEvents) != 2 {
-		t.Fatalf("thread events = %d, want 2", len(platform.threadEvents))
+	if len(platform.threadEvents) != 1 || platform.threadEvents[0].Message != "[chat] two" {
+		t.Fatalf("thread events = %+v, want only the second message", platform.threadEvents)
+	}
+}
+
+func TestDuplicateInitialEventReceiptIsSuccess(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	platform.duplicateSpawnReceipt = true
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+
+	postUserMessage(t, app, conv, "safe retry")
+
+	if len(platform.spawns) != 1 || len(platform.spawns[0].Events) != 1 {
+		t.Fatalf("spawns = %+v, want one atomic event", platform.spawns)
+	}
+	if len(platform.threadEvents) != 0 || len(platform.events) != 0 {
+		t.Fatalf("duplicate receipt resent event: thread=%+v main=%+v", platform.threadEvents, platform.events)
+	}
+	transcript, _ := app.store.Transcript(conv.ID, 0, 10)
+	if len(transcript) != 1 {
+		t.Fatalf("transcript rows = %d, want only user message", len(transcript))
+	}
+}
+
+func TestMissingInitialEventReceiptIsLoudWithoutDuplicateFallback(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	platform.omitSpawnReceipt = true
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+
+	postUserMessage(t, app, conv, "receipt required")
+
+	if len(platform.threadEvents) != 0 || len(platform.events) != 0 {
+		t.Fatalf("unacknowledged event was rerouted: thread=%+v main=%+v", platform.threadEvents, platform.events)
+	}
+	transcript, _ := app.store.Transcript(conv.ID, 0, 10)
+	if len(transcript) != 2 || transcript[1].Role != "system" ||
+		!strings.Contains(transcript[1].Content, "did not acknowledge") {
+		t.Fatalf("expected visible receipt failure, got %+v", transcript)
 	}
 }
 
@@ -553,8 +612,8 @@ func TestSpawnFailureFallsBackToMainThread(t *testing.T) {
 	// message spawns the thread.
 	platform.failSpawn = false
 	postUserMessage(t, app, conv, "agent is back")
-	if len(platform.spawns) != 1 || len(platform.threadEvents) != 1 {
-		t.Fatalf("recovery: spawns=%d threadEvents=%d, want 1/1",
+	if len(platform.spawns) != 1 || len(platform.threadEvents) != 0 {
+		t.Fatalf("recovery: spawns=%d threadEvents=%d, want 1/0 (event is in spawn)",
 			len(platform.spawns), len(platform.threadEvents))
 	}
 }

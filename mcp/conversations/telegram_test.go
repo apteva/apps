@@ -34,7 +34,7 @@ func telegramResult(data string) *sdk.ExecuteResult {
 func configureTelegramTestPlatform(p *recordingPlatform) *telegramTestAPI {
 	api := &telegramTestAPI{nextMessageID: 700, botName: "Apteva Conversations"}
 	p.identity = &sdk.InstallIdentity{
-		AppName: appName, Version: "0.12.1", InstallID: 77, ProjectID: "",
+		AppName: appName, Version: "0.13.0", InstallID: 77, ProjectID: "",
 		PublicURL: "https://agents.example.test",
 		Bindings: map[string]any{telegramIntegrationRole: map[string]any{
 			"ids": []any{float64(testTelegramConnectionID)}, "default_id": float64(testTelegramConnectionID),

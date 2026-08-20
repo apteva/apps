@@ -68,6 +68,8 @@ type telegramGatewayFixture struct {
 	webhookSecret string
 	sent          []map[string]any
 	nextMessageID int64
+	spawnEventIDs []string
+	threadEvents  int
 }
 
 func spawnTelegramHTTPTestSidecar(t *testing.T) (*tk.Sidecar, *telegramGatewayFixture) {
@@ -77,7 +79,7 @@ func spawnTelegramHTTPTestSidecar(t *testing.T) (*tk.Sidecar, *telegramGatewayFi
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/whoami":
-			_, _ = w.Write([]byte(`{"app_name":"conversations","version":"0.12.1","install_id":77,"project_id":"","public_url":"https://agents.example.test","bindings":{"telegram_bot":{"ids":[9],"default_id":9}}}`))
+			_, _ = w.Write([]byte(`{"app_name":"conversations","version":"0.13.0","install_id":77,"project_id":"","public_url":"https://agents.example.test","bindings":{"telegram_bot":{"ids":[9],"default_id":9}}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/connections/9":
 			_, _ = w.Write([]byte(`{"id":9,"app_slug":"telegram","name":"Test bot","status":"active","project_id":"test-proj"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/agents":
@@ -115,8 +117,30 @@ func spawnTelegramHTTPTestSidecar(t *testing.T) (*tk.Sidecar, *telegramGatewayFi
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "status": 200, "data": data})
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/apps/callback/threads/"):
-			_, _ = w.Write([]byte(`{"status":"created","thread":{"agent_id":41,"thread_id":"chat-test"}}`))
+			var body struct {
+				AgentID  int64  `json:"agent_id"`
+				ThreadID string `json:"thread_id"`
+				Events   []struct {
+					ID string `json:"id"`
+				} `json:"events"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			accepted := make([]string, 0, len(body.Events))
+			fixture.mu.Lock()
+			for _, event := range body.Events {
+				accepted = append(accepted, event.ID)
+				fixture.spawnEventIDs = append(fixture.spawnEventIDs, event.ID)
+			}
+			fixture.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "created",
+				"thread": map[string]any{"agent_id": body.AgentID, "thread_id": body.ThreadID},
+				"events": map[string]any{"accepted": accepted},
+			})
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/apps/callback/agents/"):
+			fixture.mu.Lock()
+			fixture.threadEvents++
+			fixture.mu.Unlock()
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		default:
 			http.Error(w, "offline", http.StatusBadGateway)
@@ -380,6 +404,10 @@ func TestSidecar_TelegramPublicOnboardingWebhookAndOutboundFlow(t *testing.T) {
 	sc.MCPAs("send", map[string]any{"conversation_id": convID, "text": "real sidecar outbound"}, 41, "main", itProject)
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
+	if len(fixture.spawnEventIDs) != 1 || fixture.threadEvents != 0 ||
+		!strings.Contains(fixture.spawnEventIDs[0], ":message:1:agent:41") {
+		t.Fatalf("atomic inbound delivery: spawn ids=%v follow-up thread events=%d", fixture.spawnEventIDs, fixture.threadEvents)
+	}
 	if len(fixture.sent) != 1 || fixture.sent[0]["chat_id"] != "12345" || fixture.sent[0]["text"] != "real sidecar outbound" {
 		t.Fatalf("Telegram outbound = %+v", fixture.sent)
 	}

@@ -32,7 +32,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.12.1
+version: 0.13.0
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, status). Inbox items are messages — an
@@ -55,7 +55,7 @@ icon_style: monochrome
 tags: [chat, inbox, channels, approvals, notifications]
 
 scopes: [global]
-min_apteva_version: "0.15.2"
+min_apteva_version: "0.15.3"
 
 requires:
   permissions:
