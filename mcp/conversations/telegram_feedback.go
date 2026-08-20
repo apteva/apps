@@ -27,17 +27,18 @@ type telegramFeedbackManager struct {
 }
 
 type telegramFeedbackSession struct {
-	manager     *telegramFeedbackManager
-	app         *sdk.AppCtx
-	binding     TelegramBinding
-	mode        string
-	draftID     int64
-	cancel      context.CancelFunc
-	done        chan struct{}
-	updates     chan string
-	warned      bool
-	lastDraft   string
-	latestDraft string
+	manager      *telegramFeedbackManager
+	app          *sdk.AppCtx
+	binding      TelegramBinding
+	mode         string
+	draftID      int64
+	cancel       context.CancelFunc
+	done         chan struct{}
+	updates      chan string
+	warned       bool
+	draftStarted bool
+	lastDraft    string
+	latestDraft  string
 }
 
 func newTelegramFeedbackManager(app *App) *telegramFeedbackManager {
@@ -73,12 +74,10 @@ func (m *telegramFeedbackManager) Start(app *sdk.AppCtx, cfg *TelegramConnection
 	m.sessions[binding.ID] = session
 	m.mu.Unlock()
 
-	// Send the first state before dispatching to the agent so even a fast model
-	// response never precedes Telegram's acknowledgement.
+	// Telegram's ordinary typing state is the immediate acknowledgement. An
+	// empty native draft renders as a ghost message in some clients, so the
+	// first draft waits for meaningful answer text from a tool chunk.
 	session.sendTyping()
-	if session.canDraft() {
-		session.sendDraft("") // Telegram renders its native “Thinking…” placeholder.
-	}
 	go session.run(ctx)
 }
 
@@ -163,10 +162,14 @@ func (s *telegramFeedbackSession) run(ctx context.Context) {
 			return
 		case text := <-s.updates:
 			s.latestDraft = text
+			if s.canDraft() && !s.draftStarted {
+				s.draftStarted = true
+				s.sendDraft(text)
+			}
 		case <-typing.C:
 			s.sendTyping()
 		case <-drafts.C:
-			if s.canDraft() {
+			if s.canDraft() && s.latestDraft != "" {
 				s.sendDraft(s.latestDraft)
 			}
 		case <-flush.C:
@@ -208,15 +211,19 @@ func (s *telegramFeedbackSession) sendTyping() {
 }
 
 func (s *telegramFeedbackSession) sendDraft(text string) {
+	text = telegramTextLimit(text)
+	if text == "" {
+		return
+	}
 	chatID, err := strconv.ParseInt(strings.TrimSpace(s.binding.ChatID), 10, 64)
 	if err != nil || chatID <= 0 {
 		return
 	}
 	_, err = s.manager.app.executeTelegram(s.app, s.binding.ConnectionID, "send_message_draft", map[string]any{
-		"chat_id": chatID, "draft_id": s.draftID, "text": telegramTextLimit(text),
+		"chat_id": chatID, "draft_id": s.draftID, "text": text,
 	})
 	if err == nil {
-		s.lastDraft = telegramTextLimit(text)
+		s.lastDraft = text
 	}
 	s.warn(err)
 }

@@ -34,7 +34,7 @@ func telegramResult(data string) *sdk.ExecuteResult {
 func configureTelegramTestPlatform(p *recordingPlatform) *telegramTestAPI {
 	api := &telegramTestAPI{nextMessageID: 700, botName: "Apteva Conversations"}
 	p.identity = &sdk.InstallIdentity{
-		AppName: appName, Version: "0.12.0", InstallID: 77, ProjectID: "",
+		AppName: appName, Version: "0.12.1", InstallID: 77, ProjectID: "",
 		PublicURL: "https://agents.example.test",
 		Bindings: map[string]any{telegramIntegrationRole: map[string]any{
 			"ids": []any{float64(testTelegramConnectionID)}, "default_id": float64(testTelegramConnectionID),
@@ -813,22 +813,38 @@ func TestTelegramResponseFeedbackStreamsPrivateDraftAndStopsCleanly(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.telegramFeedback.flushEvery = 10 * time.Millisecond
-	app.telegramFeedback.typingEvery = 20 * time.Millisecond
-	app.telegramFeedback.draftEvery = 40 * time.Millisecond
+	app.telegramFeedback.flushEvery = 20 * time.Millisecond
+	app.telegramFeedback.typingEvery = 200 * time.Millisecond
+	app.telegramFeedback.draftEvery = 200 * time.Millisecond
 	app.telegramFeedback.timeout = time.Second
 
 	app.telegramFeedback.Start(ctx, cfg, binding)
+	time.Sleep(50 * time.Millisecond)
+	if drafts := telegramCallsByTool(platform, "send_message_draft"); len(drafts) != 0 {
+		t.Fatalf("typing state created an empty draft: %+v", drafts)
+	}
+	firstFrameAt := time.Now()
 	app.streamer.Ingest("llm.tool_chunk", 41, "chat-"+conv.ID,
 		`{"tool":"conversations_conversations_send","id":"draft-call","chunk":"{\"conversation_id\":\"`+conv.ID+`\",\"text\":\"Hello from the agent\"}"}`,
 		time.Now())
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(150 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		drafts := telegramCallsByTool(platform, "send_message_draft")
-		if len(drafts) >= 2 {
+		if len(drafts) >= 1 {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
+	}
+	if drafts := telegramCallsByTool(platform, "send_message_draft"); len(drafts) != 1 {
+		t.Fatalf("first tool chunk was not drafted immediately after %s: %+v", time.Since(firstFrameAt), drafts)
+	}
+	app.telegramFeedback.OnFrame(StreamFrame{ConversationID: conv.ID, Text: "Hello from the agent — more detail"})
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(telegramCallsByTool(platform, "send_message_draft")) >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	app.telegramFeedback.CompleteBinding(binding.ID)
 
@@ -837,7 +853,7 @@ func TestTelegramResponseFeedbackStreamsPrivateDraftAndStopsCleanly(t *testing.T
 	if len(typing) == 0 || typing[0].Input["action"] != "typing" {
 		t.Fatalf("typing calls = %+v", typing)
 	}
-	if len(drafts) < 2 || drafts[0].Input["text"] != "" || drafts[len(drafts)-1].Input["text"] != "Hello from the agent" {
+	if len(drafts) < 2 || drafts[0].Input["text"] != "Hello from the agent" || drafts[len(drafts)-1].Input["text"] != "Hello from the agent — more detail" {
 		t.Fatalf("draft calls = %+v", drafts)
 	}
 	firstID, _ := drafts[0].Input["draft_id"].(int64)
