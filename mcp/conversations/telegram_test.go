@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -18,6 +19,7 @@ const testTelegramConnectionID int64 = 9
 type telegramTestAPI struct {
 	nextMessageID int64
 	failSend      bool
+	webhookURL    string
 }
 
 func telegramResult(data string) *sdk.ExecuteResult {
@@ -27,7 +29,7 @@ func telegramResult(data string) *sdk.ExecuteResult {
 func configureTelegramTestPlatform(p *recordingPlatform) *telegramTestAPI {
 	api := &telegramTestAPI{nextMessageID: 700}
 	p.identity = &sdk.InstallIdentity{
-		AppName: appName, Version: "0.9.0", InstallID: 77, ProjectID: "",
+		AppName: appName, Version: "0.10.0", InstallID: 77, ProjectID: "",
 		PublicURL: "https://agents.example.test",
 		Bindings: map[string]any{telegramIntegrationRole: map[string]any{
 			"ids": []any{float64(testTelegramConnectionID)}, "default_id": float64(testTelegramConnectionID),
@@ -43,7 +45,15 @@ func configureTelegramTestPlatform(p *recordingPlatform) *telegramTestAPI {
 		switch tool {
 		case "get_me":
 			return telegramResult(`{"ok":true,"result":{"id":998877,"username":"apteva_test_bot"}}`), nil
-		case "set_webhook", "answer_callback_query", "edit_message_text":
+		case "set_webhook":
+			api.webhookURL, _ = input["url"].(string)
+			return telegramResult(`{"ok":true,"result":true}`), nil
+		case "get_webhook_info":
+			return telegramResult(fmt.Sprintf(`{"ok":true,"result":{"url":%q,"pending_update_count":0}}`, api.webhookURL)), nil
+		case "delete_webhook":
+			api.webhookURL = ""
+			return telegramResult(`{"ok":true,"result":true}`), nil
+		case "answer_callback_query", "edit_message_text":
 			return telegramResult(`{"ok":true,"result":true}`), nil
 		case "send_message":
 			if api.failSend {
@@ -108,6 +118,26 @@ func postTelegramUpdate(app *App, cfg *TelegramConnectionConfig, secret, body st
 	return rec
 }
 
+func configureTelegramIntakeForTest(t *testing.T, app *App, mode string) *TransportIntakePolicy {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{
+		"connection_id": testTelegramConnectionID, "mode": mode, "default_agent_id": 41,
+		"default_title": "Telegram conversation", "require_group_mention": true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/telegram-intake", strings.NewReader(string(body)))
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleTelegramIntake(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("configure Telegram intake: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var policy TransportIntakePolicy
+	if err := json.NewDecoder(rec.Body).Decode(&policy); err != nil {
+		t.Fatal(err)
+	}
+	return &policy
+}
+
 func TestTelegramManifestUsesMultiplePlatformConnectionsAndSecretWebhook(t *testing.T) {
 	manifest := (&App{}).Manifest()
 	var telegramDepFound bool
@@ -147,7 +177,7 @@ func TestTelegramEnableUsesBoundConnectionAndHidesSecrets(t *testing.T) {
 	if cfg.WebhookSecret == "" || cfg.WebhookKey == "" || !strings.HasPrefix(cfg.WebhookURL, "https://agents.example.test/") {
 		t.Fatalf("webhook config = %+v", cfg)
 	}
-	if len(platform.integrationCalls) != 2 || platform.integrationCalls[0].Tool != "get_me" || platform.integrationCalls[1].Tool != "set_webhook" {
+	if len(platform.integrationCalls) != 3 || platform.integrationCalls[0].Tool != "get_me" || platform.integrationCalls[1].Tool != "set_webhook" || platform.integrationCalls[2].Tool != "get_webhook_info" {
 		t.Fatalf("integration calls = %+v", platform.integrationCalls)
 	}
 	setInput := platform.integrationCalls[1].Input
@@ -360,5 +390,312 @@ func TestTelegramDeliveryFailureRetriesThroughOutbox(t *testing.T) {
 	delivery, _ = app.store.DeliveryFor(messageID, "telegram:"+binding.ID)
 	if delivery.Status != "delivered" || delivery.Attempts != 2 {
 		t.Fatalf("retried delivery = %+v", delivery)
+	}
+}
+
+func TestTelegramUnknownDMCreatesPairingRequestWithoutPersistingMessage(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	configureTelegramTestPlatform(platform)
+	cfg := enableTelegramForTest(t, app, platform)
+	configureTelegramIntakeForTest(t, app, "pairing")
+	before := len(platform.integrationCalls)
+	body := `{"update_id":101,"message":{"message_id":41,"from":{"id":7001,"username":"marco","first_name":"Marco"},"chat":{"id":7001,"type":"private","first_name":"Marco"},"text":"private content must not be retained"}}`
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK {
+		t.Fatalf("pairing webhook status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	requests, err := app.store.ListTransportAccessRequests(telegramTransport, testProject)
+	if err != nil || len(requests) != 1 {
+		t.Fatalf("access requests=%+v err=%v", requests, err)
+	}
+	if requests[0].DisplayName != "Marco" || requests[0].PairingCode == "" || requests[0].ExternalChatID != "7001" {
+		t.Fatalf("access request=%+v", requests[0])
+	}
+	var messageRows int
+	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&messageRows); err != nil || messageRows != 0 {
+		t.Fatalf("unapproved content persisted: rows=%d err=%v", messageRows, err)
+	}
+	if len(platform.integrationCalls) != before+1 || platform.integrationCalls[len(platform.integrationCalls)-1].Tool != "send_message" {
+		t.Fatalf("pairing reply calls=%+v", platform.integrationCalls[before:])
+	}
+	if text, _ := platform.integrationCalls[len(platform.integrationCalls)-1].Input["text"].(string); strings.Contains(text, "private content") || !strings.Contains(text, requests[0].PairingCode) {
+		t.Fatalf("pairing reply=%q", text)
+	}
+	// Another message within the same request window is acknowledged silently.
+	body = strings.Replace(body, `"update_id":101`, `"update_id":102`, 1)
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK {
+		t.Fatalf("repeat pairing status=%d", rec.Code)
+	}
+	if len(platform.integrationCalls) != before+1 {
+		t.Fatalf("repeat pairing generated spam: %+v", platform.integrationCalls[before:])
+	}
+
+	approveBody := fmt.Sprintf(`{"id":%q,"action":"approve"}`, requests[0].ID)
+	req := httptest.NewRequest(http.MethodPost, "/telegram-access", strings.NewReader(approveBody))
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleTelegramAccess(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	binding, err := app.store.GetTelegramBindingByChat(testTelegramConnectionID, "7001")
+	if err != nil || binding.AccessMode != "pairing" || len(binding.AllowedUserIDs) != 1 || binding.AllowedUserIDs[0] != 7001 {
+		t.Fatalf("approved binding=%+v err=%v", binding, err)
+	}
+	body = `{"update_id":103,"message":{"message_id":42,"from":{"id":7001,"username":"marco","first_name":"Marco"},"chat":{"id":7001,"type":"private"},"text":"accepted message"}}`
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK {
+		t.Fatalf("accepted webhook status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	transcript, _ := app.store.Transcript(binding.ConversationID, 0, 10)
+	if len(transcript) != 1 || transcript[0].Content != "accepted message" {
+		t.Fatalf("approved transcript=%+v", transcript)
+	}
+}
+
+func TestTelegramPublicIntakeCreatesOneGenericConversationAndNewRotates(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	configureTelegramTestPlatform(platform)
+	cfg := enableTelegramForTest(t, app, platform)
+	configureTelegramIntakeForTest(t, app, "public")
+	body := `{"update_id":111,"message":{"message_id":51,"from":{"id":8001,"username":"visitor","first_name":"Visitor"},"chat":{"id":8001,"type":"private","first_name":"Visitor"},"text":"I need help"}}`
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK {
+		t.Fatalf("public webhook status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	binding, err := app.store.GetTelegramBindingByChat(testTelegramConnectionID, "8001")
+	if err != nil || binding.AccessMode != "public" || binding.Audience != "public" {
+		t.Fatalf("public binding=%+v err=%v", binding, err)
+	}
+	firstConversation := binding.ConversationID
+	conv, _ := app.store.GetConversation(firstConversation)
+	if conv.Origin != telegramTransport || conv.ConversationKey != "telegram:9:chat:8001" || conv.LeadAgentID != 41 {
+		t.Fatalf("generic public conversation=%+v", conv)
+	}
+	transcript, _ := app.store.Transcript(conv.ID, 0, 10)
+	if len(transcript) != 1 || transcript[0].Content != "I need help" {
+		t.Fatalf("first public message=%+v", transcript)
+	}
+
+	newBody := `{"update_id":112,"message":{"message_id":52,"from":{"id":8001,"username":"visitor","first_name":"Visitor"},"chat":{"id":8001,"type":"private"},"text":"/new"}}`
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, newBody); rec.Code != http.StatusOK {
+		t.Fatalf("new status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	binding, _ = app.store.GetTelegramBindingByChat(testTelegramConnectionID, "8001")
+	if binding.ConversationID == firstConversation {
+		t.Fatal("/new did not rotate the generic conversation route")
+	}
+	oldTranscript, _ := app.store.Transcript(firstConversation, 0, 10)
+	if len(oldTranscript) != 1 {
+		t.Fatalf("old transcript changed=%+v", oldTranscript)
+	}
+	var conversationCount int
+	_ = app.store.db.QueryRow(`SELECT COUNT(*) FROM conversations WHERE project_id=?`, testProject).Scan(&conversationCount)
+	if conversationCount != 2 {
+		t.Fatalf("conversation count=%d", conversationCount)
+	}
+}
+
+func TestTelegramInviteDiscoversIdentityAndBindsWithoutNumericInput(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	configureTelegramTestPlatform(platform)
+	cfg := enableTelegramForTest(t, app, platform)
+	configureTelegramIntakeForTest(t, app, "pairing")
+	conv := mkConversation(t, app, 41)
+	req := httptest.NewRequest(http.MethodPost, "/telegram-invites", strings.NewReader(fmt.Sprintf(
+		`{"connection_id":9,"conversation_id":%q,"chat_type":"private"}`, conv.ID)))
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleTelegramInvites(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("invite status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var inviteResult struct {
+		URL string `json:"invite_url"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&inviteResult); err != nil {
+		t.Fatal(err)
+	}
+	parsed, _ := url.Parse(inviteResult.URL)
+	token := parsed.Query().Get("start")
+	if token == "" || !strings.Contains(inviteResult.URL, "apteva_test_bot") {
+		t.Fatalf("invite url=%q", inviteResult.URL)
+	}
+	var rawTokenRows int
+	_ = app.store.db.QueryRow(`SELECT COUNT(*) FROM transport_invites WHERE token_hash=?`, token).Scan(&rawTokenRows)
+	if rawTokenRows != 0 {
+		t.Fatal("raw invite token was stored")
+	}
+	body := fmt.Sprintf(`{"update_id":121,"message":{"message_id":61,"from":{"id":9001,"username":"invitee","first_name":"Invitee"},"chat":{"id":9001,"type":"private"},"text":"/start %s"}}`, token)
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK {
+		t.Fatalf("redeem status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	binding, err := app.store.GetTelegramBindingByChat(testTelegramConnectionID, "9001")
+	if err != nil || binding.ConversationID != conv.ID || binding.AccessMode != "invite" || binding.ChatType != "private" {
+		t.Fatalf("invite binding=%+v err=%v", binding, err)
+	}
+	transcript, _ := app.store.Transcript(conv.ID, 0, 10)
+	if len(transcript) != 0 {
+		t.Fatalf("/start leaked into transcript=%+v", transcript)
+	}
+}
+
+func TestTelegramInviteRejectsTheWrongChatTypeWithoutConsumingIt(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	configureTelegramTestPlatform(platform)
+	cfg := enableTelegramForTest(t, app, platform)
+	configureTelegramIntakeForTest(t, app, "pairing")
+	req := httptest.NewRequest(http.MethodPost, "/telegram-invites", strings.NewReader(
+		`{"connection_id":9,"chat_type":"group"}`))
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleTelegramInvites(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("group invite status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var inviteResult struct {
+		URL string `json:"invite_url"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&inviteResult); err != nil {
+		t.Fatal(err)
+	}
+	parsed, _ := url.Parse(inviteResult.URL)
+	token := parsed.Query().Get("startgroup")
+	if token == "" {
+		t.Fatalf("group invite url=%q", inviteResult.URL)
+	}
+	body := fmt.Sprintf(`{"update_id":122,"message":{"message_id":62,"from":{"id":9002,"first_name":"Invitee"},"chat":{"id":9002,"type":"private"},"text":"/start %s"}}`, token)
+	if got := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); got.Code != http.StatusOK {
+		t.Fatalf("wrong chat-type redemption status=%d body=%s", got.Code, got.Body.String())
+	}
+	if _, err := app.store.GetTelegramBindingByChat(testTelegramConnectionID, "9002"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("wrong chat type created binding: %v", err)
+	}
+	lastCall := platform.integrationCalls[len(platform.integrationCalls)-1]
+	if lastCall.Tool != "send_message" || !strings.Contains(lastCall.Input["text"].(string), "different kind") {
+		t.Fatalf("wrong chat-type response=%+v", lastCall)
+	}
+	var unused int
+	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM transport_invites WHERE token_hash=? AND used_at IS NULL`, hashTransportToken(token)).Scan(&unused); err != nil || unused != 1 {
+		t.Fatalf("invite was consumed: unused=%d err=%v", unused, err)
+	}
+}
+
+func TestTelegramBlockedSenderStaysSilentUntilUnblocked(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	configureTelegramTestPlatform(platform)
+	cfg := enableTelegramForTest(t, app, platform)
+	configureTelegramIntakeForTest(t, app, "pairing")
+	body := `{"update_id":125,"message":{"message_id":65,"from":{"id":9005,"first_name":"Blocked"},"chat":{"id":9005,"type":"private"},"text":"hello"}}`
+	if got := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); got.Code != http.StatusOK {
+		t.Fatalf("initial pairing status=%d", got.Code)
+	}
+	requests, _ := app.store.ListTransportAccessRequests(telegramTransport, testProject)
+	if len(requests) != 1 {
+		t.Fatalf("initial requests=%+v", requests)
+	}
+	action := func(name string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/telegram-access", strings.NewReader(fmt.Sprintf(
+			`{"id":%q,"action":%q}`, requests[0].ID, name)))
+		authorizeTestRequest(req)
+		rec := httptest.NewRecorder()
+		app.handleTelegramAccess(rec, req)
+		return rec
+	}
+	if rec := action("block"); rec.Code != http.StatusOK {
+		t.Fatalf("block status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	before := len(platform.integrationCalls)
+	body = strings.Replace(body, `"update_id":125`, `"update_id":126`, 1)
+	if got := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); got.Code != http.StatusOK {
+		t.Fatalf("blocked retry status=%d", got.Code)
+	}
+	if len(platform.integrationCalls) != before {
+		t.Fatalf("blocked sender received a reply: %+v", platform.integrationCalls[before:])
+	}
+	blocked, _ := app.store.ListBlockedTransportAccess(telegramTransport, testProject)
+	if len(blocked) != 1 || blocked[0].ExternalUserID != "9005" {
+		t.Fatalf("blocked list=%+v", blocked)
+	}
+	if rec := action("unblock"); rec.Code != http.StatusOK {
+		t.Fatalf("unblock status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body = strings.Replace(body, `"update_id":126`, `"update_id":127`, 1)
+	if got := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); got.Code != http.StatusOK {
+		t.Fatalf("unblocked retry status=%d", got.Code)
+	}
+	requests, _ = app.store.ListTransportAccessRequests(telegramTransport, testProject)
+	if len(requests) != 1 || len(platform.integrationCalls) != before+1 {
+		t.Fatalf("unblocked request=%+v calls=%+v", requests, platform.integrationCalls[before:])
+	}
+}
+
+func TestTelegramGroupPairingDefaultsToMentionOnly(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	configureTelegramTestPlatform(platform)
+	cfg := enableTelegramForTest(t, app, platform)
+	configureTelegramIntakeForTest(t, app, "pairing")
+	body := `{"update_id":131,"message":{"message_id":71,"from":{"id":9101,"username":"owner","first_name":"Owner"},"chat":{"id":-10055,"type":"supergroup","title":"Engineering"},"text":"/connect"}}`
+	if rec := postTelegramUpdate(app, cfg, cfg.WebhookSecret, body); rec.Code != http.StatusOK {
+		t.Fatalf("group request status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	requests, _ := app.store.ListTransportAccessRequests(telegramTransport, testProject)
+	if len(requests) != 1 || requests[0].ChatTitle != "Engineering" {
+		t.Fatalf("group request=%+v", requests)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/telegram-access", strings.NewReader(fmt.Sprintf(`{"id":%q,"action":"approve"}`, requests[0].ID)))
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleTelegramAccess(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve group status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	binding, _ := app.store.GetTelegramBindingByChat(testTelegramConnectionID, "-10055")
+	if !binding.RequireMention || binding.ChatTitle != "Engineering" {
+		t.Fatalf("group binding=%+v", binding)
+	}
+	plain := `{"update_id":132,"message":{"message_id":72,"from":{"id":9101},"chat":{"id":-10055,"type":"supergroup","title":"Engineering"},"text":"ambient chatter"}}`
+	_ = postTelegramUpdate(app, cfg, cfg.WebhookSecret, plain)
+	// Approval is for the room, so another member may address the bot without
+	// requiring a second numeric-id allowlist or access request.
+	mentioned := `{"update_id":133,"message":{"message_id":73,"from":{"id":9102,"first_name":"Teammate"},"chat":{"id":-10055,"type":"supergroup","title":"Engineering"},"text":"@apteva_test_bot please help"}}`
+	_ = postTelegramUpdate(app, cfg, cfg.WebhookSecret, mentioned)
+	transcript, _ := app.store.Transcript(binding.ConversationID, 0, 10)
+	if len(transcript) != 1 || transcript[0].Content != "@apteva_test_bot please help" {
+		t.Fatalf("mention-gated transcript=%+v", transcript)
+	}
+}
+
+func TestTelegramConnectionReportsWebhookDrift(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	api := configureTelegramTestPlatform(platform)
+	enableTelegramForTest(t, app, platform)
+	api.webhookURL = "https://other.example/webhook"
+	req := httptest.NewRequest(http.MethodGet, "/telegram-connections", nil)
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleTelegramConnections(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"webhook_status":"drifted"`) {
+		t.Fatalf("drift response status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTelegramDisconnectRemovesOwnedWebhookAndOnboardingState(t *testing.T) {
+	app, _, platform := newTestEnv(t)
+	api := configureTelegramTestPlatform(platform)
+	enableTelegramForTest(t, app, platform)
+	configureTelegramIntakeForTest(t, app, "pairing")
+	req := httptest.NewRequest(http.MethodDelete, "/telegram-connections?id=9", nil)
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleTelegramConnections(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disconnect status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if api.webhookURL != "" {
+		t.Fatalf("owned webhook was not removed: %q", api.webhookURL)
+	}
+	if _, err := app.store.GetTelegramConnection(testTelegramConnectionID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("connection remains after disconnect: %v", err)
+	}
+	if _, err := app.store.GetTransportIntakePolicy(telegramTransport, testTelegramConnectionID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("intake policy remains after disconnect: %v", err)
 	}
 }

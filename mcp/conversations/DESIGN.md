@@ -18,8 +18,9 @@ unread bookkeeping, and a cross-app hop inside the approval round-trip —
 the single most valuable behavior in the system.
 
 External transports are not conversation *types*. A Telegram chat is an
-explicit binding to an ordinary conversation. The bot token stays in a
-platform integration connection; Conversations stores the connection id,
+explicit binding to an ordinary conversation. Pairing and public intake create
+the same generic conversation rows as web or app gateways. The bot token stays
+in a platform integration connection; Conversations stores the connection id,
 chat route, webhook verification secret, and external participant identity.
 
 ## Model
@@ -37,7 +38,11 @@ chat route, webhook verification secret, and external participant identity.
 - `deliveries` — the ledger. One row per (message, target); pending rows
   are redelivered on mount (crash-safe sends, the Hermes pattern).
 - `telegram_connections` / `telegram_bindings` — one verified webhook per
-  bot connection and explicit project-scoped chat-to-conversation routes.
+  bot connection and project-scoped chat-to-conversation routes. Routes may be
+  created by pairing, public intake, one-time invitation, or advanced recovery.
+- `transport_intake_policies` / `transport_access_requests` /
+  `transport_invites` — provider-neutral onboarding state. Unapproved content
+  is never retained; invitations store only a token hash.
 - `telegram_updates` / `telegram_message_links` / `telegram_action_tokens`
   — inbound deduplication, provider message editing, and opaque callbacks.
 
@@ -50,12 +55,30 @@ chat route, webhook verification secret, and external participant identity.
   callback tool invoked on action. This makes the app the platform's
   notification provider; no other app needs its own inbox.
 - **HTTP** (dashboard): /chats /messages /stream (SSE) /inbox
-  /message-action /seen /telegram-connections /telegram-bindings, plus the
-  secret-verified /telegram-webhook/*. (Reserved prefixes /health /manifest
+  /message-action /seen /telegram-connections /telegram-bindings
+  /telegram-intake /telegram-access /telegram-invites, plus the secret-verified
+  /telegram-webhook/*. (Reserved prefixes /health /manifest
   /mcp /events /ui/ are avoided — guarded by a test.)
 - **Adapters**: `web` (the SSE hub), authenticated agent/app callbacks, and
   `telegram`. Telegram executes Bot API tools through the bound platform
   connection; raw bot credentials never enter app config or SQLite.
+
+## Telegram onboarding (v0.10.0)
+
+Webhook activation calls `getMe`, `setWebhook`, and `getWebhookInfo` through
+the bound platform connection. The default intake mode is fail-closed pairing:
+an unknown sender receives one rate-bounded access-request code, while the app
+stores only their Telegram identity metadata. An operator approves, dismisses,
+or blocks the request in the dashboard. One-time `t.me` links bind a private
+chat or group without copying numeric ids; their random token is single-use,
+expires after 15 minutes, and is stored only as SHA-256.
+
+Public intake is an explicit alternative. The first private message creates or
+reuses a normal public conversation keyed by connection and Telegram chat, adds
+the external participant, and forwards the first message to the chosen lead
+agent. `/new` rotates only the active route; the old transcript stays in the
+generic store. Groups never auto-open and default to mention-only activation.
+Webhook drift is displayed but never fought automatically.
 
 ## Thread-per-conversation
 

@@ -32,6 +32,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/delivery-failures", Handler: a.handleDeliveryFailures},
 		{Pattern: "/telegram-connections", Handler: a.handleTelegramConnections},
 		{Pattern: "/telegram-bindings", Handler: a.handleTelegramBindings},
+		{Pattern: "/telegram-intake", Handler: a.handleTelegramIntake},
+		{Pattern: "/telegram-access", Handler: a.handleTelegramAccess},
+		{Pattern: "/telegram-invites", Handler: a.handleTelegramInvites},
 		{Pattern: "/telegram-webhook/", Handler: a.handleTelegramWebhook, NoAuth: true},
 	}
 }

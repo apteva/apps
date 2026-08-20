@@ -45,6 +45,11 @@ type TelegramBinding struct {
 	ConversationTitle string  `json:"conversation_title,omitempty"`
 	Audience          string  `json:"audience,omitempty"`
 	ChatID            string  `json:"chat_id"`
+	ChatType          string  `json:"chat_type,omitempty"`
+	ChatTitle         string  `json:"chat_title,omitempty"`
+	ChatUsername      string  `json:"chat_username,omitempty"`
+	RequireMention    bool    `json:"require_mention"`
+	AccessMode        string  `json:"access_mode"`
 	AllowedUserIDs    []int64 `json:"allowed_user_ids"`
 	CreatedByUser     int64   `json:"-"`
 	CreatedAt         string  `json:"created_at"`
@@ -149,11 +154,16 @@ func (s *store) UpsertTelegramConnection(cfg TelegramConnectionConfig) error {
 }
 
 func (s *store) CreateTelegramBinding(binding TelegramBinding) (*TelegramBinding, error) {
+	if binding.AccessMode == "" {
+		binding.AccessMode = "manual"
+	}
 	_, err := s.db.Exec(`
 		INSERT INTO telegram_bindings
-		(id,connection_id,project_id,conversation_id,chat_id,allowed_user_ids_json,created_by_user_id)
-		VALUES (?,?,?,?,?,?,?)`, binding.ID, binding.ConnectionID, binding.ProjectID,
-		binding.ConversationID, binding.ChatID, encodeInt64s(binding.AllowedUserIDs), binding.CreatedByUser)
+		(id,connection_id,project_id,conversation_id,chat_id,allowed_user_ids_json,created_by_user_id,
+		 chat_type,chat_title,chat_username,require_mention,access_mode)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, binding.ID, binding.ConnectionID, binding.ProjectID,
+		binding.ConversationID, binding.ChatID, encodeInt64s(binding.AllowedUserIDs), binding.CreatedByUser,
+		binding.ChatType, binding.ChatTitle, binding.ChatUsername, binding.RequireMention, binding.AccessMode)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +175,8 @@ func scanTelegramBinding(scanner interface{ Scan(...any) error }) (*TelegramBind
 	var allowed string
 	err := scanner.Scan(&binding.ID, &binding.ConnectionID, &binding.ProjectID,
 		&binding.ConversationID, &binding.ConversationTitle, &binding.Audience,
-		&binding.ChatID, &allowed, &binding.CreatedByUser, &binding.CreatedAt, &binding.UpdatedAt)
+		&binding.ChatID, &allowed, &binding.ChatType, &binding.ChatTitle, &binding.ChatUsername,
+		&binding.RequireMention, &binding.AccessMode, &binding.CreatedByUser, &binding.CreatedAt, &binding.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +186,8 @@ func scanTelegramBinding(scanner interface{ Scan(...any) error }) (*TelegramBind
 
 const telegramBindingColumns = `
 	b.id,b.connection_id,b.project_id,b.conversation_id,c.title,c.audience,
-	b.chat_id,b.allowed_user_ids_json,b.created_by_user_id,b.created_at,b.updated_at`
+	b.chat_id,b.allowed_user_ids_json,b.chat_type,b.chat_title,b.chat_username,
+	b.require_mention,b.access_mode,b.created_by_user_id,b.created_at,b.updated_at`
 
 func (s *store) GetTelegramBinding(id string) (*TelegramBinding, error) {
 	return scanTelegramBinding(s.db.QueryRow(`SELECT `+telegramBindingColumns+`
@@ -345,14 +357,17 @@ func (s *store) PruneTelegramState() error {
 // ─── platform connection + setup HTTP ───────────────────────────────
 
 type telegramConnectionView struct {
-	ConnectionID int64  `json:"connection_id"`
-	Name         string `json:"name"`
-	Status       string `json:"status"`
-	ProjectID    string `json:"project_id"`
-	Enabled      bool   `json:"enabled"`
-	BotID        string `json:"bot_id,omitempty"`
-	BotUsername  string `json:"bot_username,omitempty"`
-	WebhookURL   string `json:"webhook_url,omitempty"`
+	ConnectionID       int64  `json:"connection_id"`
+	Name               string `json:"name"`
+	Status             string `json:"status"`
+	ProjectID          string `json:"project_id"`
+	Enabled            bool   `json:"enabled"`
+	BotID              string `json:"bot_id,omitempty"`
+	BotUsername        string `json:"bot_username,omitempty"`
+	WebhookURL         string `json:"webhook_url,omitempty"`
+	WebhookStatus      string `json:"webhook_status,omitempty"` // healthy | drifted | error
+	PendingUpdateCount int64  `json:"pending_update_count,omitempty"`
+	LastWebhookError   string `json:"last_webhook_error,omitempty"`
 }
 
 func (a *App) boundTelegramConnections(app *sdk.AppCtx, projectID string) ([]sdk.PlatformConnection, error) {
@@ -461,6 +476,7 @@ func (a *App) handleTelegramConnections(w http.ResponseWriter, r *http.Request) 
 				view.BotID = cfg.BotID
 				view.BotUsername = cfg.BotUsername
 				view.WebhookURL = cfg.WebhookURL
+				view.WebhookStatus, view.PendingUpdateCount, view.LastWebhookError = a.telegramWebhookHealth(app.WithProject(projectID), cfg)
 			}
 			out = append(out, view)
 		}
@@ -483,11 +499,92 @@ func (a *App) handleTelegramConnections(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
+		status, pending, lastError := a.telegramWebhookHealth(app.WithProject(projectID), cfg)
 		writeJSON(w, telegramConnectionView{ConnectionID: conn.ID, Name: conn.Name, Status: conn.Status,
-			ProjectID: conn.ProjectID, Enabled: true, BotID: cfg.BotID, BotUsername: cfg.BotUsername, WebhookURL: cfg.WebhookURL})
+			ProjectID: conn.ProjectID, Enabled: true, BotID: cfg.BotID, BotUsername: cfg.BotUsername,
+			WebhookURL: cfg.WebhookURL, WebhookStatus: status, PendingUpdateCount: pending, LastWebhookError: lastError})
+	case http.MethodDelete:
+		connectionID, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("id")), 10, 64)
+		if err != nil || connectionID <= 0 {
+			http.Error(w, "connection id required", http.StatusBadRequest)
+			return
+		}
+		if _, err := a.boundTelegramConnection(app, projectID, connectionID); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		cfg, err := a.store.GetTelegramConnection(connectionID)
+		if err != nil {
+			http.Error(w, "Telegram bot is not active", http.StatusNotFound)
+			return
+		}
+		currentURL, _, _, _ := a.telegramWebhookInfo(app.WithProject(projectID), connectionID)
+		if currentURL == cfg.WebhookURL {
+			if _, err := a.executeTelegram(app.WithProject(projectID), connectionID, "delete_webhook", map[string]any{}); err != nil {
+				http.Error(w, "remove Telegram webhook: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+		}
+		tx, err := a.store.db.Begin()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback()
+		if _, err = tx.Exec(`DELETE FROM transport_intake_policies WHERE transport=? AND connection_id=?`, telegramTransport, connectionID); err == nil {
+			_, err = tx.Exec(`DELETE FROM transport_access_requests WHERE transport=? AND connection_id=?`, telegramTransport, connectionID)
+		}
+		if err == nil {
+			_, err = tx.Exec(`DELETE FROM transport_invites WHERE transport=? AND connection_id=?`, telegramTransport, connectionID)
+		}
+		if err == nil {
+			_, err = tx.Exec(`DELETE FROM deliveries WHERE target IN (
+				SELECT 'telegram:' || id FROM telegram_bindings WHERE connection_id=?)`, connectionID)
+		}
+		if err == nil {
+			_, err = tx.Exec(`DELETE FROM telegram_connections WHERE connection_id=?`, connectionID)
+		}
+		if err != nil {
+			http.Error(w, "disable Telegram bot", http.StatusInternalServerError)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			http.Error(w, "disable Telegram bot", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"disabled": true})
 	default:
-		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+		http.Error(w, "GET, POST or DELETE", http.StatusMethodNotAllowed)
 	}
+}
+
+func (a *App) telegramWebhookInfo(app *sdk.AppCtx, connectionID int64) (string, int64, string, error) {
+	result, err := a.executeTelegram(app, connectionID, "get_webhook_info", map[string]any{})
+	if err != nil {
+		return "", 0, "", err
+	}
+	var envelope struct {
+		Result struct {
+			URL                string `json:"url"`
+			PendingUpdateCount int64  `json:"pending_update_count"`
+			LastErrorMessage   string `json:"last_error_message"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(result.Data, &envelope); err != nil {
+		return "", 0, "", err
+	}
+	return envelope.Result.URL, envelope.Result.PendingUpdateCount, strings.TrimSpace(envelope.Result.LastErrorMessage), nil
+}
+
+func (a *App) telegramWebhookHealth(app *sdk.AppCtx, cfg *TelegramConnectionConfig) (string, int64, string) {
+	currentURL, pending, lastError, err := a.telegramWebhookInfo(app, cfg.ConnectionID)
+	if err != nil {
+		return "error", 0, err.Error()
+	}
+	if currentURL != cfg.WebhookURL {
+		return "drifted", pending, lastError
+	}
+	return "healthy", pending, lastError
 }
 
 func (a *App) enableTelegramConnection(app *sdk.AppCtx, connectionID, userID int64) (*TelegramConnectionConfig, error) {
@@ -561,6 +658,10 @@ func (a *App) handleTelegramBindings(w http.ResponseWriter, r *http.Request) {
 			ConnectionID   int64   `json:"connection_id"`
 			ConversationID string  `json:"conversation_id"`
 			ChatID         string  `json:"chat_id"`
+			ChatType       string  `json:"chat_type"`
+			ChatTitle      string  `json:"chat_title"`
+			ChatUsername   string  `json:"chat_username"`
+			RequireMention bool    `json:"require_mention"`
 			AllowedUserIDs []int64 `json:"allowed_user_ids"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 32<<10)).Decode(&body); err != nil {
@@ -602,6 +703,9 @@ func (a *App) handleTelegramBindings(w http.ResponseWriter, r *http.Request) {
 		binding, err := a.store.CreateTelegramBinding(TelegramBinding{
 			ID: "tgb-" + id, ConnectionID: body.ConnectionID, ProjectID: projectID,
 			ConversationID: conv.ID, ChatID: strconv.FormatInt(chatID, 10),
+			ChatType: strings.TrimSpace(body.ChatType), ChatTitle: strings.TrimSpace(body.ChatTitle),
+			ChatUsername:   strings.TrimPrefix(strings.TrimSpace(body.ChatUsername), "@"),
+			RequireMention: body.RequireMention, AccessMode: "manual",
 			AllowedUserIDs: allowed, CreatedByUser: userID,
 		})
 		if err != nil {
@@ -643,11 +747,12 @@ type telegramUpdate struct {
 }
 
 type telegramMessage struct {
-	MessageID int64        `json:"message_id"`
-	From      telegramUser `json:"from"`
-	Chat      telegramChat `json:"chat"`
-	Text      string       `json:"text"`
-	Caption   string       `json:"caption"`
+	MessageID      int64            `json:"message_id"`
+	From           telegramUser     `json:"from"`
+	Chat           telegramChat     `json:"chat"`
+	Text           string           `json:"text"`
+	Caption        string           `json:"caption"`
+	ReplyToMessage *telegramMessage `json:"reply_to_message,omitempty"`
 }
 
 type telegramCallbackQuery struct {
@@ -665,8 +770,12 @@ type telegramUser struct {
 }
 
 type telegramChat struct {
-	ID   int64  `json:"id"`
-	Type string `json:"type"`
+	ID        int64  `json:"id"`
+	Type      string `json:"type"`
+	Title     string `json:"title"`
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
 }
 
 func telegramDisplayName(user telegramUser) string {
@@ -680,9 +789,27 @@ func telegramDisplayName(user telegramUser) string {
 	return name
 }
 
+func telegramChatDisplayName(chat telegramChat, user telegramUser) string {
+	if title := strings.TrimSpace(chat.Title); title != "" {
+		return title
+	}
+	name := strings.TrimSpace(strings.TrimSpace(chat.FirstName) + " " + strings.TrimSpace(chat.LastName))
+	if name != "" {
+		return name
+	}
+	return telegramDisplayName(user)
+}
+
 func telegramSenderAllowed(binding *TelegramBinding, userID int64) bool {
 	if binding == nil || userID <= 0 {
 		return false
+	}
+	// Pairing and invitation approve a Telegram group as a room. Once the
+	// operator approves that room, its members may address the bot there; the
+	// mention gate still prevents ambient group chatter from entering it.
+	if binding.ChatType != "" && binding.ChatType != "private" && len(binding.AllowedUserIDs) == 0 &&
+		(binding.AccessMode == "pairing" || binding.AccessMode == "invite") {
+		return true
 	}
 	if binding.Audience == "public" && len(binding.AllowedUserIDs) == 0 {
 		return true
@@ -752,7 +879,7 @@ func (a *App) processTelegramUpdate(cfg *TelegramConnectionConfig, update telegr
 func (a *App) processTelegramMessage(cfg *TelegramConnectionConfig, updateID int64, incoming telegramMessage) error {
 	binding, err := a.store.GetTelegramBindingByChat(cfg.ConnectionID, strconv.FormatInt(incoming.Chat.ID, 10))
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil // Explicit routing: silently ignore chats the operator did not bind.
+		return a.processUnknownTelegramMessage(cfg, updateID, incoming)
 	}
 	if err != nil {
 		return err
@@ -763,6 +890,16 @@ func (a *App) processTelegramMessage(cfg *TelegramConnectionConfig, updateID int
 	if !telegramSenderAllowed(binding, incoming.From.ID) {
 		return nil
 	}
+	if handled, err := a.processTelegramCommand(cfg, binding, incoming); handled || err != nil {
+		return err
+	}
+	if binding.RequireMention && incoming.Chat.Type != "private" && !telegramMessageAddressesBot(cfg, incoming) {
+		return nil
+	}
+	return a.processBoundTelegramMessage(cfg, binding, updateID, incoming)
+}
+
+func (a *App) processBoundTelegramMessage(cfg *TelegramConnectionConfig, binding *TelegramBinding, updateID int64, incoming telegramMessage) error {
 	content := strings.TrimSpace(incoming.Text)
 	if content == "" {
 		content = strings.TrimSpace(incoming.Caption)

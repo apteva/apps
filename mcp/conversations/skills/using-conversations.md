@@ -109,9 +109,11 @@ decides in the inbox, and you relay the outcome.
 A conversation can hold several agents: user messages are forwarded to
 the lead; any participant may send. If you are not the lead, contribute
 when addressed or when your expertise is the point — do not echo the
-lead. Telegram chats are explicit bindings to ordinary conversations; agents
-continue replying with `conversations_send`. Do not ask for bot tokens or
-Telegram credentials—the operator manages those in a platform integration
-connection. Public Telegram conversations keep the same rule as public web
-conversations: reply to the visitor, never place approvals or internal alerts
-in front of them.
+lead. Telegram chats remain bindings to ordinary conversations even when
+pairing or public intake created them automatically; agents always reply with
+`conversations_send`. Do not ask for bot tokens, numeric chat ids, user ids, or
+Telegram credentials—the guided transport setup and platform integration
+connection own those details. Public Telegram conversations keep the same rule
+as public web conversations: reply to the visitor, never place approvals or
+internal alerts in front of them. `/new` changes the active Telegram route but
+does not erase the previous Conversations transcript.

@@ -32,7 +32,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.9.0
+version: 0.10.0
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, status). Inbox items are messages — an
@@ -41,8 +41,9 @@ description: |
   a card anywhere updates every surface at once. Other apps raise
   inbox items via inbox_post; deliveries go through a crash-safe
   ledger. Telegram bots connect through platform-managed integration
-  connections; explicit chat bindings route messages without exposing
-  bot credentials to the app.
+  connections with guided pairing, automatic public intake, one-time
+  invites, group discovery, and webhook health—without exposing bot
+  credentials or asking operators for numeric Telegram IDs.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/conversations
 icon: /ui/icon.svg
@@ -116,7 +117,7 @@ provides:
         Reply discipline (acknowledge, work, one final outcome), where
         inbox items live (list, reuse, create with stable topic
         titles), alert/report cadence, main-thread output ownership,
-        the approval round-trip, Telegram routing, and room etiquette. Load before
+        the approval round-trip, Telegram onboarding and routing, and room etiquette. Load before
         messaging people or raising inbox items.
       metadata:
         category: communication
@@ -201,7 +202,10 @@ func (a *App) Workers() []sdk.Worker {
 			Name:     "telegram-maintenance",
 			Schedule: "@every 1h",
 			Run: func(_ context.Context, _ *sdk.AppCtx) error {
-				return a.store.PruneTelegramState()
+				if err := a.store.PruneTelegramState(); err != nil {
+					return err
+				}
+				return a.store.PruneTransportOnboarding()
 			},
 		},
 	}

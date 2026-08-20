@@ -77,7 +77,7 @@ func spawnTelegramHTTPTestSidecar(t *testing.T) (*tk.Sidecar, *telegramGatewayFi
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/whoami":
-			_, _ = w.Write([]byte(`{"app_name":"conversations","version":"0.9.0","install_id":77,"project_id":"","public_url":"https://agents.example.test","bindings":{"telegram_bot":{"ids":[9],"default_id":9}}}`))
+			_, _ = w.Write([]byte(`{"app_name":"conversations","version":"0.10.0","install_id":77,"project_id":"","public_url":"https://agents.example.test","bindings":{"telegram_bot":{"ids":[9],"default_id":9}}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/connections/9":
 			_, _ = w.Write([]byte(`{"id":9,"app_slug":"telegram","name":"Test bot","status":"active","project_id":"test-proj"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/agents":
@@ -97,6 +97,11 @@ func spawnTelegramHTTPTestSidecar(t *testing.T) (*tk.Sidecar, *telegramGatewayFi
 			case "set_webhook":
 				fixture.webhookURL, _ = body.Input["url"].(string)
 				fixture.webhookSecret, _ = body.Input["secret_token"].(string)
+				data = json.RawMessage(`{"ok":true,"result":true}`)
+			case "get_webhook_info":
+				data = json.RawMessage(fmt.Sprintf(`{"ok":true,"result":{"url":%q,"pending_update_count":0}}`, fixture.webhookURL))
+			case "delete_webhook":
+				fixture.webhookURL = ""
 				data = json.RawMessage(`{"ok":true,"result":true}`)
 			case "send_message":
 				fixture.sent = append(fixture.sent, body.Input)
@@ -319,25 +324,18 @@ func TestSidecar_PublicConversationFlow(t *testing.T) {
 	}
 }
 
-func TestSidecar_TelegramConnectionWebhookAndOutboundFlow(t *testing.T) {
+func TestSidecar_TelegramPublicOnboardingWebhookAndOutboundFlow(t *testing.T) {
 	sc, fixture := spawnTelegramHTTPTestSidecar(t)
-
-	var conv map[string]any
-	if resp := itHTTP(sc, http.MethodPost, "/chats", map[string]any{
-		"agent_id": 41, "title": "Telegram support", "project_id": itProject,
-	}, &conv); resp.Status != http.StatusOK {
-		t.Fatalf("create chat: %d %s", resp.Status, resp.Body)
-	}
-	convID, _ := conv["id"].(string)
 	var enabled map[string]any
 	if resp := itHTTP(sc, http.MethodPost, "/telegram-connections", map[string]any{"connection_id": 9}, &enabled); resp.Status != http.StatusOK {
 		t.Fatalf("enable Telegram: %d %s", resp.Status, resp.Body)
 	}
-	var binding map[string]any
-	if resp := itHTTP(sc, http.MethodPost, "/telegram-bindings", map[string]any{
-		"connection_id": 9, "conversation_id": convID, "chat_id": "12345",
-	}, &binding); resp.Status != http.StatusOK {
-		t.Fatalf("bind Telegram: %d %s", resp.Status, resp.Body)
+	var policy map[string]any
+	if resp := itHTTP(sc, http.MethodPost, "/telegram-intake", map[string]any{
+		"connection_id": 9, "mode": "public", "default_agent_id": 41,
+		"default_title": "Telegram support", "require_group_mention": true,
+	}, &policy); resp.Status != http.StatusOK {
+		t.Fatalf("configure intake: %d %s", resp.Status, resp.Body)
 	}
 
 	fixture.mu.Lock()
@@ -359,6 +357,16 @@ func TestSidecar_TelegramConnectionWebhookAndOutboundFlow(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("Telegram webhook status=%d", resp.StatusCode)
+	}
+	var routes struct {
+		Bindings []map[string]any `json:"bindings"`
+	}
+	if got := itHTTP(sc, http.MethodGet, "/telegram-bindings", nil, &routes); got.Status != http.StatusOK || len(routes.Bindings) != 1 {
+		t.Fatalf("auto-created route: %d %s %+v", got.Status, got.Body, routes)
+	}
+	convID, _ := routes.Bindings[0]["conversation_id"].(string)
+	if convID == "" || routes.Bindings[0]["audience"] != "public" || routes.Bindings[0]["access_mode"] != "public" {
+		t.Fatalf("auto-created generic conversation route = %+v", routes.Bindings[0])
 	}
 
 	var transcript []map[string]any
