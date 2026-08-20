@@ -189,21 +189,18 @@ func (a *App) applyCollectionIntent(ctx *sdk.AppCtx, pid string, inv *Invoice, a
 	}
 	switch intent.Status {
 	case "succeeded":
-		if _, _, err := dbPaymentRecord(
+		payment, paid, err := dbPaymentRecord(
 			ctx.AppDB(), pid, inv.ID, inv.TotalCents-inv.AmountPaidCents,
 			"stripe", intent.ID, nowRFC3339(),
 			"Automatic Stripe collection", "system:stripe-collection",
-		); err != nil {
+		)
+		if err != nil {
 			return nil, err
 		}
 		if err := dbCollectionAttemptSucceed(ctx.AppDB(), attemptID, intent.ID); err != nil {
 			return nil, err
 		}
-		paid, err := dbInvoiceGetByID(ctx.AppDB(), pid, inv.ID)
-		if err != nil {
-			return nil, err
-		}
-		emitInvoice(ctx, "invoice.paid", paid)
+		emitInvoicePaid(ctx, paid, payment)
 	case "requires_action":
 		if err := dbCollectionAttemptUpdate(
 			ctx.AppDB(), attemptID, intent.ID, "failed",

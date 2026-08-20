@@ -783,6 +783,170 @@ func TestPayments_CoveringTotalTransitionsToPaid(t *testing.T) {
 	}
 }
 
+func TestPayments_HistoricalReceivedAtDrivesPaidAtAndEvent(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, tk.WithEmitter(rec))
+	app := &App{}
+	c := mustCustomer(t, ctx, "historical@acme.com", "Historical Acme")
+	out, err := app.toolInvoicesCreate(ctx, map[string]any{
+		"customer_id":     c.ID,
+		"accounting_date": "2024-12-31",
+		"due_date":        "2025-01-15T00:00:00Z",
+		"metadata": map[string]any{
+			"source": "year-end-close",
+		},
+		"line_items": []any{line("Historical services", 1, 2500, 0)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv := out.(map[string]any)["invoice"].(*Invoice)
+	inv = mustFinalize(t, ctx, inv.ID)
+
+	const receivedAt = "2025-01-03T14:30:00+01:00"
+	paidOut, err := app.toolPaymentsRecord(ctx, map[string]any{
+		"invoice_id":   inv.ID,
+		"amount_cents": int64(2500),
+		"method":       "wire",
+		"received_at":  receivedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paid := paidOut.(map[string]any)["invoice"].(*Invoice)
+	payment := paidOut.(map[string]any)["payment"].(*Payment)
+	if paid.PaidAt != receivedAt {
+		t.Fatalf("paid_at = %q, want historical received_at %q", paid.PaidAt, receivedAt)
+	}
+	if payment.ReceivedAt != receivedAt {
+		t.Fatalf("payment received_at = %q, want %q", payment.ReceivedAt, receivedAt)
+	}
+	if payment.CreatedAt == receivedAt || paid.CreatedAt == receivedAt {
+		t.Fatalf("recording timestamps must remain distinct from historical payment time: payment=%q invoice=%q", payment.CreatedAt, paid.CreatedAt)
+	}
+
+	events := rec.EventsByTopic("invoice.paid")
+	if len(events) != 1 {
+		t.Fatalf("invoice.paid events = %d, want 1", len(events))
+	}
+	payload := events[0].Data.(map[string]any)
+	want := map[string]any{
+		"accounting_date":      "2024-12-31",
+		"paid_at":              receivedAt,
+		"received_at":          receivedAt,
+		"due_date":             "2025-01-15T00:00:00Z",
+		"created_at":           paid.CreatedAt,
+		"finalized_at":         paid.FinalizedAt,
+		"amount_paid_cents":    int64(2500),
+		"provider":             "local",
+		"payment_id":           payment.ID,
+		"payment_method":       "wire",
+		"payment_amount_cents": int64(2500),
+	}
+	for key, expected := range want {
+		if got := payload[key]; got != expected {
+			t.Errorf("event %s = %#v, want %#v", key, got, expected)
+		}
+	}
+	meta := mapFromAny(payload["metadata"])
+	if meta["source"] != "year-end-close" {
+		t.Errorf("event metadata = %#v", meta)
+	}
+}
+
+func TestPayments_HistoricalCoveringPaymentDeterminesPaidAt(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	c := mustCustomer(t, ctx, "partials@acme.com", "Partial Acme")
+	inv := mustFinalize(t, ctx, mustDraft(t, ctx, c.ID, []any{line("X", 1, 1000, 0)}).ID)
+
+	for _, payment := range []struct {
+		amount     int64
+		receivedAt string
+	}{
+		{600, "2023-11-01T09:00:00Z"},
+		{400, "2023-11-04T16:45:00Z"},
+	} {
+		out, err := app.toolPaymentsRecord(ctx, map[string]any{
+			"invoice_id":   inv.ID,
+			"amount_cents": payment.amount,
+			"method":       "wire",
+			"received_at":  payment.receivedAt,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		inv = out.(map[string]any)["invoice"].(*Invoice)
+	}
+	if inv.Status != "paid" || inv.PaidAt != "2023-11-04T16:45:00Z" {
+		t.Fatalf("invoice = status %q paid_at %q, want paid at covering payment time", inv.Status, inv.PaidAt)
+	}
+}
+
+func TestHTTPPayments_HistoricalReceivedAtDrivesPaidAt(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	c := mustCustomer(t, ctx, "http-history@acme.com", "HTTP History")
+	inv := mustFinalize(t, ctx, mustDraft(t, ctx, c.ID, []any{line("X", 1, 700, 0)}).ID)
+
+	req := httptest.NewRequest(http.MethodPost, "/payments", strings.NewReader(`{
+		"invoice_id": `+strconv.FormatInt(inv.ID, 10)+`,
+		"amount_cents": 700,
+		"method": "check",
+		"received_at": "2022-06-07T08:09:10Z"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	app.handleHTTPPaymentRecord(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	got, err := dbInvoiceGetByID(ctx.AppDB(), "test-proj", inv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PaidAt != "2022-06-07T08:09:10Z" {
+		t.Fatalf("paid_at = %q", got.PaidAt)
+	}
+}
+
+func TestInvoices_AccountingDateCreateUpdateAndValidation(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	c := mustCustomer(t, ctx, "accounting@acme.com", "Accounting Acme")
+	out, err := app.toolInvoicesCreate(ctx, map[string]any{
+		"customer_id":     c.ID,
+		"accounting_date": "2025-03-31",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv := out.(map[string]any)["invoice"].(*Invoice)
+	if inv.AccountingDate != "2025-03-31" {
+		t.Fatalf("accounting_date = %q", inv.AccountingDate)
+	}
+	updated, err := app.toolInvoicesUpdate(ctx, map[string]any{
+		"id": inv.ID,
+		"patch": map[string]any{
+			"accounting_date": "2025-04-01",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.(map[string]any)["invoice"].(*Invoice).AccountingDate; got != "2025-04-01" {
+		t.Fatalf("updated accounting_date = %q", got)
+	}
+	if _, err := app.toolInvoicesUpdate(ctx, map[string]any{
+		"id": inv.ID,
+		"patch": map[string]any{
+			"accounting_date": "2025-02-30",
+		},
+	}); err == nil || !strings.Contains(err.Error(), "YYYY-MM-DD") {
+		t.Fatalf("invalid accounting_date error = %v", err)
+	}
+}
+
 // As of v0.8.0, method='stripe' is accepted (webhook handler uses it;
 // manual recording is allowed for off-platform Stripe activity). The
 // (method, external_id) unique index handles idempotency for

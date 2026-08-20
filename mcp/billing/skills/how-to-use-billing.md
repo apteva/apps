@@ -137,6 +137,10 @@ lifetime totals. Run it before drafting if the customer has
 existing relationships — it'll tell you whether they have an open
 balance you should consolidate.
 
+Use `accounting_date` (`YYYY-MM-DD`) when the invoice belongs to a specific
+accounting period that differs from when the record was created or finalized.
+It is optional and can be corrected later with `invoices_update`.
+
 ## Sending the invoice — PDF + print view
 
 Once an invoice is **open** (finalized, has a number), the agent has
@@ -165,7 +169,9 @@ live in storage (e.g. to compose `respond(components=[file-card])`).
 Use `payments_record` for **non-Stripe** money — wire, cash, check,
 other. Required args: `invoice_id`, `amount_cents`, `method`.
 Default `received_at` is now (UTC); set it explicitly if the money
-landed earlier (e.g. a wire that cleared yesterday).
+landed earlier (e.g. a wire that cleared yesterday). When that payment covers
+the invoice, its `received_at` becomes the invoice's `paid_at`; the later time
+when the payment was entered remains available as the payment's `created_at`.
 
 If the payment fully covers the invoice, status flips to `paid`
 automatically. Partial payments stay `open` and accumulate —

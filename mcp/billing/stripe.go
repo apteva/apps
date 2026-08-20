@@ -813,7 +813,7 @@ func (a *App) handlePaymentIntent(ctx *sdk.AppCtx, obj json.RawMessage) error {
 				return err
 			}
 		}
-		emitInvoice(projectCtx, "invoice.paid", paid)
+		emitInvoicePaid(projectCtx, paid, pay)
 		ctx.Logger().Info("stripe payment intent recorded", "invoice_id", invoiceID, "payment_id", pay.ID, "intent", intent.ID)
 	case "requires_payment_method", "canceled":
 		if _, err := ctx.AppDB().Exec(`UPDATE billing_checkout_sessions SET status='failed' WHERE provider='stripe' AND provider_session_id=?`, intent.ID); err != nil {
@@ -926,7 +926,7 @@ func (a *App) handleCheckoutCompleted(ctx *sdk.AppCtx, obj json.RawMessage) erro
 			return fmt.Errorf("save checkout payment method: %w", err)
 		}
 	}
-	emitInvoice(ctx, "invoice.paid", inv)
+	emitInvoicePaid(ctx, inv, pay)
 	ctx.Logger().Info("stripe payment recorded",
 		"invoice_id", invoiceID, "payment_id", pay.ID, "amount", sess.AmountTotal, "session", sess.ID)
 	return nil

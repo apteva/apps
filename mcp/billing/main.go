@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.12.4
+version: 0.12.5
 description: |
   Customers, invoices, payments, and reusable customer payment methods.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -84,7 +84,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: billing/v0.12.3
+    ref: billing/v0.12.5
     entry: mcp/billing
   port: 8080
   health_check: /health
@@ -123,7 +123,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.12.4",
+		"version", "0.12.5",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -326,15 +326,16 @@ func (a *App) MCPTools() []sdk.Tool {
 		// ── Invoices ─────────────────────────────────────────────────
 		{
 			Name:        "invoices_create",
-			Description: "Create a DRAFT invoice with optional initial line items. Provider arg ('local'|'stripe') falls back to install default. PROVIDER IS FROZEN. Line items can be either free-form ({description, quantity, unit_price_cents, tax_rate_bps?}) OR catalog references ({price_id, quantity}) — when price_id is set, billing calls the catalog app to snapshot description + unit_price_cents + currency into the line. Free-form and catalog-ref lines can mix on the same invoice. Args: customer_id, currency (catalog price wins; falls back to install default), provider, due_date, notes, line_items, metadata.",
+			Description: "Create a DRAFT invoice with optional initial line items. Provider arg ('local'|'stripe') falls back to install default. PROVIDER IS FROZEN. Line items can be either free-form ({description, quantity, unit_price_cents, tax_rate_bps?}) OR catalog references ({price_id, quantity}) — when price_id is set, billing calls the catalog app to snapshot description + unit_price_cents + currency into the line. Free-form and catalog-ref lines can mix on the same invoice. Args: customer_id, currency (catalog price wins; falls back to install default), provider, accounting_date (YYYY-MM-DD), due_date, notes, line_items, metadata.",
 			InputSchema: schemaObject(map[string]any{
-				"customer_id": map[string]any{"type": "integer"},
-				"currency":    map[string]any{"type": "string"},
-				"provider":    map[string]any{"type": "string"},
-				"due_date":    map[string]any{"type": "string"},
-				"notes":       map[string]any{"type": "string"},
-				"line_items":  map[string]any{"type": "array"},
-				"metadata":    map[string]any{"type": "object"},
+				"customer_id":     map[string]any{"type": "integer"},
+				"currency":        map[string]any{"type": "string"},
+				"provider":        map[string]any{"type": "string"},
+				"accounting_date": map[string]any{"type": "string"},
+				"due_date":        map[string]any{"type": "string"},
+				"notes":           map[string]any{"type": "string"},
+				"line_items":      map[string]any{"type": "array"},
+				"metadata":        map[string]any{"type": "object"},
 			}, []string{"customer_id"}),
 			Handler: a.toolInvoicesCreate,
 		},
@@ -342,14 +343,15 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "invoices_create_from_prepared_lines",
 			Description: "Create a Billing invoice from generic prepared line items produced by another app, optionally finalizing it. Billing stays product-agnostic; source details live in invoice/line metadata.",
 			InputSchema: schemaObject(map[string]any{
-				"customer_id": map[string]any{"type": "integer"},
-				"currency":    map[string]any{"type": "string"},
-				"provider":    map[string]any{"type": "string"},
-				"due_date":    map[string]any{"type": "string"},
-				"notes":       map[string]any{"type": "string"},
-				"line_items":  map[string]any{"type": "array"},
-				"metadata":    map[string]any{"type": "object"},
-				"finalize":    map[string]any{"type": "boolean"},
+				"customer_id":     map[string]any{"type": "integer"},
+				"currency":        map[string]any{"type": "string"},
+				"provider":        map[string]any{"type": "string"},
+				"accounting_date": map[string]any{"type": "string"},
+				"due_date":        map[string]any{"type": "string"},
+				"notes":           map[string]any{"type": "string"},
+				"line_items":      map[string]any{"type": "array"},
+				"metadata":        map[string]any{"type": "object"},
+				"finalize":        map[string]any{"type": "boolean"},
 			}, []string{"customer_id", "line_items"}),
 			Handler: a.toolInvoicesCreateFromPreparedLines,
 		},
@@ -377,7 +379,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "invoices_update",
-			Description: "Patch an invoice. Args: id, patch (object). Always-allowed fields: notes, due_date, metadata. Draft-only fields: customer_id, currency, line_items (full replacement). Rejects voided invoices. Recomputes totals when line_items change; writes an audit entry.",
+			Description: "Patch an invoice. Args: id, patch (object). Always-allowed fields: notes, accounting_date (YYYY-MM-DD), due_date, metadata. Draft-only fields: customer_id, currency, line_items (full replacement). Rejects voided invoices. Recomputes totals when line_items change; writes an audit entry.",
 			InputSchema: schemaObject(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"patch": map[string]any{"type": "object"},
@@ -664,6 +666,7 @@ type Invoice struct {
 	TaxCents        int64           `json:"tax_cents"`
 	TotalCents      int64           `json:"total_cents"`
 	AmountPaidCents int64           `json:"amount_paid_cents"`
+	AccountingDate  string          `json:"accounting_date,omitempty"`
 	DueDate         string          `json:"due_date,omitempty"`
 	Notes           string          `json:"notes,omitempty"`
 	ExternalID      string          `json:"external_id,omitempty"`
@@ -901,15 +904,20 @@ func (a *App) toolInvoicesCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 
+	accountingDate := strings.TrimSpace(strArg(args, "accounting_date"))
+	if err := validateAccountingDate(accountingDate); err != nil {
+		return nil, err
+	}
 	inv := &Invoice{
-		ProjectID:  pid,
-		CustomerID: cid,
-		Provider:   provider,
-		Status:     "draft",
-		Currency:   currency,
-		DueDate:    strArg(args, "due_date"),
-		Notes:      strArg(args, "notes"),
-		LineItems:  items,
+		ProjectID:      pid,
+		CustomerID:     cid,
+		Provider:       provider,
+		Status:         "draft",
+		Currency:       currency,
+		AccountingDate: accountingDate,
+		DueDate:        strArg(args, "due_date"),
+		Notes:          strArg(args, "notes"),
+		LineItems:      items,
 	}
 	if md, ok := args["metadata"].(map[string]any); ok {
 		if raw, err := json.Marshal(md); err == nil {
@@ -931,15 +939,16 @@ func (a *App) toolInvoicesCreateFromPreparedLines(ctx *sdk.AppCtx, args map[stri
 		return nil, errors.New("line_items required")
 	}
 	createArgs := map[string]any{
-		"_project_id": strArg(args, "_project_id"),
-		"_caller":     callerActor(args),
-		"customer_id": int64Arg(args, "customer_id"),
-		"currency":    strArg(args, "currency"),
-		"provider":    strArg(args, "provider"),
-		"due_date":    strArg(args, "due_date"),
-		"notes":       strArg(args, "notes"),
-		"line_items":  rawItems,
-		"metadata":    args["metadata"],
+		"_project_id":     strArg(args, "_project_id"),
+		"_caller":         callerActor(args),
+		"customer_id":     int64Arg(args, "customer_id"),
+		"currency":        strArg(args, "currency"),
+		"provider":        strArg(args, "provider"),
+		"accounting_date": strArg(args, "accounting_date"),
+		"due_date":        strArg(args, "due_date"),
+		"notes":           strArg(args, "notes"),
+		"line_items":      rawItems,
+		"metadata":        args["metadata"],
 	}
 	out, err := a.toolInvoicesCreate(ctx, createArgs)
 	if err != nil {
@@ -1151,13 +1160,16 @@ func (a *App) toolPaymentsRecord(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if received == "" {
 		received = time.Now().UTC().Format(time.RFC3339)
 	}
+	if err := validateReceivedAt(received); err != nil {
+		return nil, err
+	}
 	pay, inv, err := dbPaymentRecord(ctx.AppDB(), pid, id, amount, method,
 		strArg(args, "external_id"), received,
 		strArg(args, "notes"), callerActor(args))
 	if err != nil {
 		return nil, err
 	}
-	emitInvoice(ctx, "invoice.paid", inv) // listeners filter on status == 'paid'
+	emitInvoicePaid(ctx, inv, pay) // listeners filter on status == 'paid'
 	return map[string]any{"payment": pay, "invoice": inv}, nil
 }
 
@@ -1380,6 +1392,36 @@ func emitInvoice(ctx *sdk.AppCtx, topic string, inv *Invoice) {
 		payload["metadata"] = inv.Metadata
 	}
 	ctx.EmitWithProject(topic, inv.ProjectID, payload)
+}
+
+func emitInvoicePaid(ctx *sdk.AppCtx, inv *Invoice, payment *Payment) {
+	if ctx == nil || inv == nil || payment == nil {
+		return
+	}
+	payload := map[string]any{
+		"id":                   inv.ID,
+		"customer_id":          inv.CustomerID,
+		"number":               inv.Number,
+		"status":               inv.Status,
+		"total_cents":          inv.TotalCents,
+		"currency":             inv.Currency,
+		"accounting_date":      inv.AccountingDate,
+		"paid_at":              inv.PaidAt,
+		"received_at":          payment.ReceivedAt,
+		"due_date":             inv.DueDate,
+		"created_at":           inv.CreatedAt,
+		"finalized_at":         inv.FinalizedAt,
+		"amount_paid_cents":    inv.AmountPaidCents,
+		"provider":             inv.Provider,
+		"payment_id":           payment.ID,
+		"payment_method":       payment.Method,
+		"payment_amount_cents": payment.AmountCents,
+		"metadata":             json.RawMessage("{}"),
+	}
+	if meta := string(inv.Metadata); meta != "" && meta != "null" {
+		payload["metadata"] = inv.Metadata
+	}
+	ctx.EmitWithProject("invoice.paid", inv.ProjectID, payload)
 }
 
 // ─── HTTP handlers ──────────────────────────────────────────────────
@@ -1628,15 +1670,21 @@ func (a *App) handleHTTPInvoiceCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	accountingDate := strings.TrimSpace(strArg(body, "accounting_date"))
+	if err := validateAccountingDate(accountingDate); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	inv := &Invoice{
-		ProjectID:  pid,
-		CustomerID: cid,
-		Provider:   provider,
-		Status:     "draft",
-		Currency:   currency,
-		DueDate:    strArg(body, "due_date"),
-		Notes:      strArg(body, "notes"),
-		LineItems:  items,
+		ProjectID:      pid,
+		CustomerID:     cid,
+		Provider:       provider,
+		Status:         "draft",
+		Currency:       currency,
+		AccountingDate: accountingDate,
+		DueDate:        strArg(body, "due_date"),
+		Notes:          strArg(body, "notes"),
+		LineItems:      items,
 	}
 	if md, ok := body["metadata"].(map[string]any); ok {
 		if raw, err := json.Marshal(md); err == nil {
@@ -1886,6 +1934,10 @@ func (a *App) handleHTTPPaymentRecord(w http.ResponseWriter, r *http.Request) {
 	if received == "" {
 		received = time.Now().UTC().Format(time.RFC3339)
 	}
+	if err := validateReceivedAt(received); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	pay, inv, err := dbPaymentRecord(ctx.AppDB(), pid, id, amount, method,
 		strArg(body, "external_id"), received,
 		strArg(body, "notes"), actorFromRequest(r))
@@ -1893,7 +1945,7 @@ func (a *App) handleHTTPPaymentRecord(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	emitInvoice(ctx, "invoice.paid", inv)
+	emitInvoicePaid(ctx, inv, pay)
 	httpJSON(w, map[string]any{"payment": pay, "invoice": inv})
 }
 
@@ -2191,7 +2243,7 @@ func dbInvoiceSearch(db *sql.DB, pid string, f invoiceFilters) ([]*Invoice, erro
 	rows, err := db.Query(
 		`SELECT i.id, i.project_id, i.customer_id, i.provider, i.number, i.status, i.currency,
 		        i.subtotal_cents, i.tax_cents, i.total_cents, i.amount_paid_cents,
-		        i.due_date, i.notes, i.external_id, i.external_url, i.last_synced_at, i.metadata,
+		        i.accounting_date, i.due_date, i.notes, i.external_id, i.external_url, i.last_synced_at, i.metadata,
 		        i.finalized_at, i.paid_at, i.voided_at, i.created_at, i.updated_at,
 		        COALESCE(c.name, ''), COALESCE(c.email, '')
 		 FROM invoices i
@@ -2218,7 +2270,7 @@ func dbInvoiceGetByID(db *sql.DB, pid string, id int64) (*Invoice, error) {
 	row := db.QueryRow(
 		`SELECT i.id, i.project_id, i.customer_id, i.provider, i.number, i.status, i.currency,
 		        i.subtotal_cents, i.tax_cents, i.total_cents, i.amount_paid_cents,
-		        i.due_date, i.notes, i.external_id, i.external_url, i.last_synced_at, i.metadata,
+		        i.accounting_date, i.due_date, i.notes, i.external_id, i.external_url, i.last_synced_at, i.metadata,
 		        i.finalized_at, i.paid_at, i.voided_at, i.created_at, i.updated_at,
 		        COALESCE(c.name, ''), COALESCE(c.email, '')
 		 FROM invoices i
@@ -2235,7 +2287,7 @@ func dbInvoiceGetByNumber(db *sql.DB, pid, number string) (*Invoice, error) {
 	row := db.QueryRow(
 		`SELECT i.id, i.project_id, i.customer_id, i.provider, i.number, i.status, i.currency,
 		        i.subtotal_cents, i.tax_cents, i.total_cents, i.amount_paid_cents,
-		        i.due_date, i.notes, i.external_id, i.external_url, i.last_synced_at, i.metadata,
+		        i.accounting_date, i.due_date, i.notes, i.external_id, i.external_url, i.last_synced_at, i.metadata,
 		        i.finalized_at, i.paid_at, i.voided_at, i.created_at, i.updated_at,
 		        COALESCE(c.name, ''), COALESCE(c.email, '')
 		 FROM invoices i
@@ -2259,6 +2311,10 @@ func lookupInvoice(db *sql.DB, pid string, args map[string]any) (*Invoice, error
 }
 
 func dbInvoiceCreate(db *sql.DB, inv *Invoice, actor string) (*Invoice, error) {
+	inv.AccountingDate = strings.TrimSpace(inv.AccountingDate)
+	if err := validateAccountingDate(inv.AccountingDate); err != nil {
+		return nil, err
+	}
 	// Verify customer exists + not deleted.
 	var n int
 	if err := db.QueryRow(
@@ -2282,11 +2338,11 @@ func dbInvoiceCreate(db *sql.DB, inv *Invoice, actor string) (*Invoice, error) {
 	res, err := tx.Exec(
 		`INSERT INTO invoices (project_id, customer_id, provider, status, currency,
 		                       subtotal_cents, tax_cents, total_cents, amount_paid_cents,
-		                       due_date, notes, metadata, created_at, updated_at)
-		 VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+		                       accounting_date, due_date, notes, metadata, created_at, updated_at)
+		 VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
 		inv.ProjectID, inv.CustomerID, inv.Provider, inv.Currency,
 		inv.SubtotalCents, inv.TaxCents, inv.TotalCents,
-		nullStr(inv.DueDate), nullStr(inv.Notes), jsonOrEmpty(inv.Metadata, "{}"),
+		nullStr(inv.AccountingDate), nullStr(inv.DueDate), nullStr(inv.Notes), jsonOrEmpty(inv.Metadata, "{}"),
 		now, now)
 	if err != nil {
 		return nil, err
@@ -2529,7 +2585,7 @@ func dbInvoiceVoid(db *sql.DB, pid string, id int64, reason, actor string) (*Inv
 }
 
 // dbInvoiceUpdate patches an invoice. Field rules:
-//   - notes, due_date, metadata: any status
+//   - notes, accounting_date, due_date, metadata: any status
 //   - customer_id, currency, line_items: drafts only
 //
 // line_items, when present, replaces the entire array (drafts only).
@@ -2575,6 +2631,20 @@ func dbInvoiceUpdate(db *sql.DB, pid string, id int64, patch map[string]any, act
 		s, _ := v.(string)
 		args = append(args, s)
 		auditDetails["notes_changed"] = true
+	}
+	if v, ok := patch["accounting_date"]; ok {
+		s, _ := v.(string)
+		s = strings.TrimSpace(s)
+		if err := validateAccountingDate(s); err != nil {
+			return nil, err
+		}
+		sets = append(sets, "accounting_date = ?")
+		if s == "" {
+			args = append(args, nil)
+		} else {
+			args = append(args, s)
+		}
+		auditDetails["accounting_date"] = s
 	}
 	if v, ok := patch["due_date"]; ok {
 		s, _ := v.(string)
@@ -2889,6 +2959,9 @@ func dbPaymentGetByID(db *sql.DB, pid string, id int64) (*Payment, error) {
 // state can never disagree with its payments.
 func dbPaymentRecord(db *sql.DB, pid string, invID int64, amount int64,
 	method, externalID, receivedAt, notes, actor string) (*Payment, *Invoice, error) {
+	if err := validateReceivedAt(receivedAt); err != nil {
+		return nil, nil, err
+	}
 	// Idempotency for processor-driven writes (Stripe webhook, future
 	// reconciler): when method='stripe' (or any non-empty external_id),
 	// check the unique (method, external_id) index BEFORE the
@@ -2975,13 +3048,13 @@ func dbPaymentRecord(db *sql.DB, pid string, invID int64, amount int64,
 		 SET amount_paid_cents = ?,
 		     status = ?,
 		     paid_at = CASE
-		       WHEN ? = 'paid' AND paid_at IS NULL THEN CURRENT_TIMESTAMP
+		       WHEN ? = 'paid' AND paid_at IS NULL THEN ?
 		       WHEN ? <> 'paid' THEN NULL
 		       ELSE paid_at
 		     END,
 		     updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ? AND project_id = ? AND amount_paid_cents = ?`,
-		newPaid, newStatus, newStatus, newStatus, invID, pid, paid)
+		newPaid, newStatus, newStatus, receivedAt, newStatus, invID, pid, paid)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -3346,7 +3419,7 @@ func scanCustomer(s rowScanner) (*Customer, error) {
 // COALESCE in the query so missing/deleted customers scan as empty.
 func scanInvoice(s rowScanner) (*Invoice, error) {
 	var inv Invoice
-	var number, dueDate, notes sql.NullString
+	var number, accountingDate, dueDate, notes sql.NullString
 	var ext, extURL, syncedAt sql.NullString
 	var meta sql.NullString
 	var finalizedAt, paidAt, voidedAt sql.NullString
@@ -3355,12 +3428,13 @@ func scanInvoice(s rowScanner) (*Invoice, error) {
 		&inv.ID, &inv.ProjectID, &inv.CustomerID, &inv.Provider, &number,
 		&inv.Status, &inv.Currency, &inv.SubtotalCents, &inv.TaxCents,
 		&inv.TotalCents, &inv.AmountPaidCents,
-		&dueDate, &notes, &ext, &extURL, &syncedAt, &meta,
+		&accountingDate, &dueDate, &notes, &ext, &extURL, &syncedAt, &meta,
 		&finalizedAt, &paidAt, &voidedAt, &inv.CreatedAt, &inv.UpdatedAt,
 		&custName, &custEmail); err != nil {
 		return nil, err
 	}
 	inv.Number = number.String
+	inv.AccountingDate = accountingDate.String
 	inv.DueDate = dueDate.String
 	inv.Notes = notes.String
 	inv.ExternalID = ext.String
@@ -3527,6 +3601,27 @@ func nullInt(p *int64) sql.NullInt64 {
 
 func nowRFC3339() string {
 	return time.Now().UTC().Format(time.RFC3339)
+}
+
+func validateAccountingDate(value string) error {
+	if value == "" {
+		return nil
+	}
+	parsed, err := time.Parse("2006-01-02", value)
+	if err != nil || parsed.Format("2006-01-02") != value {
+		return errors.New("accounting_date must be a valid date in YYYY-MM-DD format")
+	}
+	return nil
+}
+
+func validateReceivedAt(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return errors.New("received_at is required")
+	}
+	if _, err := time.Parse(time.RFC3339, value); err != nil {
+		return errors.New("received_at must be a valid RFC3339 timestamp")
+	}
+	return nil
 }
 
 func ifThen[T any](cond bool, t, f T) T {

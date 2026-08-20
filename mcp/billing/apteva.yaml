@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.12.4
+version: 0.12.5
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -28,6 +28,9 @@ description: |
   v0.12.4 passes invoice metadata through on invoice.* events so consumers
   can attribute revenue by source (e.g. subscription-cycle vs one-off)
   without a read-time join; Billing stays product-agnostic.
+  v0.12.5 adds a first-class accounting date, makes historical payment
+  timestamps authoritative for invoice paid_at, and enriches invoice.paid
+  events with invoice chronology and causative payment details.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/billing
@@ -87,7 +90,7 @@ provides:
     - name: customers_merge
       description: Merge one customer into another. Reassigns invoices + payments.
     - name: invoices_create
-      description: Create a DRAFT invoice with optional initial line items. Provider arg ('local' | 'stripe') falls back to install default. Provider is frozen after create.
+      description: Create a DRAFT invoice with optional initial line items and an optional accounting_date (YYYY-MM-DD). Provider arg ('local' | 'stripe') falls back to install default. Provider is frozen after create.
     - name: invoices_create_from_prepared_lines
       description: Create an invoice from generic prepared line items produced by another app, optionally finalizing it.
     - name: invoices_add_line_item
@@ -95,7 +98,7 @@ provides:
     - name: invoices_finalize
       description: Transition draft → open. Mints invoice number. v0.1.0 supports provider=local only.
     - name: invoices_update
-      description: Patch an invoice. Always-allowed fields (any status) — notes, due_date, metadata. Draft-only fields — customer_id, currency, line_items (replaces array).
+      description: Patch an invoice. Always-allowed fields (any status) — notes, accounting_date, due_date, metadata. Draft-only fields — customer_id, currency, line_items (replaces array).
     - name: invoices_void
       description: Void an open invoice. Cannot void paid invoices.
     - name: invoices_get
@@ -254,6 +257,18 @@ provides:
         status: string
         total_cents: integer
         currency: string
+        accounting_date: string
+        paid_at: string
+        received_at: string
+        due_date: string
+        created_at: string
+        finalized_at: string
+        amount_paid_cents: integer
+        provider: string
+        metadata: object
+        payment_id: integer
+        payment_method: string
+        payment_amount_cents: integer
     - name: invoice.refunded
       description: A Stripe refund was recorded against a billing invoice.
       payload:
@@ -339,7 +354,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: billing/v0.12.3
+    ref: billing/v0.12.5
     entry: mcp/billing
   port: 8080
   health_check: /health

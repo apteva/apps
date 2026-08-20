@@ -1,4 +1,4 @@
-# Billing (v0.10.0)
+# Billing (v0.12.5)
 
 Customers, invoices, and payments for Apteva agents and human teams.
 
@@ -7,9 +7,12 @@ Customers, invoices, and payments for Apteva agents and human teams.
 - **Customers** with billing address, tax IDs, soft-delete + merge.
 - **Invoices** with line items and an explicit lifecycle
   (draft → open → paid / void / uncollectible). The invoice issuer remains
-  local; Stripe can process its outstanding balance through Checkout.
+  local; Stripe can process its outstanding balance through Checkout. An
+  optional `accounting_date` records the invoice's posting date independently
+  from its creation, finalization, due, and payment timestamps.
 - **Payments and refunds** for Stripe, wire, cash, check, and other methods,
-  with provider-ID idempotency and paid-invoice reopening after refunds.
+  with provider-ID idempotency, historical `received_at` support, authoritative
+  invoice `paid_at`, and paid-invoice reopening after refunds.
 - **Automatic invoice collection** through a reusable saved payment method,
   with caller-stable idempotency, durable attempts, and webhook reconciliation.
 - **Append-only audit log** per invoice for status transitions.
