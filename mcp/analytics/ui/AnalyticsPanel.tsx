@@ -19,7 +19,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Archive, Plus, RefreshCw } from "lucide-react";
-import { batchResultsByID, formatMetric, formatObjectivePeriod, formatObjectiveValue, isCurrentRequest, objectiveMonthBounds, objectiveProgressWidth, partitionDashboardWidgets, resolvedWindow, scopedAppURL } from "./dashboard-ui";
+import { batchResultsByID, formatMetric, formatObjectivePeriod, formatObjectiveValue, isCurrentRequest, objectiveMonthBounds, objectiveProgressWidth, partitionDashboardWidgets, resolveMetricConfig, resolvedWindow, scopedAppURL } from "./dashboard-ui";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps are independently
@@ -1141,14 +1141,14 @@ function widgetPreset(type: DashboardWidget["type"], position: number): Partial<
         type,
         title: "Page Views",
         position,
-        config: { topic: "page_view", window: "24h" },
+        config: { topic: "page_view", window: "24h", aggregation: "count", format: "number" },
       };
     case "timeseries":
       return {
         type,
         title: "Live Page Views",
         position,
-        config: { topic: "page_view", window: "30m", interval: "minute" },
+        config: { topic: "page_view", window: "30m", interval: "minute", aggregation: "count", format: "number" },
       };
     case "top":
       return {
@@ -1175,16 +1175,17 @@ function widgetPreset(type: DashboardWidget["type"], position: number): Partial<
 }
 
 function WidgetView({ widget, data, filters }: { widget: DashboardWidget; data: any; filters: Record<string, string> }) {
+	const metricConfig = resolveMetricConfig(widget.config, filters);
   const body = !data ? (
     <Empty label="Loading widget…" />
   ) : data.error ? (
     <div className="border border-error text-error rounded p-3 text-sm" role="alert">{String(data.error)}</div>
   ) : widget.type === "stat" ? (
     <div className="text-text font-semibold tabular-nums" style={{ fontSize: "34px", lineHeight: 1 }}>
-      {formatMetric(data.value ?? 0, widget.config)}
+      {formatMetric(data.value ?? 0, metricConfig)}
     </div>
   ) : widget.type === "timeseries" ? (
-    <TrendSeries config={widget.config} data={(data.series ?? []).map((p: any) => ({ day: p.bucket, count: p.count, value: p.value }))} />
+    <TrendSeries config={metricConfig} data={(data.series ?? []).map((p: any) => ({ day: p.bucket, count: p.count, value: p.value }))} />
   ) : widget.type === "feed" ? (
     <EventFeed rows={data.events ?? []} />
   ) : (

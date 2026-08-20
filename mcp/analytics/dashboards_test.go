@@ -241,3 +241,147 @@ func TestDashboardFilterOptions(t *testing.T) {
 		t.Fatalf("first option = %#v, want Page A count 2", options[0])
 	}
 }
+
+func TestStatWidgetGenericAggregations(t *testing.T) {
+	db := testDashboardDB(t)
+	base := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	for i, value := range []string{"10", "20", "5"} {
+		if _, err := insertEvent(db, EventInsert{
+			TS: base.Add(time.Duration(i) * time.Hour).UnixMilli(), App: "subscriptions", Topic: "mrr.snapshot",
+			ProjectID: "p1", Source: "track", Props: `{"mrr":` + value + `,"account":"a` + value + `"}`,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tt := range []struct {
+		aggregation string
+		want        float64
+	}{
+		{"sum", 35}, {"average", 35.0 / 3.0}, {"avg", 35.0 / 3.0},
+		{"min", 5}, {"max", 20}, {"latest", 5}, {"change", -5},
+	} {
+		t.Run(tt.aggregation, func(t *testing.T) {
+			got, err := evaluateWidget(db, "p1", DashboardWidget{Type: "stat", Config: map[string]any{
+				"app": "subscriptions", "topic": "mrr.snapshot", "window": "all",
+				"value": "props.mrr", "aggregation": tt.aggregation,
+			}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got["value"] != tt.want {
+				t.Fatalf("value=%v want %v", got["value"], tt.want)
+			}
+		})
+	}
+
+	change, err := evaluateWidget(db, "p1", DashboardWidget{Type: "stat", Config: map[string]any{
+		"app": "subscriptions", "topic": "mrr.snapshot", "window": "all", "value": "props.mrr", "aggregation": "change",
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if change["previous"] != 10.0 || change["current"] != 5.0 || change["change"] != -5.0 || change["change_percent"] != -50.0 {
+		t.Fatalf("change metadata=%#v", change)
+	}
+}
+
+func TestCountDistinctAndLegacyAggregationDefaults(t *testing.T) {
+	db := testDashboardDB(t)
+	for i, account := range []string{"a", "b", "a"} {
+		if _, err := insertEvent(db, EventInsert{
+			TS: time.Now().Add(time.Duration(i) * time.Millisecond).UnixMilli(), App: "members", Topic: "member.seen",
+			ProjectID: "p1", Source: "track", Props: `{"account":"` + account + `","amount":2}`,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, testCase := range []struct {
+		config map[string]any
+		want   any
+	}{
+		{map[string]any{"aggregation": "count"}, int64(3)},
+		{map[string]any{"aggregation": "distinct", "by": "props.account"}, int64(2)},
+		{map[string]any{"by": "props.account"}, int64(2)},
+		{map[string]any{"value": "props.amount"}, 6.0},
+	} {
+		testCase.config["app"], testCase.config["topic"], testCase.config["window"] = "members", "member.seen", "all"
+		got, err := evaluateWidget(db, "p1", DashboardWidget{Type: "stat", Config: testCase.config}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got["value"] != testCase.want {
+			t.Fatalf("config=%#v value=%v want %v", testCase.config, got["value"], testCase.want)
+		}
+	}
+}
+
+func TestTimeseriesGenericAggregations(t *testing.T) {
+	db := testDashboardDB(t)
+	day := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	for i, value := range []string{"100", "130", "125"} {
+		if _, err := insertEvent(db, EventInsert{
+			TS: day.Add(time.Duration(i) * time.Hour).UnixMilli(), App: "members", Topic: "members.snapshot",
+			ProjectID: "p1", Source: "track", Props: `{"members":` + value + `,"account":"a` + value + `"}`,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tt := range []struct {
+		aggregation string
+		want        any
+	}{
+		{"average", 355.0 / 3.0}, {"min", 100.0}, {"max", 130.0}, {"latest", 125.0}, {"change", 25.0}, {"distinct", int64(3)},
+	} {
+		t.Run(tt.aggregation, func(t *testing.T) {
+			config := map[string]any{
+				"app": "members", "topic": "members.snapshot", "window": "all", "interval": "day", "aggregation": tt.aggregation,
+			}
+			if tt.aggregation == "distinct" {
+				config["by"] = "props.account"
+			} else {
+				config["value"] = "props.members"
+			}
+			got, err := evaluateWidget(db, "p1", DashboardWidget{Type: "timeseries", Config: config}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			series := got["series"].([]map[string]any)
+			if len(series) != 1 || series[0]["value"] != tt.want {
+				t.Fatalf("series=%#v want %v", series, tt.want)
+			}
+		})
+	}
+}
+
+func TestEveryNumericAggregationRejectsText(t *testing.T) {
+	for _, aggregation := range []string{"sum", "average", "min", "max", "latest", "change"} {
+		t.Run(aggregation, func(t *testing.T) {
+			db := testDashboardDB(t)
+			if _, err := insertEvent(db, EventInsert{TS: time.Now().UnixMilli(), App: "billing", Topic: "snapshot", ProjectID: "p1", Source: "test", Props: `{"amount":"$372"}`}); err != nil {
+				t.Fatal(err)
+			}
+			for _, widgetType := range []string{"stat", "timeseries"} {
+				_, err := evaluateWidget(db, "p1", DashboardWidget{Type: widgetType, Config: map[string]any{
+					"app": "billing", "topic": "snapshot", "window": "all", "value": "props.amount", "aggregation": aggregation,
+				}}, nil)
+				if err == nil || !strings.Contains(err.Error(), "non-numeric") {
+					t.Fatalf("%s error=%v want non-numeric", widgetType, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWidgetAggregationValidation(t *testing.T) {
+	db := testDashboardDB(t)
+	for _, config := range []map[string]any{
+		{"aggregation": "median", "value": "props.value"},
+		{"aggregation": "average"},
+		{"aggregation": "distinct"},
+	} {
+		if _, err := evaluateWidget(db, "p1", DashboardWidget{Type: "stat", Config: config}, nil); err == nil {
+			t.Fatalf("config %#v should fail", config)
+		}
+	}
+}

@@ -577,32 +577,33 @@ func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget, selectedFil
 	limit := intConfig(cfg, "limit", 10)
 	switch w.Type {
 	case "stat":
-		if valueKey := stringConfig(cfg, "value", ""); valueKey != "" {
-			sum, count, err := sumScalarForWidget(db, f, valueKey)
-			if err != nil {
-				return nil, err
-			}
-			return map[string]any{"type": w.Type, "value": sum, "count": count, "metric": "sum", "field": valueKey}, nil
-		}
-		var (
-			n   int64
-			err error
-		)
-		if by := stringConfig(cfg, "by", ""); by != "" {
-			n, err = distinctCount(db, f, by)
-		} else {
-			n, err = countEvents(db, f)
-		}
+		aggregation, err := widgetAggregation(cfg)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"type": w.Type, "value": n}, nil
+		return evaluateStatWidget(db, f, w.Type, cfg, aggregation)
 	case "timeseries":
-		rows, err := seriesForWidget(db, f, stringConfig(cfg, "interval", "minute"), stringConfig(cfg, "value", ""))
+		aggregation, err := widgetAggregation(cfg)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"type": w.Type, "series": rows}, nil
+		rows, err := seriesForWidget(
+			db,
+			f,
+			stringConfig(cfg, "interval", "minute"),
+			stringConfig(cfg, "value", ""),
+			stringConfig(cfg, "by", ""),
+			aggregation,
+		)
+		if err != nil {
+			return nil, err
+		}
+		result := map[string]any{"type": w.Type, "series": rows, "aggregation": aggregation}
+		if aggregation != "count" && aggregation != "distinct" {
+			result["metric"] = aggregation
+			result["field"] = stringConfig(cfg, "value", "")
+		}
+		return result, nil
 	case "top", "breakdown":
 		by := stringConfig(cfg, "by", "props.path")
 		rows, err := topByPropsKey(db, f, by, limit)
@@ -618,6 +619,65 @@ func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget, selectedFil
 		return map[string]any{"type": w.Type, "events": rows}, nil
 	default:
 		return nil, fmt.Errorf("unsupported widget type %q", w.Type)
+	}
+}
+
+func evaluateStatWidget(db *sql.DB, f Filter, widgetType string, cfg map[string]any, aggregation string) (map[string]any, error) {
+	valueKey := stringConfig(cfg, "value", "")
+	by := stringConfig(cfg, "by", "")
+	if aggregation == "count" {
+		n, err := countEvents(db, f)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"type": widgetType, "value": n, "aggregation": aggregation}, nil
+	}
+	if aggregation == "distinct" {
+		if by == "" {
+			by = valueKey
+		}
+		if by == "" {
+			return nil, fmt.Errorf("distinct aggregation requires by or value")
+		}
+		n, err := distinctCount(db, f, by)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"type": widgetType, "value": n, "aggregation": aggregation, "field": by}, nil
+	}
+	if valueKey == "" {
+		return nil, fmt.Errorf("%s aggregation requires value", aggregation)
+	}
+	result, err := numericScalarForWidget(db, f, valueKey, aggregation)
+	if err != nil {
+		return nil, err
+	}
+	result["type"] = widgetType
+	return result, nil
+}
+
+// widgetAggregation makes aggregation explicit without changing saved v0.9
+// dashboards: value implied sum, by implied distinct, and a bare widget
+// implied event count.
+func widgetAggregation(cfg map[string]any) (string, error) {
+	aggregation := strings.ToLower(strings.TrimSpace(stringConfig(cfg, "aggregation", "")))
+	if aggregation == "avg" {
+		aggregation = "average"
+	}
+	if aggregation == "" {
+		if stringConfig(cfg, "by", "") != "" && stringConfig(cfg, "value", "") == "" {
+			return "distinct", nil
+		}
+		if stringConfig(cfg, "value", "") != "" {
+			return "sum", nil
+		}
+		return "count", nil
+	}
+	switch aggregation {
+	case "count", "distinct", "sum", "average", "min", "max", "latest", "change":
+		return aggregation, nil
+	default:
+		return "", fmt.Errorf("unsupported aggregation %q", aggregation)
 	}
 }
 
@@ -638,35 +698,42 @@ func filterFromWidget(projectID string, cfg map[string]any) Filter {
 	return f
 }
 
-func seriesForWidget(db *sql.DB, f Filter, interval, valueKey string) ([]map[string]any, error) {
+func seriesForWidget(db *sql.DB, f Filter, interval, valueKey, by, aggregation string) ([]map[string]any, error) {
 	where, args := f.buildWhere()
-	expr := "strftime('%Y-%m-%dT%H:%M:00Z', ts / 1000, 'unixepoch')"
-	switch interval {
-	case "hour":
-		expr = "strftime('%Y-%m-%dT%H:00:00Z', ts / 1000, 'unixepoch')"
-	case "day":
-		expr = "strftime('%Y-%m-%d', ts / 1000, 'unixepoch')"
+	bucketExpr := dashboardBucketExpr(interval)
+	if aggregation == "latest" || aggregation == "change" {
+		return orderedSeriesForWidget(db, f, bucketExpr, valueKey, aggregation)
 	}
 	valueExpr := ""
 	numericPredicate := ""
-	if valueKey != "" {
+	selectValue := "COUNT(*) AS count"
+	if aggregation == "distinct" {
+		field := by
+		if field == "" {
+			field = valueKey
+		}
+		var ok bool
+		valueExpr, ok = dashboardGroupExpr(field)
+		if !ok || field == "" {
+			return nil, fmt.Errorf("distinct aggregation requires a valid by or value field")
+		}
+		selectValue = "COUNT(DISTINCT " + valueExpr + ") AS value, COUNT(*) AS count"
+	} else if aggregation != "count" {
 		var ok bool
 		valueExpr, numericPredicate, ok = numericValueExtract(valueKey)
-		if !ok {
-			return nil, fmt.Errorf("value must be a numeric event field or props.X")
+		if !ok || valueKey == "" {
+			return nil, fmt.Errorf("%s aggregation requires a numeric event field or props.X", aggregation)
 		}
+		sqlAggregation := map[string]string{"sum": "SUM", "average": "AVG", "min": "MIN", "max": "MAX"}[aggregation]
+		selectValue = sqlAggregation + "(CASE WHEN " + numericPredicate + " THEN CAST(" + valueExpr + " AS REAL) END) AS value, COUNT(*) AS count, SUM(CASE WHEN " + numericPredicate + " THEN 0 ELSE 1 END) AS invalid_count"
 	}
-	q := "SELECT " + expr + " AS bucket, COUNT(*) AS count"
-	if valueExpr != "" {
-		q += ", SUM(CASE WHEN " + numericPredicate + " THEN CAST(" + valueExpr + " AS REAL) END) AS value, SUM(CASE WHEN " + numericPredicate + " THEN 0 ELSE 1 END) AS invalid_count"
-	}
-	q += " FROM events"
+	q := "SELECT " + bucketExpr + " AS bucket, " + selectValue + " FROM events"
 	if where != "" {
 		q += " WHERE " + where
-		if valueExpr != "" {
+		if valueExpr != "" && aggregation != "count" {
 			q += " AND " + valueExpr + " IS NOT NULL"
 		}
-	} else if valueExpr != "" {
+	} else if valueExpr != "" && aggregation != "count" {
 		q += " WHERE " + valueExpr + " IS NOT NULL"
 	}
 	q += " GROUP BY bucket ORDER BY bucket"
@@ -679,16 +746,22 @@ func seriesForWidget(db *sql.DB, f Filter, interval, valueKey string) ([]map[str
 	for rows.Next() {
 		var bucket string
 		var count int64
-		if valueExpr != "" {
+		if aggregation == "distinct" {
+			var value int64
+			if err := rows.Scan(&bucket, &value, &count); err != nil {
+				return nil, err
+			}
+			out = append(out, map[string]any{"bucket": bucket, "count": count, "value": value, "aggregation": aggregation})
+		} else if aggregation != "count" {
 			var value sql.NullFloat64
 			var invalid int64
-			if err := rows.Scan(&bucket, &count, &value, &invalid); err != nil {
+			if err := rows.Scan(&bucket, &value, &count, &invalid); err != nil {
 				return nil, err
 			}
 			if invalid > 0 {
 				return nil, fmt.Errorf("value %q contains %d non-numeric row(s) in bucket %s", valueKey, invalid, bucket)
 			}
-			row := map[string]any{"bucket": bucket, "count": count, "value": 0.0}
+			row := map[string]any{"bucket": bucket, "count": count, "value": 0.0, "aggregation": aggregation}
 			if value.Valid {
 				row["value"] = value.Float64
 			}
@@ -703,28 +776,174 @@ func seriesForWidget(db *sql.DB, f Filter, interval, valueKey string) ([]map[str
 	return out, rows.Err()
 }
 
-func sumScalarForWidget(db *sql.DB, f Filter, valueKey string) (float64, int64, error) {
+func dashboardBucketExpr(interval string) string {
+	switch interval {
+	case "hour":
+		return "strftime('%Y-%m-%dT%H:00:00Z', ts / 1000, 'unixepoch')"
+	case "day":
+		return "strftime('%Y-%m-%d', ts / 1000, 'unixepoch')"
+	default:
+		return "strftime('%Y-%m-%dT%H:%M:00Z', ts / 1000, 'unixepoch')"
+	}
+}
+
+func numericScalarForWidget(db *sql.DB, f Filter, valueKey, aggregation string) (map[string]any, error) {
 	expr, numericPredicate, ok := numericValueExtract(valueKey)
 	if !ok {
-		return 0, 0, fmt.Errorf("value must be a numeric event field or props.X")
+		return nil, fmt.Errorf("value must be a numeric event field or props.X")
 	}
 	where, args := f.buildWhere()
-	q := "SELECT COALESCE(SUM(CASE WHEN " + numericPredicate + " THEN CAST(" + expr + " AS REAL) END), 0), COUNT(*), COALESCE(SUM(CASE WHEN " + numericPredicate + " THEN 0 ELSE 1 END), 0) FROM events"
+	valueWhere := expr + " IS NOT NULL"
 	if where != "" {
-		q += " WHERE " + where + " AND " + expr + " IS NOT NULL"
-	} else {
-		q += " WHERE " + expr + " IS NOT NULL"
+		valueWhere = where + " AND " + valueWhere
 	}
-	var sum float64
+	if aggregation == "latest" || aggregation == "change" {
+		return orderedScalarForWidget(db, expr, numericPredicate, valueWhere, args, valueKey, aggregation)
+	}
+	sqlAggregation := map[string]string{"sum": "SUM", "average": "AVG", "min": "MIN", "max": "MAX"}[aggregation]
+	if sqlAggregation == "" {
+		return nil, fmt.Errorf("unsupported numeric aggregation %q", aggregation)
+	}
+	q := "SELECT " + sqlAggregation + "(CASE WHEN " + numericPredicate + " THEN CAST(" + expr + " AS REAL) END), COUNT(*), COALESCE(SUM(CASE WHEN " + numericPredicate + " THEN 0 ELSE 1 END), 0) FROM events WHERE " + valueWhere
+	var value sql.NullFloat64
 	var count int64
 	var invalid int64
-	if err := db.QueryRow(q, args...).Scan(&sum, &count, &invalid); err != nil {
-		return 0, 0, err
+	if err := db.QueryRow(q, args...).Scan(&value, &count, &invalid); err != nil {
+		return nil, err
 	}
 	if invalid > 0 {
-		return 0, count, fmt.Errorf("value %q contains %d non-numeric row(s)", valueKey, invalid)
+		return nil, fmt.Errorf("value %q contains %d non-numeric row(s)", valueKey, invalid)
 	}
-	return sum, count, nil
+	resultValue := 0.0
+	if value.Valid {
+		resultValue = value.Float64
+	}
+	return map[string]any{"value": resultValue, "count": count, "aggregation": aggregation, "metric": aggregation, "field": valueKey}, nil
+}
+
+// sumScalarForWidget remains the shared strict-sum primitive used by v0.9
+// objective targets as well as legacy dashboard callers.
+func sumScalarForWidget(db *sql.DB, f Filter, valueKey string) (float64, int64, error) {
+	result, err := numericScalarForWidget(db, f, valueKey, "sum")
+	if err != nil {
+		return 0, 0, err
+	}
+	value, _ := result["value"].(float64)
+	count, _ := result["count"].(int64)
+	return value, count, nil
+}
+
+func orderedScalarForWidget(db *sql.DB, expr, numericPredicate, where string, args []any, valueKey, aggregation string) (map[string]any, error) {
+	var invalid int64
+	if err := db.QueryRow("SELECT COALESCE(SUM(CASE WHEN "+numericPredicate+" THEN 0 ELSE 1 END), 0) FROM events WHERE "+where, args...).Scan(&invalid); err != nil {
+		return nil, err
+	}
+	if invalid > 0 {
+		return nil, fmt.Errorf("value %q contains %d non-numeric row(s)", valueKey, invalid)
+	}
+	qBase := "SELECT CAST(" + expr + " AS REAL) FROM events WHERE " + where
+	var first, latest sql.NullFloat64
+	if err := db.QueryRow(qBase+" ORDER BY ts, id LIMIT 1", args...).Scan(&first); err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if err := db.QueryRow(qBase+" ORDER BY ts DESC, id DESC LIMIT 1", args...).Scan(&latest); err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	var count int64
+	if err := db.QueryRow("SELECT COUNT(*) FROM events WHERE "+where, args...).Scan(&count); err != nil {
+		return nil, err
+	}
+	latestValue := 0.0
+	if latest.Valid {
+		latestValue = latest.Float64
+	}
+	result := map[string]any{"value": latestValue, "count": count, "aggregation": aggregation, "metric": aggregation, "field": valueKey}
+	if aggregation == "change" {
+		previous := 0.0
+		if first.Valid {
+			previous = first.Float64
+		}
+		change := latestValue - previous
+		result["value"] = change
+		result["previous"] = previous
+		result["current"] = latestValue
+		result["change"] = change
+		if first.Valid && previous != 0 {
+			result["change_percent"] = change / previous * 100
+		}
+	}
+	return result, nil
+}
+
+func orderedSeriesForWidget(db *sql.DB, f Filter, bucketExpr, valueKey, aggregation string) ([]map[string]any, error) {
+	expr, numericPredicate, ok := numericValueExtract(valueKey)
+	if !ok || valueKey == "" {
+		return nil, fmt.Errorf("%s aggregation requires a numeric event field or props.X", aggregation)
+	}
+	where, args := f.buildWhere()
+	if where != "" {
+		where += " AND " + expr + " IS NOT NULL"
+	} else {
+		where = expr + " IS NOT NULL"
+	}
+	q := "SELECT " + bucketExpr + " AS bucket, CAST(" + expr + " AS REAL), CASE WHEN " + numericPredicate + " THEN 1 ELSE 0 END, ts, id FROM events WHERE " + where + " ORDER BY bucket, ts, id"
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type bucketValues struct {
+		bucket      string
+		first, last float64
+		count       int64
+	}
+	var current bucketValues
+	var out []map[string]any
+	flush := func() {
+		if current.count == 0 {
+			return
+		}
+		value := current.last
+		row := map[string]any{"bucket": current.bucket, "count": current.count, "value": value, "aggregation": aggregation}
+		if aggregation == "change" {
+			value = current.last - current.first
+			row["value"] = value
+			row["previous"] = current.first
+			row["current"] = current.last
+			row["change"] = value
+			if current.first != 0 {
+				row["change_percent"] = value / current.first * 100
+			}
+		}
+		out = append(out, row)
+	}
+	for rows.Next() {
+		var bucket string
+		var value float64
+		var numeric int
+		var ts, id int64
+		if err := rows.Scan(&bucket, &value, &numeric, &ts, &id); err != nil {
+			return nil, err
+		}
+		if numeric == 0 {
+			return nil, fmt.Errorf("value %q contains a non-numeric row in bucket %s", valueKey, bucket)
+		}
+		if current.count > 0 && bucket != current.bucket {
+			flush()
+			current = bucketValues{}
+		}
+		if current.count == 0 {
+			current.bucket = bucket
+			current.first = value
+		}
+		current.last = value
+		current.count++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	flush()
+	return out, nil
 }
 
 func distinctCount(db *sql.DB, f Filter, by string) (int64, error) {
@@ -929,9 +1148,9 @@ func templateWidgets(name string) []DashboardWidget {
 			"props.page_id": "$filters.page_id",
 		}
 		return []DashboardWidget{
-			{Type: "timeseries", Title: "Net Earnings", Config: map[string]any{"app": "patreon", "topic": "daily_earnings_snapshot", "window": "$filters.window", "interval": "day", "value": "props.net_earnings_total", "format": "currency", "currency": "USD", "where": map[string]any{"props.page_id": "$filters.page_id", "props.currency": "$filters.currency"}}},
-			{Type: "timeseries", Title: "Paid Members", Config: map[string]any{"app": "patreon", "topic": "daily_membership_snapshot", "window": "$filters.window", "interval": "day", "value": "props.paid_members", "where": filtered}},
-			{Type: "timeseries", Title: "Traffic Views", Config: map[string]any{"app": "patreon", "topic": "daily_traffic_snapshot", "window": "$filters.window", "interval": "day", "value": "props.total_views", "where": filtered}},
+			{Type: "timeseries", Title: "Net Earnings", Config: map[string]any{"app": "patreon", "topic": "daily_earnings_snapshot", "window": "$filters.window", "interval": "day", "value": "props.net_earnings_total", "aggregation": "sum", "format": "currency", "currency": "USD", "where": map[string]any{"props.page_id": "$filters.page_id", "props.currency": "$filters.currency"}}},
+			{Type: "timeseries", Title: "Paid Members", Config: map[string]any{"app": "patreon", "topic": "daily_membership_snapshot", "window": "$filters.window", "interval": "day", "value": "props.paid_members", "aggregation": "sum", "format": "number", "where": filtered}},
+			{Type: "timeseries", Title: "Traffic Views", Config: map[string]any{"app": "patreon", "topic": "daily_traffic_snapshot", "window": "$filters.window", "interval": "day", "value": "props.total_views", "aggregation": "sum", "format": "number", "where": filtered}},
 			{Type: "feed", Title: "Latest Patreon Snapshots", Config: map[string]any{"app": "patreon", "window": "$filters.window", "limit": 25, "where": filtered}},
 		}
 	}
@@ -939,9 +1158,9 @@ func templateWidgets(name string) []DashboardWidget {
 		return nil
 	}
 	return []DashboardWidget{
-		{Type: "stat", Title: "Page Views Today", Config: map[string]any{"topic": "page_view", "window": "24h"}},
-		{Type: "stat", Title: "Active Sessions", Config: map[string]any{"topic": "page_view", "window": "5m", "by": "session_id"}},
-		{Type: "timeseries", Title: "Live Page Views", Config: map[string]any{"topic": "page_view", "window": "30m", "interval": "minute"}},
+		{Type: "stat", Title: "Page Views Today", Config: map[string]any{"topic": "page_view", "window": "24h", "aggregation": "count", "format": "number"}},
+		{Type: "stat", Title: "Active Sessions", Config: map[string]any{"topic": "page_view", "window": "5m", "by": "session_id", "aggregation": "distinct", "format": "number"}},
+		{Type: "timeseries", Title: "Live Page Views", Config: map[string]any{"topic": "page_view", "window": "30m", "interval": "minute", "aggregation": "count", "format": "number"}},
 		{Type: "top", Title: "Top Pages", Config: map[string]any{"topic": "page_view", "window": "24h", "by": "props.path", "limit": 8}},
 		{Type: "breakdown", Title: "Devices", Config: map[string]any{"topic": "page_view", "window": "24h", "by": "props.device", "limit": 5}},
 		{Type: "feed", Title: "Live Activity", Config: map[string]any{"topic": "page_view", "window": "30m", "limit": 20}},

@@ -4,21 +4,68 @@ export interface DashboardWidgetResult {
   error?: string;
 }
 
+export interface DashboardChoice {
+	id: number;
+}
+
+export interface DashboardFilterDefault {
+	key: string;
+	type?: string;
+	default?: string;
+}
+
+export function defaultDashboardFilters(filters: DashboardFilterDefault[]): Record<string, string> {
+	return Object.fromEntries(filters.map((filter) => [
+		filter.key,
+		filter.default || (filter.type === "date_window" ? "30d" : "all"),
+	]));
+}
+
+export function selectDashboardID(rows: DashboardChoice[], preferredID: number, storedID: number): number {
+	return rows.find((row) => row.id === preferredID)?.id
+		|| rows.find((row) => row.id === storedID)?.id
+		|| rows[0]?.id
+		|| 0;
+}
+
 export function formatMetric(value: number, config: Record<string, unknown>): string {
-  const numeric = Number.isFinite(value) ? value : 0;
-  if (config.format === "currency") {
-    const currency = typeof config.currency === "string" && config.currency ? config.currency : "USD";
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency,
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 2,
-    }).format(numeric);
-  }
-  if (config.format === "percent") {
-    return new Intl.NumberFormat("en-US", { style: "percent", maximumFractionDigits: 1 }).format(numeric);
-  }
-  return numeric.toLocaleString();
+	const raw = Number.isFinite(value) ? value : 0;
+	const configuredScale = Number(config.scale ?? 1);
+	const numeric = raw * (Number.isFinite(configuredScale) ? configuredScale : 1);
+	const configuredDecimals = Number(config.decimals);
+	const hasConfiguredDecimals = Number.isFinite(configuredDecimals);
+	const decimals = Math.max(0, Math.min(6, hasConfiguredDecimals ? Math.floor(configuredDecimals) : 2));
+	if (config.format === "currency") {
+		const currency = typeof config.currency === "string" && config.currency ? config.currency : "USD";
+		return new Intl.NumberFormat("en-US", {
+			style: "currency",
+			currency,
+			minimumFractionDigits: hasConfiguredDecimals ? decimals : 0,
+			maximumFractionDigits: decimals,
+		}).format(numeric);
+	}
+	if (config.format === "percent") {
+		return new Intl.NumberFormat("en-US", {
+			style: "percent",
+			minimumFractionDigits: hasConfiguredDecimals ? decimals : 0,
+			maximumFractionDigits: hasConfiguredDecimals ? decimals : 1,
+		}).format(numeric);
+	}
+	const formatted = new Intl.NumberFormat("en-US", {
+		...(config.format === "compact" || config.compact === true ? { notation: "compact" as const } : {}),
+		...(hasConfiguredDecimals ? { minimumFractionDigits: decimals, maximumFractionDigits: decimals } : {}),
+	}).format(numeric);
+	return typeof config.unit === "string" && config.unit ? `${formatted} ${config.unit}` : formatted;
+}
+
+export function resolveMetricConfig(config: Record<string, unknown>, filters: Record<string, string>): Record<string, unknown> {
+	const out = { ...config };
+	for (const [key, value] of Object.entries(out)) {
+		if (typeof value === "string" && value.startsWith("$filters.")) {
+			out[key] = filters[value.slice("$filters.".length)] || value;
+		}
+	}
+	return out;
 }
 
 export function resolvedWindow(config: Record<string, unknown>, filters: Record<string, string>): string {

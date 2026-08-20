@@ -1,10 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import { batchResultsByID, formatMetric, formatObjectivePeriod, formatObjectiveValue, isCurrentRequest, objectiveMonthBounds, objectiveProgressWidth, partitionDashboardWidgets, resolvedWindow, scopedAppURL } from "./dashboard-ui";
+import { batchResultsByID, formatMetric, formatObjectivePeriod, formatObjectiveValue, isCurrentRequest, objectiveMonthBounds, objectiveProgressWidth, partitionDashboardWidgets, resolveMetricConfig, resolvedWindow, scopedAppURL } from "./dashboard-ui";
 
 describe("dashboard UI helpers", () => {
-  test("formats normalized Patreon money with an explicit USD unit", () => {
-    expect(formatMetric(1715.62, { format: "currency", currency: "USD" })).toBe("$1,715.62");
-  });
+	test("formats normalized Patreon money with an explicit USD unit", () => {
+		expect(formatMetric(1715.62, { format: "currency", currency: "USD" })).toBe("$1,715.62");
+	});
+
+	test("formats generic scaled, compact, decimal, and unit metrics", () => {
+		expect(formatMetric(1250, { format: "compact", decimals: 1 })).toBe("1.3K");
+		expect(formatMetric(0.125, { scale: 100, decimals: 1, unit: "pts" })).toBe("12.5 pts");
+		expect(formatMetric(0.125, { format: "percent" })).toBe("12.5%");
+	});
+
+	test("resolves display units from dashboard filters", () => {
+		expect(resolveMetricConfig({ format: "currency", currency: "$filters.currency" }, { currency: "EUR" })).toEqual({
+			format: "currency",
+			currency: "EUR",
+		});
+	});
 
   test("resolves window placeholders from current dashboard filters", () => {
     expect(resolvedWindow({ window: "$filters.window" }, { window: "30d" })).toBe("30d");

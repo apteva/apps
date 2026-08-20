@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.9.0
+version: 0.10.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -51,6 +51,10 @@ description: |
   v0.9 adds measurable objectives and targets over events already stored
   in Analytics. Targets use project-scoped count, sum, or distinct queries;
   no external app dependency or cross-app call is required.
+  v0.10 adds a generic project-home widget backed by any saved dashboard,
+  plus reusable count, distinct, sum, average, min, max, latest, and change
+  aggregations for dashboard stats and timeseries. Existing value/by widgets
+  retain their v0.9 sum/distinct behavior without migration.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -147,6 +151,36 @@ provides:
       label: Analytics
       icon: trending-up
       entry: /ui/AnalyticsPanel.mjs
+  ui_components:
+    - name: analytics-dashboard
+      label: Analytics
+      description: Live saved metrics, trends, and project activity from any Analytics dashboard.
+      entry: /ui/AnalyticsDashboardWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [event.recorded]
+      settings_schema:
+        type: object
+        properties:
+          dashboard_id:
+            type: integer
+            title: Dashboard ID
+            description: Saved Analytics dashboard to show. Leave unset to use the newest dashboard.
+            minimum: 1
+          show_trends:
+            type: boolean
+            title: Show trends and details
+            default: true
+          max_metrics:
+            type: integer
+            title: Maximum metrics
+            description: Maximum stat cards displayed before trends and details.
+            default: 3
+            minimum: 1
+            maximum: 6
 runtime:
   kind: source
   source:
