@@ -78,6 +78,7 @@ interface Conversation {
   kind: "direct" | "room";
   origin: string;
   audience?: string;
+  created_at: string;
   updated_at: string;
 }
 
@@ -150,14 +151,19 @@ interface ParticipantsInfo {
 
 // ─── fetch helpers ───────────────────────────────────────────────────
 
-async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${API}${path}`, { credentials: "same-origin" });
+function scopedPath(path: string, projectId: string): string {
+  if (!projectId) throw new Error("project context required");
+  return `${path}${path.includes("?") ? "&" : "?"}project_id=${encodeURIComponent(projectId)}`;
+}
+
+async function apiGet<T>(path: string, projectId: string): Promise<T> {
+  const res = await fetch(`${API}${scopedPath(path, projectId)}`, { credentials: "same-origin" });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-async function apiSend<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
+async function apiSend<T>(method: string, path: string, body: unknown, projectId: string): Promise<T> {
+  const res = await fetch(`${API}${scopedPath(path, projectId)}`, {
     method,
     credentials: "same-origin",
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
@@ -167,9 +173,9 @@ async function apiSend<T>(method: string, path: string, body?: unknown): Promise
   return res.json();
 }
 
-const apiPost = <T,>(path: string, body: unknown) => apiSend<T>("POST", path, body);
-const apiPatch = <T,>(path: string, body: unknown) => apiSend<T>("PATCH", path, body);
-const apiDelete = <T,>(path: string) => apiSend<T>("DELETE", path);
+const apiPost = <T,>(path: string, body: unknown, projectId: string) => apiSend<T>("POST", path, body, projectId);
+const apiPatch = <T,>(path: string, body: unknown, projectId: string) => apiSend<T>("PATCH", path, body, projectId);
+const apiDelete = <T,>(path: string, projectId: string) => apiSend<T>("DELETE", path, undefined, projectId);
 
 // useMediaQuery mirrors the dashboard hook of the same name — the
 // context column gates on JS matchMedia (1024px, the lg breakpoint)
@@ -546,7 +552,7 @@ function NewConversationDialog({
         lead_agent_id: leadId ?? selected[0],
         title: title.trim() || undefined,
         project_id: projectId,
-      });
+      }, projectId);
       reset();
       onCreated(conversation);
     } catch (err) {
@@ -689,7 +695,7 @@ function DetailsDialog({
     setAddAgentId("");
     setConfirmDelete(false);
     setError("");
-    apiGet<ParticipantsInfo>(`/participants?id=${encodeURIComponent(conversation.id)}`).then(
+    apiGet<ParticipantsInfo>(`/participants?id=${encodeURIComponent(conversation.id)}`, conversation.project_id).then(
       setParticipants,
       (err) => setError(err instanceof Error ? err.message : String(err)),
     );
@@ -724,7 +730,7 @@ function DetailsDialog({
     const next = title.trim();
     if (!next || next === conversation.title) return;
     void run(async () => {
-      await apiPatch(`/chats?id=${encodeURIComponent(conversation.id)}`, { title: next });
+      await apiPatch(`/chats?id=${encodeURIComponent(conversation.id)}`, { title: next }, conversation.project_id);
       onChanged();
     });
   };
@@ -736,6 +742,7 @@ function DetailsDialog({
       const updated = await apiPost<ParticipantsInfo>(
         `/participants?id=${encodeURIComponent(conversation.id)}`,
         { agent_id: id },
+        conversation.project_id,
       );
       setParticipants(updated);
       setAddAgentId("");
@@ -747,6 +754,7 @@ function DetailsDialog({
     void run(async () => {
       const updated = await apiDelete<ParticipantsInfo>(
         `/participants?id=${encodeURIComponent(conversation.id)}&agent_id=${id}`,
+        conversation.project_id,
       );
       setParticipants(updated);
       onChanged();
@@ -755,7 +763,7 @@ function DetailsDialog({
 
   const archive = () => {
     void run(async () => {
-      await apiPatch(`/chats?id=${encodeURIComponent(conversation.id)}`, { archived: true });
+      await apiPatch(`/chats?id=${encodeURIComponent(conversation.id)}`, { archived: true }, conversation.project_id);
       onClose();
       onRemoved();
     });
@@ -763,7 +771,7 @@ function DetailsDialog({
 
   const remove = () => {
     void run(async () => {
-      await apiDelete(`/chats?id=${encodeURIComponent(conversation.id)}`);
+      await apiDelete(`/chats?id=${encodeURIComponent(conversation.id)}`, conversation.project_id);
       onClose();
       onRemoved();
     });
@@ -936,7 +944,7 @@ function ContextColumn({
   useEffect(() => {
     if (refreshHold) return;
     let cancelled = false;
-    apiGet<ParticipantsInfo>(`/participants?id=${encodeURIComponent(conversation.id)}`).then(
+    apiGet<ParticipantsInfo>(`/participants?id=${encodeURIComponent(conversation.id)}`, conversation.project_id).then(
       (info) => {
         if (!cancelled) setParticipants(info);
       },
@@ -1077,7 +1085,7 @@ function normalizeStreamText(value: string): string {
   return value.replace(/\r\n/g, "\n").trim();
 }
 
-function useConversationTransport(conversationID: string) {
+function useConversationTransport(conversationID: string, projectId: string) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [bubble, setBubbleState] = useState<StreamBubbleState | null>(null);
   const [connected, setConnected] = useState(false);
@@ -1226,7 +1234,7 @@ function useConversationTransport(conversationID: string) {
     const connect = () => {
       if (cancelled) return;
       es = new EventSource(
-        `${API}/stream?chat_id=${encodeURIComponent(conversationID)}&since=${highestSeenRef.current}`,
+        `${API}${scopedPath(`/stream?chat_id=${encodeURIComponent(conversationID)}&since=${highestSeenRef.current}`, projectId)}`,
         { withCredentials: true },
       );
       es.onopen = () => setConnected(true);
@@ -1274,6 +1282,7 @@ function useConversationTransport(conversationID: string) {
       try {
         const rows = await apiGet<Message[]>(
           `/messages?chat_id=${encodeURIComponent(conversationID)}&since=${highestSeenRef.current}&limit=200`,
+          projectId,
         );
         if (!cancelled) mergeMessages(rows);
       } catch {
@@ -1291,7 +1300,7 @@ function useConversationTransport(conversationID: string) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (es) es.close();
     };
-  }, [conversationID, mergeMessages, applyFrame, cancelStreamClear, setBubble]);
+  }, [conversationID, projectId, mergeMessages, applyFrame, cancelStreamClear, setBubble]);
 
   return { messages, bubble, connected, mergeMessages };
 }
@@ -1309,7 +1318,7 @@ function ChatColumn({
   onActed: () => void;
   onRemoved: () => void;
 }) {
-  const { messages, bubble, connected, mergeMessages } = useConversationTransport(conversation.id);
+  const { messages, bubble, connected, mergeMessages } = useConversationTransport(conversation.id, conversation.project_id);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
@@ -1326,7 +1335,7 @@ function ChatColumn({
     if (archiveBusy) return;
     setArchiveBusy(true);
     try {
-      await apiPatch(`/chats?id=${encodeURIComponent(conversation.id)}`, { archived: next });
+      await apiPatch(`/chats?id=${encodeURIComponent(conversation.id)}`, { archived: next }, conversation.project_id);
       onRemoved();
     } catch {
       /* surfaced by the next list refresh */
@@ -1339,7 +1348,7 @@ function ChatColumn({
     if (archiveBusy) return;
     setArchiveBusy(true);
     try {
-      await apiDelete(`/chats?id=${encodeURIComponent(conversation.id)}`);
+      await apiDelete(`/chats?id=${encodeURIComponent(conversation.id)}`, conversation.project_id);
       onRemoved();
     } catch {
       /* surfaced by the next list refresh */
@@ -1362,7 +1371,7 @@ function ChatColumn({
       const row = await apiPost<Message>(`/messages?chat_id=${encodeURIComponent(conversation.id)}`, {
         content,
         client_message_id: newClientMessageId(),
-      });
+      }, conversation.project_id);
       mergeMessages([row]);
       setDraft("");
       // Reset the auto-grown textarea and restore focus — the same
@@ -1384,7 +1393,7 @@ function ChatColumn({
       message_id: messageId,
       action_id: actionId,
       note,
-    });
+    }, conversation.project_id);
     mergeMessages([result.message]);
     onActed();
   };
@@ -1569,21 +1578,23 @@ function priorityBadge(item: InboxItem): { label: string; cls: string } {
 
 function InboxTab({
   onOpenConversation,
+  projectId,
 }: {
   onOpenConversation: (conversationID: string) => void;
+  projectId: string;
 }) {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [note, setNote] = useState("");
 
   const load = useCallback(async () => {
     try {
-      const inbox = await apiGet<InboxItem[]>("/inbox?limit=100");
+      const inbox = await apiGet<InboxItem[]>("/inbox?limit=100", projectId);
       setItems(inbox);
       setNote(`${inbox.length} item${inbox.length === 1 ? "" : "s"}`);
     } catch (err) {
       setNote(err instanceof Error ? err.message : String(err));
     }
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     load();
@@ -1592,13 +1603,13 @@ function InboxTab({
   }, [load]);
 
   const act = async (messageId: number, actionId: string, actionNote: string) => {
-    await apiPost(`/message-action`, { message_id: messageId, action_id: actionId, note: actionNote });
+    await apiPost(`/message-action`, { message_id: messageId, action_id: actionId, note: actionNote }, projectId);
     load();
   };
 
   const dismiss = async (messageId: number) => {
     try {
-      await apiPost(`/message-dismiss`, { message_id: messageId });
+      await apiPost(`/message-dismiss`, { message_id: messageId }, projectId);
       load();
     } catch (err) {
       setNote(err instanceof Error ? err.message : String(err));
@@ -1682,9 +1693,9 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
   const loadConversations = useCallback(async () => {
     try {
       const [chats, unreadEntries, inbox] = await Promise.all([
-        apiGet<Conversation[]>(`/chats${showArchived ? "?archived=1" : ""}`),
-        apiGet<UnreadEntry[]>("/unread-summary"),
-        apiGet<InboxItem[]>("/inbox?limit=100"),
+        apiGet<Conversation[]>(`/chats${showArchived ? "?archived=1" : ""}`, projectId),
+        apiGet<UnreadEntry[]>("/unread-summary", projectId),
+        apiGet<InboxItem[]>("/inbox?limit=100", projectId),
       ]);
       const scoped = projectId
         ? chats.filter((c) => !c.project_id || c.project_id === projectId)
@@ -1709,7 +1720,7 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
   // Agent directory, fetched lazily the first time a dialog needs it.
   const ensureAgents = useCallback(() => {
     if (agents !== null) return;
-    apiGet<AgentInfo[]>(`/agents${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`).then(
+    apiGet<AgentInfo[]>(`/agents`, projectId).then(
       (list) => {
         setAgents(list);
         setAgentsError("");
@@ -1731,7 +1742,7 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
     // Number.MAX_SAFE_INTEGER >> 1, is -1 in JS — bitwise ops coerce
     // to 32-bit — so every mark stored -1 and nothing ever read as
     // seen.)
-    apiPost(`/seen`, { chat_id: selectedId, last_seen_id: entry.latest_id }).then(
+    apiPost(`/seen`, { chat_id: selectedId, last_seen_id: entry.latest_id }, projectId).then(
       () => loadConversations(),
       () => {},
     );
@@ -1832,7 +1843,7 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
       </header>
 
       {tab === "inbox" ? (
-        <InboxTab onOpenConversation={openConversation} />
+        <InboxTab onOpenConversation={openConversation} projectId={projectId} />
       ) : (
         <main
           className={`flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[260px_minmax(0,1fr)] md:divide-x md:divide-border ${
@@ -1883,7 +1894,7 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
                 <p>{showArchived ? "No archived conversations." : "No conversations yet."}</p>
                 {!showArchived && (
                   <p className="text-xs text-text-dim">
-                    Start one with New conversation, or wait for an external channel to come in.
+                    Start one with New conversation, or wait for an agent or app to open one.
                   </p>
                 )}
               </div>

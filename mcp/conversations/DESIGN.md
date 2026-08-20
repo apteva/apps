@@ -1,8 +1,9 @@
 # conversations — design
 
-One app owning every conversation surface: internal dashboard chat, the
-inbox (approvals / reports / alerts / status), and external channels
-(Telegram, Slack, …) as optional integration bindings. Developed in
+One app owning the replacement conversation surfaces: internal dashboard
+chat and the inbox (approvals / reports / alerts / status). External
+transports such as Telegram and Slack are deliberately deferred; the data
+model keeps a transport seam without shipping an adapter. Developed in
 parallel with — and without touching — apteva-server's built-in
 `channel-chat` and the deprecated `channels` sidecar. Both are donors;
 neither is modified.
@@ -16,28 +17,25 @@ Splitting inbox from conversations would mean mirrored stores, duplicated
 unread bookkeeping, and a cross-app hop inside the approval round-trip —
 the single most valuable behavior in the system.
 
-External channels are not conversation *types*. A Telegram thread is an
-ordinary conversation with a transport binding: an `origin` label, a
-`conversation_key` carrying the external identity
-(`telegram:<binding>:<chat_id>`), and an externally-keyed participant.
-Features (rooms, approvals, inbox) never branch on origin; per-transport
-differences (buttons? edits? attachments?) live in the adapter.
+Future external transports will not be conversation *types*. The retained
+`origin`, `conversation_key`, external participant, and adapter seams let a
+later transport release bind an ordinary conversation without changing the
+core room, approval, or inbox model.
 
 ## Model
 
-- `conversations` — id, project, lead agent, kind (direct|room), origin
-  (web|telegram|slack|app), conversation_key (external identity, unique).
+- `conversations` — id, project, owner user, lead agent, audience
+  (operator|public), kind (direct|room), origin (web|agent|app), and an
+  optional unique conversation key.
 - `messages` — role, content, `component_kind` (approval|report|alert|
   status — a real indexed column, replacing channel-chat's
   `LIKE '%"approval-card"%'` scans), components/attachments/metadata
   JSON, `client_message_id` idempotency key.
-- `participants` — agent, platform user, or external identity
-  (`telegram:12345`) with an optional contact URI. Strangers never become
-  platform users implicitly.
+- `participants` — agent, platform user, or externally keyed identity with
+  an optional contact URI. External identities never become platform users
+  implicitly.
 - `deliveries` — the ledger. One row per (message, target); pending rows
   are redelivered on mount (crash-safe sends, the Hermes pattern).
-- `pairing_codes` — DM policy for unknown external senders: pairing
-  (default) / allowlist / open / disabled per binding.
 
 ## Surfaces
 
@@ -48,10 +46,10 @@ differences (buttons? edits? attachments?) live in the adapter.
   callback tool invoked on action. This makes the app the platform's
   notification provider; no other app needs its own inbox.
 - **HTTP** (dashboard): /chats /messages /stream (SSE) /inbox
-  /message-action /seen /pairing. (Reserved prefixes /health /manifest
+  /message-action /seen. (Reserved prefixes /health /manifest
   /mcp /events /ui/ are avoided — guarded by a test.)
-- **Adapters**: `web` (the SSE hub) is channel zero and always on;
-  `telegram` ships as a compiling stub gated on its optional binding.
+- **Adapters**: `web` (the SSE hub) is the only adapter in this release.
+  External adapters are reserved for a later transport-focused milestone.
 
 ## Thread-per-conversation
 
@@ -74,8 +72,8 @@ true in-place drift correction.
 ## Approval round-trip
 
 message-action mutates the card in place, publishes the updated row to
-every surface (one row — transcript, inbox widget, external chat all
-agree), and forwards an `approval.result` event to the owning agent's
+every current surface (one row — transcript and inbox widget agree), and
+forwards an `approval.result` event to the owning agent's
 thread via the platform API. Writer, store, and forwarder stay in one
 process.
 

@@ -57,6 +57,17 @@ func newLiveClient(t *testing.T) *liveClient {
 
 func (c *liveClient) do(method, path string, body any, out any) int {
 	c.t.Helper()
+	if strings.HasPrefix(path, "/api/apps/conversations/") {
+		projectID := strings.TrimSpace(os.Getenv("APTEVA_LIVE_PROJECT_ID"))
+		if projectID == "" {
+			c.t.Fatalf("APTEVA_LIVE_PROJECT_ID is required for conversations live tests")
+		}
+		separator := "?"
+		if strings.Contains(path, "?") {
+			separator = "&"
+		}
+		path += separator + "project_id=" + projectID
+	}
 	var reader *bytes.Reader
 	if body != nil {
 		raw, _ := json.Marshal(body)
@@ -100,10 +111,10 @@ func (c *liveClient) ensureAgent() (int64, func()) {
 		ID int64 `json:"id"`
 	}
 	status := c.do("POST", "/api/agents", map[string]any{
-		"name":      "conversations-live-codex",
-		"directive": "You are an operations and customer-support agent. Answer chat messages briefly and directly. When monitor or scheduler events arrive, act on them per your conversations skill. Policy: you may approve refunds up to $100 yourself; larger refunds require operator approval. Refuse impossible or absurd requests politely without escalating.",
-		"mode":      "autonomous",
-		"config":    `{"default_provider":"openai-codex","include_channels":false}`,
+		"name":       "conversations-live-codex",
+		"directive":  "You are an operations and customer-support agent. Answer chat messages briefly and directly. When monitor or scheduler events arrive, act on them per your conversations skill. Policy: you may approve refunds up to $100 yourself; larger refunds require operator approval. Refuse impossible or absurd requests politely without escalating.",
+		"mode":       "autonomous",
+		"config":     `{"default_provider":"openai-codex","include_channels":false}`,
 		"project_id": os.Getenv("APTEVA_LIVE_PROJECT_ID"),
 	}, &created)
 	if status != 200 || created.ID == 0 {
@@ -191,6 +202,34 @@ type liveInboxItem struct {
 	} `json:"message"`
 }
 
+// approvalActionID follows the card contract instead of assuming the model
+// omitted the optional actions argument. Real agents may use a domain-specific
+// positive action such as "delete_after_verification"; that is still a valid
+// approval and the operator must submit one of the IDs the card advertises.
+func approvalActionID(item liveInboxItem) string {
+	first := ""
+	for _, component := range item.Message.Components {
+		if component.Name != "approval-card" {
+			continue
+		}
+		actions, _ := component.Props["actions"].([]any)
+		for _, raw := range actions {
+			action, _ := raw.(map[string]any)
+			id, _ := action["id"].(string)
+			if id == "approve" {
+				return id
+			}
+			if first == "" && id != "" {
+				first = id
+			}
+		}
+	}
+	if first != "" {
+		return first
+	}
+	return "approve"
+}
+
 // pollInbox waits for a pending inbox item from the given agent with
 // the given kind. The inbox is instance-global, so filtering by agent
 // keeps the test independent of pre-existing items.
@@ -268,9 +307,11 @@ func TestLive_CodexApprovalRoundTrip(t *testing.T) {
 
 	item := c.pollInbox(agentID, "approval", 180*time.Second)
 	defer c.deleteConversation(item.Message.ConversationID)
+	actionID := approvalActionID(item)
+	t.Logf("resolving advertised approval action %q", actionID)
 
 	status := c.do("POST", "/api/apps/conversations/message-action", map[string]any{
-		"message_id": item.Message.ID, "action_id": "approve",
+		"message_id": item.Message.ID, "action_id": actionID,
 		"note": "Approved — verify the two newest backups are intact first.",
 	}, nil)
 	if status != 200 {
@@ -295,7 +336,7 @@ func TestLive_CodexApprovalRoundTrip(t *testing.T) {
 		cardApproved := false
 		for _, m := range transcript {
 			if m.ID == item.Message.ID && len(m.Components) > 0 &&
-				m.Components[0].Props["status"] == "approve" {
+				m.Components[0].Props["status"] == actionID {
 				cardApproved = true
 			}
 			if m.Role == "agent" && m.ID > item.Message.ID {

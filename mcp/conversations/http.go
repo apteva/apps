@@ -29,19 +29,67 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "POST", Pattern: "/message-dismiss", Handler: a.handleMessageDismiss},
 		{Method: "POST", Pattern: "/seen", Handler: a.handleSeen},
 		{Method: "GET", Pattern: "/unread-summary", Handler: a.handleUnreadSummary},
-		{Pattern: "/pairing", Handler: a.handlePairing},
+		{Pattern: "/delivery-failures", Handler: a.handleDeliveryFailures},
 	}
 }
 
 // requestUser resolves the delegated platform user, when present. The
 // platform proxy stamps subject headers; standalone runs may omit them.
 func requestUser(r *http.Request) int64 {
-	raw := r.Header.Get("X-Apteva-Subject-ID")
+	raw := r.Header.Get("X-User-ID")
 	if raw == "" {
 		raw = r.Header.Get("X-Apteva-User-ID")
 	}
 	id, _ := strconv.ParseInt(raw, 10, 64)
 	return id
+}
+
+func requestProject(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if projectID := strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID")); projectID != "" {
+		return projectID
+	}
+	return strings.TrimSpace(r.URL.Query().Get("project_id"))
+}
+
+func requestIdentity(r *http.Request) (int64, string, error) {
+	userID, projectID := requestUser(r), requestProject(r)
+	if userID <= 0 {
+		return 0, "", fmt.Errorf("authenticated user required")
+	}
+	if projectID == "" {
+		return 0, "", fmt.Errorf("project_id required")
+	}
+	return userID, projectID, nil
+}
+
+func (a *App) authorizeConversation(r *http.Request, id string) (*Conversation, error) {
+	userID, projectID, err := requestIdentity(r)
+	if err != nil {
+		return nil, err
+	}
+	ok, err := a.store.UserCanAccessConversation(id, projectID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("conversation not found")
+	}
+	return a.store.getConversationAny(id)
+}
+
+func (a *App) authorizeMessage(r *http.Request, id int64) (*Message, *Conversation, error) {
+	msg, err := a.store.GetMessage(id)
+	if err != nil {
+		return nil, nil, fmt.Errorf("message not found")
+	}
+	conv, err := a.authorizeConversation(r, msg.ConversationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return msg, conv, nil
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -62,13 +110,17 @@ type chatListEntry struct {
 func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		userID := requestUser(r)
+		userID, projectID, identityErr := requestIdentity(r)
+		if identityErr != nil {
+			http.Error(w, identityErr.Error(), http.StatusUnauthorized)
+			return
+		}
 		var conversations []Conversation
 		var err error
 		if r.URL.Query().Get("archived") == "1" {
-			conversations, err = a.store.ListArchivedForUser(userID, 100)
+			conversations, err = a.store.ListArchivedForUser(projectID, userID, 100)
 		} else {
-			conversations, err = a.store.ListConversationsForUser(userID, 100)
+			conversations, err = a.store.ListConversationsForUser(projectID, userID, 100)
 		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -92,6 +144,10 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "id required", http.StatusBadRequest)
 			return
 		}
+		if _, err := a.authorizeConversation(r, id); err != nil {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
 		if err := a.store.DeleteConversation(id); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -107,6 +163,11 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 // ({agent_ids: [...], lead_agent_id}). Extra agents become participant
 // rows; more than one flips kind to "room" (store recomputes).
 func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
+	userID, projectID, identityErr := requestIdentity(r)
+	if identityErr != nil {
+		http.Error(w, identityErr.Error(), http.StatusUnauthorized)
+		return
+	}
 	var body struct {
 		AgentID     int64   `json:"agent_id"`
 		AgentIDs    []int64 `json:"agent_ids"`
@@ -125,6 +186,10 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
+	if body.ProjectID != "" && strings.TrimSpace(body.ProjectID) != projectID {
+		http.Error(w, "project_id does not match authenticated project", http.StatusForbidden)
+		return
+	}
 	agents := body.AgentIDs
 	if len(agents) == 0 && body.AgentID != 0 {
 		agents = []int64{body.AgentID}
@@ -135,6 +200,45 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if lead == 0 {
 		http.Error(w, "agent_id or agent_ids required", http.StatusBadRequest)
+		return
+	}
+	if len(agents) == 0 || len(agents) > 8 {
+		http.Error(w, "conversation supports 1 to 8 agents", http.StatusBadRequest)
+		return
+	}
+	leadFound := false
+	requested := map[int64]bool{}
+	for _, agentID := range agents {
+		if agentID <= 0 || requested[agentID] {
+			http.Error(w, "invalid or duplicate agent_ids", http.StatusBadRequest)
+			return
+		}
+		requested[agentID] = true
+		leadFound = leadFound || agentID == lead
+	}
+	if !leadFound {
+		http.Error(w, "lead_agent_id must be a participant", http.StatusBadRequest)
+		return
+	}
+	if len([]rune(strings.TrimSpace(body.Title))) > 120 {
+		http.Error(w, "title is too long", http.StatusBadRequest)
+		return
+	}
+	appCtx := a.appCtx(r)
+	if appCtx == nil {
+		http.Error(w, "platform unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	available, err := sdk.ListAgentsVia(appCtx.PlatformAPI(), projectID)
+	if err != nil {
+		http.Error(w, "agent directory unavailable", http.StatusBadGateway)
+		return
+	}
+	for _, agent := range available {
+		delete(requested, agent.ID)
+	}
+	if len(requested) != 0 {
+		http.Error(w, "one or more agents are not available in this project", http.StatusNotFound)
 		return
 	}
 	audience := body.Audience
@@ -155,8 +259,8 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		origin = "app"
 	}
 	conv, err := a.store.CreateConversation(CreateConversationInput{
-		ProjectID: body.ProjectID, LeadAgentID: lead,
-		Title: body.Title, OwnerUserID: requestUser(r),
+		ProjectID: projectID, LeadAgentID: lead,
+		Title: body.Title, OwnerUserID: userID,
 		ConversationKey: body.ConversationKey, Audience: audience, Origin: origin,
 	})
 	if err != nil {
@@ -184,6 +288,10 @@ func (a *App) handleUpdateChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil || id == "" {
 		http.Error(w, "id and a title or archived field required", http.StatusBadRequest)
+		return
+	}
+	if _, err := a.authorizeConversation(r, id); err != nil {
+		http.Error(w, "conversation not found", http.StatusNotFound)
 		return
 	}
 	var conv *Conversation
@@ -221,7 +329,7 @@ func (a *App) handleParticipants(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id required", http.StatusBadRequest)
 		return
 	}
-	conv, err := a.store.GetConversation(id)
+	conv, err := a.authorizeConversation(r, id)
 	if err != nil {
 		http.Error(w, "conversation not found", http.StatusNotFound)
 		return
@@ -246,6 +354,20 @@ func (a *App) handleParticipants(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&body); err != nil || body.AgentID == 0 {
 			http.Error(w, "agent_id required", http.StatusBadRequest)
+			return
+		}
+		appCtx := a.appCtx(r)
+		if appCtx == nil {
+			http.Error(w, "platform unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		agents, listErr := sdk.ListAgentsVia(appCtx.PlatformAPI(), conv.ProjectID)
+		allowed := false
+		for _, agent := range agents {
+			allowed = allowed || agent.ID == body.AgentID
+		}
+		if listErr != nil || !allowed {
+			http.Error(w, "agent not found in conversation project", http.StatusNotFound)
 			return
 		}
 		if err := a.store.AddAgentParticipant(id, body.AgentID); err != nil {
@@ -278,12 +400,17 @@ func (a *App) handleParticipants(w http.ResponseWriter, r *http.Request) {
 // capability (authorized by platform.instances.read, which this app
 // already holds); older platforms get a clear error, not a guess.
 func (a *App) handleAgents(w http.ResponseWriter, r *http.Request) {
+	_, projectID, identityErr := requestIdentity(r)
+	if identityErr != nil {
+		http.Error(w, identityErr.Error(), http.StatusUnauthorized)
+		return
+	}
 	app := a.appCtx(r)
 	if app == nil {
 		http.Error(w, "platform unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	agents, err := sdk.ListAgentsVia(app.PlatformAPI(), r.URL.Query().Get("project_id"))
+	agents, err := sdk.ListAgentsVia(app.PlatformAPI(), projectID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -317,6 +444,10 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "chat_id required", http.StatusBadRequest)
 			return
 		}
+		if _, err := a.authorizeConversation(r, conversationID); err != nil {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
 		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		messages, err := a.store.Transcript(conversationID, since, limit)
@@ -343,9 +474,11 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	conversationID := r.URL.Query().Get("chat_id")
 	var body struct {
-		ChatID   string `json:"chat_id"`
-		Content  string `json:"content"`
-		ClientID string `json:"client_message_id"`
+		ChatID         string       `json:"chat_id"`
+		Content        string       `json:"content"`
+		ClientID       string       `json:"client_message_id"`
+		Attachments    []Attachment `json:"attachments"`
+		TargetAgentIDs []int64      `json:"target_agent_ids"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -358,19 +491,35 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "chat_id required", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(body.Content) == "" {
-		http.Error(w, "content required", http.StatusBadRequest)
+	if strings.TrimSpace(body.Content) == "" && len(body.Attachments) == 0 {
+		http.Error(w, "content or attachments required", http.StatusBadRequest)
 		return
 	}
-	conv, err := a.store.GetConversation(conversationID)
+	conv, err := a.authorizeConversation(r, conversationID)
 	if err != nil {
 		http.Error(w, "conversation not found", http.StatusNotFound)
 		return
 	}
 
-	msg, inserted, err := a.store.AppendMessageIdempotent(&Message{
+	if len(body.Attachments) > 10 {
+		http.Error(w, "attachments supports at most 10 entries", http.StatusBadRequest)
+		return
+	}
+	for _, attachment := range body.Attachments {
+		if attachment.Type != "image" || strings.TrimSpace(attachment.DataURL) == "" {
+			http.Error(w, "unsupported attachment type", http.StatusBadRequest)
+			return
+		}
+	}
+	targets, err := a.resolveAgentTargets(conv, body.TargetAgentIDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	msg, inserted, err := a.appendAndDeliver(a.appCtx(r), conv, &Message{
 		ConversationID: conv.ID, Role: "user", Content: body.Content,
-		UserID: requestUser(r), ClientID: body.ClientID,
+		UserID: requestUser(r), ClientID: body.ClientID, Attachments: body.Attachments,
+		Metadata: map[string]any{"target_agent_ids": targets},
 	})
 	if err != nil {
 		http.Error(w, "insert failed", http.StatusInternalServerError)
@@ -380,8 +529,7 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, msg)
 		return
 	}
-	a.deliver(a.appCtx(r), conv, msg)
-	a.forwardToAgents(a.appCtx(r), conv, msg)
+	a.forwardToAgents(a.appCtx(r), conv, msg, targets)
 	writeJSON(w, msg)
 }
 
@@ -398,34 +546,84 @@ var mountedCtx *sdk.AppCtx
 // context). Every failure degrades to the main thread, and a total
 // delivery failure is loud: a system row lands in the conversation
 // instead of an indefinite quiet.
-func (a *App) forwardToAgents(app *sdk.AppCtx, conv *Conversation, msg *Message) {
+func (a *App) forwardToAgents(app *sdk.AppCtx, conv *Conversation, msg *Message, requested []int64) {
 	if app == nil {
 		return
 	}
-	event := fmt.Sprintf("[chat] %s", msg.Content)
-
-	if threadID := a.ensureConversationThread(app, conv); threadID != "" {
-		if tc, ok := app.PlatformAPI().(sdk.ThreadClient); ok {
-			if err := tc.SendThreadEvent(sdk.ThreadRef{AgentID: conv.LeadAgentID, ThreadID: threadID}, event); err == nil {
-				// Instant feedback: the thinking bubble appears the
-				// moment the agent has the message. The telemetry feed
-				// upgrades it to token text when the bridge is on; the
-				// durable reply settles it either way (see toolSend).
-				a.streamer.emitAck(conv.ID, threadID)
-				return
-			}
-		}
-	}
-	if err := app.PlatformAPI().SendEvent(conv.LeadAgentID, event); err != nil {
-		notice := fmt.Sprintf("(could not reach agent %d — your message is saved. err: %v)", conv.LeadAgentID, err)
-		if sys, sysErr := a.store.AppendMessage(&Message{
-			ConversationID: conv.ID, Role: "system", Content: notice,
-		}); sysErr == nil {
+	targets, err := a.resolveAgentTargets(conv, requested)
+	if err != nil {
+		if sys, _, sysErr := a.appendAndDeliver(app, conv, &Message{ConversationID: conv.ID, Role: "system", Content: err.Error()}); sysErr == nil {
 			a.hub.publish(conv.ID, *sys)
 		}
 		return
 	}
-	a.streamer.emitAck(conv.ID, "")
+	for _, agentID := range targets {
+		event := a.agentEventPayload(conv, msg, agentID, targets)
+		threadID := a.ensureConversationThreadForAgent(app, conv, agentID)
+		forwardErr := fmt.Errorf("thread unavailable")
+		if threadID != "" {
+			if tc, ok := app.PlatformAPI().(sdk.ThreadClient); ok {
+				forwardErr = tc.SendThreadEvent(sdk.ThreadRef{AgentID: agentID, ThreadID: threadID}, event)
+			}
+		}
+		if forwardErr != nil {
+			fallback := "[chat] " + msg.Content
+			if len(msg.Attachments) > 0 {
+				fallback += fmt.Sprintf("\n(%d attachment(s) are available in conversation %s)", len(msg.Attachments), conv.ID)
+			}
+			forwardErr = app.PlatformAPI().SendEvent(agentID, fallback)
+		}
+		if forwardErr != nil {
+			notice := fmt.Sprintf("(could not reach agent %d — your message is saved. err: %v)", agentID, forwardErr)
+			_, _, _ = a.appendAndDeliver(app, conv, &Message{ConversationID: conv.ID, Role: "system", Content: notice})
+			continue
+		}
+		a.streamer.emitAck(conv.ID, threadID)
+	}
+}
+
+func (a *App) resolveAgentTargets(conv *Conversation, requested []int64) ([]int64, error) {
+	participants, err := a.store.AgentParticipants(conv.ID)
+	if err != nil {
+		return nil, err
+	}
+	allowed := map[int64]bool{}
+	for _, id := range participants {
+		allowed[id] = true
+	}
+	if len(requested) == 0 {
+		requested = []int64{conv.LeadAgentID}
+	}
+	seen := map[int64]bool{}
+	out := make([]int64, 0, len(requested))
+	for _, id := range requested {
+		if id <= 0 || !allowed[id] {
+			return nil, fmt.Errorf("agent %d is not a conversation participant", id)
+		}
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+func (a *App) agentEventPayload(conv *Conversation, msg *Message, agentID int64, targets []int64) any {
+	text := "[chat] " + msg.Content
+	if conv.Kind == "room" {
+		text += fmt.Sprintf("\nConversation: %s (%s). Addressed agent: %d. Other addressed agent ids: %v. Reply with conversations_send to this conversation.",
+			conv.Title, conv.ID, agentID, targets)
+	}
+	if len(msg.Attachments) == 0 {
+		return text
+	}
+	parts := []map[string]any{{"type": "text", "text": text}}
+	for _, attachment := range msg.Attachments {
+		if attachment.Type == "image" && attachment.DataURL != "" {
+			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": attachment.DataURL}})
+		}
+	}
+	return parts
 }
 
 // ─── SSE ─────────────────────────────────────────────────────────────
@@ -434,6 +632,21 @@ func (a *App) forwardToAgents(app *sdk.AppCtx, conv *Conversation, msg *Message)
 // panel, ?scope=user for the global bell/tray. Reconnects backfill via
 // ?since=<last_id> before going live — the hub never replays.
 func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
+	userID, projectID, identityErr := requestIdentity(r)
+	if identityErr != nil {
+		http.Error(w, identityErr.Error(), http.StatusUnauthorized)
+		return
+	}
+	conversationID := r.URL.Query().Get("chat_id")
+	if conversationID != "" {
+		if _, err := a.authorizeConversation(r, conversationID); err != nil {
+			http.Error(w, "conversation not found", http.StatusNotFound)
+			return
+		}
+	} else if r.URL.Query().Get("scope") != "user" {
+		http.Error(w, "chat_id or scope=user required", http.StatusBadRequest)
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -442,7 +655,6 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 
-	conversationID := r.URL.Query().Get("chat_id")
 	var ch <-chan Message
 	var frames <-chan StreamFrame
 	var cancel, cancelFrames func()
@@ -461,10 +673,7 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 		ch, cancel = a.hub.subscribeConversation(conversationID)
 		frames, cancelFrames = a.hub.subscribeFrames(conversationID)
 	case r.URL.Query().Get("scope") == "user":
-		ch, cancel = a.hub.subscribeUser(fmt.Sprint(requestUser(r)))
-	default:
-		http.Error(w, "chat_id or scope=user required", http.StatusBadRequest)
-		return
+		ch, cancel = a.hub.subscribeUser(projectID + ":" + fmt.Sprint(userID))
 	}
 	defer cancel()
 	if cancelFrames != nil {
@@ -505,8 +714,13 @@ func writeSSE(w http.ResponseWriter, m Message) {
 // ─── inbox ───────────────────────────────────────────────────────────
 
 func (a *App) handleInbox(w http.ResponseWriter, r *http.Request) {
+	userID, projectID, identityErr := requestIdentity(r)
+	if identityErr != nil {
+		http.Error(w, identityErr.Error(), http.StatusUnauthorized)
+		return
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	items, err := a.store.Inbox(limit)
+	items, err := a.store.Inbox(projectID, userID, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -525,7 +739,7 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "message_id and action_id required", http.StatusBadRequest)
 		return
 	}
-	msg, err := a.store.GetMessage(body.MessageID)
+	msg, _, err := a.authorizeMessage(r, body.MessageID)
 	if err != nil {
 		http.Error(w, "message not found", http.StatusNotFound)
 		return
@@ -535,7 +749,14 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"message": updated, "status": body.ActionID})
+	deliveryStatus := "not_required"
+	if target := approvalDeliveryTarget(msg); target != "" {
+		deliveryStatus = "pending"
+		if delivery, deliveryErr := a.store.DeliveryFor(updated.ID, target); deliveryErr == nil {
+			deliveryStatus = delivery.Status
+		}
+	}
+	writeJSON(w, map[string]any{"message": updated, "status": body.ActionID, "result_delivery_status": deliveryStatus})
 }
 
 // handleMessageDismiss hides an inbox card from the pending view.
@@ -547,6 +768,10 @@ func (a *App) handleMessageDismiss(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&body); err != nil || body.MessageID == 0 {
 		http.Error(w, "message_id required", http.StatusBadRequest)
+		return
+	}
+	if _, _, err := a.authorizeMessage(r, body.MessageID); err != nil {
+		http.Error(w, "message not found", http.StatusNotFound)
 		return
 	}
 	updated, err := a.DismissMessage(body.MessageID)
@@ -569,7 +794,16 @@ func (a *App) handleSeen(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "chat_id required", http.StatusBadRequest)
 		return
 	}
-	if err := a.store.MarkSeen(requestUser(r), body.ChatID, body.LastSeenID); err != nil {
+	userID, _, identityErr := requestIdentity(r)
+	if identityErr != nil {
+		http.Error(w, identityErr.Error(), http.StatusUnauthorized)
+		return
+	}
+	if _, err := a.authorizeConversation(r, body.ChatID); err != nil {
+		http.Error(w, "conversation not found", http.StatusNotFound)
+		return
+	}
+	if err := a.store.MarkSeen(userID, body.ChatID, body.LastSeenID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -577,7 +811,12 @@ func (a *App) handleSeen(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleUnreadSummary(w http.ResponseWriter, r *http.Request) {
-	entries, err := a.store.UnreadSummary(requestUser(r))
+	userID, projectID, identityErr := requestIdentity(r)
+	if identityErr != nil {
+		http.Error(w, identityErr.Error(), http.StatusUnauthorized)
+		return
+	}
+	entries, err := a.store.UnreadSummary(projectID, userID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -588,30 +827,34 @@ func (a *App) handleUnreadSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, entries)
 }
 
-// ─── pairing ─────────────────────────────────────────────────────────
-
-func (a *App) handlePairing(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleDeliveryFailures(w http.ResponseWriter, r *http.Request) {
+	_, projectID, identityErr := requestIdentity(r)
+	if identityErr != nil {
+		http.Error(w, identityErr.Error(), http.StatusUnauthorized)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		codes, err := a.store.PendingPairings()
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		items, err := a.store.FailedDeliveries(projectID, limit)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, codes)
+		writeJSON(w, items)
 	case http.MethodPost:
 		var body struct {
-			Code string `json:"code"`
+			ID int64 `json:"id"`
 		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil || body.Code == "" {
-			http.Error(w, "code required", http.StatusBadRequest)
+		if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&body); err != nil || body.ID <= 0 {
+			http.Error(w, "id required", http.StatusBadRequest)
 			return
 		}
-		if err := a.store.ApprovePairing(body.Code); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if err := a.store.RetryFailedDelivery(projectID, body.ID); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true})
+		writeJSON(w, map[string]any{"queued": true})
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
 	}

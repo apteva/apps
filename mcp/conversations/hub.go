@@ -99,13 +99,17 @@ func (h *hub) publishToUser(userID string, m Message) {
 	h.fanOut(h.byUser, userID, m)
 }
 
-// publishBroadcast reaches every user-scope subscriber regardless of
-// key — inbox items are operator-facing whoever owns the source
-// conversation.
-func (h *hub) publishBroadcast(m Message) {
+// publishProject reaches every operator stream in one project. User stream
+// keys are "<project>:<user>", preventing inbox events from leaking between
+// tenants served by the same global app install.
+func (h *hub) publishProject(projectID string, m Message) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	for _, subs := range h.byUser {
+	prefix := projectID + ":"
+	for key, subs := range h.byUser {
+		if len(key) < len(prefix) || key[:len(prefix)] != prefix {
+			continue
+		}
 		for _, ch := range subs {
 			select {
 			case ch <- m:

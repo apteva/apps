@@ -4,10 +4,6 @@
 --   * Inbox items ARE messages. component_kind is a real, indexed
 --     column — the queryable replacement for channel-chat's
 --     LIKE '%"approval-card"%' scans over components_json.
---   * External channels are bindings, not conversation types.
---     conversation_key carries the external identity
---     ("telegram:<binding>:<chat_id>"); origin is a label, and no
---     feature branches on it.
 --   * Deliveries are a ledger: a row per (message, target), pending
 --     until the adapter confirms. Pending rows are redelivered on
 --     mount so a crash mid-send never loses a reply.
@@ -18,8 +14,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     lead_agent_id    INTEGER  NOT NULL,
     title            TEXT     NOT NULL DEFAULT 'Chat',
     kind             TEXT     NOT NULL DEFAULT 'direct',   -- direct | room
-    origin           TEXT     NOT NULL DEFAULT 'web',      -- web | telegram | slack | app
-    conversation_key TEXT     NOT NULL DEFAULT '',         -- external identity; '' for web
+    origin           TEXT     NOT NULL DEFAULT 'web',      -- web | app
+    conversation_key TEXT     NOT NULL DEFAULT '',         -- stable grouping key; '' for user chats
     -- The per-conversation core thread ("chat-<id>", spawned lazily on
     -- first inbound message). '' = not yet spawned; delivery falls back
     -- to the agent's main thread until it exists.
@@ -43,7 +39,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content           TEXT     NOT NULL DEFAULT '',
     agent_id          INTEGER  NOT NULL DEFAULT 0,
     user_id           INTEGER  NOT NULL DEFAULT 0,
-    external_sender   TEXT     NOT NULL DEFAULT '',         -- "telegram:12345"
+    external_sender   TEXT     NOT NULL DEFAULT '',         -- reserved for future transports
     thread_id         TEXT     NOT NULL DEFAULT '',
     status            TEXT     NOT NULL DEFAULT 'final',    -- streaming | final
     component_kind    TEXT     NOT NULL DEFAULT '',         -- '' | approval | report | alert | status
@@ -71,7 +67,7 @@ CREATE TABLE IF NOT EXISTS participants (
     conversation_id   TEXT    NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     agent_id          INTEGER NOT NULL DEFAULT 0,
     user_id           INTEGER NOT NULL DEFAULT 0,
-    external_identity TEXT    NOT NULL DEFAULT '',           -- "telegram:12345"
+    external_identity TEXT    NOT NULL DEFAULT '',           -- reserved for future transports
     display_name      TEXT    NOT NULL DEFAULT '',
     -- Optional link to a CRM contact (apteva://contact/N). Linking an
     -- external sender to a contact is an explicit action, never an
@@ -84,8 +80,8 @@ CREATE TABLE IF NOT EXISTS participants (
 CREATE TABLE IF NOT EXISTS deliveries (
     id           INTEGER  PRIMARY KEY AUTOINCREMENT,
     message_id   INTEGER  NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-    -- Adapter-scoped address: "web:user:1", "agent:286",
-    -- "telegram:<binding>:<chat_id>".
+    -- Adapter-scoped address: "web:user:1", "agent:286", or an
+    -- authenticated sibling-app callback.
     target       TEXT     NOT NULL,
     status       TEXT     NOT NULL DEFAULT 'pending',        -- pending | delivered | failed
     attempts     INTEGER  NOT NULL DEFAULT 0,
@@ -96,21 +92,6 @@ CREATE TABLE IF NOT EXISTS deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_deliveries_pending
     ON deliveries(status) WHERE status = 'pending';
-
--- DM policy for unknown external senders (the Hermes/OpenClaw pairing
--- pattern): a stranger DMing a bound bot gets a one-time code; an
--- operator approves it; only then does a conversation exist.
-CREATE TABLE IF NOT EXISTS pairing_codes (
-    code              TEXT     PRIMARY KEY,
-    channel           TEXT     NOT NULL,                     -- telegram | slack | …
-    external_identity TEXT     NOT NULL,
-    display_name      TEXT     NOT NULL DEFAULT '',
-    created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at        DATETIME NOT NULL,
-    approved_at       DATETIME
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_pairing_identity
-    ON pairing_codes(channel, external_identity);
 
 -- Per-user read watermark, one row per (user, conversation). The
 -- single source of truth — no client-side shadow copy.

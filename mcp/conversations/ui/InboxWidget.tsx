@@ -93,14 +93,19 @@ interface AgentInfo {
   name: string;
 }
 
-async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${API}${path}`, { credentials: "same-origin" });
+function scopedPath(path: string, projectId: string): string {
+  if (!projectId) throw new Error("project context required");
+  return `${path}${path.includes("?") ? "&" : "?"}project_id=${encodeURIComponent(projectId)}`;
+}
+
+async function apiGet<T>(path: string, projectId: string): Promise<T> {
+  const res = await fetch(`${API}${scopedPath(path, projectId)}`, { credentials: "same-origin" });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-async function apiPost<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
+async function apiPost<T>(path: string, body: unknown, projectId: string): Promise<T> {
+  const res = await fetch(`${API}${scopedPath(path, projectId)}`, {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
@@ -304,12 +309,14 @@ function ApprovalModal({
   agentName,
   onClose,
   onActed,
+  projectId,
 }: {
   open: boolean;
   message: InboxMessage;
   agentName: string;
   onClose: () => void;
   onActed: () => void;
+  projectId: string;
 }) {
   const props = card(message, "approval-card");
   const [note, setNote] = useState("");
@@ -323,7 +330,7 @@ function ApprovalModal({
     setBusy(true);
     setError("");
     try {
-      await apiPost(`/message-action`, { message_id: message.id, action_id: actionId, note });
+      await apiPost(`/message-action`, { message_id: message.id, action_id: actionId, note }, projectId);
       onActed();
       onClose();
     } catch (err) {
@@ -389,11 +396,13 @@ function InboxRow({
   now,
   agentName,
   onChanged,
+  projectId,
 }: {
   item: InboxItem;
   now: number;
   agentName: string;
   onChanged: () => void;
+  projectId: string;
 }) {
   const [detailOpen, setDetailOpen] = useState(false);
   const [approvalOpen, setApprovalOpen] = useState(false);
@@ -413,7 +422,7 @@ function InboxRow({
 
   const dismiss = async () => {
     try {
-      await apiPost(`/message-dismiss`, { message_id: m.id });
+      await apiPost(`/message-dismiss`, { message_id: m.id }, projectId);
       onChanged();
     } catch {
       /* surfaced on next reload */
@@ -479,6 +488,7 @@ function InboxRow({
           agentName={agentName}
           onClose={() => setApprovalOpen(false)}
           onActed={onChanged}
+          projectId={projectId}
         />
       ) : (
         <DetailModal
@@ -498,6 +508,7 @@ function InboxRow({
 // ─── widget root ─────────────────────────────────────────────────────
 
 export default function InboxWidget(props: HostProps) {
+	const projectId = props.projectId ?? "";
   const [items, setItems] = useState<InboxItem[]>([]);
   const [agents, setAgents] = useState<Map<number, string>>(new Map());
   const [loading, setLoading] = useState(false);
@@ -513,7 +524,7 @@ export default function InboxWidget(props: HostProps) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const inbox = await apiGet<InboxItem[]>("/inbox?limit=100");
+		const inbox = await apiGet<InboxItem[]>("/inbox?limit=100", projectId);
       setItems(inbox);
       setError("");
     } catch (err) {
@@ -521,7 +532,7 @@ export default function InboxWidget(props: HostProps) {
     } finally {
       setLoading(false);
     }
-  }, []);
+	}, [projectId]);
 
   useEffect(() => {
     load();
@@ -531,12 +542,11 @@ export default function InboxWidget(props: HostProps) {
   }, [load, props.eventRevision]);
 
   useEffect(() => {
-    const query = props.projectId ? `?project_id=${encodeURIComponent(props.projectId)}` : "";
-    apiGet<AgentInfo[]>(`/agents${query}`).then(
+	apiGet<AgentInfo[]>(`/agents`, projectId).then(
       (list) => setAgents(new Map(list.map((a) => [a.id, a.name]))),
       () => {},
     );
-  }, [props.projectId]);
+	}, [projectId]);
 
   const visible = items.slice(0, limit);
   const agentName = (id?: number) =>
@@ -596,6 +606,7 @@ export default function InboxWidget(props: HostProps) {
             now={now}
             agentName={agentName(item.message.agent_id)}
             onChanged={() => void load()}
+			projectId={projectId}
           />
         ))}
         {items.length > visible.length && (

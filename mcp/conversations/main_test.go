@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -90,6 +91,17 @@ func callerCtx(agentID int64, threadID string) context.Context {
 	return sdk.WithCaller(context.Background(), &sdk.Caller{
 		AgentID: agentID, ThreadID: threadID, ProjectID: testProject,
 	})
+}
+
+func appCallerCtx(appName string) context.Context {
+	return sdk.WithCaller(context.Background(), &sdk.Caller{
+		AppInstallID: 77, AppName: appName, ProjectID: testProject,
+	})
+}
+
+func authorizeTestRequest(req *http.Request) {
+	req.Header.Set("X-User-ID", "1")
+	req.Header.Set("X-Apteva-Project-ID", testProject)
 }
 
 func mkConversation(t *testing.T, app *App, agentID int64) *Conversation {
@@ -188,7 +200,7 @@ func TestReportsAppearInTranscriptAndInbox(t *testing.T) {
 		t.Fatal("report missing from its conversation's transcript")
 	}
 
-	items, err := app.store.Inbox(50)
+	items, err := app.store.Inbox(testProject, 1, 50)
 	if err != nil {
 		t.Fatalf("inbox: %v", err)
 	}
@@ -234,7 +246,7 @@ func TestInboxPriorityOrdering(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	items, err := app.store.Inbox(50)
+	items, err := app.store.Inbox(testProject, 1, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +302,7 @@ func TestApprovalRoundTripForwardsToAgentThread(t *testing.T) {
 		t.Fatal("expected already-resolved refusal")
 	}
 	// Resolved approvals leave the pending inbox view.
-	items, _ := app.store.Inbox(50)
+	items, _ := app.store.Inbox(testProject, 1, 50)
 	for _, item := range items {
 		if item.Message.ID == messageID {
 			t.Fatal("resolved approval still listed in inbox")
@@ -303,7 +315,7 @@ func TestApprovalRoundTripForwardsToAgentThread(t *testing.T) {
 func TestInboxPostCallbackReachesPostingApp(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
 
-	out, err := app.toolInboxPost(context.Background(), ctx, map[string]any{
+	out, err := app.toolInboxPost(appCallerCtx("certs"), ctx, map[string]any{
 		"kind": "approval", "title": "Renew certificate?",
 		"source_app": "certs", "callback_tool": "certs_renew_decision",
 	})
@@ -335,7 +347,7 @@ func TestInboxPostCallbackReachesPostingApp(t *testing.T) {
 	}
 
 	// Repeated posts from the same app group into one system conversation.
-	again, err := app.toolInboxPost(context.Background(), ctx, map[string]any{
+	again, err := app.toolInboxPost(appCallerCtx("certs"), ctx, map[string]any{
 		"kind": "alert", "title": "Cert expiring", "source_app": "certs", "severity": "warn",
 	})
 	if err != nil {
@@ -350,82 +362,28 @@ func TestInboxPostCallbackReachesPostingApp(t *testing.T) {
 
 // ─── delivery ledger ─────────────────────────────────────────────────
 
-func TestUnconfiguredExternalTargetStaysPendingAndRedelivers(t *testing.T) {
-	app, ctx, _ := newTestEnv(t)
-	// An external-origin conversation whose key routes to the (stub,
-	// unconfigured) telegram adapter.
-	conv, err := app.store.CreateConversation(CreateConversationInput{
-		ProjectID: testProject, LeadAgentID: 41, OwnerUserID: 1,
-		Origin: "telegram", ConversationKey: "telegram:bind1:555",
-		ExternalIdentity: "telegram:12345", ExternalName: "Marco",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{
-		"conversation_id": conv.ID, "text": "reply to telegram",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	messageID := out.(map[string]any)["message_id"].(int64)
-
-	// Web delivered; telegram pending (adapter unconfigured), never
-	// failed — the binding may appear later.
-	webDelivery, err := app.store.DeliveryFor(messageID, "web:user:1")
-	if err != nil || webDelivery.Status != "delivered" {
-		t.Fatalf("web delivery = %+v err=%v, want delivered", webDelivery, err)
-	}
-	tgDelivery, err := app.store.DeliveryFor(messageID, "telegram:bind1:555")
-	if err != nil || tgDelivery.Status != "pending" {
-		t.Fatalf("telegram delivery = %+v err=%v, want pending", tgDelivery, err)
-	}
-
-	// Mount-time replay picks the pending row up again (and, with the
-	// adapter still unconfigured, leaves it pending — never lost, never
-	// dead-lettered).
-	redelivered, err := app.redeliverPending(ctx)
-	if err != nil {
-		t.Fatalf("redeliver: %v", err)
-	}
-	if redelivered != 1 {
-		t.Fatalf("redelivered = %d, want 1", redelivered)
-	}
-	tgDelivery, _ = app.store.DeliveryFor(messageID, "telegram:bind1:555")
-	if tgDelivery.Status != "pending" || tgDelivery.Attempts < 2 {
-		t.Fatalf("after replay: %+v, want pending with attempts>=2", tgDelivery)
-	}
-}
-
-// ─── pairing ─────────────────────────────────────────────────────────
-
-func TestPairingGateForUnknownSenders(t *testing.T) {
+func TestUnknownDeliveryTargetDeadLettersAndCanBeRequeued(t *testing.T) {
 	app, _, _ := newTestEnv(t)
-
-	code, approved, err := app.store.EnsurePairing("telegram", "telegram:777", "Stranger")
-	if err != nil || approved {
-		t.Fatalf("first contact: code=%q approved=%v err=%v", code, approved, err)
+	conv := mkConversation(t, app, 41)
+	msg, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", Content: "test"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(code) != 8 {
-		t.Fatalf("code %q, want 8 chars", code)
+	const target = "future-transport:recipient"
+	if err := app.store.EnsureDelivery(msg.ID, target); err != nil {
+		t.Fatal(err)
 	}
-	// Re-contact re-uses the live code — a stranger cannot mint codes.
-	code2, approved, err := app.store.EnsurePairing("telegram", "telegram:777", "Stranger")
-	if err != nil || approved || code2 != code {
-		t.Fatalf("re-contact: code=%q (want %q) approved=%v err=%v", code2, code, approved, err)
+	app.attemptDelivery(nil, target, conv, msg)
+	delivery, err := app.store.DeliveryFor(msg.ID, target)
+	if err != nil || delivery.Status != "failed" {
+		t.Fatalf("delivery = %+v err=%v, want failed", delivery, err)
 	}
-
-	if err := app.store.ApprovePairing(code); err != nil {
-		t.Fatalf("approve: %v", err)
+	if err := app.store.RetryFailedDelivery(testProject, delivery.ID); err != nil {
+		t.Fatal(err)
 	}
-	_, approved, err = app.store.EnsurePairing("telegram", "telegram:777", "Stranger")
-	if err != nil || !approved {
-		t.Fatalf("post-approval contact: approved=%v err=%v", approved, err)
-	}
-	// Unknown code is a refusal, not a silent success.
-	if err := app.store.ApprovePairing("NOPE1234"); err == nil {
-		t.Fatal("expected unknown-code refusal")
+	delivery, err = app.store.DeliveryFor(msg.ID, target)
+	if err != nil || delivery.Status != "pending" || delivery.Attempts != 0 {
+		t.Fatalf("requeued delivery = %+v err=%v, want pending attempts=0", delivery, err)
 	}
 }
 
@@ -440,7 +398,7 @@ func TestUserMessageForwardFailureIsLoud(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/messages?chat_id="+conv.ID,
 		strings.NewReader(`{"content":"are you there?"}`))
-	req.Header.Set("X-Apteva-Subject-ID", "1")
+	authorizeTestRequest(req)
 	rec := httptest.NewRecorder()
 	app.handleMessages(rec, req)
 	if rec.Code != 200 {
@@ -464,7 +422,7 @@ func postUserMessage(t *testing.T, app *App, conv *Conversation, content string)
 	t.Helper()
 	req := httptest.NewRequest("POST", "/messages?chat_id="+conv.ID,
 		strings.NewReader(`{"content":"`+content+`"}`))
-	req.Header.Set("X-Apteva-Subject-ID", "1")
+	authorizeTestRequest(req)
 	rec := httptest.NewRecorder()
 	app.handleMessages(rec, req)
 	if rec.Code != 200 {
@@ -575,7 +533,7 @@ func TestDismissRemovesFromInboxKeepsHistory(t *testing.T) {
 	if _, err := app.DismissMessage(messageID); err != nil {
 		t.Fatalf("dismiss: %v", err)
 	}
-	items, _ := app.store.Inbox(50)
+	items, _ := app.store.Inbox(testProject, 1, 50)
 	for _, item := range items {
 		if item.Message.ID == messageID {
 			t.Fatal("dismissed alert still in inbox")
@@ -629,12 +587,12 @@ func TestInboxItemsBroadcastToEveryUserScope(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
 
 	// A user who owns nothing, subscribed to their bell stream.
-	ch, cancel := app.hub.subscribeUser("7")
+	ch, cancel := app.hub.subscribeUser(testProject + ":7")
 	defer cancel()
 
 	// inbox_post creates an ownerless system conversation — the exact
 	// shape that used to deliver to "web:user:0" and ping nobody.
-	if _, err := app.toolInboxPost(context.Background(), ctx, map[string]any{
+	if _, err := app.toolInboxPost(appCallerCtx("backup"), ctx, map[string]any{
 		"kind": "alert", "title": "Backup failed", "severity": "error", "source_app": "backup",
 	}); err != nil {
 		t.Fatal(err)
@@ -696,7 +654,7 @@ func TestCreateListAlertFlow(t *testing.T) {
 		t.Fatalf("alert: %v", err)
 	}
 	messageID := out.(map[string]any)["message_id"].(int64)
-	items, _ := app.store.Inbox(50)
+	items, _ := app.store.Inbox(testProject, 1, 50)
 	found := false
 	for _, item := range items {
 		found = found || item.Message.ID == messageID
@@ -773,6 +731,8 @@ func (p *recordingPlatform) ListAgents(projectID string) ([]sdk.PlatformAgent, e
 	return []sdk.PlatformAgent{
 		{ID: 41, Name: "Research", Status: "running", ProjectID: projectID, AttachedToCaller: true},
 		{ID: 42, Name: "Ops", Status: "stopped", ProjectID: projectID},
+		{ID: 43, Name: "Comms", Status: "running", ProjectID: projectID, AttachedToCaller: true},
+		{ID: 55, Name: "Finance", Status: "running", ProjectID: projectID, AttachedToCaller: true},
 	}, nil
 }
 
@@ -785,7 +745,7 @@ func doChats(t *testing.T, app *App, method, target, body string) *httptest.Resp
 		reader = strings.NewReader(body)
 	}
 	req := httptest.NewRequest(method, target, reader)
-	req.Header.Set("X-Apteva-Subject-ID", "1")
+	authorizeTestRequest(req)
 	rec := httptest.NewRecorder()
 	app.handleChats(rec, req)
 	return rec
@@ -859,10 +819,10 @@ func TestRenameArchiveUnarchiveDeleteViaHTTP(t *testing.T) {
 	if _, err := app.store.GetConversation(conv.ID); err == nil {
 		t.Fatal("archived conversation still visible to GetConversation")
 	}
-	if active, _ := app.store.ListConversationsForUser(1, 50); len(active) != 0 {
+	if active, _ := app.store.ListConversationsForUser(testProject, 1, 50); len(active) != 0 {
 		t.Fatalf("active list has %d rows, want 0", len(active))
 	}
-	archived, _ := app.store.ListArchivedForUser(1, 50)
+	archived, _ := app.store.ListArchivedForUser(testProject, 1, 50)
 	if len(archived) != 1 || archived[0].ID != conv.ID {
 		t.Fatalf("archived list = %+v, want the conversation", archived)
 	}
@@ -897,7 +857,7 @@ func TestParticipantsEndpointGuardsLead(t *testing.T) {
 
 	do := func(method, target, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, target, strings.NewReader(body))
-		req.Header.Set("X-Apteva-Subject-ID", "1")
+		authorizeTestRequest(req)
 		rec := httptest.NewRecorder()
 		app.handleParticipants(rec, req)
 		return rec
@@ -939,6 +899,7 @@ func TestAgentsEndpointServesDirectory(t *testing.T) {
 	mountedCtx = ctx
 
 	req := httptest.NewRequest("GET", "/agents?project_id=proj-1", nil)
+	authorizeTestRequest(req)
 	rec := httptest.NewRecorder()
 	app.handleAgents(rec, req)
 	if rec.Code != 200 {
@@ -953,7 +914,7 @@ func TestAgentsEndpointServesDirectory(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &agents); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(agents) != 2 || agents[0].Name != "Research" || agents[1].Status != "stopped" {
+	if len(agents) != 4 || agents[0].Name != "Research" || agents[1].Status != "stopped" {
 		t.Fatalf("agents = %+v", agents)
 	}
 	// The binding annotation must survive the trip — the panel scopes
@@ -984,8 +945,8 @@ func TestInboxPostWithoutSourceAppRejected(t *testing.T) {
 	_, err := app.toolInboxPost(context.Background(), ctx, map[string]any{
 		"kind": "alert", "title": "anon",
 	})
-	if err == nil || !strings.Contains(err.Error(), "source_app") {
-		t.Fatalf("err = %v, want source_app requirement", err)
+	if err == nil || !strings.Contains(err.Error(), "authenticated sibling app identity") {
+		t.Fatalf("err = %v, want authenticated app identity requirement", err)
 	}
 }
 

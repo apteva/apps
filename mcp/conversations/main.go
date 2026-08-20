@@ -2,15 +2,13 @@ package main
 
 // conversations — one app for every conversation surface.
 //
-// Internal dashboard chat, the inbox (approvals / reports / alerts /
-// status), and external channels as optional integration bindings.
+// Internal dashboard chat and the inbox (approvals / reports / alerts /
+// status) share one durable model.
 // The organizing rule: inbox items ARE messages. An agent's approval
 // request is a typed card inside its conversation; the inbox is a
 // priority-ordered query over those rows; acting on a card anywhere
-// mutates the one row every surface renders. External threads are
-// ordinary conversations with a transport binding (origin +
-// conversation_key), never a special type — features must not branch
-// on origin.
+// mutates the one row every surface renders. External transports are
+// deliberately deferred until the internal replacement is proven.
 //
 // Developed in parallel with apteva-server's built-in channel-chat and
 // the deprecated channels sidecar. Both are donors; neither is
@@ -19,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -33,17 +32,15 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.7.0
+version: 0.8.0
 description: |
-  One conversation system: internal dashboard chat, the inbox
-  (approvals, reports, alerts, status), and external channels as
-  optional integration bindings. Inbox items are messages — an
+  One conversation system for dashboard chat and the inbox
+  (approvals, reports, alerts, status). Inbox items are messages — an
   agent's approval request is a typed card in its conversation, and
   the inbox is a priority-ordered view over those rows, so acting on
-  a card anywhere updates every surface at once. External threads
-  (Telegram first) are ordinary conversations with a transport
-  binding, never a special type. Other apps raise inbox items via
-  inbox_post; deliveries go through a crash-safe ledger.
+  a card anywhere updates every surface at once. Other apps raise
+  inbox items via inbox_post; deliveries go through a crash-safe
+  ledger. External transports are intentionally deferred.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/conversations
 icon: /ui/icon.svg
@@ -51,44 +48,28 @@ icon_style: monochrome
 tags: [chat, inbox, channels, approvals, notifications]
 
 scopes: [global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.15.0"
 
 requires:
   permissions:
     - db.write.app
-    - net.egress
     - platform.apps.call
     - platform.instances.read
     - platform.instances.write
     - platform.threads.write
     - platform.telemetry.read
-    - platform.connections.read
-    - platform.connections.execute
-  integrations:
-    - role: telegram_bot
-      kind: integration
-      compatible_slugs: [telegram]
-      capabilities: []
-      required: false
-      label: "Telegram bot (optional)"
-      hint: "Bind the Telegram integration connection whose bot should send and receive messages. Unknown senders go through pairing by default."
-  apps:
-    - name: messaging
-      version: ">=0.13.0"
-      optional: true
-      reason: "email/SMS fan-out of inbox items (report digests, approval nudges)"
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: conversations_send,             description: "Send a message into a conversation. Args: conversation_id, text, components?. The calling agent must be a participant; delivery fans out to every bound surface (dashboard SSE, external channels). Never creates conversations." }
-    - { name: conversations_request_approval, description: "Ask the operator to approve something. Refused in public (visitor) conversations - raise it in an operator conversation instead. Args: conversation_id (required - list or create a conversation first), title, body?, actions? (default Approve/Deny). Renders as an actionable card in the conversation AND the inbox; the verdict comes back to this agent as an approval.result event." }
-    - { name: conversations_report,           description: "File a report. Refused in public (visitor) conversations. Args: conversation_id (required - keep one standing conversation such as Reports and reuse it), title, summary, period?, sections?. Shown in its conversation AND the inbox." }
-    - { name: conversations_alert,            description: "Raise an alert. Refused in public (visitor) conversations - raise it in an operator conversation instead. Args: conversation_id (required - reuse the conversation the problem belongs to, or create a topical one), text, severity? (info|warn|error, default info). Shown in the inbox, severity-ranked." }
-    - { name: conversations_create,           description: "Create a conversation led by this agent for an ongoing topic. Args: title. Title-idempotent per agent: an existing conversation with the same title is returned with created=false. Titles name ongoing topics - never put timestamps, ids, or per-item detail in them." }
-    - { name: conversations_list,             description: "List conversations this agent participates in. Args: limit?, query? (case-insensitive title filter - search before creating)." }
-    - { name: conversations_history,          description: "Read a conversation's transcript. Args: conversation_id, since_id?, limit?." }
+    - { name: send,             description: "Send a message into a conversation. Args: conversation_id, text, components?, attachments?. The calling agent must be a participant; delivery fans out to every bound surface. Never creates conversations." }
+    - { name: request_approval, description: "Ask the operator to approve something. Refused in public conversations. Args: conversation_id, title, body?, actions? (default Approve/Deny). The verdict comes back as an approval.result event." }
+    - { name: report,           description: "File a report. Refused in public conversations. Args: conversation_id, title, summary, period?, sections?. Shown in its conversation and the inbox." }
+    - { name: alert,            description: "Raise an alert. Refused in public conversations. Args: conversation_id, text, severity? (info|warn|error). Shown in the inbox, severity-ranked." }
+    - { name: create,           description: "Create a conversation led by this agent. Args: title. Title-idempotent per agent." }
+    - { name: list,             description: "List conversations this agent participates in. Args: limit?, query?." }
+    - { name: history,          description: "Read a conversation transcript. Args: conversation_id, since_id?, limit?." }
     - { name: inbox_post,                     description: "INTERNAL - sibling-app entry point via CallAppResult; agent calls are refused. Agents use conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
   ui_panels:
     - slot: project.page
@@ -106,6 +87,10 @@ provides:
       visibility: project
       supported_sizes: [half, full]
       default_size: half
+
+  workers:
+    - name: delivery-retry
+      schedule: "@every 10s"
 
   skills:
     - name: using-conversations
@@ -160,7 +145,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.store = newStore(ctx.AppDB())
 	a.hub = newHub()
-	a.adapters = newAdapterRegistry(a.hub)
+	a.adapters = newAdapterRegistry(a, a.hub)
 	a.streamer = newStreamer(a.hub)
 	mountedCtx = ctx
 	// Token-level streaming when the platform grants it; Stage-1 phase
@@ -169,9 +154,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.Logger().Info("telemetry bridge active — token-level streaming on")
 	}
 	// Crash recovery: anything the ledger recorded but never confirmed
-	// goes out again. Adapters that are not configured (no binding)
-	// leave their rows pending rather than failing them — the binding
-	// may appear later.
+	// goes out again according to its persisted retry schedule.
 	if redelivered, err := a.redeliverPending(ctx); err != nil {
 		ctx.Logger().Warn("pending redelivery incomplete", "err", err)
 	} else if redelivered > 0 {
@@ -187,37 +170,50 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 	}
 	return nil
 }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{
+		Name:     "delivery-retry",
+		Schedule: "@every 10s",
+		Run: func(_ context.Context, app *sdk.AppCtx) error {
+			_, err := a.redeliverPending(app)
+			return err
+		},
+	}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
-			Name: "conversations_send",
-			Description: "Send a message into a conversation you participate in. Delivery fans out to every " +
-				"surface bound to the conversation: the dashboard stream and any external channel.",
+			Name: "send",
+			Description: "Send a message into a conversation you participate in. Delivery updates the durable " +
+				"transcript and dashboard stream.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"text":            map[string]any{"type": "string"},
-			}, []string{"conversation_id", "text"}),
+				"idempotency_key": map[string]any{"type": "string"},
+				"components":      map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"attachments":     map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+			}, []string{"conversation_id"}),
 			HandlerCtx: a.toolSend,
 		},
 		{
-			Name: "conversations_request_approval",
+			Name: "request_approval",
 			Description: "Ask the operator to approve something. Requires conversation_id — find one with " +
 				"conversations_list or create one with conversations_create. The card is actionable in the " +
-				"conversation, the inbox, and any bound external channel; the verdict returns to you as an " +
+				"conversation and the inbox; the verdict returns to you as an " +
 				"approval.result event.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"title":           map[string]any{"type": "string"},
 				"body":            map[string]any{"type": "string"},
+				"actions":         map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 			}, []string{"conversation_id", "title"}),
 			HandlerCtx: a.toolRequestApproval,
 		},
 		{
-			Name: "conversations_report",
+			Name: "report",
 			Description: "File a report. Requires conversation_id — keep one standing conversation (e.g. " +
 				"\"Reports\") via conversations_create and reuse it. Shown in its conversation and the inbox.",
 			InputSchema: schemaObject(map[string]any{
@@ -225,11 +221,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"title":           map[string]any{"type": "string"},
 				"summary":         map[string]any{"type": "string"},
 				"period":          map[string]any{"type": "string"},
+				"sections":        map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 			}, []string{"conversation_id", "title", "summary"}),
 			HandlerCtx: a.toolReport,
 		},
 		{
-			Name: "conversations_alert",
+			Name: "alert",
 			Description: "Raise an alert (info|warn|error), severity-ranked in the inbox. Requires " +
 				"conversation_id — reuse the conversation the problem belongs to (conversations_list) or " +
 				"create a topical one (conversations_create).",
@@ -241,7 +238,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx: a.toolAlert,
 		},
 		{
-			Name: "conversations_create",
+			Name: "create",
 			Description: "Create a conversation you lead, for an ongoing topic (\"Reports\", " +
 				"\"Infra monitoring\", an incident name). Title-idempotent: if you already have a conversation " +
 				"with this title it is returned with created=false, so reusing a stable title never duplicates. " +
@@ -252,7 +249,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx: a.toolCreate,
 		},
 		{
-			Name: "conversations_list",
+			Name: "list",
 			Description: "List conversations this agent participates in. Pass query to filter by title " +
 				"(case-insensitive substring) — search before creating.",
 			InputSchema: schemaObject(map[string]any{
@@ -262,7 +259,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx: a.toolList,
 		},
 		{
-			Name:        "conversations_history",
+			Name:        "history",
 			Description: "Read a conversation transcript.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
@@ -272,7 +269,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx: a.toolHistory,
 		},
 		{
-			Name: "inbox_post",
+			Name:     "inbox_post",
+			Exposure: sdk.ToolExposureAppOnly,
 			Description: "INTERNAL sibling-app entry point (CallAppResult) — not for agents; agent calls are " +
 				"refused. Agents raise items with conversations_alert, conversations_report, or " +
 				"conversations_request_approval into a conversation (conversations_list to find one, " +
@@ -283,6 +281,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"title":         map[string]any{"type": "string"},
 				"body":          map[string]any{"type": "string"},
 				"severity":      map[string]any{"type": "string"},
+				"actions":       map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"sections":      map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 				"callback_tool": map[string]any{"type": "string"},
 				"agent_id":      map[string]any{"type": "integer"},
 			}, []string{"kind", "title"}),
@@ -306,6 +306,9 @@ func requireAgentCaller(ctx context.Context) (*callIdentity, error) {
 	caller := sdk.CallerFrom(ctx)
 	if caller == nil || caller.AgentID == 0 {
 		return nil, errors.New("caller identity required: this tool must be called by an agent")
+	}
+	if strings.TrimSpace(caller.ProjectID) == "" {
+		return nil, errors.New("authenticated project context required")
 	}
 	return &callIdentity{AgentID: caller.AgentID, ThreadID: caller.ThreadID, ProjectID: caller.ProjectID}, nil
 }
@@ -341,6 +344,9 @@ func (a *App) requireParticipant(from *callIdentity, conversationID string) (*Co
 	if err != nil {
 		return nil, fmt.Errorf("conversation not found: %s", conversationID)
 	}
+	if conv.ProjectID != from.ProjectID {
+		return nil, fmt.Errorf("conversation not found: %s", conversationID)
+	}
 	ok, err := a.store.IsParticipantAgent(conversationID, from.AgentID)
 	if err != nil {
 		return nil, err
@@ -360,21 +366,29 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	}
 	conversationID, _ := args["conversation_id"].(string)
 	text, _ := args["text"].(string)
-	if strings.TrimSpace(text) == "" {
-		return nil, errors.New("text required")
-	}
 	conv, err := a.requireParticipant(from, conversationID)
 	if err != nil {
 		return nil, err
 	}
-	msg, err := a.store.AppendMessage(&Message{
+	components, err := componentsArg(args, "components")
+	if err != nil {
+		return nil, err
+	}
+	attachments, err := attachmentsArg(args, "attachments")
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(text) == "" && len(attachments) == 0 {
+		return nil, errors.New("text or attachments required")
+	}
+	msg, _, err := a.appendAndDeliver(app, conv, &Message{
 		ConversationID: conv.ID, Role: "agent", Content: text,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
+		ClientID: stringArg(args, "idempotency_key"), Components: components, Attachments: attachments,
 	})
 	if err != nil {
 		return nil, err
 	}
-	a.deliver(app, conv, msg)
 	// The durable reply supersedes any pending thinking bubble.
 	a.streamer.settleAck(conv.ID)
 	return map[string]any{"message_id": msg.ID, "conversation_id": conv.ID}, nil
@@ -400,17 +414,20 @@ func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map
 	if err := requireOperatorAudience(conv, "approval"); err != nil {
 		return nil, err
 	}
-	msg, err := a.store.AppendMessage(&Message{
+	actions, err := approvalActionsArg(args)
+	if err != nil {
+		return nil, err
+	}
+	msg, _, err := a.appendAndDeliver(app, conv, &Message{
 		ConversationID: conv.ID, Role: "agent",
 		Content: "Approval requested: " + title,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
 		ComponentKind: kindApproval,
-		Components:    []Component{approvalCard(title, body, defaultApprovalActions())},
+		Components:    []Component{approvalCard(title, body, actions)},
 	})
 	if err != nil {
 		return nil, err
 	}
-	a.deliver(app, conv, msg)
 	return map[string]any{"message_id": msg.ID, "status": "pending"}, nil
 }
 
@@ -431,17 +448,20 @@ func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if title == "" || summary == "" {
 		return nil, errors.New("title and summary required")
 	}
-	msg, err := a.store.AppendMessage(&Message{
+	sections, err := genericObjectsArg(args, "sections", 50)
+	if err != nil {
+		return nil, err
+	}
+	msg, _, err := a.appendAndDeliver(app, conv, &Message{
 		ConversationID: conv.ID, Role: "agent",
 		Content: "Report: " + title,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
 		ComponentKind: kindReport,
-		Components: []Component{reportCard(title, summary, stringArg(args, "period"))},
+		Components:    []Component{reportCard(title, summary, stringArg(args, "period"), sections)},
 	})
 	if err != nil {
 		return nil, err
 	}
-	a.deliver(app, conv, msg)
 	return map[string]any{"message_id": msg.ID, "status": "sent"}, nil
 }
 
@@ -469,7 +489,7 @@ func (a *App) toolAlert(ctx context.Context, app *sdk.AppCtx, args map[string]an
 	default:
 		return nil, fmt.Errorf("invalid severity %q", severity)
 	}
-	msg, err := a.store.AppendMessage(&Message{
+	msg, _, err := a.appendAndDeliver(app, conv, &Message{
 		ConversationID: conv.ID, Role: "agent", Content: text,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
 		ComponentKind: kindAlert, Severity: severity,
@@ -478,7 +498,6 @@ func (a *App) toolAlert(ctx context.Context, app *sdk.AppCtx, args map[string]an
 	if err != nil {
 		return nil, err
 	}
-	a.deliver(app, conv, msg)
 	return map[string]any{"message_id": msg.ID}, nil
 }
 
@@ -496,7 +515,7 @@ func (a *App) toolCreate(ctx context.Context, _ *sdk.AppCtx, args map[string]any
 	if title == "" {
 		return nil, errors.New("title required")
 	}
-	if existing, err := a.store.FindAgentConversationByTitle(from.AgentID, title); err != nil {
+	if existing, err := a.store.FindAgentConversationByTitle(from.ProjectID, from.AgentID, title); err != nil {
 		return nil, err
 	} else if existing != nil {
 		return map[string]any{"conversation_id": existing.ID, "title": existing.Title, "created": false}, nil
@@ -519,7 +538,7 @@ func (a *App) toolList(ctx context.Context, _ *sdk.AppCtx, args map[string]any) 
 		return nil, err
 	}
 	limit := intArg(args, "limit", 50)
-	conversations, err := a.store.ListConversationsForAgent(from.AgentID, limit)
+	conversations, err := a.store.ListConversationsForAgent(from.ProjectID, from.AgentID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -574,4 +593,96 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 		schema["required"] = required
 	}
 	return schema
+}
+
+func genericObjectsArg(args map[string]any, key string, max int) ([]map[string]any, error) {
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", key, err)
+	}
+	var out []map[string]any
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		return nil, fmt.Errorf("%s must be an array of objects", key)
+	}
+	if len(out) > max {
+		return nil, fmt.Errorf("%s supports at most %d entries", key, max)
+	}
+	return out, nil
+}
+
+func componentsArg(args map[string]any, key string) ([]Component, error) {
+	objects, err := genericObjectsArg(args, key, 20)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Component, 0, len(objects))
+	for _, obj := range objects {
+		app, _ := obj["app"].(string)
+		name, _ := obj["name"].(string)
+		if strings.TrimSpace(app) == "" || strings.TrimSpace(name) == "" {
+			return nil, errors.New("each component requires app and name")
+		}
+		props, _ := obj["props"].(map[string]any)
+		if props == nil {
+			props = map[string]any{}
+		}
+		out = append(out, Component{App: app, Name: name, Props: props})
+	}
+	return out, nil
+}
+
+func attachmentsArg(args map[string]any, key string) ([]Attachment, error) {
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var out []Attachment
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		return nil, fmt.Errorf("%s must be an array of attachments", key)
+	}
+	if len(out) > 10 {
+		return nil, errors.New("attachments supports at most 10 entries")
+	}
+	for _, attachment := range out {
+		if attachment.Type != "image" || strings.TrimSpace(attachment.DataURL) == "" {
+			return nil, fmt.Errorf("unsupported attachment type %q", attachment.Type)
+		}
+	}
+	return out, nil
+}
+
+func approvalActionsArg(args map[string]any) ([]approvalAction, error) {
+	raw, ok := args["actions"]
+	if !ok || raw == nil {
+		return defaultApprovalActions(), nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var actions []approvalAction
+	if err := json.Unmarshal(encoded, &actions); err != nil {
+		return nil, errors.New("actions must be an array of {id,label,style?}")
+	}
+	if len(actions) == 0 || len(actions) > 8 {
+		return nil, errors.New("actions must contain 1 to 8 entries")
+	}
+	seen := map[string]bool{}
+	for i := range actions {
+		actions[i].ID = strings.TrimSpace(actions[i].ID)
+		actions[i].Label = strings.TrimSpace(actions[i].Label)
+		if actions[i].ID == "" || actions[i].Label == "" || seen[actions[i].ID] {
+			return nil, errors.New("each action requires a unique id and non-empty label")
+		}
+		seen[actions[i].ID] = true
+	}
+	return actions, nil
 }

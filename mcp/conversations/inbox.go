@@ -40,9 +40,9 @@ func approvalCard(title, body string, actions []approvalAction) Component {
 	}}
 }
 
-func reportCard(title, summary, period string) Component {
+func reportCard(title, summary, period string, sections []map[string]any) Component {
 	return Component{App: appName, Name: "report-card", Props: map[string]any{
-		"title": title, "summary": summary, "period": period, "status": "sent",
+		"title": title, "summary": summary, "period": period, "sections": sections, "status": "sent",
 	}}
 }
 
@@ -85,14 +85,22 @@ func inboxPriority(m *Message) int {
 // Inbox returns the priority-ordered items. One indexed query — the
 // component_kind column is the whole reason the LIKE-scan era ends
 // here.
-func (s *store) Inbox(limit int) ([]InboxItem, error) {
+func (s *store) Inbox(projectID string, userID int64, limit int) ([]InboxItem, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
 	rows, err := s.db.Query(`
-		SELECT `+messageCols+` FROM messages
-		WHERE component_kind IN (?, ?, ?)
-		ORDER BY id DESC LIMIT ?`, kindApproval, kindAlert, kindReport, limit)
+		SELECT `+prefixCols("m.", messageCols)+`
+		FROM messages m
+		JOIN conversations c ON c.id=m.conversation_id
+		LEFT JOIN participants p ON p.conversation_id=c.id AND p.user_id=?
+		WHERE c.project_id=? AND c.archived_at IS NULL
+		  AND (c.owner_user_id=? OR p.user_id=? OR c.owner_user_id=0)
+		  AND m.component_kind IN (?, ?, ?)
+		  AND (m.component_kind != ? OR m.action_status='pending')
+		  AND m.components_json NOT LIKE '%"dismissed":true%'
+		ORDER BY m.id DESC LIMIT ?`, userID, projectID, userID, userID,
+		kindApproval, kindAlert, kindReport, kindApproval, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -133,9 +141,21 @@ func sortInbox(items []InboxItem) {
 }
 
 func cardStatus(m *Message) string {
+	if m.ActionStatus != "" && m.ActionStatus != "resolved" {
+		return m.ActionStatus
+	}
 	for _, c := range m.Components {
 		if status, ok := c.Props["status"].(string); ok {
 			return status
+		}
+	}
+	return ""
+}
+
+func cardNote(m *Message) string {
+	for _, c := range m.Components {
+		if note, ok := c.Props["note"].(string); ok {
+			return note
 		}
 	}
 	return ""
@@ -224,37 +244,15 @@ func (a *App) resolveApproval(app *sdk.AppCtx, m *Message, actionID, note string
 	if err != nil {
 		return nil, err
 	}
-	updated, err := a.store.UpdateMessageComponents(m.ID, updatedComponents)
+	target := approvalDeliveryTarget(m)
+	updated, err := a.store.ResolveApproval(m.ID, updatedComponents, actionID, target)
 	if err != nil {
 		return nil, err
 	}
 	if conv, err := a.store.GetConversation(updated.ConversationID); err == nil {
 		a.deliver(app, conv, updated)
-	}
-
-	switch {
-	case updated.CallbackTool != "" && updated.SourceApp != "":
-		var out map[string]any
-		if err := app.PlatformAPI().CallAppResult(updated.SourceApp, updated.CallbackTool, map[string]any{
-			"message_id": updated.ID, "action_id": actionID, "note": note,
-		}, &out); err != nil {
-			app.Logger().Warn("inbox callback failed", "app", updated.SourceApp, "tool", updated.CallbackTool, "err", err)
-		}
-	case updated.AgentID != 0:
-		event := formatApprovalResult(updated.ID, actionID, note)
-		forwarded := false
-		// Thread addressing is an optional SDK surface — type-assert,
-		// never assume (testkit stubs may implement only the base).
-		if updated.ThreadID != "" {
-			if tc, ok := app.PlatformAPI().(sdk.ThreadClient); ok {
-				forwarded = tc.SendThreadEvent(
-					sdk.ThreadRef{AgentID: updated.AgentID, ThreadID: updated.ThreadID}, event) == nil
-			}
-		}
-		if !forwarded {
-			if err := app.PlatformAPI().SendEvent(updated.AgentID, event); err != nil {
-				app.Logger().Warn("approval result forward failed", "agent", updated.AgentID, "err", err)
-			}
+		if target != "" {
+			a.attemptDelivery(app, target, conv, updated)
 		}
 	}
 	return updated, nil
@@ -297,23 +295,25 @@ func (a *App) toolInboxPost(ctx context.Context, app *sdk.AppCtx, args map[strin
 		return nil, errors.New("inbox_post is the sibling-app surface — agents raise items with conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one)")
 	}
 
-	// App callers arrive without an agent id; the posting app
-	// self-declares via source_app (the platform does not yet stamp
-	// app identity on inter-app calls). Refuse anonymity rather than
-	// invent an "unknown-app" bucket.
-	sourceApp := stringArg(args, "source_app")
-	if sourceApp == "" {
-		return nil, errors.New("source_app required (calling app's name)")
+	// App identity is stamped by the authenticated app-to-app bridge. Never
+	// trust source_app supplied in the payload: doing so turns Conversations
+	// into a confused deputy for approval callbacks.
+	if caller == nil || caller.AppInstallID <= 0 || caller.AppName == "" {
+		return nil, errors.New("authenticated sibling app identity required")
+	}
+	sourceApp := caller.AppName
+	if claimed := strings.TrimSpace(stringArg(args, "source_app")); claimed != "" && claimed != sourceApp {
+		return nil, errors.New("source_app does not match authenticated calling app")
 	}
 
 	agentID := int64(intArg(args, "agent_id", 0))
-	projectID := ""
-	if caller != nil {
-		projectID = caller.ProjectID
+	projectID := strings.TrimSpace(caller.ProjectID)
+	if projectID == "" {
+		return nil, errors.New("project context required")
 	}
 	conv, err := a.store.CreateConversation(CreateConversationInput{
 		ProjectID:       projectID,
-		LeadAgentID:     firstNonZero(agentID, 1),
+		LeadAgentID:     agentID,
 		Title:           "Inbox: " + sourceApp,
 		Origin:          "app",
 		ConversationKey: inboxConversationKey(sourceApp),
@@ -333,8 +333,12 @@ func (a *App) toolInboxPost(ctx context.Context, app *sdk.AppCtx, args map[strin
 	}
 	switch kind {
 	case kindApproval:
+		actions, actionErr := approvalActionsArg(args)
+		if actionErr != nil {
+			return nil, actionErr
+		}
 		msg.ComponentKind = kindApproval
-		msg.Components = []Component{approvalCard(title, body, defaultApprovalActions())}
+		msg.Components = []Component{approvalCard(title, body, actions)}
 	case kindAlert:
 		severity := stringArg(args, "severity")
 		if severity == "" {
@@ -344,17 +348,20 @@ func (a *App) toolInboxPost(ctx context.Context, app *sdk.AppCtx, args map[strin
 		msg.Severity = severity
 		msg.Components = []Component{alertCard(body, severity)}
 	case kindReport:
+		sections, sectionErr := genericObjectsArg(args, "sections", 50)
+		if sectionErr != nil {
+			return nil, sectionErr
+		}
 		msg.ComponentKind = kindReport
-		msg.Components = []Component{reportCard(title, body, "")}
+		msg.Components = []Component{reportCard(title, body, "", sections)}
 	default:
 		return nil, fmt.Errorf("invalid kind %q (report|alert|approval)", kind)
 	}
 
-	stored, err := a.store.AppendMessage(msg)
+	stored, _, err := a.appendAndDeliver(app, conv, msg)
 	if err != nil {
 		return nil, err
 	}
-	a.deliver(app, conv, stored)
 	return map[string]any{"message_id": stored.ID, "conversation_id": conv.ID}, nil
 }
 

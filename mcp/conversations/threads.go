@@ -66,7 +66,16 @@ func threadSuffixHash(suffix string) string {
 // spawning or refreshing it as needed. Empty return means "use main" —
 // the caller falls back to SendEvent.
 func (a *App) ensureConversationThread(app *sdk.AppCtx, conv *Conversation) string {
+	return a.ensureConversationThreadForAgent(app, conv, conv.LeadAgentID)
+}
+
+// ensureConversationThreadForAgent gives every participating agent an
+// isolated thread for the room. Core namespaces thread ids by agent.
+func (a *App) ensureConversationThreadForAgent(app *sdk.AppCtx, conv *Conversation, agentID int64) string {
 	if app == nil {
+		return ""
+	}
+	if agentID <= 0 {
 		return ""
 	}
 	tc, ok := app.PlatformAPI().(sdk.ThreadClient)
@@ -80,14 +89,14 @@ func (a *App) ensureConversationThread(app *sdk.AppCtx, conv *Conversation) stri
 		threadID = conversationThreadID(conv.ID)
 	}
 	suffix := conversationThreadDirective(conv)
-	cacheKey := fmt.Sprintf("%d/%s", conv.LeadAgentID, conv.ID)
+	cacheKey := fmt.Sprintf("%d/%s", agentID, conv.ID)
 	wantHash := threadSuffixHash(suffix)
 	if prev, ok := spawnedThreads.Load(cacheKey); ok && prev.(string) == wantHash {
 		return threadID
 	}
 
 	_, err := tc.SpawnThread(sdk.ThreadSpawnRequest{
-		AgentID:         conv.LeadAgentID,
+		AgentID:         agentID,
 		ThreadID:        threadID,
 		DirectiveSuffix: suffix,
 		// MCP nil → the platform supplies the agent's spawnable MCP
@@ -97,7 +106,7 @@ func (a *App) ensureConversationThread(app *sdk.AppCtx, conv *Conversation) stri
 		// Do not cache failure — the agent may simply be stopped; the
 		// next message retries the spawn.
 		app.Logger().Warn("conversation thread spawn failed — falling back to main",
-			"agent", conv.LeadAgentID, "conversation", conv.ID, "err", err)
+			"agent", agentID, "conversation", conv.ID, "err", err)
 		return ""
 	}
 	spawnedThreads.Store(cacheKey, wantHash)

@@ -104,12 +104,11 @@ decides in the inbox, and you relay the outcome.
   recalling what was said.
 - `conversations_list` — the conversations you participate in.
 
-## Rooms and external channels
+## Rooms and future transports
 
 A conversation can hold several agents: user messages are forwarded to
 the lead; any participant may send. If you are not the lead, contribute
 when addressed or when your expertise is the point — do not echo the
-lead. External channels (Telegram and similar) are ordinary
-conversations with a transport binding: reply with `conversations_send`
-exactly as in web chat; delivery to the external side is the app's job,
-not yours.
+lead. External transports are not included in this release. When adapters
+are added later, they will bind ordinary conversations and agents will
+continue replying with `conversations_send`.
