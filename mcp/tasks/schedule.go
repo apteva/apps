@@ -327,29 +327,108 @@ func (s *scheduler) Tick(now time.Time, projectID string) error {
 	return nil
 }
 
+// An open run with no activity for staleRunMultiple cadences (clamped to
+// [staleRunMinAge, staleRunMaxAge]) is treated as wedged and auto-failed, so a
+// single stuck run cannot block every future occurrence of its schedule.
+const (
+	staleRunMultiple = 10
+	staleRunMinAge   = time.Hour
+	staleRunMaxAge   = 24 * time.Hour
+)
+
+func staleRunThreshold(cadence time.Duration) time.Duration {
+	threshold := time.Duration(staleRunMultiple) * cadence
+	if threshold < staleRunMinAge {
+		return staleRunMinAge
+	}
+	if threshold > staleRunMaxAge {
+		return staleRunMaxAge
+	}
+	return threshold
+}
+
+// scheduleCadence derives the cadence from the schedule expression itself, not
+// from next_run_at bookkeeping — a blocked schedule's bookkeeping gaps grow with
+// the blockage, which would inflate the stale threshold exactly when it matters.
+func scheduleCadence(task *Task, now time.Time) time.Duration {
+	switch task.ScheduleKind {
+	case scheduleInterval:
+		if d, err := time.ParseDuration(task.ScheduleExpression); err == nil {
+			return d
+		}
+	case scheduleCron:
+		if loc, err := time.LoadLocation(task.ScheduleTimezone); err == nil {
+			if parsed, parseErr := scheduleParser.Parse(task.ScheduleExpression); parseErr == nil {
+				first := parsed.Next(now.In(loc))
+				return parsed.Next(first).Sub(first)
+			}
+		}
+	}
+	return 0
+}
+
+func (s *scheduler) openRuns(parentID string) ([]*Task, error) {
+	rows, err := s.store.db.Query(`SELECT `+taskColumns+` FROM tasks WHERE parent_task_id=? AND state IN ('queued','running','waiting','blocked')`, parentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs := []*Task{}
+	for rows.Next() {
+		run, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
 func (s *scheduler) materialize(parent *Task, now time.Time) error {
 	if parent.NextRunAt == nil {
 		return nil
 	}
 	scheduledFor := parent.NextRunAt.UTC()
 	if parent.ScheduleKind == scheduleOnce {
-		_, activated, err := s.store.activateOneTime(parent.ID, "tasks:scheduler", scheduledFor, now)
+		run, activated, err := s.store.activateOneTime(parent.ID, "tasks:scheduler", scheduledFor, now)
 		if err != nil {
 			return err
 		}
 		if !activated {
 			return nil
 		}
-		return s.app.notifyAssigned(parent.ID, "task.ready")
+		return s.app.notifyAssigned(run, run.AssignedThreadID, "task.ready")
 	}
-	var active int
-	_ = s.store.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE parent_task_id=? AND state IN ('queued','running','waiting','blocked')`, parent.ID).Scan(&active)
 	next, err := nextOccurrence(parent, scheduledFor, now)
 	if err != nil {
 		return err
 	}
+	open, err := s.openRuns(parent.ID)
+	if err != nil {
+		return err
+	}
+	active := 0
+	staleAfter := staleRunThreshold(scheduleCadence(parent, now))
+	for _, run := range open {
+		if idle := now.Sub(run.UpdatedAt); idle >= staleAfter {
+			failed := stateFailed
+			msg := fmt.Sprintf("run exceeded max age (no activity for %s, limit %s); auto-failed by scheduler", idle.Round(time.Second), staleAfter)
+			updated, _, failErr := s.store.Update(run.ID, "tasks:scheduler", UpdateTaskInput{State: &failed, Error: &msg})
+			if failErr != nil {
+				s.app.logger().Warn("tasks scheduler stale run", "task_id", run.ID, "err", failErr.Error())
+				active++
+				continue
+			}
+			s.app.logger().Warn("tasks scheduler stale run", "task_id", run.ID, "idle", idle.String())
+			_ = s.app.notifyCreator(updated)
+			continue
+		}
+		active++
+	}
 	if active > 0 {
-		_, err = s.store.db.Exec(`UPDATE tasks SET next_run_at=?, last_run_at=?, updated_at=? WHERE id=?`, next.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), parent.ID)
+		// Advance only next_run_at: bumping last_run_at here would make a
+		// blocked schedule look like it just ran.
+		_, err = s.store.db.Exec(`UPDATE tasks SET next_run_at=?, updated_at=? WHERE id=?`, next.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), parent.ID)
 		if err == nil {
 			_, _ = s.store.recordSimpleEvent(parent.ID, "tasks:scheduler", "occurrence_skipped_overlap", parent.State, parent.State, map[string]any{"scheduled_for": scheduledFor})
 		}
@@ -364,5 +443,5 @@ func (s *scheduler) materialize(parent *Task, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	return s.app.notifyAssigned(run.ID, "task.ready")
+	return s.app.notifyAssigned(run, run.AssignedThreadID, "task.ready")
 }

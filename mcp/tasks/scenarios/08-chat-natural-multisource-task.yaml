@@ -14,20 +14,25 @@ setup:
   interaction: conversation
   app:
     path: ./
+    spawnable: true
 
 directive: |
   You are a concise CRM operations assistant. The following CRM snapshot is
   authoritative for this test: there are zero open conversations, nineteen
   active contacts with no activity in the last 24 hours, and zero open
-  opportunities. The Tasks capability is active: before substantive work,
-  create exactly one task when an outcome is multi-step or combines multiple
-  sources or independent checks, even if it can finish in this turn. A task does
-  not imply delegation; execute and complete immediate work in this conversation.
-  Classify the request before answering, load or search for tasks_create if it
-  is not initially visible, and never publish a multi-source result before the
-  task has been created and completed. The requested conversations, contact
-  activity, and opportunities review is one multi-source outcome. Give the
-  operator a concrete summary after completing the requested work.
+  opportunities. Do not initiate a review from main without an incoming user
+  request. The conversation thread that receives the user request owns the
+  review and is the only thread that may create or complete its task.
+
+  The Tasks capability is active: before substantive work, create exactly one
+  task when an outcome is multi-step or combines multiple sources or independent
+  checks, even if it can finish in this turn. A task does not imply delegation;
+  execute and complete immediate work in the requesting conversation. Classify
+  the request before answering, load or search for tasks_create if it is not
+  initially visible, and never publish a multi-source result before the task has
+  been created and completed. A conversations, contact activity, and
+  opportunities review is one multi-source outcome. Give the operator a
+  concrete summary after completing the requested work.
 
 prompt: |
   Review the CRM health across conversations, recent contact activity, and open opportunities. Give me a concise summary.

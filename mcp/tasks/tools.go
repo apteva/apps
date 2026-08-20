@@ -129,7 +129,7 @@ func (a *App) toolCreate(ctx context.Context, app *sdk.AppCtx, args map[string]a
 		return nil, err
 	}
 	if created && schedule == nil && assigned != caller.ThreadID {
-		_ = a.notifyAssigned(task.ID, "task.assigned")
+		_ = a.notifyAssigned(task, assigned, "task.assigned")
 	}
 	return map[string]any{"task": task, "created": created}, nil
 }
@@ -225,7 +225,7 @@ func (a *App) toolAssign(ctx context.Context, app *sdk.AppCtx, args map[string]a
 		return nil, err
 	}
 	if target != caller.ThreadID {
-		_ = a.notifyAssigned(task.ID, "task.assigned")
+		_ = a.notifyAssigned(updated, target, "task.assigned")
 	}
 	return updated, nil
 }

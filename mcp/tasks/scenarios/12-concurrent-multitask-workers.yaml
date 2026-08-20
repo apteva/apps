@@ -15,6 +15,7 @@ setup:
   mode: autonomous
   app:
     path: ./
+    spawnable: true
 
 directive: |
   Run one simulated concurrency stress batch. The four work items below are
@@ -59,10 +60,10 @@ directive: |
   - `DELTA|40|Delta worker started|80|Delta worker finished|DELTA OK`
 
   After all four workers exist, assign each task to its matching worker with
-  tasks_assign. Do not grant Tasks tools to workers and do not put any task in
-  waiting: active delegated work remains running. The assignment events should
-  wake the paused workers close together, so their messages may race and arrive
-  in any order.
+  tasks_assign. Apart from read-only tasks_get, do not grant Tasks mutation
+  tools to workers and do not put any task in waiting: active delegated work
+  remains running. The assignment events should wake the paused workers close
+  together, so their messages may race and arrive in any order.
 
   Collect all four worker messages before writing their reported milestones.
   Then, regardless of arrival order, process the tasks strictly in Alpha, Beta,

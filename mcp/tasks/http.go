@@ -249,7 +249,7 @@ func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if created && body.Schedule == nil {
-			_ = a.notifyAssigned(task.ID, "task.assigned")
+			_ = a.notifyAssigned(task, assigned, "task.assigned")
 		}
 		status := http.StatusOK
 		if created {

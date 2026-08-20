@@ -456,7 +456,7 @@ func TestHTTPProjectIsolationAndOperatorLifecycle(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.2.8" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.2.9" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]
@@ -578,5 +578,144 @@ func TestManifestAndToolContract(t *testing.T) {
 		if !strings.Contains(normalizedSkill, required) {
 			t.Fatalf("Tasks skill missing classification rule %q", required)
 		}
+	}
+}
+
+func TestAssignNotifiesTheThreadJustAssignedNotCurrentDBAssignee(t *testing.T) {
+	app, appCtx, platform := newTestApp(t)
+	creator := callerContext(7, "thread-main", "project-a")
+	raw, err := app.toolCreate(creator, appCtx, map[string]any{"title": "Split inbox"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := raw.(map[string]any)["task"].(*Task)
+
+	assignedRaw, err := app.toolAssign(creator, appCtx, map[string]any{
+		"task_id": task.ID, "thread_id": "thread-worker-b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotB := assignedRaw.(*Task)
+
+	// A racing second assign lands before the first call's notification: the DB
+	// now says thread-worker-a owns the task.
+	stolen := "thread-worker-a"
+	if _, _, err := app.store.Update(task.ID, "thread-main", UpdateTaskInput{AssignedThreadID: &stolen}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.notifyAssigned(snapshotB, "thread-worker-b", "task.assigned"); err != nil {
+		t.Fatal(err)
+	}
+	last := platform.events[len(platform.events)-1]
+	if last.Target.ThreadID != "thread-worker-b" {
+		t.Fatalf("wake event followed the DB's current assignee instead of the call target: %+v", last)
+	}
+}
+
+func TestOverlapSkipKeepsLastRunAtAndAdvancesNextRun(t *testing.T) {
+	app, appCtx, _ := newTestApp(t)
+	caller := callerContext(7, "opaque-schedule-owner", "project-a")
+	raw, err := app.toolCreate(caller, appCtx, map[string]any{
+		"title": "Recurring review", "schedule": map[string]any{"kind": "interval", "every": "10m"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := raw.(map[string]any)["task"].(*Task)
+	firstDue := parent.NextRunAt.Add(time.Second)
+	if err := app.scheduler.Tick(firstDue, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	parent, _ = app.store.Get(parent.ID)
+	if parent.LastRunAt == nil || parent.NextRunAt == nil {
+		t.Fatalf("materialization did not stamp run bookkeeping: %+v", parent)
+	}
+	materializedLastRun := *parent.LastRunAt
+
+	// The run is still open at the next occurrence, so the tick must skip —
+	// without making the schedule look like it just ran.
+	secondDue := parent.NextRunAt.Add(time.Second)
+	if err := app.scheduler.Tick(secondDue, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	parent, _ = app.store.Get(parent.ID)
+	if parent.LastRunAt == nil || !parent.LastRunAt.Equal(materializedLastRun) {
+		t.Fatalf("overlap skip advanced last_run_at from %v to %v", materializedLastRun, parent.LastRunAt)
+	}
+	if !parent.NextRunAt.After(secondDue) {
+		t.Fatalf("overlap skip failed to advance next_run_at: %+v", parent)
+	}
+	events, err := app.store.Events(parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events[len(events)-1].EventType != "occurrence_skipped_overlap" {
+		t.Fatalf("skip left no trace event: %+v", events)
+	}
+}
+
+func TestSchedulerAutoFailsStaleRunAndResumesOccurrences(t *testing.T) {
+	app, appCtx, platform := newTestApp(t)
+	caller := callerContext(7, "opaque-schedule-owner", "project-a")
+	raw, err := app.toolCreate(caller, appCtx, map[string]any{
+		"title": "Hourly sweep", "schedule": map[string]any{"kind": "interval", "every": "10m"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := raw.(map[string]any)["task"].(*Task)
+	if err := app.scheduler.Tick(parent.NextRunAt.Add(time.Second), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	parentID := parent.ID
+	runs, err := app.store.List(TaskFilter{ProjectID: "project-a", ParentTaskID: &parentID, Limit: 10})
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs=%+v err=%v", runs, err)
+	}
+	running := stateRunning
+	if _, _, err := app.store.Update(runs[0].ID, "opaque-default", UpdateTaskInput{State: &running}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Threshold for a 10m cadence clamps to staleRunMinAge (1h); a run idle past
+	// it must be auto-failed instead of blocking every future occurrence.
+	parent, _ = app.store.Get(parent.ID)
+	staleTick := time.Now().UTC().Add(2 * time.Hour)
+	if parent.NextRunAt.After(staleTick) {
+		t.Fatalf("test premise broken: next_run_at %v beyond stale tick", parent.NextRunAt)
+	}
+	if err := app.scheduler.Tick(staleTick, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	runs, err = app.store.List(TaskFilter{ProjectID: "project-a", ParentTaskID: &parentID, Limit: 10})
+	if err != nil || len(runs) != 2 {
+		t.Fatalf("stale run did not unblock materialization: runs=%+v err=%v", runs, err)
+	}
+	states := map[string]int{}
+	for _, run := range runs {
+		states[run.State]++
+		if run.State == stateFailed && !strings.Contains(run.Error, "auto-failed by scheduler") {
+			t.Fatalf("stale failure lacks operator-readable error: %+v", run)
+		}
+	}
+	if states[stateFailed] != 1 || states[stateQueued] != 1 {
+		t.Fatalf("want one auto-failed and one fresh run, got %+v", states)
+	}
+	var creatorReceipt, freshWake bool
+	for _, event := range platform.events {
+		payload, ok := event.Message.(map[string]any)
+		if !ok {
+			continue
+		}
+		if payload["type"] == "task.terminal" && event.Target.ThreadID == "opaque-schedule-owner" {
+			creatorReceipt = true
+		}
+		if payload["type"] == "task.ready" && event.Target.ThreadID == "opaque-default" {
+			freshWake = true
+		}
+	}
+	if !creatorReceipt || !freshWake {
+		t.Fatalf("auto-fail must tell the creator and wake the fresh run: %+v", platform.events)
 	}
 }

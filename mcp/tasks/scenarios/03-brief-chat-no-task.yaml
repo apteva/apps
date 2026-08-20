@@ -13,6 +13,7 @@ setup:
   interaction: conversation
   app:
     path: ./
+    spawnable: true
 
 directive: |
   You are a concise operations assistant. Answer simple user messages directly.

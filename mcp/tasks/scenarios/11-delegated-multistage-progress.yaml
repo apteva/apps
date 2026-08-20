@@ -13,6 +13,7 @@ setup:
   mode: autonomous
   app:
     path: ./
+    spawnable: true
 
 directive: |
   Run one simulated inbox occurrence using the Tasks app. The inbox snapshot

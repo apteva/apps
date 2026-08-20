@@ -13,11 +13,14 @@ setup:
   interaction: conversation
   app:
     path: ./
+    spawnable: true
 
 directive: |
-  You help the operator schedule operational reviews. Represent one recurring
-  outcome as one recurring task and do not execute a future occurrence during
-  schedule creation.
+  You help the operator schedule operational reviews. Do not initiate a review
+  from main without an incoming user request. The conversation thread that
+  receives the request owns schedule creation and is the only thread that may
+  create its task. Represent one recurring outcome as one recurring task and do
+  not execute a future occurrence during schedule creation.
 
 prompt: |
   Every 15 minutes, review newly active leads. Name the recurring work "New lead review".

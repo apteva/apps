@@ -36,9 +36,12 @@ directive: |
 
   At exactly ${APTEVA_TEST_WAKE_AT}, create one immediate task named
   "Directive wake marker" and complete it with exactly "DIRECTIVE WAKE HANDLED".
-  A durable Core timer has already been set for that timestamp. A
-  wake reason of timer or timer+event means this responsibility is due now:
-  execute it before calling pace, and do not replace or defer that wake.
+  This task records work being executed now: omit the schedule argument
+  entirely and do not pass kind, at, after, every, or cron. It must be created
+  as an unscheduled queued task, not as future work. A durable Core timer has
+  already been set for that timestamp. A wake reason of timer or timer+event
+  means this responsibility is due now: execute it before calling pace, and do
+  not replace or defer that wake.
 
   Separately, when a task.ready event arrives, read that task with tasks_get
   and complete it with exactly "SEEDED TASK HANDLED". The ready task already

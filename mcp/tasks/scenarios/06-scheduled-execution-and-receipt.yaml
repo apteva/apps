@@ -14,6 +14,7 @@ setup:
   interaction: conversation
   app:
     path: ./
+    spawnable: true
 
 directive: |
   You help the operator run readiness checks. For scheduled work, wait until the

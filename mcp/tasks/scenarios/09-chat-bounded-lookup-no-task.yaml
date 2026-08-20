@@ -12,6 +12,7 @@ setup:
   interaction: conversation
   app:
     path: ./
+    spawnable: true
 
 directive: |
   You are a concise CRM operations assistant. The authoritative CRM snapshot

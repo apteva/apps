@@ -17,7 +17,7 @@ var taskSkillBody string
 const manifestYAML = `schema: apteva-app/v1
 name: tasks
 display_name: Tasks
-version: 3.2.8
+version: 3.2.9
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -155,7 +155,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.EmitWithProject("task."+event.EventType, eventProjectID(a.store, event.TaskID), event)
 	})
 	a.scheduler = &scheduler{store: a.store, app: a}
-	ctx.Logger().Info("tasks app mounted", "version", "3.2.7")
+	ctx.Logger().Info("tasks app mounted", "version", "3.2.9")
 	return nil
 }
 
@@ -205,16 +205,16 @@ func (discardLogger) Info(string, ...any)  {}
 func (discardLogger) Warn(string, ...any)  {}
 func (discardLogger) Error(string, ...any) {}
 
-func (a *App) notifyAssigned(taskID, eventType string) error {
+// notifyAssigned wakes threadID with an event about task. The wake target is an
+// explicit argument, never re-read from the store: a concurrent reassign landing
+// between the caller's write and a re-read would redirect the event and leave
+// the thread this call just assigned paused forever.
+func (a *App) notifyAssigned(task *Task, threadID, eventType string) error {
 	if a.ctx == nil || a.ctx.ThreadAPI() == nil {
 		return errors.New("platform thread API unavailable")
 	}
-	task, err := a.store.Get(taskID)
-	if err != nil {
-		return err
-	}
 	payload := map[string]any{"type": eventType, "task_id": task.ID, "title": task.Title, "description": task.Description, "state": task.State, "scheduled_for": task.ScheduledFor, "parent_task_id": task.ParentTaskID}
-	return a.ctx.ThreadAPI().SendThreadEvent(sdk.ThreadRef{AgentID: task.AgentID, ThreadID: task.AssignedThreadID}, payload)
+	return a.ctx.ThreadAPI().SendThreadEvent(sdk.ThreadRef{AgentID: task.AgentID, ThreadID: threadID}, payload)
 }
 
 func (a *App) notifyCreator(task *Task) error {
