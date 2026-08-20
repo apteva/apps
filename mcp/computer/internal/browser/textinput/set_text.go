@@ -38,6 +38,7 @@ type SetResult struct {
 	RenderedText  string   `json:"rendered_text"`
 	Paragraphs    []string `json:"paragraphs"`
 	Verified      bool     `json:"verified"`
+	Verification  string   `json:"verification"`
 }
 
 func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) {
@@ -58,15 +59,21 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
 %s
   function labelFor(el) {
     if (!el) return '';
-    var aria = norm(el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title')));
+    var aria = norm(el.getAttribute && el.getAttribute('aria-label'));
     if (aria) return aria;
+	var labelled = norm(el.getAttribute && el.getAttribute('aria-labelledby'));
+	if (labelled) {
+	  var doc = el.ownerDocument || document;
+	  var joined = norm(labelled.split(/\s+/).map(function(id) { var node=doc.getElementById(id); return node ? (node.innerText||node.textContent||'') : ''; }).join(' '));
+	  if (joined) return joined;
+	}
     if (el.id) {
       var lab = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
       if (lab) return norm(lab.textContent);
     }
     var closestLabel = el.closest && el.closest('label');
     if (closestLabel) return norm(closestLabel.textContent);
-    return '';
+    return norm(el.getAttribute && (el.getAttribute('title') || el.getAttribute('placeholder')));
   }
   function isTextTarget(el) {
     if (!el || !el.matches) return false;
@@ -143,7 +150,9 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
   await new Promise(function(resolve){requestAnimationFrame(function(){requestAnimationFrame(resolve);});});
   var rendered = renderedReadback(el, isContentEditable);
   var requestedParagraphs=paragraphList(value);
-  var verified=requestedParagraphs.length===rendered.paragraphs.length&&requestedParagraphs.every(function(p,i){return p===rendered.paragraphs[i];});
+  var singleLine=isNative&&String(el.tagName||'').toLowerCase()==='input';
+  var verified=singleLine ? rendered.text===normalizeLines(value) :
+    requestedParagraphs.length===rendered.paragraphs.length&&requestedParagraphs.every(function(p,i){return p===rendered.paragraphs[i];});
   return {
     ok: true,
     kind: isContentEditable ? 'contenteditable' : 'native',
@@ -157,7 +166,8 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
     newline_mode: req.NewlineMode,
     rendered_text: rendered.text,
     paragraphs: rendered.paragraphs,
-    verified: verified
+    verified: verified,
+    verification: singleLine ? 'scalar' : 'paragraphs'
   };
 })(%s, %s)`, domselector.UniqueCSSPathFunction, string(targetJSON), string(reqJSON))
 
@@ -178,6 +188,9 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
 		return out.SetResult, errors.New("set_text failed")
 	}
 	if !out.Verified {
+		if out.Verification == "scalar" {
+			return out.SetResult, fmt.Errorf("set_text value mismatch: requested value does not match actual single-line value")
+		}
 		return out.SetResult, fmt.Errorf("set_text rendered text mismatch: requested paragraphs do not match rendered paragraphs")
 	}
 	return out.SetResult, nil

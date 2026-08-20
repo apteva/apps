@@ -196,21 +196,42 @@ type ExtractResult struct {
 // Set-of-Mark screenshot. Coordinates are viewport CSS pixels and label is the
 // value accepted by click/double_click label=N.
 type SetOfMarkTarget struct {
-	ID                string `json:"id"`
-	Label             int    `json:"label"`
-	X                 int    `json:"x"`
-	Y                 int    `json:"y"`
-	W                 int    `json:"w"`
-	H                 int    `json:"h"`
-	Tag               string `json:"tag"`
-	Role              string `json:"role,omitempty"`
-	Text              string `json:"text,omitempty"`
-	AccessibleName    string `json:"accessible_name,omitempty"`
-	Type              string `json:"type,omitempty"`
-	Disabled          bool   `json:"disabled"`
-	Loading           bool   `json:"loading"`
-	Dangerous         bool   `json:"dangerous"`
-	DestructiveEffect string `json:"destructive_effect,omitempty"`
+	ID                string         `json:"id"`
+	Label             int            `json:"label"`
+	X                 int            `json:"x"`
+	Y                 int            `json:"y"`
+	W                 int            `json:"w"`
+	H                 int            `json:"h"`
+	Tag               string         `json:"tag"`
+	Role              string         `json:"role,omitempty"`
+	Text              string         `json:"text,omitempty"`
+	AccessibleName    string         `json:"accessible_name,omitempty"`
+	Type              string         `json:"type,omitempty"`
+	Placeholder       string         `json:"placeholder,omitempty"`
+	CurrentValue      *string        `json:"current_value,omitempty"`
+	Pattern           string         `json:"pattern,omitempty"`
+	FormatHint        string         `json:"format_hint,omitempty"`
+	DateLike          bool           `json:"date_like,omitempty"`
+	Validity          *FieldValidity `json:"validity,omitempty"`
+	Disabled          bool           `json:"disabled"`
+	Loading           bool           `json:"loading"`
+	Dangerous         bool           `json:"dangerous"`
+	DestructiveEffect string         `json:"destructive_effect,omitempty"`
+}
+
+// FieldValidity is a compact semantic projection of the DOM ValidityState.
+// It is attached only to editable controls, keeping ordinary SoM payloads
+// small while allowing agents to diagnose rejected masked values.
+type FieldValidity struct {
+	Valid           bool   `json:"valid"`
+	BadInput        bool   `json:"bad_input,omitempty"`
+	PatternMismatch bool   `json:"pattern_mismatch,omitempty"`
+	TypeMismatch    bool   `json:"type_mismatch,omitempty"`
+	RangeUnderflow  bool   `json:"range_underflow,omitempty"`
+	RangeOverflow   bool   `json:"range_overflow,omitempty"`
+	StepMismatch    bool   `json:"step_mismatch,omitempty"`
+	ValueMissing    bool   `json:"value_missing,omitempty"`
+	Message         string `json:"message,omitempty"`
 }
 
 // ScrollRegion is one independently scrollable viewport or DOM container.

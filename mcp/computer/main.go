@@ -94,7 +94,7 @@ provides:
     - name: browser_session
       description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
-      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, and semantic scroll_regions. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. For a click that saves, submits, publishes, deletes, sends, pays, or navigates, pass expected_text with the intended accessible name so Computer verifies it atomically at dispatch. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and returns normalized rendered-text verification. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes."
+      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, semantic scroll_regions, date-field format metadata, and visible semantic calendar cells. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. For a click that saves, submits, publishes, deletes, sends, pays, or navigates, pass expected_text with the intended accessible name so Computer verifies it atomically at dispatch. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and uses scalar verification for native single-line inputs. set_temporal accepts ISO dates for native or confidently detected masked date fields and returns requested/actual values, format, and validity diagnostics. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -590,7 +590,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"For an operation outcome, prefer action=wait_for with declarative URL, text, selector, or semantic-target conditions; it ignores unrelated background requests and embedded frames. To verify navigation away from a known current URL, use type=url_changed and value=<the URL before the action>; use url_equals only when value is the desired destination. Use action=wait_for_stable only when the whole page must become quiet. A wait timeout returns timed_out=true and observed signals; it never means an earlier click or edit failed. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
 				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. " +
-				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If the UI shows separate date and time fields, call set_temporal separately on each field; do not put a combined date-time string into the date field. " +
+				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native or masked date/time fields, use action=set_temporal with a current target_id (preferred), label, or selector plus an ISO value such as 2026-07-01 or a time such as 11:00 AM. Computer converts ISO dates when placeholder/pattern/locale makes the displayed format clear and reports requested, actual, format_hint, and validity. If direct entry is rejected, use a fresh screenshot and choose the desired visible role=gridcell by target_id and expected_name; never guess an aria-label CSS selector from the accessible name. If the UI shows separate date and time fields, call set_temporal separately on each field. " +
 				"If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). " +
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, screenshots return semantic scroll_regions. When more than one region can scroll, pass target_id for the intended region and optionally expected_name/expected_role. Scroll reports the region that actually moved, before/after offsets, moved, wrong_target, at_start/at_end, and newly revealed controls. amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
@@ -623,7 +623,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"mime_type":     map[string]any{"type": "string", "description": "For action=upload_file with base64. MIME type hint."},
 				"file_path":     map[string]any{"type": "string", "description": "For action=upload_file. Local app filesystem path; mainly for local/dev/manual use."},
 				"text":          map[string]any{"type": "string", "description": "For action=type, short literal text. For action=set_text, the full text to put into an input, textarea, contenteditable editor, or message/post composer. For action=select_option, one option display text to select. For action=set_temporal, accepted as a fallback value. When focused on native date/time inputs, action=type can normalize full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM, but set_temporal is safer when focus is unstable. For split date/time UIs, target the date field and time field in separate calls."},
-				"value":         map[string]any{"type": "string", "description": "For action=select_option, one option value to select. For action=set_text, accepted as fallback text when text is omitted. For action=set_temporal, the value to write, such as 2026-07-01 for a date field, 11:00 AM for a time field, or 2026-07-01 11:00 AM only when the target is a single datetime field. For separate date and time fields, call set_temporal twice."},
+				"value":         map[string]any{"type": "string", "description": "For action=select_option, one option value to select. For action=set_text, accepted as fallback text when text is omitted. For action=set_temporal, prefer an ISO date such as 2026-07-01; Computer converts it for confidently detected masked date fields and returns requested, normalized, and actual values plus format/validity diagnostics. Use 11:00 AM for a time field, or a combined value only when the target is one datetime field."},
 				"texts":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option display texts."},
 				"values":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option values."},
 				"mode":          map[string]any{"type": "string", "enum": []string{"replace", "add", "remove", "toggle", "append"}, "description": "For action=select_option, replace is default and add/remove/toggle are intended for multiselect controls. For action=set_text, use replace (default) or append."},
@@ -2307,6 +2307,34 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if isSessionUnhealthyError(err) {
 			return nil, a.closeUnhealthySession(ctx, id, sess, action, err)
 		}
+		// A masked/controlled temporal field can reject or rewrite a value while
+		// still yielding essential diagnostics. app-sdk errors cannot carry a
+		// structured data payload, so return an explicit unsuccessful action
+		// observation rather than discarding the requested/actual values.
+		if action == "set_temporal" {
+			if result := temporalResultFor(sess.comp); result != nil && result.ErrorCode != "" {
+				markSemanticSnapshotDirty(sess, action)
+				a.recordSessionNavigation(ctx, id, sess)
+				afterURL := currentURL(sess.comp)
+				payload := a.sessionActionPayload(id, sess, act, args)
+				payload["success"] = false
+				payload["status"] = "rejected"
+				payload["failed"] = true
+				payload["action_completed"] = false
+				mergeTemporalResultPayload(payload, result)
+				emitEvent(ctx, "session.action", payload)
+				out := map[string]any{
+					"session_id": id, "current_url": afterURL,
+					"screenshot_url":       sessionResourceURL(ctx, id, "screenshot"),
+					"screenshot_available": true, "post_action_screenshot": "not_embedded",
+					"success": false, "failed": true, "status": "rejected", "action_completed": false,
+					"text":      "The temporal value was not accepted. Inspect temporal_actual_value, temporal_validity, temporal_placeholder, and temporal_format_hint before retrying; open a visible semantic date grid when direct entry is unavailable.",
+					"next_step": "Retry set_temporal using the returned format_hint, or take a fresh semantic screenshot and choose a current date-grid target_id.",
+				}
+				mergeTemporalResultPayload(out, result)
+				return out, nil
+			}
+		}
 		if isActionTimeoutError(err) {
 			return nil, computerUseFailure("action_timeout", id, sess, action,
 				"browser action timed out",
@@ -2975,6 +3003,30 @@ func mergeTemporalResultPayload(payload map[string]any, result *temporalinput.Re
 	payload["temporal_value"] = result.Value
 	payload["temporal_previous_value"] = result.PreviousValue
 	payload["temporal_changed"] = result.Changed
+	payload["temporal_requested_value"] = result.RequestedValue
+	payload["temporal_normalized_value"] = result.NormalizedValue
+	payload["temporal_actual_value"] = result.ActualValue
+	payload["temporal_verified"] = result.Verified
+	payload["temporal_date_like"] = result.DateLike
+	payload["temporal_validity"] = result.Validity
+	if result.Placeholder != "" {
+		payload["temporal_placeholder"] = result.Placeholder
+	}
+	if result.Pattern != "" {
+		payload["temporal_pattern"] = result.Pattern
+	}
+	if result.FormatHint != "" {
+		payload["temporal_format_hint"] = result.FormatHint
+	}
+	if result.Strategy != "" {
+		payload["temporal_strategy"] = result.Strategy
+	}
+	if result.ErrorCode != "" {
+		payload["temporal_error_code"] = result.ErrorCode
+	}
+	if result.ErrorMessage != "" {
+		payload["temporal_error"] = result.ErrorMessage
+	}
 	if result.Selector != "" {
 		payload["temporal_selector"] = result.Selector
 	}
@@ -2999,6 +3051,7 @@ func mergeTextResultPayload(payload map[string]any, result *textinput.SetResult)
 	payload["text_rendered"] = result.RenderedText
 	payload["text_paragraphs"] = result.Paragraphs
 	payload["text_verified"] = result.Verified
+	payload["text_verification"] = result.Verification
 	if result.Selector != "" {
 		payload["text_selector"] = result.Selector
 	}

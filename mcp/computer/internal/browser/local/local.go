@@ -1112,7 +1112,10 @@ func (c *Computer) setTemporal(action computer.Action) (temporalinput.Result, er
 		value = action.Text
 	}
 	res, err := temporalinput.Set(c.ctx, target, temporalinput.Request{Value: value})
-	if err == nil {
+	// Preserve the diagnostic readback even when a controlled or masked field
+	// rejected the requested value. The MCP layer uses it to return a useful
+	// structured failure instead of a generic backend error.
+	if res.Selector != "" || res.ErrorCode != "" {
 		c.setLastTemporalResult(&res)
 	}
 	return res, err
@@ -1690,6 +1693,8 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 		out = append(out, computer.SetOfMarkTarget{
 			ID: e.ID, Label: e.Label, X: e.X, Y: e.Y, W: e.W, H: e.H,
 			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
+			Placeholder: e.Placeholder, CurrentValue: e.CurrentValue, Pattern: e.Pattern,
+			FormatHint: e.FormatHint, DateLike: e.DateLike, Validity: e.Validity,
 			Disabled: e.Disabled, Loading: e.Loading, Dangerous: e.Dangerous, DestructiveEffect: e.DestructiveEffect,
 		})
 	}

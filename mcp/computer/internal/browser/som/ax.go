@@ -22,6 +22,7 @@ var axInteractiveRoles = map[string]int{
 	"checkbox": 2, "radio": 2, "switch": 2, "menuitem": 2,
 	"menuitemcheckbox": 2, "menuitemradio": 2, "option": 2,
 	"tab": 2, "treeitem": 2, "slider": 2,
+	"gridcell": 2,
 }
 
 // ShouldAugmentAX keeps hosted-browser screenshots fast while still covering

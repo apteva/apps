@@ -179,10 +179,16 @@ click/key sequences:
   when blank paragraph gaps are not desired.
 - For date/time scheduler fields, use
   `computer_use(action="set_temporal", value="2026-07-01", ...)` or
-  `value="11:00 AM"` when the field can be targeted directly.
+  `value="11:00 AM"` when the field can be targeted directly. Prefer a fresh
+  `target_id` plus `expected_name`; an accessible name derived from a
+  `<label>` is not an `aria-label` CSS attribute. Computer converts ISO dates
+  for confidently detected masked text fields and returns requested/actual
+  values, `format_hint`, placeholder, and browser validity.
 - If the page shows separate date and time fields, set them separately with
-  their own `label` or `selector`. Use a combined date-time value only when the
-  page has one actual datetime field.
+  their own current semantic target. Use a combined date-time value only when
+  the page has one actual datetime field. If direct entry is rejected, refresh
+  SoM and choose the visible calendar `role=gridcell` with its current
+  `target_id` and `expected_name`.
 
 Examples:
 

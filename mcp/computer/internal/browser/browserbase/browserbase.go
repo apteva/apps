@@ -745,7 +745,7 @@ func (c *Computer) setTemporal(ctx context.Context, action computer.Action) (tem
 		value = action.Text
 	}
 	res, err := temporalinput.Set(ctx, target, temporalinput.Request{Value: value})
-	if err == nil {
+	if res.Selector != "" || res.ErrorCode != "" {
 		c.setLastTemporalResult(&res)
 	}
 	return res, err
@@ -1260,6 +1260,8 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 		out = append(out, computer.SetOfMarkTarget{
 			ID: e.ID, Label: e.Label, X: e.X, Y: e.Y, W: e.W, H: e.H,
 			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
+			Placeholder: e.Placeholder, CurrentValue: e.CurrentValue, Pattern: e.Pattern,
+			FormatHint: e.FormatHint, DateLike: e.DateLike, Validity: e.Validity,
 			Disabled: e.Disabled, Loading: e.Loading, Dangerous: e.Dangerous, DestructiveEffect: e.DestructiveEffect,
 		})
 	}

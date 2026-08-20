@@ -106,7 +106,7 @@ document.getElementById('publish').addEventListener('click',function(){fetch('/p
 		if target.AccessibleName == "Publish" {
 			publish = target
 		}
-		if target.AccessibleName == "Post title" {
+		if target.AccessibleName == "Title" {
 			title = target
 		}
 	}
@@ -114,10 +114,10 @@ document.getElementById('publish').addEventListener('click',function(){fetch('/p
 		t.Fatalf("stable Publish SoM target has stale state: %+v all=%+v", publish, c.LastSetOfMark())
 	}
 	if title.Label == 0 {
-		t.Fatalf("ordinary placeholder input missing from SoM: %+v", c.LastSetOfMark())
+		t.Fatalf("ordinary associated-label input missing from SoM: %+v", c.LastSetOfMark())
 	}
 	if _, err := c.Execute(computer.Action{Type: "click", Label: title.Label}); err != nil {
-		t.Fatalf("ordinary placeholder label click regressed: %v", err)
+		t.Fatalf("ordinary associated-label click regressed: %v", err)
 	}
 	publish = computer.SetOfMarkTarget{}
 	for _, target := range c.LastSetOfMark() {

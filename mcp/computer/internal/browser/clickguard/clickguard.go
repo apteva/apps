@@ -138,7 +138,7 @@ func inspectScript(x, y int) string {
   }
   var leaf = deepElementFromPoint(document, %d, %d);
   if (!leaf) return {tag:'unknown',disabled:false,loading:false,dangerous:false};
-  var interactive = 'button,a[href],input,select,textarea,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[role="checkbox"],[role="radio"],[role="switch"],[onclick],[tabindex]:not([tabindex="-1"])';
+  var interactive = 'button,a[href],input,select,textarea,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[role="checkbox"],[role="radio"],[role="switch"],[role="gridcell"],[onclick],[tabindex]:not([tabindex="-1"])';
   function interactiveAncestor(node) {
     for (var current=node; current;) {
       if (current.matches && current.matches(interactive)) return current;
@@ -156,9 +156,19 @@ func inspectScript(x, y int) string {
     var doc=node.ownerDocument||document;
     return clean(ids.split(/\s+/).map(function(id){var n=doc.getElementById(id);return n?(n.innerText||n.textContent||''):'';}).join(' '));
   }
+  function associatedLabel(node){
+    if(!node)return '';
+    var doc=node.ownerDocument||document;
+    if(node.id){
+      try{var lab=doc.querySelector('label[for="'+CSS.escape(node.id)+'"]');if(lab)return clean(lab.innerText||lab.textContent);}
+      catch(e){}
+    }
+    var closest=node.closest&&node.closest('label');
+    return closest?clean(closest.innerText||closest.textContent):'';
+  }
   function name(node){
     var result=clean((node.getAttribute && node.getAttribute('aria-label')) || labelledBy(node) ||
-      (node.getAttribute && node.getAttribute('title')) || node.innerText || node.textContent ||
+      associatedLabel(node) || (node.getAttribute && node.getAttribute('title')) || node.innerText || node.textContent ||
       node.value || (node.getAttribute && node.getAttribute('alt')) ||
       (node.getAttribute && node.getAttribute('aria-placeholder')) ||
       (node.getAttribute && node.getAttribute('placeholder')) ||

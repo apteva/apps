@@ -30,6 +30,7 @@ import (
 	"os"
 	"strconv"
 
+	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
 	"golang.org/x/image/math/fixed"
@@ -39,21 +40,27 @@ import (
 // Populated by running EnumScript inside the page's main world; the
 // coordinates are in viewport space (same space clicks dispatch in).
 type Element struct {
-	ID                string `json:"id"`
-	Label             int    `json:"label"` // assigned by Enumerate in order
-	X                 int    `json:"x"`
-	Y                 int    `json:"y"`
-	W                 int    `json:"w"`
-	H                 int    `json:"h"`
-	Tag               string `json:"tag"`
-	Role              string `json:"role,omitempty"`
-	Text              string `json:"text,omitempty"`
-	AccessibleName    string `json:"accessible_name,omitempty"`
-	Type              string `json:"type,omitempty"`
-	Disabled          bool   `json:"disabled"`
-	Loading           bool   `json:"loading"`
-	Dangerous         bool   `json:"dangerous"`
-	DestructiveEffect string `json:"destructive_effect,omitempty"`
+	ID                string                  `json:"id"`
+	Label             int                     `json:"label"` // assigned by Enumerate in order
+	X                 int                     `json:"x"`
+	Y                 int                     `json:"y"`
+	W                 int                     `json:"w"`
+	H                 int                     `json:"h"`
+	Tag               string                  `json:"tag"`
+	Role              string                  `json:"role,omitempty"`
+	Text              string                  `json:"text,omitempty"`
+	AccessibleName    string                  `json:"accessible_name,omitempty"`
+	Type              string                  `json:"type,omitempty"`
+	Placeholder       string                  `json:"placeholder,omitempty"`
+	CurrentValue      *string                 `json:"current_value,omitempty"`
+	Pattern           string                  `json:"pattern,omitempty"`
+	FormatHint        string                  `json:"format_hint,omitempty"`
+	DateLike          bool                    `json:"date_like,omitempty"`
+	Validity          *computer.FieldValidity `json:"validity,omitempty"`
+	Disabled          bool                    `json:"disabled"`
+	Loading           bool                    `json:"loading"`
+	Dangerous         bool                    `json:"dangerous"`
+	DestructiveEffect string                  `json:"destructive_effect,omitempty"`
 }
 
 // Center returns the pixel at the center of the element's bbox —
@@ -97,6 +104,9 @@ const EnumScript = `
     '[role=button]','[role=link]','[role=menuitem]','[role=tab]',
     '[role=checkbox]','[role=radio]','[role=switch]','[role=combobox]',
     '[role=option]','[role=treeitem]','[role=textbox]','[role=searchbox]',
+    // Calendar widgets frequently expose days only as ARIA gridcells. These
+    // are actionable semantic targets when direct masked-date entry fails.
+    '[role=gridcell]',
     // contenteditable catches Slate.js / Lexical / ProseMirror /
     // TinyMCE / Quill / etc. rich-text editors. Patreon's body
     // editor in particular is a contenteditable div with no role.
@@ -156,14 +166,67 @@ const EnumScript = `
       return node ? (node.innerText || node.textContent || '') : '';
     }).join(' '));
   }
+  function associatedLabel(el) {
+    if (!el) return '';
+    var doc = el.ownerDocument || document;
+    if (el.id) {
+      try {
+        var lab = doc.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+        if (lab) return clean(lab.innerText || lab.textContent);
+      } catch (e) {}
+    }
+    var closest = el.closest && el.closest('label');
+    return closest ? clean(closest.innerText || closest.textContent) : '';
+  }
   function accessibleName(el) {
     return clean((el.getAttribute && el.getAttribute('aria-label')) || labelledBy(el) ||
-      (el.getAttribute && el.getAttribute('title')) || el.innerText || el.textContent ||
+      associatedLabel(el) || (el.getAttribute && el.getAttribute('title')) || el.innerText || el.textContent ||
       el.value || (el.getAttribute && el.getAttribute('alt')) ||
       (el.getAttribute && el.getAttribute('aria-placeholder')) ||
       (el.getAttribute && el.getAttribute('placeholder')) ||
       (el.getAttribute && el.getAttribute('data-placeholder')) ||
       (el.getAttribute && el.getAttribute('data-text')) || '');
+  }
+  function formatFromShape(shape) {
+    var s = clean(shape).toLowerCase();
+    if (!s) return '';
+    s = s.replace(/year/g, 'yyyy').replace(/month/g, 'mm').replace(/day/g, 'dd');
+    if (/y{2,4}[^a-z0-9]+m{1,2}[^a-z0-9]+d{1,2}/.test(s)) return 'yyyy-mm-dd';
+    if (/m{1,2}[^a-z0-9]+d{1,2}[^a-z0-9]+y{2,4}/.test(s)) return 'mm/dd/yyyy';
+    if (/d{1,2}[^a-z0-9]+m{1,2}[^a-z0-9]+y{2,4}/.test(s)) return 'dd/mm/yyyy';
+    return '';
+  }
+  function fieldMetadata(el, name) {
+    var tag = String(el.tagName || '').toLowerCase();
+    if (tag !== 'input' && tag !== 'textarea') return null;
+    var type = clean(el.type).toLowerCase();
+    var placeholder = clean(el.getAttribute('placeholder'));
+    var pattern = clean(el.getAttribute('pattern'));
+    var current = String(el.value || '');
+    var hint = type === 'date' ? 'yyyy-mm-dd' : (type === 'datetime-local' ? 'yyyy-mm-ddThh:mm' :
+      formatFromShape(placeholder) || formatFromShape(pattern));
+    if (!hint && /^\d{4}-\d{1,2}-\d{1,2}$/.test(current)) hint = 'yyyy-mm-dd';
+    if (!hint) {
+      var m = current.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (m && Number(m[1]) > 12) hint = 'dd/mm/yyyy';
+      else if (m && Number(m[2]) > 12) hint = 'mm/dd/yyyy';
+    }
+    var semantic = clean(name + ' ' + placeholder + ' ' + pattern).toLowerCase();
+    var dateLike = type === 'date' || type === 'datetime-local' ||
+      (/^(text|search|tel|)$/.test(type) && (!!hint || /\b(date|day|month|year|datum|fecha|data)\b/.test(semantic) || /[mdy]{1,4}\s*[\/.\-]\s*[mdy]{1,4}/i.test(semantic)));
+    if (!dateLike) return null;
+    if (!hint) {
+      var lang = String(el.lang || document.documentElement.lang || navigator.language || '').toLowerCase();
+      if (lang) hint = lang === 'en-us' || lang.indexOf('en-us-') === 0 ? 'mm/dd/yyyy' : 'dd/mm/yyyy';
+    }
+    var validity = el.validity ? {
+      valid: !!el.validity.valid, bad_input: !!el.validity.badInput,
+      pattern_mismatch: !!el.validity.patternMismatch, type_mismatch: !!el.validity.typeMismatch,
+      range_underflow: !!el.validity.rangeUnderflow, range_overflow: !!el.validity.rangeOverflow,
+      step_mismatch: !!el.validity.stepMismatch, value_missing: !!el.validity.valueMissing,
+      message: clean(el.validationMessage)
+    } : null;
+    return {placeholder:placeholder,current_value:current,pattern:pattern,format_hint:hint,date_like:true,validity:validity};
   }
   function isVisible(el, styleWin) {
     if (!el || !el.getBoundingClientRect) return false;
@@ -214,7 +277,7 @@ const EnumScript = `
     if (role === 'button' || role === 'link' || role === 'menuitem' ||
         role === 'tab' || role === 'checkbox' || role === 'radio' ||
         role === 'switch' || role === 'combobox' || role === 'option' ||
-        role === 'treeitem') return 2;
+        role === 'treeitem' || role === 'gridcell') return 2;
     return 1; // bare onclick / tabindex
   }
 
@@ -296,6 +359,7 @@ const EnumScript = `
         if (text.length > 40) text = text.substr(0, 40);
         var tag = el.tagName.toLowerCase();
         var role = el.getAttribute('role') || '';
+        var field = fieldMetadata(el, name);
         var disabled = !!(el.disabled || (el.matches && el.matches(':disabled')) ||
           el.getAttribute('aria-disabled') === 'true' || (el.closest && el.closest('[inert]')));
         var loading = isLoading(el, styleWin);
@@ -308,6 +372,9 @@ const EnumScript = `
           el: el, id: stableID, x: x, y: y, w: w, h: h,
           tag: tag, role: role, text: text, accessible_name: name,
           type: el.type || '',
+          placeholder: field ? field.placeholder : '', current_value: field ? field.current_value : null,
+          pattern: field ? field.pattern : '', format_hint: field ? field.format_hint : '',
+          date_like: !!field, validity: field ? field.validity : null,
           disabled: disabled, loading: loading, dangerous: effect !== '', destructive_effect: effect,
           prio: priority(tag, role, el)
         });
@@ -537,6 +604,8 @@ const EnumScript = `
     out.push({
       id: c.id, x: c.x, y: c.y, w: c.w, h: c.h,
       tag: c.tag, role: c.role, text: c.text, accessible_name: c.accessible_name, type: c.type,
+      placeholder: c.placeholder, current_value: c.current_value, pattern: c.pattern,
+      format_hint: c.format_hint, date_like: c.date_like, validity: c.validity,
       disabled: c.disabled, loading: c.loading, dangerous: c.dangerous, destructive_effect: c.destructive_effect,
       label: k + 1
     });
