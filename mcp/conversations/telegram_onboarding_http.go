@@ -92,6 +92,7 @@ func (a *App) handleTelegramIntake(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		a.syncTelegramBotNameBestEffort(app.WithProject(projectID), body.ConnectionID)
 		writeJSON(w, policy)
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
@@ -181,6 +182,7 @@ func (a *App) handleTelegramAccess(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
+			a.syncTelegramBotNameBestEffort(app.WithProject(projectID), access.ConnectionID)
 			_ = a.sendTelegramSystem(app.WithProject(projectID), access.ConnectionID, access.ExternalChatID,
 				"You’re connected to “"+conv.Title+"”. Send a message whenever you’re ready.\n\nUse /new to start a fresh conversation or /help for options.")
 			writeJSON(w, map[string]any{"state": "approved", "binding": binding, "conversation": conv})
@@ -340,6 +342,7 @@ func (a *App) handleTelegramInvites(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	a.syncTelegramBotNameBestEffort(app.WithProject(projectID), body.ConnectionID)
 	query := "start=" + url.QueryEscape(raw)
 	if body.ChatType == "group" {
 		query = "startgroup=" + url.QueryEscape(raw)

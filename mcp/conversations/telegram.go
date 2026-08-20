@@ -26,15 +26,20 @@ import (
 const telegramIntegrationRole = "telegram_bot"
 
 type TelegramConnectionConfig struct {
-	ConnectionID  int64  `json:"connection_id"`
-	WebhookKey    string `json:"-"`
-	WebhookSecret string `json:"-"`
-	WebhookURL    string `json:"webhook_url"`
-	BotID         string `json:"bot_id"`
-	BotUsername   string `json:"bot_username"`
-	CreatedByUser int64  `json:"-"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	ConnectionID    int64  `json:"connection_id"`
+	WebhookKey      string `json:"-"`
+	WebhookSecret   string `json:"-"`
+	WebhookURL      string `json:"webhook_url"`
+	BotID           string `json:"bot_id"`
+	BotUsername     string `json:"bot_username"`
+	OriginalBotName string `json:"original_bot_name,omitempty"`
+	AutoNameEnabled bool   `json:"auto_name_enabled"`
+	SyncedAgentID   int64  `json:"synced_agent_id,omitempty"`
+	SyncedBotName   string `json:"synced_bot_name,omitempty"`
+	NameSyncError   string `json:"name_sync_error,omitempty"`
+	CreatedByUser   int64  `json:"-"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 type TelegramBinding struct {
@@ -112,10 +117,13 @@ func (s *store) GetTelegramConnection(connectionID int64) (*TelegramConnectionCo
 	var cfg TelegramConnectionConfig
 	err := s.db.QueryRow(`
 		SELECT connection_id,webhook_key,webhook_secret,webhook_url,bot_id,bot_username,
+		       original_bot_name,auto_name_enabled,synced_agent_id,synced_bot_name,name_sync_error,
 		       created_by_user_id,created_at,updated_at
 		FROM telegram_connections WHERE connection_id=?`, connectionID).Scan(
 		&cfg.ConnectionID, &cfg.WebhookKey, &cfg.WebhookSecret, &cfg.WebhookURL,
-		&cfg.BotID, &cfg.BotUsername, &cfg.CreatedByUser, &cfg.CreatedAt, &cfg.UpdatedAt)
+		&cfg.BotID, &cfg.BotUsername, &cfg.OriginalBotName, &cfg.AutoNameEnabled,
+		&cfg.SyncedAgentID, &cfg.SyncedBotName, &cfg.NameSyncError,
+		&cfg.CreatedByUser, &cfg.CreatedAt, &cfg.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -126,10 +134,13 @@ func (s *store) GetTelegramConnectionByWebhookKey(key string) (*TelegramConnecti
 	var cfg TelegramConnectionConfig
 	err := s.db.QueryRow(`
 		SELECT connection_id,webhook_key,webhook_secret,webhook_url,bot_id,bot_username,
+		       original_bot_name,auto_name_enabled,synced_agent_id,synced_bot_name,name_sync_error,
 		       created_by_user_id,created_at,updated_at
 		FROM telegram_connections WHERE webhook_key=?`, key).Scan(
 		&cfg.ConnectionID, &cfg.WebhookKey, &cfg.WebhookSecret, &cfg.WebhookURL,
-		&cfg.BotID, &cfg.BotUsername, &cfg.CreatedByUser, &cfg.CreatedAt, &cfg.UpdatedAt)
+		&cfg.BotID, &cfg.BotUsername, &cfg.OriginalBotName, &cfg.AutoNameEnabled,
+		&cfg.SyncedAgentID, &cfg.SyncedBotName, &cfg.NameSyncError,
+		&cfg.CreatedByUser, &cfg.CreatedAt, &cfg.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -139,18 +150,77 @@ func (s *store) GetTelegramConnectionByWebhookKey(key string) (*TelegramConnecti
 func (s *store) UpsertTelegramConnection(cfg TelegramConnectionConfig) error {
 	_, err := s.db.Exec(`
 		INSERT INTO telegram_connections
-		(connection_id,webhook_key,webhook_secret,webhook_url,bot_id,bot_username,created_by_user_id,updated_at)
-		VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+		(connection_id,webhook_key,webhook_secret,webhook_url,bot_id,bot_username,original_bot_name,
+		 auto_name_enabled,synced_agent_id,synced_bot_name,name_sync_error,created_by_user_id,updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
 		ON CONFLICT(connection_id) DO UPDATE SET
 			webhook_key=excluded.webhook_key,
 			webhook_secret=excluded.webhook_secret,
 			webhook_url=excluded.webhook_url,
 			bot_id=excluded.bot_id,
 			bot_username=excluded.bot_username,
+			original_bot_name=CASE WHEN telegram_connections.original_bot_name='' THEN excluded.original_bot_name ELSE telegram_connections.original_bot_name END,
+			auto_name_enabled=excluded.auto_name_enabled,
+			synced_agent_id=excluded.synced_agent_id,
+			synced_bot_name=excluded.synced_bot_name,
+			name_sync_error=excluded.name_sync_error,
 			updated_at=CURRENT_TIMESTAMP`,
 		cfg.ConnectionID, cfg.WebhookKey, cfg.WebhookSecret, cfg.WebhookURL,
-		cfg.BotID, cfg.BotUsername, cfg.CreatedByUser)
+		cfg.BotID, cfg.BotUsername, cfg.OriginalBotName, cfg.AutoNameEnabled,
+		cfg.SyncedAgentID, cfg.SyncedBotName, cfg.NameSyncError, cfg.CreatedByUser)
 	return err
+}
+
+func (s *store) SetTelegramAutoName(connectionID int64, enabled bool) error {
+	_, err := s.db.Exec(`UPDATE telegram_connections SET auto_name_enabled=?,updated_at=CURRENT_TIMESTAMP WHERE connection_id=?`, enabled, connectionID)
+	return err
+}
+
+func (s *store) SetTelegramOriginalName(connectionID int64, name string) error {
+	_, err := s.db.Exec(`UPDATE telegram_connections
+		SET original_bot_name=CASE WHEN original_bot_name='' THEN ? ELSE original_bot_name END,
+		    updated_at=CURRENT_TIMESTAMP WHERE connection_id=?`, name, connectionID)
+	return err
+}
+
+func (s *store) SetTelegramNameState(connectionID, agentID int64, name, syncError string) error {
+	_, err := s.db.Exec(`UPDATE telegram_connections
+		SET synced_agent_id=?,synced_bot_name=?,name_sync_error=?,updated_at=CURRENT_TIMESTAMP
+		WHERE connection_id=?`, agentID, name, syncError, connectionID)
+	return err
+}
+
+func (s *store) TelegramRoutedAgentIDs(connectionID int64) ([]int64, error) {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT agent_id FROM (
+			SELECT default_agent_id AS agent_id
+			FROM transport_intake_policies
+			WHERE transport=? AND connection_id=?
+			UNION ALL
+			SELECT c.lead_agent_id AS agent_id
+			FROM telegram_bindings b
+			JOIN conversations c ON c.id=b.conversation_id
+			WHERE b.connection_id=? AND c.archived_at IS NULL
+			UNION ALL
+			SELECT CASE WHEN i.conversation_id='' THEN i.default_agent_id ELSE c.lead_agent_id END AS agent_id
+			FROM transport_invites i
+			LEFT JOIN conversations c ON c.id=i.conversation_id AND c.archived_at IS NULL
+			WHERE i.transport=? AND i.connection_id=? AND i.used_at IS NULL AND i.expires_at>CURRENT_TIMESTAMP
+		) WHERE agent_id>0 ORDER BY agent_id`, telegramTransport, connectionID, connectionID,
+		telegramTransport, connectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (s *store) CreateTelegramBinding(binding TelegramBinding) (*TelegramBinding, error) {
@@ -368,6 +438,122 @@ type telegramConnectionView struct {
 	WebhookStatus      string `json:"webhook_status,omitempty"` // healthy | drifted | error
 	PendingUpdateCount int64  `json:"pending_update_count,omitempty"`
 	LastWebhookError   string `json:"last_webhook_error,omitempty"`
+	OriginalBotName    string `json:"original_bot_name,omitempty"`
+	AutoNameEnabled    bool   `json:"auto_name_enabled"`
+	SyncedAgentID      int64  `json:"synced_agent_id,omitempty"`
+	SyncedBotName      string `json:"synced_bot_name,omitempty"`
+	NameSyncError      string `json:"name_sync_error,omitempty"`
+	RoutedAgentCount   int    `json:"routed_agent_count"`
+}
+
+func telegramName(name string) string {
+	name = strings.TrimSpace(name)
+	runes := []rune(name)
+	if len(runes) > 64 {
+		name = strings.TrimSpace(string(runes[:64]))
+	}
+	return name
+}
+
+// syncTelegramBotName changes Telegram's global bot display name only when
+// every active or pending route resolves to one agent. Telegram does not offer
+// a per-chat bot name, so a shared bot must retain its original identity.
+func (a *App) syncTelegramBotName(app *sdk.AppCtx, connectionID int64) error {
+	cfg, err := a.store.GetTelegramConnection(connectionID)
+	if err != nil {
+		return err
+	}
+	if cfg.OriginalBotName == "" {
+		profile, profileErr := a.executeTelegram(app, connectionID, "get_me", map[string]any{})
+		if profileErr != nil {
+			_ = a.store.SetTelegramNameState(connectionID, cfg.SyncedAgentID, cfg.SyncedBotName, profileErr.Error())
+			return profileErr
+		}
+		var me struct {
+			Result struct {
+				FirstName string `json:"first_name"`
+			} `json:"result"`
+		}
+		if json.Unmarshal(profile.Data, &me) != nil || telegramName(me.Result.FirstName) == "" {
+			err = errors.New("Telegram get_me returned no bot display name")
+			_ = a.store.SetTelegramNameState(connectionID, cfg.SyncedAgentID, cfg.SyncedBotName, err.Error())
+			return err
+		}
+		cfg.OriginalBotName = telegramName(me.Result.FirstName)
+		if err := a.store.SetTelegramOriginalName(connectionID, cfg.OriginalBotName); err != nil {
+			return err
+		}
+	}
+	agentIDs, err := a.store.TelegramRoutedAgentIDs(connectionID)
+	if err != nil {
+		_ = a.store.SetTelegramNameState(connectionID, cfg.SyncedAgentID, cfg.SyncedBotName, err.Error())
+		return err
+	}
+	targetName := telegramName(cfg.OriginalBotName)
+	targetAgentID := int64(0)
+	if cfg.AutoNameEnabled && len(agentIDs) == 1 {
+		agent, agentErr := app.PlatformAPI().GetAgent(agentIDs[0])
+		if agentErr != nil || agent == nil {
+			if agentErr == nil {
+				agentErr = errors.New("agent not found")
+			}
+			err = fmt.Errorf("read sole routed agent: %w", agentErr)
+			_ = a.store.SetTelegramNameState(connectionID, cfg.SyncedAgentID, cfg.SyncedBotName, err.Error())
+			return err
+		}
+		targetName = telegramName(agent.Name)
+		if targetName == "" {
+			err = errors.New("sole routed agent has no display name")
+			_ = a.store.SetTelegramNameState(connectionID, cfg.SyncedAgentID, cfg.SyncedBotName, err.Error())
+			return err
+		}
+		targetAgentID = agent.ID
+	}
+	if targetName == "" {
+		err = errors.New("Telegram bot's original display name is unavailable")
+		_ = a.store.SetTelegramNameState(connectionID, cfg.SyncedAgentID, cfg.SyncedBotName, err.Error())
+		return err
+	}
+	if cfg.NameSyncError == "" && cfg.SyncedAgentID == targetAgentID &&
+		((targetAgentID == 0 && cfg.SyncedBotName == "") || cfg.SyncedBotName == targetName) {
+		return nil
+	}
+	if _, err := a.executeTelegram(app, connectionID, "set_my_name", map[string]any{"name": targetName}); err != nil {
+		_ = a.store.SetTelegramNameState(connectionID, cfg.SyncedAgentID, cfg.SyncedBotName, err.Error())
+		return err
+	}
+	storedName := targetName
+	if targetAgentID == 0 {
+		storedName = ""
+	}
+	return a.store.SetTelegramNameState(connectionID, targetAgentID, storedName, "")
+}
+
+func (a *App) syncTelegramBotNameBestEffort(app *sdk.AppCtx, connectionID int64) {
+	if err := a.syncTelegramBotName(app, connectionID); err != nil && app != nil {
+		app.Logger().Warn("Telegram bot name sync failed", "connection_id", connectionID, "err", err)
+	}
+}
+
+func (a *App) telegramConnectionView(app *sdk.AppCtx, conn sdk.PlatformConnection, cfg *TelegramConnectionConfig) telegramConnectionView {
+	view := telegramConnectionView{ConnectionID: conn.ID, Name: conn.Name, Status: conn.Status, ProjectID: conn.ProjectID}
+	if cfg == nil {
+		return view
+	}
+	view.Enabled = true
+	view.BotID = cfg.BotID
+	view.BotUsername = cfg.BotUsername
+	view.WebhookURL = cfg.WebhookURL
+	view.OriginalBotName = cfg.OriginalBotName
+	view.AutoNameEnabled = cfg.AutoNameEnabled
+	view.SyncedAgentID = cfg.SyncedAgentID
+	view.SyncedBotName = cfg.SyncedBotName
+	view.NameSyncError = cfg.NameSyncError
+	if ids, err := a.store.TelegramRoutedAgentIDs(conn.ID); err == nil {
+		view.RoutedAgentCount = len(ids)
+	}
+	view.WebhookStatus, view.PendingUpdateCount, view.LastWebhookError = a.telegramWebhookHealth(app, cfg)
+	return view
 }
 
 func (a *App) boundTelegramConnections(app *sdk.AppCtx, projectID string) ([]sdk.PlatformConnection, error) {
@@ -470,13 +656,11 @@ func (a *App) handleTelegramConnections(w http.ResponseWriter, r *http.Request) 
 		}
 		out := make([]telegramConnectionView, 0, len(connections))
 		for _, conn := range connections {
-			view := telegramConnectionView{ConnectionID: conn.ID, Name: conn.Name, Status: conn.Status, ProjectID: conn.ProjectID}
+			view := a.telegramConnectionView(app.WithProject(projectID), conn, nil)
 			if cfg, err := a.store.GetTelegramConnection(conn.ID); err == nil {
-				view.Enabled = true
-				view.BotID = cfg.BotID
-				view.BotUsername = cfg.BotUsername
-				view.WebhookURL = cfg.WebhookURL
-				view.WebhookStatus, view.PendingUpdateCount, view.LastWebhookError = a.telegramWebhookHealth(app.WithProject(projectID), cfg)
+				a.syncTelegramBotNameBestEffort(app.WithProject(projectID), conn.ID)
+				cfg, _ = a.store.GetTelegramConnection(conn.ID)
+				view = a.telegramConnectionView(app.WithProject(projectID), conn, cfg)
 			}
 			out = append(out, view)
 		}
@@ -499,10 +683,39 @@ func (a *App) handleTelegramConnections(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		status, pending, lastError := a.telegramWebhookHealth(app.WithProject(projectID), cfg)
-		writeJSON(w, telegramConnectionView{ConnectionID: conn.ID, Name: conn.Name, Status: conn.Status,
-			ProjectID: conn.ProjectID, Enabled: true, BotID: cfg.BotID, BotUsername: cfg.BotUsername,
-			WebhookURL: cfg.WebhookURL, WebhookStatus: status, PendingUpdateCount: pending, LastWebhookError: lastError})
+		a.syncTelegramBotNameBestEffort(app.WithProject(projectID), conn.ID)
+		cfg, _ = a.store.GetTelegramConnection(conn.ID)
+		writeJSON(w, a.telegramConnectionView(app.WithProject(projectID), *conn, cfg))
+	case http.MethodPatch:
+		var body struct {
+			ConnectionID    int64 `json:"connection_id"`
+			AutoNameEnabled *bool `json:"auto_name_enabled"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&body); err != nil || body.ConnectionID <= 0 || body.AutoNameEnabled == nil {
+			http.Error(w, "connection_id and auto_name_enabled required", http.StatusBadRequest)
+			return
+		}
+		conn, err := a.boundTelegramConnection(app, projectID, body.ConnectionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		cfg, err := a.store.GetTelegramConnection(body.ConnectionID)
+		if err != nil {
+			http.Error(w, "Telegram bot is not active", http.StatusNotFound)
+			return
+		}
+		if err := a.store.SetTelegramAutoName(body.ConnectionID, *body.AutoNameEnabled); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := a.syncTelegramBotName(app.WithProject(projectID), body.ConnectionID); err != nil {
+			_ = a.store.SetTelegramAutoName(body.ConnectionID, cfg.AutoNameEnabled)
+			http.Error(w, "update Telegram bot name: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		cfg, _ = a.store.GetTelegramConnection(body.ConnectionID)
+		writeJSON(w, a.telegramConnectionView(app.WithProject(projectID), *conn, cfg))
 	case http.MethodDelete:
 		connectionID, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("id")), 10, 64)
 		if err != nil || connectionID <= 0 {
@@ -517,6 +730,16 @@ func (a *App) handleTelegramConnections(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			http.Error(w, "Telegram bot is not active", http.StatusNotFound)
 			return
+		}
+		if cfg.SyncedAgentID != 0 || cfg.SyncedBotName != "" {
+			if err := a.store.SetTelegramAutoName(connectionID, false); err != nil {
+				http.Error(w, "restore Telegram bot name", http.StatusInternalServerError)
+				return
+			}
+			if err := a.syncTelegramBotName(app.WithProject(projectID), connectionID); err != nil {
+				http.Error(w, "restore Telegram bot name: "+err.Error(), http.StatusBadGateway)
+				return
+			}
 		}
 		currentURL, _, _, _ := a.telegramWebhookInfo(app.WithProject(projectID), connectionID)
 		if currentURL == cfg.WebhookURL {
@@ -554,7 +777,7 @@ func (a *App) handleTelegramConnections(w http.ResponseWriter, r *http.Request) 
 		}
 		writeJSON(w, map[string]any{"disabled": true})
 	default:
-		http.Error(w, "GET, POST or DELETE", http.StatusMethodNotAllowed)
+		http.Error(w, "GET, POST, PATCH or DELETE", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -618,8 +841,9 @@ func (a *App) enableTelegramConnection(app *sdk.AppCtx, connectionID, userID int
 	}
 	var me struct {
 		Result struct {
-			ID       json.Number `json:"id"`
-			Username string      `json:"username"`
+			ID        json.Number `json:"id"`
+			Username  string      `json:"username"`
+			FirstName string      `json:"first_name"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(profile.Data, &me); err != nil || me.Result.ID.String() == "" {
@@ -627,6 +851,18 @@ func (a *App) enableTelegramConnection(app *sdk.AppCtx, connectionID, userID int
 	}
 	cfg.BotID = me.Result.ID.String()
 	cfg.BotUsername = strings.TrimSpace(me.Result.Username)
+	currentName := telegramName(me.Result.FirstName)
+	if cfg.OriginalBotName == "" {
+		cfg.OriginalBotName = currentName
+	}
+	if cfg.SyncedBotName != "" && currentName != "" && currentName != cfg.SyncedBotName {
+		cfg.SyncedAgentID = 0
+		cfg.SyncedBotName = ""
+		cfg.NameSyncError = ""
+	}
+	if getErr != nil {
+		cfg.AutoNameEnabled = true
+	}
 	if _, err := a.executeTelegram(app, connectionID, "set_webhook", map[string]any{
 		"url": cfg.WebhookURL, "secret_token": cfg.WebhookSecret,
 		"allowed_updates": []string{"message", "callback_query"},
@@ -716,6 +952,7 @@ func (a *App) handleTelegramBindings(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		a.syncTelegramBotNameBestEffort(a.appCtx(r).WithProject(projectID), body.ConnectionID)
 		writeJSON(w, binding)
 	case http.MethodDelete:
 		id := strings.TrimSpace(r.URL.Query().Get("id"))
@@ -732,6 +969,7 @@ func (a *App) handleTelegramBindings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Telegram binding not found", http.StatusNotFound)
 			return
 		}
+		a.syncTelegramBotNameBestEffort(a.appCtx(r).WithProject(projectID), binding.ConnectionID)
 		writeJSON(w, map[string]any{"deleted": true})
 	default:
 		http.Error(w, "GET, POST or DELETE", http.StatusMethodNotAllowed)

@@ -161,6 +161,12 @@ interface TelegramConnectionView {
   webhook_status?: "healthy" | "drifted" | "error";
   pending_update_count?: number;
   last_webhook_error?: string;
+  original_bot_name?: string;
+  auto_name_enabled: boolean;
+  synced_agent_id?: number;
+  synced_bot_name?: string;
+  name_sync_error?: string;
+  routed_agent_count: number;
 }
 
 interface TelegramBindingView {
@@ -2133,6 +2139,16 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
     return mode === "pairing" ? "Secure pairing is active." : mode === "public" ? "Public intake is active." : "Unknown chats are closed.";
   });
 
+  const setAutoName = (enabled: boolean) => connection && run("auto-name", async () => {
+    await apiPatch<TelegramConnectionView>("/telegram-connections", {
+      connection_id: connection.connection_id,
+      auto_name_enabled: enabled,
+    }, projectId);
+    return enabled
+      ? "Telegram will show the agent name whenever this bot routes to only one agent."
+      : `Telegram bot name restored to ${connection.original_bot_name || "its original name"}.`;
+  });
+
   const createInvite = () => run("invite", async () => {
     const result = await apiPost<{ invite_url: string; expires_at: string }>("/telegram-invites", {
       connection_id: Number(connectionId), conversation_id: inviteConversation, chat_type: inviteKind,
@@ -2194,6 +2210,7 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
           <div className="mt-4 grid gap-2 sm:grid-cols-3">{([ ["pairing", "Secure pairing", "Approve each person or group before messages reach an agent."], ["public", "Public intake", "Every new private chat gets its own public conversation."], ["closed", "Invites only", "Ignore unknown chats; one-time invites still work."] ] as const).map(([value, title, description]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => setMode(value)} className={`rounded border p-3 text-left ${mode === value ? "border-accent bg-bg-input" : "border-border bg-bg hover:bg-bg-input"}`}><span className="text-sm font-medium text-text">{title}</span><span className="mt-1 block text-xs leading-relaxed text-text-dim">{description}</span></button>)}</div>
           <div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="flex flex-col gap-1 text-xs text-text-muted">Lead agent for new conversations<select value={agentId} onChange={(event) => setAgentId(event.target.value)} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="">Select an agent</option>{(selectableAgents.length ? selectableAgents : agents).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><label className="flex flex-col gap-1 text-xs text-text-muted">Conversation title prefix<input value={defaultTitle} onChange={(event) => setDefaultTitle(event.target.value)} maxLength={120} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text" /></label></div>
           <label className="mt-4 flex items-start gap-2 text-xs text-text-muted"><input type="checkbox" checked={requireMention} onChange={(event) => setRequireMention(event.target.checked)} className="mt-0.5" /><span><span className="font-medium text-text">Require a bot mention in groups</span><span className="mt-0.5 block text-text-dim">Recommended: ordinary group chatter does not trigger the agent.</span></span></label>
+          <label className="mt-3 flex items-start gap-2 text-xs text-text-muted"><input type="checkbox" checked={connection.auto_name_enabled} onChange={(event) => setAutoName(event.target.checked)} disabled={busy !== ""} className="mt-0.5" /><span><span className="font-medium text-text">Show the sole agent’s name in Telegram</span><span className="mt-0.5 block text-text-dim">{connection.name_sync_error ? `Name update needs attention: ${connection.name_sync_error}` : connection.synced_bot_name ? `Telegram currently shows “${connection.synced_bot_name}”.` : connection.routed_agent_count > 1 ? `This bot routes to ${connection.routed_agent_count} agents, so Telegram keeps “${connection.original_bot_name || connection.name}”.` : "The original bot name is kept until this connection routes to exactly one agent."}</span></span></label>
           {mode === "public" && <div className="mt-4 rounded border border-warn bg-bg px-3 py-2 text-xs text-text-muted">Public intake accepts any private Telegram user and creates a public conversation. Pairing is safer for internal bots.</div>}
           <div className="mt-4 flex justify-end"><button type="button" onClick={savePolicy} disabled={busy !== "" || !agentId} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{busy === "policy" ? "Saving…" : policy ? "Save & continue" : "Continue"}</button></div>
         </section>}

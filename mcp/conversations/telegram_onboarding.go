@@ -74,6 +74,7 @@ func (a *App) processUnknownTelegramMessage(cfg *TelegramConnectionConfig, updat
 	if (command == "start" || command == "connect") && argument != "" {
 		binding, conv, redeemErr := a.redeemTelegramInvite(cfg, policy, incoming, argument)
 		if redeemErr == nil {
+			a.syncTelegramBotNameBestEffort(app, cfg.ConnectionID)
 			_ = a.sendTelegramSystem(app, cfg.ConnectionID, binding.ChatID,
 				"Connected to “"+conv.Title+"”. Send a message whenever you’re ready.\n\nUse /new to start fresh or /help for options.")
 			return nil
@@ -99,6 +100,7 @@ func (a *App) processUnknownTelegramMessage(cfg *TelegramConnectionConfig, updat
 		if err != nil {
 			return err
 		}
+		a.syncTelegramBotNameBestEffort(app, cfg.ConnectionID)
 		if command == "start" || command == "new" || strings.TrimSpace(incoming.Text) == "" {
 			return a.sendTelegramSystem(app, cfg.ConnectionID, binding.ChatID,
 				"Welcome — your conversation “"+conv.Title+"” is ready. Send your message whenever you like.\n\nUse /new to start fresh or /help for options.")

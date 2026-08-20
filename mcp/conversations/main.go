@@ -32,7 +32,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.10.1
+version: 0.11.0
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, status). Inbox items are messages — an
@@ -43,7 +43,9 @@ description: |
   ledger. Telegram bots connect through platform-managed integration
   connections with guided pairing, automatic public intake, one-time
   invites, group discovery, and webhook health—without exposing bot
-  credentials or asking operators for numeric Telegram IDs.
+  credentials or asking operators for numeric Telegram IDs. When one
+  agent owns every route, the bot can use that agent's display name;
+  shared routing automatically restores the original bot identity.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/conversations
 icon: /ui/icon.svg
@@ -51,7 +53,7 @@ icon_style: monochrome
 tags: [chat, inbox, channels, approvals, notifications]
 
 scopes: [global]
-min_apteva_version: "0.15.0"
+min_apteva_version: "0.15.1"
 
 requires:
   permissions:

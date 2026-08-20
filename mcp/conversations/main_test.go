@@ -769,6 +769,16 @@ func (p *recordingPlatform) ListAgents(projectID string) ([]sdk.PlatformAgent, e
 	}, nil
 }
 
+func (p *recordingPlatform) GetAgent(id int64) (*sdk.PlatformAgent, error) {
+	agents, _ := p.ListAgents(testProject)
+	for i := range agents {
+		if agents[i].ID == id {
+			return &agents[i], nil
+		}
+	}
+	return nil, fmt.Errorf("agent %d not found", id)
+}
+
 func doChats(t *testing.T, app *App, method, target, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *strings.Reader

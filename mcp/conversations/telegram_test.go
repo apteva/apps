@@ -20,6 +20,9 @@ type telegramTestAPI struct {
 	nextMessageID int64
 	failSend      bool
 	webhookURL    string
+	botName       string
+	setNames      []string
+	failSetName   bool
 }
 
 func telegramResult(data string) *sdk.ExecuteResult {
@@ -27,9 +30,9 @@ func telegramResult(data string) *sdk.ExecuteResult {
 }
 
 func configureTelegramTestPlatform(p *recordingPlatform) *telegramTestAPI {
-	api := &telegramTestAPI{nextMessageID: 700}
+	api := &telegramTestAPI{nextMessageID: 700, botName: "Apteva Conversations"}
 	p.identity = &sdk.InstallIdentity{
-		AppName: appName, Version: "0.10.1", InstallID: 77, ProjectID: "",
+		AppName: appName, Version: "0.11.0", InstallID: 77, ProjectID: "",
 		PublicURL: "https://agents.example.test",
 		Bindings: map[string]any{telegramIntegrationRole: map[string]any{
 			"ids": []any{float64(testTelegramConnectionID)}, "default_id": float64(testTelegramConnectionID),
@@ -44,7 +47,14 @@ func configureTelegramTestPlatform(p *recordingPlatform) *telegramTestAPI {
 		}
 		switch tool {
 		case "get_me":
-			return telegramResult(`{"ok":true,"result":{"id":998877,"username":"apteva_test_bot"}}`), nil
+			return telegramResult(fmt.Sprintf(`{"ok":true,"result":{"id":998877,"username":"apteva_test_bot","first_name":%q}}`, api.botName)), nil
+		case "set_my_name":
+			if api.failSetName {
+				return nil, errors.New("temporary Telegram profile outage")
+			}
+			api.botName, _ = input["name"].(string)
+			api.setNames = append(api.setNames, api.botName)
+			return telegramResult(`{"ok":true,"result":true}`), nil
 		case "set_webhook":
 			api.webhookURL, _ = input["url"].(string)
 			return telegramResult(`{"ok":true,"result":true}`), nil
@@ -674,6 +684,101 @@ func TestTelegramConnectionReportsWebhookDrift(t *testing.T) {
 	app.handleTelegramConnections(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"webhook_status":"drifted"`) {
 		t.Fatalf("drift response status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func patchTelegramAutoName(t *testing.T, app *App, enabled bool) *httptest.ResponseRecorder {
+	t.Helper()
+	body := fmt.Sprintf(`{"connection_id":%d,"auto_name_enabled":%t}`, testTelegramConnectionID, enabled)
+	req := httptest.NewRequest(http.MethodPatch, "/telegram-connections", strings.NewReader(body))
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleTelegramConnections(rec, req)
+	return rec
+}
+
+func TestTelegramBotNameFollowsSoleRoutedAgentAndRestoresWhenShared(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	api := configureTelegramTestPlatform(platform)
+	enableTelegramForTest(t, app, platform)
+
+	cfg, err := app.store.GetTelegramConnection(testTelegramConnectionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OriginalBotName != "Apteva Conversations" || !cfg.AutoNameEnabled {
+		t.Fatalf("initial identity = %+v", cfg)
+	}
+
+	configureTelegramIntakeForTest(t, app, "pairing")
+	if api.botName != "Research" || len(api.setNames) != 1 {
+		t.Fatalf("sole-agent name = %q calls=%v", api.botName, api.setNames)
+	}
+	cfg, _ = app.store.GetTelegramConnection(testTelegramConnectionID)
+	if cfg.SyncedAgentID != 41 || cfg.SyncedBotName != "Research" || cfg.NameSyncError != "" {
+		t.Fatalf("sole-agent sync state = %+v", cfg)
+	}
+
+	other := mkConversation(t, app, 43)
+	binding := bindTelegramForTest(t, app, other, "7300", nil)
+	if api.botName != "Apteva Conversations" || len(api.setNames) != 2 {
+		t.Fatalf("shared name = %q calls=%v", api.botName, api.setNames)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/telegram-bindings?id="+url.QueryEscape(binding.ID), nil)
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleTelegramBindings(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete binding: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if api.botName != "Research" || len(api.setNames) != 3 {
+		t.Fatalf("restored sole-agent name = %q calls=%v", api.botName, api.setNames)
+	}
+
+	// Re-saving identical routing is idempotent and does not spend another
+	// Telegram profile mutation.
+	configureTelegramIntakeForTest(t, app, "pairing")
+	if len(api.setNames) != 3 {
+		t.Fatalf("idempotent sync made calls=%v", api.setNames)
+	}
+}
+
+func TestTelegramAutoNameCanBeDisabledAndRestoresOriginalName(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	api := configureTelegramTestPlatform(platform)
+	enableTelegramForTest(t, app, platform)
+	configureTelegramIntakeForTest(t, app, "pairing")
+
+	rec := patchTelegramAutoName(t, app, false)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable auto name: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	cfg, _ := app.store.GetTelegramConnection(testTelegramConnectionID)
+	if cfg.AutoNameEnabled || cfg.SyncedAgentID != 0 || cfg.SyncedBotName != "" {
+		t.Fatalf("disabled identity state = %+v", cfg)
+	}
+	if api.botName != "Apteva Conversations" {
+		t.Fatalf("disabled bot name = %q", api.botName)
+	}
+}
+
+func TestTelegramNameFailureDoesNotBreakRoutingConfiguration(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	api := configureTelegramTestPlatform(platform)
+	enableTelegramForTest(t, app, platform)
+	api.failSetName = true
+
+	configureTelegramIntakeForTest(t, app, "pairing")
+	cfg, _ := app.store.GetTelegramConnection(testTelegramConnectionID)
+	if cfg.NameSyncError == "" || cfg.SyncedAgentID != 0 {
+		t.Fatalf("failed sync state = %+v", cfg)
+	}
+	if policy, err := app.store.GetTransportIntakePolicy(telegramTransport, testTelegramConnectionID); err != nil || policy.DefaultAgentID != 41 {
+		t.Fatalf("routing was not saved: policy=%+v err=%v", policy, err)
 	}
 }
 
