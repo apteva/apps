@@ -77,7 +77,7 @@ func spawnTelegramHTTPTestSidecar(t *testing.T) (*tk.Sidecar, *telegramGatewayFi
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/whoami":
-			_, _ = w.Write([]byte(`{"app_name":"conversations","version":"0.10.0","install_id":77,"project_id":"","public_url":"https://agents.example.test","bindings":{"telegram_bot":{"ids":[9],"default_id":9}}}`))
+			_, _ = w.Write([]byte(`{"app_name":"conversations","version":"0.10.1","install_id":77,"project_id":"","public_url":"https://agents.example.test","bindings":{"telegram_bot":{"ids":[9],"default_id":9}}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/connections/9":
 			_, _ = w.Write([]byte(`{"id":9,"app_slug":"telegram","name":"Test bot","status":"active","project_id":"test-proj"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/agents":

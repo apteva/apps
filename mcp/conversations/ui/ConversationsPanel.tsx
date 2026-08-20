@@ -2028,6 +2028,8 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
   const [inviteConversation, setInviteConversation] = useState("");
   const [inviteKind, setInviteKind] = useState<"private" | "group">("private");
   const [inviteURL, setInviteURL] = useState("");
+  const [inviteExpiresAt, setInviteExpiresAt] = useState("");
+  const [setupStep, setSetupStep] = useState<1 | 2 | 3>(1);
   const [requestTargets, setRequestTargets] = useState<Record<string, string>>({});
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [manualConversation, setManualConversation] = useState("");
@@ -2081,16 +2083,24 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
       setDefaultTitle("Telegram conversation");
       setRequireMention(true);
     }
-    setInviteURL("");
   }, [connectionId, policies, agents]);
 
-  const run = async (key: string, action: () => Promise<string | void>) => {
+  useEffect(() => {
+    setInviteURL("");
+    setInviteExpiresAt("");
+  }, [connectionId, inviteConversation, inviteKind]);
+
+  useEffect(() => {
+    setSetupStep(!connection?.enabled ? 1 : !policy ? 2 : 3);
+  }, [connectionId, connection?.enabled, policy?.connection_id]);
+
+  const run = async (key: string, action: () => Promise<string | void>, refresh = true) => {
     setBusy(key);
     setNotice("");
     try {
       const result = await action();
       if (result) setNotice(result);
-      await load();
+      if (refresh) await load();
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
     } finally {
@@ -2100,6 +2110,7 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
 
   const activate = () => connection && run("activate", async () => {
     const result = await apiPost<TelegramConnectionView>("/telegram-connections", { connection_id: connection.connection_id }, projectId);
+    setSetupStep(2);
     return result.bot_username ? `@${result.bot_username} is connected.` : "Telegram bot connected.";
   });
 
@@ -2107,6 +2118,8 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
     if (!window.confirm(`Disconnect ${connection.bot_username ? `@${connection.bot_username}` : connection.name}? Telegram routing and pending access requests for this bot will be removed.`)) return;
     await apiDelete(`/telegram-connections?id=${connection.connection_id}`, projectId);
     setInviteURL("");
+    setInviteExpiresAt("");
+    setSetupStep(1);
     return "Telegram bot disconnected from Conversations.";
   });
 
@@ -2116,16 +2129,18 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
       default_agent_id: Number(agentId),
       default_title: defaultTitle, require_group_mention: requireMention,
     }, projectId);
+    setSetupStep(3);
     return mode === "pairing" ? "Secure pairing is active." : mode === "public" ? "Public intake is active." : "Unknown chats are closed.";
   });
 
   const createInvite = () => run("invite", async () => {
-    const result = await apiPost<{ invite_url: string }>("/telegram-invites", {
+    const result = await apiPost<{ invite_url: string; expires_at: string }>("/telegram-invites", {
       connection_id: Number(connectionId), conversation_id: inviteConversation, chat_type: inviteKind,
     }, projectId);
     setInviteURL(result.invite_url);
+    setInviteExpiresAt(result.expires_at);
     return "One-time invite created. It expires in 15 minutes.";
-  });
+  }, false);
 
   const resolveRequest = (request: TelegramAccessRequest, action: "approve" | "dismiss" | "block" | "unblock") => run(`${action}-${request.id}`, async () => {
     await apiPost("/telegram-access", { id: request.id, action, conversation_id: action === "approve" ? requestTargets[request.id] ?? "" : "" }, projectId);
@@ -2149,42 +2164,48 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
     });
   };
 
-  const stepDone = [Boolean(connection?.enabled), Boolean(policy), Boolean(policy && (policy.mode === "public" || currentBindings.length > 0))];
+  const stepLabels = ["Connect bot", "Choose access", "Invite or receive"] as const;
 
   return (
     <div className="flex-1 min-h-0 overflow-auto p-4">
       <div className="mx-auto max-w-4xl flex flex-col gap-4">
-        <section className="rounded-md border border-border bg-bg-card p-5">
+        <section className="rounded-md border border-border bg-bg-card p-4">
           <div className="flex gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent text-bg"><Glyph d={GLYPH_CHAT} size={19} /></div>
             <div><h2 className="text-base font-semibold text-text">Telegram, without the setup friction</h2><p className="mt-1 text-sm text-text-muted">Connect a bot once. Conversations discovers people and groups, handles secure access, and keeps every message in the same durable conversation system.</p><p className="mt-2 text-xs text-text-dim">No Telegram IDs or API commands. Bot credentials remain in the platform integration connection.</p></div>
           </div>
-          <div className="mt-5 grid grid-cols-3 gap-2">
-            {["Connect bot", "Choose access", "Invite or receive"].map((label, index) => <div key={label} className={`rounded border bg-bg px-3 py-2 ${stepDone[index] ? "border-success" : "border-border"}`}><p className={`text-xs font-semibold ${stepDone[index] ? "text-success" : "text-text-dim"}`}>{stepDone[index] ? "✓" : index + 1}</p><p className="mt-0.5 text-xs text-text-muted">{label}</p></div>)}
+          <div className="mt-4 flex items-center gap-3 rounded border border-border bg-bg px-3 py-2.5">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-accent text-xs font-semibold text-accent">{setupStep}</div>
+            <div className="min-w-0"><p className="text-[10px] font-semibold uppercase tracking-wide text-text-dim">Step {setupStep} of 3</p><p className="text-sm font-medium text-text">{stepLabels[setupStep - 1]}</p></div>
+            {setupStep > 1 && <button type="button" onClick={() => { setNotice(""); setSetupStep((setupStep - 1) as 1 | 2); }} disabled={busy !== ""} className="ml-auto rounded border border-border px-3 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-40">Back</button>}
           </div>
         </section>
 
-        <section className="rounded-md border border-border bg-bg-card p-4">
-          <div className="flex items-start gap-3"><div><h2 className="text-sm font-semibold text-text">1. Bot connection</h2><p className="mt-1 text-xs text-text-muted">Choose a Telegram connection bound in the Conversations installation settings.</p></div>{connection?.enabled && <span className={`ml-auto whitespace-nowrap rounded bg-bg-input px-2 py-1 text-xs ${connection.webhook_status === "healthy" ? "text-success" : "text-warn"}`}>{connection.webhook_status === "healthy" ? "Webhook healthy" : connection.webhook_status === "drifted" ? "Webhook replaced" : "Needs attention"}</span>}</div>
+        {setupStep === 1 && <section className="rounded-md border border-border bg-bg-card p-4">
+          <div className="flex items-start gap-3"><div><h2 className="text-sm font-semibold text-text">Bot connection</h2><p className="mt-1 text-xs text-text-muted">Choose a Telegram connection bound in the Conversations installation settings.</p></div>{connection?.enabled && <span className={`ml-auto whitespace-nowrap rounded bg-bg-input px-2 py-1 text-xs ${connection.webhook_status === "healthy" ? "text-success" : "text-warn"}`}>{connection.webhook_status === "healthy" ? "Webhook healthy" : connection.webhook_status === "drifted" ? "Webhook replaced" : "Needs attention"}</span>}</div>
           {connections.length === 0 ? <div className="mt-4 rounded border border-border bg-bg px-3 py-3 text-xs text-text-muted">No Telegram connection is bound yet. Add one in the app installation settings, then return here.</div> : <div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="flex flex-col gap-1 text-xs text-text-muted">Telegram bot<select value={connectionId} onChange={(event) => setConnectionId(event.target.value)} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text">{connections.map((item) => <option key={item.connection_id} value={item.connection_id}>{item.bot_username ? `@${item.bot_username}` : item.name}</option>)}</select></label><div className="flex flex-wrap items-end gap-2"><button type="button" onClick={activate} disabled={busy !== ""} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{busy === "activate" ? "Connecting…" : connection?.enabled ? "Verify & reconnect" : "Activate bot"}</button>{connection?.bot_username && <a href={`https://t.me/${connection.bot_username}`} target="_blank" rel="noreferrer" className="rounded border border-border px-3 py-2 text-xs text-text-muted hover:bg-bg-input hover:text-text">Open bot ↗</a>}{connection?.enabled && <button type="button" onClick={deactivate} disabled={busy !== ""} className="rounded px-2 py-2 text-xs text-error hover:bg-bg-input disabled:opacity-40">{busy === "deactivate" ? "Disconnecting…" : "Disconnect"}</button>}</div></div>}
           {connection?.last_webhook_error && <p className="mt-3 text-xs text-error">Telegram reports: {connection.last_webhook_error}</p>}
           <p className="mt-3 text-xs text-text-dim">Activation verifies the bot and installs a signed webhook automatically. Reconnecting intentionally reclaims Telegram’s one webhook for this bot.</p>
-        </section>
+          {connection?.enabled && <div className="mt-4 flex justify-end"><button type="button" onClick={() => { setNotice(""); setSetupStep(2); }} disabled={busy !== ""} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">Continue</button></div>}
+        </section>}
 
-        {connection?.enabled && <section className="rounded-md border border-border bg-bg-card p-4">
-          <h2 className="text-sm font-semibold text-text">2. Choose who can start conversations</h2><p className="mt-1 text-xs text-text-muted">This policy applies to unknown chats. Existing routes keep working.</p>
+        {setupStep === 2 && connection?.enabled && <section className="rounded-md border border-border bg-bg-card p-4">
+          <h2 className="text-sm font-semibold text-text">Choose who can start conversations</h2><p className="mt-1 text-xs text-text-muted">This policy applies to unknown chats. Existing routes keep working.</p>
           <div className="mt-4 grid gap-2 sm:grid-cols-3">{([ ["pairing", "Secure pairing", "Approve each person or group before messages reach an agent."], ["public", "Public intake", "Every new private chat gets its own public conversation."], ["closed", "Invites only", "Ignore unknown chats; one-time invites still work."] ] as const).map(([value, title, description]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => setMode(value)} className={`rounded border p-3 text-left ${mode === value ? "border-accent bg-bg-input" : "border-border bg-bg hover:bg-bg-input"}`}><span className="text-sm font-medium text-text">{title}</span><span className="mt-1 block text-xs leading-relaxed text-text-dim">{description}</span></button>)}</div>
           <div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="flex flex-col gap-1 text-xs text-text-muted">Lead agent for new conversations<select value={agentId} onChange={(event) => setAgentId(event.target.value)} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="">Select an agent</option>{(selectableAgents.length ? selectableAgents : agents).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><label className="flex flex-col gap-1 text-xs text-text-muted">Conversation title prefix<input value={defaultTitle} onChange={(event) => setDefaultTitle(event.target.value)} maxLength={120} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text" /></label></div>
           <label className="mt-4 flex items-start gap-2 text-xs text-text-muted"><input type="checkbox" checked={requireMention} onChange={(event) => setRequireMention(event.target.checked)} className="mt-0.5" /><span><span className="font-medium text-text">Require a bot mention in groups</span><span className="mt-0.5 block text-text-dim">Recommended: ordinary group chatter does not trigger the agent.</span></span></label>
           {mode === "public" && <div className="mt-4 rounded border border-warn bg-bg px-3 py-2 text-xs text-text-muted">Public intake accepts any private Telegram user and creates a public conversation. Pairing is safer for internal bots.</div>}
-          <div className="mt-4 flex justify-end"><button type="button" onClick={savePolicy} disabled={busy !== "" || !agentId} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{busy === "policy" ? "Saving…" : policy ? "Save access mode" : "Continue"}</button></div>
+          <div className="mt-4 flex justify-end"><button type="button" onClick={savePolicy} disabled={busy !== "" || !agentId} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{busy === "policy" ? "Saving…" : policy ? "Save & continue" : "Continue"}</button></div>
         </section>}
 
-        {policy && <section className="rounded-md border border-border bg-bg-card p-4">
-          <h2 className="text-sm font-semibold text-text">3. Invite without asking for IDs</h2><p className="mt-1 text-xs text-text-muted">Telegram supplies the identity securely when a person opens the link or adds the bot to a group.</p>
+        {setupStep === 3 && policy && <section className="rounded-md border border-border bg-bg-card p-4">
+          <h2 className="text-sm font-semibold text-text">Invite without asking for IDs</h2><p className="mt-1 text-xs text-text-muted">Telegram supplies the identity securely when a person opens the link or adds the bot to a group.</p>
           <div className="mt-4 grid gap-3 sm:grid-cols-3"><label className="flex flex-col gap-1 text-xs text-text-muted sm:col-span-2">Destination<select value={inviteConversation} onChange={(event) => setInviteConversation(event.target.value)} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="">Create a new conversation when opened</option>{conversations.map((item) => <option key={item.id} value={item.id}>{item.title} ({item.audience})</option>)}</select></label><label className="flex flex-col gap-1 text-xs text-text-muted">Invite type<select value={inviteKind} onChange={(event) => setInviteKind(event.target.value as "private" | "group")} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="private">Person</option><option value="group">Telegram group</option></select></label></div>
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row"><button type="button" onClick={createInvite} disabled={busy !== ""} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{busy === "invite" ? "Creating…" : inviteKind === "group" ? "Create add-to-group link" : "Create Telegram invite"}</button>{inviteURL && <><a href={inviteURL} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate rounded border border-border bg-bg px-3 py-2 text-xs text-accent hover:bg-bg-input">{inviteURL}</a><button type="button" onClick={() => navigator.clipboard.writeText(inviteURL).then(() => setNotice("Invite link copied."), () => setNotice("Select the link and copy it manually."))} className="rounded border border-border px-3 py-2 text-xs text-text-muted hover:bg-bg-input">Copy</button></>}</div><p className="mt-2 text-xs text-text-dim">One use · expires after 15 minutes</p>
+          <div className="mt-3"><button type="button" onClick={createInvite} disabled={busy !== ""} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{busy === "invite" ? "Creating…" : inviteKind === "group" ? "Create add-to-group link" : "Create Telegram invite"}</button></div>
+          {inviteURL ? <div className="mt-4 rounded border border-success bg-bg px-3 py-3" role="region" aria-label="Telegram invite ready"><div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-success text-xs font-bold text-bg">✓</span><div><p className="text-sm font-medium text-text">Invite ready</p><p className="text-xs text-text-dim">One use · expires {inviteExpiresAt ? `at ${new Date(inviteExpiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "after 15 minutes"}</p></div></div><input readOnly value={inviteURL} onFocus={(event) => event.currentTarget.select()} aria-label="Telegram invite URL" className="mt-3 w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text" /><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => navigator.clipboard.writeText(inviteURL).then(() => setNotice("Invite link copied."), () => setNotice("Select the link and copy it manually."))} className="rounded border border-border px-3 py-2 text-xs text-text-muted hover:bg-bg-input hover:text-text">Copy link</button><a href={inviteURL} target="_blank" rel="noreferrer" className="rounded border border-border px-3 py-2 text-xs text-accent hover:bg-bg-input">Open in Telegram ↗</a><button type="button" onClick={createInvite} disabled={busy !== ""} className="rounded px-3 py-2 text-xs text-text-muted hover:bg-bg-input disabled:opacity-40">Create another</button></div></div> : <p className="mt-2 text-xs text-text-dim">The link will appear here and remain visible until you change the destination or invite type.</p>}
         </section>}
+
+        {notice && <div className="rounded border border-border bg-bg px-3 py-2 text-xs text-text-muted" role="status">{notice}</div>}
 
         {currentRequests.length > 0 && <section className="rounded-md border border-accent bg-bg-card p-4">
           <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-accent" /><h2 className="text-sm font-semibold text-text">Pending access requests</h2><span className="rounded bg-bg-input px-1.5 py-0.5 text-xs text-text-muted">{currentRequests.length}</span></div><p className="mt-1 text-xs text-text-muted">Message content stays private until approval; only identity and chat metadata are shown.</p>
@@ -2197,7 +2218,6 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
 
         {connection?.enabled && <section className="rounded-md border border-border bg-bg-card p-4"><button type="button" onClick={() => setAdvancedOpen((open) => !open)} className="flex w-full items-center justify-between text-left text-sm text-text-muted"><span>Advanced manual routing</span><span>{advancedOpen ? "−" : "+"}</span></button>{advancedOpen && <form onSubmit={createManualBinding} className="mt-4 grid gap-3 sm:grid-cols-2"><p className="text-xs text-text-dim sm:col-span-2">Recovery-only: bind known numeric IDs directly. The guided flow is preferred.</p><label className="flex flex-col gap-1 text-xs text-text-muted">Conversation<select value={manualConversation} onChange={(event) => setManualConversation(event.target.value)} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="">Select a conversation</option>{conversations.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><label className="flex flex-col gap-1 text-xs text-text-muted">Telegram chat ID<input value={manualChat} onChange={(event) => setManualChat(event.target.value)} placeholder="123456789 or -100…" className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text" /></label><label className="flex flex-col gap-1 text-xs text-text-muted sm:col-span-2">Allowed user IDs<input value={manualUsers} onChange={(event) => setManualUsers(event.target.value)} placeholder="Comma-separated; optional for public conversations" className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text" /></label><div className="sm:col-span-2 flex justify-end"><button type="submit" disabled={busy !== "" || !manualConversation || !manualChat.trim()} className="rounded border border-border px-3 py-2 text-xs text-text hover:bg-bg-input disabled:opacity-40">{busy === "manual" ? "Binding…" : "Create manual route"}</button></div></form>}</section>}
 
-        {notice && <div className="rounded border border-border bg-bg px-3 py-2 text-xs text-text-muted" role="status">{notice}</div>}
       </div>
     </div>
   );
