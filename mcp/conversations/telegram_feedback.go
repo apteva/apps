@@ -220,7 +220,8 @@ func (s *telegramFeedbackSession) sendDraft(text string) {
 		return
 	}
 	_, err = s.manager.app.executeTelegram(s.app, s.binding.ConnectionID, "send_message_draft", map[string]any{
-		"chat_id": chatID, "draft_id": s.draftID, "text": text,
+		"chat_id": chatID, "draft_id": s.draftID,
+		"text": telegramMarkdownToHTML(text), "parse_mode": "HTML",
 	})
 	if err == nil {
 		s.lastDraft = text

@@ -21,10 +21,13 @@ or unchanged waiting. The conversation is durable: deliver the final
 outcome even if the user disconnected, and never repeat or paraphrase
 a message whose send already succeeded.
 
-Replies render as markdown. Write for a human in a chat: lead with the
-answer. When showing a specific supported entity, attach the matching
-component card in the SAME send call as the text — never a second
-component-only message.
+Write portable chat text: lead with the answer, use short paragraphs and
+simple bullets or numbered lists, and avoid Markdown tables, raw HTML, or
+transport-specific syntax. Basic emphasis, links, inline/fenced code, quotes,
+and headings are adapted to each bound surface; Telegram receives native
+Telegram formatting while the dashboard renders the stored Markdown. When
+showing a specific supported entity, attach the matching component card in the
+SAME send call as the text — never a second component-only message.
 
 ## Where inbox items live: list, reuse, create
 

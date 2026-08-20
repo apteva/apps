@@ -32,7 +32,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.13.0
+version: 0.13.1
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, status). Inbox items are messages — an
@@ -82,7 +82,7 @@ provides:
     - prefix: /telegram-webhook/
       no_auth: true
   mcp_tools:
-    - { name: send,             description: "Send a message into a conversation. Args: conversation_id, text, components?, attachments?. The calling agent must be a participant; delivery fans out to every bound surface. Never creates conversations." }
+    - { name: send,             description: "Send portable user-visible text into a conversation. Args: conversation_id, text, components?, attachments?. Use short paragraphs and simple lists; avoid Markdown tables, raw HTML, and transport-specific syntax. Basic formatting is adapted per bound surface. The calling agent must be a participant; delivery fans out to every bound surface. Never creates conversations." }
     - { name: request_approval, description: "Ask the operator to approve something. Refused in public conversations. Args: conversation_id, title, body?, actions? (default Approve/Deny). The verdict comes back as an approval.result event." }
     - { name: report,           description: "File a report. Refused in public conversations. Args: conversation_id, title, summary, period?, sections?. Shown in its conversation and the inbox." }
     - { name: alert,            description: "Raise an alert. Refused in public conversations. Args: conversation_id, text, severity? (info|warn|error). Shown in the inbox, severity-ranked." }

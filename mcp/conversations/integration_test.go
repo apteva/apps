@@ -79,7 +79,7 @@ func spawnTelegramHTTPTestSidecar(t *testing.T) (*tk.Sidecar, *telegramGatewayFi
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/whoami":
-			_, _ = w.Write([]byte(`{"app_name":"conversations","version":"0.13.0","install_id":77,"project_id":"","public_url":"https://agents.example.test","bindings":{"telegram_bot":{"ids":[9],"default_id":9}}}`))
+			_, _ = w.Write([]byte(`{"app_name":"conversations","version":"0.13.1","install_id":77,"project_id":"","public_url":"https://agents.example.test","bindings":{"telegram_bot":{"ids":[9],"default_id":9}}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/connections/9":
 			_, _ = w.Write([]byte(`{"id":9,"app_slug":"telegram","name":"Test bot","status":"active","project_id":"test-proj"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/agents":
@@ -408,7 +408,7 @@ func TestSidecar_TelegramPublicOnboardingWebhookAndOutboundFlow(t *testing.T) {
 		!strings.Contains(fixture.spawnEventIDs[0], ":message:1:agent:41") {
 		t.Fatalf("atomic inbound delivery: spawn ids=%v follow-up thread events=%d", fixture.spawnEventIDs, fixture.threadEvents)
 	}
-	if len(fixture.sent) != 1 || fixture.sent[0]["chat_id"] != "12345" || fixture.sent[0]["text"] != "real sidecar outbound" {
+	if len(fixture.sent) != 1 || fixture.sent[0]["chat_id"] != "12345" || fixture.sent[0]["text"] != "real sidecar outbound" || fixture.sent[0]["parse_mode"] != "HTML" {
 		t.Fatalf("Telegram outbound = %+v", fixture.sent)
 	}
 }

@@ -1328,7 +1328,11 @@ func (t *telegramAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conversa
 	if err != nil {
 		return err
 	}
-	input := map[string]any{"chat_id": binding.ChatID, "text": text}
+	input := map[string]any{
+		"chat_id":    binding.ChatID,
+		"text":       telegramMarkdownToHTML(text),
+		"parse_mode": "HTML",
+	}
 	if markup != nil {
 		input["reply_markup"] = markup
 	}

@@ -34,7 +34,7 @@ func telegramResult(data string) *sdk.ExecuteResult {
 func configureTelegramTestPlatform(p *recordingPlatform) *telegramTestAPI {
 	api := &telegramTestAPI{nextMessageID: 700, botName: "Apteva Conversations"}
 	p.identity = &sdk.InstallIdentity{
-		AppName: appName, Version: "0.13.0", InstallID: 77, ProjectID: "",
+		AppName: appName, Version: "0.13.1", InstallID: 77, ProjectID: "",
 		PublicURL: "https://agents.example.test",
 		Bindings: map[string]any{telegramIntegrationRole: map[string]any{
 			"ids": []any{float64(testTelegramConnectionID)}, "default_id": float64(testTelegramConnectionID),
@@ -799,6 +799,51 @@ func telegramCallsByTool(platform *recordingPlatform, tool string) []capturedInt
 	return out
 }
 
+func TestTelegramMarkdownToHTMLIsSafeAndPortable(t *testing.T) {
+	source := "# Status\n\n**Ready** with `job_1` and [details](https://example.com?a=1&b=2).\n- first\n> quoted\n\n```go\nif a < b {}\n```"
+	want := "<b>Status</b>\n\n<b>Ready</b> with <code>job_1</code> and <a href=\"https://example.com?a=1&amp;b=2\">details</a>.\n• first\n<blockquote>quoted</blockquote>\n\n<pre><code>if a &lt; b {}\n</code></pre>"
+	if got := telegramMarkdownToHTML(source); got != want {
+		t.Fatalf("Telegram HTML:\n got: %q\nwant: %q", got, want)
+	}
+	if got, want := telegramMarkdownToHTML("<b>unsafe</b> **safe**"), "&lt;b&gt;unsafe&lt;/b&gt; <b>safe</b>"; got != want {
+		t.Fatalf("escaped Telegram HTML = %q, want %q", got, want)
+	}
+	if got := telegramMarkdownToHTML("```\nunclosed <code>"); got != "<pre><code>unclosed &lt;code&gt;\n</code></pre>" {
+		t.Fatalf("unclosed fence = %q", got)
+	}
+}
+
+func TestTelegramOutboundAdaptsMarkdownWithoutChangingTranscript(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	configureTelegramTestPlatform(platform)
+	enableTelegramForTest(t, app, platform)
+	conv := mkConversation(t, app, 41)
+	bindTelegramForTest(t, app, conv, "12345", nil)
+	original := "# Update\n\n**Done** with `job_1`; <internal> stays literal."
+
+	if _, err := app.toolSend(callerCtx(41, "main"), ctx, map[string]any{
+		"conversation_id": conv.ID, "text": original,
+	}); err != nil {
+		t.Fatalf("toolSend: %v", err)
+	}
+
+	calls := telegramCallsByTool(platform, "send_message")
+	if len(calls) != 1 {
+		t.Fatalf("send_message calls = %+v", calls)
+	}
+	if got := calls[0].Input["parse_mode"]; got != "HTML" {
+		t.Fatalf("parse_mode = %v, want HTML", got)
+	}
+	wantTelegram := "<b>Update</b>\n\n<b>Done</b> with <code>job_1</code>; &lt;internal&gt; stays literal."
+	if got := calls[0].Input["text"]; got != wantTelegram {
+		t.Fatalf("Telegram text = %q, want %q", got, wantTelegram)
+	}
+	transcript, err := app.store.Transcript(conv.ID, 0, 10)
+	if err != nil || len(transcript) != 1 || transcript[0].Content != original {
+		t.Fatalf("stored transcript = %+v, err=%v", transcript, err)
+	}
+}
+
 func TestTelegramResponseFeedbackStreamsPrivateDraftAndStopsCleanly(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
 	mountedCtx = ctx
@@ -855,6 +900,9 @@ func TestTelegramResponseFeedbackStreamsPrivateDraftAndStopsCleanly(t *testing.T
 	}
 	if len(drafts) < 2 || drafts[0].Input["text"] != "Hello from the agent" || drafts[len(drafts)-1].Input["text"] != "Hello from the agent — more detail" {
 		t.Fatalf("draft calls = %+v", drafts)
+	}
+	if drafts[0].Input["parse_mode"] != "HTML" || drafts[len(drafts)-1].Input["parse_mode"] != "HTML" {
+		t.Fatalf("draft parse modes = %+v", drafts)
 	}
 	firstID, _ := drafts[0].Input["draft_id"].(int64)
 	lastID, _ := drafts[len(drafts)-1].Input["draft_id"].(int64)
