@@ -627,12 +627,14 @@ function CallsView({ projectId }: NativePanelProps) {
     sessionRef.current = phone;
     setSoftphoneCallId(session.call_id);
     setMuted(false);
-    // media_url is same-origin relative when the app cannot resolve its public
-    // URL (local dev); absolutise it so the WebSocket constructor accepts it.
-    const url = session.media_url.startsWith("ws")
-      ? session.media_url
-      : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${session.media_url}`;
-    await phone.start(url);
+    // Browser media belongs to the gateway serving this panel. PublicURL is
+    // intentionally reserved for carrier webhooks and can name another host
+    // (for example production while the operator uses a local dashboard).
+    // Preserve the install-scoped path but always pin the socket to this origin.
+    const media = new URL(session.media_url, location.href);
+    media.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    media.host = location.host;
+    await phone.start(media.toString());
     setSelectedId(session.call_id);
     await loadCalls();
   };

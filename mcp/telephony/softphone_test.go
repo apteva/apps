@@ -551,6 +551,38 @@ func TestCallsPanelHidesBenignHistoricalMediaShutdownErrors(t *testing.T) {
 	}
 }
 
+func TestSoftphoneMediaURLUsesInstallScopedSameOriginPath(t *testing.T) {
+	app := &App{installID: 42}
+	got := app.softphoneMediaURL("call-1", "browser-token")
+	want := "/api/apps/telephony/_install/42/softphone/media/call-1/browser-token"
+	if got != want {
+		t.Fatalf("softphoneMediaURL() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "://") {
+		t.Fatalf("browser media URL must stay on the panel origin: %q", got)
+	}
+
+	if got := (&App{}).softphoneMediaURL("call-2", "token-2"); got != "/softphone/media/call-2/token-2" {
+		t.Fatalf("uninstalled softphoneMediaURL() = %q", got)
+	}
+}
+
+func TestCallsPanelPinsSoftphoneSocketToCurrentOrigin(t *testing.T) {
+	source, err := os.ReadFile("ui/CallsPanel.tsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"new URL(session.media_url, location.href)",
+		"media.host = location.host",
+		"media.protocol = location.protocol",
+	} {
+		if !strings.Contains(string(source), required) {
+			t.Fatalf("panel does not keep browser media on the current origin: missing %q", required)
+		}
+	}
+}
+
 // A human-routed call must not be answerable into a realtime thread, or the
 // caller ends up bridged to a thread nobody is listening to.
 func TestPrepareInboundRealtimeRefusesSoftphoneCalls(t *testing.T) {

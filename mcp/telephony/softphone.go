@@ -448,19 +448,17 @@ type softphoneSession struct {
 	From     string `json:"from,omitempty"`
 }
 
-// softphoneMediaURL is the externally reachable wss:// address the operator's
-// browser dials. Built from the same publicInstalledAppURL() the carrier media
-// streams use, so it inherits the proven /_install/<id>/ proxy shape.
+// softphoneMediaURL is the install-scoped path the operator's browser dials.
+// Keep it relative: the panel may be served through a local or private Apteva
+// host while PublicURL names the internet-facing carrier webhook host. The
+// browser must attach through the same gateway that served the panel, not jump
+// to PublicURL (which could be a different installation entirely).
 func (a *App) softphoneMediaURL(callID, token string) string {
-	base := a.publicInstalledAppURL()
 	path := "/softphone/media/" + callID + "/" + token
-	if base == "" {
-		return path
+	if a.installID > 0 {
+		return fmt.Sprintf("/api/apps/telephony/_install/%d%s", a.installID, path)
 	}
-	if strings.HasPrefix(base, "https://") {
-		return "wss://" + strings.TrimPrefix(base, "https://") + path
-	}
-	return "ws://" + strings.TrimPrefix(base, "http://") + path
+	return path
 }
 
 func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project string) {
