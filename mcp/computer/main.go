@@ -55,11 +55,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.78
+version: 0.7.79
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.78 adds typed custom
-  combobox results, trusted masked-input recovery, compact post-action state,
-  retryable semantic guards, and preserves all previous browser safeguards.
+  Watch, steer, and replay hosted browser sessions. v0.7.79 filters generated
+  session defaults, rejects unsupported arguments, applies safe emulation
+  bounds, and preserves all previous browser safeguards.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -92,7 +92,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
+      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name, for example {\"action\":\"open\",\"url\":\"https://example.com\"}. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. Computer ignores mechanically populated empty/default arguments and reports what it ignored. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
       description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, semantic scroll_regions, date-field format metadata, and visible semantic calendar cells. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. For a click that saves, submits, publishes, deletes, sends, pays, or navigates, pass expected_text with the intended accessible name so Computer verifies it atomically at dispatch. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and uses scalar verification for native single-line inputs. set_temporal accepts ISO dates for native or confidently detected masked date fields and returns requested/actual values, format, and validity diagnostics. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes."
     - name: computer_context_create
@@ -535,7 +535,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "browser_session",
 			Description: "Session lifecycle and tab control for app-owned browsers. Actions: open, status, close, tabs, switch_tab, close_tab. " +
-				"Ordinary open: pass only action=open plus url? or context_id?/context_name?. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. " +
+				"Ordinary open: pass only action=open plus url? or context_id?/context_name?. Generic example: {\"action\":\"open\",\"url\":\"https://example.com\"}. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. " +
 				"Advanced open overrides are backend?, persist?, auto_create_context?, timeout?, proxy_mode?/proxy_profile?/proxy_country?/proxy_sticky?, viewport?, environment?, and presentation_mode?. " +
 				"environment is advanced, opt-in QA/device emulation for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. " +
 				"Proxy overrides are opt-in; omit proxy_mode and every proxy_* selector to use Computer's configured routing. " +
@@ -552,7 +552,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. " +
 				"Returns {session_id, backend_session_id, backend, current_url, active_tab_id, tabs, context_id, debug_url, width, height, view}. " +
 				"view is a copyable browser-view component reference containing only session_id; attach it when the browser result should be visible in chat.",
-			InputSchema: schemaObject(map[string]any{
+			InputSchema: strictSchemaObject(map[string]any{
 				"action":            map[string]any{"type": "string", "enum": []string{"open", "status", "close", "tabs", "switch_tab", "close_tab"}},
 				"session_id":        map[string]any{"type": "string", "description": "App-owned live br_* session id for status/close/computer_use. It cannot reopen a closed session; start a fresh session with action=open."},
 				"tab_id":            map[string]any{"type": "string", "description": "Browser tab/page target id for switch_tab or close_tab."},
@@ -1051,25 +1051,42 @@ func (a *App) createContextRecord(ctx *sdk.AppCtx, args map[string]any) (*Comput
 }
 
 func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	args = normalizeBrowserSessionArgs(args)
+	if err := validateBrowserSessionArguments(args); err != nil {
+		return nil, err
+	}
+	args, diagnostics := normalizeBrowserSessionArgsWithDiagnostics(args)
+	decorate := func(value any, err error) (any, error) {
+		if err != nil {
+			return nil, err
+		}
+		if result, ok := value.(map[string]any); ok {
+			if len(diagnostics.IgnoredArguments) > 0 {
+				result["ignored_arguments"] = diagnostics.IgnoredArguments
+			}
+			if len(diagnostics.Warnings) > 0 {
+				result["argument_warnings"] = diagnostics.Warnings
+			}
+		}
+		return value, nil
+	}
 	action := stringArg(args, "action")
 	if action == "" {
 		return nil, fmt.Errorf("action required")
 	}
 	switch action {
 	case "open":
-		return a.openBrowserSession(ctx, args, false)
+		return decorate(a.openBrowserSession(ctx, args, false))
 	case "resume":
 		if id := strings.TrimSpace(stringArg(args, "session_id")); id != "" {
 			sess, ok := a.reg.get(id)
 			if !ok {
 				return nil, fmt.Errorf("session_not_active: app session %s is no longer active; open a new browser session with context_id or context_name instead of resuming session_id", id)
 			}
-			return a.sessionOutput(id, sess), nil
+			return decorate(a.sessionOutput(id, sess), nil)
 		}
-		return a.openBrowserSession(ctx, args, true)
+		return decorate(a.openBrowserSession(ctx, args, true))
 	case "list":
-		return map[string]any{"sessions": a.listSessions()}, nil
+		return decorate(map[string]any{"sessions": a.listSessions()}, nil)
 	case "status":
 		id := stringArg(args, "session_id")
 		if id == "" {
@@ -1087,17 +1104,17 @@ func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, err
 				}
 				return nil, err
 			}
-			return historicalSessionOutput(row), nil
+			return decorate(historicalSessionOutput(row), nil)
 		}
-		return a.sessionOutput(id, sess), nil
+		return decorate(a.sessionOutput(id, sess), nil)
 	case "tabs":
-		return a.toolBrowserTabs(ctx, args)
+		return decorate(a.toolBrowserTabs(ctx, args))
 	case "switch_tab":
-		return a.toolBrowserSwitchTab(ctx, args)
+		return decorate(a.toolBrowserSwitchTab(ctx, args))
 	case "close_tab":
-		return a.toolBrowserCloseTab(ctx, args)
+		return decorate(a.toolBrowserCloseTab(ctx, args))
 	case "close":
-		return a.toolBrowserClose(ctx, args)
+		return decorate(a.toolBrowserClose(ctx, args))
 	default:
 		return nil, fmt.Errorf("unknown browser_session action %q", action)
 	}
@@ -1711,6 +1728,7 @@ func sessionInfoOutput(info sessionInfo) map[string]any {
 		"opened_at":                     info.OpenedAt,
 		"last_used_at":                  info.LastUsedAt,
 		"proxy":                         info.Proxy,
+		"environment_applied":           info.Environment != nil,
 		"view":                          browserViewReference(info.SessionID),
 	}
 	if info.Status != "active" {
@@ -5153,6 +5171,12 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 	return out
 }
 
+func strictSchemaObject(props map[string]any, required []string) map[string]any {
+	out := schemaObject(props, required)
+	out["additionalProperties"] = false
+	return out
+}
+
 func sessionEnvironmentSchema() map[string]any {
 	return map[string]any{
 		"type":                 "object",
@@ -5173,7 +5197,7 @@ func sessionEnvironmentSchema() map[string]any {
 				},
 				"required": []string{"latitude", "longitude"},
 			},
-			"device_scale_factor": map[string]any{"type": "number", "minimum": 0.1, "maximum": 10},
+			"device_scale_factor": map[string]any{"type": "number", "minimum": 0.5, "maximum": 4, "description": "Advanced device emulation only. Omit for ordinary browsing; the normal value is 1."},
 			"mobile":              map[string]any{"type": "boolean"},
 			"touch":               map[string]any{"type": "boolean", "description": "Advertise touch capability; Computer agent actions continue using real mouse events."},
 			"max_touch_points":    map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": "Requires touch=true."},

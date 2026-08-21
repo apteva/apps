@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.78
+version: 0.7.79
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.78 adds typed custom
-  combobox results, trusted masked-input recovery, compact post-action state,
-  retryable semantic guards, and preserves all previous browser safeguards.
+  Watch, steer, and replay hosted browser sessions. v0.7.79 filters generated
+  session defaults, rejects unsupported arguments, applies safe emulation
+  bounds, and preserves all previous browser safeguards.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -51,9 +51,12 @@ provides:
       description: |
         Open a fresh app-owned browser session, inspect it, close it, or switch
         its tabs. For ordinary browsing, pass only action=open plus url or
-        context_id/context_name. Omit every other optional field unless the
-        task explicitly requires that override; never populate optional fields
-        with guessed or schema-default values. environment is an advanced
+        context_id/context_name, for example
+        {"action":"open","url":"https://example.com"}. Omit every other
+        optional field unless the task explicitly requires that override;
+        never populate optional fields with guessed or schema-default values.
+        Computer ignores mechanically populated empty/default arguments and
+        reports what it ignored. environment is an advanced
         QA/device-emulation override only for a specifically requested user
         agent, locale/languages, timezone, geolocation, device scale, mobile,
         or touch profile. Never send environment for normal navigation,

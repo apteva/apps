@@ -98,8 +98,8 @@ func Normalize(out computer.EnvironmentOptions) (computer.EnvironmentOptions, er
 			return out, fmt.Errorf("environment.geolocation.permission must be grant, prompt, or deny")
 		}
 	}
-	if out.DeviceScaleFactor != nil && (*out.DeviceScaleFactor < 0.1 || *out.DeviceScaleFactor > 10) {
-		return out, fmt.Errorf("environment.device_scale_factor must be between 0.1 and 10")
+	if out.DeviceScaleFactor != nil && (*out.DeviceScaleFactor < 0.5 || *out.DeviceScaleFactor > 4) {
+		return out, fmt.Errorf("environment.device_scale_factor must be between 0.5 and 4; omit it for the normal scale of 1")
 	}
 	if out.MaxTouchPoints != nil {
 		if *out.MaxTouchPoints < 1 || *out.MaxTouchPoints > 20 {

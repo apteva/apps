@@ -18,6 +18,28 @@ triggers:
 
 # Computer — chat attachments + web-browsing guide
 
+## Open sessions with the smallest useful call
+
+For ordinary browsing, send only `action="open"` and the destination or saved
+context. A generic new-page call is:
+
+```json
+{"action":"open","url":"https://example.com"}
+```
+
+To reopen saved state, use `context_id` or the exact `context_name` instead of
+adding provider, proxy, viewport, or environment defaults. Omit every optional
+field that the task did not explicitly request. In particular, do not send an
+`environment` object for routine navigation, audits, or saved-login sessions.
+
+Environment, viewport, backend, proxy, and presentation fields remain available
+on the same tool for explicit QA, device, location, routing, or demonstration
+requirements. When one is needed, send only the requested subfields. The normal
+device scale is `1`; omit `device_scale_factor` unless the task asks for device
+emulation. Computer filters mechanically populated defaults and reports them in
+`ignored_arguments` and `argument_warnings`. Unknown arguments are rejected
+instead of being silently honored.
+
 ## SoM badge colors
 
 Every interactive element on a screenshot has a colored numeric badge:

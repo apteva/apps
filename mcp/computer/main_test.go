@@ -558,7 +558,7 @@ func TestBrowserSessionEnvironmentIsOptInAndPropagates(t *testing.T) {
 		t.Fatalf("effective geolocation defaults = %+v", got.Geolocation)
 	}
 	openMap := out.(map[string]any)
-	if openMap["environment"] == nil {
+	if openMap["environment"] == nil || openMap["environment_applied"] != true {
 		t.Fatalf("effective environment missing from output: %#v", openMap)
 	}
 	firstSessionID := openMap["session_id"].(string)
@@ -584,6 +584,9 @@ func TestBrowserSessionEnvironmentIsOptInAndPropagates(t *testing.T) {
 	openMap = out.(map[string]any)
 	if _, exists := openMap["environment"]; exists {
 		t.Fatalf("omitted environment unexpectedly returned: %#v", openMap["environment"])
+	}
+	if openMap["environment_applied"] != false {
+		t.Fatalf("omitted environment reported as applied: %#v", openMap["environment_applied"])
 	}
 	_, _ = app.toolBrowserClose(ctx, map[string]any{"session_id": openMap["session_id"]})
 }
@@ -1218,6 +1221,9 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	if !ok {
 		t.Fatalf("browser_session schema has no properties map: %#v", tool.InputSchema)
 	}
+	if additional, ok := tool.InputSchema["additionalProperties"].(bool); !ok || additional {
+		t.Fatalf("browser_session must reject undeclared arguments: %#v", tool.InputSchema["additionalProperties"])
+	}
 	if _, ok := props["backend_session_id"]; ok {
 		t.Fatal("browser_session must not advertise provider-session attachment")
 	}
@@ -1226,8 +1232,14 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	}
 	if !strings.Contains(tool.Description, "Ordinary open: pass only") ||
 		!strings.Contains(tool.Description, "never populate optional fields") ||
-		!strings.Contains(tool.Description, "Never send environment for normal navigation") {
+		!strings.Contains(tool.Description, "Never send environment for normal navigation") ||
+		!strings.Contains(tool.Description, "https://example.com") {
 		t.Fatalf("browser_session must teach agents the minimal default call:\n%s", tool.Description)
+	}
+	for _, brand := range []string{"Monika", "Patreon", "Digilo", "Adultfolio"} {
+		if strings.Contains(tool.Description, brand) {
+			t.Fatalf("browser_session guidance must remain generic, found %q", brand)
+		}
 	}
 	environmentSchema, ok := props["environment"].(map[string]any)
 	if !ok {
@@ -1244,6 +1256,12 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 		if _, ok := environmentProps[field]; !ok {
 			t.Fatalf("browser_session environment missing %q", field)
 		}
+	}
+	scale, ok := environmentProps["device_scale_factor"].(map[string]any)
+	minimum, minOK := numericArg(scale["minimum"])
+	maximum, maxOK := numericArg(scale["maximum"])
+	if !ok || !minOK || !maxOK || minimum != 0.5 || maximum != 4 {
+		t.Fatalf("browser_session device scale bounds are unsafe: %#v", scale)
 	}
 	presentationMode, ok := props["presentation_mode"].(map[string]any)
 	if !ok {

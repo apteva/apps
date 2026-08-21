@@ -1,6 +1,8 @@
 package main
 
 import (
+	"slices"
+	"strings"
 	"testing"
 
 	tk "github.com/apteva/app-sdk/testkit"
@@ -29,11 +31,14 @@ func TestNormalizeBrowserSessionArgsDropsSynthesizedDefaults(t *testing.T) {
 			t.Fatalf("default-filled %q was not removed: %#v", key, got)
 		}
 	}
-	if proxy, ok := got["proxy"].(bool); !ok || proxy {
-		t.Fatalf("legacy proxy=false must survive normalization for backward compatibility: %#v", got)
+	if _, ok := got["proxy"]; ok {
+		t.Fatalf("legacy proxy must be ignored when proxy_mode is authoritative: %#v", got)
 	}
-	if got["persist"] != false || got["auto_create_context"] != false {
+	if got["persist"] != false {
 		t.Fatalf("meaningful lifecycle booleans changed: %#v", got)
+	}
+	if _, ok := got["auto_create_context"]; ok {
+		t.Fatalf("default auto_create_context=false was not removed: %#v", got)
 	}
 }
 
@@ -43,12 +48,79 @@ func TestNormalizeSessionEnvironmentPreservesIntentionalZeroCoordinates(t *testi
 		"geolocation": map[string]any{"latitude": float64(0), "longitude": float64(0), "permission": ""},
 	}})
 	environment, ok := got["environment"].(map[string]any)
-	if !ok || environment["locale"] != "en-GB" || environment["mobile"] != false {
+	if !ok || environment["locale"] != "en-GB" {
 		t.Fatalf("meaningful environment was not preserved: %#v", got)
+	}
+	if _, exists := environment["mobile"]; exists {
+		t.Fatalf("default mobile=false was not removed: %#v", environment)
 	}
 	geo, ok := environment["geolocation"].(map[string]any)
 	if !ok || geo["latitude"] != float64(0) || geo["longitude"] != float64(0) {
 		t.Fatalf("valid zero coordinates were discarded: %#v", environment)
+	}
+}
+
+func TestBrowserSessionFiltersProductionStyleSynthesizedTemplate(t *testing.T) {
+	previous := newBackend
+	t.Cleanup(func() { newBackend = previous })
+	fake := &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://example.com/"}
+	newBackend = func(_ backends.Config) (backends.Computer, error) {
+		return fake, nil
+	}
+
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	out, err := app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "auto_create_context": false, "backend": "local",
+		"context_id": "", "context_name": "Saved Login", "persist": false,
+		"presentation_mode": "fast", "provider_context_id": "", "proxy_country": "",
+		"proxy_mode": "auto", "proxy_profile": "", "proxy_sticky": "rotating",
+		"session_id": "", "tab_id": "", "timeout": float64(0),
+		"url":      "https://example.com/account",
+		"viewport": map[string]any{"width": float64(1600), "height": float64(800)},
+		"environment": map[string]any{
+			"device_scale_factor": float64(0.1),
+			"geolocation":         map[string]any{"accuracy": float64(0), "latitude": float64(0), "longitude": float64(0), "permission": "prompt"},
+			"languages":           []any{}, "locale": "", "max_touch_points": float64(1),
+			"mobile": false, "timezone": "", "touch": false, "user_agent": "",
+		},
+	})
+	if err != nil {
+		t.Fatalf("synthesized session template should be safely filtered: %v", err)
+	}
+	result := out.(map[string]any)
+	if applied, _ := result["environment_applied"].(bool); applied || !fake.openEnvironment.IsEmpty() {
+		t.Fatalf("synthesized environment was applied: result=%#v backend=%+v", result, fake.openEnvironment)
+	}
+	ignored, ok := result["ignored_arguments"].([]string)
+	if !ok {
+		t.Fatalf("ignored arguments missing: %#v", result)
+	}
+	for _, want := range []string{"backend", "environment", "persist", "proxy_mode", "proxy_sticky", "viewport"} {
+		if !slices.Contains(ignored, want) {
+			t.Fatalf("ignored arguments %v missing %q", ignored, want)
+		}
+	}
+	warnings, ok := result["argument_warnings"].([]string)
+	if !ok || len(warnings) != 1 || !strings.Contains(warnings[0], "no browser emulation") {
+		t.Fatalf("filter warning missing: %#v", result["argument_warnings"])
+	}
+	if result["persist"] != true {
+		t.Fatalf("synthesized persist=false should fall back to the normal default: %#v", result["persist"])
+	}
+}
+
+func TestBrowserSessionRejectsUnsupportedArgumentsAndUnsafeScale(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	app := &App{reg: &registry{m: map[string]*session{}}}
+
+	if _, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "imaginary_mode": true}); err == nil || !strings.Contains(err.Error(), "unsupported_argument") || !strings.Contains(err.Error(), "imaginary_mode") {
+		t.Fatalf("unknown argument should return a typed error: %v", err)
+	}
+	if _, err := app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "environment": map[string]any{"device_scale_factor": float64(0.1)},
+	}); err == nil || !strings.Contains(err.Error(), "between 0.5 and 4") {
+		t.Fatalf("unsafe explicit device scale should be rejected: %v", err)
 	}
 }
 
