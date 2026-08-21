@@ -242,8 +242,8 @@ func runLiveBrowserSpeech(t *testing.T, cfg liveCarrierConfig, outbound, inbound
 		"outbound_to_inbound": generateLiveSpeechFixture(t, "outbound-speech", "en-us+m3", "Apteva browser voice quality test. Clear speech should cross the carrier without static clipping or missing words. Alpha seven maple river."),
 		"inbound_to_outbound": generateLiveSpeechFixture(t, "inbound-speech", "en-us+f3", "The return channel checks intelligibility and timing. Please preserve every syllable without cuts or watery noise. Bravo nine silver garden."),
 	}
-	outboundBrowser := startLiveSpeechBrowser(t, assets.server.URL, fixtures["outbound_to_inbound"].Path, outbound.MediaURL)
-	inboundBrowser := startLiveSpeechBrowser(t, assets.server.URL, fixtures["inbound_to_outbound"].Path, inbound.MediaURL)
+	outboundBrowser := startLiveSpeechBrowser(t, assets.server.URL, fixtures["outbound_to_inbound"].Path, liveBrowserMediaURL(t, cfg, outbound.MediaURL))
+	inboundBrowser := startLiveSpeechBrowser(t, assets.server.URL, fixtures["inbound_to_outbound"].Path, liveBrowserMediaURL(t, cfg, inbound.MediaURL))
 	outboundBrowser.waitState(t, "live", 20*time.Second)
 	inboundBrowser.waitState(t, "live", 20*time.Second)
 	outboundBrowser.setMuted(t, true)
@@ -275,6 +275,37 @@ func runLiveBrowserSpeech(t *testing.T, cfg liveCarrierConfig, outbound, inbound
 	}
 	t.Log("real Chrome speech capture and playback passed in both directions")
 	return liveBrowserSpeechResult{Evidence: evidence, Fixtures: fixtures}
+}
+
+func liveBrowserMediaURL(t *testing.T, cfg liveCarrierConfig, raw string) string {
+	t.Helper()
+	media, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		t.Fatalf("parse browser media URL: %v", err)
+	}
+	if !media.IsAbs() {
+		base, err := url.Parse(strings.TrimRight(cfg.baseURL, "/") + "/")
+		if err != nil {
+			t.Fatalf("parse live carrier base URL: %v", err)
+		}
+		media = base.ResolveReference(media)
+	}
+	switch media.Scheme {
+	case "https":
+		media.Scheme = "wss"
+	case "http":
+		media.Scheme = "ws"
+	}
+	return media.String()
+}
+
+func TestLiveBrowserMediaURLUsesPublicCarrierOrigin(t *testing.T) {
+	cfg := liveCarrierConfig{baseURL: "https://public.example"}
+	got := liveBrowserMediaURL(t, cfg, "/api/apps/telephony/softphone/media/call/token")
+	want := "wss://public.example/api/apps/telephony/softphone/media/call/token"
+	if got != want {
+		t.Fatalf("liveBrowserMediaURL()=%q, want %q", got, want)
+	}
 }
 
 func analyzeRecordedSpeech(recorded []int16, recordedRate int, fixture liveSpeechFixture) liveSpeechRecordingMetrics {
@@ -403,6 +434,10 @@ func startLiveSpeechBrowser(t *testing.T, assetsURL, speechPath, mediaURL string
 	cmd := exec.CommandContext(t.Context(), chrome,
 		"--headless=new", "--disable-gpu", "--no-sandbox", "--no-first-run", "--no-default-browser-check",
 		"--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
+		// zrok's free public frontend presents an interactive warning to
+		// Mozilla-prefixed browsers. This dedicated automation identity is the
+		// documented non-interactive bypass and also applies to worker WebSockets.
+		"--user-agent=Apteva-Telephony-Live-Test/1.0",
 		"--autoplay-policy=no-user-gesture-required", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
 		"--use-file-for-fake-audio-capture="+speechPath, "--remote-allow-origins=*", "--remote-debugging-port=0",
 		"--user-data-dir="+profile, "about:blank")

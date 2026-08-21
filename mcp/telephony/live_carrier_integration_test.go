@@ -701,6 +701,11 @@ func drainLiveCarrierAudio(conn net.Conn) {
 
 func assertLiveToneExchange(t *testing.T, source, destination net.Conn, frequency int, label string) liveToneMetrics {
 	t.Helper()
+	// Telnyx continuously delivers 20 ms media frames, including silence. Drain
+	// frames accumulated while the previous direction was under test so this
+	// assertion measures newly transmitted audio instead of immediately filling
+	// its sample window from stale silence.
+	drainLiveCarrierAudio(destination)
 	started := time.Now()
 	result := make(chan liveToneResult, 1)
 	go func() {
@@ -726,7 +731,10 @@ func assertLiveToneExchange(t *testing.T, source, destination net.Conn, frequenc
 		result <- liveToneResult{pcm: pcm, firstArrival: first}
 	}()
 
-	tone := sinePCM(24000, frequency, 480*100)
+	// Send exactly the 36,000 samples collected by the reader. Sending a longer
+	// tone leaves its tail queued for the following direction and makes the
+	// bidirectional assertion order-dependent.
+	tone := sinePCM(24000, frequency, 480*75)
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for offset := 0; offset < len(tone); offset += 480 {
