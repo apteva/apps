@@ -34,12 +34,20 @@ The source number must have a ready outbound profile. The destination number
 must have an enabled, healthy `human_browser` inbound route.
 
 The test refuses to dial until those conditions pass. It then calls through the
-installed Telephony app, answers both call legs with deterministic softphone
-protocol clients, sends distinct PCM tones in both directions, and measures
-signal identity, level, continuity, cuts, and first-audio latency. After hangup
-it verifies durable initiated/incoming, answered, and completed lifecycle
-events; waits for the Telnyx recording callback; downloads the recording
-through Telephony's provider-neutral playback endpoint; and confirms that both
-tones exist in the WAV. The final test log contains a
+installed Telephony app and answers both call legs automatically. First,
+deterministic protocol clients send distinct PCM tones in both directions and
+measure signal identity, level, continuity, cuts, and first-audio latency.
+Then two real headless Chrome processes replace those clients. eSpeak supplies
+different clean speech WAVs as their fake microphones, and the production
+`SoftphoneSession`, capture worklet, worker/WebSocket transport, and playback
+worklet carry each voice in turn. This stage requires `bun`, `espeak`, and
+Google Chrome/Chromium; set `TELEPHONY_LIVE_CHROME` if the browser is not on the
+standard path.
+
+After hangup the test verifies durable initiated/incoming, answered, and
+completed lifecycle events; waits for the Telnyx recording callback; downloads
+the recording through Telephony's provider-neutral playback endpoint; confirms
+that both tones exist; and correlates each recorded speech cadence with its
+reference WAV. The final test log contains a
 `LIVE_CARRIER_EVIDENCE` JSON object with call IDs and measured evidence. It does
 not invoke an LLM or require a person to answer either number.

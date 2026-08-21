@@ -87,17 +87,19 @@ type liveRecording struct {
 }
 
 type liveCarrierEvidence struct {
-	Provider        string                         `json:"provider"`
-	OutboundCallID  string                         `json:"outbound_call_id"`
-	InboundCallID   string                         `json:"inbound_call_id"`
-	From            string                         `json:"from"`
-	To              string                         `json:"to"`
-	ToneResults     map[string]liveToneMetrics     `json:"tone_results"`
-	LifecycleTopics map[string][]string            `json:"lifecycle_topics"`
-	RecordingID     string                         `json:"recording_id"`
-	RecordingSource string                         `json:"recording_source"`
-	RecordingTones  map[string]liveToneMetrics     `json:"recording_tones"`
-	Diagnostics     map[string]liveCallDiagnostics `json:"diagnostics"`
+	Provider        string                                  `json:"provider"`
+	OutboundCallID  string                                  `json:"outbound_call_id"`
+	InboundCallID   string                                  `json:"inbound_call_id"`
+	From            string                                  `json:"from"`
+	To              string                                  `json:"to"`
+	ToneResults     map[string]liveToneMetrics              `json:"tone_results"`
+	LifecycleTopics map[string][]string                     `json:"lifecycle_topics"`
+	RecordingID     string                                  `json:"recording_id"`
+	RecordingSource string                                  `json:"recording_source"`
+	RecordingTones  map[string]liveToneMetrics              `json:"recording_tones"`
+	RecordingSpeech map[string]liveSpeechRecordingMetrics   `json:"recording_speech"`
+	BrowserSpeech   map[string]liveBrowserDirectionEvidence `json:"browser_speech"`
+	Diagnostics     map[string]liveCallDiagnostics          `json:"diagnostics"`
 }
 
 type liveCallDiagnostics struct {
@@ -191,6 +193,8 @@ func TestTier2LiveCarrierLoopback(t *testing.T) {
 	}
 	evidence.ToneResults["outbound_to_inbound"] = assertLiveToneExchange(t, outboundBrowser, inboundBrowser, 523, "outbound-to-inbound")
 	evidence.ToneResults["inbound_to_outbound"] = assertLiveToneExchange(t, inboundBrowser, outboundBrowser, 941, "inbound-to-outbound")
+	speech := runLiveBrowserSpeech(t, cfg, outbound, inbound)
+	evidence.BrowserSpeech = speech.Evidence
 
 	if err := liveCarrierPost(cfg, "/calls/"+url.PathEscape(outbound.CallID)+"/hangup", nil, nil); err != nil {
 		t.Fatal(err)
@@ -215,7 +219,7 @@ func TestTier2LiveCarrierLoopback(t *testing.T) {
 	if recording.Provider != "telnyx" || recording.ProviderStatus != "completed" || recording.PlaybackURL == "" {
 		t.Fatalf("Telnyx recording did not become playable: %+v", recording)
 	}
-	evidence.RecordingTones = assertLiveRecordingAudio(t, cfg, recording)
+	evidence.RecordingTones, evidence.RecordingSpeech = assertLiveRecordingAudio(t, cfg, recording, speech.Fixtures)
 
 	encoded, _ := json.MarshalIndent(evidence, "", "  ")
 	t.Logf("LIVE_CARRIER_EVIDENCE\n%s", encoded)
@@ -509,7 +513,7 @@ func waitLiveRecording(t *testing.T, cfg liveCarrierConfig, callID string, timeo
 	return liveRecording{}
 }
 
-func assertLiveRecordingAudio(t *testing.T, cfg liveCarrierConfig, recording liveRecording) map[string]liveToneMetrics {
+func assertLiveRecordingAudio(t *testing.T, cfg liveCarrierConfig, recording liveRecording, fixtures map[string]liveSpeechFixture) (map[string]liveToneMetrics, map[string]liveSpeechRecordingMetrics) {
 	t.Helper()
 	endpoint, err := url.Parse(recording.PlaybackURL)
 	if err != nil {
@@ -560,17 +564,25 @@ func assertLiveRecordingAudio(t *testing.T, cfg liveCarrierConfig, recording liv
 	}); err != nil {
 		t.Fatalf("read Telnyx recording audio: %v", err)
 	}
-	results := map[string]liveToneMetrics{
+	toneResults := map[string]liveToneMetrics{
 		"523_hz": analyzeLiveTone(mixed, info.SampleRate, 523),
 		"941_hz": analyzeLiveTone(mixed, info.SampleRate, 941),
 	}
-	for frequency, metrics := range results {
+	for frequency, metrics := range toneResults {
 		if metrics.PeakRMS < 300 || metrics.PeakScore < 0.08 {
 			t.Fatalf("Telnyx recording does not contain the %s test signal: %+v", frequency, metrics)
 		}
 	}
+	speechResults := make(map[string]liveSpeechRecordingMetrics, len(fixtures))
+	for direction, fixture := range fixtures {
+		metrics := analyzeRecordedSpeech(mixed, info.SampleRate, fixture)
+		if metrics.RecordedRMS < 300 || metrics.EnvelopeCorrelation < 0.35 {
+			t.Fatalf("Telnyx recording does not preserve the %s speech cadence: %+v", direction, metrics)
+		}
+		speechResults[direction] = metrics
+	}
 	t.Logf("Telnyx recording verified: id=%s bytes=%d sample_rate=%d channels=%d", recording.ID, written, info.SampleRate, info.Channels)
-	return results
+	return toneResults, speechResults
 }
 
 func waitLiveInboundCall(t *testing.T, cfg liveCarrierConfig, known map[string]bool, timeout time.Duration) liveCarrierCall {
