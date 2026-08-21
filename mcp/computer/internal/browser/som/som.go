@@ -255,12 +255,15 @@ const EnumScript = `
     // editing a draft, so editable targets are never classified here.
     if (!actionable || (el && el.isContentEditable) || role === 'textbox' || role === 'searchbox') return '';
     var semantic = clean(name + ' ' + text).toLowerCase();
-    if (/\bpublish\b/.test(semantic)) return 'immediate_publish';
-    if (/\b(delete|destroy|erase)\b/.test(semantic)) return 'destructive_delete';
-    if (/\b(send|post)\b/.test(semantic)) return 'immediate_send';
-    if (/\b(pay|payout|purchase|buy|checkout|place order)\b/.test(semantic)) return 'financial_action';
-    if (/\b(withdraw|withdrawal)\b/.test(semantic)) return 'financial_action';
-    if (/\b(schedule|set publish date)\b/.test(semantic)) return 'schedule_publish';
+	    if (/\b(set|choose|select|edit|change)\s+(the\s+)?(publish\s+)?(date|time)\b/.test(semantic)) return '';
+	    if (/\b(schedule (post|publication|publish)|confirm schedule|publish later)\b/.test(semantic) || /^schedule(?:\s+schedule)?$/.test(semantic)) return 'schedule_publish';
+	    if (/\bpublish\b/.test(semantic)) return 'immediate_publish';
+	    if (/\b(delete|destroy|erase)\b/.test(semantic)) return 'destructive_delete';
+	    if (/\b(send|post)\b/.test(semantic)) return 'immediate_send';
+	    if (/\b(pay|payout|purchase|buy|checkout|place order)\b/.test(semantic)) return 'financial_action';
+	    if (/\b(withdraw|withdrawal)\b/.test(semantic)) return 'financial_action';
+	    if (/\b(grant access|revoke access|change permissions|make admin|remove admin)\b/.test(semantic)) return 'permission_change';
+	    if (/\b(deactivate account|close account|transfer account)\b/.test(semantic)) return 'account_change';
     return '';
   }
 

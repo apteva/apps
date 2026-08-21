@@ -53,6 +53,12 @@ func TestDestructiveEffectOnlyClassifiesActionableControls(t *testing.T) {
 	if got := destructiveEffectForText("Withdraw funds", "menuitem"); got != "financial_action" {
 		t.Fatalf("Withdraw menuitem effect=%q", got)
 	}
+	if got := destructiveEffectForText("Set publish date", "button"); got != "" {
+		t.Fatalf("configuration opener was classified as consequential: %q", got)
+	}
+	if got := destructiveEffectForText("Schedule post", "button"); got != "schedule_publish" {
+		t.Fatalf("final schedule effect=%q", got)
+	}
 }
 
 func TestSnapshotBoxesUsesBackendIDsAndViewportOffsets(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/chromedp/cdproto/input"
 	cdpruntime "github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
@@ -17,7 +18,37 @@ import (
 
 type Options struct {
 	ExpectedText               string
+	ExpectedEffect             string
+	ConfirmConsequence         string
+	EnforceConsequence         bool
 	RequireExpectedIfDangerous bool
+}
+
+// ConsequenceError is returned before mouse dispatch when the caller's intent
+// and explicit acknowledgement do not match the live target's consequence.
+// Callers can use errors.As to return a structured, retry-safe rejection.
+type ConsequenceError struct {
+	Code               string
+	Target             Target
+	DetectedEffect     string
+	ExpectedEffect     string
+	ConfirmConsequence string
+}
+
+func (e *ConsequenceError) Error() string {
+	if e == nil {
+		return "click rejected: consequence guard failed"
+	}
+	actual := strings.TrimSpace(e.Target.AccessibleName)
+	if actual == "" {
+		actual = strings.TrimSpace(e.Target.Text)
+	}
+	switch e.Code {
+	case "semantic_intent_mismatch":
+		return fmt.Sprintf("click rejected: semantic_intent_mismatch: requested effect %q but live target %s is classified as %q; no action was executed", e.ExpectedEffect, describe(e.Target, actual), e.DetectedEffect)
+	default:
+		return fmt.Sprintf("click rejected: consequence_confirmation_required: live target %s is classified as %q; pass expected_effect=%q and confirm_consequence=%q only when that consequence is intended; no action was executed", describe(e.Target, actual), e.DetectedEffect, e.DetectedEffect, e.DetectedEffect)
+	}
 }
 
 type Target struct {
@@ -94,7 +125,75 @@ func Validate(target Target, options Options) error {
 	if expected != "" && normalize(actual) != expected {
 		return fmt.Errorf("click rejected: expected target %q but live target is %s", strings.TrimSpace(options.ExpectedText), describe(target, actual))
 	}
+	if options.EnforceConsequence {
+		detected := CanonicalEffect(target.DestructiveEffect)
+		expectedEffect := CanonicalEffect(options.ExpectedEffect)
+		confirmation := CanonicalEffect(options.ConfirmConsequence)
+		if target.Dangerous || detected != "" {
+			if expectedEffect != "" && expectedEffect != detected {
+				return &ConsequenceError{Code: "semantic_intent_mismatch", Target: target, DetectedEffect: detected, ExpectedEffect: expectedEffect, ConfirmConsequence: confirmation}
+			}
+			if expectedEffect == "" || confirmation != detected {
+				return &ConsequenceError{Code: "consequence_confirmation_required", Target: target, DetectedEffect: detected, ExpectedEffect: expectedEffect, ConfirmConsequence: confirmation}
+			}
+		}
+	}
 	return nil
+}
+
+// CanonicalEffect maps the established SoM risk codes to the smaller public
+// consequence vocabulary. Unknown values are normalized but preserved so a
+// future detector fails closed instead of silently becoming safe.
+func CanonicalEffect(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "immediate_publish", "immediate_external_commit":
+		return "immediate_external_commit"
+	case "schedule_publish", "scheduled_external_commit":
+		return "scheduled_external_commit"
+	case "immediate_send", "message_send":
+		return "message_send"
+	case "destructive_delete", "delete":
+		return "delete"
+	case "financial_action", "permission_change", "account_change":
+		return normalized
+	case "navigation_only", "open_configuration", "save_draft", "none", "":
+		return normalized
+	default:
+		return normalized
+	}
+}
+
+func IsConsequentialEffect(effect string) bool {
+	switch CanonicalEffect(effect) {
+	case "immediate_external_commit", "scheduled_external_commit", "message_send", "financial_action", "delete", "permission_change", "account_change":
+		return true
+	default:
+		return false
+	}
+}
+
+// StoreResult copies the atomic live-target observation into the action's
+// optional result sink. It is intentionally tiny so every CDP backend shares
+// identical consequence reporting without another DOM inspection.
+func StoreResult(result *computer.ClickResult, target Target, options Options, dispatched bool) {
+	if result == nil {
+		return
+	}
+	name := strings.TrimSpace(target.AccessibleName)
+	if name == "" {
+		name = strings.TrimSpace(target.Text)
+	}
+	detected := CanonicalEffect(target.DestructiveEffect)
+	*result = computer.ClickResult{
+		TargetName:       name,
+		TargetRole:       target.Role,
+		DetectedEffect:   detected,
+		LegacyEffect:     target.DestructiveEffect,
+		Dangerous:        target.Dangerous || detected != "",
+		Confirmed:        detected != "" && CanonicalEffect(options.ExpectedEffect) == detected && CanonicalEffect(options.ConfirmConsequence) == detected,
+		ActionDispatched: dispatched,
+	}
 }
 
 func normalize(value string) string {
@@ -202,10 +301,14 @@ func inspectScript(x, y int) string {
   var disabled=!!(el.disabled||(el.matches&&el.matches(':disabled'))||(el.getAttribute&&el.getAttribute('aria-disabled')==='true')||(el.closest&&el.closest('[inert]')));
   var accessible=name(el), text=clean(el.innerText||el.textContent||'');
   var semantic=clean(accessible+' '+text).toLowerCase(), effect='';
-  if(/\bpublish\b/.test(semantic)) effect='immediate_publish';
-  else if(/\b(delete|destroy|erase)\b/.test(semantic)) effect='destructive_delete';
-  else if(/\b(send|post)\b/.test(semantic)) effect='immediate_send';
-  else if(/\b(pay|payout|purchase|buy|checkout|place order)\b/.test(semantic)) effect='financial_action';
+	  if(/\b(set|choose|select|edit|change)\s+(the\s+)?(publish\s+)?(date|time)\b/.test(semantic)) effect='';
+	  else if(/\b(schedule (post|publication|publish)|confirm schedule|publish later)\b/.test(semantic)||/^schedule(?:\s+schedule)?$/.test(semantic)) effect='schedule_publish';
+	  else if(/\bpublish\b/.test(semantic)) effect='immediate_publish';
+	  else if(/\b(delete|destroy|erase)\b/.test(semantic)) effect='destructive_delete';
+	  else if(/\b(send|post)\b/.test(semantic)) effect='immediate_send';
+	  else if(/\b(pay|payout|purchase|buy|checkout|place order|withdraw|withdrawal)\b/.test(semantic)) effect='financial_action';
+	  else if(/\b(grant access|revoke access|change permissions|make admin|remove admin)\b/.test(semantic)) effect='permission_change';
+	  else if(/\b(deactivate account|close account|transfer account)\b/.test(semantic)) effect='account_change';
   return {tag:(el.tagName||'unknown').toLowerCase(),role:(el.getAttribute&&el.getAttribute('role'))||'',text:text.slice(0,120),accessible_name:accessible.slice(0,120),disabled:disabled,loading:loading(el),dangerous:effect!=='',destructive_effect:effect,opaque_frame:opaqueFrame};
 })()`, x, y)
 }

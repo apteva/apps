@@ -831,10 +831,14 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cursor unavailable, continuing click: %v\n", err)
 		}
-		if _, err := clickguard.Click(c.ctx, x, y, 1, clickguard.Options{
-			ExpectedText: expectedText, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
-		}); err != nil {
-			return nil, fmt.Errorf("click: %w", err)
+		guardOptions := clickguard.Options{
+			ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
+			EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
+		}
+		target, clickErr := clickguard.Click(c.ctx, x, y, 1, guardOptions)
+		clickguard.StoreResult(action.ClickResult, target, guardOptions, clickErr == nil)
+		if clickErr != nil {
+			return nil, fmt.Errorf("click: %w", clickErr)
 		}
 		focusJS := fmt.Sprintf(`(function(){
 			var el = document.elementFromPoint(%d, %d);
@@ -866,10 +870,14 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cursor unavailable, continuing double click: %v\n", err)
 		}
-		if _, err := clickguard.Click(c.ctx, x, y, 2, clickguard.Options{
-			ExpectedText: expectedText, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
-		}); err != nil {
-			return nil, fmt.Errorf("double_click: %w", err)
+		guardOptions := clickguard.Options{
+			ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
+			EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
+		}
+		target, clickErr := clickguard.Click(c.ctx, x, y, 2, guardOptions)
+		clickguard.StoreResult(action.ClickResult, target, guardOptions, clickErr == nil)
+		if clickErr != nil {
+			return nil, fmt.Errorf("double_click: %w", clickErr)
 		}
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.finishAction(action)

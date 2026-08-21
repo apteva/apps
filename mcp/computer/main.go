@@ -37,6 +37,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 	backends "github.com/apteva/apps/mcp/computer/internal/browser"
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	browserenvironment "github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
@@ -94,7 +95,7 @@ provides:
     - name: browser_session
       description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name, for example {\"action\":\"open\",\"url\":\"https://example.com\"}. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. Computer ignores mechanically populated empty/default arguments and reports what it ignored. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
-      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, semantic scroll_regions, date-field format metadata, and visible semantic calendar cells. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. For a click that saves, submits, publishes, deletes, sends, pays, or navigates, pass expected_text with the intended accessible name so Computer verifies it atomically at dispatch. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and uses scalar verification for native single-line inputs. set_temporal accepts ISO dates for native or confidently detected masked date fields and returns requested/actual values, format, and validity diagnostics. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes."
+      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, semantic scroll_regions, date-field format metadata, and visible semantic calendar cells. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. expected_text guards click identity. When dangerous=true, expected_effect and an identical confirm_consequence are required and checked against the live target before dispatch; omit both for ordinary clicks. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and uses scalar verification for native single-line inputs. set_temporal accepts ISO dates for native or confidently detected masked date fields and returns requested/actual values, format, and validity diagnostics. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -586,7 +587,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "computer_use",
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
-				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. For any click that saves, submits, publishes, deletes, sends, pays, or navigates, pass expected_text with the intended accessible name so the name and loading state are verified atomically. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates that resolve to consequential controls require expected_text exactly matching the live accessible name. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
+				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. Pass expected_text for target identity. When dangerous=true, also pass expected_effect and repeat that exact generic effect in confirm_consequence; Computer rejects missing or contradictory consequence intent before mouse dispatch. Omit both consequence fields for ordinary clicks. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates receive the same consequence guard. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
 				"For an operation outcome, prefer action=wait_for with declarative URL, text, selector, or semantic-target conditions; it ignores unrelated background requests and embedded frames. To verify navigation away from a known current URL, use type=url_changed and value=<the URL before the action>; use url_equals only when value is the desired destination. Use action=wait_for_stable only when the whole page must become quiet. A wait timeout returns timed_out=true and observed signals; it never means an earlier click or edit failed. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
 				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. Custom button comboboxes are opened and inspected automatically. An unavailable option returns error_code, control_kind, menu_open, current_value, visible_options, recoverable=false, and a refreshed som_revision instead of a generic backend error. " +
@@ -595,8 +596,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, screenshots return semantic scroll_regions. When more than one region can scroll, pass target_id for the intended region and optionally expected_name/expected_role. Scroll reports the region that actually moved, before/after offsets, moved, wrong_target, at_start/at_end, and newly revealed controls. amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
 				"Use action=navigate with url for direct navigation, action=back for browser history, and action=reload to refresh the current page. Do not emulate these with Control+L, Alt+ArrowLeft, or F5. " +
-				"Use action=batch for guarded click followed by wait_for. Set observation=som_delta to receive a lightweight refreshed semantic state without image bytes; batch keeps observation=screenshot as its compatibility default. Semantic labels and target ids become stale after page-changing actions and must be refreshed before reuse. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
-				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), target_id? (stable SoM target or scroll region), som_revision? (stale-target guard), selector? (CSS selector), expected_text? (click guard), expected_name?, expected_role?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, conditions?, match?, quiet_ms?, timeout_ms?, observation?, annotate? (screenshot only, default true). " +
+				"Use action=batch for a consequential click followed by wait_for so the declared external outcome is verified without risking a duplicate retry. Consequential clicks always return a lightweight SoM delta and action_dispatched/outcome_verified fields; outcome_verified remains false until an explicit wait condition proves the result. Set observation=som_delta for other compact refreshes; batch keeps observation=screenshot as its compatibility default. Semantic labels and target ids become stale after page-changing actions and must be refreshed before reuse. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
+				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), target_id? (stable SoM target or scroll region), som_revision? (stale-target guard), selector? (CSS selector), expected_text? (click identity guard), expected_effect?, confirm_consequence?, expected_name?, expected_role?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, conditions?, match?, quiet_ms?, timeout_ms?, observation?, annotate? (screenshot only, default true). " +
 				"Screenshot responses include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
@@ -606,32 +607,34 @@ func (a *App) MCPTools() []sdk.Tool {
 					"description": "For action=batch. Ordered click/double_click/scroll/wait/wait_for/wait_for_stable steps. A timed-out wait stops later steps but returns completed steps and the requested final observation. Batch defaults observation=screenshot for compatibility; use som_delta for a compact semantic refresh.",
 					"items":       map[string]any{"type": "object"},
 				},
-				"url":           map[string]any{"type": "string", "description": "Required for action=navigate. Absolute http(s) URL to load in the current tab."},
-				"tab_id":        map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
-				"coordinate":    map[string]any{"type": "string"},
-				"label":         map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
-				"target_id":     map[string]any{"type": "string", "description": "Stable target id from som/som_delta, or semantic region id from scroll_regions. Prefer this over a mutable numeric label when available."},
-				"som_revision":  map[string]any{"type": "integer", "minimum": 1, "description": "Optional revision returned by som_delta. Rejects a label/target_id if a newer screenshot has replaced its target map."},
-				"selector":      map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, or set_temporal. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
-				"expected_text": map[string]any{"type": "string", "description": "For click/double_click, the intended exact accessible name, verified atomically at dispatch time along with loading/disabled state. Always pass it for actions that save, submit, publish, delete, send, pay, or navigate. Required when a raw coordinate lands on a consequential control; recommended for label/target_id/selector clicks."},
-				"expected_name": map[string]any{"type": "string", "description": "Optional semantic accessible-name guard for target_id/label actions, especially scroll."},
-				"expected_role": map[string]any{"type": "string", "description": "Optional semantic role guard for target_id/label actions, especially scroll."},
-				"checked":       map[string]any{"type": "boolean", "description": "For action=set_checked. Desired final checked state for a checkbox, radio button, ARIA checkbox, or ARIA switch."},
-				"source_url":    map[string]any{"type": "string", "description": "For action=upload_file. HTTP(S) URL to download and upload."},
-				"base64":        map[string]any{"type": "string", "description": "For action=upload_file. Base64 file content, optionally as a data URL."},
-				"filename":      map[string]any{"type": "string", "description": "For action=upload_file with source_url/base64. Suggested filename."},
-				"mime_type":     map[string]any{"type": "string", "description": "For action=upload_file with base64. MIME type hint."},
-				"file_path":     map[string]any{"type": "string", "description": "For action=upload_file. Local app filesystem path; mainly for local/dev/manual use."},
-				"text":          map[string]any{"type": "string", "description": "For action=type, short literal text. For action=set_text, the full text to put into an input, textarea, contenteditable editor, or message/post composer. For action=select_option, one option display text to select. For action=set_temporal, accepted as a fallback value. When focused on native date/time inputs, action=type can normalize full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM, but set_temporal is safer when focus is unstable. For split date/time UIs, target the date field and time field in separate calls."},
-				"value":         map[string]any{"type": "string", "description": "For action=select_option, one option value to select. For action=set_text, accepted as fallback text when text is omitted. For action=set_temporal, prefer an ISO date such as 2026-07-01; Computer converts it for confidently detected masked date fields and returns requested, normalized, and actual values plus format/validity diagnostics. Use 11:00 AM for a time field, or a combined value only when the target is one datetime field."},
-				"texts":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option display texts."},
-				"values":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option values."},
-				"mode":          map[string]any{"type": "string", "enum": []string{"replace", "add", "remove", "toggle", "append"}, "description": "For action=select_option, replace is default and add/remove/toggle are intended for multiselect controls. For action=set_text, use replace (default) or append."},
-				"newline_mode":  map[string]any{"type": "string", "enum": []string{"preserve", "compact"}, "description": "For action=set_text. preserve keeps line breaks exactly; compact collapses repeated blank lines to single line breaks for public messages/composers."},
-				"key":           map[string]any{"type": "string", "description": "For action=key. Page/editor command key such as Enter, Tab, Backspace, Escape, ArrowUp, Control+A, Control+Z, Meta+A, or Shift+Tab. Do not use action=type for command keys. Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching; call browser_session(action=tabs) then browser_session(action=switch_tab)."},
-				"direction":     map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "For action=scroll."},
-				"amount":        map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
-				"duration":      map[string]any{"type": "integer"},
+				"url":                 map[string]any{"type": "string", "description": "Required for action=navigate. Absolute http(s) URL to load in the current tab."},
+				"tab_id":              map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
+				"coordinate":          map[string]any{"type": "string"},
+				"label":               map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
+				"target_id":           map[string]any{"type": "string", "description": "Stable target id from som/som_delta, or semantic region id from scroll_regions. Prefer this over a mutable numeric label when available."},
+				"som_revision":        map[string]any{"type": "integer", "minimum": 1, "description": "Optional revision returned by som_delta. Rejects a label/target_id if a newer screenshot has replaced its target map."},
+				"selector":            map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, or set_temporal. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
+				"expected_text":       map[string]any{"type": "string", "description": "For click/double_click, the intended exact accessible name, verified atomically at dispatch time along with loading/disabled state. Always pass it for actions that save, submit, publish, delete, send, pay, or navigate. Required when a raw coordinate lands on a consequential control; recommended for label/target_id/selector clicks."},
+				"expected_effect":     map[string]any{"type": "string", "enum": []string{"navigation_only", "open_configuration", "save_draft", "immediate_external_commit", "scheduled_external_commit", "message_send", "financial_action", "delete", "permission_change", "account_change"}, "description": "For click/double_click only. State the intended semantic effect. Required when the live target is consequential; omit for ordinary clicks unless distinguishing navigation/configuration intent."},
+				"confirm_consequence": map[string]any{"type": "string", "enum": []string{"immediate_external_commit", "scheduled_external_commit", "message_send", "financial_action", "delete", "permission_change", "account_change"}, "description": "For a consequential click only. Explicitly repeat the exact expected_effect to acknowledge the externally visible or irreversible consequence. Omit for ordinary navigation/editing."},
+				"expected_name":       map[string]any{"type": "string", "description": "Optional semantic accessible-name guard for target_id/label actions, especially scroll."},
+				"expected_role":       map[string]any{"type": "string", "description": "Optional semantic role guard for target_id/label actions, especially scroll."},
+				"checked":             map[string]any{"type": "boolean", "description": "For action=set_checked. Desired final checked state for a checkbox, radio button, ARIA checkbox, or ARIA switch."},
+				"source_url":          map[string]any{"type": "string", "description": "For action=upload_file. HTTP(S) URL to download and upload."},
+				"base64":              map[string]any{"type": "string", "description": "For action=upload_file. Base64 file content, optionally as a data URL."},
+				"filename":            map[string]any{"type": "string", "description": "For action=upload_file with source_url/base64. Suggested filename."},
+				"mime_type":           map[string]any{"type": "string", "description": "For action=upload_file with base64. MIME type hint."},
+				"file_path":           map[string]any{"type": "string", "description": "For action=upload_file. Local app filesystem path; mainly for local/dev/manual use."},
+				"text":                map[string]any{"type": "string", "description": "For action=type, short literal text. For action=set_text, the full text to put into an input, textarea, contenteditable editor, or message/post composer. For action=select_option, one option display text to select. For action=set_temporal, accepted as a fallback value. When focused on native date/time inputs, action=type can normalize full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM, but set_temporal is safer when focus is unstable. For split date/time UIs, target the date field and time field in separate calls."},
+				"value":               map[string]any{"type": "string", "description": "For action=select_option, one option value to select. For action=set_text, accepted as fallback text when text is omitted. For action=set_temporal, prefer an ISO date such as 2026-07-01; Computer converts it for confidently detected masked date fields and returns requested, normalized, and actual values plus format/validity diagnostics. Use 11:00 AM for a time field, or a combined value only when the target is one datetime field."},
+				"texts":               map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option display texts."},
+				"values":              map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option values."},
+				"mode":                map[string]any{"type": "string", "enum": []string{"replace", "add", "remove", "toggle", "append"}, "description": "For action=select_option, replace is default and add/remove/toggle are intended for multiselect controls. For action=set_text, use replace (default) or append."},
+				"newline_mode":        map[string]any{"type": "string", "enum": []string{"preserve", "compact"}, "description": "For action=set_text. preserve keeps line breaks exactly; compact collapses repeated blank lines to single line breaks for public messages/composers."},
+				"key":                 map[string]any{"type": "string", "description": "For action=key. Page/editor command key such as Enter, Tab, Backspace, Escape, ArrowUp, Control+A, Control+Z, Meta+A, or Shift+Tab. Do not use action=type for command keys. Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching; call browser_session(action=tabs) then browser_session(action=switch_tab)."},
+				"direction":           map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "For action=scroll."},
+				"amount":              map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
+				"duration":            map[string]any{"type": "integer"},
 				"conditions": map[string]any{"type": "array", "minItems": 1, "maxItems": 8, "description": "For wait_for. Declarative browser outcomes. match defaults to any.", "items": map[string]any{"type": "object", "properties": map[string]any{
 					"type":           map[string]any{"type": "string", "enum": []string{"url_changed", "url_equals", "url_contains", "text_present", "text_absent", "selector_present", "selector_absent", "target_present", "target_absent"}, "description": "Outcome predicate. For navigation away from a known current URL, choose url_changed. Choose url_equals only when the destination URL is known."},
 					"value":          map[string]any{"type": "string", "description": "Required for URL/text conditions. For url_changed, pass the URL before the action (success means current URL differs). For url_equals/url_contains, pass the desired destination URL/value. For text conditions, pass visible text."},
@@ -2172,33 +2175,39 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 
 	act := backends.Action{
-		Type:         action,
-		Label:        intArg(args, "label"),
-		Selector:     stringArg(args, "selector"),
-		Text:         stringArg(args, "text"),
-		Value:        stringArg(args, "value"),
-		Texts:        stringSliceArg(args, "texts"),
-		Values:       stringSliceArg(args, "values"),
-		Mode:         stringArg(args, "mode"),
-		NewlineMode:  stringArg(args, "newline_mode"),
-		Key:          stringArg(args, "key"),
-		Direction:    stringArg(args, "direction"),
-		Amount:       intArg(args, "amount"),
-		URL:          strings.TrimSpace(stringArg(args, "url")),
-		Duration:     intArg(args, "duration"),
-		QuietMS:      intArg(args, "quiet_ms"),
-		TimeoutMS:    intArg(args, "timeout_ms"),
-		Match:        strings.TrimSpace(stringArg(args, "match")),
-		Conditions:   conditions,
-		ExpectedText: strings.TrimSpace(stringArg(args, "expected_text")),
-		TargetID:     strings.TrimSpace(stringArg(args, "target_id")),
-		SOMRevision:  intArg(args, "som_revision"),
-		ExpectedName: strings.TrimSpace(stringArg(args, "expected_name")),
-		ExpectedRole: strings.TrimSpace(stringArg(args, "expected_role")),
-		Presentation: sess.presentation,
+		Type:               action,
+		Label:              intArg(args, "label"),
+		Selector:           stringArg(args, "selector"),
+		Text:               stringArg(args, "text"),
+		Value:              stringArg(args, "value"),
+		Texts:              stringSliceArg(args, "texts"),
+		Values:             stringSliceArg(args, "values"),
+		Mode:               stringArg(args, "mode"),
+		NewlineMode:        stringArg(args, "newline_mode"),
+		Key:                stringArg(args, "key"),
+		Direction:          stringArg(args, "direction"),
+		Amount:             intArg(args, "amount"),
+		URL:                strings.TrimSpace(stringArg(args, "url")),
+		Duration:           intArg(args, "duration"),
+		QuietMS:            intArg(args, "quiet_ms"),
+		TimeoutMS:          intArg(args, "timeout_ms"),
+		Match:              strings.TrimSpace(stringArg(args, "match")),
+		Conditions:         conditions,
+		ExpectedText:       strings.TrimSpace(stringArg(args, "expected_text")),
+		ExpectedEffect:     strings.TrimSpace(stringArg(args, "expected_effect")),
+		ConfirmConsequence: strings.TrimSpace(stringArg(args, "confirm_consequence")),
+		TargetID:           strings.TrimSpace(stringArg(args, "target_id")),
+		SOMRevision:        intArg(args, "som_revision"),
+		ExpectedName:       strings.TrimSpace(stringArg(args, "expected_name")),
+		ExpectedRole:       strings.TrimSpace(stringArg(args, "expected_role")),
+		Presentation:       sess.presentation,
 	}
 	if checked, ok := boolArg(args, "checked"); ok {
 		act.Checked = checked
+	}
+	if action == "click" || action == "double_click" {
+		act.EnforceConsequence = true
+		act.ClickResult = &backends.ClickResult{}
 	}
 	act.X, act.Y = coordinateArg(args)
 	// Some model/tool serializers populate an omitted optional integer with its
@@ -2435,6 +2444,13 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 				return out, nil
 			}
 		}
+		var consequenceErr *clickguard.ConsequenceError
+		if errors.As(err, &consequenceErr) {
+			a.recordSessionNavigation(ctx, id, sess)
+			out := consequenceRejectionPayload(ctx, id, sess, act, consequenceErr)
+			emitEvent(ctx, "session.action", out)
+			return out, nil
+		}
 		if isActionTimeoutError(err) {
 			return nil, computerUseFailure("action_timeout", id, sess, action,
 				"browser action timed out",
@@ -2458,6 +2474,11 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	markSemanticSnapshotDirty(sess, action)
 	observation := observationArg(args, action)
+	if (action == "click" || action == "double_click") && act.ClickResult != nil && act.ClickResult.Dangerous {
+		// Consequential clicks always return a fresh lightweight semantic delta,
+		// even when ordinary clicks default to no post-action observation.
+		observation = "som_delta"
+	}
 	if observation == "none" && !rawArgPresent(args, "observation") &&
 		(action == "click" || action == "double_click") && strings.EqualFold(act.ExpectedRole, "gridcell") {
 		observation = "som_delta"
@@ -2530,6 +2551,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	mergeTemporalResultPayload(payload, temporalResult)
 	mergeTextResultPayload(payload, textResult)
 	mergeScrollResultPayload(payload, scrollResult)
+	mergeClickResultPayload(payload, act)
 	if observationDelta != nil {
 		payload["som_delta"] = observationDelta
 		payload["som_revision"] = sess.somRevision
@@ -2620,6 +2642,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	mergeTemporalResultPayload(out, temporalResult)
 	mergeTextResultPayload(out, textResult)
 	mergeScrollResultPayload(out, scrollResult)
+	mergeClickResultPayload(out, act)
 	if observationDelta != nil {
 		if added, ok := observationDelta["added"]; ok {
 			out["revealed_targets"] = added
@@ -2677,6 +2700,8 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 	completed := make([]map[string]any, 0, len(steps))
 	completedCount := 0
 	batchTimedOut := false
+	batchHadConsequence := false
+	lastConsequenceStep := -1
 	for index, step := range steps {
 		action := strings.TrimSpace(stringArg(step, "action"))
 		switch action {
@@ -2716,10 +2741,16 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 			Direction: stringArg(step, "direction"), Amount: intArg(step, "amount"),
 			Duration: intArg(step, "duration"), QuietMS: intArg(step, "quiet_ms"), TimeoutMS: intArg(step, "timeout_ms"),
 			Match: strings.TrimSpace(stringArg(step, "match")), Conditions: conditions,
-			ExpectedText: strings.TrimSpace(stringArg(step, "expected_text")),
-			TargetID:     strings.TrimSpace(stringArg(step, "target_id")), SOMRevision: intArg(step, "som_revision"),
+			ExpectedText:       strings.TrimSpace(stringArg(step, "expected_text")),
+			ExpectedEffect:     strings.TrimSpace(stringArg(step, "expected_effect")),
+			ConfirmConsequence: strings.TrimSpace(stringArg(step, "confirm_consequence")),
+			TargetID:           strings.TrimSpace(stringArg(step, "target_id")), SOMRevision: intArg(step, "som_revision"),
 			ExpectedName: strings.TrimSpace(stringArg(step, "expected_name")), ExpectedRole: strings.TrimSpace(stringArg(step, "expected_role")),
 			Presentation: sess.presentation,
+		}
+		if action == "click" || action == "double_click" {
+			act.EnforceConsequence = true
+			act.ClickResult = &backends.ClickResult{}
 		}
 		act.X, act.Y = coordinateArg(step)
 		if (action == "click" || action == "double_click") && strings.TrimSpace(stringArg(step, "coordinate")) != "" {
@@ -2759,6 +2790,15 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 			_, err = sess.comp.Execute(act)
 		}
 		if err != nil {
+			var consequenceErr *clickguard.ConsequenceError
+			if errors.As(err, &consequenceErr) {
+				out := consequenceRejectionPayload(ctx, id, sess, act, consequenceErr)
+				out["batch_step"] = index + 1
+				out["completed_steps"] = len(completed)
+				out["steps"] = completed
+				emitEvent(ctx, "session.action", out)
+				return out, nil
+			}
 			code := "batch_step_failed"
 			if strings.Contains(err.Error(), "click rejected:") {
 				code = "unsafe_click_rejected"
@@ -2779,7 +2819,25 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 		if action == "scroll" {
 			mergeScrollResultPayload(stepResult, scrollResultFor(sess.comp))
 		}
+		mergeClickResultPayload(stepResult, act)
 		completed = append(completed, stepResult)
+		if act.ClickResult != nil && act.ClickResult.Dangerous {
+			batchHadConsequence = true
+			lastConsequenceStep = len(completed) - 1
+		}
+		if action == "wait_for" && lastConsequenceStep >= 0 && waitResult != nil {
+			consequenceStep := completed[lastConsequenceStep]
+			verified := waitResult.Matched && !waitResult.TimedOut
+			consequenceStep["outcome_verified"] = verified
+			if verified {
+				consequenceStep["outcome_status"] = "verified"
+			} else {
+				consequenceStep["outcome_status"] = "not_observed"
+				consequenceStep["critical"] = true
+				consequenceStep["do_not_repeat_action"] = true
+			}
+			lastConsequenceStep = -1
+		}
 		if batchTimedOut {
 			break
 		}
@@ -2788,6 +2846,9 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 
 	tabEvent := autoFollowNewTab(sess.comp, beforeTabs)
 	observation := observationArg(args, "batch")
+	if batchHadConsequence && observation == "none" {
+		observation = "som_delta"
+	}
 	var shot []byte
 	var delta map[string]any
 	if observation != "none" {
@@ -3298,6 +3359,59 @@ func mergeScrollResultPayload(payload map[string]any, result *backends.ScrollRes
 	payload["scroll_requested_target_id"] = result.RequestedTargetID
 	payload["scroll_actual_target_name"] = result.ActualTargetName
 	payload["scroll_requested_target_name"] = result.RequestedTargetName
+}
+
+func mergeClickResultPayload(payload map[string]any, act backends.Action) {
+	if payload == nil || act.ClickResult == nil || !act.ClickResult.Dangerous {
+		return
+	}
+	payload["detected_effect"] = act.ClickResult.DetectedEffect
+	payload["legacy_destructive_effect"] = act.ClickResult.LegacyEffect
+	payload["expected_effect"] = clickguard.CanonicalEffect(act.ExpectedEffect)
+	payload["consequence_confirmed"] = act.ClickResult.Confirmed
+	payload["action_dispatched"] = act.ClickResult.ActionDispatched
+	payload["outcome_verified"] = false
+	payload["outcome_status"] = "semantic_observation_returned"
+	payload["do_not_repeat_action"] = true
+	if act.ClickResult.TargetName != "" {
+		payload["target_name"] = act.ClickResult.TargetName
+	}
+	if act.ClickResult.TargetRole != "" {
+		payload["target_role"] = act.ClickResult.TargetRole
+	}
+}
+
+func consequenceRejectionPayload(ctx *sdk.AppCtx, id string, sess *session, act backends.Action, rejection *clickguard.ConsequenceError) map[string]any {
+	out := map[string]any{
+		"session_id": id, "success": false, "failed": true, "status": "rejected",
+		"action":           act.Type,
+		"action_completed": false, "action_dispatched": false, "error_code": rejection.Code,
+		"detected_effect":       rejection.DetectedEffect,
+		"expected_effect":       rejection.ExpectedEffect,
+		"confirm_consequence":   rejection.ConfirmConsequence,
+		"consequence_confirmed": false,
+		"current_url":           currentURL(sess.comp),
+		"screenshot_url":        sessionResourceURL(ctx, id, "screenshot"),
+		"text":                  rejection.Error(),
+	}
+	if rejection.Target.AccessibleName != "" {
+		out["actual_accessible_name"] = rejection.Target.AccessibleName
+	} else if rejection.Target.Text != "" {
+		out["actual_accessible_name"] = rejection.Target.Text
+	}
+	if rejection.Target.Role != "" {
+		out["target_role"] = rejection.Target.Role
+	}
+	if rejection.Code == "semantic_intent_mismatch" {
+		out["next_step"] = "Do not retry this target. Take a fresh semantic screenshot and choose a control whose detected consequence matches the intended operation, or stop."
+	} else {
+		out["required_confirmation"] = map[string]any{
+			"expected_effect":     rejection.DetectedEffect,
+			"confirm_consequence": rejection.DetectedEffect,
+		}
+		out["next_step"] = "Retry only if the detected consequence is truly intended; otherwise choose a different semantic target or stop."
+	}
+	return out
 }
 
 func screenshotRecoveryFor(comp backends.Computer) *backends.ScreenshotRecoveryInfo {
@@ -4533,7 +4647,18 @@ func validateClickTargetArgs(action string, args map[string]any) error {
 		if strings.TrimSpace(stringArg(args, "expected_text")) != "" {
 			return fmt.Errorf("expected_text is only valid for click or double_click")
 		}
+		if strings.TrimSpace(stringArg(args, "expected_effect")) != "" || strings.TrimSpace(stringArg(args, "confirm_consequence")) != "" {
+			return fmt.Errorf("expected_effect and confirm_consequence are only valid for click or double_click")
+		}
 		return nil
+	}
+	expectedEffect := clickguard.CanonicalEffect(stringArg(args, "expected_effect"))
+	confirmation := clickguard.CanonicalEffect(stringArg(args, "confirm_consequence"))
+	if !validClickEffect(expectedEffect) {
+		return fmt.Errorf("unsupported expected_effect %q", stringArg(args, "expected_effect"))
+	}
+	if !validClickEffect(confirmation) || (confirmation != "" && !clickguard.IsConsequentialEffect(confirmation)) {
+		return fmt.Errorf("confirm_consequence must be an irreversible consequence class, got %q", stringArg(args, "confirm_consequence"))
 	}
 	if rawArgPresent(args, "label") && intArg(args, "label") <= 0 && strings.TrimSpace(stringArg(args, "target_id")) == "" && !(action == "click" && strings.TrimSpace(stringArg(args, "selector")) != "") {
 		return fmt.Errorf("label=%d is not clickable; label must be a positive label from the latest screenshot", intArg(args, "label"))
@@ -4545,6 +4670,17 @@ func validateClickTargetArgs(action string, args map[string]any) error {
 		return fmt.Errorf("double_click requires label=N from the latest screenshot, or coordinate=\"x,y\" for targets without a badge")
 	}
 	return nil
+}
+
+func validClickEffect(effect string) bool {
+	switch effect {
+	case "", "navigation_only", "open_configuration", "save_draft",
+		"immediate_external_commit", "scheduled_external_commit", "message_send",
+		"financial_action", "delete", "permission_change", "account_change":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateStableArgs(action string, args map[string]any) error {

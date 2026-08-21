@@ -655,9 +655,13 @@ func (c *Computer) executeClick(ctx context.Context, action computer.Action, cli
 	if err := presentation.BeforeClick(ctx, x, y, action.Presentation); err != nil {
 		fmt.Fprintf(os.Stderr, "[BROWSERBASE] presentation cursor unavailable, continuing click: %v\n", err)
 	}
-	if _, err := clickguard.Click(ctx, x, y, clickCount, clickguard.Options{
-		ExpectedText: expectedText, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
-	}); err != nil {
+	guardOptions := clickguard.Options{
+		ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
+		EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
+	}
+	target, err := clickguard.Click(ctx, x, y, clickCount, guardOptions)
+	clickguard.StoreResult(action.ClickResult, target, guardOptions, err == nil)
+	if err != nil {
 		return err
 	}
 	if focusAfter {

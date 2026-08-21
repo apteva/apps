@@ -23,6 +23,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 	backends "github.com/apteva/apps/mcp/computer/internal/browser"
+	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	"github.com/apteva/apps/mcp/computer/internal/browser/stability"
 )
 
@@ -2337,6 +2338,103 @@ func TestComputerUseExpectedNameMismatchReturnsSafeRetry(t *testing.T) {
 	}
 	if len(fake.actionOnlyCalls) != 0 {
 		t.Fatalf("guard mismatch dispatched browser action: %+v", fake.actionOnlyCalls)
+	}
+}
+
+func TestComputerUseConsequenceIntentIsStructuredAndAtomic(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+	publish := backends.SetOfMarkTarget{ID: "som_publish", Label: 2, Tag: "button", Role: "button", AccessibleName: "Publish", Dangerous: true, DestructiveEffect: "immediate_publish"}
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1000, Height: 600},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		url:     "https://example.com/editor", somTargets: []backends.SetOfMarkTarget{publish},
+	}
+	fake.executeActionHook = func(action backends.Action) error {
+		if !action.EnforceConsequence || action.ClickResult == nil {
+			t.Fatalf("public click omitted atomic consequence enforcement: %+v", action)
+		}
+		return fmt.Errorf("click: %w", &clickguard.ConsequenceError{
+			Code:           "semantic_intent_mismatch",
+			Target:         clickguard.Target{Tag: "button", Role: "button", AccessibleName: "Publish", Dangerous: true, DestructiveEffect: "immediate_publish"},
+			DetectedEffect: "immediate_external_commit", ExpectedEffect: action.ExpectedEffect,
+		})
+	}
+	newBackend = func(backends.Config) (backends.Computer, error) { return fake, nil }
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	opened, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := opened.(map[string]any)["session_id"].(string)
+	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": id, "action": "screenshot"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": id, "action": "click", "target_id": publish.ID,
+		"expected_text": "Publish", "expected_effect": "open_configuration",
+	})
+	if err != nil {
+		t.Fatalf("consequence rejection lost structured result: %v", err)
+	}
+	m := out.(map[string]any)
+	if m["error_code"] != "semantic_intent_mismatch" || m["action_dispatched"] != false || m["detected_effect"] != "immediate_external_commit" {
+		t.Fatalf("structured consequence rejection=%+v", m)
+	}
+	if len(fake.actionOnlyCalls) != 1 {
+		t.Fatalf("unexpected dispatch count: %+v", fake.actionOnlyCalls)
+	}
+}
+
+func TestComputerUseConfirmedConsequenceReturnsCompactObservation(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+	publish := backends.SetOfMarkTarget{ID: "som_publish", Label: 2, Tag: "button", Role: "button", AccessibleName: "Publish", Dangerous: true, DestructiveEffect: "immediate_publish"}
+	confirmation := backends.SetOfMarkTarget{ID: "som_confirmation", Label: 3, Tag: "button", Role: "button", AccessibleName: "View published item"}
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1000, Height: 600},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		url:     "https://example.com/editor", somTargets: []backends.SetOfMarkTarget{publish},
+	}
+	fake.executeActionHook = func(action backends.Action) error {
+		if action.ClickResult == nil {
+			t.Fatal("click result sink missing")
+		}
+		*action.ClickResult = backends.ClickResult{
+			TargetName: "Publish", TargetRole: "button", DetectedEffect: "immediate_external_commit",
+			LegacyEffect: "immediate_publish", Dangerous: true, Confirmed: true, ActionDispatched: true,
+		}
+		fake.somTargets = []backends.SetOfMarkTarget{confirmation}
+		return nil
+	}
+	newBackend = func(backends.Config) (backends.Computer, error) { return fake, nil }
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	opened, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := opened.(map[string]any)["session_id"].(string)
+	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": id, "action": "screenshot"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": id, "action": "click", "target_id": publish.ID, "expected_text": "Publish",
+		"expected_effect": "immediate_external_commit", "confirm_consequence": "immediate_external_commit",
+		"observation": "none",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := out.(map[string]any)
+	if m["action_dispatched"] != true || m["consequence_confirmed"] != true || m["outcome_verified"] != false {
+		t.Fatalf("consequence result=%+v", m)
+	}
+	delta, _ := m["som_delta"].(map[string]any)
+	added, _ := delta["added"].([]backends.SetOfMarkTarget)
+	if len(added) != 1 || added[0].ID != confirmation.ID {
+		t.Fatalf("forced compact consequence observation=%+v", delta)
 	}
 }
 

@@ -110,10 +110,11 @@ provides:
         target_id plus som_revision when a workflow spans changing screenshots;
         stale revisions and name/role mismatches are rejected. Computer resolves the live element
         again immediately before dispatch and rejects loading or disabled
-        targets. For any click that saves, submits, publishes, deletes, sends,
-        pays, or navigates, pass expected_text with the intended accessible
-        name so it is verified atomically. A coordinate that lands on a consequential control requires
-        expected_text exactly matching its current accessible name. For an
+        targets. Pass expected_text to guard target identity. When dangerous=true,
+        also pass expected_effect and repeat that exact generic effect in
+        confirm_consequence; missing or contradictory consequence intent is
+        rejected before mouse dispatch. Omit both consequence fields for
+        ordinary clicks. Coordinates receive the same consequence guard. For an
         operation outcome, prefer action=wait_for with declarative URL, text,
         selector, or semantic-target conditions. It ignores unrelated
         background requests and embedded frames. To verify navigation away
@@ -159,13 +160,17 @@ provides:
         Use action=navigate with url for direct navigation, action=back for
         browser history, and action=reload to refresh the current page. Do not
         emulate these with Control+L, Alt+ArrowLeft, or F5. Use action=batch
-        for guarded click followed by wait_for. Set observation=som_delta for a
+        for a consequential click followed by wait_for so its external outcome
+        is verified without risking a duplicate retry. Consequential clicks
+        always return a compact semantic delta plus action_dispatched and
+        outcome_verified fields. Set observation=som_delta for a
         compact refreshed semantic state without image bytes; batch keeps
         observation=screenshot as its compatibility default. Semantic labels
         and target ids become stale after page-changing actions and must be
         refreshed before reuse. Args:
         session_id, action, url? (navigate only), tab_id?, coordinate?, label?,
-        target_id?, som_revision?, selector?, expected_text?, expected_name?,
+        target_id?, som_revision?, selector?, expected_text?, expected_effect?,
+        confirm_consequence?, expected_name?,
         expected_role?, conditions?, match?, quiet_ms?, timeout_ms?, observation?,
         checked?, source_url?, base64?, filename?, mime_type?, file_path?,
         text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?,

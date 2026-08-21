@@ -412,22 +412,32 @@ func destructiveEffectForText(value, role string) string {
 		return ""
 	}
 	value = strings.ToLower(strings.Join(strings.Fields(value), " "))
+	for _, configuration := range []string{"set publish date", "choose publish date", "select publish date", "change publish date", "edit publish date"} {
+		if strings.Contains(value, configuration) {
+			return ""
+		}
+	}
 	for _, item := range []struct {
 		words  []string
 		effect string
 	}{
+		{[]string{"schedule post", "schedule publication", "schedule publish", "confirm schedule", "publish later"}, "schedule_publish"},
 		{[]string{"publish"}, "immediate_publish"},
 		{[]string{"delete", "destroy", "erase"}, "destructive_delete"},
 		{[]string{"send", "post"}, "immediate_send"},
 		{[]string{"pay", "payout", "purchase", "buy", "checkout", "place order"}, "financial_action"},
 		{[]string{"withdraw", "withdrawal"}, "financial_action"},
-		{[]string{"schedule", "set publish date"}, "schedule_publish"},
+		{[]string{"grant access", "revoke access", "change permissions", "make admin", "remove admin"}, "permission_change"},
+		{[]string{"deactivate account", "close account", "transfer account"}, "account_change"},
 	} {
 		for _, word := range item.words {
 			if value == word || strings.HasPrefix(value, word+" ") || strings.HasSuffix(value, " "+word) || strings.Contains(value, " "+word+" ") {
 				return item.effect
 			}
 		}
+	}
+	if value == "schedule" {
+		return "schedule_publish"
 	}
 	return ""
 }

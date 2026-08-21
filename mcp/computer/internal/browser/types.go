@@ -3,6 +3,7 @@ package computer
 import "github.com/apteva/apps/mcp/computer/internal/browser/api"
 
 type Action = api.Action
+type ClickResult = api.ClickResult
 type PresentationOptions = api.PresentationOptions
 type DisplaySize = api.DisplaySize
 type ScreenshotOptions = api.ScreenshotOptions

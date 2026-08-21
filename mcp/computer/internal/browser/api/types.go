@@ -34,21 +34,51 @@ type Action struct {
 	Match        string          `json:"match,omitempty"`         // for "wait_for": any (default) or all
 	Conditions   []WaitCondition `json:"conditions,omitempty"`    // for "wait_for": observable completion conditions
 	ExpectedText string          `json:"expected_text,omitempty"` // live accessible name required immediately before click
-	TargetID     string          `json:"target_id,omitempty"`     // stable SoM target or semantic scroll-region id
-	SOMRevision  int             `json:"som_revision,omitempty"`  // optional revision guard for label/target_id actions
-	ExpectedName string          `json:"expected_name,omitempty"` // semantic target name required before dispatch
-	ExpectedRole string          `json:"expected_role,omitempty"` // semantic target role required before dispatch
+	// ExpectedEffect states the caller's intended semantic consequence. Safe
+	// navigation intents are accepted, but a live consequential target must map
+	// to and exactly match one of the generic consequence classes.
+	ExpectedEffect string `json:"expected_effect,omitempty"`
+	// ConfirmConsequence is required for a consequential click and must repeat
+	// the exact generic effect. It is separate from ExpectedText: one guards
+	// target identity, while this field acknowledges the external consequence.
+	ConfirmConsequence string `json:"confirm_consequence,omitempty"`
+	TargetID           string `json:"target_id,omitempty"`     // stable SoM target or semantic scroll-region id
+	SOMRevision        int    `json:"som_revision,omitempty"`  // optional revision guard for label/target_id actions
+	ExpectedName       string `json:"expected_name,omitempty"` // semantic target name required before dispatch
+	ExpectedRole       string `json:"expected_role,omitempty"` // semantic target role required before dispatch
 	// GuardDangerousCoordinate is set by the MCP layer only when the caller
 	// explicitly targeted a raw coordinate. Backends then require expected_text
 	// if the live hit-tested element is consequential.
-	GuardDangerousCoordinate bool                `json:"-"`
-	Presentation             PresentationOptions `json:"-"`
-	NoScreenshot             bool                `json:"-"`
+	GuardDangerousCoordinate bool `json:"-"`
+	// EnforceConsequence is enabled by the public Computer MCP surface for every
+	// click kind. Keeping it internal preserves direct backend compatibility
+	// while ensuring agent-driven label, selector, target-id, and coordinate
+	// clicks all receive the same atomic live-DOM guard.
+	EnforceConsequence bool `json:"-"`
+	// ClickResult is an internal result sink shared through Action's value copy.
+	// Backends populate it from the same live hit-test used immediately before
+	// mouse dispatch, avoiding a second, potentially stale target inspection.
+	ClickResult  *ClickResult        `json:"-"`
+	Presentation PresentationOptions `json:"-"`
+	NoScreenshot bool                `json:"-"`
 	// Label: Set-of-Mark target. When non-zero, click/double_click
 	// resolve the target via the label→bbox map populated by the
 	// most recent screenshot. Takes precedence over X/Y when set.
 	// Implementations that don't support SoM fall back to X/Y.
 	Label int `json:"label,omitempty"`
+}
+
+// ClickResult is the compact live consequence observation for one click.
+// DetectedEffect uses provider-neutral public effect names; LegacyEffect keeps
+// the existing SoM destructive_effect code available for diagnostics.
+type ClickResult struct {
+	TargetName       string `json:"target_name,omitempty"`
+	TargetRole       string `json:"target_role,omitempty"`
+	DetectedEffect   string `json:"detected_effect,omitempty"`
+	LegacyEffect     string `json:"legacy_effect,omitempty"`
+	Dangerous        bool   `json:"dangerous"`
+	Confirmed        bool   `json:"consequence_confirmed"`
+	ActionDispatched bool   `json:"action_dispatched"`
 }
 
 // WaitCondition is one provider-neutral browser outcome. Conditions are
@@ -251,6 +281,7 @@ type ScrollRegion struct {
 	CanScrollX bool   `json:"can_scroll_x"`
 	CanScrollY bool   `json:"can_scroll_y"`
 	ParentID   string `json:"parent_id,omitempty"`
+	OpenedBy   string `json:"opened_by,omitempty"`
 	Document   bool   `json:"document"`
 }
 
