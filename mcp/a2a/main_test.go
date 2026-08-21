@@ -624,6 +624,14 @@ func TestFederatedDiscoveryAddressIsImmediatelyActionable(t *testing.T) {
 		"peers_json": string(sourcePeerJSON), "public_url": "http://127.0.0.1:9",
 	})
 	sourceApp := &App{}
+	// Import source configuration without mounting it: this unit test hosts
+	// both nodes in one process, while production has one globalCtx per sidecar.
+	if _, err := ensureLocalNode(sourceCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncConfiguredPeers(sourceCtx); err != nil {
+		t.Fatal(err)
+	}
 
 	// One discovery call returns a remote address that is already valid for
 	// agent_ask; agent_get is not required for resolution.

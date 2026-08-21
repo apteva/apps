@@ -141,49 +141,6 @@ func ensureLocalNode(app *sdk.AppCtx) (*localNode, error) {
 	return &node, nil
 }
 
-func peerConfigs(app *sdk.AppCtx) ([]peerConfig, error) {
-	raw := strings.TrimSpace(app.Config().Get("peers_json"))
-	if raw == "" {
-		return nil, nil
-	}
-	var peers []peerConfig
-	if err := json.Unmarshal([]byte(raw), &peers); err != nil {
-		var wrapper struct {
-			Peers []peerConfig `json:"peers"`
-		}
-		if err2 := json.Unmarshal([]byte(raw), &wrapper); err2 != nil {
-			return nil, fmt.Errorf("invalid peers_json: %w", err)
-		}
-		peers = wrapper.Peers
-	}
-	seenID := map[string]bool{}
-	seenToken := map[string]bool{}
-	for i := range peers {
-		peers[i].ID = strings.TrimSpace(peers[i].ID)
-		peers[i].Name = strings.TrimSpace(peers[i].Name)
-		peers[i].BaseURL = strings.TrimRight(strings.TrimSpace(peers[i].BaseURL), "/")
-		peers[i].Token = strings.TrimSpace(peers[i].Token)
-		if peers[i].ID == "" || peers[i].BaseURL == "" || peers[i].Token == "" {
-			return nil, fmt.Errorf("peers_json entry %d requires id, base_url, and token", i)
-		}
-		if seenID[peers[i].ID] {
-			return nil, fmt.Errorf("duplicate peer id %q", peers[i].ID)
-		}
-		if seenToken[peers[i].Token] {
-			return nil, fmt.Errorf("peer tokens must be unique")
-		}
-		seenID[peers[i].ID] = true
-		seenToken[peers[i].Token] = true
-		if peers[i].Name == "" {
-			peers[i].Name = peers[i].ID
-		}
-		if err := validatePeerBaseURL(peers[i].BaseURL); err != nil {
-			return nil, fmt.Errorf("peer %q: %w", peers[i].ID, err)
-		}
-	}
-	return peers, nil
-}
-
 func validatePeerBaseURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {

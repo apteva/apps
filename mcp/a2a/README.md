@@ -20,11 +20,32 @@ records, and communicates with configured peer installations.
 
 Agents never receive peer credentials or raw routing configuration.
 
+## Peer registry
+
+Every remote installation is a generic peer in `a2a_peers`; there are no
+Fleet-, hub-, or tenant-specific peer types. Peer credentials are encrypted
+with the installation's A2A key before they are written to the app database.
+Set `A2A_MASTER_KEY` to a base64-encoded 32-byte key to provide that key from a
+secret manager; otherwise A2A creates `a2a-peer.key` beside its database.
+
+Bound apps can reconcile relationships without exposing administrative tools
+to agents:
+
+```text
+node_info
+peer_upsert
+peer_remove
+```
+
+These operations are `app_only`. A peer created through `peer_upsert` is owned
+by the authenticated calling app install, and no other app install can update
+or remove it. This lets a lifecycle controller such as Fleet pair nodes while
+A2A remains the direct discovery and message transport.
+
 ## Manual peer configuration
 
-Fleet automation is intentionally not required. Configure each participating
-global A2A app with a reciprocal entry in the encrypted `peers_json` install
-setting:
+Automation is not required. Configure each participating global A2A app with a
+reciprocal entry in the encrypted `peers_json` install setting:
 
 ```json
 [
@@ -46,6 +67,10 @@ action.
 
 Each relationship should use a different token. HTTPS is required except for
 loopback development URLs.
+
+`peers_json` remains a backwards-compatible desired-state input for
+operator-managed peers. At mount, A2A imports and reconciles those entries into
+the same registry without overwriting peers owned by an app install.
 
 ## HTTP surface
 

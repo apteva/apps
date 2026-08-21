@@ -29,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: a2a
 display_name: Agent to Agent
-version: 0.3.0
+version: 0.4.0
 description: |
   Agent-to-agent communication within and between Apteva installations.
   Automatically generates Agent Cards for attached local agents, discovers
@@ -61,6 +61,9 @@ provides:
     - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event." }
     - { name: agent_reply, description: "Reply to a task another agent sent you: completed, input_required, failed, or working." }
     - { name: agent_tasks, description: "List your agent-to-agent tasks (sent and received)." }
+    - { name: node_info,   description: "Read this installation's A2A node identity.", exposure: app_only }
+    - { name: peer_upsert, description: "Create or reconcile an app-managed A2A peer.", exposure: app_only }
+    - { name: peer_remove, description: "Remove an A2A peer managed by the calling app.", exposure: app_only }
   publishes:
     - { name: task.created, description: "An agent-to-agent task was created." }
     - { name: task.updated, description: "An agent-to-agent task changed status." }
@@ -82,9 +85,9 @@ db:
   migrations: migrations/
 config_schema:
   - name: peers_json
-    label: A2A peers
+    label: A2A peers (operator managed)
     type: password
-    description: JSON array of peer id, name, base_url, token, discover_agents, and invoke_agents.
+    description: Backwards-compatible desired-state JSON for operator-managed peers. Automation uses the private peer registry operations.
     required: false
   - name: public_url
     label: A2A public URL override
@@ -150,6 +153,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	if _, err := ensureLocalNode(ctx); err != nil {
 		return fmt.Errorf("initialize a2a node: %w", err)
+	}
+	if err := syncConfiguredPeers(ctx); err != nil {
+		return fmt.Errorf("initialize a2a peer registry: %w", err)
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("a2a mounted")
@@ -246,6 +252,36 @@ func (a *App) MCPTools() []sdk.Tool {
 				"limit":  map[string]any{"type": "integer"},
 			}, nil),
 			HandlerCtx: a.toolTasks,
+		},
+		{
+			Name:        "node_info",
+			Description: "Read this installation's stable A2A node identity and peer registry status. Private to authenticated bound apps.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Exposure:    sdk.ToolExposureAppOnly,
+			HandlerCtx:  a.toolNodeInfo,
+		},
+		{
+			Name:        "peer_upsert",
+			Description: "Create or idempotently reconcile a generic A2A peer owned by the calling app install. Private to authenticated bound apps.",
+			InputSchema: schemaObject(map[string]any{
+				"id":              map[string]any{"type": "string"},
+				"name":            map[string]any{"type": "string"},
+				"base_url":        map[string]any{"type": "string"},
+				"token":           map[string]any{"type": "string"},
+				"discover_agents": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"invoke_agents":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			}, []string{"id", "base_url", "token"}),
+			Exposure:   sdk.ToolExposureAppOnly,
+			HandlerCtx: a.toolPeerUpsert,
+		},
+		{
+			Name:        "peer_remove",
+			Description: "Idempotently remove a generic A2A peer owned by the calling app install. Private to authenticated bound apps.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "string"},
+			}, []string{"id"}),
+			Exposure:   sdk.ToolExposureAppOnly,
+			HandlerCtx: a.toolPeerRemove,
 		},
 	}
 }

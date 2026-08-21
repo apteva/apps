@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: a2a
 display_name: Agent to Agent
-version: 0.3.0
+version: 0.4.0
 description: |
   Agent-to-agent communication within and between Apteva installations.
   Automatically generates Agent Cards for attached local agents, discovers
@@ -37,6 +37,9 @@ provides:
     - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event." }
     - { name: agent_reply, description: "Reply to a task another agent sent you: completed, input_required, failed, or working." }
     - { name: agent_tasks, description: "List your agent-to-agent tasks (sent and received)." }
+    - { name: node_info,   description: "Read this installation's A2A node identity.", exposure: app_only }
+    - { name: peer_upsert, description: "Create or reconcile an app-managed A2A peer.", exposure: app_only }
+    - { name: peer_remove, description: "Remove an A2A peer managed by the calling app.", exposure: app_only }
   publishes:
     - { name: task.created, description: "An agent-to-agent task was created." }
     - { name: task.updated, description: "An agent-to-agent task changed status." }
@@ -61,9 +64,9 @@ db:
 
 config_schema:
   - name: peers_json
-    label: A2A peers
+    label: A2A peers (operator managed)
     type: password
-    description: JSON array of peer id, name, base_url, token, discover_agents, and invoke_agents.
+    description: Backwards-compatible desired-state JSON for operator-managed peers. Automation uses the private peer registry operations.
     required: false
   - name: public_url
     label: A2A public URL override
