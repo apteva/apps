@@ -495,6 +495,7 @@ func (a *App) softphoneMediaURL(callID, token string) string {
 func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project string) {
 	var body struct {
 		To        string `json:"to"`
+		From      string `json:"from"`
 		Recording *bool  `json:"recording"`
 	}
 	if err := decodeJSONBody(r, &body); err != nil {
@@ -507,7 +508,7 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 		return
 	}
 	ctx := globalCtx.WithProject(project)
-	session, err := a.placeHumanCall(ctx, project, to, body.Recording)
+	session, err := a.placeHumanCall(ctx, project, to, strings.TrimSpace(body.From), body.Recording)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -661,14 +662,14 @@ func decodeJSONBody(r *http.Request, out any) error {
 // placement path (placeOutboundLeg) and differs only in what sits on the far
 // side of the bridge: a loopback softphone hub instead of a spawned realtime
 // thread. No agent id is involved, because no thread is spawned.
-func (a *App) placeHumanCall(ctx *sdk.AppCtx, projectID, to string, recordingOverride *bool) (*softphoneSession, error) {
+func (a *App) placeHumanCall(ctx *sdk.AppCtx, projectID, to, requestedFrom string, recordingOverride *bool) (*softphoneSession, error) {
 	// Carriers dial this app's public wss:// media endpoint (publicWSStreamURL),
 	// so an unreachable public URL must fail here rather than after the callee's
 	// phone has already rung. Mirrors the check toolPlaceCall makes.
 	if err := a.validatePublicEndpoint(); err != nil {
 		return nil, err
 	}
-	bound, creds, from, err := a.resolveCarrierBinding(ctx)
+	bound, creds, from, err := a.resolveCarrierBinding(ctx, projectID, requestedFrom)
 	if err != nil {
 		return nil, err
 	}

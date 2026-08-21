@@ -352,9 +352,14 @@ const KEYPAD_ROWS: string[][] = [
   ["+", "0", "back"],
 ];
 
-function Dialer({ value, onChange, onCall, busy, disabled, recent, status }: {
+function Dialer({ value, from, fromNumbers, fromLoading, fromError, onChange, onFromChange, onCall, busy, disabled, recent, status }: {
   value: string;
+  from: string;
+  fromNumbers: ConnectedNumber[];
+  fromLoading: boolean;
+  fromError: string;
   onChange: (next: string) => void;
+  onFromChange: (next: string) => void;
   onCall: () => void;
   busy: boolean;
   disabled: boolean;
@@ -368,9 +373,26 @@ function Dialer({ value, onChange, onCall, busy, disabled, recent, status }: {
   };
   return (
     <div className="p-4 space-y-4" style={{ maxWidth: "22rem", margin: "0 auto" }}>
+      <label className="block">
+        <span className="text-xs text-text-dim">Call from</span>
+        <select
+          value={from}
+          disabled={fromLoading || fromNumbers.length === 0 || disabled}
+          onChange={(event) => onFromChange(event.target.value)}
+          className="mt-1 h-10 w-full rounded border border-border bg-bg px-3 text-sm tabular-nums disabled:opacity-50"
+        >
+          <option value="">{fromLoading ? "Loading connected numbers…" : "Select a caller ID"}</option>
+          {fromNumbers.map((number) => (
+            <option key={`${number.provider}-${number.phone_number}`} value={number.phone_number}>
+              {number.phone_number}{number.friendly_name ? ` — ${number.friendly_name}` : ""}
+            </option>
+          ))}
+        </select>
+        {fromError ? <span className="mt-1 block text-xs text-error">{fromError}</span> : null}
+      </label>
       <div>
         <div className="text-xs text-text-dim">New call</div>
-        <form onSubmit={(event) => { event.preventDefault(); if (valid && !busy && !disabled) onCall(); }}>
+        <form onSubmit={(event) => { event.preventDefault(); if (valid && E164_RE.test(from) && !busy && !disabled) onCall(); }}>
           <input
             type="tel"
             value={value}
@@ -404,7 +426,7 @@ function Dialer({ value, onChange, onCall, busy, disabled, recent, status }: {
 
       <button
         type="button"
-        disabled={!valid || busy || disabled}
+        disabled={!valid || !E164_RE.test(from) || busy || disabled}
         onClick={onCall}
         className="w-full flex items-center justify-center gap-2 rounded bg-accent text-bg text-sm font-medium disabled:opacity-40"
         style={{ height: "2.9rem" }}
@@ -503,6 +525,10 @@ function CallsView({ projectId, installId }: NativePanelProps) {
 
   // ─── softphone ───────────────────────────────────────────────────
   const [dialNumber, setDialNumber] = useState("");
+  const [fromNumber, setFromNumber] = useState("");
+  const [fromNumbers, setFromNumbers] = useState<ConnectedNumber[]>([]);
+  const [fromLoading, setFromLoading] = useState(false);
+  const [fromError, setFromError] = useState("");
   const [dialerOpen, setDialerOpen] = useState(false);
   const [softphoneCallId, setSoftphoneCallId] = useState("");
   const [softphoneState, setSoftphoneState] = useState<SoftphoneState | "">("");
@@ -540,6 +566,44 @@ function CallsView({ projectId, installId }: NativePanelProps) {
     const sep = path.includes("?") ? "&" : "?";
     return `${API}${path}${sep}project_id=${encodeURIComponent(projectId)}`;
   }, [projectId]);
+
+  const chooseFromNumber = useCallback((value: string) => {
+    setFromNumber(value);
+    if (value) localStorage.setItem(`apteva.telephony.softphone.from.v1:${projectId}`, value);
+  }, [projectId]);
+
+  const loadOutboundNumbers = useCallback(async () => {
+    setFromLoading(true);
+    setFromError("");
+    try {
+      const data = await postJSON<ConnectedNumbersResponse>(withProject("/numbers/connected"), {});
+      const seen = new Set<string>();
+      const available = (data.numbers ?? []).filter((number) => {
+        if (!E164_RE.test(number.phone_number) || number.carrier_status === "not_found" || seen.has(number.phone_number)) return false;
+        if ((number.capabilities?.length ?? 0) > 0 && !number.capabilities?.includes("voice")) return false;
+        seen.add(number.phone_number);
+        return true;
+      });
+      setFromNumbers(available);
+      const saved = localStorage.getItem(`apteva.telephony.softphone.from.v1:${projectId}`) || "";
+      setFromNumber((current) => {
+        if (available.some((number) => number.phone_number === current)) return current;
+        if (available.some((number) => number.phone_number === saved)) return saved;
+        return available.length === 1 ? available[0].phone_number : "";
+      });
+      if (available.length === 0) setFromError("No voice-capable numbers are connected to this carrier.");
+    } catch (error) {
+      setFromNumbers([]);
+      setFromNumber("");
+      setFromError((error as Error).message || "Could not load connected numbers");
+    } finally {
+      setFromLoading(false);
+    }
+  }, [projectId, withProject]);
+
+  useEffect(() => {
+    if (dialerOpen) void loadOutboundNumbers();
+  }, [dialerOpen, loadOutboundNumbers]);
 
   const loadCalls = useCallback(async () => {
     setLoading(true);
@@ -722,7 +786,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
     setStatus("");
     try {
       const session = await postJSON<{ call_id: string; media_url: string }>(
-        withProject("/softphone/place"), { to },
+        withProject("/softphone/place"), { to, from: fromNumber },
       );
       await startAudio(session);
       setDialNumber("");
@@ -955,7 +1019,12 @@ function CallsView({ projectId, installId }: NativePanelProps) {
           {dialerOpen ? (
             <Dialer
               value={dialNumber}
+              from={fromNumber}
+              fromNumbers={fromNumbers}
+              fromLoading={fromLoading}
+              fromError={fromError}
               onChange={setDialNumber}
+              onFromChange={chooseFromNumber}
               onCall={() => void placeSoftphoneCall()}
               busy={softphoneBusy}
               disabled={Boolean(softphoneCallId)}

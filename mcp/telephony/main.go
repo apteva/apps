@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.2.10
+version: 0.2.11
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -376,10 +376,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "telephony_place_call",
 			Description: "Place an outbound voice call via the bound carrier. Telephony spawns a realtime sub-thread and bridges carrier audio into it. " +
-				"Args: to (E.164 phone number, required), directive (system instructions for the call, required), voice? (provider-specific; omitted uses the realtime provider default), greeting?, timeout_sec? (ring timeout, default 30). " +
+				"Args: to (E.164 phone number, required), from? (owned caller ID; required when several numbers are connected), directive (system instructions for the call, required), voice? (provider-specific; omitted uses the realtime provider default), greeting?, timeout_sec? (ring timeout, default 30). " +
 				"Returns: { call_id, thread_id }. Use send/done events to monitor — do not poll telephony_active_calls in a tight loop.",
 			InputSchema: schemaObject(map[string]any{
 				"to":               map[string]any{"type": "string", "description": "Phone number to dial in E.164 format (e.g. +14155551234)."},
+				"from":             map[string]any{"type": "string", "description": "Owned caller-ID number in E.164 format. Required when the bound carrier has multiple connected numbers; otherwise Telephony selects the sole number."},
 				"directive":        map[string]any{"type": "string", "description": "System instructions the realtime model runs with. Should describe the persona, the goal of the call, and when to escalate to main via send(). Keep it short — 2-4 sentences."},
 				"voice":            map[string]any{"type": "string", "description": "Provider-specific realtime voice id. Omit to use the configured provider default."},
 				"greeting":         map[string]any{"type": "string", "description": "Opening instruction spoken after the callee connects."},
@@ -816,21 +817,9 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		}
 	}
 
-	bound := ctx.IntegrationFor("carrier")
-	if bound == nil {
-		return mcpError("no carrier bound — pick Twilio, Telnyx, Plivo, SignalWire, or Vonage in app settings"), nil
-	}
-
-	// Read the carrier connection's phone_number for the From= field.
-	// The credentials endpoint is permission-gated server-side; the
-	// manifest declares platform.connections.read_credentials.
-	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
+	bound, creds, from, err := a.resolveCarrierBinding(ctx, projectID, strArg(args, "from", ""))
 	if err != nil {
-		return mcpError("read carrier credentials: " + err.Error()), nil
-	}
-	from := creds.Fields["phone_number"]
-	if !validE164(from) {
-		return mcpError("carrier connection has no phone_number configured"), nil
+		return mcpError(err.Error()), nil
 	}
 	recordingPolicy, err := a.db().recordingSettings(projectID)
 	if err != nil {
@@ -989,7 +978,7 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 // resolveCarrierBinding returns the bound carrier integration, its credentials,
 // and the validated From= number. Extracted from toolPlaceCall so the softphone
 // path resolves its carrier identically.
-func (a *App) resolveCarrierBinding(ctx *sdk.AppCtx) (*sdk.BoundIntegration, *sdk.ConnectionCredentials, string, error) {
+func (a *App) resolveCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom string) (*sdk.BoundIntegration, *sdk.ConnectionCredentials, string, error) {
 	bound := ctx.IntegrationFor("carrier")
 	if bound == nil {
 		return nil, nil, "", errors.New("no carrier bound — pick Twilio, Telnyx, Plivo, SignalWire, or Vonage in app settings")
@@ -998,9 +987,9 @@ func (a *App) resolveCarrierBinding(ctx *sdk.AppCtx) (*sdk.BoundIntegration, *sd
 	if err != nil {
 		return nil, nil, "", errors.New("read carrier credentials: " + err.Error())
 	}
-	from := creds.Fields["phone_number"]
-	if !validE164(from) {
-		return nil, nil, "", errors.New("carrier connection has no phone_number configured")
+	from, err := a.resolveOutboundFrom(ctx, projectID, bound, creds, requestedFrom)
+	if err != nil {
+		return nil, nil, "", err
 	}
 	return bound, creds, from, nil
 }

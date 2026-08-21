@@ -167,6 +167,66 @@ func TestConnectedNumbersKeepsRouteWhenCarrierNumberIsMissing(t *testing.T) {
 	}
 }
 
+func TestOutboundFromUsesProjectRouteWithoutCredentialPhoneNumber(t *testing.T) {
+	platform := &answerPlatform{
+		bindings: map[string]any{"carrier": int64(10)},
+		credentials: &sdk.ConnectionCredentials{
+			Slug: "telnyx", Fields: map[string]string{"api_key": "test-key"},
+		},
+		integrationResponse: map[string]json.RawMessage{
+			"list_phone_numbers": json.RawMessage(`{"data":[{"id":"number-1","phone_number":"+33123456789","features":["voice"]}]}`),
+		},
+	}
+	app, ctx := withTelephonyTestContext(t, platform)
+	route := routeRow{
+		ID: "route-fr", ProjectID: "project-a", CarrierSlug: "telnyx", CarrierConnectionID: 10,
+		PhoneNumber: "+33123456789", PhoneNumberSID: "number-1", AgentID: 7, Enabled: true,
+		Secret: "route-secret", CreatedAt: "2026-08-21T10:00:00Z", UpdatedAt: "2026-08-21T10:00:00Z",
+	}
+	if err := app.db().insertRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	bound := ctx.IntegrationFor("carrier")
+	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, requested := range map[string]string{"automatic": "", "selected": route.PhoneNumber} {
+		t.Run(name, func(t *testing.T) {
+			got, err := app.resolveOutboundFrom(ctx, "project-a", bound, creds, requested)
+			if err != nil || got != route.PhoneNumber {
+				t.Fatalf("from=%q err=%v, want %q", got, err, route.PhoneNumber)
+			}
+		})
+	}
+	if _, err := app.resolveOutboundFrom(ctx, "project-a", bound, creds, "+33999999999"); err == nil || !strings.Contains(err.Error(), "not owned") {
+		t.Fatalf("unowned caller ID accepted: %v", err)
+	}
+}
+
+func TestOutboundFromRequiresSelectionWhenProjectHasMultipleRoutes(t *testing.T) {
+	platform := &answerPlatform{
+		bindings:    map[string]any{"carrier": int64(10)},
+		credentials: &sdk.ConnectionCredentials{Slug: "telnyx", Fields: map[string]string{}},
+	}
+	app, ctx := withTelephonyTestContext(t, platform)
+	for index, phone := range []string{"+33123456789", "+33123456780"} {
+		route := routeRow{
+			ID: fmt.Sprintf("route-%d", index), ProjectID: "project-a", CarrierSlug: "telnyx", CarrierConnectionID: 10,
+			PhoneNumber: phone, AgentID: 7, Enabled: true, Secret: fmt.Sprintf("secret-%d", index),
+			CreatedAt: "2026-08-21T10:00:00Z", UpdatedAt: "2026-08-21T10:00:00Z",
+		}
+		if err := app.db().insertRoute(route); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bound := ctx.IntegrationFor("carrier")
+	creds, _ := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
+	if _, err := app.resolveOutboundFrom(ctx, "project-a", bound, creds, ""); err == nil || !strings.Contains(err.Error(), "choose a from number") {
+		t.Fatalf("ambiguous caller ID was selected: %v", err)
+	}
+}
+
 func TestListOwnedCarrierNumbersPaginatesTelnyx(t *testing.T) {
 	firstPage := make([]map[string]any, 2)
 	for i := range firstPage {
@@ -249,6 +309,10 @@ func TestConnectedNumbersPanelContract(t *testing.T) {
 		"(number.capabilities ?? []).length",
 		"setOffers([])",
 		"void loadConnected()",
+		"Call from",
+		`withProject("/numbers/connected")`,
+		`{ to, from: fromNumber }`,
+		"chooseFromNumber",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("panel missing %q", required)

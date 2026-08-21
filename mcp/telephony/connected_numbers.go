@@ -65,6 +65,83 @@ type connectedNumberView struct {
 	HealthMessage       string              `json:"health_message,omitempty"`
 }
 
+// resolveOutboundFrom selects and validates the caller ID independently of a
+// carrier's credential shape. Project routes are the fastest source of truth;
+// carrier inventory covers owned-but-unrouted numbers; credential phone_number
+// remains a legacy fallback for older connections.
+func (a *App) resolveOutboundFrom(
+	ctx *sdk.AppCtx,
+	projectID string,
+	bound *sdk.BoundIntegration,
+	creds *sdk.ConnectionCredentials,
+	requested string,
+) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested != "" && !validE164(requested) {
+		return "", errors.New("from must be a valid E.164 number (+ followed by 8-15 digits)")
+	}
+	routes, err := a.db().listRoutesForProjectConnection(projectID, bound.ConnectionID)
+	if err != nil {
+		return "", fmt.Errorf("list outbound caller IDs: %w", err)
+	}
+	routes = currentRoutesByNumber(routes)
+	routed := make([]string, 0, len(routes))
+	for _, route := range routes {
+		phone := strings.TrimSpace(route.PhoneNumber)
+		if !validE164(phone) {
+			continue
+		}
+		if route.Enabled && !containsString(routed, phone) {
+			routed = append(routed, phone)
+		}
+	}
+	if requested == "" {
+		if len(routed) == 1 {
+			return routed[0], nil
+		}
+		if len(routed) > 1 {
+			return "", errors.New("multiple connected caller-ID numbers are available; choose a from number")
+		}
+	}
+
+	legacy := strings.TrimSpace(creds.Fields["phone_number"])
+	if validE164(legacy) {
+		if requested == "" || compactPhoneNumber(legacy) == compactPhoneNumber(requested) {
+			return legacy, nil
+		}
+	}
+
+	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
+	provider := &numberProvider{Slug: slug, ConnID: bound.ConnectionID, Fields: creds.Fields}
+	owned, err := listOwnedCarrierNumbers(ctx, provider)
+	if err != nil {
+		return "", fmt.Errorf("list owned caller-ID numbers: %w", err)
+	}
+	available := make([]string, 0, len(owned))
+	for _, number := range owned {
+		phone := strings.TrimSpace(number.PhoneNumber)
+		if !validE164(phone) || (len(number.Capabilities) > 0 && !containsString(number.Capabilities, "voice")) {
+			continue
+		}
+		if requested != "" && compactPhoneNumber(phone) == compactPhoneNumber(requested) {
+			return phone, nil
+		}
+		if !containsString(available, phone) {
+			available = append(available, phone)
+		}
+	}
+	if requested != "" {
+		return "", errors.New("selected from number is not owned by the bound carrier")
+	}
+	if len(available) == 1 {
+		return available[0], nil
+	}
+	if len(available) > 1 {
+		return "", errors.New("multiple owned caller-ID numbers are available; choose a from number")
+	}
+	return "", errors.New("the bound carrier has no voice-capable caller-ID number")
+}
+
 func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
 	projectID := currentProject(ctx)
 	if projectID == "" {
