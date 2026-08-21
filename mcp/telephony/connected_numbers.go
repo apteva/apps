@@ -142,6 +142,63 @@ func (a *App) resolveOutboundFrom(
 	return "", errors.New("the bound carrier has no voice-capable caller-ID number")
 }
 
+// resolveOutboundCarrierCredentials enriches provider adapter fields with
+// resources that belong to the selected number rather than to the API-key
+// credential. Telnyx Call Control applications are one such resource.
+func (a *App) resolveOutboundCarrierCredentials(
+	ctx *sdk.AppCtx,
+	projectID string,
+	bound *sdk.BoundIntegration,
+	creds *sdk.ConnectionCredentials,
+	from string,
+) (*sdk.ConnectionCredentials, error) {
+	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
+	if slug != "telnyx" || validProviderResourceID(creds.Fields["connection_id"]) {
+		return creds, nil
+	}
+
+	connectionID := ""
+	routes, err := a.db().listRoutesForProjectConnection(projectID, bound.ConnectionID)
+	if err != nil {
+		return nil, fmt.Errorf("list Telnyx routes for outbound call: %w", err)
+	}
+	for _, route := range currentRoutesByNumber(routes) {
+		if compactPhoneNumber(route.PhoneNumber) != compactPhoneNumber(from) {
+			continue
+		}
+		var config telnyxRouteConfig
+		if json.Unmarshal([]byte(route.PreviousVoiceURL), &config) == nil && validProviderResourceID(config.ApplicationID) {
+			connectionID = config.ApplicationID
+			break
+		}
+	}
+
+	if connectionID == "" {
+		provider := &numberProvider{Slug: slug, ConnID: bound.ConnectionID, Fields: creds.Fields}
+		owned, listErr := listOwnedCarrierNumbers(ctx, provider)
+		if listErr != nil {
+			return nil, fmt.Errorf("resolve Telnyx connection for %s: %w", from, listErr)
+		}
+		for _, number := range owned {
+			if compactPhoneNumber(number.PhoneNumber) == compactPhoneNumber(from) && validProviderResourceID(number.ConnectionID) {
+				connectionID = number.ConnectionID
+				break
+			}
+		}
+	}
+	if connectionID == "" {
+		return nil, errors.New("selected Telnyx number has no Call Control connection configured")
+	}
+
+	resolved := *creds
+	resolved.Fields = make(map[string]string, len(creds.Fields)+1)
+	for key, value := range creds.Fields {
+		resolved.Fields[key] = value
+	}
+	resolved.Fields["connection_id"] = connectionID
+	return &resolved, nil
+}
+
 func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
 	projectID := currentProject(ctx)
 	if projectID == "" {

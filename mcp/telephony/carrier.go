@@ -191,7 +191,7 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		connectionID = c.fields["connection_id"]
 	}
 	if connectionID == "" {
-		return nil, fmt.Errorf("telnyx connection has no connection_id configured")
+		return nil, fmt.Errorf("selected Telnyx number has no Call Control connection configured")
 	}
 	input := map[string]any{
 		"connection_id":      connectionID,

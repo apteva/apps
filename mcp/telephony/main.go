@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.2.12
+version: 0.2.13
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -988,6 +988,10 @@ func (a *App) resolveCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom st
 		return nil, nil, "", errors.New("read carrier credentials: " + err.Error())
 	}
 	from, err := a.resolveOutboundFrom(ctx, projectID, bound, creds, requestedFrom)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	creds, err = a.resolveOutboundCarrierCredentials(ctx, projectID, bound, creds, from)
 	if err != nil {
 		return nil, nil, "", err
 	}

@@ -227,6 +227,63 @@ func TestOutboundFromRequiresSelectionWhenProjectHasMultipleRoutes(t *testing.T)
 	}
 }
 
+func TestTelnyxOutboundUsesSelectedNumbersRouteApplication(t *testing.T) {
+	platform := &answerPlatform{
+		bindings: map[string]any{"carrier": int64(10)},
+		credentials: &sdk.ConnectionCredentials{
+			Slug: "telnyx", Fields: map[string]string{"api_key": "test-key"},
+		},
+		integrationResponse: map[string]json.RawMessage{
+			"list_phone_numbers": json.RawMessage(`{"data":[{"id":"number-fr","phone_number":"+33189313431","connection_id":"application-live"}]}`),
+			"make_call":          json.RawMessage(`{"data":{"call_control_id":"call-control-1"}}`),
+		},
+	}
+	app, ctx := withTelephonyTestContext(t, platform)
+	config, _ := json.Marshal(telnyxRouteConfig{ApplicationID: "application-route"})
+	route := routeRow{
+		ID: "route-fr-outbound", ProjectID: "project-a", CarrierSlug: "telnyx", CarrierConnectionID: 10,
+		PhoneNumber: "+33189313431", PhoneNumberSID: "number-fr", AgentID: 7, Enabled: true,
+		Secret: "route-secret", PreviousVoiceURL: string(config),
+		CreatedAt: "2026-08-21T10:00:00Z", UpdatedAt: "2026-08-21T10:00:00Z",
+	}
+	if err := app.db().insertRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.placeHumanCall(ctx, "project-a", "+33612345678", route.PhoneNumber, nil); err != nil {
+		t.Fatalf("place Telnyx browser call: %v", err)
+	}
+	var makeCall *integrationCall
+	for index := range platform.integrationCalls {
+		if platform.integrationCalls[index].Tool == "make_call" {
+			makeCall = &platform.integrationCalls[index]
+			break
+		}
+	}
+	if makeCall == nil || makeCall.Input["connection_id"] != "application-route" || makeCall.Input["from"] != route.PhoneNumber {
+		t.Fatalf("Telnyx placement did not use selected number application: %#v", platform.integrationCalls)
+	}
+	if _, mutated := platform.credentials.Fields["connection_id"]; mutated {
+		t.Fatal("number-specific connection_id was written into shared credentials")
+	}
+}
+
+func TestTelnyxOutboundFallsBackToOwnedNumberConnection(t *testing.T) {
+	platform := &answerPlatform{
+		bindings:    map[string]any{"carrier": int64(10)},
+		credentials: &sdk.ConnectionCredentials{Slug: "telnyx", Fields: map[string]string{}},
+		integrationResponse: map[string]json.RawMessage{
+			"list_phone_numbers": json.RawMessage(`{"data":[{"id":"number-fr","phone_number":"+33189313431","connection_id":"application-live"}]}`),
+		},
+	}
+	app, ctx := withTelephonyTestContext(t, platform)
+	bound := ctx.IntegrationFor("carrier")
+	creds, _ := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
+	resolved, err := app.resolveOutboundCarrierCredentials(ctx, "project-a", bound, creds, "+33189313431")
+	if err != nil || resolved.Fields["connection_id"] != "application-live" {
+		t.Fatalf("resolved credentials=%#v err=%v", resolved, err)
+	}
+}
+
 func TestListOwnedCarrierNumbersPaginatesTelnyx(t *testing.T) {
 	firstPage := make([]map[string]any, 2)
 	for i := range firstPage {
