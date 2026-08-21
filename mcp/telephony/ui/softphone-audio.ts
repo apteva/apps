@@ -85,7 +85,7 @@ export interface SoftphoneDiagnostics {
 export const DEFAULT_SOFTPHONE_AUDIO_OPTIONS: SoftphoneAudioOptions = {
   echoCancellation: true,
   noiseSuppression: false,
-  autoGainControl: true,
+  autoGainControl: false,
 };
 
 function microphoneConstraints(options: SoftphoneAudioOptions): MediaTrackConstraints {

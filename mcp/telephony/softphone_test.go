@@ -793,7 +793,7 @@ func TestSoftphoneUsesAdaptiveJitterAndVisibleDiagnostics(t *testing.T) {
 			t.Fatalf("adaptive jitter worklet missing %q", required)
 		}
 	}
-	for _, required := range []string{"onDiagnostics", `type: "ping"`, "noiseSuppression: false", "autoGainControl: true", `type: "diagnostics"`} {
+	for _, required := range []string{"onDiagnostics", `type: "ping"`, "noiseSuppression: false", "autoGainControl: false", `type: "diagnostics"`} {
 		if !strings.Contains(string(audio), required) {
 			t.Fatalf("softphone diagnostics/audio controls missing %q", required)
 		}
@@ -821,7 +821,7 @@ func TestSoftphoneRecommendedAudioMigrationAndLocalMicrophoneTest(t *testing.T) 
 		t.Fatal(err)
 	}
 	settingsText := string(settings)
-	for _, required := range []string{"MicrophoneTestSession", "pcm16WAV", `type: "audio/wav"`, "autoGainControl: true"} {
+	for _, required := range []string{"MicrophoneTestSession", "pcm16WAV", `type: "audio/wav"`, "autoGainControl: false"} {
 		if !strings.Contains(audioText, required) {
 			t.Fatalf("local microphone pipeline missing %q", required)
 		}
@@ -833,7 +833,7 @@ func TestSoftphoneRecommendedAudioMigrationAndLocalMicrophoneTest(t *testing.T) 
 			t.Fatalf("recommended audio UI/migration missing %q", required)
 		}
 	}
-	for _, required := range []string{"apteva.telephony.softphone.audio.v2", "LEGACY_AUDIO_SETTINGS_KEY", "autoGainControl: true"} {
+	for _, required := range []string{"apteva.telephony.softphone.audio.v3", "PREVIOUS_AUDIO_SETTINGS_KEY", "autoGainControl: false"} {
 		if !strings.Contains(settingsText, required) {
 			t.Fatalf("recommended audio migration missing %q", required)
 		}
