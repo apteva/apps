@@ -128,6 +128,18 @@ func (a *App) spawnTenantWithMode(ctx context.Context, tenantID, slug, configDir
 func tenantSpawnEnv(configDir string, port int, tenantID string) []string {
 	deployStart, deployEnd, codeStart, codeEnd := tenantAppPortRanges(port)
 	env := append([]string{}, os.Environ()...)
+	// A Fleet sidecar is itself an app process. Never pass its install identity
+	// into the independent tenant server: tenant-owned sidecars must receive
+	// credentials minted by that tenant, not reuse the parent's callback token
+	// or install/project context. Dedicated delegated-DNS values are copied
+	// below before the child starts.
+	for _, key := range []string{
+		"APTEVA_APP_TOKEN", "APTEVA_OUTBOUND_TOKEN", "APTEVA_INSTALL_ID",
+		"APTEVA_PROJECT_ID", "APTEVA_APP_CONFIG", "APTEVA_APP_PORT",
+		"APTEVA_GATEWAY_URL", "APTEVA_PUBLIC_URL", "DB_PATH",
+	} {
+		env = unsetEnv(env, key)
+	}
 	env = setEnv(env, "APTEVA_HOME", configDir)
 	env = setEnv(env, "PORT", strconv.Itoa(port))
 	env = setEnv(env, "QUIET", "1")
@@ -180,6 +192,17 @@ func setEnv(env []string, key, value string) []string {
 		}
 	}
 	return append(env, prefix+value)
+}
+
+func unsetEnv(env []string, key string) []string {
+	prefix := key + "="
+	out := env[:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, prefix) {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // setupTokenRe matches the canonical apteva setup token shape that

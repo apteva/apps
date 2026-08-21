@@ -1,0 +1,109 @@
+name: a2a-fleet-provisioned-instance-to-main
+description: Fleet provisions a tenant, installs and pairs A2A, and a tenant agent discovers and asks a main agent.
+
+timeout: 300s
+max_iterations: 24
+
+setup:
+  mode: autonomous
+  required_env:
+    - APTEVA_TEST_CLI_BIN
+    - APTEVA_TEST_SERVER_BIN
+    - APTEVA_TEST_CORE_BIN
+    - APTEVA_TEST_FLEET_DATA_ROOT
+  app:
+    path: ./
+  topology:
+    nodes:
+      - id: main
+        global: true
+        config:
+          node_name: Main
+          public_url: ${NODE_main_URL}
+        apps:
+          - id: fleet
+            path: ../fleet
+            global: true
+            bindings:
+              a2a: app
+            env:
+              FLEET_APTEVA_BIN: ${APTEVA_TEST_CLI_BIN}
+              APTEVA_SERVER_BIN: ${APTEVA_TEST_SERVER_BIN}
+              APTEVA_CORE_BIN: ${APTEVA_TEST_CORE_BIN}
+              FLEET_DATA_ROOT: ${APTEVA_TEST_FLEET_DATA_ROOT}
+        agents:
+          - id: main_support
+            name: Main Support
+            directive: |
+              Wait for an [a2a] request, then call agent_reply with status
+              completed and exact message MAIN_SUPPORT_OK. Do not initiate tasks.
+
+      - id: fleet_instance
+        primary: true
+        global: true
+        provision:
+          from: main
+          app: fleet
+          tool: tenant_create
+          connect_host: 127.0.0.1
+          args:
+            slug: tier3-a2a-fleet
+            owner_email: tier3-a2a@apteva.test
+            apteva_version: host
+          cleanup:
+            tool: tenant_delete
+            args:
+              tenant_id: ${RESULT.tenant_id}
+              confirm: true
+
+directive: |
+  You are an agent inside a Fleet-provisioned instance. Call agents_discover
+  exactly once with query "Main Support". Pass its returned address directly
+  to agent_ask and ask for MAIN_SUPPORT_OK. Do not call agent_get. Stop after
+  the completed reply arrives.
+
+outcome_assert:
+  - http: GET /api/apps/a2a/tasks
+    node: fleet_instance
+    expect_field_at: tasks.0.direction
+    expect_field_eq: outbound
+  - http: GET /api/apps/a2a/tasks
+    node: fleet_instance
+    expect_field_at: tasks.0.status
+    expect_field_eq: completed
+  - http: GET /api/apps/a2a/tasks
+    node: main
+    expect_field_at: tasks.0.direction
+    expect_field_eq: inbound
+  - http: GET /api/apps/a2a/tasks
+    node: main
+    expect_field_at: tasks.0.status
+    expect_field_eq: completed
+
+trajectory_assert:
+  - tool_called_with:
+      node: fleet_instance
+      agent: primary
+      tool: agents_discover
+      result_contains: Main Support
+      count: 1
+  - tool_called_with:
+      node: fleet_instance
+      agent: primary
+      tool: agent_ask
+      success: true
+      count: 1
+  - tool_not_called_with:
+      node: fleet_instance
+      agent: primary
+      tool: agent_get
+  - tool_called_with:
+      node: main
+      agent: main_support
+      tool: agent_reply
+      args: {status: completed}
+      success: true
+
+budget:
+  total_tokens: 80000
+  cost_usd: 1.00

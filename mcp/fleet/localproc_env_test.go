@@ -39,3 +39,41 @@ func TestTenantSpawnEnvDisablesChildIngress(t *testing.T) {
 		t.Fatalf("APTEVA_DELEGATED_DNS_TENANT_ID = %q", got["APTEVA_DELEGATED_DNS_TENANT_ID"])
 	}
 }
+
+func TestTenantSpawnEnvStripsParentAppIdentity(t *testing.T) {
+	t.Setenv("APTEVA_APP_TOKEN", "parent-app-token")
+	t.Setenv("APTEVA_OUTBOUND_TOKEN", "parent-outbound-token")
+	t.Setenv("APTEVA_INSTALL_ID", "42")
+	t.Setenv("APTEVA_PROJECT_ID", "parent-project")
+	t.Setenv("APTEVA_APP_CONFIG", `{"parent":true}`)
+	t.Setenv("APTEVA_APP_PORT", "5555")
+	t.Setenv("APTEVA_GATEWAY_URL", "http://parent.invalid")
+	t.Setenv("APTEVA_PUBLIC_URL", "https://parent.invalid")
+	t.Setenv("DB_PATH", "/tmp/parent-app.db")
+
+	env := tenantSpawnEnv("/tmp/apteva-tenant", 43559, "tnt_test")
+	got := map[string]string{}
+	for _, kv := range env {
+		if key, value, ok := strings.Cut(kv, "="); ok {
+			got[key] = value
+		}
+	}
+	for _, key := range []string{
+		"APTEVA_APP_TOKEN", "APTEVA_OUTBOUND_TOKEN", "APTEVA_INSTALL_ID",
+		"APTEVA_PROJECT_ID", "APTEVA_APP_CONFIG", "APTEVA_APP_PORT",
+		"APTEVA_GATEWAY_URL", "APTEVA_PUBLIC_URL", "DB_PATH",
+	} {
+		if value, exists := got[key]; exists {
+			t.Fatalf("%s leaked into tenant environment as %q", key, value)
+		}
+	}
+	if got["APTEVA_DELEGATED_DNS_FLEET_URL"] != "http://127.0.0.1:5555" {
+		t.Fatalf("delegated Fleet URL = %q", got["APTEVA_DELEGATED_DNS_FLEET_URL"])
+	}
+	if got["APTEVA_DELEGATED_DNS_TOKEN"] != "parent-app-token" {
+		t.Fatalf("delegated token was not copied explicitly")
+	}
+	if got["APTEVA_DELEGATED_DNS_PROJECT_ID"] != "parent-project" {
+		t.Fatalf("delegated project was not copied explicitly")
+	}
+}
