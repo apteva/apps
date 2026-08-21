@@ -194,16 +194,17 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		return nil, fmt.Errorf("selected Telnyx number has no Call Control connection configured")
 	}
 	input := map[string]any{
-		"connection_id":      connectionID,
-		"to":                 req.To,
-		"from":               req.From,
-		"stream_url":         c.app.publicWSStreamURL("telnyx", req.CallID, req.CallbackSecret),
-		"stream_track":       "inbound_track",
-		"timeout_secs":       req.TimeoutSec,
-		"time_limit_secs":    req.MaxDurationSec,
-		"command_id":         telnyxCommandID(req.CallID, "place"),
-		"webhook_url":        c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
-		"webhook_url_method": "POST",
+		"connection_id":                          connectionID,
+		"to":                                     req.To,
+		"from":                                   req.From,
+		"stream_url":                             c.app.publicWSStreamURL("telnyx", req.CallID, req.CallbackSecret),
+		"stream_track":                           "inbound_track",
+		"stream_establish_before_call_originate": true,
+		"timeout_secs":                           req.TimeoutSec,
+		"time_limit_secs":                        req.MaxDurationSec,
+		"command_id":                             telnyxCommandID(req.CallID, "place"),
+		"webhook_url":                            c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
+		"webhook_url_method":                     "POST",
 	}
 	applyTelnyxMediaProfile(input)
 	if req.RecordingMode == recordingModeAlways {
@@ -212,9 +213,9 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		input["record_format"] = "wav"
 		input["record_track"] = "both"
 	}
-	data, err := executeCarrierTool(ctx, c.connID, "make_call", input)
+	data, err := executeCarrierTool(ctx, c.connID, "dial_call", input)
 	if err != nil {
-		return nil, fmt.Errorf("telnyx make_call failed: %w", err)
+		return nil, fmt.Errorf("telnyx dial_call failed: %w", err)
 	}
 	var out struct {
 		Data struct {
@@ -223,14 +224,14 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("decode telnyx make_call response: %w", err)
+		return nil, fmt.Errorf("decode telnyx dial_call response: %w", err)
 	}
 	sid := out.Data.CallControlID
 	if sid == "" {
 		sid = out.Data.CallLegID
 	}
 	if sid == "" {
-		return nil, errors.New("telnyx make_call returned no call control id")
+		return nil, errors.New("telnyx dial_call returned no call control id")
 	}
 	return &carrierPlaceResult{CarrierSID: sid}, nil
 }

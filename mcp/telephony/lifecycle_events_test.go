@@ -37,6 +37,13 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 	if !reflect.DeepEqual(disk.ConfigSchema, embedded.ConfigSchema) {
 		t.Fatalf("config schema declaration drift:\ndisk: %#v\nembedded: %#v", disk.ConfigSchema, embedded.ConfigSchema)
 	}
+	if len(disk.Requires.Integrations) != 1 || len(embedded.Requires.Integrations) != 1 {
+		t.Fatalf("carrier dependency missing: disk=%#v embedded=%#v", disk.Requires.Integrations, embedded.Requires.Integrations)
+	}
+	if len(disk.Requires.Integrations[0].Tools) != 0 || len(embedded.Requires.Integrations[0].Tools) != 0 {
+		t.Fatalf("carrier dependency declares a provider-specific tool as generic: disk=%#v embedded=%#v",
+			disk.Requires.Integrations[0].Tools, embedded.Requires.Integrations[0].Tools)
+	}
 	if !containsString(embeddedTools, "telephony_routes_set_transport") {
 		t.Fatal("direct SIP transport tool is not declared in the manifest")
 	}

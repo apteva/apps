@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.2.13
+version: 0.2.14
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -38,9 +38,10 @@ requires:
       kind: integration
       compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage]
       capabilities: [voice.place, voice.update]
-      tools:
-        voice.place:  make_call
-        voice.update: update_call    # hangup via Status=completed
+      # Carrier tool names are provider-specific (for example, Twilio uses
+      # make_call while Telnyx uses dial_call). The generic carrier adapter
+      # resolves those contracts at runtime instead of declaring a false
+      # one-size-fits-all mapping here.
       required: true
       label: "Voice carrier"
       hint: "Provide a Twilio, Telnyx, Plivo, SignalWire, or Vonage connection with a voice-capable phone number. The From= value is read from the connection's phone_number field."

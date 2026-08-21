@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.2.13
+version: 0.2.14
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -72,9 +72,6 @@ requires:
       kind: integration
       compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage]
       capabilities: [voice.place, voice.update]
-      tools:
-        voice.place:  make_call
-        voice.update: update_call
       required: true
       label: "Voice carrier"
 provides:

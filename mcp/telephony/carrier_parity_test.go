@@ -293,7 +293,7 @@ func TestPlivoSignatureV3KnownVector(t *testing.T) {
 func TestProviderCarrierPlacementUsesParityCallbacksAndRecording(t *testing.T) {
 	t.Run("telnyx", func(t *testing.T) {
 		platform := &answerPlatform{integrationResponse: map[string]json.RawMessage{
-			"make_call": json.RawMessage(`{"data":{"call_control_id":"telnyx-call-1"}}`),
+			"dial_call": json.RawMessage(`{"data":{"call_control_id":"telnyx-call-1"}}`),
 		}}
 		a, ctx := withTelephonyTestContext(t, platform)
 		carrier := &telnyxCarrier{app: a, connID: 9, fields: map[string]string{"connection_id": "connection-1"}}
@@ -304,12 +304,23 @@ func TestProviderCarrierPlacementUsesParityCallbacksAndRecording(t *testing.T) {
 		if err != nil || result.CarrierSID != "telnyx-call-1" {
 			t.Fatalf("place Telnyx call: result=%+v err=%v", result, err)
 		}
+		if got := platform.integrationCalls[0].Tool; got != "dial_call" {
+			t.Fatalf("Telnyx placement used %q, want dial_call", got)
+		}
 		input := platform.integrationCalls[0].Input
+		for _, required := range []string{"connection_id", "to", "from", "stream_url", "webhook_url", "command_id"} {
+			if input[required] == nil || input[required] == "" {
+				t.Fatalf("Telnyx dial_call lacks required %s: %#v", required, input)
+			}
+		}
 		if input["record"] != "record-from-answer" || input["record_channels"] != "dual" || input["webhook_url"] == "" || input["command_id"] == "" {
 			t.Fatalf("Telnyx call lacks recording or status callback parity: %#v", input)
 		}
 		if input["stream_codec"] != "L16" || input["stream_bidirectional_codec"] != "L16" || input["stream_bidirectional_sampling_rate"] != 16000 {
 			t.Fatalf("Telnyx call is not using the wideband media profile: %#v", input)
+		}
+		if input["stream_establish_before_call_originate"] != true {
+			t.Fatalf("Telnyx call may originate before its media stream is ready: %#v", input)
 		}
 		if err := carrier.Hangup(ctx, &callRow{ID: "call-1", CarrierSID: result.CarrierSID}); err != nil {
 			t.Fatal(err)

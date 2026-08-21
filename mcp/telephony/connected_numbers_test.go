@@ -235,7 +235,7 @@ func TestTelnyxOutboundUsesSelectedNumbersRouteApplication(t *testing.T) {
 		},
 		integrationResponse: map[string]json.RawMessage{
 			"list_phone_numbers": json.RawMessage(`{"data":[{"id":"number-fr","phone_number":"+33189313431","connection_id":"application-live"}]}`),
-			"make_call":          json.RawMessage(`{"data":{"call_control_id":"call-control-1"}}`),
+			"dial_call":          json.RawMessage(`{"data":{"call_control_id":"call-control-1"}}`),
 		},
 	}
 	app, ctx := withTelephonyTestContext(t, platform)
@@ -249,21 +249,41 @@ func TestTelnyxOutboundUsesSelectedNumbersRouteApplication(t *testing.T) {
 	if err := app.db().insertRoute(route); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.placeHumanCall(ctx, "project-a", "+33612345678", route.PhoneNumber, nil); err != nil {
+	session, err := app.placeHumanCall(ctx, "project-a", "+33612345678", route.PhoneNumber, nil)
+	if err != nil {
 		t.Fatalf("place Telnyx browser call: %v", err)
 	}
-	var makeCall *integrationCall
+	stored, err := app.db().findCall(session.CallID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored == nil || stored.Status != "initiated" || stored.CarrierSID != "call-control-1" ||
+		stored.ThreadID != "human-"+session.CallID || session.MediaURL == "" {
+		t.Fatalf("Telnyx browser placement was not persisted completely: session=%+v call=%+v", session, stored)
+	}
+	var dialCall *integrationCall
 	for index := range platform.integrationCalls {
-		if platform.integrationCalls[index].Tool == "make_call" {
-			makeCall = &platform.integrationCalls[index]
+		if platform.integrationCalls[index].Tool == "dial_call" {
+			dialCall = &platform.integrationCalls[index]
 			break
 		}
 	}
-	if makeCall == nil || makeCall.Input["connection_id"] != "application-route" || makeCall.Input["from"] != route.PhoneNumber {
+	if dialCall == nil || dialCall.Input["connection_id"] != "application-route" || dialCall.Input["from"] != route.PhoneNumber {
 		t.Fatalf("Telnyx placement did not use selected number application: %#v", platform.integrationCalls)
 	}
 	if _, mutated := platform.credentials.Fields["connection_id"]; mutated {
 		t.Fatal("number-specific connection_id was written into shared credentials")
+	}
+	if msg := app.hangupCall(ctx, session.CallID, 0, "project-a"); msg != "" {
+		t.Fatalf("hang up Telnyx browser call: %s", msg)
+	}
+	last := platform.integrationCalls[len(platform.integrationCalls)-1]
+	if last.Tool != "hangup_call" || last.Input["call_control_id"] != "call-control-1" {
+		t.Fatalf("Telnyx hangup contract mismatch: %#v", last)
+	}
+	stored, err = app.db().findCall(session.CallID)
+	if err != nil || stored.Status != "completed" {
+		t.Fatalf("Telnyx browser hangup was not persisted: call=%+v err=%v", stored, err)
 	}
 }
 
