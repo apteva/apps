@@ -369,11 +369,14 @@ func parseOwnedCarrierNumbers(provider string, raw json.RawMessage) ([]ownedNumb
 
 func (a *App) connectedNumberView(ctx *sdk.AppCtx, provider string, number ownedNumber, route *routeRow, agentName func(int64) string) connectedNumberView {
 	view := connectedNumberView{
-		PhoneNumber:         number.PhoneNumber,
-		Provider:            provider,
-		ProviderNumberID:    number.ProviderNumberID,
-		FriendlyName:        number.FriendlyName,
-		Capabilities:        number.Capabilities,
+		PhoneNumber:      number.PhoneNumber,
+		Provider:         provider,
+		ProviderNumberID: number.ProviderNumberID,
+		FriendlyName:     number.FriendlyName,
+		// Always encode an empty JSON array rather than null. Some carriers,
+		// including Telnyx, omit capabilities when no feature metadata is
+		// available, and the panel treats this field as a collection.
+		Capabilities:        append([]string{}, number.Capabilities...),
 		CarrierStatus:       number.CarrierStatus,
 		RouteStatus:         "not_configured",
 		VoiceWebhookStatus:  webhookNotConfigured,
@@ -567,7 +570,7 @@ func normalizedOwnedPhone(value string) string {
 }
 
 func normalizedCapabilities(value any) []string {
-	var out []string
+	out := make([]string, 0)
 	switch typed := value.(type) {
 	case map[string]any:
 		for name, enabled := range typed {

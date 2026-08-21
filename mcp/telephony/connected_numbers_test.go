@@ -162,6 +162,9 @@ func TestConnectedNumbersKeepsRouteWhenCarrierNumberIsMissing(t *testing.T) {
 	if view.Route == nil || view.CarrierStatus != "not_found" || view.RoutingHealth != "degraded" {
 		t.Fatalf("missing carrier number route was hidden: %#v", view)
 	}
+	if view.Capabilities == nil {
+		t.Fatal("connected number capabilities must encode as an empty array, not null")
+	}
 }
 
 func TestListOwnedCarrierNumbersPaginatesTelnyx(t *testing.T) {
@@ -243,6 +246,7 @@ func TestConnectedNumbersPanelContract(t *testing.T) {
 		"Find a number",
 		"Assigned agent",
 		"Routing health",
+		"(number.capabilities ?? []).length",
 		"setOffers([])",
 		"void loadConnected()",
 	} {

@@ -1094,7 +1094,7 @@ interface ConnectedNumber {
   provider: string;
   provider_number_id?: string;
   friendly_name?: string;
-  capabilities: string[];
+  capabilities?: string[] | null;
   carrier_status?: string;
   route_status: "enabled" | "disabled" | "not_configured";
   route?: ConnectedRoute;
@@ -1453,7 +1453,7 @@ function NumbersView({ projectId }: NativePanelProps) {
                       <div className="truncate capitalize">{number.provider}</div>
                       <div className="truncate text-xs text-text-dim">{number.carrier_status || "owned"}</div>
                     </div>
-                    <div className="truncate text-xs text-text-muted">{number.capabilities.length > 0 ? number.capabilities.join(", ") : "-"}</div>
+                    <div className="truncate text-xs text-text-muted">{(number.capabilities ?? []).length > 0 ? number.capabilities!.join(", ") : "-"}</div>
                     <div className="min-w-0">
                       {number.route ? (
                         <>
