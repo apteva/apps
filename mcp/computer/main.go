@@ -56,11 +56,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.79
+version: 0.7.80
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.79 filters generated
-  session defaults, rejects unsupported arguments, applies safe emulation
-  bounds, and preserves all previous browser safeguards.
+  Watch, steer, and replay hosted browser sessions. v0.7.80 adds semantic
+  scroll identities and atomic consequence confirmation while preserving all
+  previous browser, proxy, extraction, session, and input safeguards.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
