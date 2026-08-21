@@ -27,25 +27,28 @@ type numberSearchRequest struct {
 }
 
 type numberOffer struct {
-	ConfirmationToken  string   `json:"confirmation_token,omitempty"`
-	ExpiresAt          string   `json:"expires_at,omitempty"`
-	Provider           string   `json:"provider"`
-	PhoneNumber        string   `json:"phone_number"`
-	Country            string   `json:"country"`
-	NumberType         string   `json:"number_type"`
-	FriendlyName       string   `json:"friendly_name,omitempty"`
-	Locality           string   `json:"locality,omitempty"`
-	Region             string   `json:"region,omitempty"`
-	Features           []string `json:"features,omitempty"`
-	MonthlyPrice       string   `json:"monthly_price,omitempty"`
-	UpfrontPrice       string   `json:"upfront_price,omitempty"`
-	InboundPrice       string   `json:"inbound_price,omitempty"`
-	Currency           string   `json:"currency,omitempty"`
-	AddressRequirement string   `json:"address_requirement,omitempty"`
-	RequirementsMet    *bool    `json:"requirements_met,omitempty"`
-	ComplianceRequired bool     `json:"compliance_required,omitempty"`
-	PurchaseReady      bool     `json:"purchase_ready"`
-	PurchaseBlocker    string   `json:"purchase_blocker,omitempty"`
+	ConfirmationToken          string   `json:"confirmation_token,omitempty"`
+	ExpiresAt                  string   `json:"expires_at,omitempty"`
+	Provider                   string   `json:"provider"`
+	PhoneNumber                string   `json:"phone_number"`
+	Country                    string   `json:"country"`
+	NumberType                 string   `json:"number_type"`
+	FriendlyName               string   `json:"friendly_name,omitempty"`
+	Locality                   string   `json:"locality,omitempty"`
+	Region                     string   `json:"region,omitempty"`
+	Features                   []string `json:"features,omitempty"`
+	MonthlyPrice               string   `json:"monthly_price,omitempty"`
+	UpfrontPrice               string   `json:"upfront_price,omitempty"`
+	InboundPrice               string   `json:"inbound_price,omitempty"`
+	Currency                   string   `json:"currency,omitempty"`
+	AddressRequirement         string   `json:"address_requirement,omitempty"`
+	RequirementsMet            *bool    `json:"requirements_met,omitempty"`
+	ComplianceRequired         bool     `json:"compliance_required,omitempty"`
+	RecommendedComplianceID    string   `json:"recommended_compliance_id,omitempty"`
+	RecommendedComplianceName  string   `json:"recommended_compliance_name,omitempty"`
+	MatchingComplianceProfiles int      `json:"matching_compliance_profiles,omitempty"`
+	PurchaseReady              bool     `json:"purchase_ready"`
+	PurchaseBlocker            string   `json:"purchase_blocker,omitempty"`
 }
 
 type numberCountryResult struct {
@@ -246,7 +249,11 @@ func (a *App) searchNumberInventory(ctx *sdk.AppCtx, args map[string]any) (map[s
 		for i := range offers {
 			offers[i].Provider = provider.Slug
 			offers[i].Country = country
-			if !validE164(offers[i].PhoneNumber) {
+			if offers[i].PurchaseBlocker != "" {
+				// Provider-specific enrichment already found a safety or
+				// compliance blocker. Preserve it and do not mint a purchase
+				// token that could bypass the UI warning.
+			} else if !validE164(offers[i].PhoneNumber) {
 				offers[i].PurchaseBlocker = "provider returned an invalid phone number"
 			} else if offers[i].MonthlyPrice == "" {
 				offers[i].PurchaseBlocker = "provider did not return a monthly price"
@@ -255,7 +262,7 @@ func (a *App) searchNumberInventory(ctx *sdk.AppCtx, args map[string]any) (map[s
 			} else if offers[i].RequirementsMet != nil && !*offers[i].RequirementsMet && provider.Slug != "telnyx" {
 				offers[i].PurchaseBlocker = "provider regulatory requirements are not met"
 			} else if provider.Purchase {
-				offers[i].ComplianceRequired = offers[i].RequirementsMet != nil && !*offers[i].RequirementsMet
+				offers[i].ComplianceRequired = offers[i].ComplianceRequired || offers[i].RequirementsMet != nil && !*offers[i].RequirementsMet
 				token := newSecret()
 				intent := numberPurchaseIntent{
 					Token: token, ProjectID: projectID, Provider: provider.Slug,
@@ -488,7 +495,11 @@ func searchTelnyxNumbers(ctx *sdk.AppCtx, connID int64, request numberSearchRequ
 		return nil, nil, err
 	}
 	offers, err := parseTelnyxOffers(data, country, request.NumberType)
-	return offers, nil, err
+	if err != nil {
+		return nil, nil, err
+	}
+	warnings := enrichTelnyxOffersCompliance(ctx, connID, country, offers)
+	return offers, warnings, nil
 }
 
 func parseTelnyxOffers(data json.RawMessage, country, requestedType string) ([]numberOffer, error) {
@@ -828,6 +839,23 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 	}
 	if provider.ConnID != intent.CarrierConnectionID || provider.Slug != intent.Provider {
 		return nil, errors.New("the bound carrier changed after this quote; search again")
+	}
+	if intent.Provider == "telnyx" && complianceID == "" {
+		plan, planErr := inspectTelnyxCompliancePlan(ctx, intent.CarrierConnectionID,
+			intent.Country, intent.NumberType, intent.ComplianceRequired)
+		if planErr != nil {
+			return nil, fmt.Errorf("verify Telnyx regulatory requirements before purchase: %w", planErr)
+		}
+		if plan.Required {
+			switch {
+			case plan.AutoProfileID != "":
+				complianceID = plan.AutoProfileID
+			case plan.ApprovedMatches == 0:
+				return nil, errors.New("compliance_id required; no approved Telnyx requirement group matches this country and number type")
+			default:
+				return nil, errors.New("compliance_id required; multiple approved Telnyx requirement groups match this country and number type")
+			}
+		}
 	}
 	if intent.Provider == "twilio" && requiresNumberAddress(intent.AddressRequirement) {
 		if addressID == "" {

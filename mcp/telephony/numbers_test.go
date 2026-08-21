@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 func TestParseNumberSearchRequestComparison(t *testing.T) {
@@ -309,6 +311,108 @@ func TestTelnyxNumberOrderUsesRequirementGroup(t *testing.T) {
 	phoneNumbers := input["phone_numbers"].([]map[string]any)
 	if phoneNumbers[0]["requirement_group_id"] != "requirement-group-123" || input["connection_id"] != "connection-123" {
 		t.Fatalf("unexpected Telnyx order input: %#v", input)
+	}
+}
+
+func TestTelnyxCompliancePlanFindsReusableApprovedProfile(t *testing.T) {
+	platform := &answerPlatform{integrationResponse: map[string]json.RawMessage{
+		"list_regulatory_requirements": json.RawMessage(`{"data":[{"country_code":"FR","phone_number_type":"local","regulatory_requirements":[{"requirement_id":"contact"}]}]}`),
+		"list_requirement_groups": json.RawMessage(`{"data":[
+			{"id":"profile-fr","country_code":"FR","phone_number_type":"local","action":"ordering","status":"approved","customer_reference":"France local","regulatory_requirements":[{"requirement_id":"contact","field_value":"Apteva"}]},
+			{"id":"profile-es","country_code":"ES","phone_number_type":"local","action":"ordering","status":"approved","regulatory_requirements":[{"requirement_id":"contact","field_value":"Apteva"}]},
+			{"id":"profile-draft","country_code":"FR","phone_number_type":"local","action":"ordering","status":"unapproved","regulatory_requirements":[{"requirement_id":"contact","field_value":"Apteva"}]}
+		]}`),
+	}}
+	_, ctx := withTelephonyTestContext(t, platform)
+	plan, err := inspectTelnyxCompliancePlan(ctx, 10, "fr", "local", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Required || plan.ApprovedMatches != 1 || plan.AutoProfileID != "profile-fr" || plan.AutoProfileName != "France local" {
+		t.Fatalf("unexpected Telnyx compliance plan: %#v", plan)
+	}
+}
+
+func TestTelnyxCompliancePlanDoesNotGuessBetweenApprovedProfiles(t *testing.T) {
+	platform := &answerPlatform{integrationResponse: map[string]json.RawMessage{
+		"list_requirement_groups": json.RawMessage(`{"data":[
+			{"id":"profile-a","country_code":"FR","phone_number_type":"local","action":"ordering","status":"approved","regulatory_requirements":[{"requirement_id":"contact","field_value":"A"}]},
+			{"id":"profile-b","country_code":"FR","phone_number_type":"local","action":"ordering","status":"approved","regulatory_requirements":[{"requirement_id":"contact","field_value":"B"}]}
+		]}`),
+	}}
+	_, ctx := withTelephonyTestContext(t, platform)
+	plan, err := inspectTelnyxCompliancePlan(ctx, 10, "FR", "local", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Required || plan.ApprovedMatches != 2 || plan.AutoProfileID != "" {
+		t.Fatalf("ambiguous profiles were not preserved for explicit selection: %#v", plan)
+	}
+}
+
+func TestTelnyxPurchaseAutomaticallyReusesApprovedProfile(t *testing.T) {
+	profile := `{"data":{"id":"profile-fr","country_code":"FR","phone_number_type":"local","action":"ordering","status":"approved","customer_reference":"France local","regulatory_requirements":[{"requirement_id":"contact","field_value":"Apteva"}]}}`
+	platform := &answerPlatform{
+		bindings:    map[string]any{"carrier": int64(10)},
+		credentials: &sdk.ConnectionCredentials{Slug: "telnyx", Fields: map[string]string{"connection_id": "application-fr"}},
+		integrationResponse: map[string]json.RawMessage{
+			"list_regulatory_requirements": json.RawMessage(`{"data":[{"regulatory_requirements":[{"requirement_id":"contact"}]}]}`),
+			"list_requirement_groups":      json.RawMessage(`{"data":[{"id":"profile-fr","country_code":"FR","phone_number_type":"local","action":"ordering","status":"approved","regulatory_requirements":[{"requirement_id":"contact","field_value":"Apteva"}]}]}`),
+			"get_requirement_group":        json.RawMessage(profile),
+			"create_number_order":          json.RawMessage(`{"data":{"id":"order-fr","status":"pending"}}`),
+		},
+	}
+	app, ctx := withTelephonyTestContext(t, platform)
+	intent := numberPurchaseIntent{
+		Token: "quote-fr", ProjectID: "project-a", Provider: "telnyx", CarrierConnectionID: 10,
+		Country: "FR", PhoneNumber: "+33189313573", NumberType: "local",
+		MonthlyPrice: "1.00", UpfrontPrice: "1.00", Currency: "USD",
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}
+	if err := dbNumberPurchaseIntentInsert(ctx.AppDB(), intent); err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.purchaseNumber(ctx, intent.Token, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["compliance_id"] != "profile-fr" {
+		t.Fatalf("purchase did not report the reused profile: %#v", result)
+	}
+	var create *integrationCall
+	for index := range platform.integrationCalls {
+		if platform.integrationCalls[index].Tool == "create_number_order" {
+			create = &platform.integrationCalls[index]
+		}
+	}
+	if create == nil {
+		t.Fatalf("Telnyx order was not created: %#v", platform.integrationCalls)
+	}
+	phoneNumbers, _ := create.Input["phone_numbers"].([]map[string]any)
+	if len(phoneNumbers) != 1 || phoneNumbers[0]["requirement_group_id"] != "profile-fr" {
+		t.Fatalf("approved requirement group was not attached to the order: %#v", create.Input)
+	}
+}
+
+func TestTelnyxSearchDoesNotMintPurchaseTokenWhenComplianceCannotBeVerified(t *testing.T) {
+	platform := &answerPlatform{
+		bindings:    map[string]any{"carrier": int64(10)},
+		credentials: &sdk.ConnectionCredentials{Slug: "telnyx", Fields: map[string]string{}},
+		failTool:    "list_regulatory_requirements",
+		integrationResponse: map[string]json.RawMessage{
+			"search_available_phone_numbers": json.RawMessage(`{"data":[{"phone_number":"+33189313573","phone_number_type":"local","cost_information":{"upfront_cost":"1.00","monthly_cost":"1.00","currency":"USD"},"features":[{"name":"voice"}]}]}`),
+		},
+	}
+	app, ctx := withTelephonyTestContext(t, platform)
+	result, err := app.searchNumberInventory(ctx, map[string]any{
+		"country": "FR", "number_type": "local", "features": []any{"voice"}, "limit": 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	offers, _ := result["offers"].([]numberOffer)
+	if len(offers) != 1 || offers[0].PurchaseBlocker == "" || offers[0].PurchaseReady || offers[0].ConfirmationToken != "" {
+		t.Fatalf("unverified Telnyx compliance remained purchasable: %#v", offers)
 	}
 }
 

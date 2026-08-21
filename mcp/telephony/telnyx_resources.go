@@ -52,6 +52,134 @@ func telnyxDataList(response map[string]any) []any {
 	return []any{}
 }
 
+type telnyxCompliancePlan struct {
+	Required        bool
+	AutoProfileID   string
+	AutoProfileName string
+	ApprovedMatches int
+}
+
+func telnyxRequirementsPresent(response map[string]any) bool {
+	for _, item := range telnyxDataList(response) {
+		entry, _ := item.(map[string]any)
+		if requirements, ok := entry["regulatory_requirements"].([]any); ok && len(requirements) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func matchingApprovedTelnyxProfiles(response map[string]any, country, numberType string) []map[string]any {
+	country = strings.ToUpper(strings.TrimSpace(country))
+	numberType = normalizeNumberType(numberType)
+	matches := make([]map[string]any, 0)
+	for _, item := range telnyxDataList(response) {
+		profile, _ := item.(map[string]any)
+		if !strings.EqualFold(stringValue(profile["country_code"]), country) ||
+			normalizeNumberType(stringValue(profile["phone_number_type"])) != numberType ||
+			!strings.EqualFold(stringValue(profile["action"]), "ordering") ||
+			!strings.EqualFold(stringValue(profile["status"]), "approved") ||
+			telnyxProfileEvaluation(profile)["status"] != "compliant" {
+			continue
+		}
+		matches = append(matches, profile)
+	}
+	return matches
+}
+
+func inspectTelnyxCompliancePlan(ctx *sdk.AppCtx, connID int64, country, numberType string, knownRequired bool) (telnyxCompliancePlan, error) {
+	plan := telnyxCompliancePlan{Required: knownRequired}
+	country = strings.ToUpper(strings.TrimSpace(country))
+	numberType = normalizeNumberType(numberType)
+	if len(country) != 2 {
+		return plan, errors.New("country must be an ISO alpha-2 code")
+	}
+	if _, err := telnyxNumberType(numberType); err != nil {
+		return plan, err
+	}
+	if !plan.Required {
+		raw, err := executeCarrierTool(ctx, connID, "list_regulatory_requirements", map[string]any{
+			"filter[country_code]": country, "filter[phone_number_type]": numberType, "filter[action]": "ordering",
+		})
+		if err != nil {
+			return plan, err
+		}
+		response, err := telnyxResponse(raw)
+		if err != nil {
+			return plan, err
+		}
+		plan.Required = telnyxRequirementsPresent(response)
+	}
+	if !plan.Required {
+		return plan, nil
+	}
+	raw, err := executeCarrierTool(ctx, connID, "list_requirement_groups", map[string]any{
+		"filter[country_code]": country, "filter[phone_number_type]": numberType,
+		"filter[action]": "ordering", "filter[status]": "approved", "page[size]": 250,
+	})
+	if err != nil {
+		return plan, err
+	}
+	response, err := telnyxResponse(raw)
+	if err != nil {
+		return plan, err
+	}
+	matches := matchingApprovedTelnyxProfiles(response, country, numberType)
+	plan.ApprovedMatches = len(matches)
+	if len(matches) == 1 {
+		plan.AutoProfileID = stringValue(matches[0]["id"])
+		plan.AutoProfileName = firstNonEmpty(stringValue(matches[0]["customer_reference"]), plan.AutoProfileID)
+	}
+	return plan, nil
+}
+
+func enrichTelnyxOffersCompliance(ctx *sdk.AppCtx, connID int64, country string, offers []numberOffer) []string {
+	type complianceGroup struct {
+		indexes       []int
+		knownRequired bool
+		allMet        bool
+	}
+	groups := map[string]*complianceGroup{}
+	for index := range offers {
+		numberType := normalizeNumberType(offers[index].NumberType)
+		group := groups[numberType]
+		if group == nil {
+			group = &complianceGroup{allMet: true}
+			groups[numberType] = group
+		}
+		group.indexes = append(group.indexes, index)
+		if offers[index].RequirementsMet == nil {
+			group.allMet = false
+		} else if !*offers[index].RequirementsMet {
+			group.allMet = false
+			group.knownRequired = true
+		}
+	}
+	warnings := []string{}
+	for numberType, group := range groups {
+		if group.allMet {
+			continue
+		}
+		plan, err := inspectTelnyxCompliancePlan(ctx, connID, country, numberType, group.knownRequired)
+		if err != nil {
+			message := fmt.Sprintf("could not verify Telnyx compliance for %s %s numbers: %v", country, numberType, err)
+			warnings = append(warnings, message)
+			for _, index := range group.indexes {
+				offers[index].ComplianceRequired = true
+				offers[index].PurchaseBlocker = message
+			}
+			continue
+		}
+		for _, index := range group.indexes {
+			offers[index].ComplianceRequired = plan.Required
+			offers[index].RecommendedComplianceID = plan.AutoProfileID
+			offers[index].RecommendedComplianceName = plan.AutoProfileName
+			offers[index].MatchingComplianceProfiles = plan.ApprovedMatches
+		}
+	}
+	return warnings
+}
+
 func validProviderResourceID(value string) bool {
 	value = strings.TrimSpace(value)
 	return value != "" && len(value) <= 128 && !strings.ContainsAny(value, "/?#\r\n\t")

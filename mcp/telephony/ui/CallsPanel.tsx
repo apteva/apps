@@ -1744,6 +1744,9 @@ interface NumberOffer {
   address_requirement?: string;
   requirements_met?: boolean;
   compliance_required?: boolean;
+  recommended_compliance_id?: string;
+  recommended_compliance_name?: string;
+  matching_compliance_profiles?: number;
   purchase_ready: boolean;
   purchase_blocker?: string;
 }
@@ -1995,7 +1998,7 @@ function NumbersView({ projectId }: NativePanelProps) {
   const review = async (offer: NumberOffer) => {
     setSelected(offer);
     setAddressSid("");
-    setBundleSid("");
+    setBundleSid(offer.recommended_compliance_id ?? "");
     setAddresses([]);
     setBundles([]);
     if (offer.provider !== "twilio" && offer.provider !== "telnyx") return;
@@ -2004,7 +2007,10 @@ function NumbersView({ projectId }: NativePanelProps) {
       const [addressData, profileData] = await Promise.all([
         postJSON<{ addresses?: ProviderAddress[] }>(endpoint("/numbers/addresses/list"), { limit: 200 }),
         postJSON<{ profiles?: RegulatoryBundle[]; bundles?: RegulatoryBundle[] }>(endpoint("/numbers/regulatory/bundles/list"), {
-          country: offer.country, ...(offer.provider === "twilio" ? { status: "twilio-approved" } : {}), limit: 200,
+          country: offer.country,
+          number_type: offer.number_type,
+          status: offer.provider === "twilio" ? "twilio-approved" : "approved",
+          limit: 200,
         }),
       ]);
       setAddresses(addressData.addresses ?? []);
@@ -2352,6 +2358,7 @@ function NumbersView({ projectId }: NativePanelProps) {
               {selected.upfront_price ? ` + ${money(selected.upfront_price, selected.currency)} setup` : ""}
               {selected.inbound_price ? `; ${money(selected.inbound_price, selected.currency, "/minute inbound")}` : ""}
               {selected.address_requirement ? `; address requirement: ${selected.address_requirement}` : ""}
+              {selected.recommended_compliance_name ? `; approved profile: ${selected.recommended_compliance_name}` : ""}
             </div>
             {selected.provider === "twilio" || selected.provider === "telnyx" ? (
               <div className="mt-3 grid max-w-3xl gap-3 md:grid-cols-2">
