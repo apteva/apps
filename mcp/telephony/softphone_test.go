@@ -567,6 +567,73 @@ func TestSoftphoneMediaURLUsesInstallScopedSameOriginPath(t *testing.T) {
 	}
 }
 
+func TestSoftphoneUsesSameOriginWorkletAsset(t *testing.T) {
+	source, err := os.ReadFile("ui/softphone-audio.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	if !strings.Contains(text, `new URL("./softphone-worklet.js", import.meta.url)`) {
+		t.Fatal("softphone worklet is not resolved beside the install-scoped panel bundle")
+	}
+	for _, forbidden := range []string{"createObjectURL", "new Blob([WORKLET_SOURCE]"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("softphone still uses CSP-sensitive blob worklet code %q", forbidden)
+		}
+	}
+	if info, err := os.Stat("ui/softphone-worklet.js"); err != nil || info.Size() == 0 {
+		t.Fatalf("softphone worklet asset is missing or empty: %v", err)
+	}
+}
+
+func TestSoftphoneBrowserSetupFailureReleasesAnswerClaim(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	row := callRow{
+		ID: "call-release-browser", ThreadID: "pending-call-release-browser",
+		Direction: "inbound", CarrierSlug: "telnyx", CarrierConnectionID: 10,
+		CarrierSID: "telnyx-release-1", CallbackSecret: "callback-secret",
+		ToNumber: "+33123456789", FromNumber: "+33612345678", Status: "pending",
+		PlacedAt: time.Now().UTC().Format(time.RFC3339), ProjectID: "project-a",
+		PeerKind: peerKindHuman, AudioBridgeURL: "pending",
+	}
+	if err := app.db().insertCall(row); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := app.db().claimPendingCallForHuman(row.ID, row.ProjectID)
+	if err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	if err := app.db().attachHumanCall(row.ID, "ws://127.0.0.1/peer/call-release-browser/session-token", "session-token"); err != nil {
+		t.Fatal(err)
+	}
+
+	wrong := httptest.NewRequest(http.MethodPost, "/softphone/release/"+row.ID,
+		strings.NewReader(`{"session_token":"wrong"}`))
+	wrong.Header.Set("X-Apteva-Project-ID", row.ProjectID)
+	wrongRecorder := httptest.NewRecorder()
+	app.softphoneReleaseAnswer(wrongRecorder, wrong, row.ProjectID, row.ID)
+	if wrongRecorder.Code != http.StatusConflict {
+		t.Fatalf("wrong token status = %d, want %d", wrongRecorder.Code, http.StatusConflict)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/softphone/release/"+row.ID,
+		strings.NewReader(`{"session_token":"session-token"}`))
+	req.Header.Set("X-Apteva-Project-ID", row.ProjectID)
+	recorder := httptest.NewRecorder()
+	app.softphoneReleaseAnswer(recorder, req, row.ProjectID, row.ID)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("release status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	stored, err := app.db().findCall(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "pending" || stored.ThreadID != "pending-"+row.ID || stored.PeerToken != "" || stored.AudioBridgeURL != "pending" {
+		t.Fatalf("browser setup failure was not made retryable: %+v", stored)
+	}
+}
+
 func TestCallsPanelPinsSoftphoneSocketToCurrentOrigin(t *testing.T) {
 	source, err := os.ReadFile("ui/CallsPanel.tsx")
 	if err != nil {
@@ -576,6 +643,8 @@ func TestCallsPanelPinsSoftphoneSocketToCurrentOrigin(t *testing.T) {
 		"new URL(session.media_url, location.href)",
 		"media.host = location.host",
 		"media.protocol = location.protocol",
+		"/softphone/release/",
+		"session_token: session.session_token",
 	} {
 		if !strings.Contains(string(source), required) {
 			t.Fatalf("panel does not keep browser media on the current origin: missing %q", required)

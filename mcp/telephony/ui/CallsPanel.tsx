@@ -609,7 +609,9 @@ function CallsView({ projectId }: NativePanelProps) {
   // Opens the operator's audio path for a call the server has already created.
   // Both dialling out and answering an inbound call funnel through here, so the
   // microphone is acquired in exactly one place.
-  const startAudio = async (session: { call_id: string; media_url: string }) => {
+  type BrowserCallSession = { call_id: string; media_url: string; session_token?: string };
+
+  const startAudio = async (session: BrowserCallSession) => {
     sessionRef.current?.stop();
     const phone = new SoftphoneSession({
       onState: (state, detail) => {
@@ -663,15 +665,27 @@ function CallsView({ projectId }: NativePanelProps) {
   const answerSoftphoneCall = async (call: Call) => {
     setSoftphoneBusy(true);
     setStatus("");
+    let session: BrowserCallSession | null = null;
     try {
-      const session = await postJSON<{ call_id: string; media_url: string }>(
+      session = await postJSON<BrowserCallSession>(
         withProject(`/softphone/answer/${encodeURIComponent(call.id)}`), {},
       );
       await startAudio(session);
       setStatus(`connected to ${call.fromNumber || call.id}`);
     } catch (e) {
+      if (session?.session_token) {
+        try {
+          await postJSON(
+            withProject(`/softphone/release/${encodeURIComponent(session.call_id)}`),
+            { session_token: session.session_token },
+          );
+        } catch {
+          // A carrier event may have ended the call while browser setup failed.
+        }
+      }
       setStatus((e as Error).message || "Answer failed");
       endSoftphone();
+      void loadCalls();
     } finally {
       setSoftphoneBusy(false);
     }

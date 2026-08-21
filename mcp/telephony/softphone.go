@@ -436,16 +436,19 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 		a.softphonePlace(w, r, project)
 	case strings.HasPrefix(action, "answer/"):
 		a.softphoneAnswer(w, r, project, strings.TrimPrefix(action, "answer/"))
+	case strings.HasPrefix(action, "release/"):
+		a.softphoneReleaseAnswer(w, r, project, strings.TrimPrefix(action, "release/"))
 	default:
 		http.NotFound(w, r)
 	}
 }
 
 type softphoneSession struct {
-	CallID   string `json:"call_id"`
-	MediaURL string `json:"media_url"`
-	To       string `json:"to,omitempty"`
-	From     string `json:"from,omitempty"`
+	CallID       string `json:"call_id"`
+	MediaURL     string `json:"media_url"`
+	SessionToken string `json:"session_token,omitempty"`
+	To           string `json:"to,omitempty"`
+	From         string `json:"from,omitempty"`
 }
 
 // softphoneMediaURL is the install-scoped path the operator's browser dials.
@@ -511,10 +514,11 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 			return
 		}
 		writeJSON(w, softphoneSession{
-			CallID:   row.ID,
-			MediaURL: a.softphoneMediaURL(row.ID, row.PeerToken),
-			To:       row.ToNumber,
-			From:     row.FromNumber,
+			CallID:       row.ID,
+			MediaURL:     a.softphoneMediaURL(row.ID, row.PeerToken),
+			SessionToken: row.PeerToken,
+			To:           row.ToNumber,
+			From:         row.FromNumber,
 		})
 		return
 	}
@@ -540,11 +544,46 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		return
 	}
 	writeJSON(w, softphoneSession{
-		CallID:   callID,
-		MediaURL: a.softphoneMediaURL(callID, peerToken),
-		To:       row.ToNumber,
-		From:     row.FromNumber,
+		CallID:       callID,
+		MediaURL:     a.softphoneMediaURL(callID, peerToken),
+		SessionToken: peerToken,
+		To:           row.ToNumber,
+		From:         row.FromNumber,
 	})
+}
+
+// softphoneReleaseAnswer makes a browser-side setup failure retryable. The
+// per-session token prevents another tab from releasing an unrelated claim.
+// resetAnswerClaim only touches an unanswered, media-inactive call, so a late
+// release can never roll an already connected carrier leg back to pending.
+func (a *App) softphoneReleaseAnswer(w http.ResponseWriter, r *http.Request, project, callID string) {
+	callID = strings.Trim(callID, "/")
+	var body struct {
+		SessionToken string `json:"session_token"`
+	}
+	if callID == "" || strings.Contains(callID, "/") || decodeJSONBody(r, &body) != nil {
+		http.Error(w, "invalid release request", http.StatusBadRequest)
+		return
+	}
+	row, err := a.db().findCall(callID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if row == nil || row.ProjectID != project {
+		http.Error(w, "unknown call_id", http.StatusNotFound)
+		return
+	}
+	if row.Status != "answering" || row.PeerKind != peerKindHuman ||
+		row.PeerToken == "" || !secureEqual(body.SessionToken, row.PeerToken) {
+		http.Error(w, "answer session is not releasable", http.StatusConflict)
+		return
+	}
+	if err := a.db().resetAnswerClaim(callID); err != nil {
+		http.Error(w, "release answer: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "pending"})
 }
 
 // setRouteAnswerMode lets the panel flip an inbound route between agent
