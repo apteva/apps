@@ -692,9 +692,12 @@ func (a *App) placeHumanCall(ctx *sdk.AppCtx, projectID, to, requestedFrom strin
 	now := time.Now().UTC()
 	callID := newCallID()
 	peerToken := newSecret()
+	// calls.thread_id is unique even for human calls that never spawn a
+	// realtime thread. A stable synthetic id prevents a legacy empty-id row
+	// (or any earlier browser call) from blocking every later outbound call.
 	row := callRow{
 		ID:                     callID,
-		ThreadID:               "",
+		ThreadID:               "human-" + callID,
 		Direction:              "outbound",
 		AgentID:                0,
 		CarrierSlug:            carrier.Slug(),

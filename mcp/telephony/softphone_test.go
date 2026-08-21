@@ -784,6 +784,45 @@ func TestSoftphoneBrowserSetupFailureReleasesAnswerClaim(t *testing.T) {
 	}
 }
 
+func TestRepeatedOutboundSoftphoneCallsUseUniqueHumanThreadIDs(t *testing.T) {
+	platform := &answerPlatform{
+		bindings: map[string]any{"carrier": int64(9)},
+		credentials: &sdk.ConnectionCredentials{
+			Slug: "twilio", Fields: map[string]string{
+				"auth_token": "test-auth-token", "phone_number": "+14155550101",
+			},
+		},
+		integrationResponse: map[string]json.RawMessage{
+			"make_call": json.RawMessage(`{"sid":"CA-outbound"}`),
+		},
+	}
+	app, ctx := withTelephonyTestContext(t, platform)
+	legacy := testCall("legacy-empty-thread", "completed")
+	legacy.ThreadID = ""
+	legacy.Direction = "inbound"
+	legacy.PeerKind = peerKindHuman
+	if err := app.db().insertCall(legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]bool{}
+	for index := 0; index < 2; index++ {
+		session, err := app.placeHumanCall(ctx, "project-a", "+14155550100", "+14155550101", nil)
+		if err != nil {
+			t.Fatalf("outbound call %d failed: %v", index+1, err)
+		}
+		row, err := app.db().findCall(session.CallID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "human-" + session.CallID
+		if row.ThreadID != want || seen[row.ThreadID] {
+			t.Fatalf("outbound call %d thread_id=%q, want unique %q", index+1, row.ThreadID, want)
+		}
+		seen[row.ThreadID] = true
+	}
+}
+
 func TestCallsPanelPinsSoftphoneSocketToCurrentOrigin(t *testing.T) {
 	source, err := os.ReadFile("ui/CallsPanel.tsx")
 	if err != nil {
