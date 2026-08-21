@@ -41,6 +41,7 @@ type gig struct {
 	Assignments          []gigAssignmentView `json:"assignments,omitempty"`
 	Submission           *submission         `json:"submission,omitempty"`
 	Submissions          []*submission       `json:"submissions,omitempty"`
+	Compensation         *gigCompensation    `json:"compensation,omitempty"`
 }
 
 type gigInstructionRow struct {
@@ -306,6 +307,10 @@ func (a *App) toolGigsCreateFromTemplate(ctx *sdk.AppCtx, args map[string]any) (
 	rendered := renderCompositionForGig(composition, vars)
 	derived := deriveFromComposition(rendered)
 	title := interpolate(tplv.TitleTemplate, vars)
+	compensation, err := compensationQuoteForCreate(ctx, pid, tid, int64Arg(args, "worker_id"), args)
+	if err != nil {
+		return nil, err
+	}
 
 	g, ass, err := createGig(ctx, pid, createOpts{
 		TemplateVersionID:  activeVID,
@@ -320,6 +325,10 @@ func (a *App) toolGigsCreateFromTemplate(ctx *sdk.AppCtx, args map[string]any) (
 		NotifyWorker:       boolArg(args, "notify_worker", false),
 		PublicDomainID:     int64Arg(args, "public_domain_id"),
 		DefaultDeadlineHrs: tplv.DefaultDeadlineHours,
+		Compensation:       compensation,
+		ContractID:         int64Arg(args, "_contract_id"),
+		MilestoneID:        int64Arg(args, "_milestone_id"),
+		OverrideReason:     strArg(args, "compensation_override_reason"),
 	})
 	if err != nil {
 		return nil, err
@@ -403,6 +412,10 @@ func (a *App) toolGigsCreateFromInstructions(ctx *sdk.AppCtx, args map[string]an
 	rendered := renderCompositionForGig(items, vars)
 	derived := deriveFromComposition(rendered)
 	title = interpolate(title, vars)
+	compensation, err := compensationQuoteForCreate(ctx, pid, 0, int64Arg(args, "worker_id"), args)
+	if err != nil {
+		return nil, err
+	}
 	g, ass, err := createGig(ctx, pid, createOpts{
 		Title:          title,
 		Vars:           vars,
@@ -414,6 +427,10 @@ func (a *App) toolGigsCreateFromInstructions(ctx *sdk.AppCtx, args map[string]an
 		WorkerID:       int64Arg(args, "worker_id"),
 		NotifyWorker:   boolArg(args, "notify_worker", false),
 		PublicDomainID: int64Arg(args, "public_domain_id"),
+		Compensation:   compensation,
+		ContractID:     int64Arg(args, "_contract_id"),
+		MilestoneID:    int64Arg(args, "_milestone_id"),
+		OverrideReason: strArg(args, "compensation_override_reason"),
 	})
 	if err != nil {
 		return nil, err
@@ -464,6 +481,10 @@ func (a *App) toolGigsCreateInline(ctx *sdk.AppCtx, args map[string]any) (any, e
 	rendered := renderCompositionForGig(items, vars)
 	derived := deriveFromComposition(rendered)
 	title = interpolate(title, vars)
+	compensation, err := compensationQuoteForCreate(ctx, pid, 0, int64Arg(args, "worker_id"), args)
+	if err != nil {
+		return nil, err
+	}
 	g, ass, err := createGig(ctx, pid, createOpts{
 		Title:          title,
 		Vars:           vars,
@@ -475,6 +496,10 @@ func (a *App) toolGigsCreateInline(ctx *sdk.AppCtx, args map[string]any) (any, e
 		WorkerID:       int64Arg(args, "worker_id"),
 		NotifyWorker:   boolArg(args, "notify_worker", false),
 		PublicDomainID: int64Arg(args, "public_domain_id"),
+		Compensation:   compensation,
+		ContractID:     int64Arg(args, "_contract_id"),
+		MilestoneID:    int64Arg(args, "_milestone_id"),
+		OverrideReason: strArg(args, "compensation_override_reason"),
 	})
 	if err != nil {
 		return nil, err
@@ -501,6 +526,28 @@ type createOpts struct {
 	NotifyWorker       bool
 	PublicDomainID     int64
 	DefaultDeadlineHrs int
+	Compensation       *rateQuote
+	ContractID         int64
+	MilestoneID        int64
+	OverrideReason     string
+}
+
+func compensationQuoteForCreate(ctx *sdk.AppCtx, pid string, templateID, workerID int64, args map[string]any) (*rateQuote, error) {
+	if explicit, ok := args["_compensation_quote"].(*rateQuote); ok {
+		return explicit, nil
+	}
+	if workerID == 0 {
+		return nil, nil
+	}
+	quantity := floatArg(args, "quantity", 1)
+	quote, err := resolveRate(ctx.AppDB(), pid, templateID, int64Arg(args, "_offer_package_id"), workerID, quantity, strArg(args, "currency"))
+	if err != nil {
+		return nil, err
+	}
+	if quote == nil || !quote.Configured {
+		return nil, nil
+	}
+	return quote, nil
 }
 
 func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentView, error) {
@@ -606,6 +653,12 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 			return nil, nil, err
 		}
 	}
+	if o.Compensation != nil {
+		o.Compensation.WorkerID = o.WorkerID
+		if err := insertGigCompensationTx(tx, pid, gigID, o.Compensation, o.ContractID, o.MilestoneID, o.OverrideReason); err != nil {
+			return nil, nil, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
@@ -685,11 +738,32 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, 
 	if expiresAt == "" {
 		expiresAt = time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339)
 	}
+	var assignmentQuote *rateQuote
+	if g.Compensation == nil {
+		var templateID int64
+		if g.TemplateVersionID > 0 {
+			_ = ctx.AppDB().QueryRow(`SELECT template_id FROM template_versions WHERE id=?`, g.TemplateVersionID).Scan(&templateID)
+		}
+		quote, qErr := resolveRate(ctx.AppDB(), pid, templateID, 0, workerID, 1, "")
+		if qErr != nil {
+			return nil, qErr
+		}
+		if quote != nil && quote.Configured {
+			assignmentQuote = quote
+		}
+	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	// Assigning a previously-open gig freezes the then-current standard rate.
+	// Existing snapshots are never replaced.
+	if assignmentQuote != nil {
+		if err := insertGigCompensationTx(tx, pid, gigID, assignmentQuote, 0, 0, ""); err != nil {
+			return nil, err
+		}
+	}
 	if mode == "direct" {
 		if _, err := tx.Exec(`
 			UPDATE gig_assignments
@@ -1042,6 +1116,9 @@ func (a *App) toolGigsCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	if err := syncContractFromGig(ctx.AppDB(), pid, id, "cancelled"); err != nil {
+		ctx.Logger().Warn("sync contract milestone after gig cancellation failed", "gig_id", id, "err", err.Error())
+	}
 	// Notify only workers who were explicitly notified about the offer.
 	for _, ass := range g.Assignments {
 		if ass.Status == "offered" || ass.Status == "accepted" {
@@ -1319,6 +1396,9 @@ func (a *App) toolGigsAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	if err := syncContractFromGig(ctx.AppDB(), pid, id, "reviewed"); err != nil {
+		ctx.Logger().Warn("sync contract milestone after gig review failed", "gig_id", id, "err", err.Error())
+	}
 	// Log to the worker's CRM timeline.
 	if wk, _ := getWorker(ctx.AppDB(), pid, workerID); wk != nil {
 		_ = crmLogActivity(ctx, pid, wk.ContactID, "note",
@@ -1329,6 +1409,11 @@ func (a *App) toolGigsAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		"submission_id": subID,
 		"worker_id":     workerID,
 	})
+	if boolArg(map[string]any{"enabled": ctx.Config().Get("auto_create_worker_payables")}, "enabled", false) {
+		if _, _, payableErr := createGigPayable(ctx, pid, id); payableErr != nil {
+			ctx.Logger().Warn("automatic gig payable failed", "gig_id", id, "err", payableErr.Error())
+		}
+	}
 	g, _ = loadGig(ctx, pid, id)
 	return map[string]any{"gig": g}, nil
 }
@@ -1427,6 +1512,9 @@ func (a *App) toolGigsReject(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	if err := syncContractFromGig(ctx.AppDB(), pid, id, "rejected"); err != nil {
+		ctx.Logger().Warn("sync contract milestone after gig rejection failed", "gig_id", id, "err", err.Error())
+	}
 	ctx.EmitWithProject("gig.rejected", pid, map[string]any{
 		"gig_id": id, "submission_id": submissionID, "worker_id": workerID, "reason": reason,
 	})
@@ -1487,6 +1575,7 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 	_ = parseJSON(checklist.String, &g.DerivedChecklist)
 	_ = parseJSON(vars2.String, &g.DerivedVariables)
 	_ = parseJSON(result.String, &g.Result)
+	g.Compensation, _ = loadGigCompensation(db, pid, id)
 	// Composition.
 	rows, err := db.Query(
 		`SELECT gi.id, gi.sort_order, gi.instruction_kind, gi.rendered_body_json, gi.result_key,
@@ -1704,7 +1793,9 @@ func (a *App) handleHTTPGigsCollection(w http.ResponseWriter, r *http.Request) {
 		// → from_template; instructions present and items have kind →
 		// inline; instructions with instruction_id → from_instructions.
 		var out any
-		if body["template_id"] != nil || body["template_slug"] != nil {
+		if body["offer_id"] != nil || body["offer_slug"] != nil {
+			out, err = a.toolGigsCreateFromOffer(ctx, body)
+		} else if body["template_id"] != nil || body["template_slug"] != nil {
 			out, err = a.toolGigsCreateFromTemplate(ctx, body)
 		} else if items, ok := body["instructions"].([]any); ok && len(items) > 0 {
 			if first, ok := items[0].(map[string]any); ok && first["kind"] != nil {

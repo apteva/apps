@@ -234,6 +234,7 @@ func workerPageHTML(token string) string {
         "<h1>" + escapeHTML(gig.title) + "</h1>" +
         "<div class='meta-row'>" +
           "<span class='pill'>Deadline: " + escapeHTML(formatDeadline(gig.deadline_at)) + "</span>" +
+          (gig.compensation ? "<span class='pill'>Agreed pay: " + escapeHTML(formatMoney(gig.compensation.worker_amount_minor, gig.compensation.currency)) + "</span>" : "") +
           "<span class='pill'>" + (gig.composition || []).length + " instruction" + ((gig.composition || []).length === 1 ? "" : "s") + "</span>" +
         "</div>" +
 	        "<div class='summary'>" + escapeHTML(summaryText()) + "</div>";
@@ -846,6 +847,11 @@ func workerPageHTML(token string) string {
       if (Number.isNaN(d.getTime())) return s;
 	      return d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 	    }
+	    function formatMoney(amountMinor, currency) {
+	      const amount = Number(amountMinor || 0) / 100;
+	      try { return new Intl.NumberFormat([], { style: "currency", currency: currency || "USD" }).format(amount); }
+	      catch (_) { return (currency || "") + " " + amount.toFixed(2); }
+	    }
 	    function publicWorkerURL(path) {
 	      const exp = Math.floor(Date.now() / 1000) + 86400;
 	      return API + path + "?sig=" + encodeURIComponent(TOKEN) + "&exp=" + exp;
@@ -1032,6 +1038,7 @@ type workerGigPayload struct {
 	Composition        []map[string]any `json:"composition"`
 	RequiredResultKeys []string         `json:"required_result_keys,omitempty"`
 	Submission         *submission      `json:"submission,omitempty"`
+	Compensation       *gigCompensation `json:"compensation,omitempty"`
 }
 
 func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token string) {
@@ -1101,6 +1108,7 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token 
 			Composition:        rendered,
 			RequiredResultKeys: requiredResultKeys(g.DerivedResultSchema),
 			Submission:         submission,
+			Compensation:       g.Compensation,
 		},
 	})
 }
@@ -1355,6 +1363,9 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 	if err := tx.Commit(); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if err := syncContractFromGig(ctx.AppDB(), pid, gigID, "submitted"); err != nil {
+		ctx.Logger().Warn("sync contract milestone after web submission failed", "gig_id", gigID, "err", err.Error())
 	}
 	ctx.EmitWithProject("gig.submitted", pid, map[string]any{
 		"gig_id":        gigID,
@@ -1732,6 +1743,9 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 	}
 	if err := tx.Commit(); err != nil {
 		return err
+	}
+	if err := syncContractFromGig(ctx.AppDB(), pid, gigID, "submitted"); err != nil {
+		ctx.Logger().Warn("sync contract milestone after channel submission failed", "gig_id", gigID, "err", err.Error())
 	}
 	ctx.EmitWithProject("gig.submitted", pid, map[string]any{
 		"gig_id":        gigID,

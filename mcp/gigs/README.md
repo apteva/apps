@@ -1,9 +1,39 @@
-# Gigs (v0.1.26)
+# Gigs (v0.2.0)
 
-Agents delegate atomic work to human workers (CRM contacts) by composing
-reusable multi-modal instructions. Templates are saved instruction sets;
-gigs are dispatched snapshots. Async by default — agents resume when the
-worker submits.
+Gigs is a generic work marketplace and execution engine. Agents can define
+standard services and packages, know the usual customer offer and worker pay,
+negotiate open jobs into contracts, and dispatch immutable work snapshots to
+human workers (CRM contacts). Async execution remains the core: agents resume
+when the worker submits.
+
+## Commercial model
+
+The commercial layer is deliberately split from execution:
+
+1. **Pay grades** classify compensation independently from skill proficiency.
+   A worker has one grade and may also have worker-specific overrides.
+2. **Rate cards** define effective worker pay by worker or grade, optionally
+   narrowed to a template or offer package. Resolution is deterministic:
+   worker+package, worker+template, package+grade, template+grade, general
+   grade rate, then the grade default.
+3. **Standard offers** wrap a published Gigs template in Basic, Standard,
+   Premium, or custom packages. Each package captures scope, delivery,
+   revisions, sell price, and pricing model.
+4. **Contracts and milestones** snapshot accepted customer and worker terms.
+   They may come from a package, direct negotiation, an order, a subscription,
+   or an accepted worker proposal.
+5. **Gig compensation** is frozen when work is dispatched or assigned. Later
+   rate changes never rewrite agreed pay. The worker link shows that amount.
+
+`offers_recommend` is the agent-facing preflight: it returns the matched
+standard offer/package, customer price, resolved worker compensation, source
+of that rate, and estimated margin. `gigs_create_from_offer` applies the same
+decision and snapshots it atomically with the gig.
+
+For project-first work, use `job_posts_create`, `proposals_submit`, and
+`proposals_accept`. A contract milestone is turned into executable work with
+`contracts_dispatch_milestone`; submission and approval then update the
+milestone, and the contract completes after all milestones are resolved.
 
 ## Three layers
 
@@ -100,14 +130,27 @@ a terminal state", not "succeeded" — filter on `status` when you mean success.
 assignment and as a `gig_event`, and returns the gig to an earlier status
 (`submitted`, `accepted`, `offered`, or `open`).
 
-## Hard deps
+## App boundaries and dependencies
 
 - `crm` (required) — workers are CRM contacts; notifications and timeline
   logging go through `crm.contacts_send_message` / `contacts_log_activity`.
 - `storage` (required) — audio/video instruction media and worker submissions live
   under `/.gigs/` (configurable).
+- `catalog` (required) — owns customer-facing products and immutable sell-side
+  prices. Publishing an offer synchronizes its service product and package
+  prices there.
+- `bills` (optional) — owns worker accounts payable. `gigs_create_payable`
+  creates an idempotent bill after work is reviewed; the
+  `auto_create_worker_payables` config can do this automatically.
+- `orders` (optional) — may create an order-sourced contract for service
+  fulfillment. Gigs stores the order reference but remains the authority for
+  scope, assignment, delivery, and worker compensation.
 - `domains` (optional) — publishes branded worker-link hostnames through
   Domains-managed DNS and server-native ingress. No CDN app is required.
+
+Gigs has no direct dependency on Checkout or Billing. Checkout is a payment
+entry point and Billing is the customer receivables ledger; both operate
+through Catalog/Orders rather than becoming part of worker compensation.
 
 ## Public worker links
 
@@ -140,7 +183,9 @@ APTEVA_PROJECT_ID=test ./gigs           # smoke run; binds to :8080
 curl http://localhost:8080/health
 ```
 
-See `migrations/001_init.sql` for the schema. Each Go file is one
+See `migrations/001_init.sql` and `migrations/004_marketplace.sql` for the
+schema. Each Go file is one
 surface: `workers.go`, `instructions.go`, `templates.go`, `gigs.go`,
 `worker_page.go`, `composition.go` (derivation), `crm.go` /
-`storage.go` (inter-app helpers).
+`storage.go` (inter-app helpers), and `marketplace_*.go` (commercial model,
+contracts, HTTP/MCP APIs, and Catalog/Bills integrations).

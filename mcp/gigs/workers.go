@@ -33,6 +33,8 @@ type worker struct {
 	Skills []workerSkillView `json:"skills,omitempty"`
 	// Hydrated from gig_assignments.
 	OpenAssignments int64 `json:"open_assignments,omitempty"`
+	// Commercial level is deliberately separate from skill proficiency.
+	PayProfile *workerPayProfile `json:"pay_profile,omitempty"`
 }
 
 type workerSkillView struct {
@@ -524,6 +526,7 @@ func getWorker(db *sql.DB, pid string, id int64) (*worker, error) {
 	w.DefaultChannel = defaultChannel.String
 	w.Notes = notes.String
 	w.ArchivedAt = archivedAt.String
+	w.PayProfile, _ = getWorkerPayProfile(db, pid, id)
 	return w, nil
 }
 
@@ -722,6 +725,13 @@ func hydrateWorkerRows(ctx *sdk.AppCtx, pid string, workers []*worker, includeCo
 	if err := countRows.Close(); err != nil {
 		return err
 	}
+	for _, item := range workers {
+		profile, err := getWorkerPayProfile(ctx.AppDB(), pid, item.ID)
+		if err != nil {
+			return err
+		}
+		item.PayProfile = profile
+	}
 	if !includeContacts {
 		return nil
 	}
@@ -901,6 +911,28 @@ func (a *App) handleHTTPWorkerItem(w http.ResponseWriter, r *http.Request) {
 		default:
 			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
+		return
+	}
+	if len(parts) == 2 && parts[1] == "pay-grade" {
+		if r.Method != http.MethodPut && r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var body map[string]any
+		if err := httpDecode(r, &body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		if body == nil {
+			body = map[string]any{}
+		}
+		body["_project_id"], body["worker_id"] = pid, id
+		out, err := a.toolWorkersSetPayGrade(ctx, body)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, out)
 		return
 	}
 	switch r.Method {

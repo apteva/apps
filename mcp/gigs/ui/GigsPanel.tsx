@@ -1,5 +1,5 @@
 // GigsPanel — dashboard surface for the gigs app. Four tabs:
-//   Queue, Templates, Instructions, Workers
+//   Queue, Offers, Rates, Marketplace, Templates, Instructions, Workers
 // All API calls go through /api/apps/gigs/* (the platform's reverse
 // proxy). Worker creation lives on the Workers tab and can either
 // promote an existing CRM contact or create/match one by channel.
@@ -53,6 +53,7 @@ interface Worker {
   open_assignments?: number;
   contact?: CrmContact;
   skills?: WorkerSkill[];
+  pay_profile?: { worker_id:number; currency?:string; pay_grade?: PayGrade };
 }
 interface Skill {
   id: number;
@@ -155,7 +156,15 @@ interface Gig {
   submission?: Submission;
   submissions?: Submission[];
   rejection_reason?: string;
+  compensation?: GigCompensation;
 }
+interface PayGrade { id: number; slug: string; name: string; rank: number; description?: string; default_pricing_model?: string; default_amount_minor?: number; currency?: string; active: boolean; }
+interface RateCard { id: number; template_id?: number; offer_package_id?: number; pay_grade_id?: number; worker_id?: number; pricing_model: string; amount_minor: number; currency: string; unit?: string; status: string; source: string; }
+interface OfferPackage { id: number; offer_id: number; slug: string; name: string; tier?: string; description?: string; scope?: Record<string, unknown>; pricing_model: string; quantity?: number; unit?: string; delivery_days?: number; revisions?: number; customer_amount_minor?: number; currency?: string; catalog_price_id?: number; active: boolean; sort_order: number; }
+interface StandardOffer { id: number; template_id: number; slug: string; name: string; description?: string; category?: string; visibility: string; status: string; version: number; catalog_product_id?: number; packages?: OfferPackage[]; }
+interface GigCompensation { pricing_model: string; rate_amount_minor: number; quantity: number; unit?: string; worker_amount_minor: number; customer_amount_minor?: number; currency: string; rate_source: string; payable_status: string; payable_bill_id?: number; }
+interface JobPost { id: number; title: string; description?: string; status: string; visibility: string; budget_min_minor?: number; budget_max_minor?: number; currency?: string; deadline_at?: string; }
+interface ContractRecord { id: number; title: string; source_type: string; worker_id?: number; pricing_model: string; customer_amount_minor?: number; worker_amount_minor?: number; currency: string; status: string; milestones?: Array<{ id:number; title:string; status:string; worker_amount_minor?:number; currency:string }>; }
 interface StorageFile {
   id: number;
   name: string;
@@ -449,7 +458,7 @@ function contactLine(c: CrmContact): string {
 
 // ─── shell ───────────────────────────────────────────────────────
 
-type Tab = "queue" | "templates" | "instructions" | "workers" | "public-links";
+type Tab = "queue" | "offers" | "rates" | "marketplace" | "templates" | "instructions" | "workers" | "public-links";
 
 export default function GigsPanel(props: NativePanelProps) {
   const { projectId } = props;
@@ -457,7 +466,7 @@ export default function GigsPanel(props: NativePanelProps) {
   return (
     <div className="flex flex-col h-full bg-bg text-text">
       <nav className="flex gap-1 border-b border-border px-3 pt-3 overflow-x-auto shrink-0">
-        {(["queue","templates","instructions","workers","public-links"] as Tab[]).map((t) => (
+        {(["queue","offers","rates","marketplace","templates","instructions","workers","public-links"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -474,6 +483,9 @@ export default function GigsPanel(props: NativePanelProps) {
       </nav>
       <div className="flex-1 overflow-auto">
         {tab === "queue"        && <QueueTab projectId={projectId} />}
+        {tab === "offers"       && <OffersTab projectId={projectId} />}
+        {tab === "rates"        && <RatesTab projectId={projectId} />}
+        {tab === "marketplace"  && <MarketplaceTab projectId={projectId} />}
         {tab === "templates"    && <TemplatesTab projectId={projectId} />}
         {tab === "instructions" && <InstructionsTab projectId={projectId} />}
         {tab === "workers"      && <WorkersTab projectId={projectId} />}
@@ -612,6 +624,23 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
           </div>
         </div>
       </Panel>
+
+      {g.compensation && (
+        <Panel className="p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs uppercase tracking-wide text-text-muted">Agreed worker compensation</div>
+              <div className="mt-1 text-lg font-semibold">{formatMoneyMinor(g.compensation.worker_amount_minor, g.compensation.currency)}</div>
+              <div className="text-xs text-text-muted">
+                {g.compensation.pricing_model}{g.compensation.unit ? ` · ${g.compensation.quantity} ${g.compensation.unit}` : ""} · {g.compensation.rate_source}
+              </div>
+            </div>
+            <Pill tone={g.compensation.payable_status === "created" ? "success" : g.compensation.payable_status === "failed" ? "danger" : "default"}>
+              payable: {g.compensation.payable_status}
+            </Pill>
+          </div>
+        </Panel>
+      )}
 
       <div>
         <h3 className="text-sm font-semibold text-text-muted uppercase tracking-wide">Composition</h3>
@@ -939,9 +968,13 @@ function SubmissionFileLink({
 function NewGigForm({
   projectId, onDone, onCancel,
 }: { projectId: string; onDone: (gig: Gig) => void; onCancel: () => void }) {
-  const [mode, setMode] = useState<"template" | "instructions">("template");
+  const [mode, setMode] = useState<"offer" | "template" | "instructions">("offer");
   const [templates, setTemplates] = useState<Template[]>([]);
   const [instructions, setInstructions] = useState<Instruction[]>([]);
+  const [offers, setOffers] = useState<StandardOffer[]>([]);
+  const [offerId, setOfferId] = useState("");
+  const [packageId, setPackageId] = useState("");
+  const [quantity, setQuantity] = useState("1");
   const [templateId, setTemplateId] = useState("");
   const [title, setTitle] = useState("");
   const [varsText, setVarsText] = useState("{}");
@@ -965,9 +998,20 @@ function NewGigForm({
     api<{ instructions: Instruction[] }>("/instructions?include_archived=false", projectId)
       .then((d) => setInstructions(d.instructions || []))
       .catch(() => setInstructions([]));
-  }, [projectId, templateId]);
+    api<{ offers: StandardOffer[] }>("/offers?status=active", projectId)
+      .then((d) => {
+        setOffers(d.offers || []);
+        if (!offerId && d.offers?.[0]) {
+          setOfferId(String(d.offers[0].id));
+          const first = d.offers[0].packages?.find((p) => p.active);
+          if (first) { setPackageId(String(first.id)); setQuantity(String(first.quantity || 1)); }
+        }
+      }).catch(() => setOffers([]));
+  }, [projectId, templateId, offerId]);
 
   const selectedTemplate = templates.find((t) => String(t.id) === templateId);
+  const selectedOffer = offers.find((o) => String(o.id) === offerId);
+  const selectedPackage = selectedOffer?.packages?.find((p) => String(p.id) === packageId);
   const selectedInstructions = selectedInstructionIds
     .map((id) => instructions.find((i) => i.id === id))
     .filter(Boolean) as Instruction[];
@@ -985,7 +1029,10 @@ function NewGigForm({
         notify_worker: workerId ? notifyWorker : undefined,
         public_domain_id: workerId && publicDomainId ? Number(publicDomainId) : undefined,
       };
-      if (mode === "template") {
+      if (mode === "offer") {
+        if (!offerId || !packageId) throw new Error("Select a published offer package");
+        body.offer_id = Number(offerId); body.package_id = Number(packageId); body.quantity = Number(quantity || 1);
+      } else if (mode === "template") {
         if (!templateId) throw new Error("Select a published template");
         body.template_id = Number(templateId);
       } else {
@@ -1017,12 +1064,25 @@ function NewGigForm({
         value={mode}
         onChange={setMode}
         options={[
+          { value: "offer", label: "Standard offer" },
           { value: "template", label: "From template" },
           { value: "instructions", label: "From instructions" },
         ]}
       />
 
-      {mode === "template" ? (
+      {mode === "offer" ? (
+        <div className="space-y-2">
+          <Field as="select" value={offerId} onChange={(e) => {
+            const next = offers.find((o) => String(o.id) === e.target.value); setOfferId(e.target.value);
+            const first = next?.packages?.find((p) => p.active); setPackageId(first ? String(first.id) : ""); setQuantity(String(first?.quantity || 1));
+          }} required><option value="">Select standard offer</option>{offers.map((o)=><option key={o.id} value={o.id}>{o.name}</option>)}</Field>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            <Field as="select" value={packageId} onChange={(e) => { const p=selectedOffer?.packages?.find((x)=>String(x.id)===e.target.value);setPackageId(e.target.value);setQuantity(String(p?.quantity||1)); }} required><option value="">Select package</option>{selectedOffer?.packages?.filter((p)=>p.active).map((p)=><option key={p.id} value={p.id}>{p.name} · {formatMoneyMinor(p.customer_amount_minor||0,p.currency||"EUR")}</option>)}</Field>
+            <Field type="number" min="0.01" step="0.01" value={quantity} onChange={(e)=>setQuantity(e.target.value)} placeholder="Quantity" required/>
+          </div>
+          {selectedPackage && <div className="text-xs text-text-muted">{selectedPackage.description || selectedPackage.tier || selectedPackage.slug} · {selectedPackage.delivery_days || "—"} days · {selectedPackage.revisions ?? 0} revisions</div>}
+        </div>
+      ) : mode === "template" ? (
         <div className="space-y-2">
           <Field as="select" value={templateId} onChange={(e) => setTemplateId(e.target.value)} required>
             <option value="">Select published template</option>
@@ -1368,6 +1428,90 @@ function summariseBody(kind: string, body: Record<string, unknown>): string {
     return (body.caption ? String(body.caption) : `[${kind}]`) + response;
   if (kind.startsWith("input_")) return String(body.label || "");
   return "";
+}
+
+// ─── Offers ─────────────────────────────────────────────────────
+
+function OffersTab({ projectId }: { projectId: string }) {
+  const [offers, setOffers] = useState<StandardOffer[]>([]);
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [name, setName] = useState("");
+  const [templateId, setTemplateId] = useState("");
+  const [description, setDescription] = useState("");
+  const [category, setCategory] = useState("");
+  const [visibility, setVisibility] = useState("private");
+  const [packagesText, setPackagesText] = useState("[]");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const reload = useCallback(async () => {
+    try {
+      const [offerData, templateData] = await Promise.all([
+        api<{ offers: StandardOffer[] }>("/offers", projectId),
+        api<{ templates: Template[] }>("/templates?include_archived=false", projectId),
+      ]);
+      setOffers(offerData.offers || []);
+      setTemplates((templateData.templates || []).filter((t) => t.current_version?.status === "active"));
+      if (!selectedId && offerData.offers?.[0]) setSelectedId(offerData.offers[0].id);
+    } catch (e) { setErr((e as Error).message); }
+  }, [projectId, selectedId]);
+  useEffect(() => { reload(); }, [reload]);
+  const selected = offers.find((o) => o.id === selectedId);
+  useEffect(() => {
+    if (selected) setPackagesText(JSON.stringify((selected.packages || []).filter((p) => p.active).map((p) => ({
+      slug:p.slug,name:p.name,tier:p.tier,description:p.description,scope:p.scope,pricing_model:p.pricing_model,
+      quantity:p.quantity,unit:p.unit,delivery_days:p.delivery_days,revisions:p.revisions,
+      customer_amount_minor:p.customer_amount_minor,currency:p.currency,sort_order:p.sort_order,
+    })), null, 2));
+  }, [selectedId, selected?.version]);
+  const create = async (e: React.FormEvent) => {
+    e.preventDefault(); setBusy(true); setErr(null);
+    try {
+      const data = await api<{ offer: StandardOffer }>("/offers", projectId, { method:"POST", body:JSON.stringify({name,template_id:Number(templateId),description,category,visibility}) });
+      setName(""); setDescription(""); setCategory(""); setSelectedId(data.offer.id); await reload();
+    } catch (e2) { setErr((e2 as Error).message); } finally { setBusy(false); }
+  };
+  const savePackages = async () => {
+    if (!selected) return; setBusy(true); setErr(null);
+    try {
+      const packages = JSON.parse(packagesText);
+      if (!Array.isArray(packages)) throw new Error("Packages JSON must be an array");
+      await api(`/offers/${selected.id}/packages`, projectId, {method:"PUT",body:JSON.stringify({packages})}); await reload();
+    } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
+  };
+  const publish = async () => { if (!selected) return; setBusy(true);setErr(null);try{await api(`/offers/${selected.id}/publish`,projectId,{method:"POST",body:"{}"});await reload();}catch(e){setErr((e as Error).message);}finally{setBusy(false);} };
+  return <div className="grid grid-cols-1 xl:grid-cols-[360px_1fr] min-h-full">
+    <aside className="border-r border-border p-4 space-y-4">
+      <div><h2 className="font-semibold">Standard offers</h2><p className="text-xs text-text-muted mt-1">What the business sells, backed by executable templates.</p></div>
+      <div className="space-y-1">{offers.map((o)=><button key={o.id} onClick={()=>setSelectedId(o.id)} className={cx("w-full text-left rounded border p-3",selectedId===o.id?"border-accent bg-accent/10":"border-border hover:bg-bg-subtle")}><div className="flex justify-between gap-2"><span className="font-medium">{o.name}</span><Pill tone={o.status==="active"?"success":"default"}>{o.status}</Pill></div><div className="text-xs text-text-muted mt-1">/{o.slug} · v{o.version} · {o.packages?.filter((p)=>p.active).length||0} packages</div></button>)}</div>
+      <Panel className="p-3"><form onSubmit={create} className="space-y-2"><h3 className="text-sm font-semibold">New offer</h3><Field value={name} onChange={(e)=>setName(e.target.value)} placeholder="Offer name" required/><Field as="select" value={templateId} onChange={(e)=>setTemplateId(e.target.value)} required><option value="">Published template…</option>{templates.map((t)=><option key={t.id} value={t.id}>{t.name}</option>)}</Field><Field value={description} onChange={(e)=>setDescription(e.target.value)} placeholder="Description"/><Field value={category} onChange={(e)=>setCategory(e.target.value)} placeholder="Category"/><Field as="select" value={visibility} onChange={(e)=>setVisibility(e.target.value)}><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></Field><Button disabled={busy} tone="primary">Create offer</Button></form></Panel>
+    </aside>
+    <section className="p-5 space-y-4">{err&&<div className="text-red text-sm border border-red/30 bg-red/10 rounded p-3">{err}</div>}{selected?<><Panel className="p-4"><div className="flex justify-between items-start gap-3"><div><h2 className="text-xl font-semibold">{selected.name}</h2><p className="text-sm text-text-muted mt-1">{selected.description||"No description"}</p><div className="text-xs text-text-muted mt-2">Template #{selected.template_id} · Catalog product {selected.catalog_product_id||"not published"}</div></div><Button disabled={busy||selected.status==="active"} tone="primary" onClick={publish}>{selected.status==="active"?"Published":"Publish to Catalog"}</Button></div></Panel><Panel className="p-4 space-y-3"><div><h3 className="font-semibold">Packages</h3><p className="text-xs text-text-muted">Define Basic/Standard/Premium or any custom tiers. Amounts use minor currency units.</p></div><Field as="textarea" rows={18} value={packagesText} onChange={(e)=>setPackagesText(e.target.value)} className="font-mono text-xs"/><Button disabled={busy} tone="primary" onClick={savePackages}>Save packages</Button></Panel></>:<Panel className="p-6 text-text-muted">Create or select an offer.</Panel>}</section>
+  </div>;
+}
+
+// ─── Rates ──────────────────────────────────────────────────────
+
+function RatesTab({ projectId }: { projectId: string }) {
+  const [grades,setGrades]=useState<PayGrade[]>([]); const [rates,setRates]=useState<RateCard[]>([]); const [workers,setWorkers]=useState<Worker[]>([]); const [templates,setTemplates]=useState<Template[]>([]); const [offers,setOffers]=useState<StandardOffer[]>([]);
+  const [gradeName,setGradeName]=useState(""); const [gradeRank,setGradeRank]=useState("0"); const [gradeAmount,setGradeAmount]=useState(""); const [gradeCurrency,setGradeCurrency]=useState("EUR");
+  const [scopeType,setScopeType]=useState<"grade"|"worker">("grade"); const [scopeId,setScopeId]=useState(""); const [templateId,setTemplateId]=useState(""); const [packageId,setPackageId]=useState(""); const [model,setModel]=useState("fixed"); const [amount,setAmount]=useState(""); const [currency,setCurrency]=useState("EUR"); const [unit,setUnit]=useState(""); const [busy,setBusy]=useState(false); const [err,setErr]=useState<string|null>(null);
+  const [profileWorkerId,setProfileWorkerId]=useState(""); const [profileGradeId,setProfileGradeId]=useState("");
+  const reload=useCallback(async()=>{try{const [g,r,w,t,o]=await Promise.all([api<{pay_grades:PayGrade[]}>("/pay-grades?include_inactive=true",projectId),api<{rates:RateCard[]}>("/rates?include_archived=true",projectId),api<{workers:Worker[]}>("/workers?include_contact=true",projectId),api<{templates:Template[]}>("/templates",projectId),api<{offers:StandardOffer[]}>("/offers",projectId)]);setGrades(g.pay_grades||[]);setRates(r.rates||[]);setWorkers(w.workers||[]);setTemplates(t.templates||[]);setOffers(o.offers||[]);}catch(e){setErr((e as Error).message);}},[projectId]); useEffect(()=>{reload();},[reload]);
+  const addGrade=async(e:React.FormEvent)=>{e.preventDefault();setBusy(true);setErr(null);try{await api("/pay-grades",projectId,{method:"POST",body:JSON.stringify({name:gradeName,rank:Number(gradeRank),default_pricing_model:gradeAmount?"fixed":undefined,default_amount_minor:gradeAmount?Number(gradeAmount):undefined,currency:gradeAmount?gradeCurrency:undefined})});setGradeName("");setGradeAmount("");await reload();}catch(e2){setErr((e2 as Error).message);}finally{setBusy(false);}};
+  const addRate=async(e:React.FormEvent)=>{e.preventDefault();setBusy(true);setErr(null);try{const body:Record<string,unknown>={pricing_model:model,amount_minor:Number(amount),currency,unit:unit||undefined,template_id:templateId?Number(templateId):undefined,offer_package_id:packageId?Number(packageId):undefined};body[scopeType==="grade"?"pay_grade_id":"worker_id"]=Number(scopeId);await api("/rates",projectId,{method:"POST",body:JSON.stringify(body)});setAmount("");await reload();}catch(e2){setErr((e2 as Error).message);}finally{setBusy(false);}};
+  const assignGrade=async(e:React.FormEvent)=>{e.preventDefault();setBusy(true);setErr(null);try{await api(`/workers/${profileWorkerId}/pay-grade`,projectId,{method:"PUT",body:JSON.stringify({pay_grade_id:Number(profileGradeId)})});setProfileWorkerId("");setProfileGradeId("");await reload();}catch(e2){setErr((e2 as Error).message);}finally{setBusy(false);}};
+  const allPackages=offers.flatMap((o)=>(o.packages||[]).filter((p)=>p.active).map((p)=>({...p,offerName:o.name})));
+  return <div className="p-5 space-y-5"><div><h2 className="text-xl font-semibold">Pay grades and rate cards</h2><p className="text-sm text-text-muted">Worker commercial levels are separate from skill proficiency. Specific rates override general defaults.</p></div>{err&&<div className="text-red text-sm border border-red/30 bg-red/10 rounded p-3">{err}</div>}<Panel className="p-4"><form onSubmit={assignGrade} className="flex flex-wrap items-end gap-2"><div className="min-w-56 flex-1"><div className="text-xs text-text-muted mb-1">Worker</div><Field as="select" value={profileWorkerId} onChange={(e)=>setProfileWorkerId(e.target.value)} required><option value="">Select worker…</option>{workers.map((w)=><option key={w.id} value={w.id}>{contactName(w.contact||{id:w.contact_id})}{w.pay_profile?.pay_grade?` · ${w.pay_profile.pay_grade.name}`:" · no grade"}</option>)}</Field></div><div className="min-w-48 flex-1"><div className="text-xs text-text-muted mb-1">Commercial level</div><Field as="select" value={profileGradeId} onChange={(e)=>setProfileGradeId(e.target.value)} required><option value="">Select grade…</option>{grades.filter((g)=>g.active).map((g)=><option key={g.id} value={g.id}>{g.name}</option>)}</Field></div><Button disabled={busy||!profileWorkerId||!profileGradeId} tone="primary">Assign grade</Button></form></Panel><div className="grid grid-cols-1 xl:grid-cols-2 gap-4"><Panel className="p-4"><form onSubmit={addGrade} className="space-y-3"><h3 className="font-semibold">Add pay grade</h3><div className="grid grid-cols-2 gap-2"><Field value={gradeName} onChange={(e)=>setGradeName(e.target.value)} placeholder="Standard, Senior…" required/><Field type="number" value={gradeRank} onChange={(e)=>setGradeRank(e.target.value)} placeholder="Rank"/><Field type="number" min="0" value={gradeAmount} onChange={(e)=>setGradeAmount(e.target.value)} placeholder="General default (minor units)"/><Field value={gradeCurrency} onChange={(e)=>setGradeCurrency(e.target.value.toUpperCase())} maxLength={3}/></div><Button disabled={busy} tone="primary">Add grade</Button></form><div className="mt-4 divide-y divide-border">{grades.map((g)=><div key={g.id} className="py-2 flex justify-between"><div><span className="font-medium">L{g.rank} · {g.name}</span><div className="text-xs text-text-muted">/{g.slug}</div></div><span className="text-sm">{g.default_amount_minor?formatMoneyMinor(g.default_amount_minor,g.currency||"EUR"):"No general default"}</span></div>)}</div></Panel><Panel className="p-4"><form onSubmit={addRate} className="space-y-3"><h3 className="font-semibold">Add effective rate</h3><div className="grid grid-cols-2 gap-2"><Field as="select" value={scopeType} onChange={(e)=>{setScopeType(e.target.value as "grade"|"worker");setScopeId("");}}><option value="grade">Pay grade</option><option value="worker">Worker override</option></Field><Field as="select" value={scopeId} onChange={(e)=>setScopeId(e.target.value)} required><option value="">Select…</option>{scopeType==="grade"?grades.filter((g)=>g.active).map((g)=><option key={g.id} value={g.id}>{g.name}</option>):workers.map((w)=><option key={w.id} value={w.id}>{contactName(w.contact||{id:w.contact_id})}</option>)}</Field><Field as="select" value={templateId} onChange={(e)=>{setTemplateId(e.target.value);setPackageId("");}}><option value="">General / any template</option>{templates.map((t)=><option key={t.id} value={t.id}>{t.name}</option>)}</Field><Field as="select" value={packageId} onChange={(e)=>{setPackageId(e.target.value);setTemplateId("");}}><option value="">No package override</option>{allPackages.map((p)=><option key={p.id} value={p.id}>{p.offerName} · {p.name}</option>)}</Field><Field as="select" value={model} onChange={(e)=>setModel(e.target.value)}>{["fixed","hourly","per_unit","daily","milestone","recurring"].map((m)=><option key={m}>{m}</option>)}</Field><Field value={unit} onChange={(e)=>setUnit(e.target.value)} placeholder="Unit (optional)"/><Field type="number" min="0" value={amount} onChange={(e)=>setAmount(e.target.value)} placeholder="Amount in minor units" required/><Field value={currency} onChange={(e)=>setCurrency(e.target.value.toUpperCase())} maxLength={3} required/></div><Button disabled={busy} tone="primary">Set rate</Button></form></Panel></div><Panel className="overflow-hidden"><div className="p-3 border-b border-border font-semibold">Rate history</div><div className="divide-y divide-border">{rates.map((r)=><div key={r.id} className="p-3 grid grid-cols-[1fr_auto] gap-3"><div><span className="font-medium">{r.worker_id?`Worker #${r.worker_id}`:`Grade #${r.pay_grade_id}`}</span><div className="text-xs text-text-muted">{r.offer_package_id?`Package #${r.offer_package_id}`:r.template_id?`Template #${r.template_id}`:"General"} · {r.pricing_model}{r.unit?`/${r.unit}`:""} · {r.source}</div></div><div className="text-right"><div>{formatMoneyMinor(r.amount_minor,r.currency)}</div><Pill tone={r.status==="active"?"success":"default"}>{r.status}</Pill></div></div>)}</div></Panel></div>;
+}
+
+// ─── Marketplace ────────────────────────────────────────────────
+
+function MarketplaceTab({projectId}:{projectId:string}){
+  const [jobs,setJobs]=useState<JobPost[]>([]);const [contracts,setContracts]=useState<ContractRecord[]>([]);const [title,setTitle]=useState("");const [description,setDescription]=useState("");const [budgetMin,setBudgetMin]=useState("");const [budgetMax,setBudgetMax]=useState("");const [currency,setCurrency]=useState("EUR");const [visibility,setVisibility]=useState("private");const [busy,setBusy]=useState(false);const [err,setErr]=useState<string|null>(null);
+  const reload=useCallback(async()=>{try{const [j,c]=await Promise.all([api<{job_posts:JobPost[]}>("/job-posts",projectId),api<{contracts:ContractRecord[]}>("/contracts",projectId)]);setJobs(j.job_posts||[]);setContracts(c.contracts||[]);}catch(e){setErr((e as Error).message);}},[projectId]);useEffect(()=>{reload();},[reload]);
+  const create=async(e:React.FormEvent)=>{e.preventDefault();setBusy(true);setErr(null);try{await api("/job-posts",projectId,{method:"POST",body:JSON.stringify({title,description,budget_min_minor:budgetMin?Number(budgetMin):undefined,budget_max_minor:budgetMax?Number(budgetMax):undefined,currency:(budgetMin||budgetMax)?currency:undefined,visibility,publish:true,pricing_models:["fixed","hourly"]})});setTitle("");setDescription("");setBudgetMin("");setBudgetMax("");await reload();}catch(e2){setErr((e2 as Error).message);}finally{setBusy(false);}};
+  return <div className="p-5 space-y-5"><div><h2 className="text-xl font-semibold">Marketplace</h2><p className="text-sm text-text-muted">Demand-first job posts and accepted contracts. Provider proposals can be submitted through MCP or the HTTP API.</p></div>{err&&<div className="text-red text-sm border border-red/30 bg-red/10 rounded p-3">{err}</div>}<div className="grid grid-cols-1 xl:grid-cols-[380px_1fr] gap-4"><Panel className="p-4"><form onSubmit={create} className="space-y-2"><h3 className="font-semibold">Post a job</h3><Field value={title} onChange={(e)=>setTitle(e.target.value)} placeholder="Job title" required/><Field as="textarea" rows={4} value={description} onChange={(e)=>setDescription(e.target.value)} placeholder="Scope and deliverables"/><div className="grid grid-cols-3 gap-2"><Field type="number" min="0" value={budgetMin} onChange={(e)=>setBudgetMin(e.target.value)} placeholder="Min"/><Field type="number" min="0" value={budgetMax} onChange={(e)=>setBudgetMax(e.target.value)} placeholder="Max"/><Field value={currency} onChange={(e)=>setCurrency(e.target.value.toUpperCase())} maxLength={3}/></div><Field as="select" value={visibility} onChange={(e)=>setVisibility(e.target.value)}><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></Field><Button disabled={busy} tone="primary">Publish job</Button></form></Panel><Panel className="overflow-hidden"><div className="p-3 border-b border-border font-semibold">Job posts</div><div className="divide-y divide-border">{jobs.length===0&&<div className="p-4 text-sm text-text-muted">No job posts.</div>}{jobs.map((j)=><div key={j.id} className="p-3"><div className="flex justify-between gap-2"><span className="font-medium">{j.title}</span><Pill tone={j.status==="open"?"success":"default"}>{j.status}</Pill></div><div className="text-xs text-text-muted mt-1">{j.visibility}{j.budget_max_minor?` · ${formatMoneyMinor(j.budget_min_minor||0,j.currency||"EUR")}–${formatMoneyMinor(j.budget_max_minor,j.currency||"EUR")}`:""}</div></div>)}</div></Panel></div><Panel className="overflow-hidden"><div className="p-3 border-b border-border font-semibold">Contracts</div><div className="divide-y divide-border">{contracts.length===0&&<div className="p-4 text-sm text-text-muted">No contracts yet.</div>}{contracts.map((c)=><div key={c.id} className="p-3 flex justify-between gap-3"><div><div className="font-medium">{c.title}</div><div className="text-xs text-text-muted">{c.source_type} · {c.pricing_model} · worker {c.worker_id||"unassigned"} · {c.milestones?.length||0} milestones</div></div><div className="text-right"><Pill tone={c.status==="active"?"success":"default"}>{c.status}</Pill><div className="text-sm mt-1">{formatMoneyMinor(c.worker_amount_minor||0,c.currency)}</div></div></div>)}</div></Panel></div>;
 }
 
 // ─── Templates ──────────────────────────────────────────────────
@@ -2232,6 +2376,7 @@ function WorkersTab({ projectId }: { projectId: string }) {
               <Pill tone={wk.status === "active" ? "success" : "warn"}>{wk.status}</Pill>
               <span>{wk.accepted_count}✓ · {wk.rejected_count}✕</span>
               {wk.open_assignments != null && <span>{wk.open_assignments} open</span>}
+              {wk.pay_profile?.pay_grade && <span>{wk.pay_profile.pay_grade.name}</span>}
             </div>
           </div>
         ))}
@@ -2438,4 +2583,10 @@ function formatDate(iso: string): string {
     const d = new Date(iso);
     return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   } catch { return iso; }
+}
+
+function formatMoneyMinor(amountMinor: number, currency: string): string {
+  const amount = Number(amountMinor || 0) / 100;
+  try { return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD" }).format(amount); }
+  catch { return `${currency || ""} ${amount.toFixed(2)}`.trim(); }
 }

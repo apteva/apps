@@ -72,6 +72,9 @@ func expireDueGigs(ctx context.Context, app *sdk.AppCtx) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		if err := syncContractFromGig(app.AppDB(), g.pid, g.id, "expired"); err != nil {
+			app.Logger().Warn("sync contract milestone after gig expiry failed", "gig_id", g.id, "err", err.Error())
+		}
 		app.EmitWithProject("gig.expired", g.pid, map[string]any{"gig_id": g.id})
 	}
 	return nil

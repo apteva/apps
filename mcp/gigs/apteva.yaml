@@ -2,12 +2,12 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.1.26
+version: 0.2.0
 description: |
-  Agents delegate atomic work to human workers (CRM contacts) by
-  composing reusable multi-modal instructions. Templates are saved
-  instruction sets; gigs are dispatched snapshots. Async by default —
-  agents resume on gig.submitted.
+  Generic work marketplace and execution engine. Define standard offers,
+  service packages, worker pay grades and effective rate cards; negotiate
+  jobs into contracts and milestones; then dispatch immutable gigs to CRM
+  contacts. Catalog owns sell-side prices and Bills owns worker payables.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/gigs
@@ -16,7 +16,7 @@ icon_style: monochrome
 tags: [gigs, workers, delegation, productivity]
 
 scopes: [project, global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.11.0"
 
 requires:
   permissions:
@@ -24,6 +24,19 @@ requires:
     - platform.instances.read
     - platform.apps.call
     - platform.ingress.write
+  apps:
+    - name: catalog
+      version: ">=0.3.0"
+      optional: false
+      reason: Customer-facing standard offers publish service products and immutable prices into Catalog.
+    - name: bills
+      version: ">=0.1.33"
+      optional: true
+      reason: Approved external-worker compensation can become an accounts-payable bill.
+    - name: orders
+      version: ">=0.3.0"
+      optional: true
+      reason: Paid service orders can reference Gigs contracts and fulfillment work without coupling Gigs to Checkout.
   integrations:
     - role: contacts
       kind: app
@@ -148,6 +161,59 @@ provides:
       description: Accept a selected submission. Bumps that worker's accepted_count and logs to the contact's CRM timeline.
     - name: gigs_reject_result
       description: Reject a selected submission with a reason. Re-opens the gig or keeps the same worker for a redo.
+    # ─── Commercial catalog and marketplace ──────────────────────────
+    - name: pay_grades_create
+      description: Create a configurable worker pay grade, separate from skill proficiency.
+    - name: pay_grades_list
+      description: List active or historical worker pay grades.
+    - name: pay_grades_update
+      description: Update a worker pay grade and its optional general default rate.
+    - name: workers_set_pay_grade
+      description: Assign a commercial pay grade to a worker.
+    - name: rates_set
+      description: Add a versioned effective worker-pay rate scoped by worker or grade and optionally template or package.
+    - name: rates_list
+      description: Inspect current and historical worker-pay rate cards.
+    - name: rates_resolve
+      description: Deterministically explain the standard worker compensation for a worker and work context.
+    - name: offers_create
+      description: Create a standard service offer around a Gigs template.
+    - name: offers_list
+      description: List standard offers and their packages.
+    - name: offers_get
+      description: Fetch a standard offer and packages.
+    - name: offers_update
+      description: Update offer metadata while preserving version history on snapshots.
+    - name: offer_packages_set
+      description: Set Basic, Standard, Premium, or custom commercial packages for an offer.
+    - name: offers_publish
+      description: Publish an offer and synchronize its customer-facing product and prices into Catalog.
+    - name: offers_recommend
+      description: Explain the matching standard offer, customer price, worker compensation, rate source, and estimated margin.
+    - name: gigs_create_from_offer
+      description: Dispatch a published offer package and snapshot the resolved commercial terms onto the gig.
+    - name: job_posts_create
+      description: Create or publish a project-first marketplace job post.
+    - name: job_posts_list
+      description: List marketplace job posts.
+    - name: proposals_submit
+      description: Submit or replace a worker proposal on an open job.
+    - name: proposals_list
+      description: List proposals for a job post.
+    - name: proposals_accept
+      description: Award a job, reject competing proposals, and create the accepted contract and milestones.
+    - name: contracts_create
+      description: Create a direct, package, order, or subscription contract with immutable commercial terms.
+    - name: contracts_get
+      description: Fetch a contract and milestones.
+    - name: contracts_list
+      description: List contracts by lifecycle or worker.
+    - name: contracts_add_milestone
+      description: Add a priced deliverable milestone to a contract.
+    - name: contracts_dispatch_milestone
+      description: Dispatch a pending contract milestone into a compensated worker gig and track it through review.
+    - name: gigs_create_payable
+      description: Create or retry the Bills payable for reviewed work, idempotently.
   ui_panels:
     - slot: project.page
       label: Gigs
@@ -240,5 +306,10 @@ config_schema:
     default: 2048
     label: Maximum submission file size (MB)
     description: Per-file limit applied before a worker upload session is created.
+  - name: auto_create_worker_payables
+    type: bool
+    default: false
+    label: Automatically create worker payables
+    description: After a compensated gig is reviewed, create a received vendor bill in the optional Bills app. Disabled by default so employee/payroll work is never treated as contractor AP accidentally.
 
 upgrade_policy: auto-patch

@@ -83,6 +83,14 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/workers", Handler: a.handleHTTPWorkersCollection},
 		{Pattern: "/workers/", Handler: a.handleHTTPWorkerItem},
 		{Pattern: "/skills", Handler: a.handleHTTPSkills},
+		{Pattern: "/pay-grades", Handler: a.handleHTTPPayGrades},
+		{Pattern: "/rates", Handler: a.handleHTTPRates},
+		{Pattern: "/offers", Handler: a.handleHTTPOffersCollection},
+		{Pattern: "/offers/", Handler: a.handleHTTPOfferItem},
+		{Pattern: "/job-posts", Handler: a.handleHTTPJobPosts},
+		{Pattern: "/proposals", Handler: a.handleHTTPProposals},
+		{Pattern: "/contracts", Handler: a.handleHTTPContractsCollection},
+		{Pattern: "/contracts/", Handler: a.handleHTTPContractItem},
 
 		// Public worker-link hostnames. These operator endpoints remain
 		// authenticated; only /worker/ is public.
@@ -110,6 +118,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	out = append(out, a.instructionTools()...)
 	out = append(out, a.templateTools()...)
 	out = append(out, a.gigTools()...)
+	out = append(out, a.marketplaceTools()...)
 	return out
 }
 
