@@ -436,7 +436,7 @@ function LevelMeter({ label, value }: { label: string; value: number }) {
   );
 }
 
-function CallsView({ projectId }: NativePanelProps) {
+function CallsView({ projectId, installId }: NativePanelProps) {
   const layout = usePanelWidth();
   const [calls, setCalls] = useState<Call[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -492,7 +492,6 @@ function CallsView({ projectId }: NativePanelProps) {
       setSelectedId((current) => current && list.some((c) => c.id === current)
         ? current
         : list[0]?.id ?? "");
-      setStatus(`${list.length} calls`);
     } catch (e) {
       setStatus((e as Error).message || "Load failed");
     } finally {
@@ -611,6 +610,8 @@ function CallsView({ projectId }: NativePanelProps) {
   // microphone is acquired in exactly one place.
   type BrowserCallSession = { call_id: string; media_url: string; session_token?: string };
 
+  const workletURL = `/api/apps/telephony/_install/${encodeURIComponent(String(installId))}/ui/softphone-worklet.js`;
+
   const startAudio = async (session: BrowserCallSession) => {
     sessionRef.current?.stop();
     const phone = new SoftphoneSession({
@@ -636,7 +637,7 @@ function CallsView({ projectId }: NativePanelProps) {
     const media = new URL(session.media_url, location.href);
     media.protocol = location.protocol === "https:" ? "wss:" : "ws:";
     media.host = location.host;
-    await phone.start(media.toString());
+    await phone.start(media.toString(), workletURL);
     setSelectedId(session.call_id);
     await loadCalls();
   };
@@ -673,6 +674,7 @@ function CallsView({ projectId }: NativePanelProps) {
       await startAudio(session);
       setStatus(`connected to ${call.fromNumber || call.id}`);
     } catch (e) {
+      console.error("Telephony softphone answer failed", e);
       if (session?.session_token) {
         try {
           await postJSON(

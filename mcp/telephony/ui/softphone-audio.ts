@@ -13,12 +13,6 @@ const SAMPLE_RATE = 24_000;
 // ~80 ms of slack absorbs network jitter without adding audible latency.
 const JITTER_TARGET_SAMPLES = SAMPLE_RATE * 0.08;
 
-// Keep the AudioWorklet on the same install-scoped origin as this bundle.
-// Blob-backed worklets are rejected by Chrome under the dashboard's strict CSP
-// even when worker-src allows blob:, which previously left inbound calls stuck
-// at "answering" immediately after microphone permission was granted.
-const WORKLET_MODULE_URL = new URL("./softphone-worklet.js", import.meta.url).toString();
-
 function floatToPCM16(input: Float32Array): ArrayBuffer {
   const out = new Int16Array(input.length);
   for (let i = 0; i < input.length; i++) {
@@ -80,7 +74,7 @@ export class SoftphoneSession {
     return this.muted;
   }
 
-  async start(mediaURL: string): Promise<void> {
+  async start(mediaURL: string, workletURL: string): Promise<void> {
     this.callbacks.onState?.("connecting");
     try {
       // Echo cancellation matters more than anything else here: without it the
@@ -100,7 +94,7 @@ export class SoftphoneSession {
       // that explicit interaction.
       this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: "interactive" });
       if (this.ctx.state === "suspended") await this.ctx.resume();
-      await this.ctx.audioWorklet.addModule(WORKLET_MODULE_URL);
+      await this.ctx.audioWorklet.addModule(workletURL);
 
       deviceRate = this.ctx.sampleRate;
       const source = this.ctx.createMediaStreamSource(this.stream);
