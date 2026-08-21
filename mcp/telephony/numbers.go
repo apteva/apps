@@ -987,6 +987,10 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 	switch path {
 	case "/numbers/connected":
 		result, err = a.connectedNumbers(ctx)
+	case "/numbers/outbound-profile":
+		result, err = a.configureNumberOutboundProfile(ctx,
+			strings.TrimSpace(strArg(body, "phone_number", "")),
+			strings.TrimSpace(strArg(body, "profile_id", "")))
 	case "/numbers/transport":
 		var route *routeRow
 		route, err = a.setRouteTransport(ctx,

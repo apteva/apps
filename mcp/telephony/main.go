@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.2.14
+version: 0.2.15
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -1807,13 +1807,23 @@ func (a *App) configureTelnyxRoute(ctx *sdk.AppCtx, route *routeRow) error {
 	if previousConnectionID != "" && !validProviderResourceID(previousConnectionID) {
 		return errors.New("Telnyx number has an invalid previous connection")
 	}
-	createdRaw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "create_call_control_application", map[string]any{
+	applicationInput := map[string]any{
 		"application_name":     "Apteva inbound " + route.ID,
 		"webhook_event_url":    a.inboundRouteURL(*route),
 		"active":               true,
 		"webhook_api_version":  "2",
 		"webhook_timeout_secs": 5,
-	})
+	}
+	// Outbound policy is carrier-specific, but route provisioning is not: when
+	// a provider exposes one unambiguous enabled profile, attach it while
+	// creating the application. Multiple profiles remain an explicit operator
+	// choice and are surfaced through the generic outbound-readiness API.
+	if profiles, profileErr := listTelnyxOutboundProfiles(ctx, route.CarrierConnectionID); profileErr != nil {
+		ctx.Logger().Warn("inspect Telnyx outbound profiles while configuring route", "route", route.ID, "err", profileErr)
+	} else if profileID := soleEnabledOutboundProfileID(profiles); profileID != "" {
+		applicationInput["outbound"] = map[string]any{"outbound_voice_profile_id": profileID}
+	}
+	createdRaw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "create_call_control_application", applicationInput)
 	if err != nil {
 		return fmt.Errorf("create Telnyx Call Control Application: %w", err)
 	}

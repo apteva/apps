@@ -234,8 +234,10 @@ func TestTelnyxOutboundUsesSelectedNumbersRouteApplication(t *testing.T) {
 			Slug: "telnyx", Fields: map[string]string{"api_key": "test-key"},
 		},
 		integrationResponse: map[string]json.RawMessage{
-			"list_phone_numbers": json.RawMessage(`{"data":[{"id":"number-fr","phone_number":"+33189313431","connection_id":"application-live"}]}`),
-			"dial_call":          json.RawMessage(`{"data":{"call_control_id":"call-control-1"}}`),
+			"list_phone_numbers":           json.RawMessage(`{"data":[{"id":"number-fr","phone_number":"+33189313431","connection_id":"application-live"}]}`),
+			"list_outbound_voice_profiles": json.RawMessage(`{"data":[{"id":"profile-default","name":"Default","enabled":true}]}`),
+			"get_call_control_application": json.RawMessage(`{"data":{"id":"application-route","active":true,"outbound":{"outbound_voice_profile_id":"profile-default"}}}`),
+			"dial_call":                    json.RawMessage(`{"data":{"call_control_id":"call-control-1"}}`),
 		},
 	}
 	app, ctx := withTelephonyTestContext(t, platform)
@@ -292,7 +294,9 @@ func TestTelnyxOutboundFallsBackToOwnedNumberConnection(t *testing.T) {
 		bindings:    map[string]any{"carrier": int64(10)},
 		credentials: &sdk.ConnectionCredentials{Slug: "telnyx", Fields: map[string]string{}},
 		integrationResponse: map[string]json.RawMessage{
-			"list_phone_numbers": json.RawMessage(`{"data":[{"id":"number-fr","phone_number":"+33189313431","connection_id":"application-live"}]}`),
+			"list_phone_numbers":           json.RawMessage(`{"data":[{"id":"number-fr","phone_number":"+33189313431","connection_id":"application-live"}]}`),
+			"list_outbound_voice_profiles": json.RawMessage(`{"data":[{"id":"profile-default","name":"Default","enabled":true}]}`),
+			"get_call_control_application": json.RawMessage(`{"data":{"id":"application-live","active":true,"outbound":{"outbound_voice_profile_id":"profile-default"}}}`),
 		},
 	}
 	app, ctx := withTelephonyTestContext(t, platform)
@@ -390,6 +394,9 @@ func TestConnectedNumbersPanelContract(t *testing.T) {
 		`withProject("/numbers/connected")`,
 		`{ to, from: fromNumber }`,
 		"chooseFromNumber",
+		`withProject("/numbers/outbound-profile")`,
+		"selection_required",
+		"Outbound calling setup",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("panel missing %q", required)

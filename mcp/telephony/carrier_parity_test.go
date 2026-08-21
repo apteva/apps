@@ -98,6 +98,7 @@ func TestTelnyxRouteRequiresSignedWebhooksAndSetsTimeout(t *testing.T) {
 		},
 		integrationResponse: map[string]json.RawMessage{
 			"list_phone_numbers":              json.RawMessage(`{"data":[{"id":"number-id","phone_number":"+14155550101","connection_id":"old-app"}]}`),
+			"list_outbound_voice_profiles":    json.RawMessage(`{"data":[{"id":"profile-default","name":"Default","enabled":true}]}`),
 			"create_call_control_application": json.RawMessage(`{"data":{"id":"new-app"}}`),
 		},
 	}
@@ -113,12 +114,16 @@ func TestTelnyxRouteRequiresSignedWebhooksAndSetsTimeout(t *testing.T) {
 	if err := a.configureTelnyxRoute(ctx, stored); err != nil {
 		t.Fatal(err)
 	}
-	if len(platform.integrationCalls) != 3 {
+	if len(platform.integrationCalls) != 4 {
 		t.Fatalf("Telnyx configuration calls=%#v", platform.integrationCalls)
 	}
-	createInput := platform.integrationCalls[1].Input
+	createInput := platform.integrationCalls[2].Input
 	if createInput["webhook_timeout_secs"] != 5 || createInput["webhook_api_version"] != "2" {
 		t.Fatalf("Telnyx webhook resilience settings=%#v", createInput)
+	}
+	outbound, _ := createInput["outbound"].(map[string]any)
+	if outbound["outbound_voice_profile_id"] != "profile-default" {
+		t.Fatalf("sole enabled outbound profile was not attached: %#v", createInput)
 	}
 }
 
@@ -133,6 +138,7 @@ func TestTelnyxRouteSupportsUnassignedNumberAndRestoresUnassignedState(t *testin
 		},
 		integrationResponse: map[string]json.RawMessage{
 			"list_phone_numbers":              json.RawMessage(`{"data":[{"id":"number-id","phone_number":"+14155550101","connection_id":""}]}`),
+			"list_outbound_voice_profiles":    json.RawMessage(`{"data":[]}`),
 			"create_call_control_application": json.RawMessage(`{"data":{"id":"new-app"}}`),
 		},
 	}
@@ -162,8 +168,8 @@ func TestTelnyxRouteSupportsUnassignedNumberAndRestoresUnassignedState(t *testin
 	if config.ApplicationID != "new-app" || config.PreviousConnectionID != "" {
 		t.Fatalf("unexpected saved Telnyx route config: %+v", config)
 	}
-	if len(platform.integrationCalls) != 3 || platform.integrationCalls[2].Tool != "update_phone_number" ||
-		platform.integrationCalls[2].Input["connection_id"] != "new-app" {
+	if len(platform.integrationCalls) != 4 || platform.integrationCalls[3].Tool != "update_phone_number" ||
+		platform.integrationCalls[3].Input["connection_id"] != "new-app" {
 		t.Fatalf("unexpected Telnyx configuration calls: %#v", platform.integrationCalls)
 	}
 

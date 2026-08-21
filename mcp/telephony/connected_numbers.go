@@ -51,18 +51,19 @@ type connectedRouteView struct {
 }
 
 type connectedNumberView struct {
-	PhoneNumber         string              `json:"phone_number"`
-	Provider            string              `json:"provider"`
-	ProviderNumberID    string              `json:"provider_number_id,omitempty"`
-	FriendlyName        string              `json:"friendly_name,omitempty"`
-	Capabilities        []string            `json:"capabilities"`
-	CarrierStatus       string              `json:"carrier_status,omitempty"`
-	RouteStatus         string              `json:"route_status"`
-	Route               *connectedRouteView `json:"route,omitempty"`
-	VoiceWebhookStatus  string              `json:"voice_webhook_status"`
-	StatusCallbackState string              `json:"status_callback_status"`
-	RoutingHealth       string              `json:"routing_health"`
-	HealthMessage       string              `json:"health_message,omitempty"`
+	PhoneNumber         string                `json:"phone_number"`
+	Provider            string                `json:"provider"`
+	ProviderNumberID    string                `json:"provider_number_id,omitempty"`
+	FriendlyName        string                `json:"friendly_name,omitempty"`
+	Capabilities        []string              `json:"capabilities"`
+	CarrierStatus       string                `json:"carrier_status,omitempty"`
+	RouteStatus         string                `json:"route_status"`
+	Route               *connectedRouteView   `json:"route,omitempty"`
+	VoiceWebhookStatus  string                `json:"voice_webhook_status"`
+	StatusCallbackState string                `json:"status_callback_status"`
+	RoutingHealth       string                `json:"routing_health"`
+	HealthMessage       string                `json:"health_message,omitempty"`
+	Outbound            outboundReadinessView `json:"outbound"`
 }
 
 // resolveOutboundFrom selects and validates the caller ID independently of a
@@ -153,41 +154,15 @@ func (a *App) resolveOutboundCarrierCredentials(
 	from string,
 ) (*sdk.ConnectionCredentials, error) {
 	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
-	if slug != "telnyx" || validProviderResourceID(creds.Fields["connection_id"]) {
+	if slug != "telnyx" {
 		return creds, nil
 	}
-
-	connectionID := ""
-	routes, err := a.db().listRoutesForProjectConnection(projectID, bound.ConnectionID)
+	connectionID, err := a.resolveTelnyxApplicationID(ctx, projectID, bound, creds, from)
 	if err != nil {
-		return nil, fmt.Errorf("list Telnyx routes for outbound call: %w", err)
+		return nil, err
 	}
-	for _, route := range currentRoutesByNumber(routes) {
-		if compactPhoneNumber(route.PhoneNumber) != compactPhoneNumber(from) {
-			continue
-		}
-		var config telnyxRouteConfig
-		if json.Unmarshal([]byte(route.PreviousVoiceURL), &config) == nil && validProviderResourceID(config.ApplicationID) {
-			connectionID = config.ApplicationID
-			break
-		}
-	}
-
-	if connectionID == "" {
-		provider := &numberProvider{Slug: slug, ConnID: bound.ConnectionID, Fields: creds.Fields}
-		owned, listErr := listOwnedCarrierNumbers(ctx, provider)
-		if listErr != nil {
-			return nil, fmt.Errorf("resolve Telnyx connection for %s: %w", from, listErr)
-		}
-		for _, number := range owned {
-			if compactPhoneNumber(number.PhoneNumber) == compactPhoneNumber(from) && validProviderResourceID(number.ConnectionID) {
-				connectionID = number.ConnectionID
-				break
-			}
-		}
-	}
-	if connectionID == "" {
-		return nil, errors.New("selected Telnyx number has no Call Control connection configured")
+	if err := a.ensureOutboundReady(ctx, slug, bound.ConnectionID, connectionID); err != nil {
+		return nil, err
 	}
 
 	resolved := *creds
@@ -197,6 +172,50 @@ func (a *App) resolveOutboundCarrierCredentials(
 	}
 	resolved.Fields["connection_id"] = connectionID
 	return &resolved, nil
+}
+
+func (a *App) resolveTelnyxApplicationID(
+	ctx *sdk.AppCtx,
+	projectID string,
+	bound *sdk.BoundIntegration,
+	creds *sdk.ConnectionCredentials,
+	from string,
+) (string, error) {
+	if validProviderResourceID(creds.Fields["connection_id"]) {
+		return strings.TrimSpace(creds.Fields["connection_id"]), nil
+	}
+	applicationID := ""
+	routes, err := a.db().listRoutesForProjectConnection(projectID, bound.ConnectionID)
+	if err != nil {
+		return "", fmt.Errorf("list Telnyx routes for outbound call: %w", err)
+	}
+	for _, route := range currentRoutesByNumber(routes) {
+		if compactPhoneNumber(route.PhoneNumber) != compactPhoneNumber(from) {
+			continue
+		}
+		if id := telnyxRouteApplicationID(&route, ""); id != "" {
+			applicationID = id
+			break
+		}
+	}
+
+	if applicationID == "" {
+		provider := &numberProvider{Slug: "telnyx", ConnID: bound.ConnectionID, Fields: creds.Fields}
+		owned, listErr := listOwnedCarrierNumbers(ctx, provider)
+		if listErr != nil {
+			return "", fmt.Errorf("resolve Telnyx connection for %s: %w", from, listErr)
+		}
+		for _, number := range owned {
+			if compactPhoneNumber(number.PhoneNumber) == compactPhoneNumber(from) && validProviderResourceID(number.ConnectionID) {
+				applicationID = number.ConnectionID
+				break
+			}
+		}
+	}
+	if applicationID == "" {
+		return "", errors.New("selected Telnyx number has no Call Control connection configured")
+	}
+	return applicationID, nil
 }
 
 func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
@@ -220,6 +239,12 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
 
 	routesByID := make(map[string]*routeRow, len(routes))
 	routesByPhone := make(map[string]*routeRow, len(routes))
+	ownedConnectionsByPhone := make(map[string]string, len(owned))
+	for _, number := range owned {
+		if phone := compactPhoneNumber(number.PhoneNumber); phone != "" && validProviderResourceID(number.ConnectionID) {
+			ownedConnectionsByPhone[phone] = number.ConnectionID
+		}
+	}
 	for i := range routes {
 		route := &routes[i]
 		if id := strings.TrimSpace(route.PhoneNumberSID); id != "" {
@@ -275,6 +300,26 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
 		}
 		numbers = append(numbers, a.connectedNumberView(ctx, provider.Slug, number, route, resolveAgentName))
 	}
+	if provider.Slug == "telnyx" {
+		profiles, profileErr := listTelnyxOutboundProfiles(ctx, provider.ConnID)
+		for i := range numbers {
+			phone := compactPhoneNumber(numbers[i].PhoneNumber)
+			applicationID := telnyxRouteApplicationID(routesByPhone[phone], ownedConnectionsByPhone[phone])
+			if profileErr != nil {
+				numbers[i].Outbound = outboundReadinessView{
+					Required: true, Status: outboundConfigError, ApplicationID: applicationID,
+					Profiles: []outboundProfileOption{}, Message: profileErr.Error(),
+				}
+				continue
+			}
+			readiness, readinessErr := a.telnyxOutboundReadiness(ctx, provider.ConnID, applicationID, profiles)
+			if readinessErr != nil {
+				readiness.Status = outboundConfigError
+				readiness.Message = readinessErr.Error()
+			}
+			numbers[i].Outbound = readiness
+		}
+	}
 
 	sort.SliceStable(numbers, func(i, j int) bool {
 		leftRouted := numbers[i].Route != nil && numbers[i].Route.Enabled
@@ -312,6 +357,40 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
 		"count":      len(numbers),
 		"numbers":    numbers,
 		"direct_sip": directSIP,
+	}, nil
+}
+
+func (a *App) configureNumberOutboundProfile(ctx *sdk.AppCtx, phoneNumber, profileID string) (map[string]any, error) {
+	projectID := currentProject(ctx)
+	if projectID == "" {
+		return nil, errors.New("project context required for outbound configuration")
+	}
+	bound := ctx.IntegrationFor("carrier")
+	if bound == nil {
+		return nil, errors.New("no carrier bound")
+	}
+	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
+	if err != nil {
+		return nil, fmt.Errorf("read carrier credentials: %w", err)
+	}
+	from, err := a.resolveOutboundFrom(ctx, projectID, bound, creds, strings.TrimSpace(phoneNumber))
+	if err != nil {
+		return nil, err
+	}
+	provider := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
+	if provider != "telnyx" {
+		return nil, fmt.Errorf("provider %s does not require outbound profile selection", provider)
+	}
+	applicationID, err := a.resolveTelnyxApplicationID(ctx, projectID, bound, creds, from)
+	if err != nil {
+		return nil, err
+	}
+	readiness, err := a.applyOutboundProfile(ctx, provider, bound.ConnectionID, applicationID, profileID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"ok": true, "provider": provider, "phone_number": from, "outbound": readiness,
 	}, nil
 }
 
@@ -516,6 +595,7 @@ func (a *App) connectedNumberView(ctx *sdk.AppCtx, provider string, number owned
 		VoiceWebhookStatus:  webhookNotConfigured,
 		StatusCallbackState: webhookNotConfigured,
 		RoutingHealth:       "not_configured",
+		Outbound:            carrierOutboundReady(),
 	}
 	if route == nil {
 		return view

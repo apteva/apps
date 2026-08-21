@@ -352,7 +352,7 @@ const KEYPAD_ROWS: string[][] = [
   ["+", "0", "back"],
 ];
 
-function Dialer({ value, from, fromNumbers, fromLoading, fromError, onChange, onFromChange, onCall, busy, disabled, recent, status }: {
+function Dialer({ value, from, fromNumbers, fromLoading, fromError, onChange, onFromChange, onCall, onApplyProfile, onRefreshNumbers, profileBusy, busy, disabled, recent, status }: {
   value: string;
   from: string;
   fromNumbers: ConnectedNumber[];
@@ -361,12 +361,24 @@ function Dialer({ value, from, fromNumbers, fromLoading, fromError, onChange, on
   onChange: (next: string) => void;
   onFromChange: (next: string) => void;
   onCall: () => void;
+  onApplyProfile: (profileId: string) => void;
+  onRefreshNumbers: () => void;
+  profileBusy: boolean;
   busy: boolean;
   disabled: boolean;
   recent: { number: string; label: string }[];
   status: string;
 }) {
   const valid = E164_RE.test(value);
+  const selectedNumber = fromNumbers.find((number) => number.phone_number === from);
+  const outbound = selectedNumber?.outbound;
+  const [profileId, setProfileId] = useState("");
+  const enabledProfiles = outbound?.profiles.filter((profile) => profile.enabled) ?? [];
+  const outboundBlocked = Boolean(outbound?.required && outbound.status !== "ready" && outbound.status !== "auto_configurable");
+  useEffect(() => {
+    const recommended = outbound?.recommended_profile_id ?? "";
+    setProfileId((current) => enabledProfiles.some((profile) => profile.id === current) ? current : recommended);
+  }, [from, outbound?.recommended_profile_id, enabledProfiles.map((profile) => profile.id).join(",")]);
   const press = (key: string) => {
     if (key === "back") onChange(value.slice(0, -1));
     else onChange(normalizeDialInput(value + key));
@@ -390,9 +402,28 @@ function Dialer({ value, from, fromNumbers, fromLoading, fromError, onChange, on
         </select>
         {fromError ? <span className="mt-1 block text-xs text-error">{fromError}</span> : null}
       </label>
+      {outbound?.required && outbound.status !== "ready" ? (
+        <div className={`rounded border p-3 text-xs ${outbound.status === "auto_configurable" ? "border-info/30 bg-info/10" : "border-warn/30 bg-warn/10"}`}>
+          <div className="font-medium">Outbound calling setup</div>
+          <p className="mt-1 text-text-muted">{outbound.message || "This caller ID needs an outbound calling profile."}</p>
+          {outbound.status === "selection_required" ? (
+            <div className="mt-2 flex gap-2">
+              <select value={profileId} onChange={(event) => setProfileId(event.target.value)} className="h-9 min-w-0 flex-1 rounded border border-border bg-bg px-2 text-xs">
+                <option value="">Select a profile</option>
+                {enabledProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name || profile.id}</option>)}
+              </select>
+              <button type="button" disabled={!profileId || profileBusy} onClick={() => onApplyProfile(profileId)} className="h-9 rounded bg-accent px-3 text-bg disabled:opacity-40">
+                {profileBusy ? "Applying…" : "Apply"}
+              </button>
+            </div>
+          ) : outbound.status === "setup_required" || outbound.status === "error" ? (
+            <button type="button" disabled={profileBusy} onClick={onRefreshNumbers} className="mt-2 h-8 rounded border border-border bg-bg px-3 disabled:opacity-40">Refresh</button>
+          ) : null}
+        </div>
+      ) : null}
       <div>
         <div className="text-xs text-text-dim">New call</div>
-        <form onSubmit={(event) => { event.preventDefault(); if (valid && E164_RE.test(from) && !busy && !disabled) onCall(); }}>
+        <form onSubmit={(event) => { event.preventDefault(); if (valid && E164_RE.test(from) && !busy && !disabled && !outboundBlocked) onCall(); }}>
           <input
             type="tel"
             value={value}
@@ -426,7 +457,7 @@ function Dialer({ value, from, fromNumbers, fromLoading, fromError, onChange, on
 
       <button
         type="button"
-        disabled={!valid || !E164_RE.test(from) || busy || disabled}
+        disabled={!valid || !E164_RE.test(from) || busy || disabled || outboundBlocked}
         onClick={onCall}
         className="w-full flex items-center justify-center gap-2 rounded bg-accent text-bg text-sm font-medium disabled:opacity-40"
         style={{ height: "2.9rem" }}
@@ -529,6 +560,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
   const [fromNumbers, setFromNumbers] = useState<ConnectedNumber[]>([]);
   const [fromLoading, setFromLoading] = useState(false);
   const [fromError, setFromError] = useState("");
+  const [profileBusy, setProfileBusy] = useState(false);
   const [dialerOpen, setDialerOpen] = useState(false);
   const [softphoneCallId, setSoftphoneCallId] = useState("");
   const [softphoneState, setSoftphoneState] = useState<SoftphoneState | "">("");
@@ -600,6 +632,24 @@ function CallsView({ projectId, installId }: NativePanelProps) {
       setFromLoading(false);
     }
   }, [projectId, withProject]);
+
+  const configureOutboundProfile = useCallback(async (profileId: string) => {
+    if (!fromNumber || !profileId) return;
+    setProfileBusy(true);
+    setStatus("");
+    try {
+      await postJSON(withProject("/numbers/outbound-profile"), {
+        phone_number: fromNumber,
+        profile_id: profileId,
+      });
+      await loadOutboundNumbers();
+      setStatus("Outbound calling profile applied");
+    } catch (error) {
+      setStatus((error as Error).message || "Could not apply outbound calling profile");
+    } finally {
+      setProfileBusy(false);
+    }
+  }, [fromNumber, loadOutboundNumbers, withProject]);
 
   useEffect(() => {
     if (dialerOpen) void loadOutboundNumbers();
@@ -1026,6 +1076,9 @@ function CallsView({ projectId, installId }: NativePanelProps) {
               onChange={setDialNumber}
               onFromChange={chooseFromNumber}
               onCall={() => void placeSoftphoneCall()}
+              onApplyProfile={(profileId) => void configureOutboundProfile(profileId)}
+              onRefreshNumbers={() => void loadOutboundNumbers()}
+              profileBusy={profileBusy}
               busy={softphoneBusy}
               disabled={Boolean(softphoneCallId)}
               recent={recentNumbers}
@@ -1283,6 +1336,26 @@ interface ConnectedNumber {
   status_callback_status: string;
   routing_health: string;
   health_message?: string;
+  outbound: OutboundReadiness;
+}
+
+interface OutboundProfileOption {
+  id: string;
+  name?: string;
+  enabled: boolean;
+  destinations?: string[];
+  daily_spend_limit?: string;
+  daily_spend_limit_enabled?: boolean;
+}
+
+interface OutboundReadiness {
+  required: boolean;
+  status: "ready" | "auto_configurable" | "selection_required" | "setup_required" | "error";
+  application_id?: string;
+  profile_id?: string;
+  recommended_profile_id?: string;
+  profiles: OutboundProfileOption[];
+  message?: string;
 }
 
 interface ConnectedNumbersResponse {
