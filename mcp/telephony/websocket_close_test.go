@@ -138,7 +138,7 @@ func TestWebSocketCloseStatePreservesFirstCause(t *testing.T) {
 	}
 
 	code, reason = websocketCloseDetails(nil)
-	if code != ws.StatusNormalClosure || reason != "media stream stopped" {
+	if code != ws.StatusNormalClosure || reason != "call media ended normally" {
 		t.Fatalf("normal details = code %d reason %q", code, reason)
 	}
 }

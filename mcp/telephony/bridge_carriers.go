@@ -264,7 +264,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 					return
 				}
 			case "stop":
-				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusNormalClosure, cfg.Provider+" media stream stopped")
+				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusNormalClosure, cfg.Provider+" call media ended normally")
 				return
 			}
 		}

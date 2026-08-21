@@ -376,7 +376,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			case "stop":
-				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusNormalClosure, "Twilio media stream stopped")
+				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusNormalClosure, "Twilio call media ended normally")
 				return
 			}
 		}

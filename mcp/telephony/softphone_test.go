@@ -376,6 +376,98 @@ func TestClaimPendingCallForHumanIsSingleWinner(t *testing.T) {
 	}
 }
 
+// An inbound human call must stay parked at the carrier until the browser has
+// both microphone access and an open media socket. Opening that socket is what
+// finally sends the provider's answer command and moves the call to answered.
+func TestInboundSoftphoneAnswersCarrierWhenBrowserMediaIsReady(t *testing.T) {
+	for _, test := range []struct {
+		provider string
+		wantTool string
+	}{
+		{provider: "telnyx", wantTool: "answer_call"},
+		{provider: "twilio", wantTool: "update_call"},
+		{provider: "plivo", wantTool: "update_call"},
+	} {
+		t.Run(test.provider, func(t *testing.T) {
+			platform := &answerPlatform{}
+			app, _ := withTelephonyTestContext(t, platform)
+			callID := "call-browser-answer-" + test.provider
+			row := callRow{
+				ID: callID, Direction: "inbound", CarrierSlug: test.provider,
+				CarrierConnectionID: 10, CarrierSID: test.provider + "-call-1", CallbackSecret: "callback-secret",
+				ToNumber: "+33123456789", FromNumber: "+33612345678", Status: "answering",
+				PlacedAt: time.Now().UTC().Format(time.RFC3339), ProjectID: "project-a",
+				PeerKind: peerKindHuman, PeerToken: "browser-token",
+				AudioBridgeURL: "ws://127.0.0.1:8080/peer/" + callID + "/browser-token",
+			}
+			if err := app.db().insertCall(row); err != nil {
+				t.Fatal(err)
+			}
+			server := softphoneTestServer(t, app)
+			browser := dialWS(t, server.URL+"/softphone/media/"+callID+"/browser-token")
+
+			_ = browser.SetReadDeadline(time.Now().Add(3 * time.Second))
+			data, op, err := wsutil.ReadServerData(browser)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if op != ws.OpText || !strings.Contains(string(data), `"type":"ready"`) {
+				t.Fatalf("browser event = %s (op=%v), want ready", data, op)
+			}
+			stored, err := app.db().findCall(row.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status != "answered" || stored.AnsweredAt == "" {
+				t.Fatalf("call was not marked answered: %+v", stored)
+			}
+			if len(platform.integrationCalls) != 1 || platform.integrationCalls[0].Tool != test.wantTool {
+				t.Fatalf("carrier calls = %#v, want one %s %s", platform.integrationCalls, test.provider, test.wantTool)
+			}
+			if test.provider == "telnyx" {
+				streamURL, _ := platform.integrationCalls[0].Input["stream_url"].(string)
+				if !strings.Contains(streamURL, "/media/telnyx/") {
+					t.Fatalf("Telnyx answer stream_url = %q", streamURL)
+				}
+			}
+		})
+	}
+}
+
+func TestInboundSoftphoneCarrierAnswerFailureReturnsCallToPending(t *testing.T) {
+	platform := &answerPlatform{failTool: "answer_call"}
+	app, _ := withTelephonyTestContext(t, platform)
+	row := callRow{
+		ID: "call-browser-retry", ThreadID: "", Direction: "inbound", CarrierSlug: "telnyx",
+		CarrierConnectionID: 10, CarrierSID: "telnyx-call-2", CallbackSecret: "callback-secret",
+		ToNumber: "+33123456789", FromNumber: "+33612345678", Status: "answering",
+		PlacedAt: time.Now().UTC().Format(time.RFC3339), ProjectID: "project-a",
+		PeerKind: peerKindHuman, PeerToken: "failed-token",
+		AudioBridgeURL: "ws://127.0.0.1:8080/peer/call-browser-retry/failed-token",
+	}
+	if err := app.db().insertCall(row); err != nil {
+		t.Fatal(err)
+	}
+	server := softphoneTestServer(t, app)
+	browser := dialWS(t, server.URL+"/softphone/media/call-browser-retry/failed-token")
+
+	_ = browser.SetReadDeadline(time.Now().Add(3 * time.Second))
+	data, op, err := wsutil.ReadServerData(browser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op != ws.OpText || !strings.Contains(string(data), `"type":"call.error"`) {
+		t.Fatalf("browser event = %s (op=%v), want call.error", data, op)
+	}
+	stored, err := app.db().findCall(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "pending" || stored.AudioBridgeURL != "pending" || stored.PeerToken != "" {
+		t.Fatalf("failed answer was not reset safely: %+v", stored)
+	}
+}
+
 // A human-routed call must not be answerable into a realtime thread, or the
 // caller ends up bridged to a thread nobody is listening to.
 func TestPrepareInboundRealtimeRefusesSoftphoneCalls(t *testing.T) {

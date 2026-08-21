@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.2.3
+version: 0.2.4
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -2103,7 +2103,7 @@ func (a *App) handleTwilioStreamStatus(w http.ResponseWriter, r *http.Request) {
 		_ = a.db().updateMediaStatus(callID, "connected", "", 0, "")
 		_ = a.db().clearStateExpiry(callID)
 	case "stream-stopped":
-		_ = a.db().updateMediaStatusWithLeg(callID, "disconnected", "", 1000, "Twilio media stream stopped", string(mediaCloseLegCarrier))
+		_ = a.db().updateMediaStatusWithLeg(callID, "disconnected", "", 1000, "Twilio call media ended normally", string(mediaCloseLegCarrier))
 		_ = a.db().clearStateExpiry(callID)
 	case "stream-error":
 		reason := strings.TrimSpace(r.FormValue("StreamError"))
@@ -3372,8 +3372,8 @@ func (c *callsDB) releaseAnswerClaim(id string) error {
 
 func (c *callsDB) resetAnswerClaim(id string) error {
 	_, err := c.db.Exec(`UPDATE calls SET status = 'pending', thread_id = 'pending-' || id,
-        audio_bridge_url = 'pending', directive = 'inbound pending', voice = ''
-        WHERE id = ? AND status = 'answering' AND media_active = 0`, id)
+	        audio_bridge_url = 'pending', peer_token = '', directive = 'inbound pending', voice = ''
+	        WHERE id = ? AND status = 'answering' AND media_active = 0`, id)
 	return err
 }
 

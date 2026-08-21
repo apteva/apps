@@ -102,7 +102,7 @@ func websocketCloseDetails(err error) (ws.StatusCode, string) {
 		}
 	}
 	if err == nil {
-		return ws.StatusNormalClosure, "media stream stopped"
+		return ws.StatusNormalClosure, "call media ended normally"
 	}
 	return ws.StatusInternalServerError, "media bridge transport error"
 }

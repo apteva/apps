@@ -286,6 +286,30 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		previous.Stop()
 	}
 	logSoftphone("softphone browser attached", "call", callID)
+	// The browser opens this socket only after getUserMedia succeeds. For an
+	// inbound human call, this is therefore the first safe point to answer the
+	// carrier leg: answering in /softphone/answer would connect the caller while
+	// the operator was still deciding whether to grant microphone access.
+	if row.Direction == "inbound" && row.Status == "answering" {
+		if globalCtx == nil {
+			_ = a.db().resetAnswerClaim(callID)
+			_ = writer.Write(ws.OpText, softphoneEventDetail("call.error", callID, "Telephony is not ready to answer calls."))
+			return
+		}
+		ctx := globalCtx.WithProject(row.ProjectID)
+		if err := a.answerInboundCarrierCall(ctx, row); err != nil {
+			_ = a.db().resetAnswerClaim(callID)
+			logSoftphone("softphone carrier answer failed", "call", callID, "provider", row.CarrierSlug, "err", err)
+			_ = writer.Write(ws.OpText, softphoneEventDetail("call.error", callID, "The carrier could not answer the call."))
+			return
+		}
+		if err := a.db().updateStatus(callID, "answered", ""); err != nil {
+			logSoftphone("softphone answered status failed", "call", callID, "err", err)
+			_ = writer.Write(ws.OpText, softphoneEventDetail("call.error", callID, "The call connected, but Telephony could not save its status."))
+			return
+		}
+		row.Status = "answered"
+	}
 	_ = writer.Write(ws.OpText, softphoneEvent("ready", callID))
 
 	defer func() {
@@ -351,8 +375,16 @@ func upgradeBuffered(w http.ResponseWriter, r *http.Request) (net.Conn, net.Conn
 }
 
 func softphoneEvent(kind, callID string) []byte {
-	payload, _ := json.Marshal(map[string]string{"type": kind, "call_id": callID})
-	return payload
+	return softphoneEventDetail(kind, callID, "")
+}
+
+func softphoneEventDetail(kind, callID, detail string) []byte {
+	payload := map[string]string{"type": kind, "call_id": callID}
+	if detail != "" {
+		payload["detail"] = detail
+	}
+	encoded, _ := json.Marshal(payload)
+	return encoded
 }
 
 // softphonePathParts splits "<prefix><call_id>/<token>" into its two segments.

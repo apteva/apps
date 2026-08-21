@@ -233,11 +233,13 @@ export class SoftphoneSession {
       ws.onmessage = (event: MessageEvent) => {
         if (typeof event.data === "string") {
           try {
-            const parsed = JSON.parse(event.data) as { type?: string };
+            const parsed = JSON.parse(event.data) as { type?: string; detail?: string };
             if (parsed.type === "call.ended" || parsed.type === "session.replaced") {
               this.closed = true;
               this.callbacks.onState?.("ended", parsed.type);
               this.teardown();
+            } else if (parsed.type === "call.error") {
+              this.fail(parsed.detail || "The call could not be connected.");
             }
           } catch {
             // Status frames are advisory; a malformed one must not drop audio.
