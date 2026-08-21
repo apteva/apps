@@ -19,7 +19,7 @@ must route inbound calls to this Telephony install with `answer_mode` set to
 `human_browser`.
 
 ```bash
-export RUN_TELEPHONY_LIVE_CARRIER=1
+export RUN_TELEPHONY_LIVE_CARRIER=I_UNDERSTAND_THIS_PLACES_A_BILLABLE_CALL
 export APTEVA_LIVE_BASE_URL=https://public-apteva.example
 export APTEVA_LIVE_API_KEY=...
 export APTEVA_LIVE_PROJECT_ID=...
@@ -29,7 +29,17 @@ export TELEPHONY_LIVE_TO_NUMBER=+...
 apteva test --tier 2 --profile live-carrier .
 ```
 
-The test calls through the installed Telephony app, answers both call legs with
-softphone protocol clients, sends known PCM tones in both directions, checks
-signal identity and level, hangs up, and waits for terminal carrier lifecycle
-events. It does not invoke an LLM.
+Both numbers must belong to the Telnyx connection bound to the installation.
+The source number must have a ready outbound profile. The destination number
+must have an enabled, healthy `human_browser` inbound route.
+
+The test refuses to dial until those conditions pass. It then calls through the
+installed Telephony app, answers both call legs with deterministic softphone
+protocol clients, sends distinct PCM tones in both directions, and measures
+signal identity, level, continuity, cuts, and first-audio latency. After hangup
+it verifies durable initiated/incoming, answered, and completed lifecycle
+events; waits for the Telnyx recording callback; downloads the recording
+through Telephony's provider-neutral playback endpoint; and confirms that both
+tones exist in the WAV. The final test log contains a
+`LIVE_CARRIER_EVIDENCE` JSON object with call IDs and measured evidence. It does
+not invoke an LLM or require a person to answer either number.

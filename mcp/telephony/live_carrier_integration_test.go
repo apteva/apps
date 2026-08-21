@@ -10,7 +10,7 @@ package main
 //
 // Required environment:
 //
-//	RUN_TELEPHONY_LIVE_CARRIER=1
+//	RUN_TELEPHONY_LIVE_CARRIER=I_UNDERSTAND_THIS_PLACES_A_BILLABLE_CALL
 //	APTEVA_LIVE_BASE_URL=https://public-apteva.example
 //	APTEVA_LIVE_API_KEY=...
 //	APTEVA_LIVE_PROJECT_ID=...
@@ -20,7 +20,8 @@ package main
 // FROM must be voice-capable with an outbound profile. TO must be a different,
 // dedicated number routed to this Telephony install with answer_mode set to
 // human_browser. The test places a billable call and hangs it up after the
-// audio assertions.
+// audio and recording assertions. Both numbers must belong to the Telnyx
+// connection bound to the target Telephony installation.
 
 import (
 	"bytes"
@@ -49,14 +50,68 @@ type liveCarrierConfig struct {
 }
 
 type liveCarrierCall struct {
-	ID          string `json:"id"`
-	Direction   string `json:"direction"`
-	ToNumber    string `json:"to_number"`
-	FromNumber  string `json:"from_number"`
-	Status      string `json:"status"`
-	MediaStatus string `json:"media_status"`
-	PeerKind    string `json:"peer_kind"`
-	Error       string `json:"error_message"`
+	ID          string         `json:"id"`
+	Direction   string         `json:"direction"`
+	ToNumber    string         `json:"to_number"`
+	FromNumber  string         `json:"from_number"`
+	Status      string         `json:"status"`
+	MediaStatus string         `json:"media_status"`
+	PeerKind    string         `json:"peer_kind"`
+	Error       string         `json:"error_message"`
+	MediaError  string         `json:"media_error_message"`
+	BrowserDiag map[string]any `json:"browser_audio_diagnostics"`
+	CarrierDiag map[string]any `json:"carrier_audio_diagnostics"`
+}
+
+type liveConnectedNumber struct {
+	PhoneNumber   string `json:"phone_number"`
+	Provider      string `json:"provider"`
+	RoutingHealth string `json:"routing_health"`
+	Route         *struct {
+		Enabled    bool   `json:"enabled"`
+		AnswerMode string `json:"answer_mode"`
+	} `json:"route"`
+	Outbound struct {
+		Status string `json:"status"`
+	} `json:"outbound"`
+}
+
+type liveRecording struct {
+	ID                  string `json:"id"`
+	CallID              string `json:"call_id"`
+	Provider            string `json:"provider"`
+	ProviderStatus      string `json:"provider_status"`
+	StorageStatus       string `json:"storage_status"`
+	PlaybackURL         string `json:"playback_url"`
+	ProviderRecordingID string `json:"provider_recording_id"`
+}
+
+type liveCarrierEvidence struct {
+	Provider        string                         `json:"provider"`
+	OutboundCallID  string                         `json:"outbound_call_id"`
+	InboundCallID   string                         `json:"inbound_call_id"`
+	From            string                         `json:"from"`
+	To              string                         `json:"to"`
+	ToneResults     map[string]liveToneMetrics     `json:"tone_results"`
+	LifecycleTopics map[string][]string            `json:"lifecycle_topics"`
+	RecordingID     string                         `json:"recording_id"`
+	RecordingSource string                         `json:"recording_source"`
+	RecordingTones  map[string]liveToneMetrics     `json:"recording_tones"`
+	Diagnostics     map[string]liveCallDiagnostics `json:"diagnostics"`
+}
+
+type liveCallDiagnostics struct {
+	Browser map[string]any `json:"browser"`
+	Carrier map[string]any `json:"carrier"`
+}
+
+type liveToneMetrics struct {
+	Samples        int     `json:"samples"`
+	PeakRMS        float64 `json:"peak_rms"`
+	PeakScore      float64 `json:"peak_score"`
+	Coverage       float64 `json:"coverage"`
+	LongestCutMS   int64   `json:"longest_cut_ms"`
+	FirstArrivalMS int64   `json:"first_arrival_ms"`
 }
 
 type liveToneResult struct {
@@ -74,10 +129,17 @@ func TestLiveCarrierToneDetector(t *testing.T) {
 	if rms < 5000 || score < 0.8 || wrongScore > 0.05 {
 		t.Fatalf("tone detector rejected deterministic fixture: rms=%.1f score=%.3f wrong_score=%.3f", rms, score, wrongScore)
 	}
+	withCut := append(sinePCM(24000, 523, 12000), make([]int16, 2400)...)
+	withCut = append(withCut, sinePCM(24000, 523, 12000)...)
+	metrics := analyzeLiveTone(withCut, 24000, 523)
+	if metrics.Coverage < 0.85 || metrics.LongestCutMS < 80 || metrics.LongestCutMS > 120 {
+		t.Fatalf("continuity detector missed a 100ms cut: %+v", metrics)
+	}
 }
 
 func TestTier2LiveCarrierLoopback(t *testing.T) {
 	cfg := requireLiveCarrierConfig(t)
+	requireLiveTelnyxPreflight(t, cfg)
 	baseline := liveCarrierCalls(t, cfg)
 	known := make(map[string]bool, len(baseline))
 	for _, call := range baseline {
@@ -86,7 +148,7 @@ func TestTier2LiveCarrierLoopback(t *testing.T) {
 
 	var outbound softphoneSession
 	liveCarrierJSON(t, cfg, http.MethodPost, "/softphone/place", map[string]any{
-		"to": cfg.to, "from": cfg.from, "timeout_sec": 30, "recording": false,
+		"to": cfg.to, "from": cfg.from, "timeout_sec": 30, "recording": true,
 	}, &outbound)
 	if outbound.CallID == "" || outbound.MediaURL == "" {
 		t.Fatalf("outbound softphone session is incomplete: call_id=%q media_url=%q", outbound.CallID, outbound.MediaURL)
@@ -101,7 +163,6 @@ func TestTier2LiveCarrierLoopback(t *testing.T) {
 	})
 
 	outboundBrowser := dialLiveCarrierWS(t, cfg, outbound.MediaURL)
-	waitLiveSoftphoneEvent(t, outboundBrowser, "peer.connected", 20*time.Second)
 
 	inboundCall := waitLiveInboundCall(t, cfg, known, 30*time.Second)
 	if inboundCall.PeerKind != peerKindHuman || inboundCall.Status != "pending" {
@@ -113,6 +174,9 @@ func TestTier2LiveCarrierLoopback(t *testing.T) {
 		t.Fatalf("inbound softphone session is incomplete: %+v", inbound)
 	}
 	inboundBrowser := dialLiveCarrierWS(t, cfg, inbound.MediaURL)
+	// Do not wait for outbound media before answering the destination. Some
+	// carriers open the media stream only after the far leg answers.
+	waitLiveSoftphoneEvent(t, outboundBrowser, "peer.connected", 20*time.Second)
 	waitLiveSoftphoneEvent(t, inboundBrowser, "peer.connected", 20*time.Second)
 
 	waitLiveCallConnected(t, cfg, outbound.CallID, 30*time.Second)
@@ -120,8 +184,13 @@ func TestTier2LiveCarrierLoopback(t *testing.T) {
 	drainLiveCarrierAudio(outboundBrowser)
 	drainLiveCarrierAudio(inboundBrowser)
 
-	assertLiveToneExchange(t, outboundBrowser, inboundBrowser, 523, "outbound-to-inbound")
-	assertLiveToneExchange(t, inboundBrowser, outboundBrowser, 941, "inbound-to-outbound")
+	evidence := liveCarrierEvidence{
+		Provider: "telnyx", OutboundCallID: outbound.CallID, InboundCallID: inbound.CallID,
+		From: cfg.from, To: cfg.to, ToneResults: map[string]liveToneMetrics{},
+		LifecycleTopics: map[string][]string{}, Diagnostics: map[string]liveCallDiagnostics{},
+	}
+	evidence.ToneResults["outbound_to_inbound"] = assertLiveToneExchange(t, outboundBrowser, inboundBrowser, 523, "outbound-to-inbound")
+	evidence.ToneResults["inbound_to_outbound"] = assertLiveToneExchange(t, inboundBrowser, outboundBrowser, 941, "inbound-to-outbound")
 
 	if err := liveCarrierPost(cfg, "/calls/"+url.PathEscape(outbound.CallID)+"/hangup", nil, nil); err != nil {
 		t.Fatal(err)
@@ -129,12 +198,33 @@ func TestTier2LiveCarrierLoopback(t *testing.T) {
 	callActive = false
 	waitLiveCallTerminal(t, cfg, outbound.CallID, 30*time.Second)
 	waitLiveCallTerminal(t, cfg, inbound.CallID, 30*time.Second)
+
+	for _, callID := range []string{outbound.CallID, inbound.CallID} {
+		final := waitLiveCallDiagnostics(t, cfg, callID, 10*time.Second)
+		if final.MediaError != "" || final.Error != "" {
+			t.Fatalf("final state is not a clean Telnyx call: %+v", final)
+		}
+		requireCleanLiveDiagnostics(t, callID, final.CarrierDiag)
+		evidence.Diagnostics[callID] = liveCallDiagnostics{Browser: final.BrowserDiag, Carrier: final.CarrierDiag}
+	}
+	evidence.LifecycleTopics[outbound.CallID] = requireLiveLifecycle(t, cfg, outbound.CallID, "call.initiated", "call.answered", "call.completed")
+	evidence.LifecycleTopics[inbound.CallID] = requireLiveLifecycle(t, cfg, inbound.CallID, "call.incoming", "call.answered", "call.completed")
+	recording := waitLiveRecording(t, cfg, outbound.CallID, 90*time.Second)
+	evidence.RecordingID = recording.ID
+	evidence.RecordingSource = firstNonEmpty(recording.StorageStatus, recording.ProviderStatus)
+	if recording.Provider != "telnyx" || recording.ProviderStatus != "completed" || recording.PlaybackURL == "" {
+		t.Fatalf("Telnyx recording did not become playable: %+v", recording)
+	}
+	evidence.RecordingTones = assertLiveRecordingAudio(t, cfg, recording)
+
+	encoded, _ := json.MarshalIndent(evidence, "", "  ")
+	t.Logf("LIVE_CARRIER_EVIDENCE\n%s", encoded)
 }
 
 func requireLiveCarrierConfig(t *testing.T) liveCarrierConfig {
 	t.Helper()
-	if os.Getenv("RUN_TELEPHONY_LIVE_CARRIER") != "1" {
-		t.Fatal("live-carrier profile places a billable call; set RUN_TELEPHONY_LIVE_CARRIER=1 to confirm")
+	if os.Getenv("RUN_TELEPHONY_LIVE_CARRIER") != "I_UNDERSTAND_THIS_PLACES_A_BILLABLE_CALL" {
+		t.Fatal("live-carrier profile places a billable call; set RUN_TELEPHONY_LIVE_CARRIER=I_UNDERSTAND_THIS_PLACES_A_BILLABLE_CALL to confirm")
 	}
 	cfg := liveCarrierConfig{
 		baseURL:   strings.TrimRight(strings.TrimSpace(os.Getenv("APTEVA_LIVE_BASE_URL")), "/"),
@@ -164,6 +254,37 @@ func requireLiveCarrierConfig(t *testing.T) liveCarrierConfig {
 		t.Fatal("TELEPHONY_LIVE_FROM_NUMBER and TELEPHONY_LIVE_TO_NUMBER must be different E.164 numbers")
 	}
 	return cfg
+}
+
+func requireLiveTelnyxPreflight(t *testing.T, cfg liveCarrierConfig) {
+	t.Helper()
+	var response struct {
+		Provider string                `json:"provider"`
+		Numbers  []liveConnectedNumber `json:"numbers"`
+	}
+	liveCarrierJSON(t, cfg, http.MethodPost, "/numbers/connected", map[string]any{}, &response)
+	if response.Provider != "telnyx" {
+		t.Fatalf("live carrier profile requires a Telnyx binding, got %q", response.Provider)
+	}
+	byNumber := make(map[string]liveConnectedNumber, len(response.Numbers))
+	for _, number := range response.Numbers {
+		byNumber[compactPhoneNumber(number.PhoneNumber)] = number
+	}
+	from, fromOK := byNumber[compactPhoneNumber(cfg.from)]
+	to, toOK := byNumber[compactPhoneNumber(cfg.to)]
+	if !fromOK || !toOK {
+		t.Fatalf("both live-test numbers must belong to the bound Telnyx connection: from_owned=%t to_owned=%t", fromOK, toOK)
+	}
+	if from.Provider != "telnyx" || from.Outbound.Status != outboundReady {
+		t.Fatalf("Telnyx source number is not outbound-ready: number=%s provider=%s status=%s", from.PhoneNumber, from.Provider, from.Outbound.Status)
+	}
+	if to.Provider != "telnyx" || to.Route == nil || !to.Route.Enabled || to.Route.AnswerMode != answerModeHumanBrowser {
+		t.Fatalf("Telnyx destination must have an enabled human_browser route: %+v", to)
+	}
+	if to.RoutingHealth != "healthy" {
+		t.Fatalf("Telnyx destination routing is not healthy: number=%s health=%s", to.PhoneNumber, to.RoutingHealth)
+	}
+	t.Logf("Telnyx preflight passed: from=%s outbound=%s to=%s route=%s", cfg.from, from.Outbound.Status, cfg.to, to.RoutingHealth)
 }
 
 func liveCarrierAppURL(cfg liveCarrierConfig, path string) string {
@@ -253,6 +374,203 @@ func liveCarrierCalls(t *testing.T, cfg liveCarrierConfig) []liveCarrierCall {
 	}
 	liveCarrierJSON(t, cfg, http.MethodGet, "/calls", nil, &response)
 	return response.Calls
+}
+
+func liveCarrierCallByID(t *testing.T, cfg liveCarrierConfig, callID string) liveCarrierCall {
+	t.Helper()
+	for _, call := range liveCarrierCalls(t, cfg) {
+		if call.ID == callID {
+			return call
+		}
+	}
+	t.Fatalf("call %s disappeared from the live Telephony call list", callID)
+	return liveCarrierCall{}
+}
+
+func waitLiveCallDiagnostics(t *testing.T, cfg liveCarrierConfig, callID string, timeout time.Duration) liveCarrierCall {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		call := liveCarrierCallByID(t, cfg, callID)
+		if call.CarrierDiag["provider"] != nil {
+			return call
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("call %s did not persist carrier audio diagnostics", callID)
+	return liveCarrierCall{}
+}
+
+func requireCleanLiveDiagnostics(t *testing.T, callID string, diagnostics map[string]any) {
+	t.Helper()
+	provider, _ := diagnostics["provider"].(string)
+	codec, _ := diagnostics["codec"].(string)
+	pacer, _ := diagnostics["pacer_mode"].(string)
+	sampleRate, _ := diagnostics["sample_rate"].(float64)
+	droppedMS, _ := diagnostics["dropped_stale_ms"].(float64)
+	sequenceGaps, _ := diagnostics["sequence_gaps"].(float64)
+	if provider != "telnyx" || codec != carrierCodecL16_16 || pacer != "live_human" || int(sampleRate) != 16000 {
+		t.Fatalf("call %s negotiated an unexpected carrier audio path: %+v", callID, diagnostics)
+	}
+	if droppedMS > 200 || sequenceGaps > 10 {
+		t.Fatalf("call %s exceeded live audio loss limits: dropped_ms=%.0f sequence_gaps=%.0f diagnostics=%+v", callID, droppedMS, sequenceGaps, diagnostics)
+	}
+}
+
+func liveCarrierMCP(t *testing.T, cfg liveCarrierConfig, tool string, args map[string]any) map[string]any {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": tool, "arguments": args},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := cfg.baseURL + "/api/apps/telephony/mcp?project_id=" + url.QueryEscape(cfg.projectID)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := liveCarrierHTTPClient.Do(req)
+	if err != nil {
+		t.Fatalf("live MCP %s: %v", tool, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		t.Fatalf("live MCP %s: status=%d body=%s", tool, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var envelope struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Error != nil || len(envelope.Result.Content) == 0 {
+		t.Fatalf("live MCP %s returned an invalid envelope: error=%v decode=%v body=%s", tool, envelope.Error, err, raw)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(envelope.Result.Content[0].Text), &result); err != nil || envelope.Result.IsError {
+		t.Fatalf("live MCP %s tool result failed: decode=%v result=%s", tool, err, envelope.Result.Content[0].Text)
+	}
+	return result
+}
+
+func requireLiveLifecycle(t *testing.T, cfg liveCarrierConfig, callID string, required ...string) []string {
+	t.Helper()
+	result := liveCarrierMCP(t, cfg, "telephony_call_events_list", map[string]any{"call_id": callID, "limit": 200})
+	rawEvents, _ := result["events"].([]any)
+	topics := make([]string, 0, len(rawEvents))
+	present := make(map[string]bool, len(rawEvents))
+	for _, raw := range rawEvents {
+		event, _ := raw.(map[string]any)
+		topic, _ := event["topic"].(string)
+		if topic != "" {
+			topics = append(topics, topic)
+			present[topic] = true
+		}
+	}
+	for _, topic := range required {
+		if !present[topic] {
+			t.Fatalf("call %s lifecycle is missing %s; got %v", callID, topic, topics)
+		}
+	}
+	return topics
+}
+
+func waitLiveRecording(t *testing.T, cfg liveCarrierConfig, callID string, timeout time.Duration) liveRecording {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var latest []liveRecording
+	for time.Now().Before(deadline) {
+		var response struct {
+			Recordings []liveRecording `json:"recordings"`
+		}
+		liveCarrierJSON(t, cfg, http.MethodGet, "/recordings/?call_id="+url.QueryEscape(callID), nil, &response)
+		latest = response.Recordings
+		for _, recording := range latest {
+			if recording.ProviderStatus == "completed" && recording.PlaybackURL != "" {
+				return recording
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("call %s did not produce a playable recording within %s; recordings=%+v", callID, timeout, latest)
+	return liveRecording{}
+}
+
+func assertLiveRecordingAudio(t *testing.T, cfg liveCarrierConfig, recording liveRecording) map[string]liveToneMetrics {
+	t.Helper()
+	endpoint, err := url.Parse(recording.PlaybackURL)
+	if err != nil {
+		t.Fatalf("parse recording playback URL: %v", err)
+	}
+	if !endpoint.IsAbs() {
+		base, _ := url.Parse(cfg.baseURL)
+		endpoint = base.ResolveReference(endpoint)
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.apiKey)
+	resp, err := liveCarrierHTTPClient.Do(req)
+	if err != nil {
+		t.Fatalf("download live recording: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		t.Fatalf("download live recording: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	file, err := os.CreateTemp(t.TempDir(), "telnyx-loopback-*.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	written, err := io.Copy(file, io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		t.Fatalf("save live recording: %v", err)
+	}
+	if written < 44 {
+		t.Fatalf("live recording is unexpectedly short: %d bytes", written)
+	}
+	info, err := inspectPCM16WAV(file)
+	if err != nil {
+		t.Fatalf("inspect Telnyx recording: %v", err)
+	}
+	mixed := make([]int16, 0, info.DataSize/int64(info.Channels*2))
+	if err := forEachWAVFrame(file, info, func(frame []int16) error {
+		var sum int64
+		for _, sample := range frame {
+			sum += int64(sample)
+		}
+		mixed = append(mixed, int16(sum/int64(len(frame))))
+		return nil
+	}); err != nil {
+		t.Fatalf("read Telnyx recording audio: %v", err)
+	}
+	results := map[string]liveToneMetrics{
+		"523_hz": analyzeLiveTone(mixed, info.SampleRate, 523),
+		"941_hz": analyzeLiveTone(mixed, info.SampleRate, 941),
+	}
+	for frequency, metrics := range results {
+		if metrics.PeakRMS < 300 || metrics.PeakScore < 0.08 {
+			t.Fatalf("Telnyx recording does not contain the %s test signal: %+v", frequency, metrics)
+		}
+	}
+	t.Logf("Telnyx recording verified: id=%s bytes=%d sample_rate=%d channels=%d", recording.ID, written, info.SampleRate, info.Channels)
+	return results
 }
 
 func waitLiveInboundCall(t *testing.T, cfg liveCarrierConfig, known map[string]bool, timeout time.Duration) liveCarrierCall {
@@ -369,7 +687,7 @@ func drainLiveCarrierAudio(conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Time{})
 }
 
-func assertLiveToneExchange(t *testing.T, source, destination net.Conn, frequency int, label string) {
+func assertLiveToneExchange(t *testing.T, source, destination net.Conn, frequency int, label string) liveToneMetrics {
 	t.Helper()
 	started := time.Now()
 	result := make(chan liveToneResult, 1)
@@ -415,14 +733,65 @@ func assertLiveToneExchange(t *testing.T, source, destination net.Conn, frequenc
 	if received.err != nil && len(received.pcm) < 12000 {
 		t.Fatalf("%s carrier audio ended early: samples=%d err=%v", label, len(received.pcm), received.err)
 	}
-	peakRMS, toneScore := strongestLiveToneWindow(received.pcm, 24000, frequency)
-	if peakRMS < 500 || toneScore < 0.12 {
-		t.Fatalf("%s audio quality failed: samples=%d peak_rms=%.1f tone_score=%.3f latency=%s", label, len(received.pcm), peakRMS, toneScore, received.firstArrival)
+	metrics := analyzeLiveTone(received.pcm, 24000, frequency)
+	metrics.FirstArrivalMS = received.firstArrival.Milliseconds()
+	if metrics.PeakRMS < 500 || metrics.PeakScore < 0.12 {
+		t.Fatalf("%s audio quality failed: %+v", label, metrics)
 	}
 	if received.firstArrival <= 0 || received.firstArrival > 5*time.Second {
 		t.Fatalf("%s audio latency out of bounds: %s", label, received.firstArrival)
 	}
-	t.Logf("%s passed: samples=%d peak_rms=%.1f tone_score=%.3f first_audio=%s", label, len(received.pcm), peakRMS, toneScore, received.firstArrival.Round(time.Millisecond))
+	if metrics.Coverage < 0.7 || metrics.LongestCutMS > 200 {
+		t.Fatalf("%s audio continuity failed: %+v", label, metrics)
+	}
+	t.Logf("%s passed: samples=%d peak_rms=%.1f tone_score=%.3f coverage=%.2f longest_cut=%dms first_audio=%s",
+		label, metrics.Samples, metrics.PeakRMS, metrics.PeakScore, metrics.Coverage,
+		metrics.LongestCutMS, received.firstArrival.Round(time.Millisecond))
+	return metrics
+}
+
+func analyzeLiveTone(samples []int16, sampleRate, frequency int) liveToneMetrics {
+	metrics := liveToneMetrics{Samples: len(samples)}
+	window := sampleRate / 50 // 20 ms, matching carrier media packet cadence.
+	if window <= 0 || len(samples) < window {
+		return metrics
+	}
+	type windowResult struct {
+		rms, score float64
+		strong     bool
+	}
+	windows := make([]windowResult, 0, len(samples)/window)
+	firstStrong, lastStrong := -1, -1
+	for start := 0; start+window <= len(samples); start += window {
+		rms, score := strongestLiveToneWindow(samples[start:start+window], sampleRate, frequency)
+		strong := rms >= 300 && score >= 0.08
+		windows = append(windows, windowResult{rms: rms, score: score, strong: strong})
+		metrics.PeakRMS = math.Max(metrics.PeakRMS, rms)
+		metrics.PeakScore = math.Max(metrics.PeakScore, score)
+		if strong {
+			if firstStrong < 0 {
+				firstStrong = len(windows) - 1
+			}
+			lastStrong = len(windows) - 1
+		}
+	}
+	if firstStrong < 0 {
+		return metrics
+	}
+	strongCount, weakRun, maxWeakRun := 0, 0, 0
+	for _, result := range windows[firstStrong : lastStrong+1] {
+		if result.strong {
+			strongCount++
+			weakRun = 0
+			continue
+		}
+		weakRun++
+		maxWeakRun = max(maxWeakRun, weakRun)
+	}
+	activeWindows := lastStrong - firstStrong + 1
+	metrics.Coverage = float64(strongCount) / float64(activeWindows)
+	metrics.LongestCutMS = int64(maxWeakRun * 20)
+	return metrics
 }
 
 func strongestLiveToneWindow(samples []int16, sampleRate, frequency int) (peakRMS, peakScore float64) {
