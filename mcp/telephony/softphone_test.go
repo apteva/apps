@@ -272,8 +272,8 @@ func TestSoftphoneHubDropsRealtimePacingControlFrames(t *testing.T) {
 			return
 		}
 		var event map[string]string
-		if json.Unmarshal(data, &event) == nil && event["type"] == "ready" {
-			continue // the hub's own hello frame
+		if json.Unmarshal(data, &event) == nil && (event["type"] == "ready" || event["type"] == "peer.connected") {
+			continue // hub-owned connection state, not realtime pacing control
 		}
 		t.Fatalf("realtime pacing control leaked to the browser: %s", data)
 	}
@@ -758,16 +758,23 @@ func TestSoftphoneRetriesTransientBrowserMediaDisconnects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	workerSource, err := os.ReadFile("ui/softphone-worker.js")
+	if err != nil {
+		t.Fatal(err)
+	}
 	audioText := string(audioSource)
 	for _, required := range []string{
 		`"connecting" | "reconnecting" | "live"`,
 		"MAX_RECONNECT_MS",
-		"scheduleReconnect()",
 		"Connection interrupted; retrying…",
-		"Audio reconnected",
 	} {
 		if !strings.Contains(audioText, required) {
 			t.Fatalf("softphone reconnect contract missing %q", required)
+		}
+	}
+	for _, required := range []string{"scheduleReconnect()", "MAX_RECONNECT_MS", "MAX_RECONNECT_DELAY_MS"} {
+		if !strings.Contains(string(workerSource), required) {
+			t.Fatalf("worker reconnect contract missing %q", required)
 		}
 	}
 	if !strings.Contains(string(panelSource), "Reconnecting audio…") {
@@ -793,7 +800,7 @@ func TestSoftphoneUsesAdaptiveJitterAndVisibleDiagnostics(t *testing.T) {
 			t.Fatalf("adaptive jitter worklet missing %q", required)
 		}
 	}
-	for _, required := range []string{"onDiagnostics", `type: "ping"`, "noiseSuppression: false", "autoGainControl: false", `type: "diagnostics"`} {
+	for _, required := range []string{"onDiagnostics", `type: "ping"`, "noiseSuppression: false", "autoGainControl: false", "microphoneTransportReady", `type: "diagnostics"`} {
 		if !strings.Contains(string(audio), required) {
 			t.Fatalf("softphone diagnostics/audio controls missing %q", required)
 		}
@@ -833,7 +840,7 @@ func TestSoftphoneRecommendedAudioMigrationAndLocalMicrophoneTest(t *testing.T) 
 			t.Fatalf("recommended audio UI/migration missing %q", required)
 		}
 	}
-	for _, required := range []string{"apteva.telephony.softphone.audio.v3", "PREVIOUS_AUDIO_SETTINGS_KEY", "autoGainControl: false"} {
+	for _, required := range []string{"apteva.telephony.softphone.audio.v4", "PREVIOUS_AUDIO_SETTINGS_KEY", "autoGainControl: false"} {
 		if !strings.Contains(settingsText, required) {
 			t.Fatalf("recommended audio migration missing %q", required)
 		}
@@ -936,7 +943,7 @@ func TestCallsPanelPinsSoftphoneSocketToCurrentOrigin(t *testing.T) {
 		"new URL(session.media_url, location.href)",
 		"media.host = location.host",
 		"media.protocol = location.protocol",
-		"phone.start(media.toString(), workletURL, audioOptions)",
+		"phone.start(media.toString(), workletURL, workerURL, audioOptions)",
 		"/softphone/release/",
 		"session_token: session.session_token",
 	} {

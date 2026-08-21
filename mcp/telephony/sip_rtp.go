@@ -224,6 +224,10 @@ type sipRTPPacer struct {
 	dropStale      bool
 	trimToPackets  int
 	droppedPackets atomic.Int64
+	needsCrossfade atomic.Bool
+	lastSentPCM    []int16
+	dropMu         sync.Mutex
+	drops          []audioDropEvent
 }
 
 func newSIPRTPPacer(
@@ -274,6 +278,12 @@ func (p *sipRTPPacer) run() {
 			select {
 			case packet := <-p.queue:
 				p.playback.pending.Add(-1)
+				if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
+					pcm := decodeSIPG711(packet.payload, p.media.offer.Codec)
+					applyPCMOverlapCrossfade(p.lastSentPCM, pcm, twilioMediaSampleRate/200)
+					packet.payload = encodeSIPG711(pcm, p.media.offer.Codec)
+				}
+				p.lastSentPCM = decodeSIPG711(packet.payload, p.media.offer.Codec)
 				wire := &rtp.Packet{Header: rtp.Header{
 					Version: 2, PayloadType: p.media.offer.PayloadType,
 					SequenceNumber: p.sequence, Timestamp: p.timestamp, SSRC: p.ssrc,
@@ -318,6 +328,8 @@ func (p *sipRTPPacer) drain() int {
 }
 
 func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
+	before := len(p.queue) + len(packets)
+	droppedBefore := p.droppedPackets.Load()
 	if p.dropStale && len(packets) > cap(p.queue) {
 		p.droppedPackets.Add(int64(len(packets) - cap(p.queue)))
 		packets = packets[len(packets)-cap(p.queue):]
@@ -335,6 +347,19 @@ func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
 			}
 		}
 	}
+	if dropped := p.droppedPackets.Load() - droppedBefore; dropped > 0 {
+		p.needsCrossfade.Store(true)
+		p.dropMu.Lock()
+		p.drops = append(p.drops, audioDropEvent{
+			Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier",
+			Reason: "stale_live_audio", DurationMS: int(dropped) * int(sipRTPPacketTime/time.Millisecond),
+			QueueBeforeMS: before * int(sipRTPPacketTime/time.Millisecond), QueueAfterMS: len(p.queue) * int(sipRTPPacketTime/time.Millisecond),
+		})
+		if len(p.drops) > 100 {
+			p.drops = p.drops[len(p.drops)-100:]
+		}
+		p.dropMu.Unlock()
+	}
 	if len(packets) > cap(p.queue)-len(p.queue) {
 		return len(p.queue) * int(sipRTPPacketTime/time.Millisecond), errors.New("direct SIP playback queue overflow")
 	}
@@ -347,6 +372,12 @@ func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
 		}
 	}
 	return len(p.queue) * int(sipRTPPacketTime/time.Millisecond), nil
+}
+
+func (p *sipRTPPacer) dropEvents() []audioDropEvent {
+	p.dropMu.Lock()
+	defer p.dropMu.Unlock()
+	return append([]audioDropEvent(nil), p.drops...)
 }
 
 func (p *sipRTPPacer) droppedMS() int {
@@ -492,7 +523,7 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 					continue
 				}
 				pcm := decodeSIPG711(payload, media.offer.Codec)
-				processed := audioFrontend.process(pcm)
+				processed := processCarrierInput(row, audioFrontend, pcm)
 				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
 				if localSpeechStarted {
 					audioFrontend.markLocalSignal()
@@ -530,6 +561,7 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 			Provider: "sip_direct", Codec: carrierCodecPCMU8, SampleRate: 8000,
 			PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
+			DropEvents:                   pacer.dropEvents(),
 		})
 		if session.ctx.Err() == nil {
 			_ = session.hangup()

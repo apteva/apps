@@ -48,10 +48,16 @@ import (
 // Twilio. Only the fields we actually act on are typed; the rest
 // (event metadata, sequence numbers) is ignored.
 type twilioFrame struct {
-	Event     string `json:"event"`
-	StreamSID string `json:"streamSid,omitempty"`
-	Start     *struct {
-		CallSID string `json:"callSid"`
+	Event          string `json:"event"`
+	StreamSID      string `json:"streamSid,omitempty"`
+	SequenceNumber string `json:"sequenceNumber,omitempty"`
+	Start          *struct {
+		CallSID     string `json:"callSid"`
+		MediaFormat struct {
+			Encoding   string `json:"encoding"`
+			SampleRate int    `json:"sampleRate"`
+			Channels   int    `json:"channels"`
+		} `json:"mediaFormat"`
 	} `json:"start,omitempty"`
 	Media *struct {
 		Payload string `json:"payload"`
@@ -211,7 +217,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tw, _, _, err := ws.UpgradeHTTP(r, w)
+	tw, twReadConn, err := upgradeBuffered(w, r)
 	if err != nil {
 		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "Twilio websocket upgrade failed", string(mediaCloseLegCarrier))
 		globalCtx.Logger().Warn("twilio ws upgrade", "err", err, "call", callID)
@@ -282,6 +288,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	outputResampler := newPCMResampler(24000, 8000)
 	playback := newTwilioPlaybackTracker()
 	audioFrontend := newCarrierAudioFrontend(8000)
+	inputSequences := &audioSequenceTracker{}
 	defer func() {
 		select {
 		case <-streamSidCh:
@@ -294,7 +301,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer cancel()
 		for {
-			data, op, err := readWebSocketData(tw, ws.StateServerSide, twWriter)
+			data, op, err := readWebSocketData(twReadConn, ws.StateServerSide, twWriter)
 			if err != nil {
 				code, reason := websocketCloseDetails(err)
 				closeState.SetLeg(mediaCloseLegCarrier, code, reason)
@@ -330,7 +337,16 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 					default:
 					}
 				}
+				format := f.Start.MediaFormat
+				if (format.Encoding != "" || format.SampleRate != 0 || format.Channels != 0) &&
+					(format.Encoding != "audio/x-mulaw" || format.SampleRate != twilioMediaSampleRate || format.Channels != 1) {
+					closeState.SetLeg(mediaCloseLegCarrier, ws.StatusUnsupportedData, "Twilio negotiated unsupported media format")
+					return
+				}
 			case "media":
+				if sequence, err := strconv.ParseUint(f.SequenceNumber, 10, 64); err == nil {
+					inputSequences.observe(sequence, "carrier_to_operator")
+				}
 				if f.Media == nil || f.Media.Payload == "" {
 					continue
 				}
@@ -338,7 +354,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					continue
 				}
-				processed := audioFrontend.process(ulawToPCM16(mu))
+				processed := processCarrierInput(row, audioFrontend, ulawToPCM16(mu))
 				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
 				if localSpeechStarted {
 					audioFrontend.markLocalSignal()
@@ -408,13 +424,19 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "twilio", carrierCodecPCMU8, maxQueuedMS, droppedStaleMS)
 		var preAnswerDroppedMS int64
+		sequenceGaps, dropEvents := inputSequences.snapshot()
+		dropEvents = append(dropEvents, pacer.dropEvents()...)
 		if hub := a.softphones.lookup(callID); hub != nil {
 			preAnswerDroppedMS = hub.preAnswerDroppedMS()
+			captureGaps, captureDrops := hub.captureDiagnostics()
+			sequenceGaps += captureGaps
+			dropEvents = append(dropEvents, captureDrops...)
 		}
 		_ = a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
 			Provider: "twilio", Codec: carrierCodecPCMU8, SampleRate: twilioMediaSampleRate,
 			PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
+			SequenceGaps:                 sequenceGaps, DropEvents: dropEvents,
 		})
 	}()
 

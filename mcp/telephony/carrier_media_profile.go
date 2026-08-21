@@ -27,4 +27,9 @@ func applyTelnyxMediaProfile(input map[string]any) {
 	input["stream_bidirectional_mode"] = "rtp"
 	input["stream_bidirectional_codec"] = profile.Provider
 	input["stream_bidirectional_sampling_rate"] = profile.SampleRate
+	// Telnyx recommends targeting the same leg for outbound API calls. Without
+	// this, browser audio can be injected toward the wrong call leg while the
+	// destination appears connected but hears silence.
+	input["stream_bidirectional_target_legs"] = "self"
+	input["send_silence_when_idle"] = true
 }

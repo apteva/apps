@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,17 +32,23 @@ type jsonMediaBridgeConfig struct {
 }
 
 type carrierMediaFrame struct {
-	Event          string `json:"event"`
-	StreamSID      string `json:"streamSid,omitempty"`
-	StreamID       string `json:"stream_id,omitempty"`
-	SequenceNumber any    `json:"sequenceNumber,omitempty"`
-	Start          *struct {
+	Event               string `json:"event"`
+	StreamSID           string `json:"streamSid,omitempty"`
+	StreamID            string `json:"stream_id,omitempty"`
+	SequenceNumber      any    `json:"sequenceNumber,omitempty"`
+	SequenceNumberSnake any    `json:"sequence_number,omitempty"`
+	Start               *struct {
 		CallSID       string `json:"callSid,omitempty"`
 		CallID        string `json:"callId,omitempty"`
 		CallUUID      string `json:"callUuid,omitempty"`
 		CallControlID string `json:"call_control_id,omitempty"`
 		StreamSID     string `json:"streamSid,omitempty"`
 		StreamID      string `json:"streamId,omitempty"`
+		MediaFormat   struct {
+			Encoding   string `json:"encoding,omitempty"`
+			SampleRate int    `json:"sample_rate,omitempty"`
+			Channels   int    `json:"channels,omitempty"`
+		} `json:"media_format,omitempty"`
 	} `json:"start,omitempty"`
 	Media *struct {
 		Payload string `json:"payload"`
@@ -48,6 +56,7 @@ type carrierMediaFrame struct {
 	Mark *struct {
 		Name string `json:"name"`
 	} `json:"mark,omitempty"`
+	Error any `json:"error,omitempty"`
 }
 
 func (a *App) handleSignalWireMediaStream(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +121,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		return
 	}
 
-	carrier, _, _, err := ws.UpgradeHTTP(r, w)
+	carrier, carrierReadConn, err := upgradeBuffered(w, r)
 	if err != nil {
 		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, cfg.Provider+" websocket upgrade failed", string(mediaCloseLegCarrier))
 		globalCtx.Logger().Warn("carrier ws upgrade", "provider", cfg.Provider, "err", err, "call", callID)
@@ -180,11 +189,12 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	outputResampler := carrierOutputResampler(cfg.OutputCodec)
 	playback := newTwilioPlaybackTracker()
 	audioFrontend := newCarrierAudioFrontend(carrierCodecSampleRate(cfg.InputCodec))
+	inputSequences := &audioSequenceTracker{}
 
 	go func() {
 		defer cancel()
 		for {
-			data, op, err := readWebSocketData(carrier, ws.StateServerSide, carrierWriter)
+			data, op, err := readWebSocketData(carrierReadConn, ws.StateServerSide, carrierWriter)
 			if err != nil {
 				code, reason := websocketCloseDetails(err)
 				closeState.SetLeg(mediaCloseLegCarrier, code, reason)
@@ -203,6 +213,10 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			}
 			switch f.Event {
 			case "start":
+				if err := validateCarrierStartFormat(cfg, f); err != nil {
+					closeState.SetLeg(mediaCloseLegCarrier, ws.StatusUnsupportedData, err.Error())
+					return
+				}
 				if providerCallID := frameCallID(f); providerCallID != "" {
 					if row.CarrierSID != "" && row.CarrierSID != providerCallID {
 						closeState.SetLeg(mediaCloseLegCarrier, ws.StatusPolicyViolation, cfg.Provider+" call ID mismatch")
@@ -219,6 +233,9 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 					}
 				}
 			case "media":
+				if sequence, ok := frameSequenceNumber(f); ok {
+					inputSequences.observe(sequence, "carrier_to_operator")
+				}
 				if f.Media == nil || f.Media.Payload == "" {
 					continue
 				}
@@ -267,6 +284,13 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			case "stop":
 				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusNormalClosure, cfg.Provider+" call media ended normally")
 				return
+			case "error":
+				detail := cfg.Provider + " reported a media stream error"
+				if encoded, err := json.Marshal(f.Error); err == nil && string(encoded) != "null" {
+					detail += ": " + string(encoded)
+				}
+				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, detail)
+				return
 			}
 		}
 	}()
@@ -307,13 +331,19 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	defer func() {
 		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, cfg.Provider, cfg.InputCodec, maxQueuedMS, droppedStaleMS)
 		var preAnswerDroppedMS int64
+		sequenceGaps, dropEvents := inputSequences.snapshot()
+		dropEvents = append(dropEvents, pacer.dropEvents()...)
 		if hub := a.softphones.lookup(callID); hub != nil {
 			preAnswerDroppedMS = hub.preAnswerDroppedMS()
+			captureGaps, captureDrops := hub.captureDiagnostics()
+			sequenceGaps += captureGaps
+			dropEvents = append(dropEvents, captureDrops...)
 		}
 		if err := a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
 			Provider: cfg.Provider, Codec: cfg.OutputCodec, SampleRate: sampleRate,
 			PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
+			SequenceGaps:                 sequenceGaps, DropEvents: dropEvents,
 		}); err != nil {
 			globalCtx.Logger().Warn("persist carrier audio diagnostics", "provider", cfg.Provider, "call", callID, "err", err)
 		}
@@ -390,6 +420,40 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	}
 }
 
+func frameSequenceNumber(frame carrierMediaFrame) (uint64, bool) {
+	value := frame.SequenceNumberSnake
+	if value == nil {
+		value = frame.SequenceNumber
+	}
+	switch typed := value.(type) {
+	case float64:
+		if typed >= 0 {
+			return uint64(typed), true
+		}
+	case string:
+		value, err := strconv.ParseUint(typed, 10, 64)
+		return value, err == nil
+	}
+	return 0, false
+}
+
+func validateCarrierStartFormat(cfg jsonMediaBridgeConfig, frame carrierMediaFrame) error {
+	if cfg.Provider != "telnyx" || frame.Start == nil {
+		return nil
+	}
+	format := frame.Start.MediaFormat
+	if format.Encoding != "" && !strings.EqualFold(format.Encoding, "L16") {
+		return fmt.Errorf("Telnyx negotiated unsupported media encoding %s", format.Encoding)
+	}
+	if format.SampleRate != 0 && format.SampleRate != carrierCodecSampleRate(cfg.InputCodec) {
+		return fmt.Errorf("Telnyx negotiated %d Hz, expected %d Hz", format.SampleRate, carrierCodecSampleRate(cfg.InputCodec))
+	}
+	if format.Channels > 1 {
+		return fmt.Errorf("Telnyx negotiated %d channels, expected mono", format.Channels)
+	}
+	return nil
+}
+
 // Human softphone calls must preserve the caller waveform. The adaptive voice
 // frontend exists for realtime agents (VAD/barge-in/noise gating); applying it
 // to a person-to-person call can suppress quiet syllables and make the browser
@@ -450,7 +514,7 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vonage, _, _, err := ws.UpgradeHTTP(r, w)
+	vonage, vonageReadConn, err := upgradeBuffered(w, r)
 	if err != nil {
 		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "Vonage websocket upgrade failed", string(mediaCloseLegCarrier))
 		globalCtx.Logger().Warn("vonage ws upgrade", "err", err, "call", callID)
@@ -529,7 +593,7 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		inputResampler := newPCMResampler(16000, 24000)
 		for {
-			data, op, err := readWebSocketData(vonage, ws.StateServerSide, vonageWriter)
+			data, op, err := readWebSocketData(vonageReadConn, ws.StateServerSide, vonageWriter)
 			if err != nil {
 				code, reason := websocketCloseDetails(err)
 				closeState.SetLeg(mediaCloseLegCarrier, code, reason)

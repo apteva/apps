@@ -22,11 +22,15 @@ func TestJSONHumanAudioPacerBoundsLatencyAndDropsOnlyStaleAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if queuedMS > 60 {
-		t.Fatalf("live human queue=%dms, want <=60ms after trimming", queuedMS)
+	if queuedMS < 100 || queuedMS > 120 {
+		t.Fatalf("live human queue=%dms, want adaptive trim near 100-120ms", queuedMS)
 	}
 	if droppedMS < 300 {
 		t.Fatalf("stale audio dropped=%dms, want at least 300ms from a 400ms burst", droppedMS)
+	}
+	events := pacer.dropEvents()
+	if len(events) != 1 || events[0].Direction != "operator_to_carrier" || events[0].Timestamp == "" || events[0].DurationMS < 300 {
+		t.Fatalf("JSON pacer drop events = %#v", events)
 	}
 }
 
@@ -45,11 +49,15 @@ func TestTwilioHumanAudioPacerUsesSameBoundedPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if queuedMS > 60 {
-		t.Fatalf("Twilio live human queue=%dms, want <=60ms after trimming", queuedMS)
+	if queuedMS < 100 || queuedMS > 120 {
+		t.Fatalf("Twilio live human queue=%dms, want adaptive trim near 100-120ms", queuedMS)
 	}
 	if droppedMS < 300 {
 		t.Fatalf("Twilio stale audio dropped=%dms, want at least 300ms from a 400ms burst", droppedMS)
+	}
+	events := pacer.dropEvents()
+	if len(events) != 1 || events[0].QueueBeforeMS != 400 || events[0].QueueAfterMS < 100 || events[0].QueueAfterMS > 120 {
+		t.Fatalf("Twilio pacer drop events = %#v", events)
 	}
 }
 

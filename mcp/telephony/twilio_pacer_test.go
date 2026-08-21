@@ -15,10 +15,14 @@ type twilioWriteObservation struct {
 }
 
 func testTwilioPacer(t *testing.T) (*twilioAudioPacer, context.CancelFunc, <-chan twilioWriteObservation) {
+	return testTwilioPacerWithPolicy(t, bufferedCarrierPacerPolicy())
+}
+
+func testTwilioPacerWithPolicy(t *testing.T, policy carrierPacerPolicy) (*twilioAudioPacer, context.CancelFunc, <-chan twilioWriteObservation) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	writes := make(chan twilioWriteObservation, 64)
-	pacer := newTwilioAudioPacer(ctx, "stream-test", newTwilioPlaybackTracker(), func(payload []byte) error {
+	pacer := newTwilioAudioPacerWithPolicy(ctx, "stream-test", newTwilioPlaybackTracker(), policy, func(payload []byte) error {
 		var envelope struct {
 			Event string `json:"event"`
 		}
@@ -198,17 +202,15 @@ func TestTwilioAudioPacerClearPreemptsQueuedMedia(t *testing.T) {
 }
 
 func TestTwilioAudioPacerOverflowClearsAndRemainsUsable(t *testing.T) {
-	pacer, cancel, writes := testTwilioPacer(t)
+	pacer, cancel, writes := testTwilioPacerWithPolicy(t, carrierPacerPolicy{bufferMS: 200, maxQueueMS: 20})
 	defer cancel()
-	pacer.maxQueuedSamples = 159
-	_, err := pacer.enqueue(context.Background(), []twilioAudioPacket{{PCM: make([]int16, 160), AudioEndMS: 20}}, realtimeBridgeControl{ItemID: "item-overflow"})
+	_, err := pacer.enqueue(context.Background(), []twilioAudioPacket{{PCM: make([]int16, 320), AudioEndMS: 40}}, realtimeBridgeControl{ItemID: "item-overflow"})
 	if !errors.Is(err, errTwilioPacerOverflow) {
 		t.Fatalf("overflow error=%v", err)
 	}
 	if observation := waitTwilioWrite(t, writes); observation.event != "clear" {
 		t.Fatalf("overflow event=%q, want clear", observation.event)
 	}
-	pacer.maxQueuedSamples = 160
 	if _, err := pacer.enqueue(context.Background(), []twilioAudioPacket{{PCM: make([]int16, 160), AudioEndMS: 20}}, realtimeBridgeControl{ItemID: "item-recovered"}); err != nil {
 		t.Fatal(err)
 	}

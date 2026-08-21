@@ -104,6 +104,22 @@ interface BrowserAudioDiagnostics {
   auto_gain_control?: boolean;
   mic_active_rms_dbfs?: number;
   mic_peak_dbfs?: number;
+  mic_post_peak_dbfs?: number;
+  mic_input_gain_db?: number;
+  mic_limiter_reduction_db?: number;
+  capture_sequence_gaps?: number;
+  playback_sequence_gaps?: number;
+  drop_events?: PersistedDropEvent[];
+}
+
+interface PersistedDropEvent {
+  timestamp?: string;
+  direction?: string;
+  reason?: string;
+  duration_ms?: number;
+  queue_before_ms?: number;
+  queue_after_ms?: number;
+  sequence?: number;
 }
 
 interface CarrierAudioDiagnostics {
@@ -115,6 +131,8 @@ interface CarrierAudioDiagnostics {
   max_queued_ms?: number;
   dropped_stale_ms?: number;
   pre_answer_microphone_dropped_ms?: number;
+  sequence_gaps?: number;
+  drop_events?: PersistedDropEvent[];
 }
 
 interface Call {
@@ -573,10 +591,11 @@ function AudioProcessingSettings({
   disabled: boolean;
   onChange: (value: SoftphoneAudioOptions) => void;
 }) {
-  const options: { key: keyof SoftphoneAudioOptions; label: string }[] = [
+  const options: { key: "echoCancellation" | "noiseSuppression" | "autoGainControl" | "highpassFilter"; label: string }[] = [
     { key: "echoCancellation", label: "Echo cancellation" },
     { key: "noiseSuppression", label: "Noise suppression" },
     { key: "autoGainControl", label: "Automatic gain" },
+    { key: "highpassFilter", label: "Voice high-pass filter" },
   ];
   return (
     <div className="rounded border border-border/70 p-3">
@@ -594,8 +613,22 @@ function AudioProcessingSettings({
           </label>
         ))}
       </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-text-dim">Output mode</span>
+        <button type="button" disabled={disabled} onClick={() => onChange({ ...value, echoCancellation: true })} className={`rounded border px-2 py-1 ${value.echoCancellation ? "border-accent text-accent" : "border-border text-text-muted"}`}>Speakers</button>
+        <button type="button" disabled={disabled} onClick={() => onChange({ ...value, echoCancellation: false })} className={`rounded border px-2 py-1 ${!value.echoCancellation ? "border-accent text-accent" : "border-border text-text-muted"}`}>Headset</button>
+        <label className="ml-2 flex items-center gap-2 text-text-muted">
+          Mic headroom
+          <select disabled={disabled} value={value.inputGainDB} onChange={(event) => onChange({ ...value, inputGainDB: Number(event.target.value) })} className="rounded border border-border bg-bg px-2 py-1">
+            <option value={-9}>-9 dB</option>
+            <option value={-6}>-6 dB (recommended)</option>
+            <option value={-3}>-3 dB</option>
+            <option value={0}>0 dB</option>
+          </select>
+        </label>
+      </div>
       <p className="mt-2 text-xs text-text-dim">
-        Echo cancellation is recommended for speakers. Changes apply to the next call.
+        Speakers enable echo cancellation; headsets disable it. The -6 dB headroom and -3 dBFS limiter protect the carrier stream from clipping. Changes apply to the next call.
       </p>
     </div>
   );
@@ -609,7 +642,7 @@ function appliedSetting(value: boolean | null): string {
 function microphoneLevelAssessment(result: MicrophoneTestResult): { label: string; className: string } {
   if (result.activeRmsDbfs === null) return { label: "No speech detected", className: "text-warn" };
   if (result.activeRmsDbfs < -35) return { label: "Very quiet — enable automatic gain or raise the input level", className: "text-error" };
-  if (result.peakDbfs !== null && result.peakDbfs > -1) return { label: "Near clipping — lower the input level", className: "text-warn" };
+  if (result.postPeakDbfs !== null && result.postPeakDbfs > -2.8) return { label: "Limiter active — add more microphone headroom", className: "text-warn" };
   return { label: "Input level looks healthy", className: "text-success" };
 }
 
@@ -784,6 +817,8 @@ function MicrophoneTest({
               {assessment?.label}
               {result.activeRmsDbfs !== null ? ` · speech ${result.activeRmsDbfs.toFixed(1)} dBFS` : ""}
               {result.peakDbfs !== null ? ` · peak ${result.peakDbfs.toFixed(1)} dBFS` : ""}
+              {result.postPeakDbfs !== null ? ` · sent peak ${result.postPeakDbfs.toFixed(1)} dBFS` : ""}
+              {result.limiterReductionDb > 0.1 ? ` · limiter ${result.limiterReductionDb.toFixed(1)} dB` : ""}
             </span>
             <button type="button" onClick={discard} className="text-text-muted hover:text-text">Discard</button>
           </div>
@@ -801,6 +836,7 @@ function PersistedAudioDiagnostics({ call }: { call: Call }) {
   if (Object.keys(browser).length === 0 && Object.keys(carrier).length === 0) return null;
   const microphoneWarning = typeof browser.mic_active_rms_dbfs === "number" && browser.mic_active_rms_dbfs < -35;
   const latencyWarning = (carrier.max_queued_ms ?? 0) > 150;
+  const dropEvents = [...(browser.drop_events ?? []), ...(carrier.drop_events ?? [])].slice(-5);
   return (
     <div className="rounded border border-border/70 p-3 space-y-2 text-xs">
       <div className="font-medium">Saved audio diagnostics</div>
@@ -808,6 +844,8 @@ function PersistedAudioDiagnostics({ call }: { call: Call }) {
         <div className="text-text-dim tabular-nums">
           Browser: mic {typeof browser.mic_active_rms_dbfs === "number" ? `${browser.mic_active_rms_dbfs.toFixed(1)} dBFS` : "–"}
           {typeof browser.mic_peak_dbfs === "number" ? ` (peak ${browser.mic_peak_dbfs.toFixed(1)})` : ""}
+          {typeof browser.mic_post_peak_dbfs === "number" ? ` · sent peak ${browser.mic_post_peak_dbfs.toFixed(1)}` : ""}
+          {typeof browser.mic_limiter_reduction_db === "number" ? ` · limiter ${browser.mic_limiter_reduction_db.toFixed(1)} dB` : ""}
           {` · RTT ${browser.rtt_ms ?? "–"} ms`}
           {` · playback buffer ${browser.playback_queue_ms ?? 0}/${browser.playback_target_ms ?? 0} ms`}
           {` · underruns ${browser.playback_underruns ?? 0}`}
@@ -824,6 +862,19 @@ function PersistedAudioDiagnostics({ call }: { call: Call }) {
           {` · max queue ${carrier.max_queued_ms ?? 0} ms`}
           {` · stale dropped ${carrier.dropped_stale_ms ?? 0} ms`}
           {` · pre-answer mic held ${carrier.pre_answer_microphone_dropped_ms ?? 0} ms`}
+          {` · sequence gaps ${carrier.sequence_gaps ?? 0}`}
+        </div>
+      ) : null}
+      {dropEvents.length > 0 ? (
+        <div className="space-y-1 text-text-dim tabular-nums">
+          <div className="font-medium text-text-muted">Recent media drops</div>
+          {dropEvents.map((event, index) => (
+            <div key={`${event.timestamp ?? "drop"}-${index}`}>
+              {event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : "–"}
+              {` · ${event.direction ?? "unknown"} · ${event.duration_ms ?? 0} ms · ${event.reason ?? "unknown"}`}
+              {typeof event.queue_before_ms === "number" ? ` · queue ${event.queue_before_ms}→${event.queue_after_ms ?? 0} ms` : ""}
+            </div>
+          ))}
         </div>
       ) : null}
       {microphoneWarning ? <div className="text-error">The saved microphone level was very quiet.</div> : null}
@@ -1136,6 +1187,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
   type BrowserCallSession = { call_id: string; media_url: string; session_token?: string };
 
   const workletURL = `/api/apps/telephony/_install/${encodeURIComponent(String(installId))}/ui/softphone-worklet.js`;
+  const workerURL = `/api/apps/telephony/_install/${encodeURIComponent(String(installId))}/ui/softphone-worker.js`;
 
   const startAudio = async (session: BrowserCallSession) => {
     sessionRef.current?.stop();
@@ -1164,7 +1216,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
     const media = new URL(session.media_url, location.href);
     media.protocol = location.protocol === "https:" ? "wss:" : "ws:";
     media.host = location.host;
-    await phone.start(media.toString(), workletURL, audioOptions);
+    await phone.start(media.toString(), workletURL, workerURL, audioOptions);
     setSelectedId(session.call_id);
     await loadCalls();
   };
@@ -1535,6 +1587,9 @@ function CallsView({ projectId, installId }: NativePanelProps) {
                       {` · dropped ${diagnostics.droppedMs} ms`}
                       {` · ${Math.round(diagnostics.audioContextRate / 1000)} kHz`}
                       {diagnostics.micActiveRmsDbfs !== null ? ` · mic ${diagnostics.micActiveRmsDbfs.toFixed(1)} dBFS` : ""}
+                      {diagnostics.micPostPeakDbfs !== null ? ` · sent peak ${diagnostics.micPostPeakDbfs.toFixed(1)}` : ""}
+                      {diagnostics.micLimiterReductionDb > 0.1 ? ` · limiter ${diagnostics.micLimiterReductionDb.toFixed(1)} dB` : ""}
+                      {diagnostics.dropEvents.length > 0 ? ` · drop events ${diagnostics.dropEvents.length}` : ""}
                       {` · AGC ${appliedSetting(diagnostics.autoGainControl)}`}
                     </div>
                   ) : null}

@@ -28,10 +28,11 @@ type carrierPacerResult struct {
 }
 
 type carrierPacerPolicy struct {
-	bufferMS   int
-	maxQueueMS int
-	trimToMS   int
-	dropStale  bool
+	bufferMS           int
+	maxQueueMS         int
+	adaptiveMaxQueueMS int
+	trimToMS           int
+	dropStale          bool
 }
 
 func bufferedCarrierPacerPolicy() carrierPacerPolicy {
@@ -42,7 +43,7 @@ func liveHumanCarrierPacerPolicy() carrierPacerPolicy {
 	// A human microphone already arrives at real-time cadence. A very small
 	// cushion absorbs scheduler jitter; anything older than this is stale
 	// conversation and must not turn into seconds of perceived latency.
-	return carrierPacerPolicy{bufferMS: 40, maxQueueMS: 120, trimToMS: 60, dropStale: true}
+	return carrierPacerPolicy{bufferMS: 40, maxQueueMS: 180, adaptiveMaxQueueMS: 220, trimToMS: 110, dropStale: true}
 }
 
 type carrierPacerCommand struct {
@@ -141,8 +142,25 @@ type jsonCarrierAudioPacer struct {
 	onError       func(error)
 	policy        carrierPacerPolicy
 
-	errMu sync.Mutex
-	err   error
+	errMu  sync.Mutex
+	err    error
+	dropMu sync.Mutex
+	drops  []audioDropEvent
+}
+
+func (p *jsonCarrierAudioPacer) dropEvents() []audioDropEvent {
+	p.dropMu.Lock()
+	defer p.dropMu.Unlock()
+	return append([]audioDropEvent(nil), p.drops...)
+}
+
+func (p *jsonCarrierAudioPacer) recordDrop(event audioDropEvent) {
+	p.dropMu.Lock()
+	defer p.dropMu.Unlock()
+	p.drops = append(p.drops, event)
+	if len(p.drops) > 100 {
+		p.drops = p.drops[len(p.drops)-100:]
+	}
 }
 
 func newJSONCarrierAudioPacer(ctx context.Context, sampleRate int, codec, shape, streamID string, marks bool,
@@ -229,12 +247,20 @@ func (p *jsonCarrierAudioPacer) run() {
 	)
 	bufferSamples := p.sampleRate * p.policy.bufferMS / 1000
 	maxQueuedSamples := p.sampleRate * p.policy.maxQueueMS / 1000
+	adaptiveMaxQueuedSamples := p.sampleRate * p.policy.adaptiveMaxQueueMS / 1000
 	trimToSamples := p.sampleRate * p.policy.trimToMS / 1000
 	if maxQueuedSamples <= 0 {
 		maxQueuedSamples = p.sampleRate * 15
 	}
+	if adaptiveMaxQueuedSamples < maxQueuedSamples {
+		adaptiveMaxQueuedSamples = maxQueuedSamples
+	}
 	bufferWindow := time.Duration(bufferSamples) * time.Second / time.Duration(p.sampleRate)
 	droppedSamples := 0
+	activeMaxQueuedSamples := maxQueuedSamples
+	var adaptiveUntil time.Time
+	var lastSentTail []int16
+	needsCrossfade := false
 	stopTimer := func() {
 		if timer == nil {
 			return
@@ -298,7 +324,13 @@ func (p *jsonCarrierAudioPacer) run() {
 		packet := queue[0]
 		queue = queue[1:]
 		queuedSamples -= len(packet.PCM)
-		payload := encodeCarrierPacket(packet.PCM, p.codec)
+		pcm := packet.PCM
+		if needsCrossfade && len(lastSentTail) > 0 {
+			pcm = append([]int16(nil), pcm...)
+			applyPCMOverlapCrossfade(lastSentTail, pcm, p.sampleRate/200)
+			needsCrossfade = false
+		}
+		payload := encodeCarrierPacket(pcm, p.codec)
 		frame, _ := json.Marshal(buildCarrierOutbound(p.shape, p.streamID, payload))
 		if err := p.write(frame); err != nil {
 			return err
@@ -312,6 +344,8 @@ func (p *jsonCarrierAudioPacer) run() {
 			bufferedThrough = now
 		}
 		bufferedThrough = bufferedThrough.Add(duration)
+		tailSamples := min(len(pcm), max(1, p.sampleRate/200))
+		lastSentTail = append(lastSentTail[:0], pcm[len(pcm)-tailSamples:]...)
 		if markName := p.playback.add(packet.ItemID, packet.AudioEndMS); markName != "" {
 			if p.marks {
 				mark, _ := json.Marshal(map[string]any{"event": "mark", "mark": map[string]string{"name": markName}})
@@ -348,10 +382,19 @@ func (p *jsonCarrierAudioPacer) run() {
 		return carrierSamplesToMS(cleared, p.sampleRate), p.write(frame)
 	}
 	dropOldest := func(targetSamples int) {
+		before := queuedSamples
 		for queuedSamples > targetSamples && len(queue) > 0 {
 			droppedSamples += len(queue[0].PCM)
 			queuedSamples -= len(queue[0].PCM)
 			queue = queue[1:]
+		}
+		if dropped := before - queuedSamples; dropped > 0 {
+			needsCrossfade = true
+			p.recordDrop(audioDropEvent{
+				Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier",
+				Reason: "stale_live_audio", DurationMS: carrierSamplesToMS(dropped, p.sampleRate),
+				QueueBeforeMS: carrierSamplesToMS(before, p.sampleRate), QueueAfterMS: carrierSamplesToMS(queuedSamples, p.sampleRate),
+			})
 		}
 	}
 	handleCommand := func(command carrierPacerCommand) error {
@@ -372,10 +415,16 @@ func (p *jsonCarrierAudioPacer) run() {
 			command.response <- carrierPacerResult{clearedMS: clearedMS, err: err}
 			return nil
 		}
+		if !adaptiveUntil.IsZero() && time.Now().After(adaptiveUntil) {
+			activeMaxQueuedSamples = maxQueuedSamples
+			adaptiveUntil = time.Time{}
+		}
 		queue = append(queue, command.packets...)
 		queuedSamples += incoming
-		if p.policy.dropStale && queuedSamples > maxQueuedSamples {
+		if p.policy.dropStale && queuedSamples > activeMaxQueuedSamples {
 			dropOldest(trimToSamples)
+			activeMaxQueuedSamples = adaptiveMaxQueuedSamples
+			adaptiveUntil = time.Now().Add(5 * time.Second)
 		}
 		queuedAtEnqueue := queuedSamples
 		err := fillLead()
@@ -423,6 +472,29 @@ func (p *jsonCarrierAudioPacer) run() {
 				return
 			}
 		}
+	}
+}
+
+func applyPCMOverlapCrossfade(previousTail, next []int16, samples int) {
+	n := min(samples, min(len(previousTail), len(next)))
+	if n <= 0 {
+		return
+	}
+	previousTail = previousTail[len(previousTail)-n:]
+	for i := 0; i < n; i++ {
+		// Equal-power overlap avoids the discontinuity produced by joining two
+		// unrelated waveform phases after stale packets are removed.
+		t := float64(i+1) / float64(n+1)
+		left := float64(previousTail[i]) * (1 - t)
+		right := float64(next[i]) * t
+		mixed := int(left + right)
+		if mixed > 32767 {
+			mixed = 32767
+		}
+		if mixed < -32768 {
+			mixed = -32768
+		}
+		next[i] = int16(mixed)
 	}
 }
 

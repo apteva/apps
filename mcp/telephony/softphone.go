@@ -25,6 +25,7 @@ package main
 // and re-attaching resumes audio.
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,7 +55,44 @@ type softphoneHub struct {
 	direction           string
 	status              string
 	preAnswerMicSamples int64
+	captureSequenceSet  bool
+	captureExpected     uint32
+	captureSequenceGaps int
+	captureDropEvents   []audioDropEvent
 	closed              bool
+}
+
+const softphoneAudioFrameMagic uint32 = 0x31545041
+
+func decodeSoftphoneAudioFrame(data []byte) (payload []byte, sequence uint32, framed bool) {
+	if len(data) < 16 || binary.LittleEndian.Uint32(data[:4]) != softphoneAudioFrameMagic {
+		return data, 0, false
+	}
+	return data[16:], binary.LittleEndian.Uint32(data[4:8]), true
+}
+
+func (h *softphoneHub) observeCaptureFrame(sequence uint32) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.captureSequenceSet && sequence > h.captureExpected {
+		gap := int(sequence - h.captureExpected)
+		h.captureSequenceGaps += gap
+		h.captureDropEvents = append(h.captureDropEvents, audioDropEvent{
+			Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier",
+			Reason: "capture_sequence_gap", DurationMS: gap * 20, Sequence: uint64(h.captureExpected),
+		})
+		if len(h.captureDropEvents) > 100 {
+			h.captureDropEvents = h.captureDropEvents[len(h.captureDropEvents)-100:]
+		}
+	}
+	h.captureExpected = sequence + 1
+	h.captureSequenceSet = true
+}
+
+func (h *softphoneHub) captureDiagnostics() (int, []audioDropEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.captureSequenceGaps, append([]audioDropEvent(nil), h.captureDropEvents...)
 }
 
 func (h *softphoneHub) setCallState(direction, status string) {
@@ -352,6 +390,12 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		_ = previous.Write(ws.OpText, softphoneEvent("session.replaced", ""))
 		previous.Stop()
 	}
+	// A browser can reconnect while the carrier peer remains attached. Mirror
+	// handlePeerSocket's notification so the client can safely reopen its
+	// microphone gate without waiting for another carrier reconnect.
+	if hub.peerWriter() != nil {
+		_ = writer.Write(ws.OpText, softphoneEvent("peer.connected", callID))
+	}
 	logSoftphone("softphone browser attached", "call", callID)
 	// The browser opens this socket only after getUserMedia succeeds. For an
 	// inbound human call, this is therefore the first safe point to answer the
@@ -395,10 +439,17 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		switch op {
 		case ws.OpBinary:
 			// Operator microphone audio, PCM16LE @ 24 kHz.
+			payload, sequence, framed := decodeSoftphoneAudioFrame(data)
+			if framed {
+				hub.observeCaptureFrame(sequence)
+			}
+			if len(payload) == 0 {
+				continue
+			}
 			if hub.microphoneReady() {
-				hub.toPeer(ws.OpBinary, data)
+				hub.toPeer(ws.OpBinary, payload)
 			} else {
-				hub.dropPreAnswerMicrophone(data)
+				hub.dropPreAnswerMicrophone(payload)
 			}
 		case ws.OpText:
 			var control struct {

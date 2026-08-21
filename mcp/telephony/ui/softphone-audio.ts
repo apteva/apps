@@ -10,9 +10,8 @@
 // failing the call.
 
 const SAMPLE_RATE = 24_000;
-const JITTER_TARGET_MS = 60;
+const JITTER_TARGET_MS = 80;
 const MAX_RECONNECT_MS = 30_000;
-const MAX_RECONNECT_DELAY_MS = 4_000;
 
 function floatToPCM16(input: Float32Array): ArrayBuffer {
   const out = new Int16Array(input.length);
@@ -62,6 +61,18 @@ export interface SoftphoneAudioOptions {
   echoCancellation: boolean;
   noiseSuppression: boolean;
   autoGainControl: boolean;
+  inputGainDB: number;
+  highpassFilter: boolean;
+}
+
+export interface AudioDropEvent {
+  timestamp: string;
+  direction: string;
+  reason: string;
+  duration_ms: number;
+  queue_before_ms?: number;
+  queue_after_ms?: number;
+  sequence?: number | null;
 }
 
 export interface SoftphoneDiagnostics {
@@ -80,12 +91,20 @@ export interface SoftphoneDiagnostics {
   autoGainControl: boolean | null;
   micActiveRmsDbfs: number | null;
   micPeakDbfs: number | null;
+  micPostPeakDbfs: number | null;
+  micInputGainDb: number;
+  micLimiterReductionDb: number;
+  captureSequenceGaps: number;
+  playbackSequenceGaps: number;
+  dropEvents: AudioDropEvent[];
 }
 
 export const DEFAULT_SOFTPHONE_AUDIO_OPTIONS: SoftphoneAudioOptions = {
   echoCancellation: true,
   noiseSuppression: false,
   autoGainControl: false,
+  inputGainDB: -6,
+  highpassFilter: true,
 };
 
 function microphoneConstraints(options: SoftphoneAudioOptions): MediaTrackConstraints {
@@ -111,6 +130,8 @@ export interface MicrophoneTestResult {
   sampleRate: number;
   activeRmsDbfs: number | null;
   peakDbfs: number | null;
+  postPeakDbfs: number | null;
+  limiterReductionDb: number;
   settings: MicrophoneAppliedSettings;
 }
 
@@ -177,6 +198,8 @@ export class MicrophoneTestSession {
   private activeSquares = 0;
   private activeSamples = 0;
   private peak = 0;
+  private postPeak = 0;
+  private limiterReductionDB = 0;
   private settings: MicrophoneAppliedSettings | null = null;
   private stopped = false;
 
@@ -194,13 +217,23 @@ export class MicrophoneTestSession {
       await this.ctx.audioWorklet.addModule(workletURL);
       const contextRate = this.ctx.sampleRate;
       const source = this.ctx.createMediaStreamSource(this.stream);
-      this.capture = new AudioWorkletNode(this.ctx, "softphone-capture");
+      this.capture = new AudioWorkletNode(this.ctx, "softphone-capture", {
+        processorOptions: { inputGainDB: options.inputGainDB, highpassFilter: options.highpassFilter },
+      });
       // Keep the capture branch renderable without monitoring the microphone.
       this.sink = this.ctx.createGain();
       this.sink.gain.value = 0;
       this.capture.connect(this.sink).connect(this.ctx.destination);
-      this.capture.port.onmessage = (event: MessageEvent<Float32Array>) => {
+      this.capture.port.onmessage = (event: MessageEvent<Float32Array | { type?: string; post_peak?: number; limiter_reduction_db?: number }>) => {
         if (this.stopped) return;
+        if (!(event.data instanceof Float32Array)) {
+          if (event.data.type === "capture.stats") {
+            this.peak = Math.max(this.peak, (event.data as { pre_peak?: number }).pre_peak ?? 0);
+            this.postPeak = Math.max(this.postPeak, event.data.post_peak ?? 0);
+            this.limiterReductionDB = Math.max(this.limiterReductionDB, event.data.limiter_reduction_db ?? 0);
+          }
+          return;
+        }
         let frame = event.data;
         if (contextRate !== SAMPLE_RATE) frame = resample(frame, contextRate, SAMPLE_RATE);
         const level = rms(frame);
@@ -208,7 +241,6 @@ export class MicrophoneTestSession {
         const pcm = new Int16Array(floatToPCM16(frame));
         this.frames.push(pcm);
         this.samples += pcm.length;
-        for (let i = 0; i < frame.length; i++) this.peak = Math.max(this.peak, Math.abs(frame[i]));
         // Exclude silence from the speech-level estimate so a pause before or
         // after speaking does not make a healthy microphone look too quiet.
         if (level >= 0.005) {
@@ -239,6 +271,8 @@ export class MicrophoneTestSession {
       sampleRate: SAMPLE_RATE,
       activeRmsDbfs: dbfs(activeRms),
       peakDbfs: dbfs(peak),
+      postPeakDbfs: dbfs(this.postPeak || peak),
+      limiterReductionDb: this.limiterReductionDB,
       settings,
     };
   }
@@ -265,359 +299,247 @@ export class MicrophoneTestSession {
 }
 
 export class SoftphoneSession {
-  private ws: WebSocket | null = null;
+  private worker: Worker | null = null;
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
   private capture: AudioWorkletNode | null = null;
   private playback: AudioWorkletNode | null = null;
+  private sink: GainNode | null = null;
   private muted = false;
   private closed = false;
   private micLevel = 0;
   private speakerLevel = 0;
   private levelTimer: ReturnType<typeof setInterval> | null = null;
-  private mediaURL = "";
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private reconnectStartedAt = 0;
-  private reconnectAttempt = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
-  private micActiveSquares = 0;
-  private micActiveSamples = 0;
-  private micPeak = 0;
+  private opened = false;
+  private microphoneTransportReady = false;
   private diagnostics: SoftphoneDiagnostics = {
     rttMs: null, queueMs: 0, targetMs: JITTER_TARGET_MS, underruns: 0,
     droppedMs: 0, maxQueueMs: 0, audioContextRate: SAMPLE_RATE,
     websocketBufferedBytes: 0, microphoneSampleRate: 0, microphoneChannelCount: 0,
     echoCancellation: null, noiseSuppression: null, autoGainControl: null,
-    micActiveRmsDbfs: null, micPeakDbfs: null,
+    micActiveRmsDbfs: null, micPeakDbfs: null, micPostPeakDbfs: null,
+    micInputGainDb: DEFAULT_SOFTPHONE_AUDIO_OPTIONS.inputGainDB, micLimiterReductionDb: 0,
+    captureSequenceGaps: 0, playbackSequenceGaps: 0, dropEvents: [],
   };
 
   constructor(private readonly callbacks: SoftphoneCallbacks = {}) {}
 
-  get isMuted(): boolean {
-    return this.muted;
-  }
+  get isMuted(): boolean { return this.muted; }
 
   async start(
     mediaURL: string,
     workletURL: string,
+    workerURL: string,
     options: SoftphoneAudioOptions = DEFAULT_SOFTPHONE_AUDIO_OPTIONS,
   ): Promise<void> {
     this.callbacks.onState?.("connecting");
-    this.mediaURL = mediaURL;
     try {
-      // Echo cancellation matters more than anything else here: without it the
-      // caller hears themselves through the operator's speakers.
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: microphoneConstraints(options),
-      });
+      this.stream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) });
       const track = this.stream.getAudioTracks()[0];
-      if (track) {
-        const applied = appliedMicrophoneSettings(track);
-        this.diagnostics = {
-          ...this.diagnostics,
-          microphoneSampleRate: applied.sampleRate ?? 0,
-          microphoneChannelCount: applied.channelCount ?? 0,
-          echoCancellation: applied.echoCancellation,
-          noiseSuppression: applied.noiseSuppression,
-          autoGainControl: applied.autoGainControl,
-        };
-      }
-    } catch (err) {
-      this.fail("microphone permission denied");
-      throw err;
-    }
-
-    let deviceRate = SAMPLE_RATE;
-    try {
-      // Constructed from the operator's Answer click. getUserMedia may display
-      // a permission prompt, but the resumed context remains associated with
-      // that explicit interaction.
+      if (!track) throw new Error("No microphone audio track was returned.");
+      const applied = appliedMicrophoneSettings(track);
+      this.diagnostics = {
+        ...this.diagnostics, microphoneSampleRate: applied.sampleRate ?? 0,
+        microphoneChannelCount: applied.channelCount ?? 0, echoCancellation: applied.echoCancellation,
+        noiseSuppression: applied.noiseSuppression, autoGainControl: applied.autoGainControl,
+        micInputGainDb: options.inputGainDB,
+      };
       this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: "interactive" });
       if (this.ctx.state === "suspended") await this.ctx.resume();
       await this.ctx.audioWorklet.addModule(workletURL);
-
-      deviceRate = this.ctx.sampleRate;
+      this.diagnostics.audioContextRate = this.ctx.sampleRate;
       const source = this.ctx.createMediaStreamSource(this.stream);
-      this.capture = new AudioWorkletNode(this.ctx, "softphone-capture");
-      this.playback = new AudioWorkletNode(this.ctx, "softphone-playback", {
-        numberOfInputs: 0,
-        outputChannelCount: [1],
-        processorOptions: {
-          initialTargetMs: JITTER_TARGET_MS,
-          minTargetMs: 40,
-          maxTargetMs: 140,
-          hardMaxMs: 250,
-        },
+      this.capture = new AudioWorkletNode(this.ctx, "softphone-capture", {
+        processorOptions: { inputGainDB: options.inputGainDB, highpassFilter: options.highpassFilter },
       });
-      this.diagnostics.audioContextRate = deviceRate;
-      this.playback.port.onmessage = (event: MessageEvent) => {
-        const stats = event.data as {
-          type?: string; queue_ms?: number; target_ms?: number; underruns?: number;
-          dropped_ms?: number; max_queue_ms?: number;
-        };
-        if (stats.type !== "stats") return;
-        this.diagnostics = {
-          ...this.diagnostics,
-          queueMs: stats.queue_ms ?? 0,
-          targetMs: stats.target_ms ?? JITTER_TARGET_MS,
-          underruns: stats.underruns ?? 0,
-          droppedMs: stats.dropped_ms ?? 0,
-          maxQueueMs: stats.max_queue_ms ?? 0,
-        };
-        this.callbacks.onDiagnostics?.({ ...this.diagnostics });
-      };
-      // Install the capture consumer before connecting the graph. MessagePort
-      // otherwise retains frames produced during WebSocket setup and releases
-      // them as a burst, which a carrier interprets as seconds of queued audio.
-      this.capture.port.onmessage = (event: MessageEvent<Float32Array>) => {
-        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-        let frame = event.data;
-        if (deviceRate !== SAMPLE_RATE) frame = resample(frame, deviceRate, SAMPLE_RATE);
-        this.micLevel = this.muted ? 0 : rms(frame);
-        if (!this.muted) {
-          for (let i = 0; i < frame.length; i++) this.micPeak = Math.max(this.micPeak, Math.abs(frame[i]));
-          if (this.micLevel >= 0.005) {
-            for (let i = 0; i < frame.length; i++) this.micActiveSquares += frame[i] * frame[i];
-            this.micActiveSamples += frame.length;
-          }
-        }
-        // Muting sends silence rather than nothing: a continuous stream keeps
-        // the carrier-side live pacer's timing stable after answer.
-        if (this.muted) frame = new Float32Array(frame.length);
-        this.ws.send(floatToPCM16(frame));
-      };
+      this.playback = new AudioWorkletNode(this.ctx, "softphone-playback", {
+        numberOfInputs: 0, outputChannelCount: [1],
+        processorOptions: { initialTargetMs: JITTER_TARGET_MS, minTargetMs: 60, maxTargetMs: 160, hardMaxMs: 320 },
+      });
+      this.installWorkletDiagnostics();
+      this.sink = this.ctx.createGain();
+      this.sink.gain.value = 0;
+      this.capture.connect(this.sink).connect(this.ctx.destination);
       source.connect(this.capture);
       this.playback.connect(this.ctx.destination);
-
-      await this.openSocket(mediaURL);
-    } catch (err) {
-      if (!this.closed) {
-        const detail = err instanceof Error && err.message ? err.message : "browser audio setup failed";
-        this.fail(detail);
-      }
-      throw err;
+      await this.openWorker(mediaURL, workerURL);
+      this.levelTimer = setInterval(() => {
+        this.callbacks.onLevels?.(this.micLevel, this.speakerLevel);
+        this.micLevel *= 0.65;
+        this.speakerLevel *= 0.65;
+      }, 100);
+    } catch (error) {
+      if (!this.closed) this.fail(error instanceof Error ? error.message : "browser audio setup failed");
+      throw error;
     }
-
-    this.levelTimer = setInterval(() => {
-      this.callbacks.onLevels?.(this.micLevel, this.speakerLevel);
-      this.refreshMicrophoneDiagnostics();
-      // Decay so the meters fall back to zero when a side goes quiet.
-      this.speakerLevel *= 0.6;
-    }, 100);
   }
 
-  private openSocket(mediaURL: string): Promise<void> {
+  private installWorkletDiagnostics(): void {
+    if (!this.capture || !this.playback) return;
+    this.capture.port.onmessage = (event: MessageEvent) => {
+      const stats = event.data;
+      if (stats?.type !== "capture.stats") return;
+      this.micLevel = this.muted ? 0 : (stats.active_rms ?? 0);
+      this.diagnostics = {
+        ...this.diagnostics, micActiveRmsDbfs: dbfs(stats.active_rms ?? 0),
+        micPeakDbfs: dbfs(stats.pre_peak ?? 0), micPostPeakDbfs: dbfs(stats.post_peak ?? 0),
+        micInputGainDb: stats.input_gain_db ?? this.diagnostics.micInputGainDb,
+        micLimiterReductionDb: stats.limiter_reduction_db ?? 0,
+      };
+    };
+    this.playback.port.onmessage = (event: MessageEvent) => {
+      const stats = event.data;
+      if (stats?.type !== "stats") return;
+      this.speakerLevel = Math.max(this.speakerLevel, stats.speaker_level ?? 0);
+      this.diagnostics = {
+        ...this.diagnostics, queueMs: stats.queue_ms ?? 0, targetMs: stats.target_ms ?? JITTER_TARGET_MS,
+        underruns: stats.underruns ?? 0, droppedMs: stats.dropped_ms ?? 0,
+        maxQueueMs: stats.max_queue_ms ?? 0, playbackSequenceGaps: stats.playback_sequence_gaps ?? 0,
+        dropEvents: [...this.diagnostics.dropEvents.filter((item) => item.direction !== "carrier_to_operator"), ...(stats.drop_events ?? [])].slice(-100),
+      };
+      this.callbacks.onDiagnostics?.({ ...this.diagnostics });
+    };
+  }
+
+  private openWorker(mediaURL: string, workerURL: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(mediaURL);
-      ws.binaryType = "arraybuffer";
-      this.ws = ws;
+      const worker = new Worker(workerURL);
+      this.worker = worker;
+      const captureChannel = new MessageChannel();
+      const playbackChannel = new MessageChannel();
+      this.capture?.port.postMessage({ type: "transport", port: captureChannel.port1 }, [captureChannel.port1]);
+      this.playback?.port.postMessage({ type: "transport", port: playbackChannel.port1 }, [playbackChannel.port1]);
       let settled = false;
-      let opened = false;
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error("audio connection timed out"));
+      }, 10_000);
       const finish = (error?: Error) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        if (error) reject(error);
-        else resolve();
+        if (error) reject(error); else resolve();
       };
-      const timeout = setTimeout(() => {
-        try {
-          ws.close();
-        } catch {
-          // The browser may already have discarded the failed socket.
-        }
-        finish(new Error("audio connection timed out"));
-      }, 10_000);
-
-      ws.onopen = () => {
-        if (this.closed || this.ws !== ws) {
-          ws.close();
-          return;
-        }
-        opened = true;
-        this.startRTTProbe(ws);
-        finish();
-      };
-      ws.onerror = () => {
-        finish(new Error("audio connection failed"));
-      };
-      ws.onclose = () => {
-        if (this.ws !== ws) return;
-        this.ws = null;
-        this.stopRTTProbe();
-        finish(new Error("audio connection closed before it was ready"));
-        if (!this.closed && opened) {
-          this.scheduleReconnect();
+      worker.onmessage = (event: MessageEvent) => {
+        const message = event.data;
+        if (message?.type === "socket.open") {
+          this.opened = true;
+          this.startRTTProbe();
+          finish();
+        } else if (message?.type === "socket.message") {
+          this.handleControl(message.data);
+        } else if (message?.type === "socket.close") {
+          this.stopRTTProbe();
+          this.microphoneTransportReady = false;
+          if (this.opened && !this.closed) this.callbacks.onState?.("reconnecting", "Connection interrupted; retrying…");
+          else finish(new Error("audio connection closed before it was ready"));
+        } else if (message?.type === "socket.failed") {
+          this.fail(message.detail || "audio connection lost");
+        } else if (message?.type === "transport.drop" && message.event) {
+          this.diagnostics.dropEvents = [...this.diagnostics.dropEvents, message.event].slice(-100);
+        } else if (message?.type === "transport.stats") {
+          this.diagnostics.websocketBufferedBytes = message.buffered_bytes ?? 0;
         }
       };
-      ws.onmessage = (event: MessageEvent) => {
-        if (this.ws !== ws) return;
-        if (typeof event.data === "string") {
-          try {
-            const parsed = JSON.parse(event.data) as { type?: string; detail?: string; nonce?: number };
-            if (parsed.type === "pong" && typeof parsed.nonce === "number") {
-              this.diagnostics.rttMs = Math.max(0, Math.round(performance.now() - parsed.nonce));
-              this.callbacks.onDiagnostics?.({ ...this.diagnostics });
-              return;
-            }
-            if (parsed.type === "call.ended" || parsed.type === "session.replaced") {
-              this.closed = true;
-              this.callbacks.onState?.("ended", parsed.type);
-              this.teardown();
-            } else if (parsed.type === "call.error") {
-              this.fail(parsed.detail || "The call could not be connected.");
-            } else if (parsed.type === "peer.disconnected") {
-              this.playback?.port.postMessage("flush");
-              this.callbacks.onState?.("reconnecting", "Carrier audio interrupted; reconnecting…");
-            } else if (parsed.type === "ready" || parsed.type === "peer.connected") {
-              this.markLive();
-            }
-          } catch {
-            // Status frames are advisory; a malformed one must not drop audio.
-          }
-          return;
-        }
-        let frame = pcm16ToFloat(event.data as ArrayBuffer);
-        this.speakerLevel = Math.max(this.speakerLevel, rms(frame));
-        if (this.ctx && this.ctx.sampleRate !== SAMPLE_RATE) {
-          frame = resample(frame, SAMPLE_RATE, this.ctx.sampleRate);
-        }
-        this.playback?.port.postMessage(frame);
-      };
+      worker.onerror = () => finish(new Error("audio worker failed"));
+      worker.postMessage({
+        type: "init", mediaURL, contextRate: this.ctx?.sampleRate ?? SAMPLE_RATE,
+        capturePort: captureChannel.port2, playbackPort: playbackChannel.port2,
+      }, [captureChannel.port2, playbackChannel.port2]);
     });
   }
 
-  private startRTTProbe(ws: WebSocket): void {
+  private handleControl(data: string): void {
+    try {
+      const parsed = JSON.parse(data) as { type?: string; detail?: string; nonce?: number };
+      if (parsed.type === "pong" && typeof parsed.nonce === "number") {
+        this.diagnostics.rttMs = Math.max(0, Math.round(performance.now() - parsed.nonce));
+        this.callbacks.onDiagnostics?.({ ...this.diagnostics });
+      } else if (parsed.type === "call.ended" || parsed.type === "session.replaced") {
+        this.closed = true; this.callbacks.onState?.("ended", parsed.type); this.teardown();
+      } else if (parsed.type === "call.error") {
+        this.fail(parsed.detail || "The call could not be connected.");
+      } else if (parsed.type === "peer.disconnected") {
+        this.microphoneTransportReady = false;
+        this.worker?.postMessage({ type: "microphone.ready", value: false });
+        this.worker?.postMessage({ type: "flush" });
+        this.callbacks.onState?.("reconnecting", "Carrier audio interrupted; reconnecting…");
+      } else if (parsed.type === "peer.connected") {
+        this.microphoneTransportReady = true;
+        this.worker?.postMessage({ type: "microphone.ready", value: true });
+        this.callbacks.onState?.("live", this.opened ? undefined : "Audio reconnected");
+      }
+    } catch { /* Status frames are advisory. */ }
+  }
+
+  private startRTTProbe(): void {
     this.stopRTTProbe();
     const ping = () => {
-      if (this.ws === ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "ping", nonce: performance.now() }));
-        this.sendDiagnostics(ws);
-      }
+      this.sendText(JSON.stringify({ type: "ping", nonce: performance.now() }));
+      this.sendDiagnostics();
     };
     ping();
     this.pingTimer = setInterval(ping, 5_000);
   }
 
-  private refreshMicrophoneDiagnostics(): void {
-    const activeRms = this.micActiveSamples > 0 ? Math.sqrt(this.micActiveSquares / this.micActiveSamples) : 0;
-    this.diagnostics.micActiveRmsDbfs = dbfs(activeRms);
-    this.diagnostics.micPeakDbfs = dbfs(this.micPeak);
-    this.diagnostics.websocketBufferedBytes = this.ws?.bufferedAmount ?? 0;
-  }
+  private sendText(data: string): void { this.worker?.postMessage({ type: "send.text", data }); }
 
-  private sendDiagnostics(ws: WebSocket): void {
-    if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
-    this.refreshMicrophoneDiagnostics();
+  private sendDiagnostics(): void {
     const value = this.diagnostics;
-    ws.send(JSON.stringify({
-      type: "diagnostics",
-      diagnostics: {
-        rtt_ms: value.rttMs,
-        playback_queue_ms: value.queueMs,
-        playback_target_ms: value.targetMs,
-        playback_max_queue_ms: value.maxQueueMs,
-        playback_underruns: value.underruns,
-        playback_dropped_ms: value.droppedMs,
-        websocket_buffered_bytes: value.websocketBufferedBytes,
-        audio_context_rate: value.audioContextRate,
-        microphone_sample_rate: value.microphoneSampleRate,
-        microphone_channel_count: value.microphoneChannelCount,
-        echo_cancellation: value.echoCancellation,
-        noise_suppression: value.noiseSuppression,
-        auto_gain_control: value.autoGainControl,
-        mic_active_rms_dbfs: value.micActiveRmsDbfs,
-        mic_peak_dbfs: value.micPeakDbfs,
-      },
-    }));
+    this.sendText(JSON.stringify({ type: "diagnostics", diagnostics: {
+      rtt_ms: value.rttMs, playback_queue_ms: value.queueMs, playback_target_ms: value.targetMs,
+      playback_max_queue_ms: value.maxQueueMs, playback_underruns: value.underruns,
+      playback_dropped_ms: value.droppedMs, websocket_buffered_bytes: value.websocketBufferedBytes,
+      audio_context_rate: value.audioContextRate, microphone_sample_rate: value.microphoneSampleRate,
+      microphone_channel_count: value.microphoneChannelCount, echo_cancellation: value.echoCancellation,
+      noise_suppression: value.noiseSuppression, auto_gain_control: value.autoGainControl,
+      mic_active_rms_dbfs: value.micActiveRmsDbfs, mic_peak_dbfs: value.micPeakDbfs,
+      mic_post_peak_dbfs: value.micPostPeakDbfs, mic_input_gain_db: value.micInputGainDb,
+      mic_limiter_reduction_db: value.micLimiterReductionDb, capture_sequence_gaps: value.captureSequenceGaps,
+      playback_sequence_gaps: value.playbackSequenceGaps, drop_events: value.dropEvents,
+    }}));
     this.callbacks.onDiagnostics?.({ ...value });
   }
 
   private stopRTTProbe(): void {
-    if (this.pingTimer !== null) {
-      clearInterval(this.pingTimer);
-      this.pingTimer = null;
-    }
-  }
-
-  private markLive(): void {
-    const recovered = this.reconnectStartedAt > 0 || this.reconnectAttempt > 0;
-    this.reconnectStartedAt = 0;
-    this.reconnectAttempt = 0;
-    if (this.reconnectTimer !== null) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    this.callbacks.onState?.("live", recovered ? "Audio reconnected" : undefined);
-  }
-
-  private scheduleReconnect(): void {
-    if (this.closed || this.reconnectTimer !== null || !this.mediaURL) return;
-    const now = Date.now();
-    if (this.reconnectStartedAt === 0) this.reconnectStartedAt = now;
-    if (now - this.reconnectStartedAt >= MAX_RECONNECT_MS) {
-      this.fail("audio connection lost after repeated retries");
-      return;
-    }
-    this.playback?.port.postMessage("flush");
-    this.callbacks.onState?.("reconnecting", "Connection interrupted; retrying…");
-    const delay = Math.min(250 * (2 ** this.reconnectAttempt), MAX_RECONNECT_DELAY_MS);
-    this.reconnectAttempt += 1;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      if (this.closed) return;
-      void this.openSocket(this.mediaURL).catch(() => this.scheduleReconnect());
-    }, delay);
+    if (this.pingTimer !== null) clearInterval(this.pingTimer);
+    this.pingTimer = null;
   }
 
   setMuted(muted: boolean): void {
     this.muted = muted;
-    if (muted) {
-      // Drop anything already queued so unmuting resumes at the live edge.
-      this.playback?.port.postMessage("flush");
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ type: "interrupt" }));
-      }
-    }
+    this.capture?.port.postMessage({ type: "muted", value: muted });
+    if (muted) this.sendText(JSON.stringify({ type: "interrupt" }));
   }
 
   stop(): void {
     if (this.closed) return;
-    this.closed = true;
-    this.callbacks.onState?.("ended");
-    this.teardown();
+    this.closed = true; this.callbacks.onState?.("ended"); this.teardown();
   }
 
   private fail(detail: string): void {
-    this.closed = true;
-    this.callbacks.onState?.("error", detail);
-    this.teardown();
+    this.closed = true; this.callbacks.onState?.("error", detail); this.teardown();
   }
 
   private teardown(): void {
-    if (this.ws?.readyState === WebSocket.OPEN) this.sendDiagnostics(this.ws);
+    this.microphoneTransportReady = false;
+    this.sendDiagnostics();
     this.stopRTTProbe();
-    if (this.reconnectTimer !== null) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    if (this.levelTimer !== null) {
-      clearInterval(this.levelTimer);
-      this.levelTimer = null;
-    }
-    try {
-      this.ws?.close();
-    } catch {
-      // Already closing.
-    }
-    this.ws = null;
-    this.capture?.port.close();
+    if (this.levelTimer !== null) clearInterval(this.levelTimer);
+    this.levelTimer = null;
+    const worker = this.worker;
+    worker?.postMessage({ type: "close" });
+    if (worker) setTimeout(() => worker.terminate(), 100);
+    this.worker = null;
+    this.capture?.disconnect();
+    this.playback?.disconnect();
+    this.sink?.disconnect();
     this.stream?.getTracks().forEach((track) => track.stop());
     this.stream = null;
     void this.ctx?.close().catch(() => undefined);
-    this.ctx = null;
-    this.capture = null;
-    this.playback = null;
+    this.ctx = null; this.capture = null; this.playback = null; this.sink = null;
   }
 }
 
