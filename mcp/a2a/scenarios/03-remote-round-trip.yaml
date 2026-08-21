@@ -1,0 +1,80 @@
+name: a2a-remote-round-trip
+description: An agent discovers a peer-node agent and uses its address directly.
+
+timeout: 120s
+max_iterations: 20
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  topology:
+    nodes:
+      - id: main
+        primary: true
+        global: true
+        config:
+          public_url: ${NODE_main_URL}
+          peers_json: >-
+            [{"id":"tenant","name":"Tenant","base_url":"${NODE_tenant_APP_URL}","token":"a2a-test-main-tenant-03","discover_agents":["*"],"invoke_agents":["*"]}]
+      - id: tenant
+        global: true
+        config:
+          public_url: ${NODE_tenant_URL}
+          peers_json: >-
+            [{"id":"main","name":"Main","base_url":"${NODE_main_APP_URL}","token":"a2a-test-main-tenant-03","discover_agents":["Remote Worker"],"invoke_agents":["Remote Worker"]}]
+        agents:
+          - id: remote_worker
+            name: Remote Worker
+            directive: |
+              Wait for an [a2a] request. Reply once with status completed and
+              exact message REMOTE_OK. Do not initiate tasks.
+
+directive: |
+  Call agents_discover once with query "Remote Worker". Use the returned
+  address directly in agent_ask without calling agent_get. Ask for REMOTE_OK.
+  Stop after the completed reply arrives.
+
+outcome_assert:
+  - http: GET /api/apps/a2a/tasks
+    node: main
+    expect_field_at: tasks.0.direction
+    expect_field_eq: outbound
+  - http: GET /api/apps/a2a/tasks
+    node: main
+    expect_field_at: tasks.0.status
+    expect_field_eq: completed
+  - http: GET /api/apps/a2a/tasks
+    node: tenant
+    expect_field_at: tasks.0.direction
+    expect_field_eq: inbound
+  - http: GET /api/apps/a2a/tasks
+    node: tenant
+    expect_field_at: tasks.0.status
+    expect_field_eq: completed
+
+trajectory_assert:
+  - tool_called_with:
+      node: main
+      agent: primary
+      tool: agents_discover
+      result_contains: Remote Worker
+  - tool_called_with:
+      node: main
+      agent: primary
+      tool: agent_ask
+      success: true
+  - tool_not_called_with:
+      node: main
+      agent: primary
+      tool: agent_get
+  - tool_called_with:
+      node: tenant
+      agent: remote_worker
+      tool: agent_reply
+      args: { status: completed }
+      success: true
+
+budget:
+  total_tokens: 60000
+  cost_usd: 0.55

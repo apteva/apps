@@ -1,0 +1,77 @@
+name: a2a-remote-follow-up
+description: A remote agent requests input and completes after agent_send follow-up.
+
+timeout: 150s
+max_iterations: 28
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  topology:
+    nodes:
+      - id: main
+        primary: true
+        global: true
+        config:
+          public_url: ${NODE_main_URL}
+          peers_json: >-
+            [{"id":"tenant","name":"Tenant","base_url":"${NODE_tenant_APP_URL}","token":"a2a-test-main-tenant-04","discover_agents":["*"],"invoke_agents":["*"]}]
+      - id: tenant
+        global: true
+        config:
+          public_url: ${NODE_tenant_URL}
+          peers_json: >-
+            [{"id":"main","name":"Main","base_url":"${NODE_main_APP_URL}","token":"a2a-test-main-tenant-04","discover_agents":["Clarifier"],"invoke_agents":["Clarifier"]}]
+        agents:
+          - id: clarifier
+            name: Clarifier
+            directive: |
+              For the first [a2a] request, call agent_reply with status
+              input_required and ask "Which code?". When its follow-up arrives,
+              call agent_reply on that task with status completed and exact
+              message CODE_OK. Do not initiate tasks.
+
+directive: |
+  Discover Clarifier and pass its returned address directly to agent_ask. Ask
+  it to validate a code, without initially giving the code. When it replies
+  input_required, call agent_send with that same task_id and message "Code is
+  2468". Do not start another task. Stop after CODE_OK arrives.
+
+outcome_assert:
+  - http: GET /api/apps/a2a/tasks
+    node: main
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/a2a/tasks
+    node: main
+    expect_field_at: tasks.0.status
+    expect_field_eq: completed
+  - http: GET /api/apps/a2a/tasks
+    node: tenant
+    expect_field_at: tasks.0.status
+    expect_field_eq: completed
+
+trajectory_assert:
+  - tool_called_with:
+      node: main
+      agent: primary
+      tool: agent_send
+      args: { message: Code is 2468 }
+      success: true
+  - tool_called_with:
+      node: tenant
+      agent: clarifier
+      tool: agent_reply
+      args: { status: input_required }
+      success: true
+  - tool_called_with:
+      node: tenant
+      agent: clarifier
+      tool: agent_reply
+      args: { status: completed }
+      success: true
+
+budget:
+  total_tokens: 80000
+  cost_usd: 0.75

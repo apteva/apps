@@ -1,0 +1,61 @@
+name: a2a-peer-grant-denied
+description: Discovery and invocation grants are enforced independently.
+
+timeout: 90s
+max_iterations: 14
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  topology:
+    nodes:
+      - id: main
+        primary: true
+        global: true
+        config:
+          public_url: ${NODE_main_URL}
+          peers_json: >-
+            [{"id":"tenant","name":"Tenant","base_url":"${NODE_tenant_APP_URL}","token":"a2a-test-main-tenant-05","discover_agents":["*"],"invoke_agents":["*"]}]
+      - id: tenant
+        global: true
+        config:
+          public_url: ${NODE_tenant_URL}
+          peers_json: >-
+            [{"id":"main","name":"Main","base_url":"${NODE_main_APP_URL}","token":"a2a-test-main-tenant-05","discover_agents":["Protected Worker"],"invoke_agents":[]}]
+        agents:
+          - id: protected_worker
+            name: Protected Worker
+            directive: Do not initiate A2A tasks. Only respond if a request arrives.
+
+directive: |
+  Discover Protected Worker, then try exactly once to ask it for DENIED_TEST
+  using the returned address. If invocation is denied, stop and do not retry.
+
+outcome_assert:
+  - http: GET /api/apps/a2a/tasks
+    node: tenant
+    expect_count_at: tasks
+    expect_count: 0
+
+trajectory_assert:
+  - tool_called_with:
+      node: main
+      agent: primary
+      tool: agents_discover
+      result_contains: Protected Worker
+  - tool_called_with:
+      node: main
+      agent: primary
+      tool: agent_ask
+      success: false
+      result_contains: may not invoke
+      count: 1
+  - tool_not_called_with:
+      node: tenant
+      agent: protected_worker
+      tool: agent_reply
+
+budget:
+  total_tokens: 50000
+  cost_usd: 0.40

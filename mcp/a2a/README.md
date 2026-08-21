@@ -68,3 +68,16 @@ tasks/cancel
 Agent Cards advertise JSON-RPC with streaming and push notifications disabled.
 The origin app polls open remote tasks and delivers state changes through the
 existing local A2A event mechanism.
+
+## Tests
+
+Run deterministic app tests with `go test ./...`. Run the real-agent suite
+with the topology-capable CLI from this app directory:
+
+```sh
+apteva test ./scenarios
+```
+
+The suite covers same-project communication, global-install project isolation,
+two-node request/reply and follow-up flows, peer grants, and a hub connected to
+two independent tenant nodes.

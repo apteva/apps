@@ -1,0 +1,66 @@
+name: a2a-local-round-trip
+description: A local agent discovers and asks another agent in the same project.
+
+timeout: 90s
+max_iterations: 16
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  topology:
+    nodes:
+      - id: main
+        primary: true
+        agents:
+          - id: worker
+            name: Local Worker
+            directive: |
+              Wait for an [a2a] request. When one arrives, call agent_reply once
+              with status completed and the exact message LOCAL_OK. Do not
+              initiate tasks yourself.
+
+directive: |
+  Call agents_discover once with query "Local Worker". Pass its returned
+  address directly to agent_ask; do not call agent_get. Ask the worker to
+  return LOCAL_OK. After the completed reply arrives, stop.
+
+outcome_assert:
+  - http: GET /api/apps/a2a/tasks
+    node: main
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/a2a/tasks
+    node: main
+    expect_field_at: tasks.0.status
+    expect_field_eq: completed
+  - http: GET /api/apps/a2a/tasks
+    node: main
+    expect_field_at: tasks.0.direction
+    expect_field_eq: local
+
+trajectory_assert:
+  - tool_called_with:
+      node: main
+      agent: primary
+      tool: agents_discover
+      result_contains: Local Worker
+  - tool_called_with:
+      node: main
+      agent: primary
+      tool: agent_ask
+      success: true
+  - tool_not_called_with:
+      node: main
+      agent: primary
+      tool: agent_get
+  - tool_called_with:
+      node: main
+      agent: worker
+      tool: agent_reply
+      args: { status: completed }
+      success: true
+
+budget:
+  total_tokens: 50000
+  cost_usd: 0.40

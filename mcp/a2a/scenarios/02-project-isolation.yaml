@@ -1,0 +1,63 @@
+name: a2a-project-isolation
+description: A global install discovers only agents in the caller's project.
+
+timeout: 90s
+max_iterations: 18
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  topology:
+    nodes:
+      - id: main
+        primary: true
+        global: true
+        agents:
+          - id: local_worker
+            name: Visible Worker
+            directive: |
+              Wait for an [a2a] request, then call agent_reply with status
+              completed and message VISIBLE_OK. Do not initiate tasks.
+          - id: other_worker
+            name: Hidden Worker
+            project: other
+            directive: |
+              Do not initiate any A2A task. Only respond if a request arrives.
+
+directive: |
+  Discover "Worker" agents. Ask Visible Worker to return VISIBLE_OK using the
+  address from discovery. Do not contact any other agent and do not call
+  agent_get. Stop after the completed reply.
+
+outcome_assert:
+  - http: GET /api/apps/a2a/tasks
+    node: main
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/a2a/tasks
+    node: main
+    project: other
+    expect_count_at: tasks
+    expect_count: 0
+
+trajectory_assert:
+  - tool_called_with:
+      node: main
+      agent: primary
+      tool: agents_discover
+      result_contains: Visible Worker
+      result_not_contains: Hidden Worker
+  - tool_called_with:
+      node: main
+      agent: primary
+      tool: agent_ask
+      success: true
+  - tool_not_called_with:
+      node: main
+      agent: other_worker
+      tool: agent_reply
+
+budget:
+  total_tokens: 70000
+  cost_usd: 0.50

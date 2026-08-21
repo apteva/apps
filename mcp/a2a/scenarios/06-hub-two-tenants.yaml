@@ -1,0 +1,91 @@
+name: a2a-hub-two-tenants
+description: One hub discovers and communicates directly with two peer nodes.
+
+timeout: 150s
+max_iterations: 30
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  topology:
+    nodes:
+      - id: hub
+        primary: true
+        global: true
+        config:
+          public_url: ${NODE_hub_URL}
+          peers_json: >-
+            [{"id":"tenant_a","name":"Tenant A","base_url":"${NODE_tenant_a_APP_URL}","token":"a2a-test-hub-a-06","discover_agents":["*"],"invoke_agents":["*"]},{"id":"tenant_b","name":"Tenant B","base_url":"${NODE_tenant_b_APP_URL}","token":"a2a-test-hub-b-06","discover_agents":["*"],"invoke_agents":["*"]}]
+      - id: tenant_a
+        global: true
+        config:
+          public_url: ${NODE_tenant_a_URL}
+          peers_json: >-
+            [{"id":"hub","name":"Hub","base_url":"${NODE_hub_APP_URL}","token":"a2a-test-hub-a-06","discover_agents":["Tenant A Worker"],"invoke_agents":["Tenant A Worker"]}]
+        agents:
+          - id: tenant_a_worker
+            name: Tenant A Worker
+            directive: |
+              Wait for an [a2a] request, then reply completed with exact message
+              TENANT_A_OK. Do not initiate tasks.
+      - id: tenant_b
+        global: true
+        config:
+          public_url: ${NODE_tenant_b_URL}
+          peers_json: >-
+            [{"id":"hub","name":"Hub","base_url":"${NODE_hub_APP_URL}","token":"a2a-test-hub-b-06","discover_agents":["Tenant B Worker"],"invoke_agents":["Tenant B Worker"]}]
+        agents:
+          - id: tenant_b_worker
+            name: Tenant B Worker
+            directive: |
+              Wait for an [a2a] request, then reply completed with exact message
+              TENANT_B_OK. Do not initiate tasks.
+
+directive: |
+  Make one agents_discover call for "Tenant". From that single result, pass
+  the returned addresses directly to agent_ask: ask Tenant A Worker for
+  TENANT_A_OK and Tenant B Worker for TENANT_B_OK. Do not call agent_get.
+  Stop after both completed replies arrive.
+
+outcome_assert:
+  - http: GET /api/apps/a2a/tasks
+    node: hub
+    expect_count_at: tasks
+    expect_count: 2
+  - http: GET /api/apps/a2a/tasks
+    node: tenant_a
+    expect_field_at: tasks.0.status
+    expect_field_eq: completed
+  - http: GET /api/apps/a2a/tasks
+    node: tenant_b
+    expect_field_at: tasks.0.status
+    expect_field_eq: completed
+
+trajectory_assert:
+  - tool_called_with:
+      node: hub
+      agent: primary
+      tool: agents_discover
+      result_contains: Tenant A Worker
+      count: 1
+  - tool_called_with:
+      node: hub
+      agent: primary
+      tool: agents_discover
+      result_contains: Tenant B Worker
+      count: 1
+  - tool_called_with:
+      node: hub
+      agent: primary
+      tool: agent_ask
+      count: 2
+      success: true
+  - tool_not_called_with:
+      node: hub
+      agent: primary
+      tool: agent_get
+
+budget:
+  total_tokens: 90000
+  cost_usd: 0.85
