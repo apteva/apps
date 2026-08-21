@@ -312,6 +312,59 @@ func TestFirstNormalMediaCloseCauseSurvivesCarrierStopCallback(t *testing.T) {
 	}
 }
 
+func TestTerminalCarrierMediaStopReconcilesGenericTransportClose(t *testing.T) {
+	db := testCallsDB(t)
+	call := testCall("media-terminal-reconcile", "in-progress")
+	if err := db.insertCall(call); err != nil {
+		t.Fatal(err)
+	}
+	endedAt := time.Now().UTC()
+	if err := db.updateMediaStatusWithLeg(call.ID, "error", "unexpected EOF", 1011, "media bridge transport error", "carrier"); err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := db.reconcileTerminalCarrierMediaStop(call.ID, endedAt.Format(time.RFC3339Nano), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reconciled {
+		t.Fatal("expected terminal carrier close to be reconciled")
+	}
+	stored, err := db.findCall(call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.MediaStatus != "disconnected" || stored.MediaErrorMessage != "" ||
+		stored.MediaCloseCode != 1000 || stored.MediaCloseReason != "carrier stream ended with call" ||
+		stored.MediaCloseLeg != "carrier" {
+		t.Fatalf("reconciled media state = %+v", stored)
+	}
+}
+
+func TestTerminalCarrierMediaStopPreservesEarlierTransportFailure(t *testing.T) {
+	db := testCallsDB(t)
+	call := testCall("media-earlier-error", "in-progress")
+	if err := db.insertCall(call); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.updateMediaStatusWithLeg(call.ID, "error", "unexpected EOF", 1011, "media bridge transport error", "carrier"); err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := db.reconcileTerminalCarrierMediaStop(call.ID, time.Now().UTC().Add(5*time.Second).Format(time.RFC3339Nano), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled {
+		t.Fatal("an earlier transport failure must remain diagnostic")
+	}
+	stored, err := db.findCall(call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.MediaStatus != "error" || stored.MediaCloseCode != 1011 {
+		t.Fatalf("earlier media failure was overwritten: %+v", stored)
+	}
+}
+
 func TestTelnyxStreamingFailureIsMediaOnly(t *testing.T) {
 	body := `{"data":{"id":"evt-stream","event_type":"streaming.failed","occurred_at":"2026-07-28T10:00:00Z","payload":{"call_control_id":"v3:test","hangup_cause":"websocket timeout"}}}`
 	req := httptest.NewRequest(http.MethodPost, "https://example.test/status", strings.NewReader(body))

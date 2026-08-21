@@ -2056,6 +2056,16 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "persist media status", http.StatusInternalServerError)
 			return
 		}
+		// Telnyx closes its media WebSocket as the call ends and may do so
+		// without a WebSocket close frame. The bridge initially records that as
+		// a generic carrier transport error; the signed streaming.stopped event
+		// lets us safely reconcile it to a normal carrier-side close.
+		if row.CarrierSlug == "telnyx" && update.MediaStatus == "disconnected" {
+			if _, err := a.db().reconcileTerminalCarrierMediaStop(callID, update.Facts.OccurredAt, false); err != nil {
+				http.Error(w, "reconcile carrier media stop", http.StatusInternalServerError)
+				return
+			}
+		}
 		if update.MediaStatus == "connected" {
 			_ = a.db().clearStateExpiry(callID)
 		} else if update.MediaStatus == "disconnected" {
@@ -2065,6 +2075,14 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if update.Status != "" {
+		// Reconcile before persisting/publishing the terminal lifecycle event so
+		// subscribers receive the truthful media result in the same event.
+		if row.CarrierSlug == "telnyx" && isTerminalStatus(update.Status) {
+			if _, err := a.db().reconcileTerminalCarrierMediaStop(callID, update.Facts.OccurredAt, true); err != nil {
+				http.Error(w, "reconcile terminal carrier media", http.StatusInternalServerError)
+				return
+			}
+		}
 		created, err := a.db().updateStatusWithFacts(callID, update.Status, update.Error, update.Facts)
 		if err != nil {
 			http.Error(w, "persist status", http.StatusInternalServerError)
@@ -2870,7 +2888,9 @@ func callsPanelPublic(rows []callRow) []map[string]any {
 			"media_close_code": r.MediaCloseCode, "media_close_reason": r.MediaCloseReason,
 			"media_close_leg": r.MediaCloseLeg,
 			"placed_at":       r.PlacedAt, "answered_at": r.AnsweredAt, "ended_at": r.EndedAt,
-			"project_id": r.ProjectID, "error_message": callsPanelErrorMessage(r),
+			"termination_cause": r.TerminationCause, "termination_code": r.TerminationCode,
+			"termination_initiator": r.TerminationInitiator,
+			"project_id":            r.ProjectID, "error_message": callsPanelErrorMessage(r),
 			"recording_mode": r.RecordingMode, "recording_count": r.RecordingCount,
 			"recording_status": r.RecordingStatus,
 			// peer_kind lets the panel tell a softphone call (which it can
@@ -3549,6 +3569,55 @@ func (c *callsDB) updateMediaStatusWithLeg(id, status, errMsg string, closeCode 
 		status, now, status, terminalMedia, now, status, closeCode, closeCode,
 		status, closeReason, closeReason, status, closeLeg, closeLeg, now, id)
 	return err
+}
+
+// reconcileTerminalCarrierMediaStop corrects one narrow false-positive: a
+// carrier socket ending without a close frame at essentially the same moment
+// as a terminal provider event. Real failures (core/local leg, streaming.failed,
+// or an earlier carrier transport failure) remain diagnostic errors.
+func (c *callsDB) reconcileTerminalCarrierMediaStop(id, occurredAt string, terminalEvent bool) (bool, error) {
+	row, err := c.findCall(id)
+	if err != nil || row == nil {
+		return false, err
+	}
+	if !terminalEvent && !isTerminalStatus(row.Status) {
+		return false, nil
+	}
+	if row.MediaStatus != "error" || row.MediaCloseLeg != string(mediaCloseLegCarrier) ||
+		row.MediaCloseCode != 1011 || row.MediaCloseReason != "media bridge transport error" {
+		return false, nil
+	}
+	mediaEnded, err := time.Parse(time.RFC3339Nano, row.MediaDisconnectedAt)
+	if err != nil {
+		mediaEnded, err = time.Parse(time.RFC3339, row.MediaDisconnectedAt)
+	}
+	if err != nil {
+		return false, nil
+	}
+	terminalAt := normalizedEventTime(occurredAt, time.Now().UTC())
+	terminalEnded, err := time.Parse(time.RFC3339Nano, terminalAt)
+	if err != nil {
+		return false, nil
+	}
+	delta := mediaEnded.Sub(terminalEnded)
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > 2*time.Second {
+		return false, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := c.db.Exec(`UPDATE calls SET media_status = 'disconnected', media_active = 0,
+        media_error_message = '', media_close_code = 1000,
+        media_close_reason = 'carrier stream ended with call', media_close_leg = 'carrier',
+        state_expires_at = '', updated_at = ?
+        WHERE id = ? AND media_status = 'error' AND media_close_leg = 'carrier'
+          AND media_close_code = 1011 AND media_close_reason = 'media bridge transport error'`, now, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 func (c *callsDB) setStateExpiry(id string, at time.Time) error {

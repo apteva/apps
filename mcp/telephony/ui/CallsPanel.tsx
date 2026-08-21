@@ -79,6 +79,12 @@ interface RawCall {
   direction?: string;
   PeerKind?: string;
   peer_kind?: string;
+  TerminationCause?: string;
+  termination_cause?: string;
+  TerminationCode?: string;
+  termination_code?: string;
+  TerminationInitiator?: string;
+  termination_initiator?: string;
 }
 
 interface Call {
@@ -108,6 +114,9 @@ interface Call {
   recordingStatus: string;
   direction: string;
   peerKind: string;
+  terminationCause: string;
+  terminationCode: string;
+  terminationInitiator: string;
 }
 
 interface RecordingSettings {
@@ -204,6 +213,9 @@ function normalizeCall(row: RawCall): Call {
     recordingStatus: row.recording_status ?? row.RecordingStatus ?? "",
     direction: row.direction ?? row.Direction ?? "outbound",
     peerKind: row.peer_kind ?? row.PeerKind ?? "realtime",
+    terminationCause: row.termination_cause ?? row.TerminationCause ?? "",
+    terminationCode: row.termination_code ?? row.TerminationCode ?? "",
+    terminationInitiator: row.termination_initiator ?? row.TerminationInitiator ?? "",
   };
 }
 
@@ -352,14 +364,16 @@ const KEYPAD_ROWS: string[][] = [
   ["+", "0", "back"],
 ];
 
-function Dialer({ value, from, fromNumbers, fromLoading, fromError, onChange, onFromChange, onCall, onApplyProfile, onRefreshNumbers, profileBusy, busy, disabled, recent, status }: {
+function Dialer({ value, from, timeoutSec, fromNumbers, fromLoading, fromError, onChange, onFromChange, onTimeoutChange, onCall, onApplyProfile, onRefreshNumbers, profileBusy, busy, disabled, recent, status }: {
   value: string;
   from: string;
+  timeoutSec: number;
   fromNumbers: ConnectedNumber[];
   fromLoading: boolean;
   fromError: string;
   onChange: (next: string) => void;
   onFromChange: (next: string) => void;
+  onTimeoutChange: (next: number) => void;
   onCall: () => void;
   onApplyProfile: (profileId: string) => void;
   onRefreshNumbers: () => void;
@@ -401,6 +415,17 @@ function Dialer({ value, from, fromNumbers, fromLoading, fromError, onChange, on
           ))}
         </select>
         {fromError ? <span className="mt-1 block text-xs text-error">{fromError}</span> : null}
+      </label>
+      <label className="block">
+        <span className="text-xs text-text-dim">Ring destination for</span>
+        <select
+          value={timeoutSec}
+          disabled={disabled}
+          onChange={(event) => onTimeoutChange(Number(event.target.value))}
+          className="mt-1 h-9 w-full rounded border border-border bg-bg px-3 text-sm disabled:opacity-50"
+        >
+          {[30, 45, 60, 90, 120].map((seconds) => <option key={seconds} value={seconds}>{seconds} seconds</option>)}
+        </select>
       </label>
       {outbound?.required && outbound.status !== "ready" ? (
         <div className={`rounded border p-3 text-xs ${outbound.status === "auto_configurable" ? "border-info/30 bg-info/10" : "border-warn/30 bg-warn/10"}`}>
@@ -542,6 +567,54 @@ function AudioProcessingSettings({
   );
 }
 
+function useInboundRingtone(active: boolean) {
+  const [enabled, setEnabled] = useState(false);
+  const contextRef = useRef<AudioContext | null>(null);
+
+  const enable = useCallback(async () => {
+    const AudioContextClass = window.AudioContext
+      ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextClass) return;
+    const context = contextRef.current ?? new AudioContextClass();
+    contextRef.current = context;
+    await context.resume();
+    setEnabled(true);
+  }, []);
+
+  const disable = useCallback(() => setEnabled(false), []);
+
+  useEffect(() => {
+    if (!active || !enabled || !contextRef.current) return;
+    const context = contextRef.current;
+    const ring = () => {
+      const start = context.currentTime;
+      for (const offset of [0, 0.32]) {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = "sine";
+        oscillator.frequency.value = 440;
+        gain.gain.setValueAtTime(0, start + offset);
+        gain.gain.linearRampToValueAtTime(0.07, start + offset + 0.02);
+        gain.gain.setValueAtTime(0.07, start + offset + 0.18);
+        gain.gain.linearRampToValueAtTime(0, start + offset + 0.25);
+        oscillator.connect(gain).connect(context.destination);
+        oscillator.start(start + offset);
+        oscillator.stop(start + offset + 0.26);
+      }
+    };
+    ring();
+    const timer = window.setInterval(ring, 1800);
+    return () => window.clearInterval(timer);
+  }, [active, enabled]);
+
+  useEffect(() => () => {
+    void contextRef.current?.close();
+    contextRef.current = null;
+  }, []);
+
+  return { ringtoneEnabled: enabled, enableRingtone: enable, disableRingtone: disable };
+}
+
 function CallsView({ projectId, installId }: NativePanelProps) {
   const layout = usePanelWidth();
   const [calls, setCalls] = useState<Call[]>([]);
@@ -557,6 +630,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
   // ─── softphone ───────────────────────────────────────────────────
   const [dialNumber, setDialNumber] = useState("");
   const [fromNumber, setFromNumber] = useState("");
+  const [dialTimeoutSec, setDialTimeoutSec] = useState(60);
   const [fromNumbers, setFromNumbers] = useState<ConnectedNumber[]>([]);
   const [fromLoading, setFromLoading] = useState(false);
   const [fromError, setFromError] = useState("");
@@ -744,6 +818,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
       call.direction === "inbound" && call.peerKind === "human" && call.status === "pending"),
     [calls],
   );
+  const { ringtoneEnabled, enableRingtone, disableRingtone } = useInboundRingtone(ringing.length > 0);
 
   // Redial shortcuts: the most recent distinct outbound destinations.
   const recentNumbers = useMemo(() => {
@@ -836,7 +911,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
     setStatus("");
     try {
       const session = await postJSON<{ call_id: string; media_url: string }>(
-        withProject("/softphone/place"), { to, from: fromNumber },
+        withProject("/softphone/place"), { to, from: fromNumber, timeout_sec: dialTimeoutSec },
       );
       await startAudio(session);
       setDialNumber("");
@@ -938,6 +1013,14 @@ function CallsView({ projectId, installId }: NativePanelProps) {
           </p>
         </div>
         <div className="text-xs text-text-muted truncate" style={{ maxWidth: "16rem" }}>{status}</div>
+        <button
+          type="button"
+          onClick={() => { if (ringtoneEnabled) disableRingtone(); else void enableRingtone(); }}
+          className={`h-8 px-3 rounded border text-xs ${ringtoneEnabled ? "border-success/30 bg-success/10 text-success" : "border-border hover:bg-bg-muted"}`}
+          title="Browsers require one click before they may play an incoming-call sound"
+        >
+          {ringtoneEnabled ? "Call sounds on" : "Enable call sounds"}
+        </button>
         {softphoneCallId && softphoneCallId !== selected?.id ? (
           <button
             type="button"
@@ -1056,7 +1139,11 @@ function CallsView({ projectId, installId }: NativePanelProps) {
                     <div className="text-sm tabular-nums">{duration(call, now) || "-"}</div>
                     <div className="truncate text-sm text-text-muted">{call.voice || "-"}</div>
                     <div className="truncate text-sm text-text-muted">
-                      {call.recordingStatus ? recordingStatusLabel(call.recordingStatus) : call.recordingMode === "always" ? "Enabled" : "Off"}
+                      {call.recordingStatus
+                        ? recordingStatusLabel(call.recordingStatus)
+                        : call.recordingMode === "always" && TERMINAL_STATUSES.has(call.status) && !call.answeredAt
+                          ? "Not recorded"
+                          : call.recordingMode === "always" ? "Enabled" : "Off"}
                     </div>
                   </button>
                 );
@@ -1070,11 +1157,13 @@ function CallsView({ projectId, installId }: NativePanelProps) {
             <Dialer
               value={dialNumber}
               from={fromNumber}
+              timeoutSec={dialTimeoutSec}
               fromNumbers={fromNumbers}
               fromLoading={fromLoading}
               fromError={fromError}
               onChange={setDialNumber}
               onFromChange={chooseFromNumber}
+              onTimeoutChange={setDialTimeoutSec}
               onCall={() => void placeSoftphoneCall()}
               onApplyProfile={(profileId) => void configureOutboundProfile(profileId)}
               onRefreshNumbers={() => void loadOutboundNumbers()}
@@ -1124,18 +1213,27 @@ function CallsView({ projectId, installId }: NativePanelProps) {
                       </span>
                       <div className="min-w-0">
                         <div className="text-xs font-medium truncate">
-                          {softphoneState === "live"
-                            ? "On the call"
-                            : softphoneState === "connecting"
-                              ? "Connecting audio…"
-                              : softphoneState === "reconnecting"
-                                ? "Reconnecting audio…"
-                                : "Audio ended"}
+                          {selected.status === "answered" || selected.status === "in-progress"
+                            ? "Connected"
+                            : selected.status === "ringing"
+                              ? "Destination ringing"
+                              : selected.status === "initiated"
+                                ? "Dialing — waiting for answer"
+                                : selected.status === "no-answer"
+                                  ? "No answer"
+                                  : softphoneState === "live"
+                                    ? "Browser audio ready"
+                                    : softphoneState === "connecting"
+                                      ? "Connecting browser audio…"
+                                      : softphoneState === "reconnecting"
+                                        ? "Reconnecting audio…"
+                                        : "Audio ended"}
                           {softphoneDetail ? <span className="text-text-muted"> — {softphoneDetail}</span> : null}
                         </div>
                         <div className="text-xs text-text-muted tabular-nums">
                           {duration(selected, now) || "just started"}
-                          {selected.recordingMode === "always" ? <span className="text-error font-medium"> · REC</span> : null}
+                          {selected.recordingMode === "always" && (Boolean(selected.answeredAt) || selected.status === "answered" || selected.status === "in-progress")
+                            ? <span className="text-error font-medium"> · REC</span> : null}
                         </div>
                       </div>
                     </div>
@@ -1200,6 +1298,10 @@ function CallsView({ projectId, installId }: NativePanelProps) {
                 <dd className="truncate">{selected.fromNumber || "-"}</dd>
                 <dt className="text-text-dim">Carrier SID</dt>
                 <dd className="truncate font-mono text-xs">{selected.carrierSid || "-"}</dd>
+                <dt className="text-text-dim">Termination</dt>
+                <dd className="truncate text-xs">
+                  {[selected.terminationCause, selected.terminationCode, selected.terminationInitiator].filter(Boolean).join(" / ") || "-"}
+                </dd>
                 <dt className="text-text-dim">Call ID</dt>
                 <dd className="truncate font-mono text-xs">{selected.id}</dd>
               </dl>
@@ -1218,8 +1320,10 @@ function CallsView({ projectId, installId }: NativePanelProps) {
                   <div className="py-4 text-sm text-text-muted">
                     {selected.recordingMode === "always" && !TERMINAL_STATUSES.has(selected.status)
                       ? "Recording is in progress."
-                      : selected.recordingMode === "always"
-                        ? "The carrier is still processing the recording."
+                      : selected.recordingMode === "always" && !selected.answeredAt
+                        ? "Not recorded — the call was never answered."
+                        : selected.recordingMode === "always"
+                          ? "The carrier is still processing the recording."
                         : "No recording."}
                   </div>
                 ) : recordings.map((recording) => (

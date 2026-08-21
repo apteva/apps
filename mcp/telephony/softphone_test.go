@@ -807,7 +807,7 @@ func TestRepeatedOutboundSoftphoneCallsUseUniqueHumanThreadIDs(t *testing.T) {
 
 	seen := map[string]bool{}
 	for index := 0; index < 2; index++ {
-		session, err := app.placeHumanCall(ctx, "project-a", "+14155550100", "+14155550101", nil)
+		session, err := app.placeHumanCall(ctx, "project-a", "+14155550100", "+14155550101", 60, nil)
 		if err != nil {
 			t.Fatalf("outbound call %d failed: %v", index+1, err)
 		}

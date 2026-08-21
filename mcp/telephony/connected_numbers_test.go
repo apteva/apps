@@ -251,7 +251,7 @@ func TestTelnyxOutboundUsesSelectedNumbersRouteApplication(t *testing.T) {
 	if err := app.db().insertRoute(route); err != nil {
 		t.Fatal(err)
 	}
-	session, err := app.placeHumanCall(ctx, "project-a", "+33612345678", route.PhoneNumber, nil)
+	session, err := app.placeHumanCall(ctx, "project-a", "+33612345678", route.PhoneNumber, 60, nil)
 	if err != nil {
 		t.Fatalf("place Telnyx browser call: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestTelnyxOutboundUsesSelectedNumbersRouteApplication(t *testing.T) {
 			break
 		}
 	}
-	if dialCall == nil || dialCall.Input["connection_id"] != "application-route" || dialCall.Input["from"] != route.PhoneNumber {
+	if dialCall == nil || dialCall.Input["connection_id"] != "application-route" || dialCall.Input["from"] != route.PhoneNumber || dialCall.Input["timeout_secs"] != 60 {
 		t.Fatalf("Telnyx placement did not use selected number application: %#v", platform.integrationCalls)
 	}
 	if _, mutated := platform.credentials.Fields["connection_id"]; mutated {
@@ -392,7 +392,9 @@ func TestConnectedNumbersPanelContract(t *testing.T) {
 		"void loadConnected()",
 		"Call from",
 		`withProject("/numbers/connected")`,
-		`{ to, from: fromNumber }`,
+		`{ to, from: fromNumber, timeout_sec: dialTimeoutSec }`,
+		"Enable call sounds",
+		"Ring destination for",
 		"chooseFromNumber",
 		`withProject("/numbers/outbound-profile")`,
 		"selection_required",
