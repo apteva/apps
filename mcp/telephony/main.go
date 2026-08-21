@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.2.9
+version: 0.2.10
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -1901,16 +1901,14 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 		return err
 	case "telnyx":
 		input := map[string]any{
-			"call_control_id":            row.CarrierSID,
-			"command_id":                 telnyxCommandID(row.ID, "answer"),
-			"stream_url":                 a.publicWSStreamURL("telnyx", row.ID, row.CallbackSecret),
-			"stream_track":               "inbound_track",
-			"stream_codec":               "PCMU",
-			"stream_bidirectional_mode":  "rtp",
-			"stream_bidirectional_codec": "PCMU",
-			"webhook_url":                a.statusCallbackURL(row.ID, row.CallbackSecret, row.ProjectID),
-			"webhook_url_method":         "POST",
+			"call_control_id":    row.CarrierSID,
+			"command_id":         telnyxCommandID(row.ID, "answer"),
+			"stream_url":         a.publicWSStreamURL("telnyx", row.ID, row.CallbackSecret),
+			"stream_track":       "inbound_track",
+			"webhook_url":        a.statusCallbackURL(row.ID, row.CallbackSecret, row.ProjectID),
+			"webhook_url_method": "POST",
 		}
+		applyTelnyxMediaProfile(input)
 		if row.RecordingMode == recordingModeAlways {
 			input["record"] = "record-from-answer"
 			input["record_channels"] = telnyxRecordingChannels(row.RecordingChannels)

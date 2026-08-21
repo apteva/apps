@@ -352,17 +352,21 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			// Operator microphone audio, PCM16LE @ 24 kHz.
 			hub.toPeer(ws.OpBinary, data)
 		case ws.OpText:
-			// Only `interrupt` is meaningful from a human peer: it flushes
-			// queued playback on the carrier side. Everything else is ignored
-			// so a compromised tab cannot drive the bridge's control channel.
 			var control struct {
-				Type string `json:"type"`
+				Type  string  `json:"type"`
+				Nonce float64 `json:"nonce,omitempty"`
 			}
-			if json.Unmarshal(data, &control) != nil || control.Type != "interrupt" {
+			if json.Unmarshal(data, &control) != nil {
 				continue
 			}
-			payload, _ := json.Marshal(realtimeBridgeControl{Type: "interrupt", Source: "operator"})
-			hub.toPeer(ws.OpText, payload)
+			switch control.Type {
+			case "ping":
+				pong, _ := json.Marshal(map[string]any{"type": "pong", "nonce": control.Nonce})
+				_ = writer.Write(ws.OpText, pong)
+			case "interrupt":
+				payload, _ := json.Marshal(realtimeBridgeControl{Type: "interrupt", Source: "operator"})
+				hub.toPeer(ws.OpText, payload)
+			}
 		}
 	}
 }

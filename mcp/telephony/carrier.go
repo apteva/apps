@@ -194,20 +194,18 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		return nil, fmt.Errorf("telnyx connection has no connection_id configured")
 	}
 	input := map[string]any{
-		"connection_id":              connectionID,
-		"to":                         req.To,
-		"from":                       req.From,
-		"stream_url":                 c.app.publicWSStreamURL("telnyx", req.CallID, req.CallbackSecret),
-		"stream_track":               "inbound_track",
-		"stream_codec":               "PCMU",
-		"stream_bidirectional_mode":  "rtp",
-		"stream_bidirectional_codec": "PCMU",
-		"timeout_secs":               req.TimeoutSec,
-		"time_limit_secs":            req.MaxDurationSec,
-		"command_id":                 telnyxCommandID(req.CallID, "place"),
-		"webhook_url":                c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
-		"webhook_url_method":         "POST",
+		"connection_id":      connectionID,
+		"to":                 req.To,
+		"from":               req.From,
+		"stream_url":         c.app.publicWSStreamURL("telnyx", req.CallID, req.CallbackSecret),
+		"stream_track":       "inbound_track",
+		"timeout_secs":       req.TimeoutSec,
+		"time_limit_secs":    req.MaxDurationSec,
+		"command_id":         telnyxCommandID(req.CallID, "place"),
+		"webhook_url":        c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
+		"webhook_url_method": "POST",
 	}
+	applyTelnyxMediaProfile(input)
 	if req.RecordingMode == recordingModeAlways {
 		input["record"] = "record-from-answer"
 		input["record_channels"] = telnyxRecordingChannels(req.RecordingChannels)

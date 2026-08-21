@@ -308,6 +308,9 @@ func TestProviderCarrierPlacementUsesParityCallbacksAndRecording(t *testing.T) {
 		if input["record"] != "record-from-answer" || input["record_channels"] != "dual" || input["webhook_url"] == "" || input["command_id"] == "" {
 			t.Fatalf("Telnyx call lacks recording or status callback parity: %#v", input)
 		}
+		if input["stream_codec"] != "L16" || input["stream_bidirectional_codec"] != "L16" || input["stream_bidirectional_sampling_rate"] != 16000 {
+			t.Fatalf("Telnyx call is not using the wideband media profile: %#v", input)
+		}
 		if err := carrier.Hangup(ctx, &callRow{ID: "call-1", CarrierSID: result.CarrierSID}); err != nil {
 			t.Fatal(err)
 		}
@@ -358,6 +361,9 @@ func TestProviderInboundAnswerAndRejectCommands(t *testing.T) {
 				if answer.Tool != "answer_call" || answer.Input["record"] != "record-from-answer" || answer.Input["stream_url"] == "" || answer.Input["command_id"] == "" {
 					t.Fatalf("Telnyx answer lacks realtime or recording controls: %#v", answer)
 				}
+				if answer.Input["stream_codec"] != "L16" || answer.Input["stream_bidirectional_codec"] != "L16" || answer.Input["stream_bidirectional_sampling_rate"] != 16000 {
+					t.Fatalf("Telnyx answer is not using the wideband media profile: %#v", answer.Input)
+				}
 			} else {
 				alegURL, _ := answer.Input["aleg_url"].(string)
 				if answer.Tool != "update_call" || !strings.Contains(alegURL, "rc=2") {
@@ -395,7 +401,7 @@ func TestJSONCarrierMediaBridgesArePacedAndInterruptible(t *testing.T) {
 		rawPacketBytes  int
 	}{
 		{provider: "signalwire", codec: carrierCodecL16_24, sampleRate: 24000, rawPacketBytes: 960},
-		{provider: "telnyx", codec: carrierCodecPCMU8, sampleRate: 8000, rawPacketBytes: 160},
+		{provider: "telnyx", codec: carrierCodecL16_16, sampleRate: 16000, rawPacketBytes: 640},
 		{provider: "plivo", codec: carrierCodecPCMU8, sampleRate: 8000, rawPacketBytes: 160},
 	} {
 		t.Run(tc.provider, func(t *testing.T) {

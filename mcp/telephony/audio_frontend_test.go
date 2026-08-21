@@ -211,6 +211,31 @@ func TestAudioFrontendDiagnosticsIncludeCarrierNoiseAndIngress(t *testing.T) {
 	}
 }
 
+func TestHumanCarrierAudioBypassesAgentVoiceFrontend(t *testing.T) {
+	frontend := newCarrierAudioFrontend(16000)
+	input := make([]int16, frontend.frameSamples)
+	for i := range input {
+		input[i] = int16((i%17 - 8) * 40)
+	}
+	result := processCarrierInput(&callRow{PeerKind: peerKindHuman}, frontend, input)
+	if len(result.PCM) != len(input) {
+		t.Fatalf("human audio length changed: got %d want %d", len(result.PCM), len(input))
+	}
+	for i := range input {
+		if result.PCM[i] != input[i] {
+			t.Fatalf("human sample %d changed: got %d want %d", i, result.PCM[i], input[i])
+		}
+	}
+	if snapshot := frontend.snapshot(); snapshot.Frames != 0 {
+		t.Fatalf("human audio entered agent frontend: %+v", snapshot)
+	}
+
+	_ = processCarrierInput(&callRow{PeerKind: peerKindRealtime}, frontend, input)
+	if snapshot := frontend.snapshot(); snapshot.Frames != 1 {
+		t.Fatalf("realtime audio bypassed agent frontend: %+v", snapshot)
+	}
+}
+
 type capturingAudioLogger struct {
 	message string
 	fields  map[string]any

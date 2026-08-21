@@ -10,8 +10,7 @@
 // failing the call.
 
 const SAMPLE_RATE = 24_000;
-// ~80 ms of slack absorbs network jitter without adding audible latency.
-const JITTER_TARGET_SAMPLES = SAMPLE_RATE * 0.08;
+const JITTER_TARGET_MS = 60;
 const MAX_RECONNECT_MS = 30_000;
 const MAX_RECONNECT_DELAY_MS = 4_000;
 
@@ -56,7 +55,30 @@ export type SoftphoneState = "connecting" | "reconnecting" | "live" | "ended" | 
 export interface SoftphoneCallbacks {
   onState?: (state: SoftphoneState, detail?: string) => void;
   onLevels?: (mic: number, speaker: number) => void;
+  onDiagnostics?: (diagnostics: SoftphoneDiagnostics) => void;
 }
+
+export interface SoftphoneAudioOptions {
+  echoCancellation: boolean;
+  noiseSuppression: boolean;
+  autoGainControl: boolean;
+}
+
+export interface SoftphoneDiagnostics {
+  rttMs: number | null;
+  queueMs: number;
+  targetMs: number;
+  underruns: number;
+  droppedMs: number;
+  maxQueueMs: number;
+  audioContextRate: number;
+}
+
+export const DEFAULT_SOFTPHONE_AUDIO_OPTIONS: SoftphoneAudioOptions = {
+  echoCancellation: true,
+  noiseSuppression: false,
+  autoGainControl: false,
+};
 
 export class SoftphoneSession {
   private ws: WebSocket | null = null;
@@ -73,6 +95,11 @@ export class SoftphoneSession {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectStartedAt = 0;
   private reconnectAttempt = 0;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private diagnostics: SoftphoneDiagnostics = {
+    rttMs: null, queueMs: 0, targetMs: JITTER_TARGET_MS, underruns: 0,
+    droppedMs: 0, maxQueueMs: 0, audioContextRate: SAMPLE_RATE,
+  };
 
   constructor(private readonly callbacks: SoftphoneCallbacks = {}) {}
 
@@ -80,14 +107,22 @@ export class SoftphoneSession {
     return this.muted;
   }
 
-  async start(mediaURL: string, workletURL: string): Promise<void> {
+  async start(
+    mediaURL: string,
+    workletURL: string,
+    options: SoftphoneAudioOptions = DEFAULT_SOFTPHONE_AUDIO_OPTIONS,
+  ): Promise<void> {
     this.callbacks.onState?.("connecting");
     this.mediaURL = mediaURL;
     try {
       // Echo cancellation matters more than anything else here: without it the
       // caller hears themselves through the operator's speakers.
       this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        audio: {
+          echoCancellation: options.echoCancellation,
+          noiseSuppression: options.noiseSuppression,
+          autoGainControl: options.autoGainControl,
+        },
       });
     } catch (err) {
       this.fail("microphone permission denied");
@@ -109,7 +144,30 @@ export class SoftphoneSession {
       this.playback = new AudioWorkletNode(this.ctx, "softphone-playback", {
         numberOfInputs: 0,
         outputChannelCount: [1],
+        processorOptions: {
+          initialTargetMs: JITTER_TARGET_MS,
+          minTargetMs: 40,
+          maxTargetMs: 140,
+          hardMaxMs: 250,
+        },
       });
+      this.diagnostics.audioContextRate = deviceRate;
+      this.playback.port.onmessage = (event: MessageEvent) => {
+        const stats = event.data as {
+          type?: string; queue_ms?: number; target_ms?: number; underruns?: number;
+          dropped_ms?: number; max_queue_ms?: number;
+        };
+        if (stats.type !== "stats") return;
+        this.diagnostics = {
+          ...this.diagnostics,
+          queueMs: stats.queue_ms ?? 0,
+          targetMs: stats.target_ms ?? JITTER_TARGET_MS,
+          underruns: stats.underruns ?? 0,
+          droppedMs: stats.dropped_ms ?? 0,
+          maxQueueMs: stats.max_queue_ms ?? 0,
+        };
+        this.callbacks.onDiagnostics?.({ ...this.diagnostics });
+      };
       source.connect(this.capture);
       this.playback.connect(this.ctx.destination);
 
@@ -169,6 +227,7 @@ export class SoftphoneSession {
           return;
         }
         opened = true;
+        this.startRTTProbe(ws);
         finish();
       };
       ws.onerror = () => {
@@ -177,6 +236,7 @@ export class SoftphoneSession {
       ws.onclose = () => {
         if (this.ws !== ws) return;
         this.ws = null;
+        this.stopRTTProbe();
         finish(new Error("audio connection closed before it was ready"));
         if (!this.closed && opened) {
           this.scheduleReconnect();
@@ -186,7 +246,12 @@ export class SoftphoneSession {
         if (this.ws !== ws) return;
         if (typeof event.data === "string") {
           try {
-            const parsed = JSON.parse(event.data) as { type?: string; detail?: string };
+            const parsed = JSON.parse(event.data) as { type?: string; detail?: string; nonce?: number };
+            if (parsed.type === "pong" && typeof parsed.nonce === "number") {
+              this.diagnostics.rttMs = Math.max(0, Math.round(performance.now() - parsed.nonce));
+              this.callbacks.onDiagnostics?.({ ...this.diagnostics });
+              return;
+            }
             if (parsed.type === "call.ended" || parsed.type === "session.replaced") {
               this.closed = true;
               this.callbacks.onState?.("ended", parsed.type);
@@ -212,6 +277,24 @@ export class SoftphoneSession {
         this.playback?.port.postMessage(frame);
       };
     });
+  }
+
+  private startRTTProbe(ws: WebSocket): void {
+    this.stopRTTProbe();
+    const ping = () => {
+      if (this.ws === ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "ping", nonce: performance.now() }));
+      }
+    };
+    ping();
+    this.pingTimer = setInterval(ping, 5_000);
+  }
+
+  private stopRTTProbe(): void {
+    if (this.pingTimer !== null) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
   }
 
   private markLive(): void {
@@ -269,6 +352,7 @@ export class SoftphoneSession {
   }
 
   private teardown(): void {
+    this.stopRTTProbe();
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -293,5 +377,5 @@ export class SoftphoneSession {
   }
 }
 
-export const SOFTPHONE_JITTER_TARGET_SAMPLES = JITTER_TARGET_SAMPLES;
+export const SOFTPHONE_JITTER_TARGET_SAMPLES = SAMPLE_RATE * JITTER_TARGET_MS / 1000;
 export const SOFTPHONE_MAX_RECONNECT_MS = MAX_RECONNECT_MS;

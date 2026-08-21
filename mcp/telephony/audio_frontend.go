@@ -419,11 +419,17 @@ func rmsDBFS(rms float64) float64 {
 
 func logAudioFrontendDiagnostics(logger audioDiagnosticsLogger, frontend *carrierAudioFrontend, row *callRow, provider, codec string, maxQueuedMS int) {
 	snapshot := frontend.snapshot()
+	processing := "voice_frontend"
+	if row.PeerKind == peerKindHuman {
+		processing = "passthrough"
+	}
 	logger.Info("carrier audio diagnostics",
 		"provider", provider,
 		"call", row.ID,
 		"codec", codec,
 		"sample_rate", frontend.sampleRate,
+		"peer_kind", row.PeerKind,
+		"processing", processing,
 		"ingress_path", firstNonEmpty(row.IngressPath, "direct_or_unreported"),
 		"forwarded", row.ForwardedFrom != "",
 		"frames", snapshot.Frames,

@@ -62,8 +62,9 @@ func (a *App) handleSignalWireMediaStream(w http.ResponseWriter, r *http.Request
 }
 
 func (a *App) handleTelnyxMediaStream(w http.ResponseWriter, r *http.Request) {
+	profile := mediaProfileForCarrier("telnyx")
 	a.handleJSONMediaStream(w, r, jsonMediaBridgeConfig{
-		Provider: "telnyx", PathPrefix: "/media/telnyx/", InputCodec: carrierCodecPCMU8, OutputCodec: carrierCodecPCMU8,
+		Provider: "telnyx", PathPrefix: "/media/telnyx/", InputCodec: profile.Codec, OutputCodec: profile.Codec,
 		RequireStreamSID: true, OutboundShape: "telnyx", PlaybackMarks: true,
 	})
 }
@@ -225,7 +226,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				if err != nil {
 					continue
 				}
-				processed := audioFrontend.process(pcm)
+				processed := processCarrierInput(row, audioFrontend, pcm)
 				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
 				if localSpeechStarted {
 					audioFrontend.markLocalSignal()
@@ -366,6 +367,17 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			maxQueuedMS = queuedMS
 		}
 	}
+}
+
+// Human softphone calls must preserve the caller waveform. The adaptive voice
+// frontend exists for realtime agents (VAD/barge-in/noise gating); applying it
+// to a person-to-person call can suppress quiet syllables and make the browser
+// leg sound substantially worse than the carrier recording.
+func processCarrierInput(row *callRow, frontend *carrierAudioFrontend, pcm []int16) audioFrontendResult {
+	if row != nil && row.PeerKind == peerKindHuman {
+		return audioFrontendResult{PCM: pcm}
+	}
+	return frontend.process(pcm)
 }
 
 func carrierCodecSampleRate(codec string) int {

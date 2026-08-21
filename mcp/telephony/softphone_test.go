@@ -251,6 +251,44 @@ func TestSoftphoneHubForwardsOnlyInterruptFromBrowser(t *testing.T) {
 	}
 }
 
+func TestSoftphoneBrowserPingReportsRoundTripWithoutReachingPeer(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	insertSoftphoneCall(t, app, "in-progress")
+	server := softphoneTestServer(t, app)
+
+	peer := dialWS(t, server.URL+"/peer/call-soft-1/peer-secret")
+	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
+	if err := wsutil.WriteClientText(browser, []byte(`{"type":"ping","nonce":123.5}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = browser.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		data, op, err := wsutil.ReadServerData(browser)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if op != ws.OpText {
+			continue
+		}
+		var event struct {
+			Type  string  `json:"type"`
+			Nonce float64 `json:"nonce"`
+		}
+		if json.Unmarshal(data, &event) == nil && event.Type == "pong" {
+			if event.Nonce != 123.5 {
+				t.Fatalf("pong nonce=%v", event.Nonce)
+			}
+			break
+		}
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, _, err := wsutil.ReadServerData(peer); err == nil {
+		t.Fatal("browser ping leaked into carrier audio peer")
+	}
+}
+
 // A reloading tab must be able to rejoin a live call: the carrier leg stays up
 // and audio resumes on the new socket.
 func TestSoftphoneBrowserReconnectResumesAudio(t *testing.T) {
@@ -668,6 +706,36 @@ func TestSoftphoneRetriesTransientBrowserMediaDisconnects(t *testing.T) {
 	}
 }
 
+func TestSoftphoneUsesAdaptiveJitterAndVisibleDiagnostics(t *testing.T) {
+	worklet, err := os.ReadFile("ui/softphone-worklet.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio, err := os.ReadFile("ui/softphone-audio.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	panel, err := os.ReadFile("ui/CallsPanel.tsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"target_ms", "underruns", "dropped_ms", "stableSamples", "dropOldest"} {
+		if !strings.Contains(string(worklet), required) {
+			t.Fatalf("adaptive jitter worklet missing %q", required)
+		}
+	}
+	for _, required := range []string{"onDiagnostics", `type: "ping"`, "noiseSuppression: false", "autoGainControl: false"} {
+		if !strings.Contains(string(audio), required) {
+			t.Fatalf("softphone diagnostics/audio controls missing %q", required)
+		}
+	}
+	for _, required := range []string{"Browser audio processing", "underruns", "buffer"} {
+		if !strings.Contains(string(panel), required) {
+			t.Fatalf("panel diagnostics missing %q", required)
+		}
+	}
+}
+
 func TestSoftphoneBrowserSetupFailureReleasesAnswerClaim(t *testing.T) {
 	softphoneTestCtx(t)
 	app := &App{installID: 42}
@@ -725,7 +793,7 @@ func TestCallsPanelPinsSoftphoneSocketToCurrentOrigin(t *testing.T) {
 		"new URL(session.media_url, location.href)",
 		"media.host = location.host",
 		"media.protocol = location.protocol",
-		"phone.start(media.toString(), workletURL)",
+		"phone.start(media.toString(), workletURL, audioOptions)",
 		"/softphone/release/",
 		"session_token: session.session_token",
 	} {

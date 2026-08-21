@@ -1,7 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { SoftphoneSession, type SoftphoneState } from "./softphone-audio";
+import {
+  DEFAULT_SOFTPHONE_AUDIO_OPTIONS,
+  SoftphoneSession,
+  type SoftphoneAudioOptions,
+  type SoftphoneDiagnostics,
+  type SoftphoneState,
+} from "./softphone-audio";
 
 const API = "/api/apps/telephony";
+const AUDIO_SETTINGS_KEY = "apteva.telephony.softphone.audio.v1";
+
+function loadAudioOptions(): SoftphoneAudioOptions {
+  try {
+    const saved = JSON.parse(localStorage.getItem(AUDIO_SETTINGS_KEY) || "null") as Partial<SoftphoneAudioOptions> | null;
+    return saved ? { ...DEFAULT_SOFTPHONE_AUDIO_OPTIONS, ...saved } : { ...DEFAULT_SOFTPHONE_AUDIO_OPTIONS };
+  } catch {
+    return { ...DEFAULT_SOFTPHONE_AUDIO_OPTIONS };
+  }
+}
 
 interface NativePanelProps {
   appName: string;
@@ -436,6 +452,43 @@ function LevelMeter({ label, value }: { label: string; value: number }) {
   );
 }
 
+function AudioProcessingSettings({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: SoftphoneAudioOptions;
+  disabled: boolean;
+  onChange: (value: SoftphoneAudioOptions) => void;
+}) {
+  const options: { key: keyof SoftphoneAudioOptions; label: string }[] = [
+    { key: "echoCancellation", label: "Echo cancellation" },
+    { key: "noiseSuppression", label: "Noise suppression" },
+    { key: "autoGainControl", label: "Automatic gain" },
+  ];
+  return (
+    <div className="rounded border border-border/70 p-3">
+      <div className="text-xs font-medium">Browser audio processing</div>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
+        {options.map((option) => (
+          <label key={option.key} className="flex items-center gap-2 text-xs text-text-muted">
+            <input
+              type="checkbox"
+              checked={value[option.key]}
+              disabled={disabled}
+              onChange={(event) => onChange({ ...value, [option.key]: event.target.checked })}
+            />
+            {option.label}
+          </label>
+        ))}
+      </div>
+      <p className="mt-2 text-xs text-text-dim">
+        Echo cancellation is recommended for speakers. Changes apply to the next call.
+      </p>
+    </div>
+  );
+}
+
 function CallsView({ projectId, installId }: NativePanelProps) {
   const layout = usePanelWidth();
   const [calls, setCalls] = useState<Call[]>([]);
@@ -456,6 +509,8 @@ function CallsView({ projectId, installId }: NativePanelProps) {
   const [softphoneDetail, setSoftphoneDetail] = useState("");
   const [muted, setMuted] = useState(false);
   const [levels, setLevels] = useState<{ mic: number; speaker: number }>({ mic: 0, speaker: 0 });
+  const [audioOptions, setAudioOptions] = useState<SoftphoneAudioOptions>(loadAudioOptions);
+  const [diagnostics, setDiagnostics] = useState<SoftphoneDiagnostics | null>(null);
   const [softphoneBusy, setSoftphoneBusy] = useState(false);
   const sessionRef = useRef<SoftphoneSession | null>(null);
 
@@ -466,7 +521,12 @@ function CallsView({ projectId, installId }: NativePanelProps) {
     setSoftphoneState("");
     setMuted(false);
     setLevels({ mic: 0, speaker: 0 });
+    setDiagnostics(null);
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem(AUDIO_SETTINGS_KEY, JSON.stringify(audioOptions));
+  }, [audioOptions]);
 
   // The audio session owns a microphone and an AudioContext; unmounting the
   // panel without releasing them would leave the mic indicator lit.
@@ -637,10 +697,12 @@ function CallsView({ projectId, installId }: NativePanelProps) {
         }
       },
       onLevels: (mic, speaker) => setLevels({ mic, speaker }),
+      onDiagnostics: setDiagnostics,
     });
     sessionRef.current = phone;
     setSoftphoneCallId(session.call_id);
     setMuted(false);
+    setDiagnostics(null);
     // Browser media belongs to the gateway serving this panel. PublicURL is
     // intentionally reserved for carrier webhooks and can name another host
     // (for example production while the operator uses a local dashboard).
@@ -648,7 +710,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
     const media = new URL(session.media_url, location.href);
     media.protocol = location.protocol === "https:" ? "wss:" : "ws:";
     media.host = location.host;
-    await phone.start(media.toString(), workletURL);
+    await phone.start(media.toString(), workletURL, audioOptions);
     setSelectedId(session.call_id);
     await loadCalls();
   };
@@ -966,11 +1028,26 @@ function CallsView({ projectId, installId }: NativePanelProps) {
                   </div>
                   <LevelMeter label="Mic" value={muted ? 0 : levels.mic} />
                   <LevelMeter label="Caller" value={levels.speaker} />
+                  {diagnostics ? (
+                    <div className="text-xs text-text-dim tabular-nums">
+                      RTT {diagnostics.rttMs === null ? "–" : `${diagnostics.rttMs} ms`}
+                      {` · buffer ${diagnostics.queueMs}/${diagnostics.targetMs} ms (max ${diagnostics.maxQueueMs})`}
+                      {` · underruns ${diagnostics.underruns}`}
+                      {` · dropped ${diagnostics.droppedMs} ms`}
+                      {` · ${Math.round(diagnostics.audioContextRate / 1000)} kHz`}
+                    </div>
+                  ) : null}
                   <p className="text-xs text-text-dim">
                     Use headphones — speaker audio picked up by the microphone echoes back to the caller.
                   </p>
                 </div>
               ) : null}
+
+              <AudioProcessingSettings
+                value={audioOptions}
+                disabled={Boolean(softphoneCallId)}
+                onChange={setAudioOptions}
+              />
 
               <dl className="grid gap-x-3 gap-y-3 text-sm" style={{ gridTemplateColumns: DETAILS_COLUMNS }}>
                 <dt className="text-text-dim">Status</dt>
