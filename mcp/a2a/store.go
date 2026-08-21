@@ -7,22 +7,29 @@ import (
 	"time"
 )
 
-// Task is one agent-to-agent exchange. Statuses mirror the A2A
-// protocol lifecycle so this ledger can back real cross-server A2A
-// later without a migration.
+// Task is one agent-to-agent exchange: local, authoritative inbound,
+// or outbound tracking. Statuses follow the A2A protocol lifecycle.
 type Task struct {
-	ID            int64  `json:"id"`
-	ProjectID     string `json:"project_id,omitempty"`
-	Kind          string `json:"kind"`
-	Status        string `json:"status"`
-	FromAgentID   int64  `json:"from_agent_id"`
-	FromAgentName string `json:"from_agent_name,omitempty"`
-	FromThreadID  string `json:"-"`
-	ToAgentID     int64  `json:"to_agent_id"`
-	ToAgentName   string `json:"to_agent_name,omitempty"`
-	ToThreadID    string `json:"-"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	ID                int64  `json:"id"`
+	ProjectID         string `json:"project_id,omitempty"`
+	Kind              string `json:"kind"`
+	Status            string `json:"status"`
+	FromAgentID       int64  `json:"from_agent_id"`
+	FromAgentName     string `json:"from_agent_name,omitempty"`
+	FromThreadID      string `json:"-"`
+	ToAgentID         int64  `json:"to_agent_id"`
+	ToAgentName       string `json:"to_agent_name,omitempty"`
+	ToThreadID        string `json:"-"`
+	Direction         string `json:"direction,omitempty"`
+	PeerID            string `json:"peer_id,omitempty"`
+	RemoteCardID      string `json:"remote_card_id,omitempty"`
+	ProtocolTaskID    string `json:"protocol_task_id,omitempty"`
+	ProtocolContextID string `json:"protocol_context_id,omitempty"`
+	RemoteTaskID      string `json:"remote_task_id,omitempty"`
+	RemoteContextID   string `json:"remote_context_id,omitempty"`
+	LastSyncedAt      string `json:"last_synced_at,omitempty"`
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
 }
 
 // openStatuses are the states in which a task still awaits resolution.
@@ -37,14 +44,21 @@ func nowUTC() string {
 }
 
 func createTask(db *sql.DB, t *Task) (*Task, error) {
+	if t.Direction == "" {
+		t.Direction = "local"
+	}
 	now := nowUTC()
 	res, err := db.Exec(`
 		INSERT INTO a2a_tasks
 			(project_id, kind, status, from_agent_id, from_agent_name, from_thread_id,
-			 to_agent_id, to_agent_name, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 to_agent_id, to_agent_name, direction, peer_id, remote_card_id,
+			 protocol_task_id, protocol_context_id, remote_task_id, remote_context_id,
+			 last_synced_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ProjectID, t.Kind, t.Status, t.FromAgentID, t.FromAgentName, t.FromThreadID,
-		t.ToAgentID, t.ToAgentName, now, now)
+		t.ToAgentID, t.ToAgentName, t.Direction, t.PeerID, t.RemoteCardID,
+		t.ProtocolTaskID, t.ProtocolContextID, t.RemoteTaskID, t.RemoteContextID,
+		t.LastSyncedAt, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -55,13 +69,17 @@ func createTask(db *sql.DB, t *Task) (*Task, error) {
 func getTask(db *sql.DB, projectID string, id int64) (*Task, error) {
 	row := db.QueryRow(`
 		SELECT id, project_id, kind, status, from_agent_id, from_agent_name, from_thread_id,
-		       to_agent_id, to_agent_name, COALESCE(to_thread_id,''), created_at, updated_at
+		       to_agent_id, to_agent_name, COALESCE(to_thread_id,''), direction, peer_id,
+		       remote_card_id, protocol_task_id, protocol_context_id, remote_task_id,
+		       remote_context_id, last_synced_at, created_at, updated_at
 		FROM a2a_tasks
 		WHERE id = ? AND project_id = ?`,
 		id, projectID)
 	var t Task
 	err := row.Scan(&t.ID, &t.ProjectID, &t.Kind, &t.Status, &t.FromAgentID, &t.FromAgentName,
-		&t.FromThreadID, &t.ToAgentID, &t.ToAgentName, &t.ToThreadID, &t.CreatedAt, &t.UpdatedAt)
+		&t.FromThreadID, &t.ToAgentID, &t.ToAgentName, &t.ToThreadID, &t.Direction, &t.PeerID,
+		&t.RemoteCardID, &t.ProtocolTaskID, &t.ProtocolContextID, &t.RemoteTaskID,
+		&t.RemoteContextID, &t.LastSyncedAt, &t.CreatedAt, &t.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -94,6 +112,42 @@ func setTaskStatus(db *sql.DB, projectID string, id int64, status string) error 
 	return nil
 }
 
+func setRemoteTaskCorrelation(db *sql.DB, projectID string, id int64, remoteTaskID, remoteContextID string) error {
+	_, err := db.Exec(`UPDATE a2a_tasks
+		SET remote_task_id = ?, remote_context_id = ?, last_synced_at = ?, updated_at = ?
+		WHERE id = ? AND project_id = ?`,
+		remoteTaskID, remoteContextID, nowUTC(), nowUTC(), id, projectID)
+	return err
+}
+
+func setTaskSyncState(db *sql.DB, projectID string, id int64, status string) error {
+	_, err := db.Exec(`UPDATE a2a_tasks SET status = ?, last_synced_at = ?, updated_at = ?
+		WHERE id = ? AND project_id = ?`, status, nowUTC(), nowUTC(), id, projectID)
+	return err
+}
+
+func getTaskByProtocolID(db *sql.DB, protocolTaskID string) (*Task, error) {
+	row := db.QueryRow(`
+		SELECT id, project_id, kind, status, from_agent_id, from_agent_name, from_thread_id,
+		       to_agent_id, to_agent_name, COALESCE(to_thread_id,''), direction, peer_id,
+		       remote_card_id, protocol_task_id, protocol_context_id, remote_task_id,
+		       remote_context_id, last_synced_at, created_at, updated_at
+		FROM a2a_tasks WHERE protocol_task_id = ?`, protocolTaskID)
+	var t Task
+	err := row.Scan(&t.ID, &t.ProjectID, &t.Kind, &t.Status, &t.FromAgentID, &t.FromAgentName,
+		&t.FromThreadID, &t.ToAgentID, &t.ToAgentName, &t.ToThreadID, &t.Direction, &t.PeerID,
+		&t.RemoteCardID, &t.ProtocolTaskID, &t.ProtocolContextID, &t.RemoteTaskID,
+		&t.RemoteContextID, &t.LastSyncedAt, &t.CreatedAt, &t.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return &t, err
+}
+
+func listOpenOutboundTasks(db *sql.DB, projectID string, limit int) ([]*Task, error) {
+	return listTasks(db, projectID, taskFilter{Status: "open", Limit: limit, Direction: "outbound"})
+}
+
 func recordMessage(db *sql.DB, taskID, fromAgentID, toAgentID int64, body, statusAfter string) error {
 	_, err := db.Exec(`
 		INSERT INTO a2a_messages (task_id, from_agent_id, to_agent_id, body, status_after, created_at)
@@ -111,6 +165,18 @@ func deliveriesInWindow(db *sql.DB, fromAgentID, toAgentID int64, window time.Du
 		SELECT COUNT(*) FROM a2a_messages
 		WHERE from_agent_id = ? AND to_agent_id = ? AND created_at > ?`,
 		fromAgentID, toAgentID, cutoff).Scan(&n)
+	return n, err
+}
+
+func peerDeliveriesInWindow(db *sql.DB, peerID string, window time.Duration) (int, error) {
+	cutoff := time.Now().UTC().Add(-window).Format(time.RFC3339)
+	var n int
+	err := db.QueryRow(`
+		SELECT COUNT(*)
+		FROM a2a_messages m
+		JOIN a2a_tasks t ON t.id = m.task_id
+		WHERE t.direction = 'inbound' AND t.peer_id = ?
+		  AND m.from_agent_id = 0 AND m.created_at > ?`, peerID, cutoff).Scan(&n)
 	return n, err
 }
 
@@ -156,11 +222,19 @@ func listMessages(db *sql.DB, taskID int64) ([]*Message, error) {
 	return out, rows.Err()
 }
 
+func messageBodyExists(db *sql.DB, taskID, fromAgentID int64, body string) (bool, error) {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM a2a_messages
+		WHERE task_id = ? AND from_agent_id = ? AND body = ?`, taskID, fromAgentID, body).Scan(&n)
+	return n > 0, err
+}
+
 type taskFilter struct {
-	AgentID int64  // participant (either side); required for the tool view
-	Role    string // "", "sent", "received"
-	Status  string // "", "open", or an exact status
-	Limit   int
+	AgentID   int64  // participant (either side); required for the tool view
+	Role      string // "", "sent", "received"
+	Status    string // "", "open", or an exact status
+	Limit     int
+	Direction string
 }
 
 func listTasks(db *sql.DB, projectID string, f taskFilter) ([]*Task, error) {
@@ -191,10 +265,16 @@ func listTasks(db *sql.DB, projectID string, f taskFilter) ([]*Task, error) {
 		where = append(where, "status = ?")
 		args = append(args, f.Status)
 	}
+	if f.Direction != "" {
+		where = append(where, "direction = ?")
+		args = append(args, f.Direction)
+	}
 	args = append(args, limit)
 	rows, err := db.Query(`
 		SELECT id, project_id, kind, status, from_agent_id, from_agent_name, from_thread_id,
-		       to_agent_id, to_agent_name, COALESCE(to_thread_id,''), created_at, updated_at
+		       to_agent_id, to_agent_name, COALESCE(to_thread_id,''), direction, peer_id,
+		       remote_card_id, protocol_task_id, protocol_context_id, remote_task_id,
+		       remote_context_id, last_synced_at, created_at, updated_at
 		FROM a2a_tasks
 		WHERE `+strings.Join(where, " AND ")+`
 		ORDER BY updated_at DESC, id DESC
@@ -207,7 +287,9 @@ func listTasks(db *sql.DB, projectID string, f taskFilter) ([]*Task, error) {
 	for rows.Next() {
 		var t Task
 		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Kind, &t.Status, &t.FromAgentID, &t.FromAgentName,
-			&t.FromThreadID, &t.ToAgentID, &t.ToAgentName, &t.ToThreadID, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			&t.FromThreadID, &t.ToAgentID, &t.ToAgentName, &t.ToThreadID, &t.Direction, &t.PeerID,
+			&t.RemoteCardID, &t.ProtocolTaskID, &t.ProtocolContextID, &t.RemoteTaskID,
+			&t.RemoteContextID, &t.LastSyncedAt, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &t)

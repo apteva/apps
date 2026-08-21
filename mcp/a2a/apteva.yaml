@@ -2,14 +2,12 @@ schema: apteva-app/v1
 
 name: a2a
 display_name: Agent to Agent
-version: 0.2.1
+version: 0.3.0
 description: |
-  Agent-to-agent communication. Lets agents in the same project message
-  each other and exchange request/reply tasks with A2A-protocol-compatible
-  semantics (submitted, working, input_required, completed, failed,
-  canceled). Every exchange is recorded in a durable task ledger. Local
-  delivery in this version; the same ledger is the substrate for
-  cross-server A2A (fleet tenants, external peers) in later versions.
+  Agent-to-agent communication within and between Apteva installations.
+  Automatically generates Agent Cards for attached local agents, discovers
+  configured A2A peers, and maps standard A2A messages and tasks into the
+  existing durable local task ledger and live agent threads.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/a2a
 icon: /ui/icon.svg
@@ -28,9 +26,13 @@ requires:
 
 provides:
   http_routes:
-    - prefix: /
+    - { prefix: /tasks }
+    - { prefix: /directory, no_auth: true }
+    - { prefix: /agent-cards, no_auth: true }
+    - { prefix: /agents, no_auth: true }
   mcp_tools:
-    - { name: agents_discover, description: "Discover agents you can message: peers in your project today; server/fleet/web scopes in later versions." }
+    - { name: agents_discover, description: "Discover local and configured remote agents; every returned address can be messaged immediately." }
+    - { name: agent_get,      description: "Optionally inspect the full Agent Card for an address returned by agents_discover." }
     - { name: agent_send,  description: "Send a one-way message to another agent, or add a message to an existing task." }
     - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event." }
     - { name: agent_reply, description: "Reply to a task another agent sent you: completed, input_required, failed, or working." }
@@ -38,6 +40,8 @@ provides:
   publishes:
     - { name: task.created, description: "An agent-to-agent task was created." }
     - { name: task.updated, description: "An agent-to-agent task changed status." }
+  workers:
+    - { name: remote-task-sync, schedule: "@every 5s" }
   ui_panels:
     - slot: project.page
       label: Agent to Agent
@@ -54,5 +58,43 @@ db:
   driver: sqlite
   path: /data/a2a.db
   migrations: migrations/
+
+config_schema:
+  - name: peers_json
+    label: A2A peers
+    type: password
+    description: JSON array of peer id, name, base_url, token, discover_agents, and invoke_agents.
+    required: false
+  - name: public_url
+    label: A2A public URL override
+    type: text
+    description: Optional externally reachable base URL; defaults to the platform public URL.
+    required: false
+  - name: node_name
+    label: A2A node name
+    type: text
+    description: Operator-facing name for this A2A installation.
+    default: Apteva
+    required: false
+  - name: peer_timeout_seconds
+    label: Peer timeout seconds
+    type: text
+    default: "8"
+    required: false
+  - name: card_cache_seconds
+    label: Agent Card cache seconds
+    type: text
+    default: "300"
+    required: false
+  - name: rate_limit_per_minute
+    label: A2A messages per minute
+    type: text
+    default: "12"
+    required: false
+  - name: max_open_tasks
+    label: Maximum open tasks per agent pair
+    type: text
+    default: "25"
+    required: false
 
 upgrade_policy: auto-patch

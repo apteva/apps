@@ -2,17 +2,11 @@ package main
 
 // a2a — agent-to-agent communication.
 //
-// Phase 1: same-project messaging over the platform's existing
-// primitives. agent_send / agent_ask create ledger tasks and deliver
-// via PlatformClient.SendEvent; agent_reply resolves a task and routes
-// the answer back to the thread that asked (SendThreadEvent) or the
-// agent's main thread as fallback. No apteva-server or apteva-core
-// changes required.
-//
-// The task statuses intentionally mirror the A2A protocol lifecycle
-// (submitted → working → input_required → completed/failed/canceled)
-// so later phases can expose this same ledger over real A2A transport
-// (fleet tenants, external peers) without reshaping it.
+// Local exchanges use the platform's existing event/thread primitives.
+// Remote exchanges use Agent Cards plus the A2A v1 JSON-RPC binding;
+// the receiving installation owns the authoritative inbound task and
+// the calling installation keeps an outbound task record correlated to
+// it. Both paths share the same durable ledger and agent-facing tools.
 //
 // Trust boundary: every delivered event tells the receiving agent the
 // content comes from another agent, not its operator, and must never
@@ -35,14 +29,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: a2a
 display_name: Agent to Agent
-version: 0.2.1
+version: 0.3.0
 description: |
-  Agent-to-agent communication. Lets agents in the same project message
-  each other and exchange request/reply tasks with A2A-protocol-compatible
-  semantics (submitted, working, input_required, completed, failed,
-  canceled). Every exchange is recorded in a durable task ledger. Local
-  delivery in this version; the same ledger is the substrate for
-  cross-server A2A (fleet tenants, external peers) in later versions.
+  Agent-to-agent communication within and between Apteva installations.
+  Automatically generates Agent Cards for attached local agents, discovers
+  configured A2A peers, and maps standard A2A messages and tasks into the
+  existing durable local task ledger and live agent threads.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/a2a
 icon: /ui/icon.svg
@@ -58,9 +50,13 @@ requires:
     - platform.threads.write
 provides:
   http_routes:
-    - prefix: /
+    - { prefix: /tasks }
+    - { prefix: /directory, no_auth: true }
+    - { prefix: /agent-cards, no_auth: true }
+    - { prefix: /agents, no_auth: true }
   mcp_tools:
-    - { name: agents_discover, description: "Discover agents you can message: peers in your project today; server/fleet/web scopes in later versions." }
+    - { name: agents_discover, description: "Discover local and configured remote agents; every returned address can be messaged immediately." }
+    - { name: agent_get,      description: "Optionally inspect the full Agent Card for an address returned by agents_discover." }
     - { name: agent_send,  description: "Send a one-way message to another agent, or add a message to an existing task." }
     - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event." }
     - { name: agent_reply, description: "Reply to a task another agent sent you: completed, input_required, failed, or working." }
@@ -68,6 +64,8 @@ provides:
   publishes:
     - { name: task.created, description: "An agent-to-agent task was created." }
     - { name: task.updated, description: "An agent-to-agent task changed status." }
+  workers:
+    - { name: remote-task-sync, schedule: "@every 5s" }
   ui_panels:
     - slot: project.page
       label: Agent to Agent
@@ -82,6 +80,43 @@ db:
   driver: sqlite
   path: /data/a2a.db
   migrations: migrations/
+config_schema:
+  - name: peers_json
+    label: A2A peers
+    type: password
+    description: JSON array of peer id, name, base_url, token, discover_agents, and invoke_agents.
+    required: false
+  - name: public_url
+    label: A2A public URL override
+    type: text
+    description: Optional externally reachable base URL; defaults to the platform public URL.
+    required: false
+  - name: node_name
+    label: A2A node name
+    type: text
+    description: Operator-facing name for this A2A installation.
+    default: Apteva
+    required: false
+  - name: peer_timeout_seconds
+    label: Peer timeout seconds
+    type: text
+    default: "8"
+    required: false
+  - name: card_cache_seconds
+    label: Agent Card cache seconds
+    type: text
+    default: "300"
+    required: false
+  - name: rate_limit_per_minute
+    label: A2A messages per minute
+    type: text
+    default: "12"
+    required: false
+  - name: max_open_tasks
+    label: Maximum open tasks per agent pair
+    type: text
+    default: "25"
+    required: false
 upgrade_policy: auto-patch
 `
 
@@ -95,7 +130,9 @@ const (
 
 var globalCtx *sdk.AppCtx
 
-type App struct{}
+type App struct {
+	client *http.Client
+}
 
 func main() { sdk.Run(&App{}) }
 
@@ -111,20 +148,28 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("a2a requires a db block")
 	}
+	if _, err := ensureLocalNode(ctx); err != nil {
+		return fmt.Errorf("initialize a2a node: %w", err)
+	}
 	globalCtx = ctx
 	ctx.Logger().Info("a2a mounted")
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{Name: "remote-task-sync", Schedule: "@every 5s", Run: a.syncRemoteTasks}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/tasks", Handler: a.handleTasks},
 		{Pattern: "/tasks/", Handler: a.handleTaskItem},
+		{Pattern: "/directory/agents", Handler: a.handleDirectory, NoAuth: true},
+		{Pattern: "/agent-cards/", Handler: a.handleAgentCard, NoAuth: true},
+		{Pattern: "/agents/", Handler: a.handleAgentProtocol, NoAuth: true},
 	}
 }
 
@@ -132,25 +177,34 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "agents_discover",
-			Description: "Discover agents you can message. Returns one entry per peer with an address to pass " +
-				"directly to agent_send/agent_ask. scope=project (default) lists the other agents in your project. " +
-				"Scopes server, fleet, and web are reserved for exposed cross-project agents, fleet tenants, and " +
-				"external A2A peers — they return empty until those phases ship.",
+			Description: "Discover local and configured remote agents. Every returned address can be passed directly " +
+				"to agent_send or agent_ask. Use agent_get only when you want the selected agent's complete Agent Card.",
 			InputSchema: schemaObject(map[string]any{
-				"scope": map[string]any{"type": "string", "enum": []string{"project", "server", "fleet", "web", "all"},
-					"description": "Defaults to project."},
+				"query":      map[string]any{"type": "string", "description": "Optional text matched against names, descriptions, and skills."},
+				"capability": map[string]any{"type": "string", "description": "Optional exact skill id."},
+				"peer":       map[string]any{"type": "string", "description": "Optional generic peer id/name, or local."},
+				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
 			}, nil),
 			HandlerCtx: a.toolDiscover,
 		},
 		{
+			Name:        "agent_get",
+			Description: "Get the complete current Agent Card for an address returned by agents_discover. This is optional; discovery addresses are already actionable.",
+			InputSchema: schemaObject(map[string]any{
+				"agent":   map[string]any{"type": "string", "description": "Address returned by agents_discover."},
+				"refresh": map[string]any{"type": "boolean", "description": "Refresh a remote card instead of using a valid cache entry."},
+			}, []string{"agent"}),
+			HandlerCtx: a.toolGetAgent,
+		},
+		{
 			Name: "agent_send",
-			Description: "Send a one-way message to another agent in this project. No reply is expected. " +
-				"to is the target agent's id or exact name — discover peers with agents_discover. " +
+			Description: "Send a one-way message to a local or remote agent. No reply is expected. " +
+				"to is an address returned by agents_discover, a local id, or an exact local name. " +
 				"Pass task_id to add a follow-up message to an existing a2a task instead of starting a new one " +
 				"(for example to answer a task that is input_required, or to continue a finished exchange). " +
 				"For work that needs an answer, use agent_ask instead.",
 			InputSchema: schemaObject(map[string]any{
-				"to":      map[string]any{"type": "string", "description": "Target agent id or exact name (from agents_discover). Ignored when task_id is set."},
+				"to":      map[string]any{"type": "string", "description": "Actionable address returned by agents_discover, local agent id, or exact local name. Ignored when task_id is set."},
 				"message": map[string]any{"type": "string", "description": "Complete message for the other agent."},
 				"task_id": map[string]any{"type": "string", "description": "Existing a2a task id to append this message to."},
 			}, []string{"message"}),
@@ -158,11 +212,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "agent_ask",
-			Description: "Ask another agent in this project to do something. Creates an a2a task, delivers the request, " +
+			Description: "Ask a local or remote agent to do something. Creates an a2a task, delivers the request, " +
 				"and returns immediately with the task id. The reply arrives later as an [a2a] event — do not block or poll for it; " +
-				"continue other work or pace. to is the target agent's id or exact name — discover peers with agents_discover.",
+				"continue other work or pace. Pass the actionable address from agents_discover; local ids and exact local names also work.",
 			InputSchema: schemaObject(map[string]any{
-				"to":      map[string]any{"type": "string", "description": "Target agent id or exact name (from agents_discover)."},
+				"to":      map[string]any{"type": "string", "description": "Actionable address returned by agents_discover, local agent id, or exact local name."},
 				"message": map[string]any{"type": "string", "description": "Complete, self-contained request: objective, constraints, and what a good answer looks like."},
 			}, []string{"to", "message"}),
 			HandlerCtx: a.toolAsk,
@@ -225,11 +279,10 @@ func identify(ctx context.Context, app *sdk.AppCtx) (*callIdentity, error) {
 	return id, nil
 }
 
-// resolveTarget validates the destination agent: it must exist and be
-// in the caller's project (phase 1 policy — cross-project and remote
-// peers come with the exposure/peer-registry phases). to accepts a
-// numeric id, an "agent:<id>" address from agents_discover, or an
-// exact agent name (resolved via the platform's agent directory).
+// resolveTarget validates a local destination agent: it must exist and be
+// in the caller's project. Remote actionable addresses are dispatched before
+// this helper. Local targets accept a numeric id, an "agent:<id>" address
+// from agents_discover, or an exact name from the platform directory.
 func resolveTarget(app *sdk.AppCtx, from *callIdentity, to string) (*sdk.PlatformAgent, error) {
 	to = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(to), "agent:"))
 	id, err := strconv.ParseInt(to, 10, 64)
@@ -310,16 +363,18 @@ func checkLimits(app *sdk.AppCtx, from *callIdentity, toAgentID int64, newAsk bo
 
 // --- tool handlers ----------------------------------------------------------
 
-// discoverEntry is the uniform peer shape agents_discover returns
-// across every scope: address goes straight into agent_send/agent_ask
+// discoverEntry is the uniform source shape agents_discover returns:
+// address goes straight into agent_send/agent_ask
 // unchanged, so locality stays an implementation detail.
 type discoverEntry struct {
-	ID      int64  `json:"id"`
-	Address string `json:"address"`
-	Name    string `json:"name"`
-	Online  bool   `json:"online"`
-	Mode    string `json:"mode,omitempty"`
-	Scope   string `json:"scope"`
+	ID          int64    `json:"id,omitempty"`
+	Address     string   `json:"address"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Online      bool     `json:"online"`
+	Mode        string   `json:"mode,omitempty"`
+	Peer        string   `json:"peer,omitempty"`
+	Skills      []string `json:"skills,omitempty"`
 }
 
 // projectPeers lists the caller's project agents plus whether the
@@ -362,62 +417,121 @@ func (a *App) toolDiscover(ctx context.Context, app *sdk.AppCtx, args map[string
 	if err != nil {
 		return nil, err
 	}
-	scope := strings.TrimSpace(stringArg(args, "scope"))
-	if scope == "" {
-		scope = "project"
-	}
-	switch scope {
-	case "project", "all":
-	case "server", "fleet", "web":
-		return map[string]any{
-			"agents": []discoverEntry{},
-			"note":   fmt.Sprintf("scope %q is not available yet — exposed cross-project agents, fleet tenants, and external A2A peers arrive in later versions; use scope=project", scope),
-		}, nil
-	default:
-		return nil, fmt.Errorf("unknown scope %q — use project, server, fleet, web, or all", scope)
+	query := strings.TrimSpace(stringArg(args, "query"))
+	capability := strings.TrimSpace(stringArg(args, "capability"))
+	peerFilter := strings.TrimSpace(stringArg(args, "peer"))
+	limit := int(int64Arg(args, "limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 50
 	}
 	peers, annotated, err := projectPeers(app, from)
 	if err != nil {
 		return nil, fmt.Errorf("agent discovery unavailable on this platform version: %v", err)
 	}
 	entries := make([]discoverEntry, 0, len(peers))
+	var warnings []string
 	hidden := 0
-	for _, peer := range peers {
-		if peer.ID == from.AgentID {
-			continue
+	if peerFilter == "" || strings.EqualFold(peerFilter, "local") {
+		for _, peer := range peers {
+			if peer.ID == from.AgentID {
+				continue
+			}
+			if annotated && !peer.AttachedToCaller {
+				hidden++
+				continue
+			}
+			profile, profileErr := ensureAgentProfile(app.AppDB(), peer)
+			if profileErr != nil {
+				warnings = append(warnings, fmt.Sprintf("could not prepare card for %s: %v", peer.Name, profileErr))
+				continue
+			}
+			if !profile.Enabled || !matchesAgentQuery(peer.Name, profile.Description, skillIDs(profile.Skills), query, capability) {
+				continue
+			}
+			entries = append(entries, discoverEntry{
+				ID:          peer.ID,
+				Address:     "agent:" + strconv.FormatInt(peer.ID, 10),
+				Name:        peer.Name,
+				Description: profile.Description,
+				Online:      strings.EqualFold(peer.Status, "running"),
+				Mode:        peer.Mode,
+				Peer:        "local",
+				Skills:      skillIDs(profile.Skills),
+			})
 		}
-		// Only list peers that hold a2a tools themselves — an agent
-		// without them receives messages but can never reply. On
-		// platforms without the annotation, list everyone.
-		if annotated && !peer.AttachedToCaller {
-			hidden++
-			continue
+	}
+
+	configured, configErr := peerConfigs(app)
+	if configErr != nil {
+		warnings = append(warnings, configErr.Error())
+	} else {
+		type peerResult struct {
+			peer    peerConfig
+			entries []directoryEntry
+			err     error
 		}
-		entries = append(entries, discoverEntry{
-			ID:      peer.ID,
-			Address: "agent:" + strconv.FormatInt(peer.ID, 10),
-			Name:    peer.Name,
-			Online:  strings.EqualFold(peer.Status, "running"),
-			Mode:    peer.Mode,
-			Scope:   "project",
-		})
+		selected := make([]peerConfig, 0, len(configured))
+		for _, peer := range configured {
+			if peerFilter == "" || peer.ID == peerFilter || strings.EqualFold(peer.Name, peerFilter) {
+				selected = append(selected, peer)
+			}
+		}
+		results := make(chan peerResult, len(selected))
+		for _, peer := range selected {
+			peer := peer
+			go func() {
+				remote, fetchErr := a.fetchPeerDirectory(ctx, app, peer, query, capability)
+				results <- peerResult{peer: peer, entries: remote, err: fetchErr}
+			}()
+		}
+		for range selected {
+			result := <-results
+			if result.err != nil {
+				warnings = append(warnings, fmt.Sprintf("peer %s unavailable: %v", result.peer.Name, result.err))
+				continue
+			}
+			for _, remote := range result.entries {
+				cached, cacheErr := upsertRemoteAgent(app.AppDB(), result.peer, remote, nil,
+					time.Duration(configInt(app, "card_cache_seconds", defaultCardCacheSeconds))*time.Second)
+				if cacheErr != nil {
+					warnings = append(warnings, fmt.Sprintf("could not cache %s from %s: %v", remote.Name, result.peer.Name, cacheErr))
+					continue
+				}
+				entries = append(entries, discoverEntry{
+					Address:     "a2a:" + cached.Ref,
+					Name:        remote.Name,
+					Description: remote.Description,
+					Online:      remote.Online,
+					Peer:        result.peer.Name,
+					Skills:      remote.Skills,
+				})
+			}
+		}
+	}
+
+	sortDiscoverEntries(entries)
+	if len(entries) > limit {
+		entries = entries[:limit]
 	}
 	result := map[string]any{"agents": entries}
 	var notes []string
 	if hidden > 0 {
-		notes = append(notes, fmt.Sprintf("%d project agent(s) without Agent to Agent attached are not listed — they could not reply; the operator can attach the app to include them", hidden))
+		notes = append(notes, fmt.Sprintf("%d local agent(s) without Agent to Agent attached are not listed", hidden))
 	}
 	if !annotated {
-		notes = append(notes, "this platform version does not report which agents hold a2a tools; peers listed here may be unable to reply")
+		notes = append(notes, "this platform version does not report which local agents hold a2a tools; local results may be unable to reply")
 	}
-	if scope == "all" {
-		notes = append(notes, "only project-scope peers are live; server, fleet, and web scopes arrive in later versions")
+	if strings.TrimSpace(stringArg(args, "scope")) != "" {
+		notes = append(notes, "scope is deprecated and ignored; discovery now uses generic local and peer sources")
 	}
-	if len(entries) == 0 && hidden == 0 {
-		notes = append(notes, "no other agents in your project")
+	if len(entries) == 0 {
+		notes = append(notes, "no matching agents are currently discoverable")
 	}
 	if len(notes) > 0 {
 		result["note"] = strings.Join(notes, ". ")
+	}
+	if len(warnings) > 0 {
+		result["warnings"] = warnings
 	}
 	return result, nil
 }
@@ -432,7 +546,15 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 		return nil, errors.New("message required")
 	}
 	if taskID := int64Arg(args, "task_id"); taskID != 0 {
-		return a.sendFollowUp(app, from, taskID, message)
+		return a.sendFollowUp(ctx, app, from, taskID, message)
+	}
+	if remote, remoteErr := resolveRemoteAddress(app, stringArg(args, "to")); remoteErr != nil {
+		return nil, remoteErr
+	} else if remote != nil {
+		if err := checkLimits(app, from, 0, false); err != nil {
+			return nil, err
+		}
+		return a.startRemoteTask(ctx, app, from, remote, message, true)
 	}
 	target, err := resolveTarget(app, from, stringArg(args, "to"))
 	if err != nil {
@@ -481,6 +603,14 @@ func (a *App) toolAsk(ctx context.Context, app *sdk.AppCtx, args map[string]any)
 	if message == "" {
 		return nil, errors.New("message required")
 	}
+	if remote, remoteErr := resolveRemoteAddress(app, stringArg(args, "to")); remoteErr != nil {
+		return nil, remoteErr
+	} else if remote != nil {
+		if err := checkLimits(app, from, 0, true); err != nil {
+			return nil, err
+		}
+		return a.startRemoteTask(ctx, app, from, remote, message, false)
+	}
 	target, err := resolveTarget(app, from, stringArg(args, "to"))
 	if err != nil {
 		return nil, err
@@ -521,13 +651,29 @@ func (a *App) toolAsk(ctx context.Context, app *sdk.AppCtx, args map[string]any)
 // sendFollowUp appends a message to an existing task and delivers it
 // to the other participant. If the requester answers an input_required
 // question, the task moves back to working.
-func (a *App) sendFollowUp(app *sdk.AppCtx, from *callIdentity, taskID int64, message string) (any, error) {
+func (a *App) sendFollowUp(ctx context.Context, app *sdk.AppCtx, from *callIdentity, taskID int64, message string) (any, error) {
 	task, err := getTask(app.AppDB(), from.ProjectID, taskID)
 	if err != nil {
 		return nil, err
 	}
 	if task == nil {
 		return nil, fmt.Errorf("task %d not found", taskID)
+	}
+	if task.Direction == "outbound" {
+		if from.AgentID != task.FromAgentID {
+			return nil, fmt.Errorf("you are not a participant of task %d", taskID)
+		}
+		return a.continueRemoteTask(ctx, app, task, message)
+	}
+	if task.Direction == "inbound" {
+		if from.AgentID != task.ToAgentID {
+			return nil, fmt.Errorf("you are not a participant of task %d", taskID)
+		}
+		_ = recordMessage(app.AppDB(), task.ID, from.AgentID, 0, message, task.Status)
+		return map[string]any{
+			"task_id": task.ID, "delivered": true, "status": task.Status,
+			"note": "follow-up recorded; the remote requester can retrieve it through the A2A task",
+		}, nil
 	}
 	var toID int64
 	switch from.AgentID {
@@ -587,6 +733,35 @@ func (a *App) toolReply(ctx context.Context, app *sdk.AppCtx, args map[string]an
 	}
 	if !openStatuses[task.Status] {
 		return nil, fmt.Errorf("task %d is already %s — use agent_send(task_id=\"%d\") for a follow-up message", taskID, task.Status, taskID)
+	}
+	if task.Direction == "inbound" {
+		if from.AgentID != task.ToAgentID {
+			return nil, fmt.Errorf("you are not a participant of task %d", taskID)
+		}
+		switch status {
+		case "completed", "input_required", "failed", "working":
+		default:
+			return nil, fmt.Errorf("status %q is not valid for the responder", status)
+		}
+		if from.ThreadID != "" && task.ToThreadID == "" {
+			_ = setTaskResponderThread(app.AppDB(), from.ProjectID, task.ID, from.ThreadID)
+		}
+		if err := setTaskStatus(app.AppDB(), from.ProjectID, task.ID, status); err != nil {
+			return nil, err
+		}
+		task.Status = status
+		_ = recordMessage(app.AppDB(), task.ID, from.AgentID, 0, message, status)
+		emitTask(app, "task.updated", task)
+		return map[string]any{
+			"task_id": task.ID, "status": status, "delivered": true,
+			"note": "reply recorded; the remote requester can retrieve it through the A2A task",
+		}, nil
+	}
+	if task.Direction == "outbound" {
+		if from.AgentID != task.FromAgentID || status != "canceled" {
+			return nil, fmt.Errorf("remote task replies are produced by the remote agent; the local requester may only cancel")
+		}
+		return a.cancelRemoteTask(ctx, app, task, message)
 	}
 
 	var deliverTo int64

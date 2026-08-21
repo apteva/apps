@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -92,6 +95,10 @@ func (p *recordingPlatform) lastEvent(t *testing.T) capturedEvent {
 const testProject = "proj-1"
 
 func newTestEnv(t *testing.T) (*sdk.AppCtx, *recordingPlatform) {
+	return newTestEnvWithConfig(t, nil)
+}
+
+func newTestEnvWithConfig(t *testing.T, config map[string]string) (*sdk.AppCtx, *recordingPlatform) {
 	t.Helper()
 	platform := &recordingPlatform{
 		agents: map[int64]*sdk.PlatformAgent{
@@ -102,7 +109,11 @@ func newTestEnv(t *testing.T) (*sdk.AppCtx, *recordingPlatform) {
 		},
 		attached: map[int64]bool{41: true, 42: true, 43: true},
 	}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject), tk.WithPlatform(platform))
+	opts := []tk.Option{tk.WithProjectID(testProject), tk.WithPlatform(platform)}
+	if config != nil {
+		opts = append(opts, tk.WithConfig(config))
+	}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", opts...)
 	return ctx, platform
 }
 
@@ -375,6 +386,29 @@ func TestNoReservedRoutePrefixes(t *testing.T) {
 	}
 }
 
+func TestFederationRoutesOwnPeerAuthentication(t *testing.T) {
+	routes := (&App{}).HTTPRoutes()
+	wantPublic := map[string]bool{
+		"/directory/agents": true,
+		"/agent-cards/":     true,
+		"/agents/":          true,
+	}
+	for _, route := range routes {
+		if wantPublic[route.Pattern] && !route.NoAuth {
+			t.Fatalf("federation route %q must bypass the SDK token gate and authenticate its peer itself", route.Pattern)
+		}
+		if strings.HasPrefix(route.Pattern, "/tasks") && route.NoAuth {
+			t.Fatalf("operator route %q must remain platform-authenticated", route.Pattern)
+		}
+	}
+	manifest := (&App{}).Manifest()
+	for _, route := range manifest.Provides.HTTPRoutes {
+		if wantPublic[route.Prefix] && !route.NoAuth {
+			t.Fatalf("manifest federation prefix %q missing no_auth", route.Prefix)
+		}
+	}
+}
+
 // TestManifestMatchesYAML guards the release failure mode where the
 // version (or permissions) get bumped in apteva.yaml but not in the
 // embedded manifestYAML, or vice versa.
@@ -415,17 +449,15 @@ func TestDiscoverListsProjectPeers(t *testing.T) {
 		t.Fatal("discover leaked another project's agent")
 	}
 	crm, ok := ids[42]
-	if !ok || crm.Address != "agent:42" || crm.Name != "CRM" || crm.Scope != "project" {
+	if !ok || crm.Address != "agent:42" || crm.Name != "CRM" || crm.Peer != "local" {
 		t.Fatalf("bad CRM entry: %+v", crm)
 	}
 
-	// Reserved scopes: empty with a note, never an error.
+	// Old topology scopes are ignored with a migration note; discovery
+	// remains generic and returns the same actionable agents.
 	res = resultMap(t)(app.toolDiscover(callerCtx(41, ""), ctx, map[string]any{"scope": "fleet"}))
-	if len(res["agents"].([]discoverEntry)) != 0 || res["note"] == nil {
-		t.Fatalf("fleet scope should be empty with note, got %+v", res)
-	}
-	if _, err := app.toolDiscover(callerCtx(41, ""), ctx, map[string]any{"scope": "galaxy"}); err == nil {
-		t.Fatal("unknown scope accepted")
+	if len(res["agents"].([]discoverEntry)) != 2 || !strings.Contains(res["note"].(string), "deprecated") {
+		t.Fatalf("legacy scope should be ignored with note, got %+v", res)
 	}
 }
 
@@ -555,5 +587,140 @@ func TestFollowUpRoutesToResponderThread(t *testing.T) {
 	ev := platform.lastEvent(t)
 	if ev.AgentID != 42 || !strings.Contains(ev.Message, "Still there?") {
 		t.Fatalf("worker-death fallback wrong: %+v", ev)
+	}
+}
+
+func TestFederatedDiscoveryAddressIsImmediatelyActionable(t *testing.T) {
+	const sharedToken = "test-peer-token-with-enough-entropy"
+	targetPeerJSON, _ := json.Marshal([]peerConfig{{
+		ID: "source", Name: "Source instance", BaseURL: "http://127.0.0.1:1", Token: sharedToken,
+		DiscoverAgents: []string{"CRM"}, InvokeAgents: []string{"CRM"},
+	}})
+	targetCtx, targetPlatform := newTestEnvWithConfig(t, map[string]string{"peers_json": string(targetPeerJSON)})
+	targetApp := &App{}
+	if err := targetApp.OnMount(targetCtx); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/directory/agents", targetApp.handleDirectory)
+	mux.HandleFunc("/agent-cards/", targetApp.handleAgentCard)
+	mux.HandleFunc("/agents/", targetApp.handleAgentProtocol)
+	server := httptest.NewServer(http.StripPrefix("/api/apps/a2a", mux))
+	t.Cleanup(server.Close)
+	targetCtx.Config()["public_url"] = server.URL
+	unauthorized, err := http.Get(server.URL + "/api/apps/a2a/directory/agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unauthorized.Body.Close()
+	if unauthorized.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous directory status = %d, want 401", unauthorized.StatusCode)
+	}
+
+	sourcePeerJSON, _ := json.Marshal([]peerConfig{{
+		ID: "target", Name: "Main instance", BaseURL: server.URL + "/api/apps/a2a", Token: sharedToken,
+	}})
+	sourceCtx, sourcePlatform := newTestEnvWithConfig(t, map[string]string{
+		"peers_json": string(sourcePeerJSON), "public_url": "http://127.0.0.1:9",
+	})
+	sourceApp := &App{}
+
+	// One discovery call returns a remote address that is already valid for
+	// agent_ask; agent_get is not required for resolution.
+	discovered := resultMap(t)(sourceApp.toolDiscover(callerCtx(41, "source-thread"), sourceCtx, map[string]any{
+		"query": "CRM", "peer": "target",
+	}))
+	entries := discovered["agents"].([]discoverEntry)
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Address, "a2a:remote_") {
+		t.Fatalf("remote discovery = %+v", discovered)
+	}
+	address := entries[0].Address
+
+	// Use the discovery address directly: no agent_get call is required.
+	asked := resultMap(t)(sourceApp.toolAsk(callerCtx(41, "source-thread"), sourceCtx, map[string]any{
+		"to": address, "message": "Check the deployment.",
+	}))
+	localTaskID := asked["task_id"].(int64)
+	if event := targetPlatform.lastEvent(t); event.AgentID != 42 || !strings.Contains(event.Message, "Check the deployment.") {
+		t.Fatalf("inbound remote delivery = %+v", event)
+	}
+
+	// Optional inspection still returns the complete generated Agent Card and
+	// preserves the actionable address.
+	details := resultMap(t)(sourceApp.toolGetAgent(callerCtx(41, "source-thread"), sourceCtx, map[string]any{
+		"agent": address,
+	}))
+	if details["address"] != address || details["card"] == nil {
+		t.Fatalf("agent_get = %+v", details)
+	}
+	card, ok := details["card"].(*AgentCard)
+	if !ok || len(card.SupportedInterfaces) != 1 || card.SupportedInterfaces[0].ProtocolVersion != "1.0" ||
+		len(card.DefaultInputModes) != 1 || card.DefaultInputModes[0] != "text/plain" {
+		t.Fatalf("generated A2A v1 card = %+v", details["card"])
+	}
+
+	// The target's ordinary agent_reply updates the protocol task. The source
+	// worker then retrieves it and routes it back to the originating thread.
+	inbound, err := listTasks(targetCtx.AppDB(), testProject, taskFilter{Direction: "inbound", Limit: 10})
+	if err != nil || len(inbound) != 1 {
+		t.Fatalf("target inbound tasks = %+v, err %v", inbound, err)
+	}
+	resultMap(t)(targetApp.toolReply(callerCtx(42, "target-worker"), targetCtx, map[string]any{
+		"task_id": fmt.Sprint(inbound[0].ID), "message": "Which deployment?", "status": "input_required",
+	}))
+	if err := sourceApp.syncRemoteTasks(context.Background(), sourceCtx); err != nil {
+		t.Fatal(err)
+	}
+	if len(sourcePlatform.threadEvents) != 1 {
+		t.Fatalf("source thread deliveries = %d", len(sourcePlatform.threadEvents))
+	}
+	question := sourcePlatform.threadEvents[0]
+	if question.Ref.AgentID != 41 || question.Ref.ThreadID != "source-thread" || !strings.Contains(question.Message, "Which deployment?") {
+		t.Fatalf("input-required delivery = %+v", question)
+	}
+
+	// A local follow-up continues the same remote task and reaches the target
+	// agent's responder thread.
+	resultMap(t)(sourceApp.toolSend(callerCtx(41, "source-thread"), sourceCtx, map[string]any{
+		"task_id": fmt.Sprint(localTaskID), "message": "Deployment 728.",
+	}))
+	if len(targetPlatform.threadEvents) != 1 || targetPlatform.threadEvents[0].Ref.ThreadID != "target-worker" ||
+		!strings.Contains(targetPlatform.threadEvents[0].Message, "Deployment 728.") {
+		t.Fatalf("remote follow-up delivery = %+v", targetPlatform.threadEvents)
+	}
+
+	resultMap(t)(targetApp.toolReply(callerCtx(42, "target-worker"), targetCtx, map[string]any{
+		"task_id": fmt.Sprint(inbound[0].ID), "message": "Credential expired.", "status": "completed",
+	}))
+	if err := sourceApp.syncRemoteTasks(context.Background(), sourceCtx); err != nil {
+		t.Fatal(err)
+	}
+	if len(sourcePlatform.threadEvents) != 2 {
+		t.Fatalf("source thread deliveries after completion = %d", len(sourcePlatform.threadEvents))
+	}
+	delivery := sourcePlatform.threadEvents[1]
+	if delivery.Ref.AgentID != 41 || delivery.Ref.ThreadID != "source-thread" || !strings.Contains(delivery.Message, "Credential expired.") {
+		t.Fatalf("remote reply delivery = %+v", delivery)
+	}
+	localTask, _ := getTask(sourceCtx.AppDB(), testProject, localTaskID)
+	if localTask == nil || localTask.Status != "completed" {
+		t.Fatalf("source outbound task = %+v", localTask)
+	}
+
+	// Cancellation also maps to the same remote protocol task.
+	cancelAsk := resultMap(t)(sourceApp.toolAsk(callerCtx(41, "source-thread"), sourceCtx, map[string]any{
+		"to": address, "message": "Start another check.",
+	}))
+	cancelTaskID := cancelAsk["task_id"].(int64)
+	resultMap(t)(sourceApp.toolReply(callerCtx(41, "source-thread"), sourceCtx, map[string]any{
+		"task_id": fmt.Sprint(cancelTaskID), "message": "No longer needed.", "status": "canceled",
+	}))
+	canceledOutbound, _ := getTask(sourceCtx.AppDB(), testProject, cancelTaskID)
+	if canceledOutbound == nil || canceledOutbound.Status != "canceled" {
+		t.Fatalf("canceled outbound task = %+v", canceledOutbound)
+	}
+	canceledInbound, err := getTaskByProtocolID(targetCtx.AppDB(), canceledOutbound.RemoteTaskID)
+	if err != nil || canceledInbound == nil || canceledInbound.Status != "canceled" {
+		t.Fatalf("canceled authoritative task = %+v, err %v", canceledInbound, err)
 	}
 }
