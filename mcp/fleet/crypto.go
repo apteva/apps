@@ -3,7 +3,9 @@ package main
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -17,7 +19,10 @@ import (
 // keyring wraps an AES-GCM AEAD bound to the fleet master key. We
 // encrypt tenant api_keys at rest with this; the master key itself
 // lives in env (FLEET_MASTER_KEY) or in the app's data dir.
-type keyring struct{ aead cipher.AEAD }
+type keyring struct {
+	aead   cipher.AEAD
+	master []byte
+}
 
 // loadKeyring resolves the fleet master key in this order:
 //  1. FLEET_MASTER_KEY env var (base64-encoded 32 bytes)
@@ -39,7 +44,7 @@ func loadKeyring(ctx *sdk.AppCtx) (*keyring, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gcm init: %w", err)
 	}
-	return &keyring{aead: gcm}, nil
+	return &keyring{aead: gcm, master: append([]byte(nil), key...)}, nil
 }
 
 func resolveMasterKey(ctx *sdk.AppCtx) ([]byte, error) {
@@ -88,4 +93,12 @@ func (k *keyring) open(blob []byte) ([]byte, error) {
 		return nil, errors.New("ciphertext too short")
 	}
 	return k.aead.Open(nil, blob[:ns], blob[ns:], nil)
+}
+
+// deriveToken deterministically mints a high-entropy secret for one Fleet-
+// owned relationship without adding another credential column to the DB.
+func (k *keyring) deriveToken(label string) string {
+	mac := hmac.New(sha256.New, k.master)
+	_, _ = mac.Write([]byte(label))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }

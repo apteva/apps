@@ -134,26 +134,32 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := a.transferTenantData(ctx, sourceHost, targetHost, sourceDir, targetDir, slug, true); err != nil {
 		return nil, fmt.Errorf("transfer clone: %w", err)
 	}
+	a2aIdentityReset, err := a.resetClonedA2AState(ctx, targetHost, targetDir)
+	if err != nil {
+		return nil, fmt.Errorf("reset cloned A2A identity: %w", err)
+	}
 	_ = a.store.recordEvent(clone.ID, "cloned", "user", map[string]any{
-		"source_tenant_id": source.ID,
-		"source_slug":      source.Slug,
-		"source_instance":  source.InstanceID,
-		"instance_id":      targetID,
-		"port":             port,
-		"started":          start,
+		"source_tenant_id":   source.ID,
+		"source_slug":        source.Slug,
+		"source_instance":    source.InstanceID,
+		"instance_id":        targetID,
+		"port":               port,
+		"started":            start,
+		"a2a_identity_reset": a2aIdentityReset,
 	})
 	if !start {
 		cleanup = false
 		ctx.Logger().Info("fleet: tenant cloned without start", "source", source.ID, "clone", clone.ID, "slug", slug, "instance_id", targetID)
 		return map[string]any{
-			"tenant_id":        clone.ID,
-			"source_tenant_id": source.ID,
-			"slug":             slug,
-			"base_url":         a.publicBaseURL(clone.BaseURL),
-			"status":           StatusStopped,
-			"started":          false,
-			"instance_id":      targetID,
-			"domains_copied":   false,
+			"tenant_id":          clone.ID,
+			"source_tenant_id":   source.ID,
+			"slug":               slug,
+			"base_url":           a.publicBaseURL(clone.BaseURL),
+			"status":             StatusStopped,
+			"started":            false,
+			"instance_id":        targetID,
+			"domains_copied":     false,
+			"a2a_identity_reset": a2aIdentityReset,
 		}, nil
 	}
 	baseURL, _, err := a.startTenantOnHostMode(ctx, targetHost, clone, targetDir, cloneVersion, port, source.Status, true)
@@ -189,6 +195,7 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"rehearsal_validated": true,
 		"instance_id":         targetID,
 		"domains_copied":      false,
+		"a2a_identity_reset":  a2aIdentityReset,
 	}, nil
 }
 

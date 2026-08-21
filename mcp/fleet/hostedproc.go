@@ -670,7 +670,7 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 	}
 	_ = a.store.recordEvent(t.ID, "auto_setup_complete", "user",
 		map[string]any{"admin_email": owner})
-	return map[string]any{
+	out := map[string]any{
 		"tenant_id":      t.ID,
 		"slug":           slug,
 		"base_url":       baseURL,
@@ -680,5 +680,7 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 		"api_key":        autoSetup.APIKey,
 		"instance_id":    instanceID,
 		"target_version": version,
-	}, nil
+	}
+	out["a2a"] = a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_create")
+	return out, nil
 }

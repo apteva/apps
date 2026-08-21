@@ -162,7 +162,13 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"same_host":        true,
 		})
 		out, _, _ := a.store.get(id)
-		return map[string]any{"tenant": a.publicTenantView(out), "migrated": true, "instance_id": targetID, "base_url": baseURL}, nil
+		return map[string]any{
+			"tenant":      a.publicTenantView(out),
+			"migrated":    true,
+			"instance_id": targetID,
+			"base_url":    baseURL,
+			"a2a":         a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_migrate"),
+		}, nil
 	}
 
 	if err := a.transferTenantData(ctx, sourceHost, targetHost, sourceDir, targetDir, t.Slug, false); err != nil {
@@ -242,6 +248,7 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"base_url":        baseURL,
 		"source_retained": retainSource,
 		"retained_source": retained,
+		"a2a":             a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_migrate"),
 	}, nil
 }
 

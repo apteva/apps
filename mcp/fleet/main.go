@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.25
+version: 0.9.0
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 icon: /ui/icon.svg
@@ -32,6 +32,11 @@ requires:
     - platform.apps.call
     - platform.connections.execute
     - platform.ingress.write
+  apps:
+    - name: a2a
+      version: ">=0.4.0"
+      optional: true
+      reason: Automatically install and pair A2A across managed tenants when the parent A2A app is bound.
   integrations:
     - role: domains
       kind: app
@@ -152,7 +157,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.8.25
+    ref: fleet/v0.9.0
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
@@ -161,6 +166,19 @@ db:
   driver: sqlite
   path: /data/fleet.db
   migrations: migrations/
+config_schema:
+  - name: a2a_main_agents_json
+    label: Parent agents allowed over A2A
+    type: text
+    description: JSON list of attached parent agent names, IDs, card IDs, or "*". Defaults to all parent agents deliberately attached to A2A.
+    default: '["*"]'
+    required: false
+  - name: a2a_tenant_agents_json
+    label: Tenant agents allowed over A2A
+    type: text
+    description: JSON list of attached tenant agent names, IDs, card IDs, or "*". Defaults to all tenant agents, which Fleet attaches to their tenant A2A install.
+    default: '["*"]'
+    required: false
 upgrade_policy: auto-patch
 `
 
@@ -195,6 +213,10 @@ type App struct {
 	startupRetryDelays []time.Duration
 	runtimeMu          sync.Mutex
 	runtimeReady       map[int64]time.Time
+	a2aMu              sync.Mutex
+	a2aReconciled      map[string]string
+	a2aLocks           map[string]*sync.Mutex
+	a2aLastSweep       time.Time
 }
 
 // globalCtx captures the platform context at OnMount so HTTP handlers
@@ -226,6 +248,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.hostedTunnels = map[hostedTunnelKey]int{}
 	a.dirtyTunnels = map[hostedTunnelKey]bool{}
 	a.runtimeReady = map[int64]time.Time{}
+	a.a2aReconciled = map[string]string{}
+	a.a2aLocks = map[string]*sync.Mutex{}
 	if err := a.initTransferState(); err != nil {
 		return err
 	}
@@ -849,6 +873,8 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
 		{Name: "health_poller", Schedule: "@every 60s", Run: a.runHealthPoller},
+		{Name: "a2a_reconcile_on_mount", Run: a.runA2AReconciler},
+		{Name: "a2a_reconcile", Schedule: a2aReconcileEvery, Run: a.runA2AReconciler},
 	}
 }
 

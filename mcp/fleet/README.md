@@ -1,6 +1,6 @@
 # Fleet
 
-Control plane for a fleet of local apteva tenants. Each tenant is a separate `apteva` process the parent host runs as a supervised child, with its own data dir (`~/.apteva-fleet/<slug>/`) and port. Zero cross-app deps.
+Control plane for Apteva tenants. Each managed tenant is a separate `apteva` process with its own data directory and port, either on the parent host or on an Instances-managed host. Cross-app features are optional.
 
 ## Status — v0.2 (admin-driven bootstrap)
 
@@ -23,6 +23,28 @@ What works today:
 - **health poller** — every 60s probes active tenants; flips to `disconnected` after 5 consecutive failures. Skips tenants in `setup_pending` / `starting` / `stopped` / `suspended` / `failed`.
 - **boot reconciler** — on parent restart, probes each local tenant's port and reattaches by URL (children survive fleet restart because they're spawned in their own process group).
 - **UI panel** — full tenant list + detail view + setup-pending banner with copy-token / open-URL / attach-key form. Lives at `ui/FleetPanel.tsx`, slot `project.page`.
+
+## Optional A2A pairing (v0.9)
+
+Bind Fleet's optional `a2a >= 0.4.0` dependency to the parent instance's global A2A install to enable automatic pairing. Without that binding Fleet behaves exactly as before.
+
+For each Fleet-managed tenant, Fleet then:
+
+- installs A2A globally in the tenant if it is missing and upgrades older installs;
+- seeds the parent as a tenant peer and registers the tenant as a parent peer with one tenant-scoped relationship token;
+- makes the tenant A2A install a default for new agents and attaches it to existing agents;
+- reconciles immediately during create, key attachment, start, and migration, once on Fleet mount, and every ten minutes afterward;
+- removes the parent peer when the tenant is deleted; and
+- resets copied A2A private data during clone so the clone gets a new node identity.
+
+`tenant_create`, `tenant_attach_key`, `tenant_start`, and `tenant_migrate` return an `a2a` status object. `tenant_get` exposes the latest pairing result from the audit log. Pairing errors are reported and retried without failing an otherwise healthy tenant.
+
+The allowlists are generic A2A agent selectors, not Fleet-specific exposure tiers:
+
+- `a2a_main_agents_json` controls parent agents visible to tenants.
+- `a2a_tenant_agents_json` controls tenant agents visible to the parent.
+
+Both default to `["*"]`. Parent agents still have to be deliberately attached to the parent A2A install. Fleet does not modify instances registered with `tenant_connect`, because it does not own their lifecycle.
 
 ## Quick start
 

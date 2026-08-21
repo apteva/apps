@@ -103,6 +103,34 @@ func TestManifestUsesServerNativeIngress(t *testing.T) {
 	}
 }
 
+func TestManifestDeclaresOptionalA2A(t *testing.T) {
+	manifests := map[string]sdk.Manifest{"embedded": (&App{}).Manifest()}
+	b, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatalf("read apteva.yaml: %v", err)
+	}
+	disk, err := sdk.ParseManifest(b)
+	if err != nil {
+		t.Fatalf("parse apteva.yaml: %v", err)
+	}
+	manifests["disk"] = *disk
+	for label, manifest := range manifests {
+		found := false
+		for _, dep := range manifest.Requires.Apps {
+			if dep.Name != "a2a" {
+				continue
+			}
+			found = true
+			if !dep.Optional || dep.Version != ">=0.4.0" {
+				t.Errorf("%s A2A dependency=%+v", label, dep)
+			}
+		}
+		if !found {
+			t.Errorf("%s manifest has no optional A2A dependency", label)
+		}
+	}
+}
+
 func TestMCPTools_DeclaredMatchHandlers(t *testing.T) {
 	// Every tool the manifest declares must have a matching handler,
 	// and every handler must be declared. Mismatch = the dashboard

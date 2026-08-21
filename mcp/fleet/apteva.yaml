@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.8.25
+version: 0.9.0
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -20,8 +20,9 @@ description: |
   restarted; the box reboots → reconcileOnBoot re-adopts surviving
   tenants and respawns dead ones.
 
-  v0.8.25 replaces the logistics-style icon with a control-plane topology
-  representing one parent coordinating managed Apteva instances.
+  v0.9.0 optionally installs and pairs the A2A app across Fleet-managed
+  tenants so attached tenant agents and attached parent agents can discover
+  and communicate directly.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -39,6 +40,11 @@ requires:
     - platform.apps.call
     - platform.connections.execute
     - platform.ingress.write
+  apps:
+    - name: a2a
+      version: ">=0.4.0"
+      optional: true
+      reason: Automatically install and pair A2A across managed tenants when the parent A2A app is bound.
   integrations:
     - role: domains
       kind: app
@@ -169,7 +175,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.8.25
+    ref: fleet/v0.9.0
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
@@ -178,5 +184,19 @@ runtime:
     cpu: 0.05
     memory: 64
     cpu_limit: 1
+
+config_schema:
+  - name: a2a_main_agents_json
+    label: Parent agents allowed over A2A
+    type: text
+    description: JSON list of attached parent agent names, IDs, card IDs, or "*". Defaults to all parent agents deliberately attached to A2A.
+    default: '["*"]'
+    required: false
+  - name: a2a_tenant_agents_json
+    label: Tenant agents allowed over A2A
+    type: text
+    description: JSON list of attached tenant agent names, IDs, card IDs, or "*". Defaults to all tenant agents, which Fleet attaches to their tenant A2A install.
+    default: '["*"]'
+    required: false
 
 upgrade_policy: auto-patch

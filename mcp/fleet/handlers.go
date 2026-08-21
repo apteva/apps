@@ -221,7 +221,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	_ = a.store.recordEvent(t.ID, "auto_setup_complete", "user", map[string]any{"admin_email": owner})
 	ctx.Logger().Info("fleet: tenant auto-setup complete", "tenant", t.ID, "slug", slug, "port", port)
 
-	return map[string]any{
+	out := map[string]any{
 		"tenant_id":      t.ID,
 		"slug":           slug,
 		"base_url":       a.publicBaseURL(t.BaseURL),
@@ -230,7 +230,9 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"admin_password": autoSetup.Password,
 		"api_key":        autoSetup.APIKey,
 		"next_steps":     "Save admin_password and api_key — they're shown ONCE. The admin_password lets the operator (or the client) log into the tenant dashboard at base_url; api_key is the long-lived bearer fleet uses internally.",
-	}, nil
+	}
+	out["a2a"] = a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_create")
+	return out, nil
 }
 
 // -- tenant_attach_key: complete the admin-driven bootstrap ---------------
@@ -286,7 +288,11 @@ func (a *App) toolAttachKey(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = a.store.updateHealth(t.ID, true, version, body)
 	}
 
-	return map[string]any{"tenant_id": t.ID, "status": StatusActive}, nil
+	return map[string]any{
+		"tenant_id": t.ID,
+		"status":    StatusActive,
+		"a2a":       a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_attach_key"),
+	}, nil
 }
 
 // verifyAPIKey GETs /api/auth/status with the supplied bearer and
@@ -421,6 +427,17 @@ func (a *App) toolGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) decorateView(t *Tenant, events []Event) map[string]any {
 	pub := a.publicTenantView(t)
 	out := map[string]any{"tenant": pub, "events": events}
+	for _, event := range events {
+		switch event.Kind {
+		case "a2a_paired", "a2a_pair_failed":
+			out["a2a"] = event.Payload
+		case "a2a_unpaired":
+			out["a2a"] = map[string]any{"status": "unpaired"}
+		default:
+			continue
+		}
+		break
+	}
 	if t.Status != StatusSetupPending {
 		return out
 	}
@@ -482,13 +499,22 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = a.store.setStatus(t.ID, newStatus, "user")
 		_ = a.store.recordEvent(t.ID, "started", "user",
 			map[string]any{"instance_id": t.InstanceID, "port": port})
-		return map[string]any{"tenant_id": t.ID, "status": newStatus}, nil
+		out := map[string]any{"tenant_id": t.ID, "status": newStatus}
+		if newStatus == StatusActive {
+			out["a2a"] = a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_start")
+		}
+		return out, nil
 	}
 
 	if portInUse(port) {
 		// Already running — make the registry agree.
 		_ = a.store.setStatus(t.ID, StatusActive, "user")
-		return map[string]any{"tenant_id": t.ID, "status": StatusActive, "note": "process already listening on port"}, nil
+		return map[string]any{
+			"tenant_id": t.ID,
+			"status":    StatusActive,
+			"note":      "process already listening on port",
+			"a2a":       a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_start"),
+		}, nil
 	}
 	// Re-spawning a previously-bootstrapped tenant: the server already
 	// has a users table, so registration isn't in setup mode and we
@@ -515,7 +541,11 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	a.procMu.Unlock()
 	_ = a.store.recordEvent(t.ID, "started", "user", nil)
 	ctx.Logger().Info("fleet: tenant started", "tenant", t.ID, "port", port, "status", newStatus)
-	return map[string]any{"tenant_id": t.ID, "status": newStatus}, nil
+	out := map[string]any{"tenant_id": t.ID, "status": newStatus}
+	if newStatus == StatusActive {
+		out["a2a"] = a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_start")
+	}
+	return out, nil
 }
 
 func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -618,10 +648,19 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("remove tenant host ingress before delete: %w", err)
 	}
 
+	a2aResult := a2aPairResult{Status: "disabled"}
+	if confirm {
+		if err := a.unpairTenantA2A(ctx, t.ID); err != nil {
+			a2aResult = a2aPairResult{Status: "error", Reason: err.Error()}
+			ctx.Logger().Warn("fleet: remove A2A peer during tenant delete", "tenant", t.ID, "err", err)
+		} else {
+			a2aResult = a2aPairResult{Status: "unpaired"}
+		}
+	}
 	if err := a.store.hardDelete(t.ID); err != nil {
 		return nil, err
 	}
-	return map[string]any{"tenant_id": t.ID, "status": StatusDeleted}, nil
+	return map[string]any{"tenant_id": t.ID, "status": StatusDeleted, "a2a": a2aResult}, nil
 }
 
 // -- tenant_support_login ------------------------------------------------
