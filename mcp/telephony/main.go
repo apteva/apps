@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.2.1
+version: 0.2.2
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -1795,14 +1795,14 @@ func (a *App) configureTelnyxRoute(ctx *sdk.AppCtx, route *routeRow) error {
 		return errors.New("Telnyx route has saved carrier configuration that does not match the number; disable or repair it before reconfiguring")
 	}
 	if previousConnectionID == "" {
-		provider, providerErr := a.numberProviderFor(ctx)
-		if providerErr != nil {
-			return providerErr
-		}
-		previousConnectionID = strings.TrimSpace(provider.Fields["connection_id"])
+		previousConnectionID = strings.TrimSpace(creds.Fields["connection_id"])
 	}
-	if !validProviderResourceID(previousConnectionID) {
-		return errors.New("Telnyx number has no previous connection to restore; assign it to the bound connection before configuring the route")
+	// A newly purchased Telnyx number is legitimately unassigned. Keep the
+	// empty value in the saved route config so rollback and disable can return
+	// the number to that same unassigned state. Non-empty IDs still need to be
+	// valid because they are later sent back to Telnyx as the restore target.
+	if previousConnectionID != "" && !validProviderResourceID(previousConnectionID) {
+		return errors.New("Telnyx number has an invalid previous connection")
 	}
 	createdRaw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "create_call_control_application", map[string]any{
 		"application_name":     "Apteva inbound " + route.ID,
@@ -1859,9 +1859,6 @@ func (a *App) disableTelnyxRoute(ctx *sdk.AppCtx, route *routeRow) error {
 	var config telnyxRouteConfig
 	if err := json.Unmarshal([]byte(route.PreviousVoiceURL), &config); err != nil || !validProviderResourceID(config.ApplicationID) {
 		return errors.New("route contains invalid saved Telnyx routing configuration")
-	}
-	if config.PreviousConnectionID == "" {
-		return errors.New("route cannot restore the Telnyx number because its previous connection is unknown")
 	}
 	if _, err := executeCarrierTool(ctx, route.CarrierConnectionID, "update_phone_number", map[string]any{
 		"id": route.PhoneNumberSID, "connection_id": config.PreviousConnectionID,

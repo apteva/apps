@@ -122,6 +122,62 @@ func TestTelnyxRouteRequiresSignedWebhooksAndSetsTimeout(t *testing.T) {
 	}
 }
 
+func TestTelnyxRouteSupportsUnassignedNumberAndRestoresUnassignedState(t *testing.T) {
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := &answerPlatform{
+		credentials: &sdk.ConnectionCredentials{
+			Slug: "telnyx", Fields: map[string]string{"public_key": base64.StdEncoding.EncodeToString(publicKey)},
+		},
+		integrationResponse: map[string]json.RawMessage{
+			"list_phone_numbers":              json.RawMessage(`{"data":[{"id":"number-id","phone_number":"+14155550101","connection_id":""}]}`),
+			"create_call_control_application": json.RawMessage(`{"data":{"id":"new-app"}}`),
+		},
+	}
+	a, ctx := withTelephonyTestContext(t, platform)
+	route := routeRow{
+		ID: "route-telnyx-unassigned", ProjectID: "project-a", CarrierSlug: "telnyx", CarrierConnectionID: 9,
+		PhoneNumber: "+14155550101", AgentID: 7, Enabled: true, Secret: "route-secret",
+	}
+	if err := a.db().insertRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := a.db().findRoute(route.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.configureTelnyxRoute(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = a.db().findRoute(route.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config telnyxRouteConfig
+	if err := json.Unmarshal([]byte(stored.PreviousVoiceURL), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.ApplicationID != "new-app" || config.PreviousConnectionID != "" {
+		t.Fatalf("unexpected saved Telnyx route config: %+v", config)
+	}
+	if len(platform.integrationCalls) != 3 || platform.integrationCalls[2].Tool != "update_phone_number" ||
+		platform.integrationCalls[2].Input["connection_id"] != "new-app" {
+		t.Fatalf("unexpected Telnyx configuration calls: %#v", platform.integrationCalls)
+	}
+
+	platform.integrationCalls = nil
+	if err := a.disableTelnyxRoute(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.integrationCalls) != 2 || platform.integrationCalls[0].Tool != "update_phone_number" ||
+		platform.integrationCalls[0].Input["connection_id"] != "" ||
+		platform.integrationCalls[1].Tool != "delete_call_control_application" {
+		t.Fatalf("unassigned Telnyx route was not restored safely: %#v", platform.integrationCalls)
+	}
+}
+
 func TestPlivoImmediateInboundSpawnsRealtimeAndRecords(t *testing.T) {
 	platform := &answerPlatform{credentials: &sdk.ConnectionCredentials{
 		Slug: "plivo", Fields: map[string]string{"password": "plivo-auth-token", "phone_number": "+14155550101"},
