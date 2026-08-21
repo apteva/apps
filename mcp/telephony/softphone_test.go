@@ -392,16 +392,32 @@ func TestInboundSoftphoneAnswersCarrierWhenBrowserMediaIsReady(t *testing.T) {
 			platform := &answerPlatform{}
 			app, _ := withTelephonyTestContext(t, platform)
 			callID := "call-browser-answer-" + test.provider
+			// v0.2.4 stored the first browser call with an empty thread id.
+			// Keep that legacy row present so a regression to another empty id
+			// reproduces the production UNIQUE constraint failure.
+			legacy := testCall("legacy-browser-"+test.provider, "completed")
+			legacy.ThreadID = ""
+			legacy.PeerKind = peerKindHuman
+			if err := app.db().insertCall(legacy); err != nil {
+				t.Fatal(err)
+			}
 			row := callRow{
-				ID: callID, Direction: "inbound", CarrierSlug: test.provider,
+				ID: callID, ThreadID: "pending-" + callID, Direction: "inbound", CarrierSlug: test.provider,
 				CarrierConnectionID: 10, CarrierSID: test.provider + "-call-1", CallbackSecret: "callback-secret",
-				ToNumber: "+33123456789", FromNumber: "+33612345678", Status: "answering",
+				ToNumber: "+33123456789", FromNumber: "+33612345678", Status: "pending",
 				PlacedAt: time.Now().UTC().Format(time.RFC3339), ProjectID: "project-a",
-				PeerKind: peerKindHuman, PeerToken: "browser-token",
-				AudioBridgeURL: "ws://127.0.0.1:8080/peer/" + callID + "/browser-token",
+				PeerKind: peerKindHuman, AudioBridgeURL: "pending",
 			}
 			if err := app.db().insertCall(row); err != nil {
 				t.Fatal(err)
+			}
+			claimed, err := app.db().claimPendingCallForHuman(callID, "project-a")
+			if err != nil || !claimed {
+				t.Fatalf("claim = %v, %v", claimed, err)
+			}
+			if err := app.db().attachHumanCall(callID,
+				"ws://127.0.0.1:8080/peer/"+callID+"/browser-token", "browser-token"); err != nil {
+				t.Fatalf("attach browser call alongside legacy empty thread id: %v", err)
 			}
 			server := softphoneTestServer(t, app)
 			browser := dialWS(t, server.URL+"/softphone/media/"+callID+"/browser-token")
@@ -418,7 +434,7 @@ func TestInboundSoftphoneAnswersCarrierWhenBrowserMediaIsReady(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if stored.Status != "answered" || stored.AnsweredAt == "" {
+			if stored.Status != "answered" || stored.AnsweredAt == "" || stored.ThreadID != "human-"+callID {
 				t.Fatalf("call was not marked answered: %+v", stored)
 			}
 			if len(platform.integrationCalls) != 1 || platform.integrationCalls[0].Tool != test.wantTool {
@@ -438,14 +454,21 @@ func TestInboundSoftphoneCarrierAnswerFailureReturnsCallToPending(t *testing.T) 
 	platform := &answerPlatform{failTool: "answer_call"}
 	app, _ := withTelephonyTestContext(t, platform)
 	row := callRow{
-		ID: "call-browser-retry", ThreadID: "", Direction: "inbound", CarrierSlug: "telnyx",
+		ID: "call-browser-retry", ThreadID: "pending-call-browser-retry", Direction: "inbound", CarrierSlug: "telnyx",
 		CarrierConnectionID: 10, CarrierSID: "telnyx-call-2", CallbackSecret: "callback-secret",
-		ToNumber: "+33123456789", FromNumber: "+33612345678", Status: "answering",
+		ToNumber: "+33123456789", FromNumber: "+33612345678", Status: "pending",
 		PlacedAt: time.Now().UTC().Format(time.RFC3339), ProjectID: "project-a",
-		PeerKind: peerKindHuman, PeerToken: "failed-token",
-		AudioBridgeURL: "ws://127.0.0.1:8080/peer/call-browser-retry/failed-token",
+		PeerKind: peerKindHuman, AudioBridgeURL: "pending",
 	}
 	if err := app.db().insertCall(row); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := app.db().claimPendingCallForHuman(row.ID, row.ProjectID)
+	if err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	if err := app.db().attachHumanCall(row.ID,
+		"ws://127.0.0.1:8080/peer/call-browser-retry/failed-token", "failed-token"); err != nil {
 		t.Fatal(err)
 	}
 	server := softphoneTestServer(t, app)
@@ -465,6 +488,66 @@ func TestInboundSoftphoneCarrierAnswerFailureReturnsCallToPending(t *testing.T) 
 	}
 	if stored.Status != "pending" || stored.AudioBridgeURL != "pending" || stored.PeerToken != "" {
 		t.Fatalf("failed answer was not reset safely: %+v", stored)
+	}
+}
+
+func TestBrowserDeclineUsesProviderRejectForPendingInboundCalls(t *testing.T) {
+	for _, test := range []struct {
+		provider string
+		wantTool string
+	}{
+		{provider: "telnyx", wantTool: "reject_call"},
+		{provider: "twilio", wantTool: "update_call"},
+		{provider: "plivo", wantTool: "hangup_call"},
+	} {
+		t.Run(test.provider, func(t *testing.T) {
+			platform := &answerPlatform{}
+			app, _ := withTelephonyTestContext(t, platform)
+			callID := "call-browser-decline-" + test.provider
+			row := callRow{
+				ID: callID, ThreadID: "pending-" + callID, Direction: "inbound", CarrierSlug: test.provider,
+				CarrierConnectionID: 10, CarrierSID: test.provider + "-call-2", CallbackSecret: "callback-secret",
+				ToNumber: "+33123456789", FromNumber: "+33612345678", Status: "pending",
+				PlacedAt: time.Now().UTC().Format(time.RFC3339), ProjectID: "project-a",
+				PeerKind: peerKindHuman, AudioBridgeURL: "pending",
+			}
+			if err := app.db().insertCall(row); err != nil {
+				t.Fatal(err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost,
+				"/calls/"+callID+"/hangup?project_id=project-a", nil)
+			recorder := httptest.NewRecorder()
+			app.handleCallAction(recorder, req)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			stored, err := app.db().findCall(callID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status != "canceled" || stored.ErrorMessage != "" {
+				t.Fatalf("declined call = %+v", stored)
+			}
+			if len(platform.integrationCalls) != 1 || platform.integrationCalls[0].Tool != test.wantTool {
+				t.Fatalf("carrier calls = %#v, want one %s %s", platform.integrationCalls, test.provider, test.wantTool)
+			}
+		})
+	}
+}
+
+func TestCallsPanelHidesBenignHistoricalMediaShutdownErrors(t *testing.T) {
+	for _, message := range []string{"media stream stopped", "media stream disconnected", "call media ended normally"} {
+		row := testCall("historical-media", "completed")
+		row.ErrorMessage = message
+		if got := callsPanelErrorMessage(row); got != "" {
+			t.Fatalf("callsPanelErrorMessage(%q) = %q", message, got)
+		}
+	}
+	row := testCall("real-error", "failed")
+	row.ErrorMessage = "carrier authentication failed"
+	if got := callsPanelErrorMessage(row); got != row.ErrorMessage {
+		t.Fatalf("real call error was hidden: %q", got)
 	}
 }
 

@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.2.4
+version: 0.2.5
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -1644,19 +1644,32 @@ func (a *App) toolRejectCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 	if row.Direction != "inbound" || (row.Status != "pending" && row.Status != "answering") {
 		return mcpError("call is not a rejectable pending inbound call"), nil
 	}
-	if row.CarrierSID != "" {
-		if err := a.rejectInboundCarrierCall(ctx, row); err != nil {
-			return mcpError("carrier reject failed: " + err.Error()), nil
-		}
-	}
 	reason := strArg(args, "reason", "rejected by agent")
-	if err := a.killCallThread(ctx, row); err != nil {
-		ctx.Logger().Warn("kill rejected call thread", "call", callID, "err", err)
-	}
-	if err := a.db().updateStatus(callID, "canceled", reason); err != nil {
-		return mcpError("persist rejection: " + err.Error()), nil
+	if err := a.rejectPendingInboundCall(ctx, row, reason); err != nil {
+		return mcpError(err.Error()), nil
 	}
 	return map[string]any{"ok": true, "call_id": callID}, nil
+}
+
+// rejectPendingInboundCall is shared by the agent tool and the browser panel.
+// Ringing calls need the provider's reject operation, which is distinct from
+// hanging up an already-active call for carriers such as Telnyx.
+func (a *App) rejectPendingInboundCall(ctx *sdk.AppCtx, row *callRow, reason string) error {
+	if row == nil || row.Direction != "inbound" || (row.Status != "pending" && row.Status != "answering") {
+		return errors.New("call is not a rejectable pending inbound call")
+	}
+	if row.CarrierSID != "" {
+		if err := a.rejectInboundCarrierCall(ctx, row); err != nil {
+			return fmt.Errorf("carrier reject failed: %w", err)
+		}
+	}
+	if err := a.killCallThread(ctx, row); err != nil {
+		ctx.Logger().Warn("kill rejected call thread", "call", row.ID, "err", err)
+	}
+	if err := a.db().updateStatus(row.ID, "canceled", reason); err != nil {
+		return fmt.Errorf("persist rejection: %w", err)
+	}
+	return nil
 }
 
 func (a *App) findTwilioPhoneNumber(ctx *sdk.AppCtx, route *routeRow) (string, string, string, error) {
@@ -2597,7 +2610,22 @@ func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if msg := a.hangupCall(globalCtx.WithProject(project), parts[1], 0, project); msg != "" {
+	ctx := globalCtx.WithProject(project)
+	row, loadErr := a.db().findCall(parts[1])
+	if loadErr != nil {
+		http.Error(w, "load call: "+loadErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	if row != nil && row.ProjectID == project && row.PeerKind == peerKindHuman &&
+		row.Direction == "inbound" && (row.Status == "pending" || row.Status == "answering") {
+		if err := a.rejectPendingInboundCall(ctx, row, ""); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
+		return
+	}
+	if msg := a.hangupCall(ctx, parts[1], 0, project); msg != "" {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
@@ -2844,7 +2872,7 @@ func callsPanelPublic(rows []callRow) []map[string]any {
 			"media_close_code": r.MediaCloseCode, "media_close_reason": r.MediaCloseReason,
 			"media_close_leg": r.MediaCloseLeg,
 			"placed_at":       r.PlacedAt, "answered_at": r.AnsweredAt, "ended_at": r.EndedAt,
-			"project_id": r.ProjectID, "error_message": r.ErrorMessage,
+			"project_id": r.ProjectID, "error_message": callsPanelErrorMessage(r),
 			"recording_mode": r.RecordingMode, "recording_count": r.RecordingCount,
 			"recording_status": r.RecordingStatus,
 			// peer_kind lets the panel tell a softphone call (which it can
@@ -2855,6 +2883,19 @@ func callsPanelPublic(rows []callRow) []map[string]any {
 		})
 	}
 	return out
+}
+
+func callsPanelErrorMessage(row callRow) string {
+	message := strings.TrimSpace(row.ErrorMessage)
+	if !isTerminalStatus(row.Status) {
+		return message
+	}
+	switch strings.ToLower(message) {
+	case "media stream stopped", "media stream disconnected", "call media ended normally":
+		return ""
+	default:
+		return message
+	}
 }
 
 func callEventPublic(r callRow) map[string]any {
@@ -3349,7 +3390,7 @@ func (c *callsDB) claimPendingCallForHuman(id, project string) (bool, error) {
 // the thread/directive/voice fields that only exist for realtime peers.
 func (c *callsDB) attachHumanCall(id, bridgeURL, peerToken string) error {
 	res, err := c.db.Exec(`UPDATE calls SET audio_bridge_url = ?, peer_token = ?,
-	        thread_id = '', directive = '', voice = ''
+	        thread_id = 'human-' || id, directive = '', voice = ''
 	        WHERE id = ? AND status = 'answering'`, bridgeURL, peerToken, id)
 	if err != nil {
 		return err
