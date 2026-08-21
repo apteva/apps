@@ -23,7 +23,26 @@ type carrierPacedPacket struct {
 type carrierPacerResult struct {
 	queuedMS  int
 	clearedMS int
+	droppedMS int
 	err       error
+}
+
+type carrierPacerPolicy struct {
+	bufferMS   int
+	maxQueueMS int
+	trimToMS   int
+	dropStale  bool
+}
+
+func bufferedCarrierPacerPolicy() carrierPacerPolicy {
+	return carrierPacerPolicy{bufferMS: 200, maxQueueMS: 15000}
+}
+
+func liveHumanCarrierPacerPolicy() carrierPacerPolicy {
+	// A human microphone already arrives at real-time cadence. A very small
+	// cushion absorbs scheduler jitter; anything older than this is stale
+	// conversation and must not turn into seconds of perceived latency.
+	return carrierPacerPolicy{bufferMS: 40, maxQueueMS: 120, trimToMS: 60, dropStale: true}
 }
 
 type carrierPacerCommand struct {
@@ -120,29 +139,34 @@ type jsonCarrierAudioPacer struct {
 	write         func([]byte) error
 	onProgress    func(twilioPlaybackProgress) error
 	onError       func(error)
+	policy        carrierPacerPolicy
 
 	errMu sync.Mutex
 	err   error
 }
 
 func newJSONCarrierAudioPacer(ctx context.Context, sampleRate int, codec, shape, streamID string, marks bool,
-	playback *twilioPlaybackTracker, write func([]byte) error, onProgress func(twilioPlaybackProgress) error, onError func(error),
+	playback *twilioPlaybackTracker, policy carrierPacerPolicy, write func([]byte) error, onProgress func(twilioPlaybackProgress) error, onError func(error),
 ) *jsonCarrierAudioPacer {
+	if policy.bufferMS <= 0 {
+		policy = bufferedCarrierPacerPolicy()
+	}
 	p := &jsonCarrierAudioPacer{
 		ctx: ctx, commands: make(chan carrierPacerCommand), clearCommands: make(chan carrierPacerCommand), done: make(chan struct{}),
 		sampleRate: sampleRate, codec: codec, shape: shape, streamID: streamID, marks: marks,
 		playback: playback, write: write, onProgress: onProgress, onError: onError,
+		policy: policy,
 	}
 	go p.run()
 	return p
 }
 
-func (p *jsonCarrierAudioPacer) enqueue(ctx context.Context, packets []carrierPacedPacket) (int, error) {
+func (p *jsonCarrierAudioPacer) enqueue(ctx context.Context, packets []carrierPacedPacket) (int, int, error) {
 	if len(packets) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 	result := p.command(ctx, carrierPacerCommand{packets: packets})
-	return result.queuedMS, result.err
+	return result.queuedMS, result.droppedMS, result.err
 }
 
 func (p *jsonCarrierAudioPacer) clear(ctx context.Context) (int, error) {
@@ -203,9 +227,14 @@ func (p *jsonCarrierAudioPacer) run() {
 		timer           *time.Timer
 		timerC          <-chan time.Time
 	)
-	bufferSamples := p.sampleRate / 5
-	maxQueuedSamples := p.sampleRate * 15
+	bufferSamples := p.sampleRate * p.policy.bufferMS / 1000
+	maxQueuedSamples := p.sampleRate * p.policy.maxQueueMS / 1000
+	trimToSamples := p.sampleRate * p.policy.trimToMS / 1000
+	if maxQueuedSamples <= 0 {
+		maxQueuedSamples = p.sampleRate * 15
+	}
 	bufferWindow := time.Duration(bufferSamples) * time.Second / time.Duration(p.sampleRate)
+	droppedSamples := 0
 	stopTimer := func() {
 		if timer == nil {
 			return
@@ -318,6 +347,13 @@ func (p *jsonCarrierAudioPacer) run() {
 		}
 		return carrierSamplesToMS(cleared, p.sampleRate), p.write(frame)
 	}
+	dropOldest := func(targetSamples int) {
+		for queuedSamples > targetSamples && len(queue) > 0 {
+			droppedSamples += len(queue[0].PCM)
+			queuedSamples -= len(queue[0].PCM)
+			queue = queue[1:]
+		}
+	}
 	handleCommand := func(command carrierPacerCommand) error {
 		if command.clear {
 			clearedMS, err := clearPlayback()
@@ -328,7 +364,7 @@ func (p *jsonCarrierAudioPacer) run() {
 		for _, packet := range command.packets {
 			incoming += len(packet.PCM)
 		}
-		if queuedSamples+incoming > maxQueuedSamples {
+		if !p.policy.dropStale && queuedSamples+incoming > maxQueuedSamples {
 			clearedMS, err := clearPlayback()
 			if err == nil {
 				err = errCarrierPacerOverflow
@@ -338,9 +374,16 @@ func (p *jsonCarrierAudioPacer) run() {
 		}
 		queue = append(queue, command.packets...)
 		queuedSamples += incoming
+		if p.policy.dropStale && queuedSamples > maxQueuedSamples {
+			dropOldest(trimToSamples)
+		}
 		queuedAtEnqueue := queuedSamples
 		err := fillLead()
-		command.response <- carrierPacerResult{queuedMS: carrierSamplesToMS(queuedAtEnqueue, p.sampleRate), err: err}
+		command.response <- carrierPacerResult{
+			queuedMS:  carrierSamplesToMS(queuedAtEnqueue, p.sampleRate),
+			droppedMS: carrierSamplesToMS(droppedSamples, p.sampleRate),
+			err:       err,
+		}
 		return err
 	}
 

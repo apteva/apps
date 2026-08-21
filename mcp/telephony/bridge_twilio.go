@@ -391,7 +391,14 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	maxQueuedMS := 0
-	pacer := newTwilioAudioPacer(ctx, streamSID, playback, func(payload []byte) error {
+	pacerPolicy := bufferedCarrierPacerPolicy()
+	pacerMode := "buffered"
+	if row.PeerKind == peerKindHuman {
+		pacerPolicy = liveHumanCarrierPacerPolicy()
+		pacerMode = "live_human"
+	}
+	droppedStaleMS := 0
+	pacer := newTwilioAudioPacerWithPolicy(ctx, streamSID, playback, pacerPolicy, func(payload []byte) error {
 		return twWriter.Write(ws.OpText, payload)
 	}, func(err error) {
 		globalCtx.Logger().Warn("twilio media writer failed", "call", callID, "err", err)
@@ -399,7 +406,16 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	})
 	defer func() {
-		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "twilio", carrierCodecPCMU8, maxQueuedMS)
+		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "twilio", carrierCodecPCMU8, maxQueuedMS, droppedStaleMS)
+		var preAnswerDroppedMS int64
+		if hub := a.softphones.lookup(callID); hub != nil {
+			preAnswerDroppedMS = hub.preAnswerDroppedMS()
+		}
+		_ = a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
+			Provider: "twilio", Codec: carrierCodecPCMU8, SampleRate: twilioMediaSampleRate,
+			PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
+			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
+		})
 	}()
 
 	var nextFrame realtimeBridgeControl
@@ -446,7 +462,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		packets := twilioAudioPackets(pcm8, len(pcm24), nextFrame)
 		frame := nextFrame
 		nextFrame = realtimeBridgeControl{}
-		queuedMS, err := pacer.enqueue(ctx, packets, frame)
+		queuedMS, droppedMS, err := pacer.enqueueWithDiagnostics(ctx, packets, frame)
 		if errors.Is(err, errTwilioPacerOverflow) {
 			globalCtx.Logger().Warn("twilio playback queue overflow", "call", callID, "item", frame.ItemID, "max_queued_ms", maxQueuedMS)
 			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.overflow", ItemID: frame.ItemID})
@@ -463,6 +479,9 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		}
 		if queuedMS > maxQueuedMS {
 			maxQueuedMS = queuedMS
+		}
+		if droppedMS > droppedStaleMS {
+			droppedStaleMS = droppedMS
 		}
 	}
 }

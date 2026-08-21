@@ -47,10 +47,7 @@ type lifecycleCursor struct {
 }
 
 func (c *callsDB) updateStatus(id, status, errMsg string) error {
-	created, err := c.updateStatusWithFacts(id, status, errMsg, lifecycleFacts{Source: "telephony"})
-	if err == nil && created && c.afterTransition != nil {
-		c.afterTransition(id)
-	}
+	_, err := c.updateStatusWithFacts(id, status, errMsg, lifecycleFacts{Source: "telephony"})
 	return err
 }
 
@@ -172,6 +169,9 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err
+	}
+	if c.afterTransition != nil && (transitionAccepted || created) {
+		c.afterTransition(id)
 	}
 	return created, nil
 }

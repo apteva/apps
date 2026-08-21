@@ -48,10 +48,43 @@ import (
 type softphoneHub struct {
 	callID string
 
-	mu      sync.Mutex
-	peer    *websocketWriterPump
-	browser *websocketWriterPump
-	closed  bool
+	mu                  sync.Mutex
+	peer                *websocketWriterPump
+	browser             *websocketWriterPump
+	direction           string
+	status              string
+	preAnswerMicSamples int64
+	closed              bool
+}
+
+func (h *softphoneHub) setCallState(direction, status string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.direction = firstNonEmpty(direction, h.direction)
+	if status != "" {
+		h.status = status
+	}
+}
+
+func (h *softphoneHub) microphoneReady() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// The outbound carrier stream can exist while the remote phone is still
+	// ringing. Do not let those early microphone frames enter a carrier playback
+	// queue. Inbound audio is also held until the carrier answer succeeds.
+	return h.status == "answered" || h.status == "in-progress"
+}
+
+func (h *softphoneHub) dropPreAnswerMicrophone(data []byte) {
+	h.mu.Lock()
+	h.preAnswerMicSamples += int64(len(data) / 2)
+	h.mu.Unlock()
+}
+
+func (h *softphoneHub) preAnswerDroppedMS() int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.preAnswerMicSamples * 1000 / 24000
 }
 
 func (h *softphoneHub) setPeer(w *websocketWriterPump) (replaced *websocketWriterPump) {
@@ -143,6 +176,15 @@ func (r *softphoneRegistry) lookup(callID string) *softphoneHub {
 	return r.hubs[callID]
 }
 
+func (r *softphoneRegistry) updateCallState(callID, direction, status string) {
+	r.mu.Lock()
+	hub := r.hubs[callID]
+	r.mu.Unlock()
+	if hub != nil {
+		hub.setCallState(direction, status)
+	}
+}
+
 // dropIfEmpty removes only the hub the caller observed and only after both
 // legs detached. Keeping a one-sided hub is what lets either the carrier or the
 // browser reconnect after a transient network failure without losing the
@@ -224,6 +266,7 @@ func (a *App) handlePeerSocket(w http.ResponseWriter, r *http.Request) {
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)
 	hub := a.softphones.hubFor(callID)
+	hub.setCallState(row.Direction, row.Status)
 	// A fresh carrier bridge owns the peer side immediately. Stop a superseded
 	// socket so it cannot keep delivering stale audio after a fast reconnect.
 	if previous := hub.setPeer(writer); previous != nil {
@@ -302,6 +345,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)
 	hub := a.softphones.hubFor(callID)
+	hub.setCallState(row.Direction, row.Status)
 	// A reconnecting tab replaces the previous socket. Close the old one so a
 	// stale session cannot keep injecting audio into a live call.
 	if previous := hub.setBrowser(writer); previous != nil {
@@ -332,6 +376,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		row.Status = "answered"
+		hub.setCallState(row.Direction, row.Status)
 	}
 	_ = writer.Write(ws.OpText, softphoneEvent("ready", callID))
 
@@ -350,11 +395,16 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		switch op {
 		case ws.OpBinary:
 			// Operator microphone audio, PCM16LE @ 24 kHz.
-			hub.toPeer(ws.OpBinary, data)
+			if hub.microphoneReady() {
+				hub.toPeer(ws.OpBinary, data)
+			} else {
+				hub.dropPreAnswerMicrophone(data)
+			}
 		case ws.OpText:
 			var control struct {
-				Type  string  `json:"type"`
-				Nonce float64 `json:"nonce,omitempty"`
+				Type        string                   `json:"type"`
+				Nonce       float64                  `json:"nonce,omitempty"`
+				Diagnostics *browserAudioDiagnostics `json:"diagnostics,omitempty"`
 			}
 			if json.Unmarshal(data, &control) != nil {
 				continue
@@ -366,6 +416,12 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			case "interrupt":
 				payload, _ := json.Marshal(realtimeBridgeControl{Type: "interrupt", Source: "operator"})
 				hub.toPeer(ws.OpText, payload)
+			case "diagnostics":
+				if control.Diagnostics != nil {
+					if err := a.db().updateBrowserAudioDiagnostics(callID, *control.Diagnostics); err != nil {
+						logSoftphone("persist browser audio diagnostics failed", "call", callID, "err", err)
+					}
+				}
 			}
 		}
 	}

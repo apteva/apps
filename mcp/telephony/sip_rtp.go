@@ -210,17 +210,20 @@ type sipRTPOutboundPacket struct {
 }
 
 type sipRTPPacer struct {
-	ctx        context.Context
-	media      *sipRTPMedia
-	playback   *sipPlaybackState
-	onProgress func(twilioPlaybackProgress) error
-	queue      chan sipRTPOutboundPacket
-	clearCh    chan chan int
-	errCh      chan error
-	done       chan struct{}
-	sequence   uint16
-	timestamp  uint32
-	ssrc       uint32
+	ctx            context.Context
+	media          *sipRTPMedia
+	playback       *sipPlaybackState
+	onProgress     func(twilioPlaybackProgress) error
+	queue          chan sipRTPOutboundPacket
+	clearCh        chan chan int
+	errCh          chan error
+	done           chan struct{}
+	sequence       uint16
+	timestamp      uint32
+	ssrc           uint32
+	dropStale      bool
+	trimToPackets  int
+	droppedPackets atomic.Int64
 }
 
 func newSIPRTPPacer(
@@ -229,12 +232,28 @@ func newSIPRTPPacer(
 	playback *sipPlaybackState,
 	onProgress func(twilioPlaybackProgress) error,
 ) *sipRTPPacer {
+	return newSIPRTPPacerWithPolicy(ctx, media, playback, bufferedCarrierPacerPolicy(), onProgress)
+}
+
+func newSIPRTPPacerWithPolicy(
+	ctx context.Context,
+	media *sipRTPMedia,
+	playback *sipPlaybackState,
+	policy carrierPacerPolicy,
+	onProgress func(twilioPlaybackProgress) error,
+) *sipRTPPacer {
+	queuePackets := sipRTPQueuePackets
+	if policy.dropStale {
+		queuePackets = max(1, policy.maxQueueMS/int(sipRTPPacketTime/time.Millisecond))
+	}
 	pacer := &sipRTPPacer{
 		ctx: ctx, media: media, playback: playback, onProgress: onProgress,
-		queue:   make(chan sipRTPOutboundPacket, sipRTPQueuePackets),
+		queue:   make(chan sipRTPOutboundPacket, queuePackets),
 		clearCh: make(chan chan int), errCh: make(chan error, 1), done: make(chan struct{}),
 		sequence: uint16(time.Now().UnixNano()), timestamp: uint32(time.Now().UnixNano()),
-		ssrc: uint32(time.Now().UnixNano() >> 16),
+		ssrc:          uint32(time.Now().UnixNano() >> 16),
+		dropStale:     policy.dropStale,
+		trimToPackets: max(1, policy.trimToMS/int(sipRTPPacketTime/time.Millisecond)),
 	}
 	go pacer.run()
 	return pacer
@@ -299,6 +318,23 @@ func (p *sipRTPPacer) drain() int {
 }
 
 func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
+	if p.dropStale && len(packets) > cap(p.queue) {
+		p.droppedPackets.Add(int64(len(packets) - cap(p.queue)))
+		packets = packets[len(packets)-cap(p.queue):]
+	}
+	if p.dropStale && len(packets) > cap(p.queue)-len(p.queue) {
+		targetPackets := min(p.trimToPackets, cap(p.queue)-len(packets))
+	trimQueue:
+		for len(p.queue) > targetPackets {
+			select {
+			case <-p.queue:
+				p.playback.pending.Add(-1)
+				p.droppedPackets.Add(1)
+			default:
+				break trimQueue
+			}
+		}
+	}
 	if len(packets) > cap(p.queue)-len(p.queue) {
 		return len(p.queue) * int(sipRTPPacketTime/time.Millisecond), errors.New("direct SIP playback queue overflow")
 	}
@@ -311,6 +347,10 @@ func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
 		}
 	}
 	return len(p.queue) * int(sipRTPPacketTime/time.Millisecond), nil
+}
+
+func (p *sipRTPPacer) droppedMS() int {
+	return int(p.droppedPackets.Load()) * int(sipRTPPacketTime/time.Millisecond)
 }
 
 func (p *sipRTPPacer) clear(ctx context.Context) (int, error) {
@@ -378,7 +418,13 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 	inputResampler := newPCMResampler(8000, 24000)
 	outputResampler := newPCMResampler(24000, 8000)
 	playback := &sipPlaybackState{}
-	pacer := newSIPRTPPacer(ctx, media, playback, func(progress twilioPlaybackProgress) error {
+	pacerPolicy := bufferedCarrierPacerPolicy()
+	pacerMode := "buffered"
+	if row.PeerKind == peerKindHuman {
+		pacerPolicy = liveHumanCarrierPacerPolicy()
+		pacerMode = "live_human"
+	}
+	pacer := newSIPRTPPacerWithPolicy(ctx, media, playback, pacerPolicy, func(progress twilioPlaybackProgress) error {
 		control, _ := json.Marshal(realtimeBridgeControl{
 			Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS,
 		})
@@ -474,7 +520,17 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 	defer func() {
 		leg, code, reason := closeState.Cause()
 		a.finishMediaBridge(row.ID, leg, code, reason)
-		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "sip_direct", carrierCodecPCMU8, maxQueuedMS)
+		droppedStaleMS := pacer.droppedMS()
+		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "sip_direct", carrierCodecPCMU8, maxQueuedMS, droppedStaleMS)
+		var preAnswerDroppedMS int64
+		if hub := a.softphones.lookup(row.ID); hub != nil {
+			preAnswerDroppedMS = hub.preAnswerDroppedMS()
+		}
+		_ = a.db().updateCarrierAudioDiagnostics(row.ID, carrierAudioDiagnostics{
+			Provider: "sip_direct", Codec: carrierCodecPCMU8, SampleRate: 8000,
+			PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
+			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
+		})
 		if session.ctx.Err() == nil {
 			_ = session.hangup()
 		}

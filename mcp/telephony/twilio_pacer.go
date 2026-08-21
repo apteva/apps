@@ -35,6 +35,7 @@ type twilioPacedPacket struct {
 type twilioPacerResult struct {
 	queuedMS  int
 	clearedMS int
+	droppedMS int
 	err       error
 }
 
@@ -49,15 +50,18 @@ type twilioPacerCommand struct {
 // carrier sees it. A short carrier lead absorbs network jitter; later packets
 // replenish that lead at absolute media deadlines.
 type twilioAudioPacer struct {
-	ctx              context.Context
-	commands         chan twilioPacerCommand
-	clearCommands    chan twilioPacerCommand
-	done             chan struct{}
-	streamSID        string
-	playback         *twilioPlaybackTracker
-	write            func([]byte) error
-	onError          func(error)
-	maxQueuedSamples int
+	ctx                   context.Context
+	commands              chan twilioPacerCommand
+	clearCommands         chan twilioPacerCommand
+	done                  chan struct{}
+	streamSID             string
+	playback              *twilioPlaybackTracker
+	write                 func([]byte) error
+	onError               func(error)
+	maxQueuedSamples      int
+	targetBufferedSamples int
+	trimToSamples         int
+	dropStale             bool
 
 	errMu sync.Mutex
 	err   error
@@ -70,25 +74,50 @@ func newTwilioAudioPacer(
 	write func([]byte) error,
 	onError func(error),
 ) *twilioAudioPacer {
+	return newTwilioAudioPacerWithPolicy(ctx, streamSID, playback, bufferedCarrierPacerPolicy(), write, onError)
+}
+
+func newTwilioAudioPacerWithPolicy(
+	ctx context.Context,
+	streamSID string,
+	playback *twilioPlaybackTracker,
+	policy carrierPacerPolicy,
+	write func([]byte) error,
+	onError func(error),
+) *twilioAudioPacer {
 	p := &twilioAudioPacer{
 		ctx: ctx, commands: make(chan twilioPacerCommand), clearCommands: make(chan twilioPacerCommand), done: make(chan struct{}),
 		streamSID: streamSID, playback: playback, write: write, onError: onError,
-		maxQueuedSamples: twilioMaxQueuedAudioSamples,
+		maxQueuedSamples:      twilioMediaSampleRate * policy.maxQueueMS / 1000,
+		targetBufferedSamples: twilioMediaSampleRate * policy.bufferMS / 1000,
+		trimToSamples:         twilioMediaSampleRate * policy.trimToMS / 1000,
+		dropStale:             policy.dropStale,
+	}
+	if p.maxQueuedSamples <= 0 {
+		p.maxQueuedSamples = twilioMaxQueuedAudioSamples
+	}
+	if p.targetBufferedSamples <= 0 {
+		p.targetBufferedSamples = twilioTargetBufferedAudioSamples
 	}
 	go p.run()
 	return p
 }
 
 func (p *twilioAudioPacer) enqueue(ctx context.Context, packets []twilioAudioPacket, frame realtimeBridgeControl) (int, error) {
+	queuedMS, _, err := p.enqueueWithDiagnostics(ctx, packets, frame)
+	return queuedMS, err
+}
+
+func (p *twilioAudioPacer) enqueueWithDiagnostics(ctx context.Context, packets []twilioAudioPacket, frame realtimeBridgeControl) (int, int, error) {
 	if len(packets) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 	paced := make([]twilioPacedPacket, len(packets))
 	for i, packet := range packets {
 		paced[i] = twilioPacedPacket{PCM: packet.PCM, ItemID: frame.ItemID, AudioEndMS: packet.AudioEndMS}
 	}
 	result := p.command(ctx, twilioPacerCommand{packets: paced})
-	return result.queuedMS, result.err
+	return result.queuedMS, result.droppedMS, result.err
 }
 
 func (p *twilioAudioPacer) clear(ctx context.Context) (int, error) {
@@ -147,8 +176,9 @@ func (p *twilioAudioPacer) run() {
 		timer           *time.Timer
 		timerC          <-chan time.Time
 		bufferedThrough time.Time
+		droppedSamples  int
 	)
-	bufferWindow := time.Duration(twilioTargetBufferedAudioSamples) * time.Second / twilioMediaSampleRate
+	bufferWindow := time.Duration(p.targetBufferedSamples) * time.Second / twilioMediaSampleRate
 	stopTimer := func() {
 		if timer == nil {
 			return
@@ -241,7 +271,7 @@ func (p *twilioAudioPacer) run() {
 		for _, packet := range command.packets {
 			incomingSamples += len(packet.PCM)
 		}
-		if queuedSamples+incomingSamples > p.maxQueuedSamples {
+		if !p.dropStale && queuedSamples+incomingSamples > p.maxQueuedSamples {
 			clearedMS, err := clear()
 			if err == nil {
 				err = errTwilioPacerOverflow
@@ -251,9 +281,16 @@ func (p *twilioAudioPacer) run() {
 		}
 		queue = append(queue, command.packets...)
 		queuedSamples += incomingSamples
+		if p.dropStale && queuedSamples > p.maxQueuedSamples {
+			for queuedSamples > p.trimToSamples && len(queue) > 0 {
+				droppedSamples += len(queue[0].PCM)
+				queuedSamples -= len(queue[0].PCM)
+				queue = queue[1:]
+			}
+		}
 		queuedAtEnqueue := queuedSamples
 		err := fillCarrierLead()
-		command.response <- twilioPacerResult{queuedMS: samplesToMS(queuedAtEnqueue), err: err}
+		command.response <- twilioPacerResult{queuedMS: samplesToMS(queuedAtEnqueue), droppedMS: samplesToMS(droppedSamples), err: err}
 		if err != nil {
 			return err
 		}

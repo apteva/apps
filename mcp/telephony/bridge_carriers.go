@@ -282,8 +282,15 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	sampleRate := carrierCodecSampleRate(cfg.OutputCodec)
 	packetizer := newCarrierAudioPacketizer(sampleRate)
 	maxQueuedMS := 0
+	droppedStaleMS := 0
+	pacerPolicy := bufferedCarrierPacerPolicy()
+	pacerMode := "buffered"
+	if row.PeerKind == peerKindHuman {
+		pacerPolicy = liveHumanCarrierPacerPolicy()
+		pacerMode = "live_human"
+	}
 	pacer := newJSONCarrierAudioPacer(ctx, sampleRate, cfg.OutputCodec, cfg.OutboundShape, streamSID, cfg.PlaybackMarks,
-		playback,
+		playback, pacerPolicy,
 		func(payload []byte) error {
 			return carrierWriter.Write(ws.OpText, payload)
 		},
@@ -298,7 +305,18 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		},
 	)
 	defer func() {
-		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, cfg.Provider, cfg.InputCodec, maxQueuedMS)
+		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, cfg.Provider, cfg.InputCodec, maxQueuedMS, droppedStaleMS)
+		var preAnswerDroppedMS int64
+		if hub := a.softphones.lookup(callID); hub != nil {
+			preAnswerDroppedMS = hub.preAnswerDroppedMS()
+		}
+		if err := a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
+			Provider: cfg.Provider, Codec: cfg.OutputCodec, SampleRate: sampleRate,
+			PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
+			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
+		}); err != nil {
+			globalCtx.Logger().Warn("persist carrier audio diagnostics", "provider", cfg.Provider, "call", callID, "err", err)
+		}
 	}()
 
 	var nextFrame realtimeBridgeControl
@@ -349,7 +367,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		packets := packetizer.add(pcmCarrier, len(pcm24), nextFrame)
 		frame := nextFrame
 		nextFrame = realtimeBridgeControl{}
-		queuedMS, err := pacer.enqueue(ctx, packets)
+		queuedMS, droppedMS, err := pacer.enqueue(ctx, packets)
 		if errors.Is(err, errCarrierPacerOverflow) {
 			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.overflow", ItemID: frame.ItemID})
 			err = coreWriter.Write(ws.OpText, control)
@@ -365,6 +383,9 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		}
 		if queuedMS > maxQueuedMS {
 			maxQueuedMS = queuedMS
+		}
+		if droppedMS > droppedStaleMS {
+			droppedStaleMS = droppedMS
 		}
 	}
 }
@@ -492,7 +513,17 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 
 	audioFrontend := newCarrierAudioFrontend(16000)
 	audioFrontend.mode = localBargeInOff
-	defer logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "vonage", carrierCodecL16_16, 0)
+	defer func() {
+		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "vonage", carrierCodecL16_16, 0, 0)
+		var preAnswerDroppedMS int64
+		if hub := a.softphones.lookup(callID); hub != nil {
+			preAnswerDroppedMS = hub.preAnswerDroppedMS()
+		}
+		_ = a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
+			Provider: "vonage", Codec: carrierCodecL16_16, SampleRate: 16000,
+			PacerMode: "direct_live", PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
+		})
+	}()
 
 	go func() {
 		defer cancel()

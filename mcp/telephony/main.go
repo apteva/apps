@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.2.15
+version: 0.2.16
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -2657,6 +2657,10 @@ func (a *App) db() *callsDB {
 			if err := a.publishLifecycleEvents(globalCtx, callID); err != nil {
 				globalCtx.Logger().Warn("publish call lifecycle event", "call", callID, "err", err)
 			}
+			row, err := (&callsDB{db: globalCtx.AppDB()}).findCall(callID)
+			if err == nil && row != nil {
+				a.softphones.updateCallState(callID, row.Direction, row.Status)
+			}
 		},
 	}
 }
@@ -2850,25 +2854,27 @@ func callsPublic(rows []callRow) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, map[string]any{
-			"call_id":            r.ID,
-			"thread_id":          r.ThreadID,
-			"direction":          r.Direction,
-			"agent_id":           r.AgentID,
-			"route_id":           r.RouteID,
-			"carrier":            r.CarrierSlug,
-			"to":                 r.ToNumber,
-			"from":               r.FromNumber,
-			"status":             r.Status,
-			"carrier_status":     r.Status,
-			"media_status":       r.MediaStatus,
-			"media_error":        r.MediaErrorMessage,
-			"media_close_leg":    r.MediaCloseLeg,
-			"media_close_code":   r.MediaCloseCode,
-			"media_close_reason": r.MediaCloseReason,
-			"placed_at":          r.PlacedAt,
-			"answered_at":        r.AnsweredAt,
-			"duration":           callDuration(r),
-			"recording_mode":     r.RecordingMode, "recording_count": r.RecordingCount,
+			"call_id":                   r.ID,
+			"thread_id":                 r.ThreadID,
+			"direction":                 r.Direction,
+			"agent_id":                  r.AgentID,
+			"route_id":                  r.RouteID,
+			"carrier":                   r.CarrierSlug,
+			"to":                        r.ToNumber,
+			"from":                      r.FromNumber,
+			"status":                    r.Status,
+			"carrier_status":            r.Status,
+			"media_status":              r.MediaStatus,
+			"media_error":               r.MediaErrorMessage,
+			"media_close_leg":           r.MediaCloseLeg,
+			"media_close_code":          r.MediaCloseCode,
+			"media_close_reason":        r.MediaCloseReason,
+			"browser_audio_diagnostics": audioDiagnosticsPublic(r.BrowserAudioDiagnostics),
+			"carrier_audio_diagnostics": audioDiagnosticsPublic(r.CarrierAudioDiagnostics),
+			"placed_at":                 r.PlacedAt,
+			"answered_at":               r.AnsweredAt,
+			"duration":                  callDuration(r),
+			"recording_mode":            r.RecordingMode, "recording_count": r.RecordingCount,
 			"recording_status": r.RecordingStatus,
 		})
 	}
@@ -2886,8 +2892,10 @@ func callsPanelPublic(rows []callRow) []map[string]any {
 			"media_error_message": r.MediaErrorMessage,
 			"media_connected_at":  r.MediaConnectedAt, "media_disconnected_at": r.MediaDisconnectedAt,
 			"media_close_code": r.MediaCloseCode, "media_close_reason": r.MediaCloseReason,
-			"media_close_leg": r.MediaCloseLeg,
-			"placed_at":       r.PlacedAt, "answered_at": r.AnsweredAt, "ended_at": r.EndedAt,
+			"media_close_leg":           r.MediaCloseLeg,
+			"browser_audio_diagnostics": audioDiagnosticsPublic(r.BrowserAudioDiagnostics),
+			"carrier_audio_diagnostics": audioDiagnosticsPublic(r.CarrierAudioDiagnostics),
+			"placed_at":                 r.PlacedAt, "answered_at": r.AnsweredAt, "ended_at": r.EndedAt,
 			"termination_cause": r.TerminationCause, "termination_code": r.TerminationCode,
 			"termination_initiator": r.TerminationInitiator,
 			"project_id":            r.ProjectID, "error_message": callsPanelErrorMessage(r),
@@ -3150,58 +3158,60 @@ func newSecret() string {
 // ─── DB layer ──────────────────────────────────────────────────────
 
 type callRow struct {
-	ID                     string
-	ThreadID               string
-	Direction              string
-	AgentID                int64
-	RouteID                string
-	CarrierSID             string
-	CarrierRequestID       string
-	CarrierSlug            string
-	CarrierConnectionID    int64
-	CallbackSecret         string
-	ToNumber               string
-	FromNumber             string
-	ForwardedFrom          string
-	IngressPath            string
-	Directive              string
-	Voice                  string
-	AudioBridgeURL         string
-	Status                 string
-	PlacedAt               string
-	AnsweredAt             string
-	EndedAt                string
-	ProjectID              string
-	ErrorMessage           string
-	IdempotencyKey         string
-	StateExpiresAt         string
-	DeadlineAt             string
-	RecordingMode          string
-	RecordingChannels      string
-	RecordingStorageMode   string
-	RecordingRetentionDays int
-	RecordingCheckedAt     string
-	RecordingCount         int
-	RecordingStatus        string
-	UpdatedAt              string
-	ProviderOccurredAt     string
-	DurationSeconds        int
-	TalkDurationSeconds    int
-	TerminationCause       string
-	TerminationCode        string
-	TerminationInitiator   string
-	ProviderSequence       int64
-	ProviderEventID        string
-	LifecycleRevision      int64
-	MediaStatus            string
-	MediaErrorMessage      string
-	MediaConnectedAt       string
-	MediaDisconnectedAt    string
-	MediaCloseCode         int
-	MediaCloseReason       string
-	MediaCloseLeg          string
-	PeerKind               string
-	PeerToken              string
+	ID                      string
+	ThreadID                string
+	Direction               string
+	AgentID                 int64
+	RouteID                 string
+	CarrierSID              string
+	CarrierRequestID        string
+	CarrierSlug             string
+	CarrierConnectionID     int64
+	CallbackSecret          string
+	ToNumber                string
+	FromNumber              string
+	ForwardedFrom           string
+	IngressPath             string
+	Directive               string
+	Voice                   string
+	AudioBridgeURL          string
+	Status                  string
+	PlacedAt                string
+	AnsweredAt              string
+	EndedAt                 string
+	ProjectID               string
+	ErrorMessage            string
+	IdempotencyKey          string
+	StateExpiresAt          string
+	DeadlineAt              string
+	RecordingMode           string
+	RecordingChannels       string
+	RecordingStorageMode    string
+	RecordingRetentionDays  int
+	RecordingCheckedAt      string
+	RecordingCount          int
+	RecordingStatus         string
+	UpdatedAt               string
+	ProviderOccurredAt      string
+	DurationSeconds         int
+	TalkDurationSeconds     int
+	TerminationCause        string
+	TerminationCode         string
+	TerminationInitiator    string
+	ProviderSequence        int64
+	ProviderEventID         string
+	LifecycleRevision       int64
+	MediaStatus             string
+	MediaErrorMessage       string
+	MediaConnectedAt        string
+	MediaDisconnectedAt     string
+	MediaCloseCode          int
+	MediaCloseReason        string
+	MediaCloseLeg           string
+	BrowserAudioDiagnostics string
+	CarrierAudioDiagnostics string
+	PeerKind                string
+	PeerToken               string
 }
 
 type routeRow struct {
@@ -3255,6 +3265,7 @@ const callSelectColumns = `id, thread_id,
 	COALESCE(media_connected_at,''), COALESCE(media_disconnected_at,''),
 	COALESCE(media_close_code,0), COALESCE(media_close_reason,''),
 	COALESCE(media_close_leg,''),
+	COALESCE(browser_audio_diagnostics,'{}'), COALESCE(carrier_audio_diagnostics,'{}'),
 	COALESCE(peer_kind,'realtime'), COALESCE(peer_token,'')`
 
 type rowScanner interface{ Scan(dest ...any) error }
@@ -3274,6 +3285,7 @@ func scanCall(row rowScanner) (*callRow, error) {
 		&r.ProviderEventID, &r.LifecycleRevision, &r.MediaStatus,
 		&r.MediaErrorMessage, &r.MediaConnectedAt, &r.MediaDisconnectedAt,
 		&r.MediaCloseCode, &r.MediaCloseReason, &r.MediaCloseLeg,
+		&r.BrowserAudioDiagnostics, &r.CarrierAudioDiagnostics,
 		&r.PeerKind, &r.PeerToken); err != nil {
 		return nil, err
 	}

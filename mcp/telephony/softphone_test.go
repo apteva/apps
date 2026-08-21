@@ -165,6 +165,75 @@ func TestSoftphoneHubBridgesAudioBothDirections(t *testing.T) {
 	}
 }
 
+func TestOutboundSoftphoneHoldsMicrophoneUntilCarrierAnswers(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	insertSoftphoneCall(t, app, "initiated")
+	server := softphoneTestServer(t, app)
+
+	peer := dialWS(t, server.URL+"/peer/call-soft-1/peer-secret")
+	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
+	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
+
+	preAnswer := pcm16ToBytes(make([]int16, 480))
+	if err := wsutil.WriteClientBinary(browser, preAnswer); err != nil {
+		t.Fatal(err)
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	if _, _, err := wsutil.ReadServerData(peer); err == nil {
+		t.Fatal("pre-answer microphone audio reached the carrier peer")
+	}
+
+	if err := app.db().updateStatus("call-soft-1", "answered", ""); err != nil {
+		t.Fatal(err)
+	}
+	postAnswer := pcm16ToBytes([]int16{11, 22, 33, 44})
+	if err := wsutil.WriteClientBinary(browser, postAnswer); err != nil {
+		t.Fatal(err)
+	}
+	if got := readBinaryWithin(t, peer, 3*time.Second); string(got) != string(postAnswer) {
+		t.Fatalf("post-answer microphone audio=%v, want %v", bytesToPCM16(got), bytesToPCM16(postAnswer))
+	}
+	hub := app.softphones.lookup("call-soft-1")
+	if hub == nil || hub.preAnswerDroppedMS() < 20 {
+		t.Fatalf("pre-answer microphone hold was not measured: hub=%#v", hub)
+	}
+}
+
+func TestSoftphonePersistsBoundedBrowserAudioDiagnostics(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	insertSoftphoneCall(t, app, "in-progress")
+	server := softphoneTestServer(t, app)
+	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
+
+	payload := `{"type":"diagnostics","diagnostics":{"rtt_ms":73,"playback_queue_ms":55,"playback_target_ms":60,"playback_underruns":2,"playback_dropped_ms":20,"audio_context_rate":24000,"microphone_sample_rate":48000,"microphone_channel_count":1,"echo_cancellation":true,"noise_suppression":false,"auto_gain_control":true,"mic_active_rms_dbfs":-22.5,"mic_peak_dbfs":-2.0}}`
+	if err := wsutil.WriteClientText(browser, []byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		row, err := app.db().findCall("call-soft-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if row != nil && row.BrowserAudioDiagnostics != "{}" {
+			var diagnostics browserAudioDiagnostics
+			if err := json.Unmarshal([]byte(row.BrowserAudioDiagnostics), &diagnostics); err != nil {
+				t.Fatal(err)
+			}
+			if diagnostics.RTTMS == nil || *diagnostics.RTTMS != 73 || diagnostics.MicActiveRMSDBFS == nil || *diagnostics.MicActiveRMSDBFS != -22.5 || diagnostics.AutoGainControl == nil || !*diagnostics.AutoGainControl {
+				t.Fatalf("persisted diagnostics=%#v", diagnostics)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("browser diagnostics were not persisted")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // The bridge sends TTS pacing control frames that mean nothing to a human. They
 // must be consumed by the hub, never forwarded, or the browser would have to
 // know the realtime protocol.
@@ -724,7 +793,7 @@ func TestSoftphoneUsesAdaptiveJitterAndVisibleDiagnostics(t *testing.T) {
 			t.Fatalf("adaptive jitter worklet missing %q", required)
 		}
 	}
-	for _, required := range []string{"onDiagnostics", `type: "ping"`, "noiseSuppression: false", "autoGainControl: false"} {
+	for _, required := range []string{"onDiagnostics", `type: "ping"`, "noiseSuppression: false", "autoGainControl: true", `type: "diagnostics"`} {
 		if !strings.Contains(string(audio), required) {
 			t.Fatalf("softphone diagnostics/audio controls missing %q", required)
 		}
@@ -732,6 +801,41 @@ func TestSoftphoneUsesAdaptiveJitterAndVisibleDiagnostics(t *testing.T) {
 	for _, required := range []string{"Browser audio processing", "underruns", "buffer"} {
 		if !strings.Contains(string(panel), required) {
 			t.Fatalf("panel diagnostics missing %q", required)
+		}
+	}
+}
+
+func TestSoftphoneRecommendedAudioMigrationAndLocalMicrophoneTest(t *testing.T) {
+	audio, err := os.ReadFile("ui/softphone-audio.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	panel, err := os.ReadFile("ui/CallsPanel.tsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	audioText := string(audio)
+	panelText := string(panel)
+	settings, err := os.ReadFile("ui/audio-settings.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settingsText := string(settings)
+	for _, required := range []string{"MicrophoneTestSession", "pcm16WAV", `type: "audio/wav"`, "autoGainControl: true"} {
+		if !strings.Contains(audioText, required) {
+			t.Fatalf("local microphone pipeline missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"Microphone test", "never uploaded", "Saved audio diagnostics",
+	} {
+		if !strings.Contains(panelText, required) {
+			t.Fatalf("recommended audio UI/migration missing %q", required)
+		}
+	}
+	for _, required := range []string{"apteva.telephony.softphone.audio.v2", "LEGACY_AUDIO_SETTINGS_KEY", "autoGainControl: true"} {
+		if !strings.Contains(settingsText, required) {
+			t.Fatalf("recommended audio migration missing %q", required)
 		}
 	}
 }

@@ -185,7 +185,7 @@ func TestAudioFrontendDiagnosticsIncludeCarrierNoiseAndIngress(t *testing.T) {
 	row := &callRow{
 		ID: "call-diagnostics", ForwardedFrom: "+34930494946", IngressPath: "forwarded",
 	}
-	logAudioFrontendDiagnostics(logger, frontend, row, "twilio", carrierCodecPCMU8, 240)
+	logAudioFrontendDiagnostics(logger, frontend, row, "twilio", carrierCodecPCMU8, 240, 0)
 	for key, want := range map[string]any{
 		"provider":         "twilio",
 		"call":             "call-diagnostics",
