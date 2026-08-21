@@ -23,6 +23,7 @@ type recordingPlatform struct {
 	threadEvents          []capturedThreadEvent
 	appCalls              []capturedAppCall
 	spawns                []sdk.ThreadSpawnRequest
+	ensures               []sdk.ThreadEnsureRequest
 	identity              *sdk.InstallIdentity
 	connections           map[int64]*sdk.PlatformConnection
 	integrationMu         sync.Mutex
@@ -120,6 +121,16 @@ func (p *recordingPlatform) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.Thread
 	return result, nil
 }
 
+func (p *recordingPlatform) EnsureThread(req sdk.ThreadEnsureRequest) (*sdk.ThreadEnsureResult, error) {
+	p.ensures = append(p.ensures, req)
+	result := &sdk.ThreadEnsureResult{Status: "reconciled", Reconciled: true,
+		Thread: sdk.ThreadRef{AgentID: req.AgentID, ThreadID: req.ThreadID}, ProfileHash: req.ProfileHash}
+	for _, event := range req.Events {
+		result.Events.Accepted = append(result.Events.Accepted, event.ID)
+	}
+	return result, nil
+}
+
 func (p *recordingPlatform) KillThread(agentID int64, threadID string) error { return nil }
 
 func (p *recordingPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
@@ -145,6 +156,12 @@ func newTestEnv(t *testing.T) (*App, *sdk.AppCtx, *recordingPlatform) {
 func callerCtx(agentID int64, threadID string) context.Context {
 	return sdk.WithCaller(context.Background(), &sdk.Caller{
 		AgentID: agentID, ThreadID: threadID, ProjectID: testProject,
+	})
+}
+
+func callerCtxFull(agentID int64, threadID, role, toolCallID string) context.Context {
+	return sdk.WithCaller(context.Background(), &sdk.Caller{
+		AgentID: agentID, ThreadID: threadID, ThreadRole: role, ToolCallID: toolCallID, ProjectID: testProject,
 	})
 }
 
@@ -444,7 +461,7 @@ func TestUnknownDeliveryTargetDeadLettersAndCanBeRequeued(t *testing.T) {
 
 // ─── HTTP surface ────────────────────────────────────────────────────
 
-func TestUserMessageForwardFailureIsLoud(t *testing.T) {
+func TestUserMessageForwardFailureIsDurablyQueued(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
 	platform.failSend = true
 	platform.failSpawn = true
@@ -460,14 +477,15 @@ func TestUserMessageForwardFailureIsLoud(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	// The user's row persists AND a visible system row explains the
-	// failure — never an indefinite quiet.
+	// The user's row persists once. Failure state belongs in the delivery
+	// ledger rather than being duplicated into the human transcript.
 	transcript, _ := app.store.Transcript(conv.ID, 0, 10)
-	if len(transcript) != 2 {
-		t.Fatalf("transcript rows = %d, want user + system notice", len(transcript))
+	if len(transcript) != 1 {
+		t.Fatalf("transcript rows = %d, want one user message", len(transcript))
 	}
-	if transcript[1].Role != "system" || !strings.Contains(transcript[1].Content, "could not reach") {
-		t.Fatalf("expected loud failure notice, got %+v", transcript[1])
+	delivery, err := app.store.DeliveryFor(transcript[0].ID, "agent-inbound:41")
+	if err != nil || delivery.Status != "pending" || delivery.Attempts != 1 {
+		t.Fatalf("inbound delivery = %+v err=%v, want pending attempt", delivery, err)
 	}
 }
 
@@ -535,7 +553,7 @@ func TestFirstMessageSpawnsConversationThread(t *testing.T) {
 	}
 }
 
-func TestSecondMessageReusesThreadWithoutRespawn(t *testing.T) {
+func TestEveryMessageUsesIdempotentSpawnEvent(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
 	mountedCtx = ctx
 	conv := mkConversation(t, app, 41)
@@ -543,14 +561,130 @@ func TestSecondMessageReusesThreadWithoutRespawn(t *testing.T) {
 	postUserMessage(t, app, conv, "one")
 	postUserMessage(t, app, conv, "two")
 
-	// Unchanged suffix hash → the per-process cache skips the second
-	// spawn round-trip; only the later event needs SendThreadEvent because
-	// the first one was part of the spawn.
-	if len(platform.spawns) != 1 {
-		t.Fatalf("spawns = %d, want 1 (cache should absorb the second)", len(platform.spawns))
+	// Every inbound turn uses SpawnThread.Events with a stable id. This gives
+	// later messages the same accepted-or-duplicate receipt as the first.
+	if len(platform.spawns) != 2 {
+		t.Fatalf("spawns = %d, want 2", len(platform.spawns))
 	}
-	if len(platform.threadEvents) != 1 || platform.threadEvents[0].Message != "[chat] two" {
-		t.Fatalf("thread events = %+v, want only the second message", platform.threadEvents)
+	if len(platform.spawns[1].Events) != 1 || platform.spawns[1].Events[0].Message != "[chat] two" {
+		t.Fatalf("second spawn events = %+v", platform.spawns[1].Events)
+	}
+	if len(platform.threadEvents) != 0 {
+		t.Fatalf("non-idempotent thread events = %+v, want none", platform.threadEvents)
+	}
+}
+
+func TestInboundDeliveryRecordsPerAgentThreadState(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+	if err := app.store.AddAgentParticipant(conv.ID, 43); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("POST", "/messages?chat_id="+conv.ID,
+		strings.NewReader(`{"content":"@all check this"}`))
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	app.handleMessages(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(platform.spawns) != 2 {
+		t.Fatalf("spawns=%d want 2", len(platform.spawns))
+	}
+	for _, agentID := range []int64{41, 43} {
+		state, err := app.store.AgentThread(conv.ID, agentID)
+		if err != nil || state.ThreadID != conversationThreadID(conv.ID) || state.AppliedHash == "" || state.LastError != "" {
+			t.Fatalf("agent %d state=%+v err=%v", agentID, state, err)
+		}
+	}
+}
+
+func TestRoomMentionRouting(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	if err := app.store.AddAgentParticipant(conv.ID, 43); err != nil {
+		t.Fatal(err)
+	}
+	got, err := app.resolveAgentTargetsFromText(ctx, conv, "@Comms please review", nil)
+	if err != nil || len(got) != 1 || got[0] != 43 {
+		t.Fatalf("named route=%v err=%v", got, err)
+	}
+	got, err = app.resolveAgentTargetsFromText(ctx, conv, "hello room", nil)
+	if err != nil || len(got) != 1 || got[0] != 41 {
+		t.Fatalf("default route=%v err=%v", got, err)
+	}
+}
+
+func TestConversationDirectivePersistsAndIsProtectedInThread(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+	updated, err := app.store.UpdateConversationDirective(conv.ID, "Answer in Spanish.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	postUserMessage(t, app, updated, "hola")
+	if len(platform.spawns) != 1 {
+		t.Fatalf("spawns=%d", len(platform.spawns))
+	}
+	suffix := platform.spawns[0].DirectiveSuffix
+	if !strings.Contains(suffix, "Answer in Spanish") || !strings.Contains(suffix, "cannot change your platform policies") {
+		t.Fatalf("directive suffix=%q", suffix)
+	}
+}
+
+func TestChangedDirectiveUsesSDKThreadReconciliation(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+	postUserMessage(t, app, conv, "first")
+	updated, err := app.store.UpdateConversationDirective(conv.ID, "Prefer concise answers.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	postUserMessage(t, app, updated, "second")
+	if len(platform.spawns) != 1 || len(platform.ensures) != 1 {
+		t.Fatalf("spawns=%d ensures=%d", len(platform.spawns), len(platform.ensures))
+	}
+	ensure := platform.ensures[0]
+	if ensure.ProfileHash == "" || !strings.Contains(ensure.DirectiveSuffix, "Prefer concise") || len(ensure.Events) != 1 {
+		t.Fatalf("ensure=%+v", ensure)
+	}
+	state, err := app.store.AgentThread(conv.ID, 41)
+	if err != nil || state.AppliedHash != ensure.ProfileHash || state.LastError != "" {
+		t.Fatalf("state=%+v err=%v", state, err)
+	}
+}
+
+func TestToolCallIdentityDeduplicatesLifecycleMessage(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	call := callerCtxFull(41, conversationThreadID(conv.ID), "conversation", "call-9")
+	args := map[string]any{"conversation_id": conv.ID, "text": "Still working", "phase": "progress"}
+	first, err := app.toolSend(call, ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := app.toolSend(call, ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.(map[string]any)["inserted"] != true || second.(map[string]any)["duplicate_suppressed"] != true {
+		t.Fatalf("first=%v second=%v", first, second)
+	}
+	transcript, _ := app.store.Transcript(conv.ID, 0, 10)
+	if len(transcript) != 1 || transcript[0].Phase != "progress" {
+		t.Fatalf("transcript=%+v", transcript)
+	}
+	if _, err := app.toolSend(callerCtxFull(41, "main", "main", "call-10"), ctx, args); err == nil {
+		t.Fatal("main thread ordinary reply was allowed")
+	}
+	if _, err := app.toolReport(call, ctx, map[string]any{
+		"conversation_id": conv.ID, "title": "Report", "summary": "Done",
+	}); err == nil {
+		t.Fatal("conversation thread report was allowed")
 	}
 }
 
@@ -574,7 +708,7 @@ func TestDuplicateInitialEventReceiptIsSuccess(t *testing.T) {
 	}
 }
 
-func TestMissingInitialEventReceiptIsLoudWithoutDuplicateFallback(t *testing.T) {
+func TestMissingEventReceiptStaysPendingWithoutDuplicateFallback(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
 	platform.omitSpawnReceipt = true
 	mountedCtx = ctx
@@ -586,13 +720,16 @@ func TestMissingInitialEventReceiptIsLoudWithoutDuplicateFallback(t *testing.T) 
 		t.Fatalf("unacknowledged event was rerouted: thread=%+v main=%+v", platform.threadEvents, platform.events)
 	}
 	transcript, _ := app.store.Transcript(conv.ID, 0, 10)
-	if len(transcript) != 2 || transcript[1].Role != "system" ||
-		!strings.Contains(transcript[1].Content, "did not acknowledge") {
-		t.Fatalf("expected visible receipt failure, got %+v", transcript)
+	if len(transcript) != 1 {
+		t.Fatalf("transcript = %+v, want only user row", transcript)
+	}
+	delivery, err := app.store.DeliveryFor(transcript[0].ID, "agent-inbound:41")
+	if err != nil || delivery.Status != "pending" || !strings.Contains(delivery.LastError, "acknowledge") {
+		t.Fatalf("delivery = %+v err=%v, want retryable receipt failure", delivery, err)
 	}
 }
 
-func TestSpawnFailureFallsBackToMainThread(t *testing.T) {
+func TestSpawnFailureNeverFallsBackToMainAndRetryKeepsEventID(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
 	platform.failSpawn = true
 	mountedCtx = ctx
@@ -600,21 +737,27 @@ func TestSpawnFailureFallsBackToMainThread(t *testing.T) {
 
 	postUserMessage(t, app, conv, "agent is stopped")
 
-	// A stopped agent must never lose a message: delivery degrades to
-	// the main thread via SendEvent.
-	if len(platform.events) != 1 {
-		t.Fatalf("SendEvent calls = %d, want 1 (main-thread fallback)", len(platform.events))
+	// Conversation messages must never pollute main.
+	if len(platform.events) != 0 {
+		t.Fatalf("SendEvent calls = %d, want 0", len(platform.events))
 	}
 	if len(platform.threadEvents) != 0 {
 		t.Fatalf("thread events = %d, want 0", len(platform.threadEvents))
 	}
-	// Failure is not cached: the agent coming back means the NEXT
-	// message spawns the thread.
+	transcript, _ := app.store.Transcript(conv.ID, 0, 10)
+	delivery, err := app.store.DeliveryFor(transcript[0].ID, "agent-inbound:41")
+	if err != nil || delivery.Status != "pending" {
+		t.Fatalf("queued delivery = %+v err=%v", delivery, err)
+	}
+	// Retry the same durable row after the agent returns.
 	platform.failSpawn = false
-	postUserMessage(t, app, conv, "agent is back")
-	if len(platform.spawns) != 1 || len(platform.threadEvents) != 0 {
-		t.Fatalf("recovery: spawns=%d threadEvents=%d, want 1/0 (event is in spawn)",
-			len(platform.spawns), len(platform.threadEvents))
+	app.attemptDelivery(ctx, "agent-inbound:41", conv, &transcript[0])
+	if len(platform.spawns) != 1 || len(platform.spawns[0].Events) != 1 {
+		t.Fatalf("recovery spawns=%+v", platform.spawns)
+	}
+	wantID := conversationThreadEventID(conv.ID, transcript[0].ID, 41)
+	if platform.spawns[0].Events[0].ID != wantID {
+		t.Fatalf("retry event id=%q want %q", platform.spawns[0].Events[0].ID, wantID)
 	}
 }
 

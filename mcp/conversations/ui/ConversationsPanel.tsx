@@ -78,6 +78,7 @@ interface Conversation {
   kind: "direct" | "room";
   origin: string;
   audience?: string;
+  directive?: string;
   created_at: string;
   updated_at: string;
 }
@@ -758,6 +759,7 @@ function DetailsDialog({
   onRemoved: () => void;
 }) {
   const [title, setTitle] = useState(conversation.title);
+  const [directive, setDirective] = useState(conversation.directive || "");
   const [participants, setParticipants] = useState<ParticipantsInfo | null>(null);
   const [addAgentId, setAddAgentId] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -767,6 +769,7 @@ function DetailsDialog({
   useEffect(() => {
     if (!open) return;
     setTitle(conversation.title);
+    setDirective(conversation.directive || "");
     setAddAgentId("");
     setConfirmDelete(false);
     setError("");
@@ -774,7 +777,7 @@ function DetailsDialog({
       setParticipants,
       (err) => setError(err instanceof Error ? err.message : String(err)),
     );
-  }, [open, conversation.id, conversation.title]);
+  }, [open, conversation.id, conversation.title, conversation.directive]);
 
   const agentName = (id: number) =>
     agents?.find((a) => a.id === id)?.name || `agent ${id}`;
@@ -806,6 +809,15 @@ function DetailsDialog({
     if (!next || next === conversation.title) return;
     void run(async () => {
       await apiPatch(`/chats?id=${encodeURIComponent(conversation.id)}`, { title: next }, conversation.project_id);
+      onChanged();
+    });
+  };
+
+  const saveDirective = () => {
+    const next = directive.trim();
+    if (next === (conversation.directive || "")) return;
+    void run(async () => {
+      await apiPatch(`/chats?id=${encodeURIComponent(conversation.id)}`, { directive: next }, conversation.project_id);
       onChanged();
     });
   };
@@ -883,6 +895,29 @@ function DetailsDialog({
               onClick={saveTitle}
               disabled={saving || !title.trim() || title.trim() === conversation.title}
               className="rounded border border-border px-2.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
+            >
+              Save
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <div className="mb-1 text-xs uppercase text-text-muted">Conversation instructions</div>
+          <textarea
+            value={directive}
+            onChange={(e) => setDirective(e.target.value)}
+            maxLength={8000}
+            rows={4}
+            placeholder="Optional context or behavior specific to this conversation"
+            className="w-full resize-y rounded border border-border bg-bg-input px-2 py-1.5 text-sm text-text focus:border-accent focus:outline-none"
+          />
+          <div className="mt-1 flex items-center justify-between gap-2">
+            <span className="text-[11px] text-text-dim">Platform policy and tool permissions cannot be overridden here.</span>
+            <button
+              type="button"
+              onClick={saveDirective}
+              disabled={saving || directive.trim() === (conversation.directive || "")}
+              className="rounded border border-border px-2.5 py-1 text-xs text-text-muted hover:text-text disabled:opacity-40"
             >
               Save
             </button>

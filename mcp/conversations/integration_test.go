@@ -268,16 +268,10 @@ func TestSidecar_HTTPSurface(t *testing.T) {
 	if resp := itHTTP(sc, "GET", "/messages?chat_id="+convID, nil, &transcript); resp.Status != 200 {
 		t.Fatalf("get messages: %d", resp.Status)
 	}
-	// Two rows: the user message, then the LOUD system notice — with
-	// no platform behind the sidecar, agent forwarding fails and the
-	// failure must be visible, never silent. Tier 2 is the only place
-	// that path runs through the real HTTP stack.
-	if len(transcript) != 2 || transcript[0]["content"] != "hello over real HTTP" {
+	// Agent delivery failure is stored in the retry ledger, not copied into
+	// the human transcript. The one durable user row remains visible.
+	if len(transcript) != 1 || transcript[0]["content"] != "hello over real HTTP" {
 		t.Fatalf("transcript = %v", transcript)
-	}
-	if transcript[1]["role"] != "system" ||
-		!strings.Contains(fmt.Sprint(transcript[1]["content"]), "could not reach") {
-		t.Fatalf("expected loud forward-failure notice, got %v", transcript[1])
 	}
 
 	// An MCP-raised alert shows up in the REST inbox — the two

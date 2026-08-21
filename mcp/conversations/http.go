@@ -187,6 +187,7 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		// "public" when a key is given, "operator" otherwise.
 		ConversationKey string `json:"conversation_key"`
 		Audience        string `json:"audience"`
+		Directive       string `json:"directive"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -268,6 +269,7 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		ProjectID: projectID, LeadAgentID: lead,
 		Title: body.Title, OwnerUserID: userID,
 		ConversationKey: body.ConversationKey, Audience: audience, Origin: origin,
+		Directive: body.Directive,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -289,8 +291,9 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleUpdateChat(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	var body struct {
-		Title    *string `json:"title"`
-		Archived *bool   `json:"archived"`
+		Title     *string `json:"title"`
+		Archived  *bool   `json:"archived"`
+		Directive *string `json:"directive"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil || id == "" {
 		http.Error(w, "id and a title or archived field required", http.StatusBadRequest)
@@ -319,8 +322,14 @@ func (a *App) handleUpdateChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if body.Directive != nil {
+		if conv, err = a.store.UpdateConversationDirective(id, strings.TrimSpace(*body.Directive)); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	if conv == nil {
-		http.Error(w, "title or archived field required", http.StatusBadRequest)
+		http.Error(w, "title, archived, or directive field required", http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, chatListEntry{Conversation: *conv, LeadAgentName: a.agentName(a.appCtx(r), conv.LeadAgentID)})
@@ -517,7 +526,7 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	targets, err := a.resolveAgentTargets(conv, body.TargetAgentIDs)
+	targets, err := a.resolveAgentTargetsFromText(a.appCtx(r), conv, body.Content, body.TargetAgentIDs)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -531,11 +540,7 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "insert failed", http.StatusInternalServerError)
 		return
 	}
-	if !inserted {
-		writeJSON(w, msg)
-		return
-	}
-	a.forwardToAgents(a.appCtx(r), conv, msg, targets)
+	_ = inserted // duplicate posts reuse the durable row and delivery ledger
 	writeJSON(w, msg)
 }
 
@@ -545,62 +550,6 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 func (a *App) appCtx(_ *http.Request) *sdk.AppCtx { return mountedCtx }
 
 var mountedCtx *sdk.AppCtx
-
-// forwardToAgents delivers an inbound message to the lead agent on the
-// conversation's OWN thread. The first event is queued atomically by
-// SpawnThread; later events use SendThreadEvent. An unacknowledged atomic
-// event is not resent through another route because that could duplicate a
-// message core actually persisted. It remains visibly failed and can be
-// retried with the same stable event id.
-func (a *App) forwardToAgents(app *sdk.AppCtx, conv *Conversation, msg *Message, requested []int64) {
-	if app == nil {
-		return
-	}
-	targets, err := a.resolveAgentTargets(conv, requested)
-	if err != nil {
-		if sys, _, sysErr := a.appendAndDeliver(app, conv, &Message{ConversationID: conv.ID, Role: "system", Content: err.Error()}); sysErr == nil {
-			a.hub.publish(conv.ID, *sys)
-		}
-		return
-	}
-	for _, agentID := range targets {
-		event := a.agentEventPayload(conv, msg, agentID, targets)
-		initialEvent := sdk.ThreadEvent{
-			ID:      conversationThreadEventID(conv.ID, msg.ID, agentID),
-			Message: event,
-		}
-		threadID, initialDelivered, spawnErr := a.ensureConversationThreadForAgent(app, conv, agentID, &initialEvent)
-		forwardErr := spawnErr
-		if forwardErr == nil && initialDelivered {
-			// The spawn receipt proves core persisted this event. Sending it
-			// again here would reintroduce both the race and a duplicate.
-			forwardErr = nil
-		} else if forwardErr == nil && threadID != "" {
-			if tc, ok := app.PlatformAPI().(sdk.ThreadClient); ok {
-				forwardErr = tc.SendThreadEvent(sdk.ThreadRef{AgentID: agentID, ThreadID: threadID}, event)
-			} else {
-				forwardErr = fmt.Errorf("platform does not support threads")
-			}
-		}
-		// A spawn transport failure means no thread route was established;
-		// preserve the existing main-thread fallback. A successful spawn
-		// without an event receipt is intentionally not rerouted because
-		// its delivery outcome is ambiguous and the retry id is durable.
-		if forwardErr != nil && threadID == "" {
-			fallback := "[chat] " + msg.Content
-			if len(msg.Attachments) > 0 {
-				fallback += fmt.Sprintf("\n(%d attachment(s) are available in conversation %s)", len(msg.Attachments), conv.ID)
-			}
-			forwardErr = app.PlatformAPI().SendEvent(agentID, fallback)
-		}
-		if forwardErr != nil {
-			notice := fmt.Sprintf("(could not reach agent %d — your message is saved. err: %v)", agentID, forwardErr)
-			_, _, _ = a.appendAndDeliver(app, conv, &Message{ConversationID: conv.ID, Role: "system", Content: notice})
-			continue
-		}
-		a.streamer.emitAck(conv.ID, threadID)
-	}
-}
 
 func (a *App) resolveAgentTargets(conv *Conversation, requested []int64) ([]int64, error) {
 	participants, err := a.store.AgentParticipants(conv.ID)
@@ -626,6 +575,70 @@ func (a *App) resolveAgentTargets(conv *Conversation, requested []int64) ([]int6
 		}
 	}
 	return out, nil
+}
+
+// resolveAgentTargetsFromText adds human routing for rooms. Explicit API
+// targets win; otherwise @all addresses every participant and @<agent name>
+// addresses matching participants. Messages without a route go to the lead.
+func (a *App) resolveAgentTargetsFromText(app *sdk.AppCtx, conv *Conversation, text string, requested []int64) ([]int64, error) {
+	if len(requested) > 0 {
+		return a.resolveAgentTargets(conv, requested)
+	}
+	participants, err := a.store.AgentParticipants(conv.ID)
+	if err != nil {
+		return nil, err
+	}
+	lower := strings.ToLower(text)
+	if containsRoutingMention(lower, "all") {
+		return a.resolveAgentTargets(conv, participants)
+	}
+	if app == nil || len(participants) <= 1 {
+		return a.resolveAgentTargets(conv, nil)
+	}
+	participant := map[int64]bool{}
+	for _, id := range participants {
+		participant[id] = true
+	}
+	agents, err := sdk.ListAgentsVia(app.PlatformAPI(), conv.ProjectID)
+	if err != nil {
+		return a.resolveAgentTargets(conv, nil)
+	}
+	var matched []int64
+	for _, agent := range agents {
+		if !participant[agent.ID] {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(agent.Name))
+		if name != "" && (containsRoutingMention(lower, name) || containsRoutingMention(lower, fmt.Sprint(agent.ID))) {
+			matched = append(matched, agent.ID)
+		}
+	}
+	return a.resolveAgentTargets(conv, matched)
+}
+
+func containsRoutingMention(text, name string) bool {
+	needle := "@" + strings.ToLower(strings.TrimSpace(name))
+	if needle == "@" {
+		return false
+	}
+	for start := 0; ; {
+		idx := strings.Index(text[start:], needle)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		end := idx + len(needle)
+		beforeOK := idx == 0 || !isRouteWordByte(text[idx-1])
+		afterOK := end == len(text) || !isRouteWordByte(text[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
+func isRouteWordByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '_' || b == '-'
 }
 
 func (a *App) agentEventPayload(conv *Conversation, msg *Message, agentID int64, targets []int64) any {

@@ -3,8 +3,8 @@ package main
 // adapters.go — the transport seam.
 //
 // An adapter delivers messages to one internal surface. `web` (the SSE
-// hub) is always configured; agent and sibling-app callbacks provide the
-// durable approval-result paths. Telegram implements the first external
+// hub) is always configured; inbound agent turns, approval results, and
+// sibling-app callbacks all use the durable ledger. Telegram implements the first external
 // transport through a platform-managed integration connection.
 
 import (
@@ -33,6 +33,7 @@ func newAdapterRegistry(app *App, h *hub) *adapterRegistry {
 	r := &adapterRegistry{byID: map[string]adapter{}}
 	r.register(&webAdapter{hub: h})
 	r.register(&agentAdapter{})
+	r.register(&agentInboundAdapter{app: app})
 	r.register(&appCallbackAdapter{})
 	r.register(&telegramAdapter{app: app})
 	return r
@@ -110,6 +111,37 @@ func (*agentAdapter) Deliver(app *sdk.AppCtx, target string, _ *Conversation, ms
 		}
 	}
 	return app.PlatformAPI().SendEvent(agentID, event)
+}
+
+// agentInboundAdapter is the user-message side of the same durable ledger.
+// Every retry uses SpawnThread.Events with the same event id; accepted and
+// duplicate receipts are both success, so a timeout cannot create two turns.
+type agentInboundAdapter struct{ app *App }
+
+func (*agentInboundAdapter) ID() string { return "agent-inbound" }
+
+func (d *agentInboundAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conversation, msg *Message) error {
+	if app == nil {
+		return errors.New("platform unavailable")
+	}
+	agentID, err := strconv.ParseInt(target, 10, 64)
+	if err != nil || agentID <= 0 {
+		return fmt.Errorf("malformed inbound agent target %q", target)
+	}
+	targets := messageTargetAgentIDs(msg)
+	event := sdk.ThreadEvent{
+		ID:      conversationThreadEventID(conv.ID, msg.ID, agentID),
+		Message: d.app.agentEventPayload(conv, msg, agentID, targets),
+	}
+	threadID, delivered, err := d.app.ensureConversationThreadForAgent(app, conv, agentID, &event)
+	if err != nil {
+		return err
+	}
+	if !delivered {
+		return fmt.Errorf("platform did not confirm inbound event %q", event.ID)
+	}
+	d.app.streamer.emitAck(conv.ID, threadID)
+	return nil
 }
 
 type appCallbackAdapter struct{}
@@ -200,6 +232,15 @@ func (a *App) deliveryTargets(conv *Conversation, msg *Message) ([]string, error
 	if msg.ComponentKind != "" {
 		targets = append(targets, "web:project")
 	}
+	if msg.Role == "user" {
+		agentIDs := messageTargetAgentIDs(msg)
+		if len(agentIDs) == 0 && conv.LeadAgentID > 0 {
+			agentIDs = []int64{conv.LeadAgentID}
+		}
+		for _, agentID := range agentIDs {
+			targets = append(targets, "agent-inbound:"+strconv.FormatInt(agentID, 10))
+		}
+	}
 	// Do not echo a Telegram user's inbound update back into Telegram. Every
 	// other durable message fans out to each chat explicitly bound to this
 	// conversation.
@@ -213,6 +254,42 @@ func (a *App) deliveryTargets(conv *Conversation, msg *Message) ([]string, error
 		}
 	}
 	return targets, nil
+}
+
+func messageTargetAgentIDs(msg *Message) []int64 {
+	if msg == nil || msg.Metadata == nil {
+		return nil
+	}
+	raw, exists := msg.Metadata["target_agent_ids"]
+	if !exists {
+		return nil
+	}
+	seen := map[int64]bool{}
+	var out []int64
+	appendID := func(id int64) {
+		if id > 0 && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	switch values := raw.(type) {
+	case []int64:
+		for _, id := range values {
+			appendID(id)
+		}
+	case []any:
+		for _, value := range values {
+			switch id := value.(type) {
+			case float64:
+				appendID(int64(id))
+			case int64:
+				appendID(id)
+			case int:
+				appendID(int64(id))
+			}
+		}
+	}
+	return out
 }
 
 func (a *App) attemptDelivery(app *sdk.AppCtx, target string, conv *Conversation, msg *Message) {

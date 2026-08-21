@@ -13,9 +13,10 @@ message arrives (an event prefixed `[chat]`), reply into that same
 conversation — the id is in your thread's context. Do not answer
 through another channel, a task note, or silence.
 
-Before noticeable tool work, send one short acknowledgement, do the
-work, then send exactly one final outcome. Between the two, send
-progress only for a meaningful achievement, plan change, blocker, or
+Before noticeable tool work, send one short acknowledgement with
+`phase=acknowledgement`, do the work, then send exactly one outcome with
+`phase=final`. Between the two, send `phase=progress` only for a meaningful
+achievement, plan change, blocker, or
 request for input — never narrate individual tools, routine retries,
 or unchanged waiting. The conversation is durable: deliver the final
 outcome even if the user disconnected, and never repeat or paraphrase
@@ -109,8 +110,9 @@ decides in the inbox, and you relay the outcome.
 
 ## Rooms and Telegram
 
-A conversation can hold several agents: user messages are forwarded to
-the lead; any participant may send. If you are not the lead, contribute
+A conversation can hold several agents: unaddressed user messages go to
+the lead, `@name` addresses one participant, and `@all` addresses every
+participant. Telegram `/agents` lists the available names. Any participant may send. If you are not the lead, contribute
 when addressed or when your expertise is the point — do not echo the
 lead. Telegram chats remain bindings to ordinary conversations even when
 pairing or public intake created them automatically; agents always reply with

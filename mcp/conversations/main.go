@@ -32,15 +32,15 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.13.1
+version: 0.14.0
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, status). Inbox items are messages — an
   agent's approval request is a typed card in its conversation, and
   the inbox is a priority-ordered view over those rows, so acting on
   a card anywhere updates every surface at once. Other apps raise
-  inbox items via inbox_post; deliveries go through a crash-safe
-  ledger. Telegram bots connect through platform-managed integration
+  inbox items via inbox_post; surface delivery and inbound agent turns
+  go through one crash-safe, idempotent ledger. Telegram bots connect through platform-managed integration
   connections with guided pairing, automatic public intake, one-time
   invites, group discovery, and webhook health—without exposing bot
   credentials or asking operators for numeric Telegram IDs. When one
@@ -82,14 +82,14 @@ provides:
     - prefix: /telegram-webhook/
       no_auth: true
   mcp_tools:
-    - { name: send,             description: "Send portable user-visible text into a conversation. Args: conversation_id, text, components?, attachments?. Use short paragraphs and simple lists; avoid Markdown tables, raw HTML, and transport-specific syntax. Basic formatting is adapted per bound surface. The calling agent must be a participant; delivery fans out to every bound surface. Never creates conversations." }
+    - { name: send,             description: "Send portable user-visible text into a conversation. Args: conversation_id, text, phase? (acknowledgement|progress|final), components?, attachments?. Use short paragraphs and simple lists; avoid Markdown tables, raw HTML, and transport-specific syntax. Basic formatting is adapted per bound surface. The calling agent must be a participant; delivery fans out to every bound surface. Never creates conversations." }
     - { name: request_approval, description: "Ask the operator to approve something. Refused in public conversations. Args: conversation_id, title, body?, actions? (default Approve/Deny). The verdict comes back as an approval.result event." }
     - { name: report,           description: "File a report. Refused in public conversations. Args: conversation_id, title, summary, period?, sections?. Shown in its conversation and the inbox." }
     - { name: alert,            description: "Raise an alert. Refused in public conversations. Args: conversation_id, text, severity? (info|warn|error). Shown in the inbox, severity-ranked." }
     - { name: create,           description: "Create a conversation led by this agent. Args: title. Title-idempotent per agent." }
     - { name: list,             description: "List conversations this agent participates in. Args: limit?, query?." }
     - { name: history,          description: "Read a conversation transcript. Args: conversation_id, since_id?, limit?." }
-    - { name: inbox_post,                     description: "INTERNAL - sibling-app entry point via CallAppResult; agent calls are refused. Agents use conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
+    - { name: inbox_post, exposure: app_only, description: "INTERNAL - sibling-app entry point via CallAppResult; agent calls are refused. Agents use conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
   ui_panels:
     - slot: project.page
       label: Conversations
@@ -227,11 +227,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "send",
 			Description: "Send a message into a conversation you participate in. Delivery updates the durable " +
-				"transcript and dashboard stream.",
+				"transcript and dashboard stream. Set phase to acknowledgement, progress, or final.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"text":            map[string]any{"type": "string"},
 				"idempotency_key": map[string]any{"type": "string"},
+				"phase":           map[string]any{"type": "string", "enum": []string{"acknowledgement", "progress", "final"}},
 				"components":      map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 				"attachments":     map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 			}, []string{"conversation_id"}),
@@ -239,6 +240,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "request_approval",
+			Meta: map[string]any{"io.apteva/wakeOnResult": true},
 			Description: "Ask the operator to approve something. Requires conversation_id — find one with " +
 				"conversations_list or create one with conversations_create. The card is actionable in the " +
 				"conversation and the inbox; the verdict returns to you as an " +
@@ -333,9 +335,11 @@ func (a *App) MCPTools() []sdk.Tool {
 // ─── agent identity ──────────────────────────────────────────────────
 
 type callIdentity struct {
-	AgentID   int64
-	ThreadID  string
-	ProjectID string
+	AgentID    int64
+	ThreadID   string
+	ThreadRole string
+	ToolCallID string
+	ProjectID  string
 }
 
 // requireAgentCaller fails closed: a tool call without caller identity
@@ -349,7 +353,8 @@ func requireAgentCaller(ctx context.Context) (*callIdentity, error) {
 	if strings.TrimSpace(caller.ProjectID) == "" {
 		return nil, errors.New("authenticated project context required")
 	}
-	return &callIdentity{AgentID: caller.AgentID, ThreadID: caller.ThreadID, ProjectID: caller.ProjectID}, nil
+	return &callIdentity{AgentID: caller.AgentID, ThreadID: caller.ThreadID, ThreadRole: caller.ThreadRole,
+		ToolCallID: caller.ToolCallID, ProjectID: caller.ProjectID}, nil
 }
 
 // requireOperatorAudience is the structural guard behind the skill's
@@ -405,6 +410,18 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	}
 	conversationID, _ := args["conversation_id"].(string)
 	text, _ := args["text"].(string)
+	phase := strings.TrimSpace(stringArg(args, "phase"))
+	if phase == "" {
+		phase = "final"
+	}
+	switch phase {
+	case "acknowledgement", "progress", "final":
+	default:
+		return nil, fmt.Errorf("invalid phase %q", phase)
+	}
+	if from.ThreadRole == "main" {
+		return nil, errors.New("ordinary conversation replies belong to the mapped conversation thread, not the main thread")
+	}
 	conv, err := a.requireParticipant(from, conversationID)
 	if err != nil {
 		return nil, err
@@ -420,17 +437,19 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	if strings.TrimSpace(text) == "" && len(attachments) == 0 {
 		return nil, errors.New("text or attachments required")
 	}
-	msg, _, err := a.appendAndDeliver(app, conv, &Message{
+	msg, inserted, err := a.appendAndDeliver(app, conv, &Message{
 		ConversationID: conv.ID, Role: "agent", Content: text,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
-		ClientID: stringArg(args, "idempotency_key"), Components: components, Attachments: attachments,
+		ClientID: toolClientID(from, stringArg(args, "idempotency_key")), Phase: phase,
+		Components: components, Attachments: attachments,
 	})
 	if err != nil {
 		return nil, err
 	}
 	// The durable reply supersedes any pending thinking bubble.
 	a.streamer.settleAck(conv.ID)
-	return map[string]any{"message_id": msg.ID, "conversation_id": conv.ID}, nil
+	return map[string]any{"message_id": msg.ID, "conversation_id": conv.ID, "phase": msg.Phase,
+		"inserted": inserted, "duplicate_suppressed": !inserted}, nil
 }
 
 func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
@@ -457,17 +476,18 @@ func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map
 	if err != nil {
 		return nil, err
 	}
-	msg, _, err := a.appendAndDeliver(app, conv, &Message{
+	msg, inserted, err := a.appendAndDeliver(app, conv, &Message{
 		ConversationID: conv.ID, Role: "agent",
 		Content: "Approval requested: " + title,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
 		ComponentKind: kindApproval,
 		Components:    []Component{approvalCard(title, body, actions)},
+		ClientID:      toolClientID(from, ""),
 	})
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"message_id": msg.ID, "status": "pending"}, nil
+	return map[string]any{"message_id": msg.ID, "status": "pending", "inserted": inserted, "duplicate_suppressed": !inserted}, nil
 }
 
 func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
@@ -482,6 +502,9 @@ func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if err := requireOperatorAudience(conv, "report"); err != nil {
 		return nil, err
 	}
+	if from.ThreadRole != "" && from.ThreadRole != "main" {
+		return nil, errors.New("reports are owned by the main thread")
+	}
 	title := strings.TrimSpace(stringArg(args, "title"))
 	summary := strings.TrimSpace(stringArg(args, "summary"))
 	if title == "" || summary == "" {
@@ -491,17 +514,18 @@ func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if err != nil {
 		return nil, err
 	}
-	msg, _, err := a.appendAndDeliver(app, conv, &Message{
+	msg, inserted, err := a.appendAndDeliver(app, conv, &Message{
 		ConversationID: conv.ID, Role: "agent",
 		Content: "Report: " + title,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
 		ComponentKind: kindReport,
 		Components:    []Component{reportCard(title, summary, stringArg(args, "period"), sections)},
+		ClientID:      toolClientID(from, ""),
 	})
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"message_id": msg.ID, "status": "sent"}, nil
+	return map[string]any{"message_id": msg.ID, "status": "sent", "inserted": inserted, "duplicate_suppressed": !inserted}, nil
 }
 
 func (a *App) toolAlert(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
@@ -528,16 +552,27 @@ func (a *App) toolAlert(ctx context.Context, app *sdk.AppCtx, args map[string]an
 	default:
 		return nil, fmt.Errorf("invalid severity %q", severity)
 	}
-	msg, _, err := a.appendAndDeliver(app, conv, &Message{
+	msg, inserted, err := a.appendAndDeliver(app, conv, &Message{
 		ConversationID: conv.ID, Role: "agent", Content: text,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
 		ComponentKind: kindAlert, Severity: severity,
 		Components: []Component{alertCard(text, severity)},
+		ClientID:   toolClientID(from, ""),
 	})
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"message_id": msg.ID}, nil
+	return map[string]any{"message_id": msg.ID, "inserted": inserted, "duplicate_suppressed": !inserted}, nil
+}
+
+func toolClientID(from *callIdentity, explicit string) string {
+	if value := strings.TrimSpace(explicit); value != "" {
+		return value
+	}
+	if from != nil && strings.TrimSpace(from.ToolCallID) != "" {
+		return fmt.Sprintf("tool-call:%d:%s", from.AgentID, strings.TrimSpace(from.ToolCallID))
+	}
+	return ""
 }
 
 // toolCreate is the deliberate conversation-creation surface — the

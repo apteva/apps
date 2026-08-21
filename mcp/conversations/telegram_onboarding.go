@@ -287,7 +287,29 @@ func (a *App) processTelegramCommand(cfg *TelegramConnectionConfig, binding *Tel
 	switch command {
 	case "start", "help":
 		return true, a.sendTelegramSystem(app, cfg.ConnectionID, binding.ChatID,
-			"This Telegram chat is connected to Conversations.\n\n/new — start a fresh conversation\n/status — show the current conversation\n/help — show this message")
+			"This Telegram chat is connected to Conversations.\n\n/new — start a fresh conversation\n/agents — list this conversation’s agents\n@name — address one agent in a room\n@all — address every agent\n/status — show the current conversation\n/help — show this message")
+	case "agents":
+		conv, err := a.store.GetConversation(binding.ConversationID)
+		if err != nil {
+			return true, err
+		}
+		ids, err := a.store.AgentParticipants(conv.ID)
+		if err != nil {
+			return true, err
+		}
+		lines := []string{"Agents in “" + conv.Title + "”:"}
+		for _, id := range ids {
+			name := a.agentName(app, id)
+			if name == "" {
+				name = fmt.Sprintf("agent %d", id)
+			}
+			suffix := ""
+			if id == conv.LeadAgentID {
+				suffix = " (lead)"
+			}
+			lines = append(lines, "• @"+name+suffix)
+		}
+		return true, a.sendTelegramSystem(app, cfg.ConnectionID, binding.ChatID, strings.Join(lines, "\n"))
 	case "status":
 		return true, a.sendTelegramSystem(app, cfg.ConnectionID, binding.ChatID,
 			"Connected to “"+binding.ConversationTitle+"” ("+binding.Audience+").")

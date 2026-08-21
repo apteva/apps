@@ -38,6 +38,7 @@ type Conversation struct {
 	// or "public" (end users behind a gateway). Inbox-kind tools refuse
 	// public conversations.
 	Audience    string    `json:"audience"`
+	Directive   string    `json:"directive,omitempty"`
 	ThreadID    string    `json:"thread_id,omitempty"`
 	OwnerUserID int64     `json:"owner_user_id,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -63,6 +64,7 @@ type Message struct {
 	ExternalSender string         `json:"external_sender,omitempty"`
 	ThreadID       string         `json:"thread_id,omitempty"`
 	Status         string         `json:"status"`
+	Phase          string         `json:"phase"`
 	ActionStatus   string         `json:"action_status,omitempty"`
 	ComponentKind  string         `json:"component_kind,omitempty"`
 	Severity       string         `json:"severity,omitempty"`
@@ -110,7 +112,8 @@ type CreateConversationInput struct {
 	ExternalIdentity string
 	ExternalName     string
 	// Audience: '' → operator. See Conversation.Audience.
-	Audience string
+	Audience  string
+	Directive string
 }
 
 func (s *store) CreateConversation(in CreateConversationInput) (*Conversation, error) {
@@ -138,9 +141,9 @@ func (s *store) CreateConversation(in CreateConversationInput) (*Conversation, e
 	}
 	id := newConversationID()
 	_, err := s.db.Exec(`
-		INSERT INTO conversations (id, project_id, lead_agent_id, title, kind, origin, conversation_key, audience, owner_user_id)
-		VALUES (?, ?, ?, ?, 'direct', ?, ?, ?, ?)`,
-		id, in.ProjectID, in.LeadAgentID, in.Title, in.Origin, in.ConversationKey, in.Audience, in.OwnerUserID)
+		INSERT INTO conversations (id, project_id, lead_agent_id, title, kind, origin, conversation_key, audience, directive, owner_user_id)
+		VALUES (?, ?, ?, ?, 'direct', ?, ?, ?, ?, ?)`,
+		id, in.ProjectID, in.LeadAgentID, in.Title, in.Origin, in.ConversationKey, in.Audience, in.Directive, in.OwnerUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -168,13 +171,13 @@ func (s *store) CreateConversation(in CreateConversationInput) (*Conversation, e
 	return s.GetConversation(id)
 }
 
-const conversationCols = `id, project_id, lead_agent_id, title, kind, origin, conversation_key, audience, thread_id, owner_user_id, created_at, updated_at`
+const conversationCols = `id, project_id, lead_agent_id, title, kind, origin, conversation_key, audience, directive, thread_id, owner_user_id, created_at, updated_at`
 
 func scanConversation(row interface{ Scan(...any) error }) (*Conversation, error) {
 	var c Conversation
 	var created, updated string
 	if err := row.Scan(&c.ID, &c.ProjectID, &c.LeadAgentID, &c.Title, &c.Kind, &c.Origin,
-		&c.ConversationKey, &c.Audience, &c.ThreadID, &c.OwnerUserID, &created, &updated); err != nil {
+		&c.ConversationKey, &c.Audience, &c.Directive, &c.ThreadID, &c.OwnerUserID, &created, &updated); err != nil {
 		return nil, err
 	}
 	c.CreatedAt, _ = parseSQLiteTime(created)
@@ -350,6 +353,20 @@ func (s *store) UpdateConversationTitle(id, title string) (*Conversation, error)
 	return s.getConversationAny(id)
 }
 
+func (s *store) UpdateConversationDirective(id, directive string) (*Conversation, error) {
+	if len([]rune(directive)) > 8000 {
+		return nil, fmt.Errorf("directive is too long")
+	}
+	res, err := s.db.Exec(`UPDATE conversations SET directive=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, directive, id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("conversation not found")
+	}
+	return s.getConversationAny(id)
+}
+
 func (s *store) SetConversationArchived(id string, archived bool) (*Conversation, error) {
 	expr := "CURRENT_TIMESTAMP"
 	if !archived {
@@ -472,11 +489,11 @@ func (s *store) AppendMessageIdempotent(m *Message) (*Message, bool, error) {
 	}
 	res, err := s.db.Exec(`
 		INSERT INTO messages (conversation_id, role, content, agent_id, user_id, external_sender,
-			thread_id, status, action_status, component_kind, severity, inbox_only, components_json,
+			thread_id, status, phase, action_status, component_kind, severity, inbox_only, components_json,
 			attachments_json, metadata_json, client_message_id, source_app, callback_tool)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ConversationID, m.Role, m.Content, m.AgentID, m.UserID, m.ExternalSender,
-		m.ThreadID, m.Status, m.ActionStatus, m.ComponentKind, m.Severity, boolToInt(m.InboxOnly),
+		m.ThreadID, m.Status, m.Phase, m.ActionStatus, m.ComponentKind, m.Severity, boolToInt(m.InboxOnly),
 		string(componentsJSON), string(attachmentsJSON), string(metadataJSON), m.ClientID, m.SourceApp, m.CallbackTool)
 	if err != nil {
 		// A concurrent duplicate hits the partial unique index; resolve
@@ -497,6 +514,9 @@ func (s *store) AppendMessageIdempotent(m *Message) (*Message, bool, error) {
 func normalizeMessage(m *Message) {
 	if m.Status == "" {
 		m.Status = "final"
+	}
+	if m.Phase == "" {
+		m.Phase = "final"
 	}
 	if m.ComponentKind == kindApproval && m.ActionStatus == "" {
 		m.ActionStatus = "pending"
@@ -546,11 +566,11 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 	}
 	res, err := tx.Exec(`
 		INSERT INTO messages (conversation_id, role, content, agent_id, user_id, external_sender,
-			thread_id, status, action_status, component_kind, severity, inbox_only, components_json,
+			thread_id, status, phase, action_status, component_kind, severity, inbox_only, components_json,
 			attachments_json, metadata_json, client_message_id, source_app, callback_tool)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ConversationID, m.Role, m.Content, m.AgentID, m.UserID, m.ExternalSender,
-		m.ThreadID, m.Status, m.ActionStatus, m.ComponentKind, m.Severity, boolToInt(m.InboxOnly),
+		m.ThreadID, m.Status, m.Phase, m.ActionStatus, m.ComponentKind, m.Severity, boolToInt(m.InboxOnly),
 		string(componentsJSON), string(attachmentsJSON), string(metadataJSON), m.ClientID, m.SourceApp, m.CallbackTool)
 	if err != nil {
 		if m.ClientID != "" && strings.Contains(err.Error(), "UNIQUE") {
@@ -584,7 +604,7 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 }
 
 const messageCols = `id, conversation_id, role, content, agent_id, user_id, external_sender, thread_id,
-	status, action_status, component_kind, severity, inbox_only, components_json, attachments_json,
+	status, phase, action_status, component_kind, severity, inbox_only, components_json, attachments_json,
 	metadata_json, client_message_id, source_app, callback_tool, created_at`
 
 func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
@@ -592,7 +612,7 @@ func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	var inboxOnly int
 	var componentsJSON, attachmentsJSON, metadataJSON, created string
 	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.UserID,
-		&m.ExternalSender, &m.ThreadID, &m.Status, &m.ActionStatus, &m.ComponentKind, &m.Severity, &inboxOnly,
+		&m.ExternalSender, &m.ThreadID, &m.Status, &m.Phase, &m.ActionStatus, &m.ComponentKind, &m.Severity, &inboxOnly,
 		&componentsJSON, &attachmentsJSON, &metadataJSON, &m.ClientID, &m.SourceApp, &m.CallbackTool, &created); err != nil {
 		return nil, err
 	}

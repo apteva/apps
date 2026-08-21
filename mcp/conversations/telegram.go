@@ -1207,6 +1207,13 @@ func (a *App) processBoundTelegramMessage(cfg *TelegramConnectionConfig, binding
 	if app != nil {
 		app = app.WithProject(binding.ProjectID)
 	}
+	targets, routeErr := a.resolveAgentTargetsFromText(app, conv, content, nil)
+	if routeErr != nil {
+		return routeErr
+	}
+	if a.telegramFeedback != nil {
+		a.telegramFeedback.Start(app, cfg, binding)
+	}
 	msg, inserted, err := a.appendAndDeliver(app, conv, &Message{
 		ConversationID: conv.ID,
 		Role:           "user",
@@ -1217,17 +1224,19 @@ func (a *App) processBoundTelegramMessage(cfg *TelegramConnectionConfig, binding
 			"transport": "telegram", "telegram_connection_id": cfg.ConnectionID,
 			"telegram_chat_id": incoming.Chat.ID, "telegram_message_id": incoming.MessageID,
 			"telegram_user_id": incoming.From.ID, "telegram_username": incoming.From.Username,
+			"target_agent_ids": targets,
 		},
 	})
 	if err != nil {
+		if a.telegramFeedback != nil {
+			a.telegramFeedback.CompleteBinding(binding.ID)
+		}
 		return err
 	}
-	if inserted {
-		if a.telegramFeedback != nil {
-			a.telegramFeedback.Start(app, cfg, binding)
-		}
-		a.forwardToAgents(app, conv, msg, nil)
+	if !inserted && a.telegramFeedback != nil {
+		a.telegramFeedback.CompleteBinding(binding.ID)
 	}
+	_ = msg
 	return nil
 }
 

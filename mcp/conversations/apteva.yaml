@@ -2,15 +2,15 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.13.1
+version: 0.14.0
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, status). Inbox items are messages — an
   agent's approval request is a typed card in its conversation, and
   the inbox is a priority-ordered view over those rows, so acting on
   a card anywhere updates every surface at once. Other apps raise
-  inbox items via inbox_post; deliveries go through a crash-safe
-  ledger. Telegram bots connect through platform-managed integration
+  inbox items via inbox_post; surface delivery and inbound agent turns
+  go through one crash-safe, idempotent ledger. Telegram bots connect through platform-managed integration
   connections with guided pairing, automatic public intake, one-time
   invites, group discovery, and webhook health—without exposing bot
   credentials or asking operators for numeric Telegram IDs. When one
@@ -52,14 +52,14 @@ provides:
     - prefix: /telegram-webhook/
       no_auth: true
   mcp_tools:
-    - { name: send,             description: "Send portable user-visible text into a conversation. Args: conversation_id, text, components?, attachments?. Use short paragraphs and simple lists; avoid Markdown tables, raw HTML, and transport-specific syntax. Basic formatting is adapted per bound surface. The calling agent must be a participant; delivery fans out to every bound surface. Never creates conversations." }
+    - { name: send,             description: "Send portable user-visible text into a conversation. Args: conversation_id, text, phase? (acknowledgement|progress|final), components?, attachments?. Use short paragraphs and simple lists; avoid Markdown tables, raw HTML, and transport-specific syntax. Basic formatting is adapted per bound surface. The calling agent must be a participant; delivery fans out to every bound surface. Never creates conversations." }
     - { name: request_approval, description: "Ask the operator to approve something. Refused in public conversations. Args: conversation_id, title, body?, actions? (default Approve/Deny). The verdict comes back as an approval.result event." }
     - { name: report,           description: "File a report. Refused in public conversations. Args: conversation_id, title, summary, period?, sections?. Shown in its conversation and the inbox." }
     - { name: alert,            description: "Raise an alert. Refused in public conversations. Args: conversation_id, text, severity? (info|warn|error). Shown in the inbox, severity-ranked." }
     - { name: create,           description: "Create a conversation led by this agent. Args: title. Title-idempotent per agent." }
     - { name: list,             description: "List conversations this agent participates in. Args: limit?, query?." }
     - { name: history,          description: "Read a conversation transcript. Args: conversation_id, since_id?, limit?." }
-    - { name: inbox_post,                     description: "INTERNAL - sibling-app entry point via CallAppResult; agent calls are refused. Agents use conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
+    - { name: inbox_post, exposure: app_only, description: "INTERNAL - sibling-app entry point via CallAppResult; agent calls are refused. Agents use conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
   ui_panels:
     - slot: project.page
       label: Conversations
