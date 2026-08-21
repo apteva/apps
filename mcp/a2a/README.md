@@ -79,5 +79,6 @@ apteva test ./scenarios
 ```
 
 The suite covers same-project communication, global-install project isolation,
-two-node request/reply and follow-up flows, peer grants, and a hub connected to
-two independent tenant nodes.
+two-node request/reply and follow-up flows, peer grants, a hub connected to two
+independent tenant nodes, and a Fleet-style tenant agent contacting a main-node
+agent.
