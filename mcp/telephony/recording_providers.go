@@ -219,7 +219,10 @@ func providerRecordingURL(provider string, raw json.RawMessage, format string) (
 		if nested, ok := response["data"].(map[string]any); ok {
 			data = nested
 		}
-		for _, key := range []string{"public_recording_urls", "recording_urls"} {
+		// Call Control's current recording resource uses download_urls. Keep
+		// accepting the older webhook/TeXML response names because existing
+		// carrier integrations may still proxy either shape.
+		for _, key := range []string{"download_urls", "public_recording_urls", "recording_urls"} {
 			if urls, ok := data[key].(map[string]any); ok {
 				if candidate := firstNonEmpty(stringValue(urls[format]), stringValue(urls["wav"]), stringValue(urls["mp3"])); strings.HasPrefix(candidate, "https://") {
 					return candidate, nil

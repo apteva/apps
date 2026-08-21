@@ -12,6 +12,8 @@
 const SAMPLE_RATE = 24_000;
 // ~80 ms of slack absorbs network jitter without adding audible latency.
 const JITTER_TARGET_SAMPLES = SAMPLE_RATE * 0.08;
+const MAX_RECONNECT_MS = 30_000;
+const MAX_RECONNECT_DELAY_MS = 4_000;
 
 function floatToPCM16(input: Float32Array): ArrayBuffer {
   const out = new Int16Array(input.length);
@@ -49,7 +51,7 @@ function rms(frame: Float32Array): number {
   return Math.sqrt(sum / Math.max(1, frame.length));
 }
 
-export type SoftphoneState = "connecting" | "live" | "ended" | "error";
+export type SoftphoneState = "connecting" | "reconnecting" | "live" | "ended" | "error";
 
 export interface SoftphoneCallbacks {
   onState?: (state: SoftphoneState, detail?: string) => void;
@@ -67,6 +69,10 @@ export class SoftphoneSession {
   private micLevel = 0;
   private speakerLevel = 0;
   private levelTimer: ReturnType<typeof setInterval> | null = null;
+  private mediaURL = "";
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectStartedAt = 0;
+  private reconnectAttempt = 0;
 
   constructor(private readonly callbacks: SoftphoneCallbacks = {}) {}
 
@@ -76,6 +82,7 @@ export class SoftphoneSession {
 
   async start(mediaURL: string, workletURL: string): Promise<void> {
     this.callbacks.onState?.("connecting");
+    this.mediaURL = mediaURL;
     try {
       // Echo cancellation matters more than anything else here: without it the
       // caller hears themselves through the operator's speakers.
@@ -139,6 +146,7 @@ export class SoftphoneSession {
       ws.binaryType = "arraybuffer";
       this.ws = ws;
       let settled = false;
+      let opened = false;
       const finish = (error?: Error) => {
         if (settled) return;
         settled = true;
@@ -147,27 +155,35 @@ export class SoftphoneSession {
         else resolve();
       };
       const timeout = setTimeout(() => {
-        if (!this.closed) this.fail("audio connection timed out");
+        try {
+          ws.close();
+        } catch {
+          // The browser may already have discarded the failed socket.
+        }
         finish(new Error("audio connection timed out"));
       }, 10_000);
 
       ws.onopen = () => {
-        this.callbacks.onState?.("live");
+        if (this.closed || this.ws !== ws) {
+          ws.close();
+          return;
+        }
+        opened = true;
         finish();
       };
       ws.onerror = () => {
-        if (!this.closed) this.fail("audio connection failed");
         finish(new Error("audio connection failed"));
       };
       ws.onclose = () => {
+        if (this.ws !== ws) return;
+        this.ws = null;
         finish(new Error("audio connection closed before it was ready"));
-        if (!this.closed) {
-          this.closed = true;
-          this.callbacks.onState?.("ended");
-          this.teardown();
+        if (!this.closed && opened) {
+          this.scheduleReconnect();
         }
       };
       ws.onmessage = (event: MessageEvent) => {
+        if (this.ws !== ws) return;
         if (typeof event.data === "string") {
           try {
             const parsed = JSON.parse(event.data) as { type?: string; detail?: string };
@@ -177,6 +193,11 @@ export class SoftphoneSession {
               this.teardown();
             } else if (parsed.type === "call.error") {
               this.fail(parsed.detail || "The call could not be connected.");
+            } else if (parsed.type === "peer.disconnected") {
+              this.playback?.port.postMessage("flush");
+              this.callbacks.onState?.("reconnecting", "Carrier audio interrupted; reconnecting…");
+            } else if (parsed.type === "ready" || parsed.type === "peer.connected") {
+              this.markLive();
             }
           } catch {
             // Status frames are advisory; a malformed one must not drop audio.
@@ -191,6 +212,36 @@ export class SoftphoneSession {
         this.playback?.port.postMessage(frame);
       };
     });
+  }
+
+  private markLive(): void {
+    const recovered = this.reconnectStartedAt > 0 || this.reconnectAttempt > 0;
+    this.reconnectStartedAt = 0;
+    this.reconnectAttempt = 0;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.callbacks.onState?.("live", recovered ? "Audio reconnected" : undefined);
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closed || this.reconnectTimer !== null || !this.mediaURL) return;
+    const now = Date.now();
+    if (this.reconnectStartedAt === 0) this.reconnectStartedAt = now;
+    if (now - this.reconnectStartedAt >= MAX_RECONNECT_MS) {
+      this.fail("audio connection lost after repeated retries");
+      return;
+    }
+    this.playback?.port.postMessage("flush");
+    this.callbacks.onState?.("reconnecting", "Connection interrupted; retrying…");
+    const delay = Math.min(250 * (2 ** this.reconnectAttempt), MAX_RECONNECT_DELAY_MS);
+    this.reconnectAttempt += 1;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.closed) return;
+      void this.openSocket(this.mediaURL).catch(() => this.scheduleReconnect());
+    }, delay);
   }
 
   setMuted(muted: boolean): void {
@@ -218,6 +269,10 @@ export class SoftphoneSession {
   }
 
   private teardown(): void {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.levelTimer !== null) {
       clearInterval(this.levelTimer);
       this.levelTimer = null;
@@ -239,3 +294,4 @@ export class SoftphoneSession {
 }
 
 export const SOFTPHONE_JITTER_TARGET_SAMPLES = JITTER_TARGET_SAMPLES;
+export const SOFTPHONE_MAX_RECONNECT_MS = MAX_RECONNECT_MS;

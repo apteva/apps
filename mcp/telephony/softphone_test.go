@@ -92,6 +92,25 @@ func readBinaryWithin(t *testing.T, conn net.Conn, within time.Duration) []byte 
 	}
 }
 
+func readSoftphoneEventWithin(t *testing.T, conn net.Conn, kind string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		_ = conn.SetReadDeadline(deadline)
+		data, op, err := wsutil.ReadServerData(conn)
+		if err != nil {
+			t.Fatalf("read %s event: %v", kind, err)
+		}
+		if op != ws.OpText {
+			continue
+		}
+		var event map[string]string
+		if json.Unmarshal(data, &event) == nil && event["type"] == kind {
+			return
+		}
+	}
+}
+
 func softphoneTestCtx(t *testing.T) *sdk.AppCtx {
 	t.Helper()
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"))
@@ -254,6 +273,32 @@ func TestSoftphoneBrowserReconnectResumesAudio(t *testing.T) {
 	}
 	if got := readBinaryWithin(t, second, 3*time.Second); string(got) != string(audio) {
 		t.Fatalf("reconnected browser got %v, want %v", bytesToPCM16(got), bytesToPCM16(audio))
+	}
+}
+
+func TestSoftphonePeerReconnectKeepsBrowserAttached(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	insertSoftphoneCall(t, app, "in-progress")
+	server := softphoneTestServer(t, app)
+
+	firstPeer := dialWS(t, server.URL+"/peer/call-soft-1/peer-secret")
+	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
+	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
+
+	if err := firstPeer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readSoftphoneEventWithin(t, browser, "peer.disconnected", 3*time.Second)
+
+	secondPeer := dialWS(t, server.URL+"/peer/call-soft-1/peer-secret")
+	readSoftphoneEventWithin(t, browser, "peer.connected", 3*time.Second)
+	audio := pcm16ToBytes([]int16{41, 42, 43})
+	if err := wsutil.WriteClientBinary(secondPeer, audio); err != nil {
+		t.Fatalf("write reconnected peer audio: %v", err)
+	}
+	if got := readBinaryWithin(t, browser, 3*time.Second); string(got) != string(audio) {
+		t.Fatalf("browser got %v after peer reconnect, want %v", bytesToPCM16(got), bytesToPCM16(audio))
 	}
 }
 
@@ -594,6 +639,32 @@ func TestSoftphoneUsesSameOriginWorkletAsset(t *testing.T) {
 	}
 	if info, err := os.Stat("ui/softphone-worklet.js"); err != nil || info.Size() == 0 {
 		t.Fatalf("softphone worklet asset is missing or empty: %v", err)
+	}
+}
+
+func TestSoftphoneRetriesTransientBrowserMediaDisconnects(t *testing.T) {
+	audioSource, err := os.ReadFile("ui/softphone-audio.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	panelSource, err := os.ReadFile("ui/CallsPanel.tsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	audioText := string(audioSource)
+	for _, required := range []string{
+		`"connecting" | "reconnecting" | "live"`,
+		"MAX_RECONNECT_MS",
+		"scheduleReconnect()",
+		"Connection interrupted; retrying…",
+		"Audio reconnected",
+	} {
+		if !strings.Contains(audioText, required) {
+			t.Fatalf("softphone reconnect contract missing %q", required)
+		}
+	}
+	if !strings.Contains(string(panelSource), "Reconnecting audio…") {
+		t.Fatal("panel hides the live audio card while the socket reconnects")
 	}
 }
 

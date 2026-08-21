@@ -104,6 +104,31 @@ func TestProviderRecordingHasPrivatePlaybackURLWithoutStorage(t *testing.T) {
 	}
 }
 
+func TestProviderRecordingURLAcceptsCurrentAndLegacyTelnyxShapes(t *testing.T) {
+	for name, raw := range map[string]string{
+		"current download URLs": `{"data":{"download_urls":{"wav":"https://recordings.example/current.wav"}}}`,
+		"legacy public URLs":    `{"data":{"public_recording_urls":{"wav":"https://recordings.example/public.wav"}}}`,
+		"legacy recording URLs": `{"data":{"recording_urls":{"wav":"https://recordings.example/legacy.wav"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := providerRecordingURL("telnyx", []byte(raw), "wav")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(got, "https://recordings.example/") {
+				t.Fatalf("providerRecordingURL() = %q", got)
+			}
+		})
+	}
+}
+
+func TestProviderRecordingURLRejectsInsecureTelnyxDownloadURL(t *testing.T) {
+	_, err := providerRecordingURL("telnyx", []byte(`{"data":{"download_urls":{"wav":"http://recordings.example/call.wav"}}}`), "wav")
+	if err == nil || !strings.Contains(err.Error(), "HTTPS recording URL") {
+		t.Fatalf("insecure Telnyx URL error = %v", err)
+	}
+}
+
 func writeTestDualRecording(t *testing.T, callerAmplitude, agentAmplitude int16) string {
 	t.Helper()
 	const sampleRate = 8000

@@ -54,10 +54,11 @@ type softphoneHub struct {
 	closed  bool
 }
 
-func (h *softphoneHub) setPeer(w *websocketWriterPump) {
+func (h *softphoneHub) setPeer(w *websocketWriterPump) (replaced *websocketWriterPump) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.peer = w
+	replaced, h.peer = h.peer, w
+	return replaced
 }
 
 func (h *softphoneHub) setBrowser(w *websocketWriterPump) (replaced *websocketWriterPump) {
@@ -70,12 +71,14 @@ func (h *softphoneHub) setBrowser(w *websocketWriterPump) (replaced *websocketWr
 // clearPeer / clearBrowser only detach the side they own. A stale goroutine
 // finishing after a reconnect must not unhook the newer socket, so both compare
 // identity before clearing.
-func (h *softphoneHub) clearPeer(w *websocketWriterPump) {
+func (h *softphoneHub) clearPeer(w *websocketWriterPump) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.peer == w {
 		h.peer = nil
+		return true
 	}
+	return false
 }
 
 func (h *softphoneHub) clearBrowser(w *websocketWriterPump) {
@@ -140,15 +143,24 @@ func (r *softphoneRegistry) lookup(callID string) *softphoneHub {
 	return r.hubs[callID]
 }
 
-func (r *softphoneRegistry) drop(callID string) {
+// dropIfEmpty removes only the hub the caller observed and only after both
+// legs detached. Keeping a one-sided hub is what lets either the carrier or the
+// browser reconnect after a transient network failure without losing the
+// other live socket.
+func (r *softphoneRegistry) dropIfEmpty(callID string, target *softphoneHub) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if hub, ok := r.hubs[callID]; ok {
-		hub.mu.Lock()
-		hub.closed = true
-		hub.mu.Unlock()
-		delete(r.hubs, callID)
+	hub, ok := r.hubs[callID]
+	if !ok || hub != target {
+		return
 	}
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if hub.peer != nil || hub.browser != nil {
+		return
+	}
+	hub.closed = true
+	delete(r.hubs, callID)
 }
 
 // ─── loopback addressing ───────────────────────────────────────────
@@ -212,18 +224,29 @@ func (a *App) handlePeerSocket(w http.ResponseWriter, r *http.Request) {
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)
 	hub := a.softphones.hubFor(callID)
-	hub.setPeer(writer)
+	// A fresh carrier bridge owns the peer side immediately. Stop a superseded
+	// socket so it cannot keep delivering stale audio after a fast reconnect.
+	if previous := hub.setPeer(writer); previous != nil {
+		previous.Stop()
+	}
 	logSoftphone("softphone peer attached", "call", callID)
+	if browser := hub.browserWriter(); browser != nil {
+		_ = browser.Write(ws.OpText, softphoneEvent("peer.connected", callID))
+	}
 
 	defer func() {
-		hub.clearPeer(writer)
+		wasCurrent := hub.clearPeer(writer)
 		closer.Close(ws.StatusNormalClosure, "softphone peer closed")
-		// The peer leg going away means the carrier bridge is gone, i.e. the
-		// call is over. Tear the hub down and hang up on the browser.
-		if browser := hub.browserWriter(); browser != nil {
-			_ = browser.Write(ws.OpText, softphoneEvent("call.ended", ""))
+		// A peer socket can disappear because the carrier network blipped or a
+		// blue-green app handoff moved the bridge. Keep the browser attached and
+		// let the replacement peer rejoin this hub. The durable call status poll
+		// remains the authority for whether the call actually ended.
+		if wasCurrent {
+			if browser := hub.browserWriter(); browser != nil {
+				_ = browser.Write(ws.OpText, softphoneEvent("peer.disconnected", callID))
+			}
 		}
-		a.softphones.drop(callID)
+		a.softphones.dropIfEmpty(callID, hub)
 		logSoftphone("softphone peer detached", "call", callID)
 	}()
 
@@ -315,6 +338,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		hub.clearBrowser(writer)
 		closer.Close(ws.StatusNormalClosure, "softphone browser closed")
+		a.softphones.dropIfEmpty(callID, hub)
 		logSoftphone("softphone browser detached", "call", callID)
 	}()
 

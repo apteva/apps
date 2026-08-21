@@ -586,6 +586,17 @@ function CallsView({ projectId, installId }: NativePanelProps) {
 
   const terminalCount = calls.length - activeCount;
 
+  // Carrier callbacks are the durable authority for call completion. A media
+  // socket may disconnect transiently and reconnect, so keep the live panel
+  // mounted until the call itself reaches a terminal state.
+  useEffect(() => {
+    if (!softphoneCallId) return;
+    const call = calls.find((candidate) => candidate.id === softphoneCallId);
+    if (call && ["completed", "failed", "no-answer", "busy", "canceled"].includes(call.status)) {
+      endSoftphone();
+    }
+  }, [calls, softphoneCallId, endSoftphone]);
+
   const hangup = async (call: Call) => {
     // "pending" is included so an operator can decline a ringing inbound call.
     if (!call || (!LIVE_STATUSES.has(call.status) && call.status !== "pending")) return;
@@ -929,7 +940,13 @@ function CallsView({ projectId, installId }: NativePanelProps) {
                       </span>
                       <div className="min-w-0">
                         <div className="text-xs font-medium truncate">
-                          {softphoneState === "live" ? "On the call" : softphoneState === "connecting" ? "Connecting audio…" : "Audio ended"}
+                          {softphoneState === "live"
+                            ? "On the call"
+                            : softphoneState === "connecting"
+                              ? "Connecting audio…"
+                              : softphoneState === "reconnecting"
+                                ? "Reconnecting audio…"
+                                : "Audio ended"}
                           {softphoneDetail ? <span className="text-text-muted"> — {softphoneDetail}</span> : null}
                         </div>
                         <div className="text-xs text-text-muted tabular-nums">
