@@ -2799,7 +2799,218 @@ const NODE_LABELS: Record<string, string> = {
   voicemail: "Voicemail", reject: "Reject", hangup: "Hang up",
 };
 
-function RoutingView({ projectId }: NativePanelProps) {
+type GuidedRouteKind = "browser" | "team" | "ai" | "menu" | "hours";
+
+const GUIDED_ROUTE_OPTIONS: Array<{ id: GuidedRouteKind; title: string; description: string }> = [
+  { id: "browser", title: "Ring in browsers", description: "Notify signed-in operators and let the first person answer." },
+  { id: "team", title: "Ring a team", description: "Ring several saved destinations together or in order." },
+  { id: "ai", title: "Connect to AI", description: "Let an Apteva agent answer immediately with your instructions." },
+  { id: "menu", title: "Phone menu", description: "Ask callers to press a key and route each choice." },
+  { id: "hours", title: "Business hours", description: "Route calls during opening hours and close the line afterwards." },
+];
+
+function routingFlowSummary(flow?: RoutingFlow) {
+  if (!flow) return "No routing is active";
+  const nodes = flow.draft?.nodes || [];
+  if (nodes.some((node) => node.type === "dtmf_menu")) return "Phone menu";
+  if (nodes.some((node) => node.type === "schedule")) return "Business hours";
+  if (nodes.some((node) => node.type === "ring_group")) return "Team ringing";
+  if (nodes.some((node) => node.type === "destination")) return "Direct routing";
+  return flow.name || "Custom routing";
+}
+
+function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativePanelProps & { onOpenNumbers: () => void; onOpenAdvanced: () => void }) {
+  const [snapshot, setSnapshot] = useState<RoutingSnapshot>({ flows: [], destinations: [], ring_groups: [], routes: [], node_types: [] });
+  const [routeId, setRouteId] = useState("");
+  const [kind, setKind] = useState<GuidedRouteKind>("browser");
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState("");
+  const [browserName, setBrowserName] = useState("Browser operators");
+  const [aiDestination, setAIDestination] = useState("");
+  const [aiAgentID, setAIAgentID] = useState("");
+  const [aiDirective, setAIDirective] = useState("Answer the call naturally, identify how you can help, and escalate when needed.");
+  const [teamMembers, setTeamMembers] = useState<string[]>(["__browser__"]);
+  const [teamStrategy, setTeamStrategy] = useState("simultaneous");
+  const [menuPrompt, setMenuPrompt] = useState("Press 1 for sales, or 2 for support.");
+  const [menuOne, setMenuOne] = useState("__browser__");
+  const [menuTwo, setMenuTwo] = useState("__browser__");
+  const [openAt, setOpenAt] = useState("09:00");
+  const [closeAt, setCloseAt] = useState("18:00");
+  const [timezone, setTimezone] = useState("Europe/Paris");
+  const [hoursDestination, setHoursDestination] = useState("__browser__");
+
+  const api = useCallback((path: string) => `${API}${path}${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`, [projectId]);
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await fetch(api("/routing/snapshot"), { credentials: "same-origin" });
+      if (!response.ok) throw new Error(await response.text());
+      const data = await response.json() as RoutingSnapshot;
+      setSnapshot(data);
+      setRouteId((current) => data.routes.some((route) => route.id === current) ? current : (data.routes[0]?.id || ""));
+    } catch (error) {
+      setStatus((error as Error).message || "Could not load call routing");
+    } finally {
+      setLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const selectedRoute = snapshot.routes.find((route) => route.id === routeId);
+  const activeFlow = snapshot.flows.find((flow) => flow.id === selectedRoute?.flow_id);
+  const publishedFlows = snapshot.flows.filter((flow) => flow.published_version_id);
+  const selectableDestinations = snapshot.destinations.filter((destination) => destination.enabled && ["browser", "agent", "ai"].includes(destination.kind));
+
+  const ensureBrowserDestination = async () => {
+    const existing = snapshot.destinations.find((destination) => destination.enabled && destination.kind === "browser");
+    if (existing) return existing.id;
+    const created = await postJSON<RoutingDestination>(api("/routing/destinations/save"), { name: browserName.trim() || "Browser operators", kind: "browser", config: {}, enabled: true });
+    return created.id;
+  };
+
+  const resolveDestination = async (id: string) => id === "__browser__" || !id ? ensureBrowserDestination() : id;
+
+  const buildDefinition = async (): Promise<RoutingDraft> => {
+    if (kind === "browser") {
+      const destinationId = await ensureBrowserDestination();
+      return { entry: "answer", nodes: [{ id: "answer", type: "destination", label: "Ring browser operators", config: { destination_id: destinationId } }] };
+    }
+    if (kind === "ai") {
+      let destinationId = aiDestination;
+      if (!destinationId) {
+        if (!aiAgentID.trim()) throw new Error("Choose an existing AI destination or enter an agent ID.");
+        const destination = await postJSON<RoutingDestination>(api("/routing/destinations/save"), { name: "AI receptionist", kind: "ai", config: { agent_id: Number(aiAgentID), directive: aiDirective.trim() }, enabled: true });
+        destinationId = destination.id;
+      }
+      return { entry: "answer", nodes: [{ id: "answer", type: "destination", label: "AI answers", config: { destination_id: destinationId } }] };
+    }
+    if (kind === "team") {
+      if (!teamMembers.length) throw new Error("Choose at least one team member.");
+      const members = await Promise.all(teamMembers.map(resolveDestination));
+      const group = await postJSON<RoutingGroup>(api("/routing/ring-groups/save"), { name: `${selectedRoute?.phone_number || "Number"} team`, strategy: teamStrategy, timeout_sec: 20, members: members.map((destination_id) => ({ destination_id, enabled: true })) });
+      return { entry: "team", nodes: [{ id: "team", type: "ring_group", label: "Ring the team", config: { ring_group_id: group.id } }] };
+    }
+    if (kind === "menu") {
+      const one = await resolveDestination(menuOne);
+      const two = await resolveDestination(menuTwo);
+      return { entry: "menu", nodes: [
+        { id: "menu", type: "dtmf_menu", label: "Choose a department", config: { prompt: menuPrompt }, branches: { "1": "option_1", "2": "option_2", default: "end" } },
+        { id: "option_1", type: "destination", label: "Key 1", config: { destination_id: one } },
+        { id: "option_2", type: "destination", label: "Key 2", config: { destination_id: two } },
+        { id: "end", type: "hangup", label: "End call" },
+      ] };
+    }
+    const destinationId = await resolveDestination(hoursDestination);
+    return { entry: "hours", nodes: [
+      { id: "hours", type: "schedule", label: "Business hours", config: { timezone, days: ["mon", "tue", "wed", "thu", "fri"], start: openAt, end: closeAt }, branches: { open: "answer", closed: "closed" } },
+      { id: "answer", type: "destination", label: "Open: answer", config: { destination_id: destinationId } },
+      { id: "closed", type: "announcement", label: "Closed message", config: { text: "We are currently closed. Please call again during business hours." }, next: "end" },
+      { id: "end", type: "hangup", label: "End call" },
+    ] };
+  };
+
+  const activate = async () => {
+    if (!selectedRoute) return;
+    setBusy(true); setStatus("");
+    try {
+      const definition = await buildDefinition();
+      const shared = snapshot.routes.filter((route) => route.flow_id && route.flow_id === selectedRoute.flow_id).length > 1;
+      const editableFlowId = selectedRoute.flow_id && !shared ? selectedRoute.flow_id : "";
+      const title = `${selectedRoute.phone_number} · ${GUIDED_ROUTE_OPTIONS.find((option) => option.id === kind)?.title || "Routing"}`;
+      const saved = await postJSON<RoutingFlow>(api("/routing/flows/save"), { id: editableFlowId, name: title, description: `Routing for ${selectedRoute.phone_number}`, draft: definition });
+      const published = await postJSON<{ valid: boolean; errors?: string[] }>(api("/routing/flows/publish"), { id: saved.id });
+      if (!published.valid) throw new Error((published.errors || ["This routing could not be activated."]).join(" · "));
+      await postJSON(api("/routing/routes/assign"), { route_id: selectedRoute.id, flow_id: saved.id });
+      setStatus(`Routing is active for ${selectedRoute.phone_number}.`);
+      await load();
+    } catch (error) {
+      setStatus((error as Error).message || "Could not activate routing");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const usePublishedFlow = async (flow: RoutingFlow) => {
+    if (!selectedRoute) return;
+    setBusy(true); setStatus("");
+    try {
+      await postJSON(api("/routing/routes/assign"), { route_id: selectedRoute.id, flow_id: flow.id });
+      setStatus(`${flow.name} is now active for ${selectedRoute.phone_number}.`);
+      await load();
+    } catch (error) { setStatus((error as Error).message || "Could not activate this flow"); }
+    finally { setBusy(false); }
+  };
+
+  if (loading) return <div className="flex h-full items-center justify-center text-sm text-text-muted">Loading call routing…</div>;
+  if (!snapshot.routes.length) return (
+    <div className="flex h-full items-center justify-center p-6">
+      <div className="max-w-lg rounded-lg border border-border bg-bg-muted/20 p-6 text-center">
+        <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full border border-border text-lg">1</div>
+        <h2 className="text-lg font-semibold">Connect an inbound number first</h2>
+        <p className="mt-2 text-sm leading-6 text-text-muted">Routing is configured per number. Add or configure a number, then return here to choose where its calls should go.</p>
+        <button type="button" onClick={onOpenNumbers} className="mt-4 h-9 rounded bg-accent px-4 text-sm font-medium text-bg">Open Numbers</button>
+        {status ? <p className="mt-3 text-xs text-danger">{status}</p> : null}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="h-full min-h-0 overflow-auto bg-bg text-text">
+      <div className="mx-auto max-w-5xl p-5 md:p-7">
+        <header className="flex flex-wrap items-start justify-between gap-3">
+          <div><h1 className="text-xl font-semibold">Incoming call routing</h1><p className="mt-1 text-sm text-text-muted">Choose a number, decide who answers, then activate it.</p></div>
+          <button type="button" onClick={onOpenAdvanced} className="h-9 rounded border border-border px-3 text-sm text-text-muted hover:bg-bg-muted">Advanced flows</button>
+        </header>
+
+        <section className="mt-6 rounded-lg border border-border p-4">
+          <div className="flex items-center gap-3"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-sm font-semibold text-bg">1</span><div><h2 className="text-sm font-semibold">Which number?</h2><p className="text-xs text-text-muted">Each number can use a different routing flow.</p></div></div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {snapshot.routes.map((route) => {
+              const flow = snapshot.flows.find((item) => item.id === route.flow_id);
+              return <button type="button" key={route.id} onClick={() => { setRouteId(route.id); setStatus(""); }} className={`rounded-lg border p-3 text-left transition ${routeId === route.id ? "border-accent bg-accent/5" : "border-border hover:bg-bg-muted/50"}`}><div className="font-mono text-sm font-semibold">{route.phone_number}</div><div className="mt-1 flex items-center gap-2 text-xs"><span className={`h-2 w-2 rounded-full ${flow?.published_version_id ? "bg-success" : "bg-text-dim"}`} /><span className="truncate text-text-muted">{routingFlowSummary(flow)}</span></div></button>;
+            })}
+          </div>
+        </section>
+
+        <section className="mt-4 rounded-lg border border-border p-4">
+          <div className="flex items-center gap-3"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-sm font-semibold text-bg">2</span><div><h2 className="text-sm font-semibold">What should happen when someone calls?</h2><p className="text-xs text-text-muted">You can change this later without changing the phone number.</p></div></div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {GUIDED_ROUTE_OPTIONS.map((option) => <button type="button" key={option.id} onClick={() => { setKind(option.id); setStatus(""); }} className={`rounded-lg border p-3 text-left ${kind === option.id ? "border-accent bg-accent/5" : "border-border hover:bg-bg-muted/50"}`}><div className="text-sm font-semibold">{option.title}</div><p className="mt-1 text-xs leading-5 text-text-muted">{option.description}</p></button>)}
+          </div>
+
+          <div className="mt-4 rounded-lg bg-bg-muted/30 p-4">
+            {kind === "browser" ? <div className="max-w-md"><Field label="Operator group name" value={browserName} onChange={setBrowserName} /><p className="mt-2 text-xs text-text-muted">All eligible browser operators will see the incoming-call banner. The first person to answer gets the call.</p></div> : null}
+            {kind === "ai" ? <div className="grid max-w-2xl gap-3 md:grid-cols-2"><label className="block"><span className="mb-1 block text-xs text-text-muted">Existing AI destination</span><select value={aiDestination} onChange={(event) => setAIDestination(event.target.value)} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="">Create from agent ID</option>{snapshot.destinations.filter((item) => item.kind === "ai").map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{!aiDestination ? <Field label="Apteva agent ID" value={aiAgentID} onChange={setAIAgentID} type="number" /> : null}<label className="block md:col-span-2"><span className="mb-1 block text-xs text-text-muted">Instructions</span><textarea rows={3} value={aiDirective} onChange={(event) => setAIDirective(event.target.value)} className="w-full rounded border border-border bg-bg px-3 py-2 text-sm" /></label></div> : null}
+            {kind === "team" ? <div className="max-w-2xl"><label className="block max-w-xs"><span className="mb-1 block text-xs text-text-muted">Ring order</span><select value={teamStrategy} onChange={(event) => setTeamStrategy(event.target.value)} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="simultaneous">Everyone at once</option><option value="sequential">One after another</option><option value="priority">By priority</option></select></label><div className="mt-3"><span className="text-xs text-text-muted">Who should ring?</span><label className="mt-1 flex items-center gap-2 rounded border border-border p-2 text-sm"><input type="checkbox" checked={teamMembers.includes("__browser__")} onChange={(event) => setTeamMembers(event.target.checked ? [...teamMembers, "__browser__"] : teamMembers.filter((id) => id !== "__browser__"))} /> Browser operators</label>{selectableDestinations.filter((item) => item.kind !== "browser").map((item) => <label key={item.id} className="mt-1 flex items-center gap-2 rounded border border-border p-2 text-sm"><input type="checkbox" checked={teamMembers.includes(item.id)} onChange={(event) => setTeamMembers(event.target.checked ? [...teamMembers, item.id] : teamMembers.filter((id) => id !== item.id))} /> {item.name}<span className="ml-auto text-xs capitalize text-text-dim">{item.kind}</span></label>)}</div></div> : null}
+            {kind === "menu" ? <div className="grid max-w-2xl gap-3 md:grid-cols-2"><label className="block md:col-span-2"><span className="mb-1 block text-xs text-text-muted">What callers hear</span><textarea rows={2} value={menuPrompt} onChange={(event) => setMenuPrompt(event.target.value)} className="w-full rounded border border-border bg-bg px-3 py-2 text-sm" /></label><DestinationSelect label="Press 1 routes to" value={menuOne} onChange={setMenuOne} destinations={selectableDestinations} /><DestinationSelect label="Press 2 routes to" value={menuTwo} onChange={setMenuTwo} destinations={selectableDestinations} /></div> : null}
+            {kind === "hours" ? <div className="grid max-w-2xl gap-3 md:grid-cols-2"><Field label="Timezone" value={timezone} onChange={setTimezone} /><DestinationSelect label="During opening hours" value={hoursDestination} onChange={setHoursDestination} destinations={selectableDestinations} /><Field label="Opens" value={openAt} onChange={setOpenAt} type="time" /><Field label="Closes" value={closeAt} onChange={setCloseAt} type="time" /><p className="text-xs text-text-muted md:col-span-2">Monday–Friday. Outside these hours callers hear a closed message and the call ends.</p></div> : null}
+          </div>
+        </section>
+
+        <section className="mt-4 rounded-lg border border-border p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-sm font-semibold text-bg">3</span><div><h2 className="text-sm font-semibold">Activate for {selectedRoute?.phone_number}</h2><p className="text-xs text-text-muted">The previous active routing is replaced only for this number.</p></div></div><button type="button" disabled={busy || !selectedRoute} onClick={activate} className="h-10 rounded bg-accent px-5 text-sm font-semibold text-bg disabled:opacity-50">{busy ? "Activating…" : "Activate routing"}</button></div>
+          {status ? <div className={`mt-3 rounded border px-3 py-2 text-sm ${status.includes("active") || status.includes("now") ? "border-success/30 bg-success/5 text-success" : "border-danger/30 bg-danger/5 text-danger"}`}>{status}</div> : null}
+        </section>
+
+        {publishedFlows.length ? <section className="mt-6"><div className="flex items-end justify-between gap-3"><div><h2 className="text-sm font-semibold">Reusable flows</h2><p className="mt-1 text-xs text-text-muted">You can keep several IVRs and reuse one on another number.</p></div><button type="button" onClick={onOpenAdvanced} className="text-xs text-accent hover:underline">Manage all flows</button></div><div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{publishedFlows.map((flow) => <div key={flow.id} className="rounded-lg border border-border p-3"><div className="flex items-center justify-between gap-2"><span className="truncate text-sm font-medium">{flow.name}</span>{flow.id === selectedRoute?.flow_id ? <span className="rounded bg-success/10 px-1.5 py-0.5 text-xs text-success">Active</span> : null}</div><p className="mt-1 text-xs text-text-muted">{routingFlowSummary(flow)}</p>{flow.id !== selectedRoute?.flow_id ? <button type="button" disabled={busy} onClick={() => void usePublishedFlow(flow)} className="mt-3 h-8 rounded border border-border px-2 text-xs hover:bg-bg-muted">Use for this number</button> : null}</div>)}</div></section> : null}
+      </div>
+    </div>
+  );
+}
+
+function DestinationSelect({ label, value, onChange, destinations }: { label: string; value: string; onChange: (value: string) => void; destinations: RoutingDestination[] }) {
+  return <label className="block"><span className="mb-1 block text-xs text-text-muted">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="__browser__">Browser operators</option>{destinations.filter((item) => item.kind !== "browser").map((item) => <option key={item.id} value={item.id}>{item.name} · {item.kind}</option>)}</select></label>;
+}
+
+function RoutingView({ projectId, onOpenNumbers }: NativePanelProps & { onOpenNumbers: () => void }) {
+  const [advanced, setAdvanced] = useState(false);
+  if (advanced) return <div className="flex h-full min-h-0 flex-col"><div className="flex h-11 shrink-0 items-center justify-between border-b border-border px-4"><div><span className="text-sm font-semibold">Advanced flow editor</span><span className="ml-2 text-xs text-text-muted">Draft, simulate and publish custom IVRs.</span></div><button type="button" onClick={() => setAdvanced(false)} className="h-8 rounded border border-border px-3 text-xs">Back to guided setup</button></div><div className="min-h-0 flex-1"><AdvancedRoutingEditor projectId={projectId} /></div></div>;
+  return <GuidedRoutingView projectId={projectId} onOpenNumbers={onOpenNumbers} onOpenAdvanced={() => setAdvanced(true)} />;
+}
+
+function AdvancedRoutingEditor({ projectId }: NativePanelProps) {
   const [snapshot, setSnapshot] = useState<RoutingSnapshot>({ flows: [], destinations: [], ring_groups: [], routes: [], node_types: [] });
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState<RoutingDraft>({ entry: "hangup", nodes: [{ id: "hangup", type: "hangup", label: "End call" }] });
@@ -2935,14 +3146,14 @@ function RoutingView({ projectId }: NativePanelProps) {
         <section className="p-4">
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <span className="text-xs font-semibold uppercase text-text-dim">Add step</span>
-            {snapshot.node_types.map((type) => <button type="button" key={type} onClick={() => addNode(type)} className="h-7 rounded border border-border px-2 text-xs hover:bg-bg-muted">{NODE_LABELS[type] || type}</button>)}
+            {(snapshot.node_types.length ? snapshot.node_types : Object.keys(NODE_LABELS)).map((type) => <button type="button" key={type} onClick={() => addNode(type)} className="h-7 rounded border border-border px-2 text-xs hover:bg-bg-muted">{NODE_LABELS[type] || type}</button>)}
           </div>
           <div className="space-y-3">
             {draft.nodes.map((node, index) => (
               <div key={node.id} className={`rounded border p-3 ${draft.entry === node.id ? "border-accent/60 bg-accent/5" : "border-border bg-bg-muted/20"}`}>
                 <div className="flex items-center gap-2">
                   <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border text-xs">{index + 1}</span>
-                  <select value={node.type} onChange={(event) => updateNode(node.id, { type: event.target.value, config: {}, branches: {} })} className="h-8 rounded border border-border bg-bg px-2 text-xs">{snapshot.node_types.map((type) => <option key={type} value={type}>{NODE_LABELS[type] || type}</option>)}</select>
+                  <select value={node.type} onChange={(event) => updateNode(node.id, { type: event.target.value, config: {}, branches: {} })} className="h-8 rounded border border-border bg-bg px-2 text-xs">{(snapshot.node_types.length ? snapshot.node_types : Object.keys(NODE_LABELS)).map((type) => <option key={type} value={type}>{NODE_LABELS[type] || type}</option>)}</select>
                   <input value={node.label || ""} onChange={(event) => updateNode(node.id, { label: event.target.value })} className="h-8 min-w-0 flex-1 rounded border border-border bg-bg px-2 text-sm" placeholder="Step label" />
                   <button type="button" onClick={() => setDraft((current) => ({ ...current, entry: node.id }))} className="h-8 rounded border border-border px-2 text-xs">{draft.entry === node.id ? "Entry" : "Set entry"}</button>
                   <button type="button" onClick={() => removeNode(node.id)} className="h-8 rounded border border-danger/30 px-2 text-xs text-danger">Remove</button>
@@ -3015,17 +3226,17 @@ function NodeConfiguration({ node, nodes, destinations, groups, update }: { node
 }
 
 export default function CallsPanel(props: NativePanelProps) {
-	const [view, setView] = useState<"calls" | "routing" | "numbers" | "addresses" | "bundles">("calls");
+  const [view, setView] = useState<"calls" | "routing" | "numbers" | "addresses" | "bundles">("calls");
   return (
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
-		<nav className="shrink-0 h-11 border-b border-border px-4 flex items-center gap-1" aria-label="Telephony views">
-			<button
-				type="button"
-				onClick={() => setView("routing")}
-				className={`h-8 px-3 rounded text-sm ${view === "routing" ? "bg-bg-muted font-medium" : "text-text-muted hover:bg-bg-muted/60"}`}
-			>
-				Routing
-			</button>
+      <nav className="shrink-0 h-11 border-b border-border px-4 flex items-center gap-1" aria-label="Telephony views">
+        <button
+          type="button"
+          onClick={() => setView("routing")}
+          className={`h-8 px-3 rounded text-sm ${view === "routing" ? "bg-bg-muted font-medium" : "text-text-muted hover:bg-bg-muted/60"}`}
+        >
+          Routing
+        </button>
         <button
           type="button"
           onClick={() => setView("calls")}
@@ -3055,9 +3266,9 @@ export default function CallsPanel(props: NativePanelProps) {
           Compliance
         </button>
       </nav>
-		<div className="min-h-0 flex-1">
-			{view === "calls" ? <CallsView {...props} /> : null}
-			{view === "routing" ? <RoutingView {...props} /> : null}
+      <div className="min-h-0 flex-1">
+        {view === "calls" ? <CallsView {...props} /> : null}
+        {view === "routing" ? <RoutingView {...props} onOpenNumbers={() => setView("numbers")} /> : null}
         {view === "numbers" ? <NumbersView key={props.projectId} {...props} /> : null}
         {view === "addresses" ? <AddressesView {...props} /> : null}
         {view === "bundles" ? <BundlesView {...props} /> : null}

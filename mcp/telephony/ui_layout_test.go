@@ -27,3 +27,27 @@ func TestPanelLayoutDoesNotDependOnArbitraryTailwindUtilities(t *testing.T) {
 		}
 	}
 }
+
+func TestRoutingPanelUsesGuidedSetupAndRetainsAdvancedEditor(t *testing.T) {
+	source, err := os.ReadFile("ui/CallsPanel.tsx")
+	if err != nil {
+		t.Fatalf("read telephony panel source: %v", err)
+	}
+	panel := string(source)
+	for _, label := range []string{
+		"Incoming call routing",
+		"Which number?",
+		"What should happen when someone calls?",
+		"Activate routing",
+		"Reusable flows",
+		"Advanced flows",
+		"Back to guided setup",
+	} {
+		if !strings.Contains(panel, label) {
+			t.Errorf("routing panel is missing guided entry point %q", label)
+		}
+	}
+	if !strings.Contains(panel, "Object.keys(NODE_LABELS)") {
+		t.Error("advanced editor does not fall back to its local node catalog")
+	}
+}
