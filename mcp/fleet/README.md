@@ -46,6 +46,10 @@ The allowlists are generic A2A agent selectors, not Fleet-specific exposure tier
 
 Both default to `["*"]`. Parent agents still have to be deliberately attached to the parent A2A install. Fleet does not modify instances registered with `tenant_connect`, because it does not own their lifecycle.
 
+Fleet v0.9.1 also strips the parent Fleet sidecar's app identity variables
+before spawning a tenant. This prevents tenant-owned apps from accidentally
+using the parent's callback credentials.
+
 ## Quick start
 
 ```sh

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.9.0
+version: 0.9.1
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -23,6 +23,9 @@ description: |
   v0.9.0 optionally installs and pairs the A2A app across Fleet-managed
   tenants so attached tenant agents and attached parent agents can discover
   and communicate directly.
+
+  v0.9.1 isolates tenant process environments from Fleet's parent-app
+  credentials so tenant-owned apps always use tenant-minted callback tokens.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -175,7 +178,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.9.0
+    ref: fleet/v0.9.1
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
