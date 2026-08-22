@@ -32,7 +32,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.14.0
+version: 0.15.0
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, status). Inbox items are messages — an
@@ -82,13 +82,13 @@ provides:
     - prefix: /telegram-webhook/
       no_auth: true
   mcp_tools:
-    - { name: send,             description: "Send portable user-visible text into a conversation. Args: conversation_id, text, phase? (acknowledgement|progress|final), components?, attachments?. Use short paragraphs and simple lists; avoid Markdown tables, raw HTML, and transport-specific syntax. Basic formatting is adapted per bound surface. The calling agent must be a participant; delivery fans out to every bound surface. Never creates conversations." }
-    - { name: request_approval, description: "Ask the operator to approve something. Refused in public conversations. Args: conversation_id, title, body?, actions? (default Approve/Deny). The verdict comes back as an approval.result event." }
-    - { name: report,           description: "File a report. Refused in public conversations. Args: conversation_id, title, summary, period?, sections?. Shown in its conversation and the inbox." }
-    - { name: alert,            description: "Raise an alert. Refused in public conversations. Args: conversation_id, text, severity? (info|warn|error). Shown in the inbox, severity-ranked." }
-    - { name: create,           description: "Create a conversation led by this agent. Args: title. Title-idempotent per agent." }
-    - { name: list,             description: "List conversations this agent participates in. Args: limit?, query?." }
-    - { name: history,          description: "Read a conversation transcript. Args: conversation_id, since_id?, limit?." }
+    - { name: send,             description: "Reply from the originating conversation thread to that exact conversation. Args: conversation_id, text, phase? (acknowledgement|progress|final), components?, attachments?. Main routes requested outcomes back to the originating thread; generic workers report to their parent and are never granted Conversations tools. Use short paragraphs and simple lists; avoid Markdown tables, raw HTML, and transport-specific syntax. Basic formatting is adapted per bound surface." }
+    - { name: request_approval, description: "Ask the operator to approve gated work owned by main or by the originating conversation thread, using that conversation's exact id. Generic workers report the blocked decision to their parent instead. Refused in public conversations. Args: conversation_id, title, body?, actions? (default Approve/Deny). The verdict returns to the asking thread as approval.result." }
+    - { name: report,           description: "Main-thread global output only: file a substantive report into an operator conversation. Conversation threads and generic workers report results to their parent/main instead. Refused in public conversations. Args: conversation_id, title, summary, period?, sections?." }
+    - { name: alert,            description: "Raise a global alert from main, or a conversation-local urgent alert from the originating conversation thread using its exact id. Generic workers report problems to their parent. Refused in public conversations. Args: conversation_id, text, severity? (info|warn|error)." }
+    - { name: create,           description: "Main-thread conversation management only: create a conversation led by this agent. Conversation threads and generic workers do not create conversations. Args: title. Title-idempotent per agent." }
+    - { name: list,             description: "Main-thread conversation management only: list conversations this agent participates in. Conversation threads already have their exact id; generic workers report to their parent. Args: limit?, query?." }
+    - { name: history,          description: "Read a conversation transcript. Main may inspect a participating conversation; a conversation thread may read only its own exact conversation; generic workers are not granted this tool. Args: conversation_id, since_id?, limit?." }
     - { name: inbox_post, exposure: app_only, description: "INTERNAL - sibling-app entry point via CallAppResult; agent calls are refused. Agents use conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
   ui_panels:
     - slot: project.page
@@ -226,8 +226,10 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "send",
-			Description: "Send a message into a conversation you participate in. Delivery updates the durable " +
-				"transcript and dashboard stream. Set phase to acknowledgement, progress, or final.",
+			Description: "Reply from the originating conversation thread to that exact conversation. Main routes " +
+				"requested outcomes back to the originating thread; generic workers report to their parent and are " +
+				"never granted Conversations tools. Delivery updates every bound surface. Set phase to " +
+				"acknowledgement, progress, or final.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"text":            map[string]any{"type": "string"},
@@ -241,10 +243,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "request_approval",
 			Meta: map[string]any{"io.apteva/wakeOnResult": true},
-			Description: "Ask the operator to approve something. Requires conversation_id — find one with " +
-				"conversations_list or create one with conversations_create. The card is actionable in the " +
-				"conversation and the inbox; the verdict returns to you as an " +
-				"approval.result event.",
+			Description: "Ask the operator to approve gated work owned by main or by the originating conversation " +
+				"thread, using that conversation's exact id. Generic workers report the blocked decision to their " +
+				"parent instead. The card is actionable in the conversation and inbox; the verdict returns to the " +
+				"asking thread as approval.result.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"title":           map[string]any{"type": "string"},
@@ -255,8 +257,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "report",
-			Description: "File a report. Requires conversation_id — keep one standing conversation (e.g. " +
-				"\"Reports\") via conversations_create and reuse it. Shown in its conversation and the inbox.",
+			Description: "Main-thread global output only: file a substantive report into an operator conversation. " +
+				"Conversation threads and generic workers report results to their parent/main instead. Keep one " +
+				"standing Reports conversation and reuse it.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"title":           map[string]any{"type": "string"},
@@ -268,9 +271,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "alert",
-			Description: "Raise an alert (info|warn|error), severity-ranked in the inbox. Requires " +
-				"conversation_id — reuse the conversation the problem belongs to (conversations_list) or " +
-				"create a topical one (conversations_create).",
+			Description: "Raise a global alert from main, or a conversation-local urgent alert from the originating " +
+				"conversation thread using its exact id. Generic workers report problems to their parent. Alerts are " +
+				"severity-ranked in the inbox.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"text":            map[string]any{"type": "string"},
@@ -280,10 +283,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "create",
-			Description: "Create a conversation you lead, for an ongoing topic (\"Reports\", " +
+			Description: "Main-thread conversation management only. Create a conversation you lead, for an ongoing topic (\"Reports\", " +
 				"\"Infra monitoring\", an incident name). Title-idempotent: if you already have a conversation " +
 				"with this title it is returned with created=false, so reusing a stable title never duplicates. " +
-				"Titles name ongoing topics — never put timestamps, ids, or per-item detail in them.",
+				"Conversation threads and generic workers do not create conversations. Titles name ongoing topics — " +
+				"never put timestamps, ids, or per-item detail in them.",
 			InputSchema: schemaObject(map[string]any{
 				"title": map[string]any{"type": "string"},
 			}, []string{"title"}),
@@ -291,8 +295,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "list",
-			Description: "List conversations this agent participates in. Pass query to filter by title " +
-				"(case-insensitive substring) — search before creating.",
+			Description: "Main-thread conversation management only. List conversations this agent participates in. " +
+				"Conversation threads already have their exact id; generic workers report to their parent. Pass query " +
+				"to filter by title (case-insensitive substring) — search before creating.",
 			InputSchema: schemaObject(map[string]any{
 				"limit": map[string]any{"type": "integer"},
 				"query": map[string]any{"type": "string"},
@@ -300,8 +305,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx: a.toolList,
 		},
 		{
-			Name:        "history",
-			Description: "Read a conversation transcript.",
+			Name: "history",
+			Description: "Read a conversation transcript. Main may inspect a participating conversation; a conversation " +
+				"thread may read only its own exact conversation; generic workers are not granted this tool.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"since_id":        map[string]any{"type": "integer"},
@@ -337,7 +343,6 @@ func (a *App) MCPTools() []sdk.Tool {
 type callIdentity struct {
 	AgentID    int64
 	ThreadID   string
-	ThreadRole string
 	ToolCallID string
 	ProjectID  string
 }
@@ -353,8 +358,33 @@ func requireAgentCaller(ctx context.Context) (*callIdentity, error) {
 	if strings.TrimSpace(caller.ProjectID) == "" {
 		return nil, errors.New("authenticated project context required")
 	}
-	return &callIdentity{AgentID: caller.AgentID, ThreadID: caller.ThreadID, ThreadRole: caller.ThreadRole,
+	if strings.TrimSpace(caller.ThreadID) == "" {
+		return nil, errors.New("trusted agent thread context required")
+	}
+	return &callIdentity{AgentID: caller.AgentID, ThreadID: strings.TrimSpace(caller.ThreadID),
 		ToolCallID: caller.ToolCallID, ProjectID: caller.ProjectID}, nil
+}
+
+// boundConversation returns the conversation that owns the caller's opaque
+// thread, if any. Conversations owns this relationship in its store; neither
+// Core nor the SDK needs to classify threads as main/conversation/worker.
+func (a *App) boundConversation(from *callIdentity) (*Conversation, error) {
+	return a.store.ConversationForAgentThread(from.ProjectID, from.AgentID, from.ThreadID)
+}
+
+// requireGlobalCaller refuses management/global-output tools from a thread
+// that Conversations itself created for a particular conversation. Other
+// opaque threads are intentionally not classified; as in Tasks, parents keep
+// global mutation tools away from generic workers when spawning them.
+func (a *App) requireGlobalCaller(from *callIdentity, tool string) error {
+	bound, err := a.boundConversation(from)
+	if err != nil {
+		return err
+	}
+	if bound != nil {
+		return fmt.Errorf("%s is not available from conversation %s; report global work to the parent/main thread", tool, bound.ID)
+	}
+	return nil
 }
 
 // requireOperatorAudience is the structural guard behind the skill's
@@ -398,6 +428,13 @@ func (a *App) requireParticipant(from *callIdentity, conversationID string) (*Co
 	if !ok {
 		return nil, fmt.Errorf("agent %d is not a participant of %s", from.AgentID, conversationID)
 	}
+	bound, err := a.boundConversation(from)
+	if err != nil {
+		return nil, err
+	}
+	if bound != nil && bound.ID != conv.ID {
+		return nil, fmt.Errorf("thread %s belongs to conversation %s and cannot operate on conversation %s", from.ThreadID, bound.ID, conv.ID)
+	}
 	return conv, nil
 }
 
@@ -419,7 +456,7 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	default:
 		return nil, fmt.Errorf("invalid phase %q", phase)
 	}
-	if from.ThreadRole == "main" {
+	if from.ThreadID == "main" {
 		return nil, errors.New("ordinary conversation replies belong to the mapped conversation thread, not the main thread")
 	}
 	conv, err := a.requireParticipant(from, conversationID)
@@ -495,15 +532,15 @@ func (a *App) toolReport(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if err != nil {
 		return nil, err
 	}
+	if err := a.requireGlobalCaller(from, "conversations_report"); err != nil {
+		return nil, err
+	}
 	conv, err := a.requireConversationArg(from, args)
 	if err != nil {
 		return nil, err
 	}
 	if err := requireOperatorAudience(conv, "report"); err != nil {
 		return nil, err
-	}
-	if from.ThreadRole != "" && from.ThreadRole != "main" {
-		return nil, errors.New("reports are owned by the main thread")
 	}
 	title := strings.TrimSpace(stringArg(args, "title"))
 	summary := strings.TrimSpace(stringArg(args, "summary"))
@@ -585,6 +622,9 @@ func (a *App) toolCreate(ctx context.Context, _ *sdk.AppCtx, args map[string]any
 	if err != nil {
 		return nil, err
 	}
+	if err := a.requireGlobalCaller(from, "conversations_create"); err != nil {
+		return nil, err
+	}
 	title := strings.TrimSpace(stringArg(args, "title"))
 	if title == "" {
 		return nil, errors.New("title required")
@@ -609,6 +649,9 @@ func (a *App) toolCreate(ctx context.Context, _ *sdk.AppCtx, args map[string]any
 func (a *App) toolList(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
 	from, err := requireAgentCaller(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := a.requireGlobalCaller(from, "conversations_list"); err != nil {
 		return nil, err
 	}
 	limit := intArg(args, "limit", 50)

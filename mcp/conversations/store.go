@@ -270,6 +270,43 @@ func (s *store) FindAgentConversationByTitle(projectID string, agentID int64, ti
 	return c, nil
 }
 
+// ConversationForAgentThread resolves the conversation that owns an opaque
+// Core thread for one agent. The relationship is app data, not a platform
+// thread role: room participants each have their own row, while the legacy
+// conversations.thread_id fallback keeps pre-v0.14 lead-agent threads bound.
+// Archived conversations remain authoritative owners until they are deleted,
+// so an old live thread cannot silently become an unbound global caller.
+func (s *store) ConversationForAgentThread(projectID string, agentID int64, threadID string) (*Conversation, error) {
+	threadID = strings.TrimSpace(threadID)
+	if strings.TrimSpace(projectID) == "" || agentID <= 0 || threadID == "" {
+		return nil, nil
+	}
+	conv, err := scanConversation(s.db.QueryRow(`
+		SELECT `+prefixCols("c.", conversationCols)+`
+		FROM conversation_agent_threads t
+		JOIN conversations c ON c.id = t.conversation_id
+		WHERE c.project_id = ? AND t.agent_id = ? AND t.thread_id = ?
+		LIMIT 1`, projectID, agentID, threadID))
+	if err == nil {
+		return conv, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+	conv, err = scanConversation(s.db.QueryRow(`
+		SELECT `+conversationCols+`
+		FROM conversations
+		WHERE project_id = ? AND lead_agent_id = ? AND thread_id = ?
+		LIMIT 1`, projectID, agentID, threadID))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return conv, nil
+}
+
 func (s *store) IsParticipantAgent(conversationID string, agentID int64) (bool, error) {
 	var one int
 	err := s.db.QueryRow(`

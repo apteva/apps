@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -159,9 +160,9 @@ func callerCtx(agentID int64, threadID string) context.Context {
 	})
 }
 
-func callerCtxFull(agentID int64, threadID, role, toolCallID string) context.Context {
+func callerCtxCall(agentID int64, threadID, toolCallID string) context.Context {
 	return sdk.WithCaller(context.Background(), &sdk.Caller{
-		AgentID: agentID, ThreadID: threadID, ThreadRole: role, ToolCallID: toolCallID, ProjectID: testProject,
+		AgentID: agentID, ThreadID: threadID, ToolCallID: toolCallID, ProjectID: testProject,
 	})
 }
 
@@ -187,6 +188,21 @@ func mkConversation(t *testing.T, app *App, agentID int64) *Conversation {
 	return conv
 }
 
+func boundConversationCaller(t *testing.T, app *App, conv *Conversation, agentID int64) context.Context {
+	t.Helper()
+	threadID := conversationThreadID(conv.ID)
+	if err := app.store.RecordAgentThread(conv.ID, agentID, threadID, "test", "test", ""); err != nil {
+		t.Fatalf("bind conversation thread: %v", err)
+	}
+	if agentID == conv.LeadAgentID {
+		if err := app.store.SetConversationThread(conv.ID, threadID); err != nil {
+			t.Fatalf("record lead conversation thread: %v", err)
+		}
+		conv.ThreadID = threadID
+	}
+	return callerCtx(agentID, threadID)
+}
+
 // ─── identity & participation ────────────────────────────────────────
 
 func TestToolsFailClosedWithoutCaller(t *testing.T) {
@@ -201,16 +217,122 @@ func TestToolsFailClosedWithoutCaller(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected caller identity to be required")
 	}
+	_, err = app.toolAlert(callerCtx(41, ""), ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "missing thread",
+	})
+	if err == nil || !strings.Contains(err.Error(), "thread context") {
+		t.Fatalf("missing thread context: err=%v", err)
+	}
 }
 
 func TestNonParticipantCannotWrite(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
 	conv := mkConversation(t, app, 41)
 
-	if _, err := app.toolSend(callerCtx(99, ""), ctx, map[string]any{
+	if _, err := app.toolSend(callerCtx(99, "worker-intruder"), ctx, map[string]any{
 		"conversation_id": conv.ID, "text": "intruding",
 	}); err == nil {
 		t.Fatal("expected participant check to refuse agent 99")
+	}
+}
+
+func TestBoundConversationThreadCanOperateOnlyOnItsConversation(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	from := boundConversationCaller(t, app, conv, 41)
+
+	if _, err := app.toolSend(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "hello",
+	}); err != nil {
+		t.Fatalf("send to own conversation: %v", err)
+	}
+	if _, err := app.toolAlert(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "urgent local issue", "severity": "warn",
+	}); err != nil {
+		t.Fatalf("alert in own conversation: %v", err)
+	}
+	if _, err := app.toolRequestApproval(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "title": "Continue?",
+	}); err != nil {
+		t.Fatalf("approval in own conversation: %v", err)
+	}
+	if _, err := app.toolHistory(from, ctx, map[string]any{"conversation_id": conv.ID}); err != nil {
+		t.Fatalf("history for own conversation: %v", err)
+	}
+
+	for tool, call := range map[string]func() (any, error){
+		"create": func() (any, error) {
+			return app.toolCreate(from, ctx, map[string]any{"title": "Wrong place"})
+		},
+		"list": func() (any, error) {
+			return app.toolList(from, ctx, nil)
+		},
+		"report": func() (any, error) {
+			return app.toolReport(from, ctx, map[string]any{
+				"conversation_id": conv.ID, "title": "Global", "summary": "Wrong owner"})
+		},
+	} {
+		if _, err := call(); err == nil || !strings.Contains(err.Error(), "parent/main") {
+			t.Fatalf("bound conversation %s: err=%v, want parent/main guidance", tool, err)
+		}
+	}
+}
+
+func TestBoundConversationThreadCannotCrossConversation(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	owned := mkConversation(t, app, 41)
+	target := mkConversation(t, app, 41)
+	from := boundConversationCaller(t, app, owned, 41)
+
+	calls := map[string]func() (any, error){
+		"send": func() (any, error) {
+			return app.toolSend(from, ctx, map[string]any{"conversation_id": target.ID, "text": "escape"})
+		},
+		"alert": func() (any, error) {
+			return app.toolAlert(from, ctx, map[string]any{
+				"conversation_id": target.ID, "text": "escape", "severity": "error"})
+		},
+		"approval": func() (any, error) {
+			return app.toolRequestApproval(from, ctx, map[string]any{
+				"conversation_id": target.ID, "title": "Escape?"})
+		},
+		"history": func() (any, error) {
+			return app.toolHistory(from, ctx, map[string]any{"conversation_id": target.ID})
+		},
+	}
+	for tool, call := range calls {
+		if _, err := call(); err == nil || !strings.Contains(err.Error(), "belongs to conversation "+owned.ID) {
+			t.Fatalf("cross-conversation %s: err=%v", tool, err)
+		}
+	}
+	transcript, err := app.store.Transcript(target.ID, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transcript) != 0 {
+		t.Fatalf("cross-conversation calls wrote target transcript: %+v", transcript)
+	}
+	items, err := app.store.Inbox(testProject, 1, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("cross-conversation calls wrote inbox effects: %+v", items)
+	}
+}
+
+func TestOpaqueUnboundThreadIsNotAssignedAPlatformRole(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	from, err := requireAgentCaller(callerCtx(41, "opaque-child-17"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := app.boundConversation(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound != nil {
+		t.Fatalf("opaque unbound thread was classified as conversation %+v", bound)
 	}
 }
 
@@ -241,16 +363,88 @@ func TestIdempotentUserMessages(t *testing.T) {
 
 // ─── inbox semantics ─────────────────────────────────────────────────
 
+func TestOneConversationSystemOwnsChatAlertsReportsAndApprovals(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	from := callerCtx(41, "thread-9")
+
+	if _, err := app.toolSend(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "ordinary reply",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolAlert(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "disk nearly full", "severity": "warn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolReport(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "title": "Weekly", "summary": "Everything is healthy",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolRequestApproval(from, ctx, map[string]any{
+		"conversation_id": conv.ID, "title": "Delete the oldest archive?",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transcript, err := app.store.Transcript(conv.ID, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transcript) != 4 {
+		t.Fatalf("transcript has %d messages, want ordinary+alert+report+approval", len(transcript))
+	}
+	transcriptKinds := map[string]int{}
+	transcriptIDs := map[int64]bool{}
+	for _, message := range transcript {
+		if message.ConversationID != conv.ID {
+			t.Fatalf("message %d escaped conversation %s into %s", message.ID, conv.ID, message.ConversationID)
+		}
+		transcriptKinds[message.ComponentKind]++
+		transcriptIDs[message.ID] = true
+	}
+	for kind, want := range map[string]int{"": 1, kindAlert: 1, kindReport: 1, kindApproval: 1} {
+		if transcriptKinds[kind] != want {
+			t.Fatalf("transcript kinds=%v", transcriptKinds)
+		}
+	}
+
+	items, err := app.store.Inbox(testProject, 1, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("inbox has %d items, want alert+report+approval projection", len(items))
+	}
+	inboxKinds := map[string]int{}
+	for _, item := range items {
+		if item.Message.ConversationID != conv.ID || !transcriptIDs[item.Message.ID] {
+			t.Fatalf("inbox item is not a projection of the same transcript: %+v", item.Message)
+		}
+		if item.Message.ComponentKind == "" {
+			t.Fatal("ordinary reply leaked into inbox")
+		}
+		inboxKinds[item.Message.ComponentKind]++
+	}
+	for _, kind := range []string{kindAlert, kindReport, kindApproval} {
+		if inboxKinds[kind] != 1 {
+			t.Fatalf("inbox kinds=%v", inboxKinds)
+		}
+	}
+}
+
 func TestReportsAppearInTranscriptAndInbox(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
 	conv := mkConversation(t, app, 41)
 
-	if _, err := app.toolReport(callerCtx(41, ""), ctx, map[string]any{
+	if _, err := app.toolReport(callerCtx(41, "main"), ctx, map[string]any{
 		"conversation_id": conv.ID, "title": "Weekly", "summary": "All good",
 	}); err != nil {
 		t.Fatalf("report: %v", err)
 	}
-	if _, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{
+	if _, err := app.toolSend(boundConversationCaller(t, app, conv, 41), ctx, map[string]any{
 		"conversation_id": conv.ID, "text": "plain message",
 	}); err != nil {
 		t.Fatalf("send: %v", err)
@@ -293,7 +487,7 @@ func TestReportsAppearInTranscriptAndInbox(t *testing.T) {
 func TestInboxPriorityOrdering(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
 	conv := mkConversation(t, app, 41)
-	from := callerCtx(41, "")
+	from := callerCtx(41, "main")
 
 	// Deliberately created in reverse-priority order: the newest row is
 	// the lowest priority, so ordering by recency alone would fail.
@@ -487,6 +681,10 @@ func TestUserMessageForwardFailureIsDurablyQueued(t *testing.T) {
 	if err != nil || delivery.Status != "pending" || delivery.Attempts != 1 {
 		t.Fatalf("inbound delivery = %+v err=%v, want pending attempt", delivery, err)
 	}
+	state, err := app.store.AgentThread(conv.ID, 41)
+	if err != nil || state.ThreadID != conversationThreadID(conv.ID) || state.LastError == "" {
+		t.Fatalf("failed spawn did not retain safe binding: state=%+v err=%v", state, err)
+	}
 }
 
 // ─── thread-per-conversation (channel-chat parity) ───────────────────
@@ -528,6 +726,19 @@ func TestFirstMessageSpawnsConversationThread(t *testing.T) {
 	// MCP nil → the platform fills the agent's spawnable set server-side.
 	if spawn.MCP != nil {
 		t.Fatalf("MCP should be nil (platform default), got %v", spawn.MCP)
+	}
+	if got, want := strings.Join(spawn.Tools, ","), strings.Join(conversationThreadTools, ","); got != want {
+		t.Fatalf("conversation tool preload=%q want=%q", got, want)
+	}
+	for _, forbidden := range []string{"conversations_create", "conversations_list", "conversations_report", "conversations_inbox_post"} {
+		if slices.Contains(spawn.Tools, forbidden) {
+			t.Fatalf("conversation preload contains global/app-only tool %q: %v", forbidden, spawn.Tools)
+		}
+	}
+	for _, required := range []string{"bound only to conversation " + conv.ID, "never send, read, approve, or alert against another conversation id", "do not grant the child Conversations tools"} {
+		if !strings.Contains(spawn.DirectiveSuffix, required) {
+			t.Fatalf("conversation directive missing %q: %s", required, spawn.DirectiveSuffix)
+		}
 	}
 
 	// The initial event was included in the atomic spawn, not sent in a
@@ -652,6 +863,9 @@ func TestChangedDirectiveUsesSDKThreadReconciliation(t *testing.T) {
 	if ensure.ProfileHash == "" || !strings.Contains(ensure.DirectiveSuffix, "Prefer concise") || len(ensure.Events) != 1 {
 		t.Fatalf("ensure=%+v", ensure)
 	}
+	if got, want := strings.Join(ensure.Tools, ","), strings.Join(conversationThreadTools, ","); got != want {
+		t.Fatalf("ensure tool preload=%q want=%q", got, want)
+	}
 	state, err := app.store.AgentThread(conv.ID, 41)
 	if err != nil || state.AppliedHash != ensure.ProfileHash || state.LastError != "" {
 		t.Fatalf("state=%+v err=%v", state, err)
@@ -661,7 +875,8 @@ func TestChangedDirectiveUsesSDKThreadReconciliation(t *testing.T) {
 func TestToolCallIdentityDeduplicatesLifecycleMessage(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
 	conv := mkConversation(t, app, 41)
-	call := callerCtxFull(41, conversationThreadID(conv.ID), "conversation", "call-9")
+	boundConversationCaller(t, app, conv, 41)
+	call := callerCtxCall(41, conversationThreadID(conv.ID), "call-9")
 	args := map[string]any{"conversation_id": conv.ID, "text": "Still working", "phase": "progress"}
 	first, err := app.toolSend(call, ctx, args)
 	if err != nil {
@@ -678,7 +893,7 @@ func TestToolCallIdentityDeduplicatesLifecycleMessage(t *testing.T) {
 	if len(transcript) != 1 || transcript[0].Phase != "progress" {
 		t.Fatalf("transcript=%+v", transcript)
 	}
-	if _, err := app.toolSend(callerCtxFull(41, "main", "main", "call-10"), ctx, args); err == nil {
+	if _, err := app.toolSend(callerCtxCall(41, "main", "call-10"), ctx, args); err == nil {
 		t.Fatal("main thread ordinary reply was allowed")
 	}
 	if _, err := app.toolReport(call, ctx, map[string]any{
@@ -767,7 +982,7 @@ func TestDismissRemovesFromInboxKeepsHistory(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
 	conv := mkConversation(t, app, 41)
 
-	out, err := app.toolAlert(callerCtx(41, ""), ctx, map[string]any{
+	out, err := app.toolAlert(callerCtx(41, "main"), ctx, map[string]any{
 		"conversation_id": conv.ID, "text": "low disk", "severity": "warn",
 	})
 	if err != nil {
@@ -805,7 +1020,7 @@ func TestPendingApprovalsCannotBeDismissed(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
 	conv := mkConversation(t, app, 41)
 
-	out, err := app.toolRequestApproval(callerCtx(41, ""), ctx, map[string]any{
+	out, err := app.toolRequestApproval(callerCtx(41, "main"), ctx, map[string]any{
 		"conversation_id": conv.ID, "title": "Delete everything?",
 	})
 	if err != nil {
@@ -854,7 +1069,7 @@ func TestInboxItemsBroadcastToEveryUserScope(t *testing.T) {
 	// Plain conversation traffic must NOT broadcast — only the owner's
 	// scope and the conversation panel see it.
 	conv := mkConversation(t, app, 41) // owner user 1
-	if _, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{
+	if _, err := app.toolSend(boundConversationCaller(t, app, conv, 41), ctx, map[string]any{
 		"conversation_id": conv.ID, "text": "private chatter",
 	}); err != nil {
 		t.Fatal(err)
@@ -874,7 +1089,7 @@ func TestInboxItemsBroadcastToEveryUserScope(t *testing.T) {
 // converge instead of sprawling.
 func TestCreateListAlertFlow(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
-	from := callerCtx(41, "worker-3")
+	from := callerCtx(41, "main")
 
 	// Omitting the conversation is an error that teaches the flow.
 	if _, err := app.toolAlert(from, ctx, map[string]any{
@@ -938,11 +1153,11 @@ func TestCreateListAlertFlow(t *testing.T) {
 func TestBackgroundApprovalRoundTrip(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
 
-	created, err := app.toolCreate(callerCtx(41, "worker-9"), ctx, map[string]any{"title": "Credential rotation"})
+	created, err := app.toolCreate(callerCtx(41, "main"), ctx, map[string]any{"title": "Credential rotation"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	out, err := app.toolRequestApproval(callerCtx(41, "worker-9"), ctx, map[string]any{
+	out, err := app.toolRequestApproval(callerCtx(41, "main"), ctx, map[string]any{
 		"conversation_id": created.(map[string]any)["conversation_id"].(string),
 		"title":           "Rotate the credentials?",
 	})
@@ -953,8 +1168,8 @@ func TestBackgroundApprovalRoundTrip(t *testing.T) {
 	if _, err := app.resolveApproval(ctx, msg, "approve", "", 1); err != nil {
 		t.Fatal(err)
 	}
-	if len(platform.threadEvents) != 1 || platform.threadEvents[0].Ref.ThreadID != "worker-9" {
-		t.Fatalf("verdict routing = %+v, want thread worker-9", platform.threadEvents)
+	if len(platform.threadEvents) != 1 || platform.threadEvents[0].Ref.ThreadID != "main" {
+		t.Fatalf("verdict routing = %+v, want thread main", platform.threadEvents)
 	}
 }
 
@@ -962,7 +1177,7 @@ func TestBackgroundApprovalRoundTrip(t *testing.T) {
 // with no audience is a mis-used alert, not a send.
 func TestSendStillRequiresConversation(t *testing.T) {
 	app, ctx, _ := newTestEnv(t)
-	if _, err := app.toolSend(callerCtx(41, ""), ctx, map[string]any{"text": "hello?"}); err == nil {
+	if _, err := app.toolSend(callerCtx(41, "unbound-thread"), ctx, map[string]any{"text": "hello?"}); err == nil {
 		t.Fatal("send without conversation_id must fail")
 	}
 }

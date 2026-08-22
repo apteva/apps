@@ -88,7 +88,12 @@ spawned lazily on first inbound message via the SDK's `ThreadClient`
 (`platform.threads.write`). The directive suffix carries the
 conversation's context and reply contract; composition with the agent's
 main directive happens core-side. MCP is left nil so the platform
-supplies the agent's spawnable set. Spawn is idempotent; a changed
+supplies the agent's spawnable set; the immediate tool preload contains only
+the conversation-facing Conversations tools plus its Core coordination tools.
+The app persists each `(conversation, agent, thread)` relationship before Core
+can execute a newly spawned thread. That stored relationship—not an inferred
+platform role—binds every call from the thread to the exact conversation and
+refuses conversation management or reports there. Spawn is idempotent; a changed
 suffix re-spawns (the sidecar-visible approximation of channel-chat's
 drift update). The first inbound message is an idempotent initial event
 inside that same spawn request, so Core persists it before starting the

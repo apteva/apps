@@ -30,6 +30,10 @@ import (
 // JSON-RPC error message (tool errors surface as code -32000 through
 // the real dispatch, which the testkit helpers treat as fatal).
 func mcpErr(t *testing.T, sc *tk.Sidecar, tool string, args map[string]any, agentID int64) string {
+	return mcpErrAsThread(t, sc, tool, args, agentID, "main")
+}
+
+func mcpErrAsThread(t *testing.T, sc *tk.Sidecar, tool string, args map[string]any, agentID int64, threadID string) string {
 	t.Helper()
 	payload, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -40,7 +44,7 @@ func mcpErr(t *testing.T, sc *tk.Sidecar, tool string, args map[string]any, agen
 	req.Header.Set("Authorization", "Bearer "+sc.Token())
 	if agentID != 0 {
 		req.Header.Set("X-Apteva-Caller-Agent", strconv.FormatInt(agentID, 10))
-		req.Header.Set("X-Apteva-Caller-Thread", "main")
+		req.Header.Set("X-Apteva-Caller-Thread", threadID)
 		req.Header.Set("X-Apteva-Project-ID", itProject)
 	}
 	resp, err := http.DefaultClient.Do(req)
@@ -195,7 +199,7 @@ func TestSidecar_AgentToolFlow(t *testing.T) {
 		t.Fatalf("create = %v", created)
 	}
 	again := sc.MCPAs("create",
-		map[string]any{"title": "infra MONITORING"}, 41, "worker-1", itProject)
+		map[string]any{"title": "infra MONITORING"}, 41, "main", itProject)
 	if again["conversation_id"] != convID || again["created"] != false {
 		t.Fatalf("second create = %v, want reuse of %s", again, convID)
 	}
@@ -218,6 +222,61 @@ func TestSidecar_AgentToolFlow(t *testing.T) {
 		map[string]any{"conversation_id": convID}, 41, "main", itProject)
 	if !strings.Contains(fmt.Sprint(history), "disk almost full") {
 		t.Fatalf("history missing the alert: %v", history)
+	}
+}
+
+func TestSidecar_PersistedConversationThreadCannotCrossOrManageGlobally(t *testing.T) {
+	sc := spawnHTTPTestSidecar(t)
+	create := func(title string) string {
+		t.Helper()
+		var conv map[string]any
+		if resp := itHTTP(sc, "POST", "/chats", map[string]any{
+			"agent_id": 41, "title": title,
+		}, &conv); resp.Status != http.StatusOK {
+			t.Fatalf("create %s: %d %s", title, resp.Status, resp.Body)
+		}
+		id, _ := conv["id"].(string)
+		return id
+	}
+	ownedID := create("Owned conversation")
+	targetID := create("Other conversation")
+
+	// The callback fixture intentionally cannot spawn Core. Conversations must
+	// still persist the ownership binding before the attempt, so there is no
+	// first-turn window in which this chat thread looks global.
+	if resp := itHTTP(sc, "POST", "/messages?chat_id="+ownedID, map[string]any{
+		"content": "establish the owning thread", "client_message_id": "bind-1",
+	}, nil); resp.Status != http.StatusOK {
+		t.Fatalf("bind via inbound message: %d %s", resp.Status, resp.Body)
+	}
+	threadID := conversationThreadID(ownedID)
+	for tool, args := range map[string]map[string]any{
+		"send":    {"conversation_id": targetID, "text": "escape"},
+		"alert":   {"conversation_id": targetID, "text": "escape", "severity": "error"},
+		"history": {"conversation_id": targetID},
+	} {
+		msg := mcpErrAsThread(t, sc, tool, args, 41, threadID)
+		if !strings.Contains(msg, "belongs to conversation "+ownedID) {
+			t.Fatalf("%s cross-conversation error=%q", tool, msg)
+		}
+	}
+	for tool, args := range map[string]map[string]any{
+		"create": {"title": "Forbidden"},
+		"list":   {},
+		"report": {"conversation_id": ownedID, "title": "Forbidden", "summary": "Wrong owner"},
+	} {
+		msg := mcpErrAsThread(t, sc, tool, args, 41, threadID)
+		if !strings.Contains(msg, "parent/main") {
+			t.Fatalf("%s bound-thread error=%q", tool, msg)
+		}
+	}
+
+	var targetTranscript []map[string]any
+	if resp := itHTTP(sc, "GET", "/messages?chat_id="+targetID, nil, &targetTranscript); resp.Status != http.StatusOK {
+		t.Fatalf("target transcript: %d %s", resp.Status, resp.Body)
+	}
+	if len(targetTranscript) != 0 {
+		t.Fatalf("cross-conversation attempts wrote target transcript: %v", targetTranscript)
 	}
 }
 
@@ -395,7 +454,7 @@ func TestSidecar_TelegramPublicOnboardingWebhookAndOutboundFlow(t *testing.T) {
 		t.Fatalf("Telegram transcript = %+v", transcript)
 	}
 
-	sc.MCPAs("send", map[string]any{"conversation_id": convID, "text": "real sidecar outbound"}, 41, "main", itProject)
+	sc.MCPAs("send", map[string]any{"conversation_id": convID, "text": "real sidecar outbound"}, 41, conversationThreadID(convID), itProject)
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
 	if len(fixture.spawnEventIDs) != 1 || fixture.threadEvents != 0 ||

@@ -386,7 +386,7 @@ func TestTelegramDeliveryFailureRetriesThroughOutbox(t *testing.T) {
 	conv := mkConversation(t, app, 41)
 	binding := bindTelegramForTest(t, app, conv, "12345", nil)
 	api.failSend = true
-	result, err := app.toolSend(callerCtx(41, "main"), ctx, map[string]any{
+	result, err := app.toolSend(boundConversationCaller(t, app, conv, 41), ctx, map[string]any{
 		"conversation_id": conv.ID, "text": "retry me",
 	})
 	if err != nil {
@@ -821,7 +821,7 @@ func TestTelegramOutboundAdaptsMarkdownWithoutChangingTranscript(t *testing.T) {
 	bindTelegramForTest(t, app, conv, "12345", nil)
 	original := "# Update\n\n**Done** with `job_1`; <internal> stays literal."
 
-	if _, err := app.toolSend(callerCtx(41, "main"), ctx, map[string]any{
+	if _, err := app.toolSend(boundConversationCaller(t, app, conv, 41), ctx, map[string]any{
 		"conversation_id": conv.ID, "text": original,
 	}); err != nil {
 		t.Fatalf("toolSend: %v", err)

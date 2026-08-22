@@ -61,3 +61,43 @@ func TestManifestToolsMatchCode(t *testing.T) {
 		}
 	}
 }
+
+func TestConversationOwnershipIsTaughtAtEveryModelSurface(t *testing.T) {
+	app := &App{}
+	descriptions := map[string]string{}
+	for _, tool := range app.MCPTools() {
+		descriptions[tool.Name] = tool.Description
+	}
+	wants := map[string][]string{
+		"send":             {"originating conversation thread", "generic workers report to their parent"},
+		"request_approval": {"owned by main or by the originating conversation", "Generic workers report"},
+		"report":           {"Main-thread global output only", "generic workers report results"},
+		"alert":            {"global alert from main", "conversation-local urgent alert", "Generic workers report"},
+		"create":           {"Main-thread conversation management only", "generic workers do not create"},
+		"list":             {"Main-thread conversation management only", "generic workers report"},
+		"history":          {"conversation thread may read only its own exact conversation", "generic workers are not granted"},
+	}
+	for tool, fragments := range wants {
+		for _, fragment := range fragments {
+			if !strings.Contains(descriptions[tool], fragment) {
+				t.Errorf("%s description missing %q:\n%s", tool, fragment, descriptions[tool])
+			}
+		}
+	}
+
+	skill, err := os.ReadFile("skills/using-conversations.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{
+		"Threads are opaque identifiers",
+		"Generic workers never publish through Conversations",
+		"do not grant the Conversations MCP",
+		"worker needs approval, it reports the exact",
+		"same capability-ownership pattern used by Tasks",
+	} {
+		if !strings.Contains(string(skill), fragment) {
+			t.Errorf("using-conversations skill missing %q", fragment)
+		}
+	}
+}

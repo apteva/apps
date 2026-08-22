@@ -30,6 +30,25 @@ Telegram formatting while the dashboard renders the stored Markdown. When
 showing a specific supported entity, attach the matching component card in the
 SAME send call as the text — never a second component-only message.
 
+## Thread ownership and delegation
+
+Threads are opaque identifiers; never infer a platform role from their name.
+Conversations records which thread belongs to each conversation and enforces
+that a bound conversation thread can operate only on that conversation.
+
+The agent's main thread owns conversation discovery and creation, global
+reports, and autonomous alerts. A conversation thread owns the visible reply,
+history, approvals, and urgent local alerts for the conversation named in its
+context. Main never writes an ordinary chat reply directly: it sends the result
+to the originating conversation thread, which communicates with the person.
+
+Generic workers never publish through Conversations. When spawning a worker,
+do not grant the Conversations MCP or any `conversations_*` tool. Give it only
+the domain tools it needs and require it to report milestones, blockers, and
+its final result to its parent. If a worker needs approval, it reports the exact
+blocked decision to its parent; the parent requests approval and returns the
+verdict. This is the same capability-ownership pattern used by Tasks.
+
 ## Where inbox items live: list, reuse, create
 
 Every alert, report, and approval needs a `conversation_id` — there is
@@ -55,12 +74,13 @@ into it and the dialogue stays on-topic.
 
 ## The inbox kinds — one global output surface
 
-Alerts and reports are the agent's single operator-output surface,
-owned by the main thread: worker threads report results back to main,
-and main decides what becomes a global alert or report. The exception
-is approvals — request one from the thread that owns the gated work,
-because the verdict returns to the asking thread. (Agent status lives
-in the status app, not here.)
+Alerts and reports are the agent's single operator-output surface. Main owns
+global and autonomous alerts and every report. A conversation thread may raise
+an urgent alert caused by work originating in that conversation, and main or
+the originating conversation thread may request approval for work it owns.
+Generic workers always report the condition or blocked decision to their
+parent instead. The approval verdict returns to the asking main/conversation
+thread. (Agent status lives in the status app, not here.)
 
 - `conversations_alert` — a genuinely urgent or materially important
   problem: what broke, its impact, the next action. Severity honestly:
@@ -105,8 +125,10 @@ decides in the inbox, and you relay the outcome.
 ## Reading context
 
 - `conversations_history` — the transcript, for joining mid-way or
-  recalling what was said.
-- `conversations_list` — the conversations you participate in.
+  recalling what was said. A conversation thread reads only the exact
+  conversation in its context.
+- `conversations_list` — main lists the conversations the agent participates
+  in. A conversation thread already has its authoritative id.
 
 ## Rooms and Telegram
 

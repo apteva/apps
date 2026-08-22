@@ -175,6 +175,84 @@ func TestLive_CodexChatRoundTrip(t *testing.T) {
 	t.Fatal("no agent reply within 120s")
 }
 
+// TestLive_CodexTwoConversationIsolation proves that one agent can hold two
+// simultaneous Conversations threads without replies crossing between them.
+func TestLive_CodexTwoConversationIsolation(t *testing.T) {
+	c := newLiveClient(t)
+	agentID, cleanupAgent := c.ensureAgent()
+	defer cleanupAgent()
+
+	create := func(title string) string {
+		t.Helper()
+		var conv struct {
+			ID string `json:"id"`
+		}
+		status := c.do("POST", "/api/apps/conversations/chats", map[string]any{
+			"agent_id": agentID, "title": title,
+		}, &conv)
+		if status != http.StatusOK || conv.ID == "" {
+			t.Fatalf("create %s: status=%d conv=%+v", title, status, conv)
+		}
+		return conv.ID
+	}
+	firstID := create("Live isolation alpha")
+	secondID := create("Live isolation beta")
+	defer c.deleteConversation(firstID)
+	defer c.deleteConversation(secondID)
+
+	post := func(conversationID, word, clientID string) {
+		t.Helper()
+		status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conversationID, map[string]any{
+			"content": "Reply with exactly one word: " + word, "client_message_id": clientID,
+		}, nil)
+		if status != http.StatusOK {
+			t.Fatalf("post %s: status=%d", word, status)
+		}
+	}
+	agentReplies := func(conversationID string) []string {
+		t.Helper()
+		var transcript []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conversationID, nil, &transcript)
+		var replies []string
+		for _, message := range transcript {
+			if message.Role == "agent" {
+				replies = append(replies, strings.ToLower(message.Content))
+			}
+		}
+		return replies
+	}
+	waitFor := func(conversationID, word string) {
+		t.Helper()
+		deadline := time.Now().Add(120 * time.Second)
+		for time.Now().Before(deadline) {
+			for _, reply := range agentReplies(conversationID) {
+				if strings.Contains(reply, word) {
+					return
+				}
+			}
+			time.Sleep(4 * time.Second)
+		}
+		t.Fatalf("conversation %s received no %q reply", conversationID, word)
+	}
+
+	post(firstID, "alpha", "live-isolation-alpha")
+	waitFor(firstID, "alpha")
+	if replies := agentReplies(secondID); len(replies) != 0 {
+		t.Fatalf("alpha reply crossed into second conversation: %v", replies)
+	}
+	post(secondID, "beta", "live-isolation-beta")
+	waitFor(secondID, "beta")
+	for _, reply := range agentReplies(firstID) {
+		if strings.Contains(reply, "beta") {
+			t.Fatalf("beta reply crossed into first conversation: %v", reply)
+		}
+	}
+	t.Logf("isolated replies stayed in %s and %s", firstID, secondID)
+}
+
 // ─── background scenarios (the manually-proven suite, codified) ─────
 
 func (c *liveClient) injectEvent(agentID int64, text string) {
