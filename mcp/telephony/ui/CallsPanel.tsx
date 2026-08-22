@@ -1856,7 +1856,19 @@ async function postJSON<T>(url: string, body: Record<string, unknown>): Promise<
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const text = await res.text();
+    let message = text;
+    try {
+      const payload = JSON.parse(text) as { error?: string; message?: string; errors?: string[]; numbers?: Array<{ phone_number?: string; route_id?: string; errors?: string[] }> };
+      const details = [
+        ...(payload.errors || []),
+        ...(payload.numbers || []).flatMap((number) => (number.errors || []).map((error) => `${number.phone_number || number.route_id || "Number"}: ${error}`)),
+      ];
+      message = details.join(" · ") || payload.error || payload.message || text;
+    } catch {}
+    throw new Error(message);
+  }
   return await res.json() as T;
 }
 
@@ -2789,9 +2801,10 @@ interface RoutingDestination {
 }
 interface RingMember { destination_id: string; enabled: boolean; position?: number; priority?: number; weight?: number; timeout_sec?: number }
 interface RoutingGroup { id: string; name: string; strategy: string; timeout_sec: number; members: RingMember[]; enabled: boolean }
-interface RoutingRoute { id: string; phone_number: string; flow_id?: string; published_flow_version_id?: string; enabled: boolean }
+interface RoutingRoute { id: string; phone_number: string; carrier?: string; recording_mode?: string; flow_id?: string; published_flow_version_id?: string; routing_variables?: Record<string, unknown>; enabled: boolean }
 interface RoutingSnapshot { flows: RoutingFlow[]; destinations: RoutingDestination[]; ring_groups: RoutingGroup[]; routes: RoutingRoute[]; node_types: string[] }
 interface RoutingSimulation { valid: boolean; errors?: string[]; trace?: Array<{ node_id: string; node_type: string; label?: string; outcome: string; next?: string }>; destination_id?: string; ring_group_id?: string; terminal_type?: string }
+interface RoutingBulkValidation { valid: boolean; errors?: string[]; numbers: Array<{ route_id: string; phone_number?: string; carrier?: string; valid: boolean; errors?: string[] }> }
 
 const NODE_LABELS: Record<string, string> = {
   announcement: "Announcement", schedule: "Business hours", caller_match: "Caller rule",
@@ -2821,7 +2834,7 @@ function routingFlowSummary(flow?: RoutingFlow) {
 
 function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativePanelProps & { onOpenNumbers: () => void; onOpenAdvanced: () => void }) {
   const [snapshot, setSnapshot] = useState<RoutingSnapshot>({ flows: [], destinations: [], ring_groups: [], routes: [], node_types: [] });
-  const [routeId, setRouteId] = useState("");
+  const [routeIds, setRouteIds] = useState<string[]>([]);
   const [kind, setKind] = useState<GuidedRouteKind>("browser");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -2839,6 +2852,9 @@ function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativeP
   const [closeAt, setCloseAt] = useState("18:00");
   const [timezone, setTimezone] = useState("Europe/Paris");
   const [hoursDestination, setHoursDestination] = useState("__browser__");
+  const [managedFlowId, setManagedFlowId] = useState("");
+  const [managedRouteIds, setManagedRouteIds] = useState<string[]>([]);
+  const [numberVariables, setNumberVariables] = useState({ alias: "", brand: "", locale: "", timezone: "", greeting: "", tags: "", recording_mode: "inherit" });
 
   const api = useCallback((path: string) => `${API}${path}${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`, [projectId]);
   const load = useCallback(async () => {
@@ -2848,7 +2864,10 @@ function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativeP
       if (!response.ok) throw new Error(await response.text());
       const data = await response.json() as RoutingSnapshot;
       setSnapshot(data);
-      setRouteId((current) => data.routes.some((route) => route.id === current) ? current : (data.routes[0]?.id || ""));
+      setRouteIds((current) => {
+        const retained = current.filter((id) => data.routes.some((route) => route.id === id));
+        return retained.length ? retained : (data.routes[0] ? [data.routes[0].id] : []);
+      });
     } catch (error) {
       setStatus((error as Error).message || "Could not load call routing");
     } finally {
@@ -2858,10 +2877,25 @@ function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativeP
 
   useEffect(() => { void load(); }, [load]);
 
-  const selectedRoute = snapshot.routes.find((route) => route.id === routeId);
-  const activeFlow = snapshot.flows.find((flow) => flow.id === selectedRoute?.flow_id);
+  const selectedRoutes = snapshot.routes.filter((route) => routeIds.includes(route.id));
+  const selectedRoute = selectedRoutes[0];
   const publishedFlows = snapshot.flows.filter((flow) => flow.published_version_id);
   const selectableDestinations = snapshot.destinations.filter((destination) => destination.enabled && ["browser", "agent", "ai"].includes(destination.kind));
+  const selectedLabel = selectedRoutes.length === 1 ? selectedRoutes[0].phone_number : `${selectedRoutes.length} numbers`;
+
+  useEffect(() => {
+    if (selectedRoutes.length !== 1) {
+      setNumberVariables({ alias: "", brand: "", locale: "", timezone: "", greeting: "", tags: "", recording_mode: "inherit" });
+      return;
+    }
+    const variables = selectedRoutes[0].routing_variables || {};
+    setNumberVariables({
+      alias: String(variables.alias || ""), brand: String(variables.brand || ""), locale: String(variables.locale || ""),
+      timezone: String(variables.timezone || ""), greeting: String(variables.greeting || ""),
+      tags: Array.isArray(variables.tags) ? variables.tags.join(", ") : String(variables.tags || ""),
+      recording_mode: String(variables.recording_mode || selectedRoutes[0].recording_mode || "inherit"),
+    });
+  }, [routeIds.join("|"), snapshot.routes]);
 
   const ensureBrowserDestination = async () => {
     const existing = snapshot.destinations.find((destination) => destination.enabled && destination.kind === "browser");
@@ -2889,7 +2923,7 @@ function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativeP
     if (kind === "team") {
       if (!teamMembers.length) throw new Error("Choose at least one team member.");
       const members = await Promise.all(teamMembers.map(resolveDestination));
-      const group = await postJSON<RoutingGroup>(api("/routing/ring-groups/save"), { name: `${selectedRoute?.phone_number || "Number"} team`, strategy: teamStrategy, timeout_sec: 20, members: members.map((destination_id) => ({ destination_id, enabled: true })) });
+      const group = await postJSON<RoutingGroup>(api("/routing/ring-groups/save"), { name: `${selectedLabel || "Numbers"} team`, strategy: teamStrategy, timeout_sec: 20, members: members.map((destination_id) => ({ destination_id, enabled: true })) });
       return { entry: "team", nodes: [{ id: "team", type: "ring_group", label: "Ring the team", config: { ring_group_id: group.id } }] };
     }
     if (kind === "menu") {
@@ -2912,18 +2946,19 @@ function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativeP
   };
 
   const activate = async () => {
-    if (!selectedRoute) return;
+    if (!selectedRoutes.length) return;
     setBusy(true); setStatus("");
     try {
       const definition = await buildDefinition();
-      const shared = snapshot.routes.filter((route) => route.flow_id && route.flow_id === selectedRoute.flow_id).length > 1;
-      const editableFlowId = selectedRoute.flow_id && !shared ? selectedRoute.flow_id : "";
-      const title = `${selectedRoute.phone_number} · ${GUIDED_ROUTE_OPTIONS.find((option) => option.id === kind)?.title || "Routing"}`;
-      const saved = await postJSON<RoutingFlow>(api("/routing/flows/save"), { id: editableFlowId, name: title, description: `Routing for ${selectedRoute.phone_number}`, draft: definition });
+      const shared = selectedRoutes.length === 1 && snapshot.routes.filter((route) => route.flow_id && route.flow_id === selectedRoute.flow_id).length > 1;
+      const editableFlowId = selectedRoutes.length === 1 && selectedRoute.flow_id && !shared ? selectedRoute.flow_id : "";
+      const title = `${selectedLabel} · ${GUIDED_ROUTE_OPTIONS.find((option) => option.id === kind)?.title || "Routing"}`;
+      const saved = await postJSON<RoutingFlow>(api("/routing/flows/save"), { id: editableFlowId, name: title, description: `Shared routing for ${selectedLabel}`, draft: definition });
       const published = await postJSON<{ valid: boolean; errors?: string[] }>(api("/routing/flows/publish"), { id: saved.id });
       if (!published.valid) throw new Error((published.errors || ["This routing could not be activated."]).join(" · "));
-      await postJSON(api("/routing/routes/assign"), { route_id: selectedRoute.id, flow_id: saved.id });
-      setStatus(`Routing is active for ${selectedRoute.phone_number}.`);
+      const variablesByRoute = selectedRoutes.length === 1 ? { [selectedRoute.id]: { ...numberVariables, tags: numberVariables.tags.split(",").map((tag) => tag.trim()).filter(Boolean) } } : {};
+      await postJSON<RoutingBulkValidation>(api("/routing/flows/numbers/assign"), { route_ids: routeIds, flow_id: saved.id, variables_by_route: variablesByRoute });
+      setStatus(`Routing is active for ${selectedLabel}.`);
       await load();
     } catch (error) {
       setStatus((error as Error).message || "Could not activate routing");
@@ -2933,13 +2968,47 @@ function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativeP
   };
 
   const usePublishedFlow = async (flow: RoutingFlow) => {
-    if (!selectedRoute) return;
+    if (!selectedRoutes.length) return;
     setBusy(true); setStatus("");
     try {
-      await postJSON(api("/routing/routes/assign"), { route_id: selectedRoute.id, flow_id: flow.id });
-      setStatus(`${flow.name} is now active for ${selectedRoute.phone_number}.`);
+      const variablesByRoute = selectedRoutes.length === 1 ? { [selectedRoute.id]: { ...numberVariables, tags: numberVariables.tags.split(",").map((tag) => tag.trim()).filter(Boolean) } } : {};
+      await postJSON(api("/routing/flows/numbers/assign"), { route_ids: routeIds, flow_id: flow.id, variables_by_route: variablesByRoute });
+      setStatus(`${flow.name} is now active for ${selectedLabel}.`);
       await load();
     } catch (error) { setStatus((error as Error).message || "Could not activate this flow"); }
+    finally { setBusy(false); }
+  };
+
+  const openNumberManager = (flow: RoutingFlow) => {
+    setManagedFlowId((current) => current === flow.id ? "" : flow.id);
+    setManagedRouteIds(snapshot.routes.filter((route) => route.flow_id === flow.id).map((route) => route.id));
+    setStatus("");
+  };
+
+  const saveManagedNumbers = async (flow: RoutingFlow) => {
+    setBusy(true); setStatus("");
+    try {
+      const currentlyAssigned = snapshot.routes.filter((route) => route.flow_id === flow.id).map((route) => route.id);
+      const additions = managedRouteIds.filter((routeId) => !currentlyAssigned.includes(routeId));
+      const removals = currentlyAssigned.filter((routeId) => !managedRouteIds.includes(routeId));
+      if (additions.length) await postJSON(api("/routing/flows/numbers/assign"), { flow_id: flow.id, route_ids: additions });
+      if (removals.length) await postJSON(api("/routing/flows/numbers/unassign"), { flow_id: flow.id, route_ids: removals });
+      setStatus(`${flow.name} now serves ${managedRouteIds.length} ${managedRouteIds.length === 1 ? "number" : "numbers"}.`);
+      setManagedFlowId("");
+      await load();
+    } catch (error) { setStatus((error as Error).message || "Could not update assigned numbers"); }
+    finally { setBusy(false); }
+  };
+
+  const duplicateFlow = async (flow: RoutingFlow) => {
+    setBusy(true); setStatus("");
+    try {
+      const copy = await postJSON<RoutingFlow>(api("/routing/flows/save"), { name: `${flow.name} copy`, description: flow.description || "", draft: flow.draft });
+      const published = await postJSON<{ valid: boolean; errors?: string[] }>(api("/routing/flows/publish"), { id: copy.id });
+      if (!published.valid) throw new Error((published.errors || ["Could not publish the copy."]).join(" · "));
+      setStatus(`${copy.name} was created without changing live numbers.`);
+      await load();
+    } catch (error) { setStatus((error as Error).message || "Could not duplicate flow"); }
     finally { setBusy(false); }
   };
 
@@ -2965,13 +3034,15 @@ function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativeP
         </header>
 
         <section className="mt-6 rounded-lg border border-border p-4">
-          <div className="flex items-center gap-3"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-sm font-semibold text-bg">1</span><div><h2 className="text-sm font-semibold">Which number?</h2><p className="text-xs text-text-muted">Each number can use a different routing flow.</p></div></div>
+          <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-sm font-semibold text-bg">1</span><div><h2 className="text-sm font-semibold">Which numbers?</h2><p className="text-xs text-text-muted">Choose one number or apply the same routing to several.</p></div></div><div className="flex gap-2"><button type="button" onClick={() => setRouteIds(snapshot.routes.map((route) => route.id))} className="h-8 rounded border border-border px-2 text-xs">Select all</button><button type="button" onClick={() => setRouteIds([])} className="h-8 rounded border border-border px-2 text-xs">Clear</button></div></div>
           <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {snapshot.routes.map((route) => {
               const flow = snapshot.flows.find((item) => item.id === route.flow_id);
-              return <button type="button" key={route.id} onClick={() => { setRouteId(route.id); setStatus(""); }} className={`rounded-lg border p-3 text-left transition ${routeId === route.id ? "border-accent bg-accent/5" : "border-border hover:bg-bg-muted/50"}`}><div className="font-mono text-sm font-semibold">{route.phone_number}</div><div className="mt-1 flex items-center gap-2 text-xs"><span className={`h-2 w-2 rounded-full ${flow?.published_version_id ? "bg-success" : "bg-text-dim"}`} /><span className="truncate text-text-muted">{routingFlowSummary(flow)}</span></div></button>;
+              const checked = routeIds.includes(route.id);
+              return <label key={route.id} className={`cursor-pointer rounded-lg border p-3 text-left transition ${checked ? "border-accent bg-accent/5" : "border-border hover:bg-bg-muted/50"}`}><div className="flex items-center gap-2"><input type="checkbox" checked={checked} onChange={(event) => { setRouteIds(event.target.checked ? [...routeIds, route.id] : routeIds.filter((id) => id !== route.id)); setStatus(""); }} /><span className="font-mono text-sm font-semibold">{route.phone_number}</span>{route.carrier ? <span className="ml-auto text-xs capitalize text-text-dim">{route.carrier}</span> : null}</div><div className="mt-1 flex items-center gap-2 pl-5 text-xs"><span className={`h-2 w-2 rounded-full ${flow?.published_version_id ? "bg-success" : "bg-text-dim"}`} /><span className="truncate text-text-muted">{routingFlowSummary(flow)}</span></div></label>;
             })}
           </div>
+          {selectedRoutes.length === 1 ? <details className="mt-3 rounded border border-border bg-bg-muted/20 p-3"><summary className="cursor-pointer text-xs font-medium">Optional settings for {selectedRoute.phone_number}</summary><p className="mt-2 text-xs text-text-muted">These values belong to this number even when it shares a flow. Advanced flows can use templates such as {"{{number.brand}}"}.</p><div className="mt-3 grid gap-3 md:grid-cols-2"><Field label="Internal name" value={numberVariables.alias} onChange={(alias) => setNumberVariables({ ...numberVariables, alias })} /><Field label="Brand" value={numberVariables.brand} onChange={(brand) => setNumberVariables({ ...numberVariables, brand })} /><Field label="Locale" value={numberVariables.locale} onChange={(locale) => setNumberVariables({ ...numberVariables, locale })} /><Field label="Timezone" value={numberVariables.timezone} onChange={(timezone) => setNumberVariables({ ...numberVariables, timezone })} /><Field label="Greeting override" value={numberVariables.greeting} onChange={(greeting) => setNumberVariables({ ...numberVariables, greeting })} /><Field label="Tags (comma separated)" value={numberVariables.tags} onChange={(tags) => setNumberVariables({ ...numberVariables, tags })} /><label className="block"><span className="mb-1 block text-xs text-text-muted">Recording</span><select value={numberVariables.recording_mode} onChange={(event) => setNumberVariables({ ...numberVariables, recording_mode: event.target.value })} className="h-9 w-full rounded border border-border bg-bg px-3 text-sm"><option value="inherit">Use project default</option><option value="off">Never record</option><option value="always">Always record</option></select></label></div></details> : null}
         </section>
 
         <section className="mt-4 rounded-lg border border-border p-4">
@@ -2990,11 +3061,15 @@ function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativeP
         </section>
 
         <section className="mt-4 rounded-lg border border-border p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-sm font-semibold text-bg">3</span><div><h2 className="text-sm font-semibold">Activate for {selectedRoute?.phone_number}</h2><p className="text-xs text-text-muted">The previous active routing is replaced only for this number.</p></div></div><button type="button" disabled={busy || !selectedRoute} onClick={activate} className="h-10 rounded bg-accent px-5 text-sm font-semibold text-bg disabled:opacity-50">{busy ? "Activating…" : "Activate routing"}</button></div>
+          <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-sm font-semibold text-bg">3</span><div><h2 className="text-sm font-semibold">Activate for {selectedRoutes.length ? selectedLabel : "selected numbers"}</h2><p className="text-xs text-text-muted">All selected numbers are validated first. If one is incompatible, none are changed.</p></div></div><button type="button" disabled={busy || !selectedRoutes.length} onClick={activate} className="h-10 rounded bg-accent px-5 text-sm font-semibold text-bg disabled:opacity-50">{busy ? "Activating…" : `Activate for ${selectedRoutes.length || 0}`}</button></div>
           {status ? <div className={`mt-3 rounded border px-3 py-2 text-sm ${status.includes("active") || status.includes("now") ? "border-success/30 bg-success/5 text-success" : "border-danger/30 bg-danger/5 text-danger"}`}>{status}</div> : null}
         </section>
 
-        {publishedFlows.length ? <section className="mt-6"><div className="flex items-end justify-between gap-3"><div><h2 className="text-sm font-semibold">Reusable flows</h2><p className="mt-1 text-xs text-text-muted">You can keep several IVRs and reuse one on another number.</p></div><button type="button" onClick={onOpenAdvanced} className="text-xs text-accent hover:underline">Manage all flows</button></div><div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{publishedFlows.map((flow) => <div key={flow.id} className="rounded-lg border border-border p-3"><div className="flex items-center justify-between gap-2"><span className="truncate text-sm font-medium">{flow.name}</span>{flow.id === selectedRoute?.flow_id ? <span className="rounded bg-success/10 px-1.5 py-0.5 text-xs text-success">Active</span> : null}</div><p className="mt-1 text-xs text-text-muted">{routingFlowSummary(flow)}</p>{flow.id !== selectedRoute?.flow_id ? <button type="button" disabled={busy} onClick={() => void usePublishedFlow(flow)} className="mt-3 h-8 rounded border border-border px-2 text-xs hover:bg-bg-muted">Use for this number</button> : null}</div>)}</div></section> : null}
+        {publishedFlows.length ? <section className="mt-6"><div className="flex items-end justify-between gap-3"><div><h2 className="text-sm font-semibold">Reusable flows</h2><p className="mt-1 text-xs text-text-muted">One IVR can serve any number of inbound lines. Publishing it updates future calls on every assigned number.</p></div><button type="button" onClick={onOpenAdvanced} className="text-xs text-accent hover:underline">Manage all flows</button></div><div className="mt-2 space-y-2">{publishedFlows.map((flow) => {
+          const assigned = snapshot.routes.filter((route) => route.flow_id === flow.id);
+          const activeForEverySelected = selectedRoutes.length > 0 && selectedRoutes.every((route) => route.flow_id === flow.id);
+          return <div key={flow.id} className="rounded-lg border border-border p-3"><div className="flex flex-wrap items-start justify-between gap-2"><div className="min-w-0"><div className="flex items-center gap-2"><span className="truncate text-sm font-medium">{flow.name}</span>{activeForEverySelected ? <span className="rounded bg-success/10 px-1.5 py-0.5 text-xs text-success">Selected numbers use this</span> : null}</div><p className="mt-1 text-xs text-text-muted">{routingFlowSummary(flow)} · {assigned.length} {assigned.length === 1 ? "number" : "numbers"}</p><div className="mt-2 flex flex-wrap gap-1">{assigned.length ? assigned.map((route) => <span key={route.id} className="rounded bg-bg-muted px-1.5 py-0.5 font-mono text-xs text-text-muted">{route.phone_number}</span>) : <span className="text-xs text-text-dim">Not assigned yet</span>}</div></div><div className="flex flex-wrap gap-2"><button type="button" disabled={busy || !selectedRoutes.length || activeForEverySelected} onClick={() => void usePublishedFlow(flow)} className="h-8 rounded border border-border px-2 text-xs disabled:opacity-50">Use for selected</button><button type="button" disabled={busy} onClick={() => openNumberManager(flow)} className="h-8 rounded border border-border px-2 text-xs">Manage numbers</button><button type="button" disabled={busy} onClick={() => void duplicateFlow(flow)} className="h-8 rounded border border-border px-2 text-xs">Duplicate</button></div></div>{managedFlowId === flow.id ? <div className="mt-3 rounded border border-border bg-bg-muted/20 p-3"><div className="flex flex-wrap gap-2">{snapshot.routes.map((route) => <label key={route.id} className="flex cursor-pointer items-center gap-2 rounded border border-border bg-bg px-2 py-1.5 text-xs"><input type="checkbox" checked={managedRouteIds.includes(route.id)} onChange={(event) => setManagedRouteIds(event.target.checked ? [...managedRouteIds, route.id] : managedRouteIds.filter((id) => id !== route.id))} /><span className="font-mono">{route.phone_number}</span>{route.flow_id && route.flow_id !== flow.id ? <span className="text-warning">moves from another flow</span> : null}</label>)}</div><div className="mt-3 flex items-center justify-between gap-3"><p className="text-xs text-text-muted">Changing these assignments does not alter the flow itself.</p><button type="button" disabled={busy} onClick={() => void saveManagedNumbers(flow)} className="h-8 rounded bg-accent px-3 text-xs font-medium text-bg">Save number assignments</button></div></div> : null}</div>;
+        })}</div></section> : null}
       </div>
     </div>
   );
@@ -3020,7 +3095,7 @@ function AdvancedRoutingEditor({ projectId }: NativePanelProps) {
   const [busy, setBusy] = useState(false);
   const [simulation, setSimulation] = useState<RoutingSimulation | null>(null);
   const [caller, setCaller] = useState("+33600000000");
-  const [routeId, setRouteId] = useState("");
+  const [routeIds, setRouteIds] = useState<string[]>([]);
   const [destinationForm, setDestinationForm] = useState({ name: "Browser operator", kind: "browser", target: "", directive: "" });
   const [groupForm, setGroupForm] = useState({ name: "Team", strategy: "simultaneous", timeout_sec: 20, members: [] as string[] });
 
@@ -3036,9 +3111,12 @@ function AdvancedRoutingEditor({ projectId }: NativePanelProps) {
         const flow = data.flows.find((item) => item.id === id);
         if (flow) { setSelectedId(flow.id); setFlowName(flow.name); setDescription(flow.description || ""); setDraft(flow.draft); }
       }
-      if (!routeId && data.routes[0]) setRouteId(data.routes[0].id);
+      setRouteIds((current) => {
+        const retained = current.filter((routeId) => data.routes.some((route) => route.id === routeId));
+        return retained.length ? retained : (data.routes[0] ? [data.routes[0].id] : []);
+      });
     } catch (error) { setStatus((error as Error).message || "Could not load routing"); }
-  }, [api, routeId, selectedId]);
+  }, [api, selectedId]);
 
   useEffect(() => { void load(); }, [projectId]);
 
@@ -3077,9 +3155,9 @@ function AdvancedRoutingEditor({ projectId }: NativePanelProps) {
     } catch (error) { setStatus((error as Error).message || "Simulation failed"); } finally { setBusy(false); }
   };
   const assign = async () => {
-    if (!routeId || !selectedId) return;
+    if (!routeIds.length || !selectedId) return;
     setBusy(true);
-    try { await postJSON(api("/routing/routes/assign"), { route_id: routeId, flow_id: selectedId }); setStatus("Published flow assigned to number"); await load(selectedId); }
+    try { await postJSON(api("/routing/flows/numbers/assign"), { route_ids: routeIds, flow_id: selectedId }); setStatus(`Published flow assigned to ${routeIds.length} ${routeIds.length === 1 ? "number" : "numbers"}`); await load(selectedId); }
     catch (error) { setStatus((error as Error).message || "Could not assign flow"); } finally { setBusy(false); }
   };
 
@@ -3127,7 +3205,7 @@ function AdvancedRoutingEditor({ projectId }: NativePanelProps) {
         {snapshot.flows.map((flow) => (
           <button type="button" key={flow.id} onClick={() => selectFlow(flow)} className={`w-full border-b border-border/70 p-3 text-left hover:bg-bg-muted/60 ${selectedId === flow.id ? "bg-bg-muted" : ""}`}>
             <div className="flex items-center justify-between gap-2"><span className="truncate text-sm font-medium">{flow.name}</span><span className={`rounded border px-1.5 py-0.5 text-xs ${flow.published_version_id ? "border-success/30 bg-success/10 text-success" : "border-border text-text-muted"}`}>{flow.published_version_id ? "Live" : "Draft"}</span></div>
-            <div className="mt-1 truncate text-xs text-text-dim">{flow.generated ? "Existing route" : `${flow.draft.nodes.length} nodes`}</div>
+            <div className="mt-1 truncate text-xs text-text-dim">{flow.generated ? "Existing route" : `${flow.draft.nodes.length} nodes`} · {snapshot.routes.filter((route) => route.flow_id === flow.id).length} numbers</div>
           </button>
         ))}
       </aside>
@@ -3176,8 +3254,8 @@ function AdvancedRoutingEditor({ projectId }: NativePanelProps) {
         <section className="rounded border border-border p-3">
           <h3 className="text-sm font-semibold">Test and assign</h3>
           <Field label="Simulated caller" value={caller} onChange={setCaller} />
-          <label className="mt-2 block"><span className="mb-1 block text-xs text-text-muted">Inbound number</span><select value={routeId} onChange={(event) => setRouteId(event.target.value)} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="">Select a number</option>{snapshot.routes.map((route) => <option value={route.id} key={route.id}>{route.phone_number}{route.flow_id === selectedId ? " · assigned" : ""}</option>)}</select></label>
-          <button type="button" onClick={assign} disabled={busy || !selected?.published_version_id || !routeId} className="mt-2 h-9 w-full rounded border border-border text-sm disabled:opacity-50">Assign published flow</button>
+          <div className="mt-2"><div className="mb-1 flex items-center justify-between"><span className="text-xs text-text-muted">Inbound numbers</span><button type="button" onClick={() => setRouteIds(snapshot.routes.map((route) => route.id))} className="text-xs text-accent">Select all</button></div><div className="max-h-48 space-y-1 overflow-auto rounded border border-border p-2">{snapshot.routes.map((route) => <label key={route.id} className="flex cursor-pointer items-center gap-2 text-xs"><input type="checkbox" checked={routeIds.includes(route.id)} onChange={(event) => setRouteIds(event.target.checked ? [...routeIds, route.id] : routeIds.filter((id) => id !== route.id))} /><span className="font-mono">{route.phone_number}</span>{route.flow_id === selectedId ? <span className="ml-auto text-success">assigned</span> : null}</label>)}</div></div>
+          <button type="button" onClick={assign} disabled={busy || !selected?.published_version_id || !routeIds.length} className="mt-2 h-9 w-full rounded border border-border text-sm disabled:opacity-50">Assign to {routeIds.length || 0} selected</button>
         </section>
 
         <section className="rounded border border-border p-3 space-y-2">

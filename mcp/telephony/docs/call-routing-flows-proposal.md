@@ -40,6 +40,24 @@ Target:  number -> route -> published flow -> destinations
 Each call pins the exact flow version it started with. Publishing a new version
 only affects new calls.
 
+### Shared flows across inbound numbers
+
+One published flow may serve many inbound routes, including routes backed by
+different carriers. Each number still has exactly one active flow assignment.
+Bulk assignment validates every selected route before opening a transaction;
+if one route cannot support the flow, no assignment is changed.
+
+Assignments may store project-safe per-number variables such as `brand`,
+`locale`, `alias`, `timezone`, `greeting`, `tags`, and metadata. Flow and
+destination strings may reference scalar values with templates such as
+`{{number.brand}}`; the runtime expands them only after pinning the immutable
+published version. `recording_mode` is validated against the number's provider
+and transport and updates the route recording policy in the same transaction.
+
+Publishing a shared flow affects future calls on every assigned number. The UI
+therefore shows all assigned numbers and offers an explicit duplicate action
+for creating an independent flow before editing.
+
 ## Flow Nodes
 
 | Category | Nodes |
@@ -216,6 +234,10 @@ Project-management tools:
 - `telephony_flows_simulate`
 - `telephony_flows_publish`
 - `telephony_routes_set_flow`
+- `telephony_flows_validate_numbers`
+- `telephony_flows_assign_numbers`
+- `telephony_flows_unassign_numbers`
+- `telephony_flows_list_numbers`
 - `telephony_destinations_create`
 - `telephony_destinations_update`
 - `telephony_destinations_list`

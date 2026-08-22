@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.3.1
+version: 0.3.2
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -114,6 +114,10 @@ provides:
     - { name: telephony_ring_groups_create, description: "Create a ring group." }
     - { name: telephony_ring_groups_list, description: "List ring groups." }
     - { name: telephony_routes_set_flow, description: "Assign a published flow to an inbound route." }
+    - { name: telephony_flows_validate_numbers, description: "Validate a published flow against several inbound numbers without changing routing." }
+    - { name: telephony_flows_assign_numbers, description: "Atomically assign a published flow to several inbound numbers." }
+    - { name: telephony_flows_unassign_numbers, description: "Atomically remove a flow from several inbound numbers." }
+    - { name: telephony_flows_list_numbers, description: "List inbound numbers assigned to a flow." }
     - { name: telephony_pending_calls, description: "List pending inbound calls." }
     - { name: telephony_hangup,       description: "End an active call." }
     - { name: telephony_active_calls, description: "List ongoing calls." }
@@ -502,6 +506,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "telephony_ring_groups_create", Description: "Create a ring group from reusable destinations.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "strategy": map[string]any{"type": "string", "enum": []string{"simultaneous", "sequential", "round_robin", "priority"}}, "timeout_sec": map[string]any{"type": "integer"}, "members": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}}, []string{"name", "members"}), HandlerCtx: a.toolRingGroupsCreate},
 		{Name: "telephony_ring_groups_list", Description: "List ring groups and ordered members.", InputSchema: schemaObject(map[string]any{}, nil), HandlerCtx: a.toolRingGroupsList},
 		{Name: "telephony_routes_set_flow", Description: "Assign a published routing flow to an inbound number after provider capability validation.", InputSchema: schemaObject(map[string]any{"route_id": map[string]any{"type": "string"}, "flow_id": map[string]any{"type": "string"}}, []string{"route_id", "flow_id"}), HandlerCtx: a.toolRoutesSetFlow},
+		{Name: "telephony_flows_validate_numbers", Description: "Validate that every selected inbound number can use a published flow without changing routing.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}, "route_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "variables_by_route": map[string]any{"type": "object"}}, []string{"flow_id", "route_ids"}), HandlerCtx: a.toolFlowsValidateNumbers},
+		{Name: "telephony_flows_assign_numbers", Description: "Atomically assign one published flow to several inbound numbers after validating every carrier route. No number is changed if any validation fails.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}, "route_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "variables_by_route": map[string]any{"type": "object"}}, []string{"flow_id", "route_ids"}), HandlerCtx: a.toolFlowsAssignNumbers},
+		{Name: "telephony_flows_unassign_numbers", Description: "Atomically remove a flow assignment from several inbound numbers.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}, "route_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, []string{"route_ids"}), HandlerCtx: a.toolFlowsUnassignNumbers},
+		{Name: "telephony_flows_list_numbers", Description: "List inbound numbers currently assigned to a routing flow.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}}, []string{"flow_id"}), HandlerCtx: a.toolFlowsListNumbers},
 		{
 			Name:        "telephony_pending_calls",
 			Description: "List pending inbound calls for the calling agent. Prefer reacting to the incoming-call event; this is for recovery/inspection.",
@@ -2974,6 +2982,7 @@ func routePublic(a *App, r routeRow) map[string]any {
 		"inbound_transport":         firstNonEmpty(r.InboundTransport, inboundTransportProgrammable),
 		"flow_id":                   r.FlowID,
 		"published_flow_version_id": r.PublishedFlowVersionID,
+		"routing_variables":         routingVariablesPublic(r.RoutingVariablesJSON),
 		"created_at":                r.CreatedAt,
 		"updated_at":                r.UpdatedAt,
 	}
@@ -3375,6 +3384,7 @@ type routeRow struct {
 	TransportConfig        string
 	FlowID                 string
 	PublishedFlowVersionID string
+	RoutingVariablesJSON   string
 	RoutingTerminalType    string
 	RoutingNodeID          string
 	RoutingPrompt          string
@@ -3806,14 +3816,15 @@ func (c *callsDB) insertRoute(r routeRow) error {
 	        (id, project_id, carrier_slug, carrier_connection_id, phone_number, phone_number_sid,
 	         agent_id, enabled, hold_prompt, timeout_sec, answer_mode, auto_directive, auto_voice,
 	         auto_greeting, secret, previous_voice_url, previous_status_callback, created_at, updated_at,
-	         recording_mode, inbound_transport, transport_config, flow_id, published_flow_version_id)
-	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	         recording_mode, inbound_transport, transport_config, flow_id, published_flow_version_id,
+	         routing_variables_json)
+	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.ProjectID, r.CarrierSlug, r.CarrierConnectionID, r.PhoneNumber, r.PhoneNumberSID,
 		r.AgentID, enabled, r.HoldPrompt, r.TimeoutSec, firstNonEmpty(r.AnswerMode, answerModeAgent),
 		r.AutoDirective, r.AutoVoice, r.AutoGreeting, r.Secret, r.PreviousVoiceURL, r.PreviousStatusCallback,
 		r.CreatedAt, r.UpdatedAt, firstNonEmpty(r.RecordingMode, recordingModeInherit),
 		firstNonEmpty(r.InboundTransport, inboundTransportProgrammable), r.TransportConfig,
-		r.FlowID, r.PublishedFlowVersionID,
+		r.FlowID, r.PublishedFlowVersionID, firstNonEmpty(r.RoutingVariablesJSON, "{}"),
 	)
 	return err
 }
@@ -3825,7 +3836,8 @@ func (c *callsDB) findRoute(id string) (*routeRow, error) {
 	        COALESCE(auto_greeting,''), secret,
 	        COALESCE(previous_voice_url,''), COALESCE(previous_status_callback,''), created_at, updated_at,
 	        COALESCE(recording_mode,'inherit'), COALESCE(inbound_transport,'programmable_websocket'),
-	        COALESCE(transport_config,''), COALESCE(flow_id,''), COALESCE(published_flow_version_id,'')
+	        COALESCE(transport_config,''), COALESCE(flow_id,''), COALESCE(published_flow_version_id,''),
+	        COALESCE(routing_variables_json,'{}')
 	        FROM inbound_routes WHERE id = ?`, id)
 	var r routeRow
 	var enabled int
@@ -3833,7 +3845,8 @@ func (c *callsDB) findRoute(id string) (*routeRow, error) {
 		&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec,
 		&r.AnswerMode, &r.AutoDirective, &r.AutoVoice, &r.AutoGreeting, &r.Secret,
 		&r.PreviousVoiceURL, &r.PreviousStatusCallback, &r.CreatedAt, &r.UpdatedAt, &r.RecordingMode,
-		&r.InboundTransport, &r.TransportConfig, &r.FlowID, &r.PublishedFlowVersionID); err != nil {
+		&r.InboundTransport, &r.TransportConfig, &r.FlowID, &r.PublishedFlowVersionID,
+		&r.RoutingVariablesJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -3864,7 +3877,8 @@ func (c *callsDB) listRoutesForAgent(agentID int64, project string) ([]routeRow,
 	        COALESCE(auto_greeting,''), secret,
 	        COALESCE(previous_voice_url,''), COALESCE(previous_status_callback,''), created_at, updated_at,
 	        COALESCE(recording_mode,'inherit'), COALESCE(inbound_transport,'programmable_websocket'),
-	        COALESCE(transport_config,''), COALESCE(flow_id,''), COALESCE(published_flow_version_id,'')
+	        COALESCE(transport_config,''), COALESCE(flow_id,''), COALESCE(published_flow_version_id,''),
+	        COALESCE(routing_variables_json,'{}')
 	        FROM inbound_routes WHERE agent_id = ? AND project_id = ? ORDER BY created_at DESC`, agentID, project)
 	if err != nil {
 		return nil, err
@@ -3878,7 +3892,8 @@ func (c *callsDB) listRoutesForAgent(agentID int64, project string) ([]routeRow,
 			&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec,
 			&r.AnswerMode, &r.AutoDirective, &r.AutoVoice, &r.AutoGreeting, &r.Secret,
 			&r.PreviousVoiceURL, &r.PreviousStatusCallback, &r.CreatedAt, &r.UpdatedAt, &r.RecordingMode,
-			&r.InboundTransport, &r.TransportConfig, &r.FlowID, &r.PublishedFlowVersionID); err != nil {
+			&r.InboundTransport, &r.TransportConfig, &r.FlowID, &r.PublishedFlowVersionID,
+			&r.RoutingVariablesJSON); err != nil {
 			return nil, err
 		}
 		r.Enabled = enabled != 0

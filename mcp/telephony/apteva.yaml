@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.3.1
+version: 0.3.2
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -86,6 +86,10 @@ provides:
     - { name: telephony_ring_groups_create, description: "Create a ring group." }
     - { name: telephony_ring_groups_list, description: "List ring groups." }
     - { name: telephony_routes_set_flow, description: "Assign a published flow to an inbound route." }
+    - { name: telephony_flows_validate_numbers, description: "Validate a published flow against several inbound numbers without changing routing." }
+    - { name: telephony_flows_assign_numbers, description: "Atomically assign a published flow to several inbound numbers." }
+    - { name: telephony_flows_unassign_numbers, description: "Atomically remove a flow from several inbound numbers." }
+    - { name: telephony_flows_list_numbers, description: "List inbound numbers assigned to a flow." }
     - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }

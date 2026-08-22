@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -181,6 +182,103 @@ func TestLegacyRoutesBecomeEquivalentGeneratedFlows(t *testing.T) {
 	var count int
 	if err := db.db.QueryRow(`SELECT COUNT(*) FROM routing_flows WHERE project_id='p1'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("flow count=%d err=%v", count, err)
+	}
+}
+
+func TestBulkNumberAssignmentIsAtomicAcrossCarrierValidation(t *testing.T) {
+	db := testCallsDB(t)
+	app := &App{}
+	withRoutingTestDB(t, app, db)
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, route := range []routeRow{
+		{ID: "route-twilio", ProjectID: "p1", CarrierSlug: "twilio", CarrierConnectionID: 1, PhoneNumber: "+33189000001", AgentID: 7, Enabled: true, TimeoutSec: 60, AnswerMode: answerModeHumanBrowser, Secret: "a", CreatedAt: now, UpdatedAt: now, RecordingMode: recordingModeInherit, InboundTransport: inboundTransportProgrammable},
+		{ID: "route-telnyx", ProjectID: "p1", CarrierSlug: "telnyx", CarrierConnectionID: 2, PhoneNumber: "+33189000002", AgentID: 7, Enabled: true, TimeoutSec: 60, AnswerMode: answerModeHumanBrowser, Secret: "b", CreatedAt: now, UpdatedAt: now, RecordingMode: recordingModeInherit, InboundTransport: inboundTransportProgrammable},
+	} {
+		if err := db.insertRoute(route); err != nil {
+			t.Fatal(err)
+		}
+	}
+	def := routingDefinition{Entry: "message", Nodes: []routingNode{{ID: "message", Type: "voicemail"}}}
+	raw, _ := json.Marshal(def)
+	flow, err := app.saveRoutingFlow("p1", "", "Voicemail", "", string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, validation, err := app.publishRoutingFlow("p1", flow.ID); err != nil || len(validation) != 0 {
+		t.Fatalf("publish: validation=%v err=%v", validation, err)
+	}
+	result, err := app.assignRoutingFlowToNumbers("p1", flow.ID, []string{"route-twilio", "route-telnyx"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Valid || len(result.Numbers) != 2 || result.Numbers[0].Valid == result.Numbers[1].Valid {
+		t.Fatalf("validation = %#v", result)
+	}
+	for _, routeID := range []string{"route-twilio", "route-telnyx"} {
+		route, err := db.findRoute(routeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if route.FlowID != "" || route.PublishedFlowVersionID != "" {
+			t.Fatalf("%s was partially assigned: %#v", routeID, route)
+		}
+	}
+}
+
+func TestBulkNumberAssignmentSharesFlowAndExpandsPerNumberVariables(t *testing.T) {
+	db := testCallsDB(t)
+	app := &App{}
+	withRoutingTestDB(t, app, db)
+	now := time.Now().UTC().Format(time.RFC3339)
+	for index, routeID := range []string{"route-one", "route-two"} {
+		route := routeRow{ID: routeID, ProjectID: "p1", CarrierSlug: "twilio", CarrierConnectionID: int64(index + 1), PhoneNumber: fmt.Sprintf("+3318900000%d", index+1), AgentID: 7, Enabled: true, TimeoutSec: 60, AnswerMode: answerModeHumanBrowser, Secret: routeID, CreatedAt: now, UpdatedAt: now, RecordingMode: recordingModeInherit, InboundTransport: inboundTransportProgrammable}
+		if err := db.insertRoute(route); err != nil {
+			t.Fatal(err)
+		}
+	}
+	destination, err := app.saveRoutingDestination("p1", "browser-shared", "Browser", "browser", map[string]any{"greeting": "Welcome to {{number.brand}}"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def := routingDefinition{Entry: "answer", Nodes: []routingNode{{ID: "answer", Type: "destination", Config: map[string]any{"destination_id": destination.ID}}}}
+	raw, _ := json.Marshal(def)
+	flow, err := app.saveRoutingFlow("p1", "", "Shared main line", "", string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, validation, err := app.publishRoutingFlow("p1", flow.ID)
+	if err != nil || len(validation) != 0 {
+		t.Fatalf("publish: version=%#v validation=%v err=%v", version, validation, err)
+	}
+	result, err := app.assignRoutingFlowToNumbers("p1", flow.ID, []string{"route-one", "route-two"}, map[string]any{
+		"route-one": map[string]any{"brand": "Paris", "recording_mode": "always"},
+		"route-two": map[string]any{"brand": "Madrid"},
+	})
+	if err != nil || !result.Valid {
+		t.Fatalf("assign: result=%#v err=%v", result, err)
+	}
+	for routeID, greeting := range map[string]string{"route-one": "Welcome to Paris", "route-two": "Welcome to Madrid"} {
+		route, err := db.findRoute(routeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if route.FlowID != flow.ID || route.PublishedFlowVersionID != version.ID {
+			t.Fatalf("%s assignment = %#v", routeID, route)
+		}
+		if routeID == "route-one" && route.RecordingMode != recordingModeAlways {
+			t.Fatalf("recording override = %q", route.RecordingMode)
+		}
+		plan, err := app.resolveInboundRoutingPlan(route, "+33600000000", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.Greeting != greeting {
+			t.Fatalf("%s greeting = %q, want %q", routeID, plan.Greeting, greeting)
+		}
+	}
+	numbers, err := app.listNumbersForRoutingFlow("p1", flow.ID)
+	if err != nil || len(numbers) != 2 {
+		t.Fatalf("assigned numbers=%#v err=%v", numbers, err)
 	}
 }
 

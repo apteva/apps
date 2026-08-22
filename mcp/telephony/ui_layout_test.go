@@ -36,10 +36,14 @@ func TestRoutingPanelUsesGuidedSetupAndRetainsAdvancedEditor(t *testing.T) {
 	panel := string(source)
 	for _, label := range []string{
 		"Incoming call routing",
-		"Which number?",
+		"Which numbers?",
 		"What should happen when someone calls?",
-		"Activate routing",
+		"Activate for",
 		"Reusable flows",
+		"Select all",
+		"Manage numbers",
+		"Duplicate",
+		"Save number assignments",
 		"Advanced flows",
 		"Back to guided setup",
 	} {

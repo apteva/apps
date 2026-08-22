@@ -102,6 +102,8 @@ type inboundRoutingPlan struct {
 }
 
 var routingIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
+var routingVariableKeyPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,63}$`)
+var routingTemplatePattern = regexp.MustCompile(`\{\{\s*number\.([A-Za-z][A-Za-z0-9_.-]{0,127})\s*\}\}`)
 
 var supportedRoutingNodes = map[string]bool{
 	"announcement": true,
@@ -388,6 +390,140 @@ func routingConfigStrings(config map[string]any, key string) []string {
 		}
 	}
 	return out
+}
+
+func routingVariablesPublic(raw string) map[string]any {
+	variables := map[string]any{}
+	if strings.TrimSpace(raw) != "" {
+		_ = json.Unmarshal([]byte(raw), &variables)
+	}
+	return variables
+}
+
+func normalizeRoutingVariables(value any) (string, error) {
+	if value == nil {
+		return "{}", nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", errors.New("number variables must be valid JSON")
+	}
+	if len(raw) > 16*1024 {
+		return "", errors.New("number variables must be at most 16 KB")
+	}
+	variables := map[string]any{}
+	if err := json.Unmarshal(raw, &variables); err != nil {
+		return "", errors.New("number variables must be an object")
+	}
+	if len(variables) > 50 {
+		return "", errors.New("number variables may contain at most 50 fields")
+	}
+	for key := range variables {
+		if !routingVariableKeyPattern.MatchString(key) {
+			return "", fmt.Errorf("invalid number variable name %q", key)
+		}
+	}
+	canonical, _ := json.Marshal(variables)
+	return string(canonical), nil
+}
+
+func validateRoutingVariablesForRoute(value any, route *routeRow) error {
+	canonical, err := normalizeRoutingVariables(value)
+	if err != nil {
+		return err
+	}
+	variables := routingVariablesPublic(canonical)
+	recording, ok := variables["recording_mode"]
+	if !ok || strings.TrimSpace(fmt.Sprint(recording)) == "" {
+		return nil
+	}
+	mode, err := normalizeRouteRecordingMode(fmt.Sprint(recording))
+	if err != nil {
+		return err
+	}
+	if mode == recordingModeAlways && route.InboundTransport == inboundTransportSIPDirect {
+		return errors.New("provider-cloud recording is unavailable on direct SIP routes")
+	}
+	if mode == recordingModeAlways && !providerSupportsRecording(route.CarrierSlug) {
+		return fmt.Errorf("call recording is not implemented for provider %s", route.CarrierSlug)
+	}
+	return nil
+}
+
+func routingTemplateVariables(route *routeRow) map[string]any {
+	variables := routingVariablesPublic(route.RoutingVariablesJSON)
+	variables["phone_number"] = route.PhoneNumber
+	variables["route_id"] = route.ID
+	variables["carrier"] = route.CarrierSlug
+	return map[string]any{"number": variables}
+}
+
+func routingTemplateValue(variables map[string]any, path string) (any, bool) {
+	var current any = variables
+	for _, part := range strings.Split(path, ".") {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = object[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func expandRoutingTemplate(value string, variables map[string]any) string {
+	return routingTemplatePattern.ReplaceAllStringFunc(value, func(match string) string {
+		parts := routingTemplatePattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		resolved, ok := routingTemplateValue(variables, "number."+parts[1])
+		if !ok {
+			return ""
+		}
+		switch typed := resolved.(type) {
+		case string:
+			return typed
+		case float64, bool, int, int64:
+			return fmt.Sprint(typed)
+		default:
+			return ""
+		}
+	})
+}
+
+func expandRoutingValue(value any, variables map[string]any) any {
+	switch typed := value.(type) {
+	case string:
+		return expandRoutingTemplate(typed, variables)
+	case []any:
+		out := make([]any, len(typed))
+		for index := range typed {
+			out[index] = expandRoutingValue(typed[index], variables)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[key] = expandRoutingValue(item, variables)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func expandRoutingDefinition(def routingDefinition, route *routeRow) routingDefinition {
+	variables := routingTemplateVariables(route)
+	for index := range def.Nodes {
+		def.Nodes[index].Label = expandRoutingTemplate(def.Nodes[index].Label, variables)
+		if expanded, ok := expandRoutingValue(def.Nodes[index].Config, variables).(map[string]any); ok {
+			def.Nodes[index].Config = expanded
+		}
+	}
+	return def
 }
 
 func callerMatches(config map[string]any, caller string) bool {
@@ -894,6 +1030,7 @@ func (a *App) resolveInboundRoutingPlan(route *routeRow, caller string, digits m
 	if err != nil {
 		return nil, err
 	}
+	def = expandRoutingDefinition(def, route)
 	simulation := simulateRoutingDefinition(def, routingSimulationContext{Caller: caller, Called: route.PhoneNumber, Digits: digits, StopAtInteraction: true})
 	if !simulation.Valid {
 		return nil, errors.New(strings.Join(simulation.Errors, "; "))
@@ -942,6 +1079,9 @@ func (a *App) resolveInboundRoutingPlan(route *routeRow, caller string, digits m
 		}
 		var config map[string]any
 		_ = json.Unmarshal([]byte(destination.ConfigJSON), &config)
+		if expanded, ok := expandRoutingValue(config, routingTemplateVariables(route)).(map[string]any); ok {
+			config = expanded
+		}
 		plan.Directive = routingConfigString(config, "directive")
 		plan.Voice = routingConfigString(config, "voice")
 		plan.Greeting = routingConfigString(config, "greeting")
@@ -986,6 +1126,13 @@ func (a *App) resolveInboundRoutingPlan(route *routeRow, caller string, digits m
 				plan.HoldPrompt = strings.TrimSpace(prefix + " " + plan.HoldPrompt)
 			}
 		}
+	}
+	variables := routingVariablesPublic(route.RoutingVariablesJSON)
+	if greeting, ok := variables["greeting"].(string); ok && strings.TrimSpace(greeting) != "" {
+		plan.Greeting = strings.TrimSpace(greeting)
+	}
+	if holdPrompt, ok := variables["hold_prompt"].(string); ok && strings.TrimSpace(holdPrompt) != "" {
+		plan.HoldPrompt = strings.TrimSpace(holdPrompt)
 	}
 	return plan, nil
 }
@@ -1357,6 +1504,229 @@ func (a *App) executeTelnyxRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *rou
 	}
 }
 
+type routingNumberValidation struct {
+	RouteID     string   `json:"route_id"`
+	PhoneNumber string   `json:"phone_number,omitempty"`
+	Carrier     string   `json:"carrier,omitempty"`
+	Valid       bool     `json:"valid"`
+	Errors      []string `json:"errors,omitempty"`
+	route       *routeRow
+}
+
+type routingBulkValidation struct {
+	Valid     bool                      `json:"valid"`
+	FlowID    string                    `json:"flow_id,omitempty"`
+	VersionID string                    `json:"version_id,omitempty"`
+	Errors    []string                  `json:"errors,omitempty"`
+	Numbers   []routingNumberValidation `json:"numbers"`
+}
+
+func normalizeRoutingRouteIDs(routeIDs []string) ([]string, error) {
+	if len(routeIDs) == 0 {
+		return nil, errors.New("choose at least one inbound number")
+	}
+	if len(routeIDs) > 250 {
+		return nil, errors.New("at most 250 inbound numbers can be changed at once")
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(routeIDs))
+	for _, routeID := range routeIDs {
+		routeID = strings.TrimSpace(routeID)
+		if routeID == "" || seen[routeID] {
+			continue
+		}
+		seen[routeID] = true
+		out = append(out, routeID)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("choose at least one inbound number")
+	}
+	return out, nil
+}
+
+func (a *App) validateRoutingNumbers(project, flowID string, routeIDs []string, variablesByRoute map[string]any) (*routingBulkValidation, *routingFlowRow, error) {
+	ids, err := normalizeRoutingRouteIDs(routeIDs)
+	if err != nil {
+		return &routingBulkValidation{Valid: false, Errors: []string{err.Error()}, Numbers: []routingNumberValidation{}}, nil, nil
+	}
+	flow, err := a.findRoutingFlow(project, strings.TrimSpace(flowID))
+	if err != nil {
+		return nil, nil, err
+	}
+	if flow == nil || flow.PublishedVersionID == "" {
+		return &routingBulkValidation{Valid: false, FlowID: flowID, Errors: []string{"flow must exist and be published"}, Numbers: []routingNumberValidation{}}, flow, nil
+	}
+	version, err := a.findRoutingVersion(project, flow.PublishedVersionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if version == nil {
+		return &routingBulkValidation{Valid: false, FlowID: flow.ID, Errors: []string{"published flow version is unavailable"}, Numbers: []routingNumberValidation{}}, flow, nil
+	}
+	definition, err := parseRoutingDefinition(version.Definition)
+	if err != nil {
+		return nil, nil, err
+	}
+	result := &routingBulkValidation{Valid: true, FlowID: flow.ID, VersionID: version.ID, Numbers: make([]routingNumberValidation, 0, len(ids))}
+	for _, routeID := range ids {
+		item := routingNumberValidation{RouteID: routeID, Valid: true}
+		route, routeErr := a.db().findRoute(routeID)
+		if routeErr != nil {
+			return nil, nil, routeErr
+		}
+		if route == nil || route.ProjectID != project {
+			item.Valid = false
+			item.Errors = []string{"inbound number does not exist in this project"}
+		} else {
+			item.route = route
+			item.PhoneNumber = route.PhoneNumber
+			item.Carrier = route.CarrierSlug
+			if !route.Enabled {
+				item.Errors = append(item.Errors, "inbound number is disabled")
+			}
+			item.Errors = append(item.Errors, a.validateFlowForRoute(project, definition, route)...)
+			if variables, ok := variablesByRoute[routeID]; ok {
+				if variableErr := validateRoutingVariablesForRoute(variables, route); variableErr != nil {
+					item.Errors = append(item.Errors, variableErr.Error())
+				}
+			}
+			item.Errors = uniqueStrings(item.Errors)
+			item.Valid = len(item.Errors) == 0
+		}
+		if !item.Valid {
+			result.Valid = false
+		}
+		result.Numbers = append(result.Numbers, item)
+	}
+	return result, flow, nil
+}
+
+func (a *App) assignRoutingFlowToNumbers(project, flowID string, routeIDs []string, variablesByRoute map[string]any) (*routingBulkValidation, error) {
+	validation, flow, err := a.validateRoutingNumbers(project, flowID, routeIDs, variablesByRoute)
+	if err != nil || !validation.Valid {
+		return validation, err
+	}
+	tx, err := a.db().db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, number := range validation.Numbers {
+		result, execErr := tx.Exec(`UPDATE inbound_routes SET flow_id=?,published_flow_version_id=?,updated_at=? WHERE id=? AND project_id=?`, flow.ID, flow.PublishedVersionID, now, number.RouteID, project)
+		if execErr != nil {
+			return nil, execErr
+		}
+		count, _ := result.RowsAffected()
+		if count != 1 {
+			return nil, fmt.Errorf("inbound number %s changed during assignment", number.RouteID)
+		}
+		if variables, ok := variablesByRoute[number.RouteID]; ok {
+			canonical, _ := normalizeRoutingVariables(variables)
+			if _, execErr = tx.Exec(`UPDATE inbound_routes SET routing_variables_json=? WHERE id=? AND project_id=?`, canonical, number.RouteID, project); execErr != nil {
+				return nil, execErr
+			}
+			decoded := routingVariablesPublic(canonical)
+			if recording, ok := decoded["recording_mode"]; ok && strings.TrimSpace(fmt.Sprint(recording)) != "" {
+				mode, _ := normalizeRouteRecordingMode(fmt.Sprint(recording))
+				if _, execErr = tx.Exec(`UPDATE inbound_routes SET recording_mode=? WHERE id=? AND project_id=?`, mode, number.RouteID, project); execErr != nil {
+					return nil, execErr
+				}
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return validation, nil
+}
+
+func (a *App) unassignRoutingFlowFromNumbers(project, flowID string, routeIDs []string) (*routingBulkValidation, error) {
+	ids, err := normalizeRoutingRouteIDs(routeIDs)
+	if err != nil {
+		return &routingBulkValidation{Valid: false, Errors: []string{err.Error()}, Numbers: []routingNumberValidation{}}, nil
+	}
+	validation := &routingBulkValidation{Valid: true, FlowID: strings.TrimSpace(flowID), Numbers: make([]routingNumberValidation, 0, len(ids))}
+	for _, routeID := range ids {
+		item := routingNumberValidation{RouteID: routeID, Valid: true}
+		route, findErr := a.db().findRoute(routeID)
+		if findErr != nil {
+			return nil, findErr
+		}
+		if route == nil || route.ProjectID != project {
+			item.Valid = false
+			item.Errors = []string{"inbound number does not exist in this project"}
+		} else {
+			item.PhoneNumber, item.Carrier = route.PhoneNumber, route.CarrierSlug
+			if validation.FlowID != "" && route.FlowID != validation.FlowID {
+				item.Valid = false
+				item.Errors = []string{"inbound number is assigned to a different flow"}
+			}
+		}
+		if !item.Valid {
+			validation.Valid = false
+		}
+		validation.Numbers = append(validation.Numbers, item)
+	}
+	if !validation.Valid {
+		return validation, nil
+	}
+	tx, err := a.db().db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, item := range validation.Numbers {
+		result, execErr := tx.Exec(`UPDATE inbound_routes SET flow_id='',published_flow_version_id='',updated_at=? WHERE id=? AND project_id=?`, now, item.RouteID, project)
+		if execErr != nil {
+			return nil, execErr
+		}
+		count, _ := result.RowsAffected()
+		if count != 1 {
+			return nil, fmt.Errorf("inbound number %s changed during unassignment", item.RouteID)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return validation, nil
+}
+
+func (a *App) listNumbersForRoutingFlow(project, flowID string) ([]map[string]any, error) {
+	rows, err := a.db().db.Query(`SELECT id FROM inbound_routes WHERE project_id=? AND flow_id=? ORDER BY phone_number`, project, strings.TrimSpace(flowID))
+	if err != nil {
+		return nil, err
+	}
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		route, err := a.db().findRoute(id)
+		if err != nil {
+			return nil, err
+		}
+		if route != nil {
+			out = append(out, routePublic(a, *route))
+		}
+	}
+	return out, nil
+}
+
 // /routing is intentionally a compact JSON management surface. The UI and MCP
 // tools share the same store and validator so publication cannot bypass rules.
 func (a *App) handleRouting(w http.ResponseWriter, r *http.Request) {
@@ -1370,25 +1740,36 @@ func (a *App) handleRouting(w http.ResponseWriter, r *http.Request) {
 		a.routingSnapshot(w, project)
 		return
 	}
+	if r.Method == http.MethodGet && path == "flows/numbers" {
+		numbers, listErr := a.listNumbersForRoutingFlow(project, r.URL.Query().Get("flow_id"))
+		if listErr != nil {
+			http.Error(w, listErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"flow_id": r.URL.Query().Get("flow_id"), "numbers": numbers})
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var body struct {
-		ID          string                   `json:"id"`
-		Name        string                   `json:"name"`
-		Description string                   `json:"description"`
-		Draft       json.RawMessage          `json:"draft"`
-		Kind        string                   `json:"kind"`
-		Config      any                      `json:"config"`
-		Enabled     *bool                    `json:"enabled"`
-		Strategy    string                   `json:"strategy"`
-		TimeoutSec  int                      `json:"timeout_sec"`
-		Members     []ringGroupMemberRow     `json:"members"`
-		FlowID      string                   `json:"flow_id"`
-		RouteID     string                   `json:"route_id"`
-		Context     routingSimulationContext `json:"context"`
+		ID               string                   `json:"id"`
+		Name             string                   `json:"name"`
+		Description      string                   `json:"description"`
+		Draft            json.RawMessage          `json:"draft"`
+		Kind             string                   `json:"kind"`
+		Config           any                      `json:"config"`
+		Enabled          *bool                    `json:"enabled"`
+		Strategy         string                   `json:"strategy"`
+		TimeoutSec       int                      `json:"timeout_sec"`
+		Members          []ringGroupMemberRow     `json:"members"`
+		FlowID           string                   `json:"flow_id"`
+		RouteID          string                   `json:"route_id"`
+		RouteIDs         []string                 `json:"route_ids"`
+		VariablesByRoute map[string]any           `json:"variables_by_route"`
+		Context          routingSimulationContext `json:"context"`
 	}
 	if err := decodeJSONBody(r, &body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1451,43 +1832,41 @@ func (a *App) handleRouting(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, ringGroupPublic(*row))
-	case "routes/assign":
-		flow, err := a.findRoutingFlow(project, body.FlowID)
-		if err != nil || flow == nil || flow.PublishedVersionID == "" {
-			http.Error(w, "flow must exist and be published", http.StatusBadRequest)
+	case "routes/assign", "flows/numbers/assign":
+		routeIDs := body.RouteIDs
+		if len(routeIDs) == 0 && body.RouteID != "" {
+			routeIDs = []string{body.RouteID}
+		}
+		validation, assignErr := a.assignRoutingFlowToNumbers(project, body.FlowID, routeIDs, body.VariablesByRoute)
+		if assignErr != nil {
+			http.Error(w, assignErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		route, routeErr := a.db().findRoute(body.RouteID)
-		if routeErr != nil || route == nil || route.ProjectID != project {
-			http.Error(w, "unknown route", http.StatusNotFound)
-			return
-		}
-		version, versionErr := a.findRoutingVersion(project, flow.PublishedVersionID)
-		if versionErr != nil || version == nil {
-			http.Error(w, "published flow version is unavailable", http.StatusBadRequest)
-			return
-		}
-		definition, parseErr := parseRoutingDefinition(version.Definition)
-		if parseErr != nil {
-			http.Error(w, parseErr.Error(), http.StatusBadRequest)
-			return
-		}
-		if capabilityErrors := a.validateFlowForRoute(project, definition, route); len(capabilityErrors) > 0 {
+		if !validation.Valid {
 			w.WriteHeader(http.StatusUnprocessableEntity)
-			writeJSON(w, map[string]any{"valid": false, "errors": capabilityErrors})
+			writeJSON(w, validation)
 			return
 		}
-		result, err := a.db().db.Exec(`UPDATE inbound_routes SET flow_id=?,published_flow_version_id=?,updated_at=? WHERE id=? AND project_id=?`, flow.ID, flow.PublishedVersionID, time.Now().UTC().Format(time.RFC3339Nano), body.RouteID, project)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeJSON(w, map[string]any{"ok": true, "valid": true, "flow_id": validation.FlowID, "version_id": validation.VersionID, "numbers": validation.Numbers})
+	case "flows/numbers/validate":
+		validation, _, validationErr := a.validateRoutingNumbers(project, body.FlowID, body.RouteIDs, body.VariablesByRoute)
+		if validationErr != nil {
+			http.Error(w, validationErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		count, _ := result.RowsAffected()
-		if count != 1 {
-			http.Error(w, "unknown route", http.StatusNotFound)
+		writeJSON(w, validation)
+	case "flows/numbers/unassign":
+		validation, unassignErr := a.unassignRoutingFlowFromNumbers(project, body.FlowID, body.RouteIDs)
+		if unassignErr != nil {
+			http.Error(w, unassignErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "route_id": body.RouteID, "flow_id": flow.ID, "version_id": flow.PublishedVersionID})
+		if !validation.Valid {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			writeJSON(w, validation)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "valid": true, "flow_id": validation.FlowID, "numbers": validation.Numbers})
 	default:
 		http.NotFound(w, r)
 	}
@@ -1538,13 +1917,24 @@ func (a *App) listRoutesForProject(project string) ([]routeRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []routeRow{}
+	ids := []string{}
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return nil, err
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	out := make([]routeRow, 0, len(ids))
+	for _, id := range ids {
 		route, err := a.db().findRoute(id)
 		if err != nil {
 			return nil, err
@@ -1553,7 +1943,7 @@ func (a *App) listRoutesForProject(project string) ([]routeRow, error) {
 			out = append(out, *route)
 		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (a *App) toolFlowsList(_ context.Context, ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -1668,31 +2058,81 @@ func (a *App) toolRingGroupsCreate(_ context.Context, ctx *sdk.AppCtx, args map[
 }
 
 func (a *App) toolRoutesSetFlow(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	project := currentProject(ctx)
-	route, err := a.db().findRoute(strArg(args, "route_id", ""))
-	if err != nil || route == nil || route.ProjectID != project {
-		return mcpError("unknown route"), nil
+	args["route_ids"] = []any{strArg(args, "route_id", "")}
+	return a.toolFlowsAssignNumbers(context.Background(), ctx, args)
+}
+
+func routingRouteIDsArg(args map[string]any) []string {
+	values := []string{}
+	switch routeIDs := args["route_ids"].(type) {
+	case []any:
+		for _, value := range routeIDs {
+			if routeID, ok := value.(string); ok {
+				values = append(values, routeID)
+			}
+		}
+	case []string:
+		values = append(values, routeIDs...)
 	}
-	flow, err := a.findRoutingFlow(project, strArg(args, "flow_id", ""))
-	if err != nil || flow == nil || flow.PublishedVersionID == "" {
-		return mcpError("flow must exist and be published"), nil
+	if len(values) == 0 {
+		if routeID := strArg(args, "route_id", ""); routeID != "" {
+			values = append(values, routeID)
+		}
 	}
-	version, _ := a.findRoutingVersion(project, flow.PublishedVersionID)
-	if version == nil {
-		return mcpError("published version unavailable"), nil
+	return values
+}
+
+func routingVariablesByRouteArg(args map[string]any) map[string]any {
+	if value, ok := args["variables_by_route"].(map[string]any); ok {
+		return value
 	}
-	def, err := parseRoutingDefinition(version.Definition)
+	return map[string]any{}
+}
+
+func (a *App) toolFlowsValidateNumbers(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	validation, _, err := a.validateRoutingNumbers(currentProject(ctx), strArg(args, "flow_id", ""), routingRouteIDsArg(args), routingVariablesByRouteArg(args))
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
-	if errs := a.validateFlowForRoute(project, def, route); len(errs) > 0 {
-		return map[string]any{"valid": false, "errors": errs}, nil
-	}
-	_, err = a.db().db.Exec(`UPDATE inbound_routes SET flow_id=?,published_flow_version_id=?,updated_at=? WHERE id=? AND project_id=?`, flow.ID, flow.PublishedVersionID, time.Now().UTC().Format(time.RFC3339Nano), route.ID, project)
+	return validation, nil
+}
+
+func (a *App) toolFlowsAssignNumbers(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	validation, err := a.assignRoutingFlowToNumbers(currentProject(ctx), strArg(args, "flow_id", ""), routingRouteIDsArg(args), routingVariablesByRouteArg(args))
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
-	return map[string]any{"ok": true, "route_id": route.ID, "flow_id": flow.ID, "version_id": flow.PublishedVersionID}, nil
+	if !validation.Valid {
+		return validation, nil
+	}
+	return map[string]any{"ok": true, "valid": true, "flow_id": validation.FlowID, "version_id": validation.VersionID, "numbers": validation.Numbers}, nil
+}
+
+func (a *App) toolFlowsUnassignNumbers(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	validation, err := a.unassignRoutingFlowFromNumbers(currentProject(ctx), strArg(args, "flow_id", ""), routingRouteIDsArg(args))
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	if !validation.Valid {
+		return validation, nil
+	}
+	return map[string]any{"ok": true, "valid": true, "flow_id": validation.FlowID, "numbers": validation.Numbers}, nil
+}
+
+func (a *App) toolFlowsListNumbers(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	flowID := strArg(args, "flow_id", "")
+	flow, err := a.findRoutingFlow(currentProject(ctx), flowID)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	if flow == nil {
+		return mcpError("unknown flow"), nil
+	}
+	numbers, err := a.listNumbersForRoutingFlow(currentProject(ctx), flowID)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	return map[string]any{"flow_id": flowID, "numbers": numbers}, nil
 }
 func (a *App) toolFlowsPublish(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	version, validation, err := a.publishRoutingFlow(currentProject(ctx), strArg(args, "flow_id", ""))
