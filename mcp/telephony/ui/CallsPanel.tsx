@@ -2761,11 +2761,271 @@ function readAsDataURL(file: File): Promise<string> {
   });
 }
 
+interface RoutingNode {
+  id: string;
+  type: string;
+  label?: string;
+  next?: string;
+  branches?: Record<string, string>;
+  config?: Record<string, unknown>;
+}
+
+interface RoutingDraft { entry: string; nodes: RoutingNode[] }
+interface RoutingFlow {
+  id: string;
+  name: string;
+  description?: string;
+  draft: RoutingDraft;
+  published_version_id?: string;
+  generated?: boolean;
+  updated_at?: string;
+}
+interface RoutingDestination {
+  id: string;
+  name: string;
+  kind: "browser" | "agent" | "ai" | "pstn" | "sip" | "voicemail";
+  config: Record<string, unknown>;
+  enabled: boolean;
+}
+interface RingMember { destination_id: string; enabled: boolean; position?: number; priority?: number; weight?: number; timeout_sec?: number }
+interface RoutingGroup { id: string; name: string; strategy: string; timeout_sec: number; members: RingMember[]; enabled: boolean }
+interface RoutingRoute { id: string; phone_number: string; flow_id?: string; published_flow_version_id?: string; enabled: boolean }
+interface RoutingSnapshot { flows: RoutingFlow[]; destinations: RoutingDestination[]; ring_groups: RoutingGroup[]; routes: RoutingRoute[]; node_types: string[] }
+interface RoutingSimulation { valid: boolean; errors?: string[]; trace?: Array<{ node_id: string; node_type: string; label?: string; outcome: string; next?: string }>; destination_id?: string; ring_group_id?: string; terminal_type?: string }
+
+const NODE_LABELS: Record<string, string> = {
+  announcement: "Announcement", schedule: "Business hours", caller_match: "Caller rule",
+  dtmf_menu: "Keypad menu", destination: "Destination", ring_group: "Ring group",
+  voicemail: "Voicemail", reject: "Reject", hangup: "Hang up",
+};
+
+function RoutingView({ projectId }: NativePanelProps) {
+  const [snapshot, setSnapshot] = useState<RoutingSnapshot>({ flows: [], destinations: [], ring_groups: [], routes: [], node_types: [] });
+  const [selectedId, setSelectedId] = useState("");
+  const [draft, setDraft] = useState<RoutingDraft>({ entry: "hangup", nodes: [{ id: "hangup", type: "hangup", label: "End call" }] });
+  const [flowName, setFlowName] = useState("Main line");
+  const [description, setDescription] = useState("");
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [simulation, setSimulation] = useState<RoutingSimulation | null>(null);
+  const [caller, setCaller] = useState("+33600000000");
+  const [routeId, setRouteId] = useState("");
+  const [destinationForm, setDestinationForm] = useState({ name: "Browser operator", kind: "browser", target: "", directive: "" });
+  const [groupForm, setGroupForm] = useState({ name: "Team", strategy: "simultaneous", timeout_sec: 20, members: [] as string[] });
+
+  const api = useCallback((path: string) => `${API}${path}${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`, [projectId]);
+  const load = useCallback(async (preferred = "") => {
+    try {
+      const res = await fetch(api("/routing/snapshot"), { credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as RoutingSnapshot;
+      setSnapshot(data);
+      const id = preferred || selectedId || data.flows.find((flow) => !flow.generated)?.id || data.flows[0]?.id || "";
+      if (id) {
+        const flow = data.flows.find((item) => item.id === id);
+        if (flow) { setSelectedId(flow.id); setFlowName(flow.name); setDescription(flow.description || ""); setDraft(flow.draft); }
+      }
+      if (!routeId && data.routes[0]) setRouteId(data.routes[0].id);
+    } catch (error) { setStatus((error as Error).message || "Could not load routing"); }
+  }, [api, routeId, selectedId]);
+
+  useEffect(() => { void load(); }, [projectId]);
+
+  const selectFlow = (flow: RoutingFlow) => {
+    setSelectedId(flow.id); setFlowName(flow.name); setDescription(flow.description || "");
+    setDraft(flow.draft); setSimulation(null); setStatus("");
+  };
+  const newFlow = () => {
+    const first = snapshot.destinations.find((item) => item.enabled);
+    const node: RoutingNode = first
+      ? { id: "answer", type: "destination", label: first.name, config: { destination_id: first.id } }
+      : { id: "hangup", type: "hangup", label: "End call" };
+    setSelectedId(""); setFlowName("New call flow"); setDescription(""); setDraft({ entry: node.id, nodes: [node] }); setSimulation(null); setStatus("New draft");
+  };
+  const saveFlow = async () => {
+    setBusy(true);
+    try {
+      const saved = await postJSON<RoutingFlow>(api("/routing/flows/save"), { id: selectedId, name: flowName, description, draft });
+      setSelectedId(saved.id); setStatus("Draft saved"); await load(saved.id);
+    } catch (error) { setStatus((error as Error).message || "Could not save flow"); } finally { setBusy(false); }
+  };
+  const publish = async () => {
+    if (!selectedId) { setStatus("Save the draft before publishing"); return; }
+    setBusy(true);
+    try {
+      const result = await postJSON<{ valid: boolean; errors?: string[]; version?: { id: string } }>(api("/routing/flows/publish"), { id: selectedId });
+      setStatus(result.valid ? `Published ${result.version?.id || "new version"}` : (result.errors || []).join(" · "));
+      await load(selectedId);
+    } catch (error) { setStatus((error as Error).message || "Could not publish flow"); } finally { setBusy(false); }
+  };
+  const simulate = async () => {
+    setBusy(true);
+    try {
+      const result = await postJSON<RoutingSimulation>(api("/routing/flows/simulate"), { id: selectedId, draft, context: { caller } });
+      setSimulation(result); setStatus(result.valid ? "Simulation completed" : (result.errors || []).join(" · "));
+    } catch (error) { setStatus((error as Error).message || "Simulation failed"); } finally { setBusy(false); }
+  };
+  const assign = async () => {
+    if (!routeId || !selectedId) return;
+    setBusy(true);
+    try { await postJSON(api("/routing/routes/assign"), { route_id: routeId, flow_id: selectedId }); setStatus("Published flow assigned to number"); await load(selectedId); }
+    catch (error) { setStatus((error as Error).message || "Could not assign flow"); } finally { setBusy(false); }
+  };
+
+  const updateNode = (id: string, patch: Partial<RoutingNode>) => setDraft((current) => ({ ...current, nodes: current.nodes.map((node) => node.id === id ? { ...node, ...patch } : node) }));
+  const addNode = (type: string) => {
+    let index = draft.nodes.length + 1;
+    let id = `${type}_${index}`;
+    while (draft.nodes.some((node) => node.id === id)) { index += 1; id = `${type}_${index}`; }
+    const node: RoutingNode = { id, type, label: NODE_LABELS[type] || type, config: {} };
+    if (type === "destination" && snapshot.destinations[0]) node.config = { destination_id: snapshot.destinations[0].id };
+    if (type === "ring_group" && snapshot.ring_groups[0]) node.config = { ring_group_id: snapshot.ring_groups[0].id };
+    if (type === "announcement") node.config = { text: "Welcome. Please wait while we connect you." };
+    if (type === "schedule") { node.config = { timezone: "Europe/Paris", days: ["mon", "tue", "wed", "thu", "fri"], start: "09:00", end: "18:00" }; node.branches = { open: "", closed: "" }; }
+    if (type === "dtmf_menu") { node.config = { prompt: "Press 1 for sales, or 2 for support." }; node.branches = { "1": "", "2": "", default: "" }; }
+    if (type === "caller_match") { node.config = { prefixes: ["+33"] }; node.branches = { match: "", default: "" }; }
+    setDraft((current) => ({ ...current, nodes: [...current.nodes, node] }));
+  };
+  const removeNode = (id: string) => setDraft((current) => ({ ...current, entry: current.entry === id ? (current.nodes.find((node) => node.id !== id)?.id || "") : current.entry, nodes: current.nodes.filter((node) => node.id !== id) }));
+
+  const saveDestination = async () => {
+    const kind = destinationForm.kind;
+    let config: Record<string, unknown> = {};
+    if (kind === "agent" || kind === "ai") config = { agent_id: Number(destinationForm.target), directive: destinationForm.directive };
+    if (kind === "pstn") config = { phone_number: destinationForm.target };
+    if (kind === "sip") config = { uri: destinationForm.target };
+    setBusy(true);
+    try { await postJSON(api("/routing/destinations/save"), { name: destinationForm.name, kind, config, enabled: true }); setStatus("Destination created"); await load(selectedId); }
+    catch (error) { setStatus((error as Error).message || "Could not create destination"); } finally { setBusy(false); }
+  };
+  const saveGroup = async () => {
+    setBusy(true);
+    try {
+      await postJSON(api("/routing/ring-groups/save"), { name: groupForm.name, strategy: groupForm.strategy, timeout_sec: groupForm.timeout_sec, members: groupForm.members.map((destination_id) => ({ destination_id, enabled: true })) });
+      setStatus("Ring group created"); await load(selectedId);
+    } catch (error) { setStatus((error as Error).message || "Could not create ring group"); } finally { setBusy(false); }
+  };
+
+  const selected = snapshot.flows.find((flow) => flow.id === selectedId);
+  return (
+    <div className="h-full min-h-0 grid bg-bg text-text" style={{ gridTemplateColumns: "17rem minmax(30rem,1fr) 21rem" }}>
+      <aside className="min-h-0 overflow-auto border-r border-border">
+        <div className="sticky top-0 z-10 border-b border-border bg-bg p-3">
+          <div className="flex items-center justify-between gap-2"><div><h2 className="text-sm font-semibold">Call flows</h2><p className="text-xs text-text-muted">Published versions route live calls.</p></div><button type="button" onClick={newFlow} className="h-8 rounded border border-border px-2 text-xs">New</button></div>
+        </div>
+        {snapshot.flows.map((flow) => (
+          <button type="button" key={flow.id} onClick={() => selectFlow(flow)} className={`w-full border-b border-border/70 p-3 text-left hover:bg-bg-muted/60 ${selectedId === flow.id ? "bg-bg-muted" : ""}`}>
+            <div className="flex items-center justify-between gap-2"><span className="truncate text-sm font-medium">{flow.name}</span><span className={`rounded border px-1.5 py-0.5 text-xs ${flow.published_version_id ? "border-success/30 bg-success/10 text-success" : "border-border text-text-muted"}`}>{flow.published_version_id ? "Live" : "Draft"}</span></div>
+            <div className="mt-1 truncate text-xs text-text-dim">{flow.generated ? "Existing route" : `${flow.draft.nodes.length} nodes`}</div>
+          </button>
+        ))}
+      </aside>
+
+      <main className="min-h-0 overflow-auto">
+        <header className="sticky top-0 z-10 border-b border-border bg-bg p-3">
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-0 flex-1"><input value={flowName} onChange={(event) => setFlowName(event.target.value)} className="h-8 w-full bg-transparent text-base font-semibold outline-none" aria-label="Flow name" /><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Describe when this flow should be used" className="h-7 w-full bg-transparent text-xs text-text-muted outline-none" /></div>
+            <button type="button" disabled={busy} onClick={simulate} className="h-8 rounded border border-border px-3 text-xs disabled:opacity-50">Simulate</button>
+            <button type="button" disabled={busy} onClick={saveFlow} className="h-8 rounded border border-border px-3 text-xs disabled:opacity-50">Save draft</button>
+            <button type="button" disabled={busy || !selectedId} onClick={publish} className="h-8 rounded bg-accent px-3 text-xs font-medium text-bg disabled:opacity-50">Publish</button>
+          </div>
+          <div className="mt-2 flex items-center gap-2 text-xs"><span className="truncate text-text-muted">{status || "Build and test the path before publishing."}</span>{selected?.published_version_id ? <span className="ml-auto shrink-0 font-mono text-text-dim">{selected.published_version_id}</span> : null}</div>
+        </header>
+
+        <section className="p-4">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold uppercase text-text-dim">Add step</span>
+            {snapshot.node_types.map((type) => <button type="button" key={type} onClick={() => addNode(type)} className="h-7 rounded border border-border px-2 text-xs hover:bg-bg-muted">{NODE_LABELS[type] || type}</button>)}
+          </div>
+          <div className="space-y-3">
+            {draft.nodes.map((node, index) => (
+              <div key={node.id} className={`rounded border p-3 ${draft.entry === node.id ? "border-accent/60 bg-accent/5" : "border-border bg-bg-muted/20"}`}>
+                <div className="flex items-center gap-2">
+                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border text-xs">{index + 1}</span>
+                  <select value={node.type} onChange={(event) => updateNode(node.id, { type: event.target.value, config: {}, branches: {} })} className="h-8 rounded border border-border bg-bg px-2 text-xs">{snapshot.node_types.map((type) => <option key={type} value={type}>{NODE_LABELS[type] || type}</option>)}</select>
+                  <input value={node.label || ""} onChange={(event) => updateNode(node.id, { label: event.target.value })} className="h-8 min-w-0 flex-1 rounded border border-border bg-bg px-2 text-sm" placeholder="Step label" />
+                  <button type="button" onClick={() => setDraft((current) => ({ ...current, entry: node.id }))} className="h-8 rounded border border-border px-2 text-xs">{draft.entry === node.id ? "Entry" : "Set entry"}</button>
+                  <button type="button" onClick={() => removeNode(node.id)} className="h-8 rounded border border-danger/30 px-2 text-xs text-danger">Remove</button>
+                </div>
+                <NodeConfiguration node={node} nodes={draft.nodes} destinations={snapshot.destinations} groups={snapshot.ring_groups} update={(patch) => updateNode(node.id, patch)} />
+              </div>
+            ))}
+          </div>
+          {simulation ? (
+            <section className={`mt-4 rounded border p-3 ${simulation.valid ? "border-success/30 bg-success/5" : "border-danger/30 bg-danger/5"}`}>
+              <div className="flex items-center justify-between"><h3 className="text-sm font-semibold">Simulation trace</h3><span className="text-xs">{simulation.valid ? "Valid path" : "Needs attention"}</span></div>
+              {simulation.errors?.length ? <ul className="mt-2 list-disc pl-5 text-xs text-danger">{simulation.errors.map((error) => <li key={error}>{error}</li>)}</ul> : null}
+              <div className="mt-3 flex flex-wrap items-center gap-1">{simulation.trace?.map((step, index) => <div key={`${step.node_id}-${index}`} className="flex items-center gap-1"><span className="rounded border border-border bg-bg px-2 py-1 text-xs">{step.label || step.node_id} <span className="text-text-dim">· {step.outcome}</span></span>{index < (simulation.trace?.length || 0) - 1 ? <span className="text-text-dim">→</span> : null}</div>)}</div>
+            </section>
+          ) : null}
+        </section>
+      </main>
+
+      <aside className="min-h-0 overflow-auto border-l border-border p-3 space-y-4">
+        <section className="rounded border border-border p-3">
+          <h3 className="text-sm font-semibold">Test and assign</h3>
+          <Field label="Simulated caller" value={caller} onChange={setCaller} />
+          <label className="mt-2 block"><span className="mb-1 block text-xs text-text-muted">Inbound number</span><select value={routeId} onChange={(event) => setRouteId(event.target.value)} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="">Select a number</option>{snapshot.routes.map((route) => <option value={route.id} key={route.id}>{route.phone_number}{route.flow_id === selectedId ? " · assigned" : ""}</option>)}</select></label>
+          <button type="button" onClick={assign} disabled={busy || !selected?.published_version_id || !routeId} className="mt-2 h-9 w-full rounded border border-border text-sm disabled:opacity-50">Assign published flow</button>
+        </section>
+
+        <section className="rounded border border-border p-3 space-y-2">
+          <h3 className="text-sm font-semibold">New destination</h3>
+          <Field label="Name" value={destinationForm.name} onChange={(name) => setDestinationForm({ ...destinationForm, name })} />
+          <label className="block"><span className="mb-1 block text-xs text-text-muted">Type</span><select value={destinationForm.kind} onChange={(event) => setDestinationForm({ ...destinationForm, kind: event.target.value })} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="browser">Browser user</option><option value="ai">AI agent</option><option value="agent">Agent offer</option><option value="pstn">External number</option><option value="sip">SIP endpoint</option><option value="voicemail">Voicemail</option></select></label>
+          {destinationForm.kind === "agent" || destinationForm.kind === "ai" ? <Field label="Agent ID" value={destinationForm.target} onChange={(target) => setDestinationForm({ ...destinationForm, target })} type="number" /> : null}
+          {destinationForm.kind === "pstn" ? <Field label="Telephone (E.164)" value={destinationForm.target} onChange={(target) => setDestinationForm({ ...destinationForm, target })} /> : null}
+          {destinationForm.kind === "sip" ? <Field label="SIP URI" value={destinationForm.target} onChange={(target) => setDestinationForm({ ...destinationForm, target })} /> : null}
+          {destinationForm.kind === "ai" ? <label className="block"><span className="mb-1 block text-xs text-text-muted">AI directive</span><textarea rows={3} value={destinationForm.directive} onChange={(event) => setDestinationForm({ ...destinationForm, directive: event.target.value })} className="w-full rounded border border-border bg-bg px-2 py-1 text-xs" /></label> : null}
+          {destinationForm.kind === "pstn" ? <p className="rounded border border-warning/30 bg-warning/5 p-2 text-xs text-warning">External numbers create a second billable carrier leg.</p> : null}
+          <button type="button" onClick={saveDestination} disabled={busy} className="h-9 w-full rounded bg-accent text-sm font-medium text-bg disabled:opacity-50">Create destination</button>
+          <div className="space-y-1 pt-1">{snapshot.destinations.map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded bg-bg-muted/40 px-2 py-1 text-xs"><span className="truncate">{item.name}</span><span className="shrink-0 capitalize text-text-dim">{item.kind}</span></div>)}</div>
+        </section>
+
+        <section className="rounded border border-border p-3 space-y-2">
+          <h3 className="text-sm font-semibold">New ring group</h3>
+          <Field label="Name" value={groupForm.name} onChange={(name) => setGroupForm({ ...groupForm, name })} />
+          <label className="block"><span className="mb-1 block text-xs text-text-muted">Strategy</span><select value={groupForm.strategy} onChange={(event) => setGroupForm({ ...groupForm, strategy: event.target.value })} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="simultaneous">Simultaneous</option><option value="sequential">Sequential</option><option value="round_robin">Round robin</option><option value="priority">Priority</option></select></label>
+          <Field label="Ring timeout (seconds)" value={String(groupForm.timeout_sec)} onChange={(value) => setGroupForm({ ...groupForm, timeout_sec: Number(value) })} type="number" />
+          <div><span className="mb-1 block text-xs text-text-muted">Members</span>{snapshot.destinations.map((item) => <label key={item.id} className="flex items-center gap-2 py-1 text-xs"><input type="checkbox" checked={groupForm.members.includes(item.id)} onChange={(event) => setGroupForm({ ...groupForm, members: event.target.checked ? [...groupForm.members, item.id] : groupForm.members.filter((id) => id !== item.id) })} /> <span>{item.name}</span><span className="ml-auto text-text-dim">{item.kind}</span></label>)}</div>
+          <button type="button" onClick={saveGroup} disabled={busy || groupForm.members.length === 0} className="h-9 w-full rounded border border-border text-sm disabled:opacity-50">Create ring group</button>
+        </section>
+      </aside>
+    </div>
+  );
+}
+
+function NodeConfiguration({ node, nodes, destinations, groups, update }: { node: RoutingNode; nodes: RoutingNode[]; destinations: RoutingDestination[]; groups: RoutingGroup[]; update: (patch: Partial<RoutingNode>) => void }) {
+  const options = nodes.filter((item) => item.id !== node.id);
+  const setConfig = (key: string, value: unknown) => update({ config: { ...(node.config || {}), [key]: value } });
+  const setBranch = (key: string, value: string) => update({ branches: { ...(node.branches || {}), [key]: value } });
+  const NextSelect = ({ label = "Then", value = node.next || "", onChange = (next: string) => update({ next }) }: { label?: string; value?: string; onChange?: (value: string) => void }) => <label className="block"><span className="mb-1 block text-xs text-text-muted">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="h-8 w-full rounded border border-border bg-bg px-2 text-xs"><option value="">Select next step</option>{options.map((item) => <option key={item.id} value={item.id}>{item.label || item.id}</option>)}</select></label>;
+  return (
+    <div className="mt-3 grid gap-3 md:grid-cols-2">
+      {node.type === "announcement" ? <label className="block md:col-span-2"><span className="mb-1 block text-xs text-text-muted">Message</span><textarea rows={2} value={String(node.config?.text || "")} onChange={(event) => setConfig("text", event.target.value)} className="w-full rounded border border-border bg-bg px-2 py-1 text-sm" /></label> : null}
+      {node.type === "destination" ? <label className="block"><span className="mb-1 block text-xs text-text-muted">Destination</span><select value={String(node.config?.destination_id || "")} onChange={(event) => setConfig("destination_id", event.target.value)} className="h-8 w-full rounded border border-border bg-bg px-2 text-xs"><option value="">Select destination</option>{destinations.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.kind}</option>)}</select></label> : null}
+      {node.type === "ring_group" ? <label className="block"><span className="mb-1 block text-xs text-text-muted">Ring group</span><select value={String(node.config?.ring_group_id || "")} onChange={(event) => setConfig("ring_group_id", event.target.value)} className="h-8 w-full rounded border border-border bg-bg px-2 text-xs"><option value="">Select group</option>{groups.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.strategy}</option>)}</select></label> : null}
+      {node.type === "schedule" ? <><Field label="Timezone" value={String(node.config?.timezone || "Europe/Paris")} onChange={(value) => setConfig("timezone", value)} /><div className="grid grid-cols-2 gap-2"><Field label="Opens" value={String(node.config?.start || "09:00")} onChange={(value) => setConfig("start", value)} type="time" /><Field label="Closes" value={String(node.config?.end || "18:00")} onChange={(value) => setConfig("end", value)} type="time" /></div><NextSelect label="When open" value={node.branches?.open || ""} onChange={(value) => setBranch("open", value)} /><NextSelect label="When closed" value={node.branches?.closed || ""} onChange={(value) => setBranch("closed", value)} /></> : null}
+      {node.type === "dtmf_menu" ? <><label className="block md:col-span-2"><span className="mb-1 block text-xs text-text-muted">Prompt</span><textarea rows={2} value={String(node.config?.prompt || "")} onChange={(event) => setConfig("prompt", event.target.value)} className="w-full rounded border border-border bg-bg px-2 py-1 text-sm" /></label>{Object.keys(node.branches || {}).map((digit) => <NextSelect key={digit} label={digit === "default" ? "Invalid key / timeout" : `Key ${digit}`} value={node.branches?.[digit] || ""} onChange={(value) => setBranch(digit, value)} />)}</> : null}
+      {node.type === "caller_match" ? <><Field label="Caller prefixes (comma separated)" value={Array.isArray(node.config?.prefixes) ? (node.config?.prefixes as string[]).join(", ") : ""} onChange={(value) => setConfig("prefixes", value.split(",").map((item) => item.trim()).filter(Boolean))} /><span /><NextSelect label="Match" value={node.branches?.match || ""} onChange={(value) => setBranch("match", value)} /><NextSelect label="Otherwise" value={node.branches?.default || ""} onChange={(value) => setBranch("default", value)} /></> : null}
+      {node.type === "announcement" ? <NextSelect /> : null}
+      {!(["announcement", "schedule", "caller_match", "dtmf_menu", "destination", "ring_group", "voicemail", "reject", "hangup"].includes(node.type)) ? <NextSelect /> : null}
+    </div>
+  );
+}
+
 export default function CallsPanel(props: NativePanelProps) {
-  const [view, setView] = useState<"calls" | "numbers" | "addresses" | "bundles">("calls");
+	const [view, setView] = useState<"calls" | "routing" | "numbers" | "addresses" | "bundles">("calls");
   return (
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
-      <nav className="shrink-0 h-11 border-b border-border px-4 flex items-center gap-1" aria-label="Telephony views">
+		<nav className="shrink-0 h-11 border-b border-border px-4 flex items-center gap-1" aria-label="Telephony views">
+			<button
+				type="button"
+				onClick={() => setView("routing")}
+				className={`h-8 px-3 rounded text-sm ${view === "routing" ? "bg-bg-muted font-medium" : "text-text-muted hover:bg-bg-muted/60"}`}
+			>
+				Routing
+			</button>
         <button
           type="button"
           onClick={() => setView("calls")}
@@ -2795,8 +3055,9 @@ export default function CallsPanel(props: NativePanelProps) {
           Compliance
         </button>
       </nav>
-      <div className="min-h-0 flex-1">
-        {view === "calls" ? <CallsView {...props} /> : null}
+		<div className="min-h-0 flex-1">
+			{view === "calls" ? <CallsView {...props} /> : null}
+			{view === "routing" ? <RoutingView {...props} /> : null}
         {view === "numbers" ? <NumbersView key={props.projectId} {...props} /> : null}
         {view === "addresses" ? <AddressesView {...props} /> : null}
         {view === "bundles" ? <BundlesView {...props} /> : null}

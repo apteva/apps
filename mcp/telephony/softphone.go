@@ -673,6 +673,11 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		http.Error(w, "call was already answered", http.StatusConflict)
 		return
 	}
+	if err := a.db().settleHumanOffers(callID, project); err != nil {
+		_ = a.db().releaseAnswerClaim(callID)
+		http.Error(w, "claim ring-group offer: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	peerToken := newSecret()
 	row.PeerToken = peerToken
 	if err := a.db().attachHumanCall(callID, a.peerLoopbackURL(row), peerToken); err != nil {

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.2.20
+version: 0.3.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -51,6 +51,7 @@ provides:
     - { prefix: /media/, no_auth: true }
     - { prefix: /webhook/, no_auth: true }
     - { prefix: /inbound/, no_auth: true }
+    - { prefix: /ivr/, no_auth: true }
     - { prefix: /xml/, no_auth: true }
     - { prefix: /ui/ }
     - { prefix: /calls }
@@ -58,6 +59,7 @@ provides:
     - { prefix: /recordings/ }
     - { prefix: /recording-settings }
     - { prefix: /numbers/ }
+    - { prefix: /routing/ }
     - { prefix: /softphone/ }
     - { prefix: /softphone/media/, no_auth: true }
     - { prefix: /peer/, no_auth: true }
@@ -72,6 +74,18 @@ provides:
     - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route. Args: route_id." }
     - { name: telephony_routes_disable, description: "Disable an inbound route and restore its previous carrier webhook. Args: route_id." }
     - { name: telephony_routes_list,  description: "List inbound call routes." }
+    - { name: telephony_flows_create, description: "Create a draft carrier-neutral IVR/routing flow." }
+    - { name: telephony_flows_list, description: "List routing flows." }
+    - { name: telephony_flows_get, description: "Get one routing flow and its draft." }
+    - { name: telephony_flows_update, description: "Update a routing-flow draft." }
+    - { name: telephony_flows_validate, description: "Validate a routing-flow draft." }
+    - { name: telephony_flows_publish, description: "Publish an immutable routing-flow version." }
+    - { name: telephony_flows_simulate, description: "Simulate a routing flow without placing a call." }
+    - { name: telephony_destinations_create, description: "Create a reusable routing destination." }
+    - { name: telephony_destinations_list, description: "List reusable routing destinations." }
+    - { name: telephony_ring_groups_create, description: "Create a ring group." }
+    - { name: telephony_ring_groups_list, description: "List ring groups." }
+    - { name: telephony_routes_set_flow, description: "Assign a published flow to an inbound route." }
     - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
@@ -102,6 +116,9 @@ provides:
     - { name: telephony_compliance_profile_evaluate, description: "Evaluate compliance-profile completeness. Args: compliance_id." }
     - { name: telephony_compliance_profile_submit, description: "Submit a complete compliance profile for review. Args: compliance_id." }
   publishes:
+    - { name: call.routing.started, description: "A call pinned and began executing a published routing flow.", payload: { call_id: string, flow_id: string, flow_version_id: string, destination_id: string, ring_group_id: string, occurred_at: string } }
+    - { name: call.routing.node_entered, description: "A call entered a routing-flow node.", payload: { call_id: string, flow_id: string, flow_version_id: string, node_id: string, node_type: string, outcome: string, occurred_at: string } }
+    - { name: call.offered, description: "A ring group offered a call to eligible destinations.", payload: { call_id: string, flow_id: string, flow_version_id: string, ring_group_id: string, occurred_at: string } }
     - name: call.incoming
       description: An inbound call reached a configured route.
       payload: &call_event_payload

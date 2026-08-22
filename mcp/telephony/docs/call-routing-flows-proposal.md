@@ -1,6 +1,11 @@
 # Telephony Call Routing Flows Proposal
 
-Status: Deferred proposal
+Status: MVP implemented (versioned flows, validation/simulation, legacy-route
+migration, schedules, caller rules, announcements, Twilio/Telnyx DTMF,
+browser/agent/AI destinations, ring-group offers, execution traces, events, and
+the Routing UI). External PSTN/SIP child-leg bridging, durable queues,
+decision webhooks, and non-Twilio voicemail remain later delivery phases and
+are rejected by route capability validation rather than failing during a call.
 
 This document proposes a carrier-neutral call-routing engine inside the
 Telephony app. It is intentionally not an implementation plan for Core or the
@@ -317,4 +322,3 @@ No Workflows call belongs in the active media or provider callback path.
 - Flow simulation explains the selected route before publication.
 - Active calls expose their pinned flow version and routing trace.
 - All data and management operations remain strictly project-scoped.
-

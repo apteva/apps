@@ -48,6 +48,7 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 		t.Fatal("direct SIP transport tool is not declared in the manifest")
 	}
 	want := []string{
+		"call.routing.started", "call.routing.node_entered", "call.offered",
 		"call.incoming", "call.initiated", "call.ringing", "call.answered",
 		"call.completed", "call.failed", "call.busy", "call.no_answer",
 		"call.canceled", "recording.ready", "recording.stored", "recording.deleted",

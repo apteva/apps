@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.2.20
+version: 0.3.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -79,6 +79,7 @@ provides:
     - { prefix: /media/, no_auth: true }
     - { prefix: /webhook/, no_auth: true }
     - { prefix: /inbound/, no_auth: true }
+    - { prefix: /ivr/, no_auth: true }
     - { prefix: /xml/, no_auth: true }
     - { prefix: /ui/ }
     - { prefix: /calls }
@@ -86,6 +87,7 @@ provides:
     - { prefix: /recordings/ }
     - { prefix: /recording-settings }
     - { prefix: /numbers/ }
+    - { prefix: /routing/ }
     - { prefix: /softphone/ }
     - { prefix: /softphone/media/, no_auth: true }
     - { prefix: /peer/, no_auth: true }
@@ -100,6 +102,18 @@ provides:
     - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route." }
     - { name: telephony_routes_disable, description: "Disable an inbound route and restore the prior carrier webhook." }
     - { name: telephony_routes_list,  description: "List inbound call routes." }
+    - { name: telephony_flows_create, description: "Create a draft carrier-neutral IVR/routing flow." }
+    - { name: telephony_flows_list, description: "List routing flows." }
+    - { name: telephony_flows_get, description: "Get one routing flow." }
+    - { name: telephony_flows_update, description: "Update a routing-flow draft." }
+    - { name: telephony_flows_validate, description: "Validate a routing-flow draft." }
+    - { name: telephony_flows_publish, description: "Publish a routing flow." }
+    - { name: telephony_flows_simulate, description: "Simulate a routing flow." }
+    - { name: telephony_destinations_create, description: "Create a routing destination." }
+    - { name: telephony_destinations_list, description: "List routing destinations." }
+    - { name: telephony_ring_groups_create, description: "Create a ring group." }
+    - { name: telephony_ring_groups_list, description: "List ring groups." }
+    - { name: telephony_routes_set_flow, description: "Assign a published flow to an inbound route." }
     - { name: telephony_pending_calls, description: "List pending inbound calls." }
     - { name: telephony_hangup,       description: "End an active call." }
     - { name: telephony_active_calls, description: "List ongoing calls." }
@@ -130,6 +144,9 @@ provides:
     - { name: telephony_compliance_profile_evaluate, description: "Evaluate compliance-profile completeness." }
     - { name: telephony_compliance_profile_submit, description: "Submit a complete compliance profile for review." }
   publishes:
+    - { name: call.routing.started, description: "A call began a published routing flow.", payload: { call_id: string, flow_id: string, flow_version_id: string, occurred_at: string } }
+    - { name: call.routing.node_entered, description: "A call entered a routing node.", payload: { call_id: string, node_id: string, node_type: string, outcome: string } }
+    - { name: call.offered, description: "A ring group offered a call.", payload: { call_id: string, ring_group_id: string } }
     - name: call.incoming
       description: An inbound call reached a configured route.
       payload: &call_event_payload
@@ -276,6 +293,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("resolve telephony installation identity: platform returned no install id")
 	}
 	a.installID = identity.InstallID
+	if err := a.ensureLegacyRoutingFlows(ctx); err != nil {
+		return fmt.Errorf("migrate existing inbound routes to routing flows: %w", err)
+	}
 	if _, err := ctx.AppDB().Exec(`UPDATE calls SET media_active = 0,
         media_status = CASE WHEN media_active <> 0 OR media_status IN ('connecting','connected') THEN 'disconnected' ELSE media_status END,
         media_disconnected_at = CASE WHEN media_active <> 0 OR media_status IN ('connecting','connected') THEN ? ELSE media_disconnected_at END,
@@ -349,6 +369,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/inbound/twilio/", Handler: a.handleTwilioInbound, NoAuth: true},
 		{Pattern: "/inbound/telnyx/", Handler: a.handleTelnyxInbound, NoAuth: true},
 		{Pattern: "/inbound/plivo/", Handler: a.handlePlivoInbound, NoAuth: true},
+		{Pattern: "/ivr/", Handler: a.handleIVRCallback, NoAuth: true},
 		// Panel data endpoint — lists active + recent calls.
 		{Pattern: "/calls", Handler: a.handleListCalls},
 		// Panel action endpoint.
@@ -357,6 +378,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/recording-settings", Handler: a.handleRecordingSettings},
 		// Provider-neutral phone-number discovery and confirmed purchase.
 		{Pattern: "/numbers/", Handler: a.handleNumbers},
+		{Pattern: "/routing/", Handler: a.handleRouting},
 		// Browser softphone. /softphone/ is panel-authenticated; the operator's
 		// audio socket is token-gated in-path like the carrier /media/ routes,
 		// and /peer/ is the loopback endpoint the carrier bridge dials.
@@ -461,6 +483,25 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"route_id"}),
 			HandlerCtx: a.toolRoutesDisable,
 		},
+		{
+			Name:        "telephony_flows_create",
+			Description: "Create a draft carrier-neutral inbound routing flow. Args: name, description?, definition ({entry,nodes}).",
+			InputSchema: schemaObject(map[string]any{
+				"name": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "definition": map[string]any{"type": "object"},
+			}, []string{"name", "definition"}),
+			HandlerCtx: a.toolFlowsCreate,
+		},
+		{Name: "telephony_flows_list", Description: "List draft and published call-routing flows for this project.", InputSchema: schemaObject(map[string]any{}, nil), HandlerCtx: a.toolFlowsList},
+		{Name: "telephony_flows_get", Description: "Get one routing flow and its editable draft.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}}, []string{"flow_id"}), HandlerCtx: a.toolFlowsGet},
+		{Name: "telephony_flows_update", Description: "Update a routing-flow draft without affecting its published version.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "definition": map[string]any{"type": "object"}}, []string{"flow_id", "definition"}), HandlerCtx: a.toolFlowsUpdate},
+		{Name: "telephony_flows_validate", Description: "Validate a routing-flow draft and its project references.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}}, []string{"flow_id"}), HandlerCtx: a.toolFlowsValidate},
+		{Name: "telephony_flows_publish", Description: "Validate and publish an immutable routing-flow version.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}}, []string{"flow_id"}), HandlerCtx: a.toolFlowsPublish},
+		{Name: "telephony_flows_simulate", Description: "Simulate a draft routing flow without placing a call.", InputSchema: schemaObject(map[string]any{"flow_id": map[string]any{"type": "string"}, "caller": map[string]any{"type": "string"}, "called": map[string]any{"type": "string"}}, []string{"flow_id"}), HandlerCtx: a.toolFlowsSimulate},
+		{Name: "telephony_destinations_create", Description: "Create a browser, agent, AI, PSTN, SIP, or voicemail routing destination.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string", "enum": []string{"browser", "agent", "ai", "pstn", "sip", "voicemail"}}, "config": map[string]any{"type": "object"}}, []string{"name", "kind"}), HandlerCtx: a.toolDestinationsCreate},
+		{Name: "telephony_destinations_list", Description: "List reusable routing destinations.", InputSchema: schemaObject(map[string]any{}, nil), HandlerCtx: a.toolDestinationsList},
+		{Name: "telephony_ring_groups_create", Description: "Create a ring group from reusable destinations.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "strategy": map[string]any{"type": "string", "enum": []string{"simultaneous", "sequential", "round_robin", "priority"}}, "timeout_sec": map[string]any{"type": "integer"}, "members": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}}, []string{"name", "members"}), HandlerCtx: a.toolRingGroupsCreate},
+		{Name: "telephony_ring_groups_list", Description: "List ring groups and ordered members.", InputSchema: schemaObject(map[string]any{}, nil), HandlerCtx: a.toolRingGroupsList},
+		{Name: "telephony_routes_set_flow", Description: "Assign a published routing flow to an inbound number after provider capability validation.", InputSchema: schemaObject(map[string]any{"route_id": map[string]any{"type": "string"}, "flow_id": map[string]any{"type": "string"}}, []string{"route_id", "flow_id"}), HandlerCtx: a.toolRoutesSetFlow},
 		{
 			Name:        "telephony_pending_calls",
 			Description: "List pending inbound calls for the calling agent. Prefer reacting to the incoming-call event; this is for recovery/inspection.",
@@ -2207,6 +2248,24 @@ func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if stored.RoutingFlowVersionID != "" {
+		routed, plan, err := a.routingPlanForCall(stored, nil)
+		if err != nil {
+			_ = a.db().updateStatus(stored.ID, "failed", "resolve inbound flow: "+err.Error())
+			writeTwilioSayHangup(w, "We could not route your call. Please try again later.")
+			return
+		}
+		if err := a.updateCallRoutingPlan(stored, plan); err != nil {
+			http.Error(w, "persist routing selection", http.StatusInternalServerError)
+			return
+		}
+		stored, _ = a.db().findCall(stored.ID)
+		if err := a.writeTwilioRoutingPlan(w, stored, routed, plan); err != nil {
+			_ = a.db().updateStatus(stored.ID, "failed", "execute inbound flow: "+err.Error())
+			writeTwilioSayHangup(w, "We could not route your call. Please try again later.")
+		}
+		return
+	}
 	if route.AnswerMode == answerModeRealtimeImmediate {
 		if globalCtx == nil {
 			_ = a.db().updateStatus(stored.ID, "failed", "app context unavailable for immediate answer")
@@ -2293,6 +2352,25 @@ type inboundCallMetadata struct {
 }
 
 func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, metadata ...inboundCallMetadata) (*callRow, bool, error) {
+	plan, err := a.resolveInboundRoutingPlan(route, from, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("resolve published routing flow: %w", err)
+	}
+	if plan != nil {
+		route.AnswerMode = plan.AnswerMode
+		route.AutoDirective = plan.Directive
+		route.AutoVoice = plan.Voice
+		route.AutoGreeting = plan.Greeting
+		route.HoldPrompt = firstNonEmpty(plan.HoldPrompt, route.HoldPrompt)
+		route.AgentID = plan.AgentID
+		if plan.TimeoutSec > 0 {
+			route.TimeoutSec = plan.TimeoutSec
+		}
+		route.RoutingTerminalType = plan.TerminalType
+		route.RoutingNodeID = plan.NodeID
+		route.RoutingPrompt = plan.Prompt
+		route.RoutingValidDigits = plan.ValidDigits
+	}
 	callID := newCallID()
 	now := time.Now().UTC()
 	recordingPolicy, err := a.db().recordingSettings(route.ProjectID)
@@ -2339,6 +2417,11 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 		RecordingRetentionDays: recordingPolicy.RetentionDays,
 		PeerKind:               inboundPeerKind(route.AnswerMode),
 	}
+	if plan != nil {
+		call.RoutingFlowID = plan.FlowID
+		call.RoutingFlowVersionID = plan.VersionID
+		call.RoutingDestinationID = plan.DestinationID
+	}
 	msg := fmt.Sprintf(
 		"Incoming phone call. call_id=%s from=%s to=%s. To answer: call telephony_answer_call with call_id=%q and a directive for the realtime call thread. To decline: call telephony_reject_call with call_id=%q.",
 		callID, from, to, callID, callID,
@@ -2363,6 +2446,9 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 		if err := a.publishLifecycleEvents(globalCtx.WithProject(route.ProjectID), stored.ID); err != nil {
 			globalCtx.Logger().Warn("publish incoming call lifecycle event", "call", stored.ID, "err", err)
 		}
+	}
+	if err := a.persistRoutingExecution(stored.ID, route.ProjectID, plan); err != nil {
+		return nil, false, fmt.Errorf("persist routing execution: %w", err)
 	}
 	// Only agent-decided routes need the main agent woken to make a pickup
 	// decision. Immediate routes answer themselves, and human_browser routes
@@ -2425,6 +2511,7 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				HangupCause   string `json:"hangup_cause"`
 				HangupSource  string `json:"hangup_source"`
 				SIPCode       string `json:"sip_hangup_cause"`
+				Digits        string `json:"digits"`
 			} `json:"payload"`
 		} `json:"data"`
 	}
@@ -2470,6 +2557,36 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				_ = a.killCallThread(globalCtx.WithProject(row.ProjectID), row)
 			}
 		}
+		if row != nil && row.RoutingFlowVersionID != "" && globalCtx != nil {
+			ctx := globalCtx.WithProject(row.ProjectID)
+			switch event.Data.EventType {
+			case "call.answered":
+				_, plan, planErr := a.routingPlanForCall(row, nil)
+				if planErr == nil && plan != nil && plan.TerminalType == "dtmf_menu" {
+					if err := a.startTelnyxGather(ctx, row, plan); err != nil {
+						ctx.Logger().Warn("start Telnyx IVR gather", "call", row.ID, "node", plan.NodeID, "err", err)
+						_ = a.db().updateStatus(row.ID, "failed", "start IVR gather: "+err.Error())
+					}
+				} else if planErr != nil {
+					ctx.Logger().Warn("resolve Telnyx IVR after answer", "call", row.ID, "err", planErr)
+				}
+			case "call.gather.ended":
+				var nodeID string
+				_ = a.db().db.QueryRow(`SELECT current_node_id FROM call_route_executions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&nodeID)
+				digit := strings.TrimSpace(event.Data.Payload.Digits)
+				if digit == "" {
+					digit = "__timeout__"
+				}
+				routed, plan, planErr := a.routingPlanForCall(row, map[string]string{nodeID: digit})
+				if planErr != nil {
+					ctx.Logger().Warn("resume Telnyx IVR", "call", row.ID, "node", nodeID, "err", planErr)
+					_ = a.db().updateStatus(row.ID, "failed", "resume IVR: "+planErr.Error())
+				} else if err := a.executeTelnyxRoutingPlan(ctx, row, routed, plan); err != nil {
+					ctx.Logger().Warn("execute Telnyx IVR selection", "call", row.ID, "node", nodeID, "digits", digit, "err", err)
+					_ = a.db().updateStatus(row.ID, "failed", "execute IVR selection: "+err.Error())
+				}
+			}
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -2489,7 +2606,17 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 	if created {
-		a.enqueueImmediateAnswer(route, stored.ID)
+		if route.RoutingTerminalType == "dtmf_menu" && globalCtx != nil {
+			ctx := globalCtx.WithProject(route.ProjectID)
+			go func() {
+				if err := a.answerTelnyxIVR(ctx, stored); err != nil {
+					ctx.Logger().Warn("answer Telnyx IVR", "call", stored.ID, "err", err)
+					_ = a.db().updateStatus(stored.ID, "failed", "answer IVR: "+err.Error())
+				}
+			}()
+		} else {
+			a.enqueueImmediateAnswer(route, stored.ID)
+		}
 	}
 }
 
@@ -2828,25 +2955,27 @@ func callerAgentID(ctx context.Context) int64 {
 
 func routePublic(a *App, r routeRow) map[string]any {
 	return map[string]any{
-		"id":                    r.ID,
-		"project_id":            r.ProjectID,
-		"carrier":               r.CarrierSlug,
-		"carrier_connection_id": r.CarrierConnectionID,
-		"phone_number":          r.PhoneNumber,
-		"phone_number_id":       r.PhoneNumberSID,
-		"phone_number_sid":      r.PhoneNumberSID,
-		"agent_id":              r.AgentID,
-		"enabled":               r.Enabled,
-		"hold_prompt":           r.HoldPrompt,
-		"timeout_sec":           r.TimeoutSec,
-		"answer_mode":           firstNonEmpty(r.AnswerMode, answerModeAgent),
-		"directive":             r.AutoDirective,
-		"voice":                 r.AutoVoice,
-		"greeting":              r.AutoGreeting,
-		"recording_mode":        firstNonEmpty(r.RecordingMode, recordingModeInherit),
-		"inbound_transport":     firstNonEmpty(r.InboundTransport, inboundTransportProgrammable),
-		"created_at":            r.CreatedAt,
-		"updated_at":            r.UpdatedAt,
+		"id":                        r.ID,
+		"project_id":                r.ProjectID,
+		"carrier":                   r.CarrierSlug,
+		"carrier_connection_id":     r.CarrierConnectionID,
+		"phone_number":              r.PhoneNumber,
+		"phone_number_id":           r.PhoneNumberSID,
+		"phone_number_sid":          r.PhoneNumberSID,
+		"agent_id":                  r.AgentID,
+		"enabled":                   r.Enabled,
+		"hold_prompt":               r.HoldPrompt,
+		"timeout_sec":               r.TimeoutSec,
+		"answer_mode":               firstNonEmpty(r.AnswerMode, answerModeAgent),
+		"directive":                 r.AutoDirective,
+		"voice":                     r.AutoVoice,
+		"greeting":                  r.AutoGreeting,
+		"recording_mode":            firstNonEmpty(r.RecordingMode, recordingModeInherit),
+		"inbound_transport":         firstNonEmpty(r.InboundTransport, inboundTransportProgrammable),
+		"flow_id":                   r.FlowID,
+		"published_flow_version_id": r.PublishedFlowVersionID,
+		"created_at":                r.CreatedAt,
+		"updated_at":                r.UpdatedAt,
 	}
 }
 
@@ -2871,10 +3000,12 @@ func callsPublic(rows []callRow) []map[string]any {
 			"media_close_reason":        r.MediaCloseReason,
 			"browser_audio_diagnostics": audioDiagnosticsPublic(r.BrowserAudioDiagnostics),
 			"carrier_audio_diagnostics": audioDiagnosticsPublic(r.CarrierAudioDiagnostics),
-			"placed_at":                 r.PlacedAt,
-			"answered_at":               r.AnsweredAt,
-			"duration":                  callDuration(r),
-			"recording_mode":            r.RecordingMode, "recording_count": r.RecordingCount,
+			"routing_flow_id":           r.RoutingFlowID, "routing_flow_version_id": r.RoutingFlowVersionID,
+			"routing_destination_id": r.RoutingDestinationID,
+			"placed_at":              r.PlacedAt,
+			"answered_at":            r.AnsweredAt,
+			"duration":               callDuration(r),
+			"recording_mode":         r.RecordingMode, "recording_count": r.RecordingCount,
 			"recording_status": r.RecordingStatus,
 		})
 	}
@@ -2895,7 +3026,9 @@ func callsPanelPublic(rows []callRow) []map[string]any {
 			"media_close_leg":           r.MediaCloseLeg,
 			"browser_audio_diagnostics": audioDiagnosticsPublic(r.BrowserAudioDiagnostics),
 			"carrier_audio_diagnostics": audioDiagnosticsPublic(r.CarrierAudioDiagnostics),
-			"placed_at":                 r.PlacedAt, "answered_at": r.AnsweredAt, "ended_at": r.EndedAt,
+			"routing_flow_id":           r.RoutingFlowID, "routing_flow_version_id": r.RoutingFlowVersionID,
+			"routing_destination_id": r.RoutingDestinationID,
+			"placed_at":              r.PlacedAt, "answered_at": r.AnsweredAt, "ended_at": r.EndedAt,
 			"termination_cause": r.TerminationCause, "termination_code": r.TerminationCode,
 			"termination_initiator": r.TerminationInitiator,
 			"project_id":            r.ProjectID, "error_message": callsPanelErrorMessage(r),
@@ -3212,6 +3345,9 @@ type callRow struct {
 	CarrierAudioDiagnostics string
 	PeerKind                string
 	PeerToken               string
+	RoutingFlowID           string
+	RoutingFlowVersionID    string
+	RoutingDestinationID    string
 }
 
 type routeRow struct {
@@ -3237,6 +3373,12 @@ type routeRow struct {
 	RecordingMode          string
 	InboundTransport       string
 	TransportConfig        string
+	FlowID                 string
+	PublishedFlowVersionID string
+	RoutingTerminalType    string
+	RoutingNodeID          string
+	RoutingPrompt          string
+	RoutingValidDigits     string
 }
 
 type callsDB struct {
@@ -3266,7 +3408,9 @@ const callSelectColumns = `id, thread_id,
 	COALESCE(media_close_code,0), COALESCE(media_close_reason,''),
 	COALESCE(media_close_leg,''),
 	COALESCE(browser_audio_diagnostics,'{}'), COALESCE(carrier_audio_diagnostics,'{}'),
-	COALESCE(peer_kind,'realtime'), COALESCE(peer_token,'')`
+	COALESCE(peer_kind,'realtime'), COALESCE(peer_token,''),
+	COALESCE(routing_flow_id,''), COALESCE(routing_flow_version_id,''),
+	COALESCE(routing_destination_id,'')`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -3286,7 +3430,8 @@ func scanCall(row rowScanner) (*callRow, error) {
 		&r.MediaErrorMessage, &r.MediaConnectedAt, &r.MediaDisconnectedAt,
 		&r.MediaCloseCode, &r.MediaCloseReason, &r.MediaCloseLeg,
 		&r.BrowserAudioDiagnostics, &r.CarrierAudioDiagnostics,
-		&r.PeerKind, &r.PeerToken); err != nil {
+		&r.PeerKind, &r.PeerToken, &r.RoutingFlowID, &r.RoutingFlowVersionID,
+		&r.RoutingDestinationID); err != nil {
 		return nil, err
 	}
 	return &r, nil
@@ -3299,8 +3444,8 @@ func (c *callsDB) insertCall(r callRow) error {
 		         forwarded_from, ingress_path, directive, voice, audio_bridge_url, status, placed_at, project_id,
 		         idempotency_key, state_expires_at, deadline_at, recording_mode,
 		         recording_channels, recording_storage_mode, recording_retention_days,
-		         peer_kind, peer_token)
-		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		         peer_kind, peer_token, routing_flow_id, routing_flow_version_id, routing_destination_id)
+		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.ThreadID, r.Direction, r.AgentID, r.RouteID, r.CarrierSID, r.CarrierRequestID,
 		r.CarrierSlug, r.CarrierConnectionID, r.CallbackSecret,
 		r.ToNumber, r.FromNumber, r.ForwardedFrom, r.IngressPath, r.Directive, r.Voice, r.AudioBridgeURL,
@@ -3308,6 +3453,7 @@ func (c *callsDB) insertCall(r callRow) error {
 		firstNonEmpty(r.RecordingMode, recordingModeOff), firstNonEmpty(r.RecordingChannels, "dual"),
 		firstNonEmpty(r.RecordingStorageMode, recordingStorageCopy), r.RecordingRetentionDays,
 		firstNonEmpty(r.PeerKind, peerKindRealtime), r.PeerToken,
+		r.RoutingFlowID, r.RoutingFlowVersionID, r.RoutingDestinationID,
 	)
 	return err
 }
@@ -3413,6 +3559,15 @@ func (c *callsDB) claimPendingCallForHuman(id, project string) (bool, error) {
 	}
 	n, err := res.RowsAffected()
 	return n == 1, err
+}
+
+func (c *callsDB) settleHumanOffers(id, project string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := c.db.Exec(`UPDATE call_offers SET
+		status=CASE WHEN destination_id=(SELECT routing_destination_id FROM calls WHERE id=?) THEN 'claimed' ELSE 'canceled' END,
+		claimed_at=CASE WHEN destination_id=(SELECT routing_destination_id FROM calls WHERE id=?) THEN ? ELSE claimed_at END
+		WHERE call_id=? AND project_id=? AND status='offered'`, id, id, now, id, project)
+	return err
 }
 
 // attachHumanCall finishes a softphone answer claim: it stamps the loopback
@@ -3651,13 +3806,14 @@ func (c *callsDB) insertRoute(r routeRow) error {
 	        (id, project_id, carrier_slug, carrier_connection_id, phone_number, phone_number_sid,
 	         agent_id, enabled, hold_prompt, timeout_sec, answer_mode, auto_directive, auto_voice,
 	         auto_greeting, secret, previous_voice_url, previous_status_callback, created_at, updated_at,
-	         recording_mode, inbound_transport, transport_config)
-	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	         recording_mode, inbound_transport, transport_config, flow_id, published_flow_version_id)
+	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.ProjectID, r.CarrierSlug, r.CarrierConnectionID, r.PhoneNumber, r.PhoneNumberSID,
 		r.AgentID, enabled, r.HoldPrompt, r.TimeoutSec, firstNonEmpty(r.AnswerMode, answerModeAgent),
 		r.AutoDirective, r.AutoVoice, r.AutoGreeting, r.Secret, r.PreviousVoiceURL, r.PreviousStatusCallback,
 		r.CreatedAt, r.UpdatedAt, firstNonEmpty(r.RecordingMode, recordingModeInherit),
 		firstNonEmpty(r.InboundTransport, inboundTransportProgrammable), r.TransportConfig,
+		r.FlowID, r.PublishedFlowVersionID,
 	)
 	return err
 }
@@ -3669,7 +3825,7 @@ func (c *callsDB) findRoute(id string) (*routeRow, error) {
 	        COALESCE(auto_greeting,''), secret,
 	        COALESCE(previous_voice_url,''), COALESCE(previous_status_callback,''), created_at, updated_at,
 	        COALESCE(recording_mode,'inherit'), COALESCE(inbound_transport,'programmable_websocket'),
-	        COALESCE(transport_config,'')
+	        COALESCE(transport_config,''), COALESCE(flow_id,''), COALESCE(published_flow_version_id,'')
 	        FROM inbound_routes WHERE id = ?`, id)
 	var r routeRow
 	var enabled int
@@ -3677,7 +3833,7 @@ func (c *callsDB) findRoute(id string) (*routeRow, error) {
 		&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec,
 		&r.AnswerMode, &r.AutoDirective, &r.AutoVoice, &r.AutoGreeting, &r.Secret,
 		&r.PreviousVoiceURL, &r.PreviousStatusCallback, &r.CreatedAt, &r.UpdatedAt, &r.RecordingMode,
-		&r.InboundTransport, &r.TransportConfig); err != nil {
+		&r.InboundTransport, &r.TransportConfig, &r.FlowID, &r.PublishedFlowVersionID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -3708,7 +3864,7 @@ func (c *callsDB) listRoutesForAgent(agentID int64, project string) ([]routeRow,
 	        COALESCE(auto_greeting,''), secret,
 	        COALESCE(previous_voice_url,''), COALESCE(previous_status_callback,''), created_at, updated_at,
 	        COALESCE(recording_mode,'inherit'), COALESCE(inbound_transport,'programmable_websocket'),
-	        COALESCE(transport_config,'')
+	        COALESCE(transport_config,''), COALESCE(flow_id,''), COALESCE(published_flow_version_id,'')
 	        FROM inbound_routes WHERE agent_id = ? AND project_id = ? ORDER BY created_at DESC`, agentID, project)
 	if err != nil {
 		return nil, err
@@ -3722,7 +3878,7 @@ func (c *callsDB) listRoutesForAgent(agentID int64, project string) ([]routeRow,
 			&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec,
 			&r.AnswerMode, &r.AutoDirective, &r.AutoVoice, &r.AutoGreeting, &r.Secret,
 			&r.PreviousVoiceURL, &r.PreviousStatusCallback, &r.CreatedAt, &r.UpdatedAt, &r.RecordingMode,
-			&r.InboundTransport, &r.TransportConfig); err != nil {
+			&r.InboundTransport, &r.TransportConfig, &r.FlowID, &r.PublishedFlowVersionID); err != nil {
 			return nil, err
 		}
 		r.Enabled = enabled != 0
