@@ -31,7 +31,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "pcb_release_create", Description: "Validate and create a traceable native release ZIP; errors block release.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "note": map[string]any{"type": "string"}}, []string{"design_id"}), HandlerCtx: a.toolRelease},
 		{Name: "pcb_components_search", Description: "Search the optional component-data integration without coupling the PCB model to it.", InputSchema: schemaObject(map[string]any{"query": map[string]any{"type": "string"}, "country": map[string]any{"type": "string"}, "currency": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, []string{"query"}), HandlerCtx: a.toolComponentsSearch},
 		{Name: "pcb_bom_source", Description: "Match up to twenty revision MPNs through the optional component-data integration.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "country": map[string]any{"type": "string"}, "currency": map[string]any{"type": "string"}}, []string{"design_id"}), HandlerCtx: a.toolBOMSource},
-		{Name: "pcb_providers_status", Description: "Report optional provider bindings and the safe capabilities enabled by this version.", InputSchema: schemaObject(nil, nil), HandlerCtx: a.toolProvidersStatus},
+		{Name: "pcb_providers_status", Description: "Report native app and provider integration bindings and the safe capabilities enabled by this version.", InputSchema: schemaObject(nil, nil), HandlerCtx: a.toolProvidersStatus},
 	}
 }
 
@@ -284,8 +284,14 @@ func (a *App) toolBOMSource(_ context.Context, app *sdk.AppCtx, args map[string]
 	return map[string]any{"revision_id": revision.ID, "matched_mpns": len(parts), "missing_mpn_designators": missing, "provider": bound.AppSlug, "result": result}, nil
 }
 func (a *App) toolProvidersStatus(_ context.Context, app *sdk.AppCtx, _ map[string]any) (any, error) {
+	storage := app.IntegrationFor("storage")
 	component, fab := app.IntegrationFor("component_data"), app.IntegrationFor("pcb_fabricator")
-	return map[string]any{"native_engine": map[string]any{"schema": pcbSchema, "engine": engineVersion, "external_engine_dependency": false}, "component_data": providerStatus(component, true), "pcb_fabricator": providerStatus(fab, false)}, nil
+	return map[string]any{
+		"native_engine":  map[string]any{"schema": pcbSchema, "engine": engineVersion, "external_engine_dependency": false},
+		"storage":        bindingStatus(storage, true, "native PCB artifacts are persisted through the selected Storage app binding"),
+		"component_data": bindingStatus(component, true, "available through the selected component-data connection"),
+		"pcb_fabricator": bindingStatus(fab, false, "discovery only in v0.1; quote/order disabled"),
+	}, nil
 }
 
 func executeProvider(app *sdk.AppCtx, bound *sdk.BoundIntegration, tool string, input map[string]any) (any, error) {
@@ -310,16 +316,19 @@ func executeProvider(app *sdk.AppCtx, bound *sdk.BoundIntegration, tool string, 
 	}
 	return map[string]any{"provider": bound.AppSlug, "data": parsed}, nil
 }
-func providerStatus(bound *sdk.BoundIntegration, executable bool) map[string]any {
+func bindingStatus(bound *sdk.BoundIntegration, executable bool, note string) map[string]any {
 	if bound == nil {
 		return map[string]any{"bound": false, "executable": false}
 	}
-	return map[string]any{"bound": true, "provider": bound.AppSlug, "connection_id": bound.ConnectionID, "executable": executable, "note": func() string {
-		if executable {
-			return "available through the generic provider role"
-		}
-		return "discovery only in v0.1; quote/order disabled"
-	}()}
+	out := map[string]any{"bound": true, "kind": bound.Kind, "executable": executable, "note": note}
+	if bound.Kind == "app" {
+		out["app_name"] = bound.AppName
+		out["install_id"] = bound.InstallID
+	} else {
+		out["provider"] = bound.AppSlug
+		out["connection_id"] = bound.ConnectionID
+	}
+	return out
 }
 func configOrArg(app *sdk.AppCtx, args map[string]any, arg, config, fallback string) string {
 	if v := stringArg(args, arg); v != "" {

@@ -154,10 +154,20 @@ func (s *Service) uploadStorage(name, contentType string, body []byte, designID,
 	if s.ctx == nil || s.ctx.PlatformAPI() == nil {
 		return "", errors.New("storage platform client unavailable")
 	}
+	bound := s.ctx.IntegrationFor("storage")
+	if bound == nil || bound.Kind != "app" || bound.InstallID <= 0 {
+		return "", errors.New("no Storage app is bound to the storage role")
+	}
+	storageApp := strings.TrimSpace(bound.AppName)
+	if storageApp == "" {
+		// AppName resolution is best-effort in the SDK. The manifest limits
+		// this role to Storage, while authorization remains tied to InstallID.
+		storageApp = "storage"
+	}
 	var out struct {
 		ID int64 `json:"id"`
 	}
-	err := s.ctx.PlatformAPI().CallAppResult("storage", "files_upload", map[string]any{"name": name, "folder": fmt.Sprintf("/.pcb/%d/", designID), "content_base64": base64.StdEncoding.EncodeToString(body), "content_type": contentType, "source": "pcb-studio", "tags": []string{"pcb", fmt.Sprintf("revision:%d", revisionID), "sha256:" + hash}, "_project_id": s.project}, &out)
+	err := s.ctx.PlatformAPI().CallAppResult(storageApp, "files_upload", map[string]any{"name": name, "folder": fmt.Sprintf("/.pcb/%d/", designID), "content_base64": base64.StdEncoding.EncodeToString(body), "content_type": contentType, "source": "pcb-studio", "tags": []string{"pcb", fmt.Sprintf("revision:%d", revisionID), "sha256:" + hash}, "_project_id": s.project}, &out)
 	if err != nil {
 		return "", err
 	}

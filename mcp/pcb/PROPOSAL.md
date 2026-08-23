@@ -943,23 +943,34 @@ requires:
     - platform.apps.call
     - platform.connections.execute
     - net.egress
-  apps:
-    - name: storage
-      version: ">=0.10.0"
-      reason: Canonical snapshots, assets, renders, and manufacturing artifacts.
-    - name: design
-      optional: true
-      reason: Optional mechanical envelope and enclosure exchange.
-    - name: code
-      optional: true
-      reason: Optional firmware and pin-map synchronization.
-    - name: devices
-      optional: true
-      reason: Optional board bring-up and deployed-device linkage.
-    - name: inventory
-      optional: true
-      reason: Optional component and manufactured-unit stock tracking.
   integrations:
+    - role: storage
+      kind: app
+      compatible_app_names: [storage]
+      capabilities: [files.read, files.write]
+      required: true
+      label: Storage
+    - role: mechanical_design
+      kind: app
+      compatible_app_names: [design]
+      capabilities: [designs.read, designs.write]
+      required: false
+      label: Mechanical Design
+    - role: firmware_source
+      kind: app
+      compatible_app_names: [code]
+      required: false
+      label: Firmware source
+    - role: device_management
+      kind: app
+      compatible_app_names: [devices]
+      required: false
+      label: Device management
+    - role: inventory
+      kind: app
+      compatible_app_names: [inventory]
+      required: false
+      label: Inventory
     - role: component_data_provider
       kind: integration
       mode: multiple

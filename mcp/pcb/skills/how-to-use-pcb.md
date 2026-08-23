@@ -18,6 +18,8 @@ Every edit creates an immutable revision. Start with `pcb_examples`, then:
 
 Local component, footprint, pin, and MPN fields remain authoritative. If the optional `component_data` provider is bound, `pcb_components_search` can search parts and `pcb_bom_source` can match revision MPNs against current distributor data. Provider results enrich a design but never mutate it automatically.
 
+All dependencies are native install bindings. The required `storage` role selects a project or global Storage app install (`kind: app`); `component_data` and `pcb_fabricator` select external connections (`kind: integration`). Do not bypass these roles with connection IDs or assumed app installations.
+
 ## Compatibility
 
 The native source remains the editable truth. Import/export compatibility is implemented as deterministic Apteva-owned adapters around that model. Adapters preserve the original source in Storage, emit a conversion report, and declare whether a format is detected, viewed, imported, edited, exported, or semantically round-tripped. V0.1 exports SVG, BOM CSV, and a native release ZIP. Gerber/Excellon and third-party project adapters are the next compatibility layer; never claim fabrication readiness until those outputs pass golden-file and round-trip tests.

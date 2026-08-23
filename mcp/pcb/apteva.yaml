@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: pcb
 display_name: PCB Studio
-version: 0.1.0
+version: 0.1.1
 description: |
   Native, agent-first electronics design for Apteva. PCB Studio owns its
   canonical circuit and board model, revision engine, validation, rendering,
@@ -23,11 +23,14 @@ requires:
     - db.write.app
     - platform.apps.call
     - platform.connections.execute
-  apps:
-    - name: storage
-      version: ">=0.10.0"
-      reason: Stores native source packages, previews, BOMs, and manufacturing releases.
   integrations:
+    - role: storage
+      kind: app
+      compatible_app_names: [storage]
+      capabilities: [files.write]
+      required: true
+      label: "Storage"
+      hint: "Stores native source packages, previews, BOMs, and manufacturing releases. Bind the project or global Storage app install that should own PCB artifacts."
     - role: component_data
       kind: integration
       compatible_slugs: [nexar]
@@ -42,7 +45,7 @@ requires:
         components.pricing: get_pricing
         components.availability: get_availability
       required: false
-      label: Electronic component data
+      label: "Electronic component data"
       hint: Optional. Bind Nexar/Octopart for live component search, authorized distributor offers, stock, and BOM matching.
     - role: pcb_fabricator
       kind: integration
@@ -51,7 +54,7 @@ requires:
       tools:
         pcb.provider_discovery: get_api_platform_overview
       required: false
-      label: PCB fabrication provider
+      label: "PCB fabrication provider"
       hint: Optional provider binding. v0.1 exposes provider readiness only; quote/order calls stay disabled until documented partner endpoints are available.
 
 provides:
@@ -85,7 +88,7 @@ provides:
     - { name: pcb_release_create, description: "Validate and create a traceable native release ZIP. Failed validation blocks release. Args: design_id, revision_id?, note?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_components_search, description: "Search the optional component-data provider. Args: query, country?, currency?, limit?.", requires: pcb.read }
     - { name: pcb_bom_source, description: "Match a revision BOM through the optional component-data provider. Args: design_id, revision_id?, country?, currency?.", requires: pcb.read, resource_from: "pcb_design/{arg.design_id}" }
-    - { name: pcb_providers_status, description: Return component-data and fabrication provider binding/readiness status., requires: pcb.read }
+    - { name: pcb_providers_status, description: Return native app and provider integration binding/readiness status., requires: pcb.read }
   ui_panels:
     - { slot: project.page, label: PCB, icon: cpu, entry: /ui/PCBPanel.mjs }
   ui_components:
