@@ -83,6 +83,17 @@ func (p *answerPlatform) KillThread(_ int64, threadID string) error {
 	return nil
 }
 
+func TestKillCallThreadSkipsHumanSoftphone(t *testing.T) {
+	platform := &answerPlatform{}
+	app, ctx := withTelephonyTestContext(t, platform)
+	if err := app.killCallThread(ctx, &callRow{AgentID: 0, ThreadID: "human-call", PeerKind: peerKindHuman}); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.killed) != 0 {
+		t.Fatalf("human softphone tried to kill a Core thread: %v", platform.killed)
+	}
+}
+
 func (p *answerPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
 	if p.credentials != nil {
 		copy := *p.credentials

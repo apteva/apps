@@ -1453,13 +1453,17 @@ func (a *App) startTelnyxGather(ctx *sdk.AppCtx, row *callRow, plan *inboundRout
 	}
 	validDigits := firstNonEmpty(plan.ValidDigits, "0123456789")
 	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "gather_using_speak", map[string]any{
-		"call_control_id":            row.CarrierSID,
-		"payload":                    firstNonEmpty(plan.Prompt, "Please choose an option using your telephone keypad."),
-		"payload_type":               "text",
-		"voice":                      "Telnyx.NaturalHD.Astra",
-		"language":                   "en-US",
-		"minimum_digits":             1,
-		"maximum_digits":             1,
+		"call_control_id": row.CarrierSID,
+		"payload":         firstNonEmpty(plan.Prompt, "Please choose an option using your telephone keypad."),
+		"payload_type":    "text",
+		"voice":           "Telnyx.NaturalHD.Astra",
+		"language":        "en-US",
+		"minimum_digits":  1,
+		"maximum_digits":  1,
+		// The routing graph owns retry/fallback behavior. Telnyx defaults to
+		// replaying the prompt three times, which delays the graph's timeout
+		// branch and makes its configured outcome carrier-dependent.
+		"maximum_tries":              1,
 		"timeout_millis":             6000,
 		"inter_digit_timeout_millis": 3000,
 		"valid_digits":               validDigits,

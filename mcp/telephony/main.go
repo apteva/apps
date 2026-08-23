@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.3.4
+version: 0.3.5
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -2014,7 +2014,10 @@ func (a *App) rejectInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 }
 
 func (a *App) killCallThread(ctx *sdk.AppCtx, row *callRow) error {
-	if row == nil || row.ThreadID == "" || strings.HasPrefix(row.ThreadID, "pending-") {
+	// Human softphone calls use a synthetic thread ID for call persistence but
+	// do not spawn a Core agent thread. Avoid asking the platform to kill agent
+	// zero when their carrier leg ends.
+	if row == nil || row.PeerKind == peerKindHuman || row.AgentID == 0 || row.ThreadID == "" || strings.HasPrefix(row.ThreadID, "pending-") {
 		return nil
 	}
 	return ctx.PlatformAPI().KillThread(row.AgentID, row.ThreadID)

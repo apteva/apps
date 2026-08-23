@@ -121,7 +121,7 @@ func TestTelnyxRoutingUsesGatherUsingSpeakContract(t *testing.T) {
 		t.Fatalf("calls = %#v", platform.integrationCalls)
 	}
 	input := platform.integrationCalls[0].Input
-	if input["maximum_digits"] != 1 || input["valid_digits"] != "12" || input["gather_id"] != "call-1:menu" {
+	if input["maximum_digits"] != 1 || input["maximum_tries"] != 1 || input["valid_digits"] != "12" || input["gather_id"] != "call-1:menu" {
 		t.Fatalf("gather input = %#v", input)
 	}
 }
