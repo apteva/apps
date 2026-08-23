@@ -5,7 +5,7 @@ import "encoding/json"
 const (
 	pcbSchema            = "apteva-pcb/v1"
 	releaseSchema        = "apteva-pcb-release/v1"
-	engineVersion        = "pcb-native/0.2.2"
+	engineVersion        = "pcb-native/0.2.3"
 	defaultClearance     = int64(200_000)
 	defaultTraceWidth    = int64(200_000)
 	defaultEdgeClearance = int64(250_000)

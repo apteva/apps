@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: pcb
 display_name: PCB Studio
-version: 0.2.2
+version: 0.2.3
 description: |
   Native, agent-first electronics design for Apteva. PCB Studio owns its
   canonical circuit and board model, revision engine, validation, rendering,
@@ -119,7 +119,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: pcb/v0.2.2, entry: mcp/pcb }
+  source: { repo: github.com/apteva/apps, ref: pcb/v0.2.3, entry: mcp/pcb }
   port: 8080
   health_check: /health
   resources: { cpu: 0.1, memory: 128, cpu_limit: 1, memory_limit: 512 }

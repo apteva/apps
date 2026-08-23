@@ -21,10 +21,10 @@ func renderSVG(def *Definition) []byte {
 	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -4 %s %s" role="img" aria-label="Apteva PCB board preview">`, canvasWidth, canvasHeight)
 	b.WriteString(`
 <defs>
-  <radialGradient id="canvas-fill" cx="50%" cy="42%" r="72%"><stop stop-color="#111923"/><stop offset="1" stop-color="#080c11"/></radialGradient>
-  <linearGradient id="board-fill" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#17232d"/><stop offset="1" stop-color="#0d151c"/></linearGradient>
-  <pattern id="canvas-grid" width="2.4" height="2.4" patternUnits="userSpaceOnUse"><path d="M2.4 0H0V2.4" fill="none" stroke="#94a3b8" stroke-opacity=".045" stroke-width=".04"/></pattern>
-  <pattern id="grid" width="2" height="2" patternUnits="userSpaceOnUse"><path d="M2 0H0V2" fill="none" stroke="#cbd5e1" stroke-opacity=".05" stroke-width=".04"/></pattern>
+  <radialGradient id="canvas-fill" cx="50%" cy="42%" r="72%"><stop stop-color="#15110e"/><stop offset="1" stop-color="#090806"/></radialGradient>
+  <linearGradient id="board-fill" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#21170f"/><stop offset="1" stop-color="#130e0a"/></linearGradient>
+  <pattern id="canvas-grid" width="2.4" height="2.4" patternUnits="userSpaceOnUse"><path d="M2.4 0H0V2.4" fill="none" stroke="#9f9993" stroke-opacity=".045" stroke-width=".04"/></pattern>
+  <pattern id="grid" width="2" height="2" patternUnits="userSpaceOnUse"><path d="M2 0H0V2" fill="none" stroke="#d0ccc8" stroke-opacity=".05" stroke-width=".04"/></pattern>
   <pattern id="keepout-pattern" width="1.4" height="1.4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="1.4" stroke="#fbbf24" stroke-opacity=".62" stroke-width=".18"/></pattern>
   <filter id="board-shadow" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="0" dy="1.2" stdDeviation="1.15" flood-color="#000" flood-opacity=".72"/></filter>
   <filter id="copper-glow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="0" stdDeviation=".11" flood-color="#f97316" flood-opacity=".42"/></filter>
@@ -37,7 +37,7 @@ func renderSVG(def *Definition) []byte {
 	if label == "" {
 		label = "Native PCB layout"
 	}
-	fmt.Fprintf(&b, `<g font-family="ui-sans-serif,system-ui,sans-serif"><text x="0" y="-2.25" font-size=".72" font-weight="700" fill="#f8fafc">%s</text><text x="0" y="-1.25" font-size=".38" letter-spacing=".08" fill="#94a3b8">APTEVA PCB · NATIVE LAYOUT</text><circle cx="%s" cy="-2.18" r=".18" fill="#f97316"/><text x="%s" y="-2.02" text-anchor="end" font-size=".38" fill="#cbd5e1">%d COMPONENTS · %d NETS</text></g>`, html.EscapeString(shortLabel(label, 48)), mm(def.Board.WidthNM-100_000), mm(def.Board.WidthNM-500_000), len(def.Components), len(def.Nets))
+	fmt.Fprintf(&b, `<g font-family="ui-sans-serif,system-ui,sans-serif"><text x="0" y="-2.25" font-size=".72" font-weight="700" fill="#f5f2ef">%s</text><text x="0" y="-1.25" font-size=".38" letter-spacing=".08" fill="#9f9993">APTEVA PCB · NATIVE LAYOUT</text><circle cx="%s" cy="-2.18" r=".18" fill="#f97316"/><text x="%s" y="-2.02" text-anchor="end" font-size=".38" fill="#d0ccc8">%d COMPONENTS · %d NETS</text></g>`, html.EscapeString(shortLabel(label, 48)), mm(def.Board.WidthNM-100_000), mm(def.Board.WidthNM-500_000), len(def.Components), len(def.Nets))
 	b.WriteByte('\n')
 	b.WriteString(`<g filter="url(#board-shadow)">` + "\n")
 	fmt.Fprintf(&b, `<rect x="0" y="0" width="%s" height="%s" rx="1.2" fill="url(#board-fill)" stroke="#f97316" stroke-width=".20"/>`, width, height)
@@ -57,13 +57,17 @@ func renderSVG(def *Definition) []byte {
 
 	for _, trace := range def.Traces {
 		color := layerColor(trace.Layer)
-		fmt.Fprintf(&b, `<polyline id="%s" points="%s" fill="none" stroke="#061814" stroke-opacity=".7" stroke-width="%s" stroke-linecap="round" stroke-linejoin="round"/>`, html.EscapeString(trace.ID)+"-mask", svgPoints(trace.Points), mm(trace.WidthNM+160_000))
+		dash := ""
+		if trace.Layer == "B.Cu" {
+			dash = ` stroke-dasharray=".55 .22"`
+		}
+		fmt.Fprintf(&b, `<polyline id="%s" points="%s" fill="none" stroke="#1a0b04" stroke-opacity=".7" stroke-width="%s" stroke-linecap="round" stroke-linejoin="round"/>`, html.EscapeString(trace.ID)+"-mask", svgPoints(trace.Points), mm(trace.WidthNM+160_000))
 		b.WriteByte('\n')
-		fmt.Fprintf(&b, `<polyline id="%s" points="%s" fill="none" stroke="%s" stroke-width="%s" stroke-linecap="round" stroke-linejoin="round" filter="url(#copper-glow)"><title>%s · %s · %s mm</title></polyline>`, html.EscapeString(trace.ID), svgPoints(trace.Points), color, mm(trace.WidthNM), html.EscapeString(netNames[trace.NetID]), html.EscapeString(trace.Layer), mm(trace.WidthNM))
+		fmt.Fprintf(&b, `<polyline id="%s" points="%s" fill="none" stroke="%s" stroke-width="%s" stroke-linecap="round" stroke-linejoin="round"%s filter="url(#copper-glow)"><title>%s · %s · %s mm</title></polyline>`, html.EscapeString(trace.ID), svgPoints(trace.Points), color, mm(trace.WidthNM), dash, html.EscapeString(netNames[trace.NetID]), html.EscapeString(trace.Layer), mm(trace.WidthNM))
 		b.WriteByte('\n')
 	}
 	for _, via := range def.Vias {
-		fmt.Fprintf(&b, `<g id="%s"><circle cx="%s" cy="%s" r="%s" fill="#d6a84f" stroke="#523a11" stroke-width=".10"/><circle cx="%s" cy="%s" r="%s" fill="#080c11"/><title>Via · %s · drill %s mm</title></g>`, html.EscapeString(via.ID), mm(via.XNM), mm(via.YNM), mm(via.DiameterNM/2), mm(via.XNM), mm(via.YNM), mm(via.DrillNM/2), html.EscapeString(netNames[via.NetID]), mm(via.DrillNM))
+		fmt.Fprintf(&b, `<g id="%s"><circle cx="%s" cy="%s" r="%s" fill="#d6a84f" stroke="#523a11" stroke-width=".10"/><circle cx="%s" cy="%s" r="%s" fill="#090806"/><title>Via · %s · drill %s mm</title></g>`, html.EscapeString(via.ID), mm(via.XNM), mm(via.YNM), mm(via.DiameterNM/2), mm(via.XNM), mm(via.YNM), mm(via.DrillNM/2), html.EscapeString(netNames[via.NetID]), mm(via.DrillNM))
 		b.WriteByte('\n')
 	}
 
@@ -75,17 +79,17 @@ func renderSVG(def *Definition) []byte {
 			fallback := inferredBody(component)
 			body = &fallback
 		}
-		bodyFill := "#111a22"
-		bodyStroke := "#cbd5e1"
+		bodyFill := "#171411"
+		bodyStroke := "#d0ccc8"
 		if component.Position.Side == "back" {
-			bodyFill, bodyStroke = "#101b2b", "#93c5fd"
+			bodyFill, bodyStroke = "#1b1510", "#fdba74"
 		}
 		fmt.Fprintf(&b, `<g id="%s" transform="translate(%s %s) rotate(%s)">`, html.EscapeString(component.ID), mm(component.Position.XNM), mm(component.Position.YNM), trimFloat(float64(component.Position.RotationUdeg)/1e6))
 		fmt.Fprintf(&b, `<rect x="%s" y="%s" width="%s" height="%s" rx=".28" fill="%s" fill-opacity=".92" stroke="%s" stroke-width=".13"/>`, mm(-body.WidthNM/2), mm(-body.HeightNM/2), mm(body.WidthNM), mm(body.HeightNM), bodyFill, bodyStroke)
 		for _, pad := range component.Pads {
 			padColor := "#fb923c"
 			if containsString(pad.Layers, "B.Cu") && !containsString(pad.Layers, "F.Cu") {
-				padColor = "#60a5fa"
+				padColor = "#d97706"
 			} else if len(pad.Layers) > 1 {
 				padColor = "#d6a84f"
 			}
@@ -103,17 +107,17 @@ func renderSVG(def *Definition) []byte {
 				fmt.Fprintf(&b, `<circle cx="%s" cy="%s" r="%s" fill="#071612" stroke="#f2dfae" stroke-width=".04"/>`, mm(pad.XNM), mm(pad.YNM), mm(pad.DrillNM/2))
 			}
 		}
-		fmt.Fprintf(&b, `<text x="0" y="%s" text-anchor="middle" font-family="ui-monospace,monospace" font-size=".86" font-weight="700" fill="#f8fafc" stroke="#080c11" stroke-width=".08" paint-order="stroke">%s</text>`, mm(-body.HeightNM/2-500_000), html.EscapeString(component.Designator))
+		fmt.Fprintf(&b, `<text x="0" y="%s" text-anchor="middle" font-family="ui-monospace,monospace" font-size=".86" font-weight="700" fill="#f5f2ef" stroke="#090806" stroke-width=".08" paint-order="stroke">%s</text>`, mm(-body.HeightNM/2-500_000), html.EscapeString(component.Designator))
 		value := component.Value
 		if value == "" {
 			value = component.Name
 		}
-		fmt.Fprintf(&b, `<text x="0" y="%s" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size=".48" fill="#94a3b8">%s</text><title>%s · %s · %s</title></g>`, mm(body.HeightNM/2+650_000), html.EscapeString(shortLabel(value, 24)), html.EscapeString(component.Designator), html.EscapeString(component.Name), html.EscapeString(component.Footprint))
+		fmt.Fprintf(&b, `<text x="0" y="%s" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size=".48" fill="#9f9993">%s</text><title>%s · %s · %s</title></g>`, mm(body.HeightNM/2+650_000), html.EscapeString(shortLabel(value, 24)), html.EscapeString(component.Designator), html.EscapeString(component.Name), html.EscapeString(component.Footprint))
 		b.WriteByte('\n')
 	}
 	b.WriteString("</g>\n")
 	// Native dimension marks make the artifact useful without a separate viewer.
-	fmt.Fprintf(&b, `<g fill="#94a3b8" stroke="#64748b" stroke-width=".06" font-family="ui-monospace,monospace" font-size=".58"><path d="M0 %sV%sM%s %sV%sM0 %sH%s"/><text x="%s" y="%s" text-anchor="middle">%s mm</text><text x="%s" y="%s" text-anchor="middle" transform="rotate(-90 %s %s)">%s mm</text></g>`, mm(def.Board.HeightNM+1_000_000), mm(def.Board.HeightNM+2_100_000), width, mm(def.Board.HeightNM+1_000_000), mm(def.Board.HeightNM+2_100_000), mm(def.Board.HeightNM+1_600_000), width, mm(def.Board.WidthNM/2), mm(def.Board.HeightNM+2_500_000), width, mm(-2_400_000), mm(def.Board.HeightNM/2), mm(-2_400_000), mm(def.Board.HeightNM/2), height)
+	fmt.Fprintf(&b, `<g fill="#9f9993" stroke="#756d66" stroke-width=".06" font-family="ui-monospace,monospace" font-size=".58"><path d="M0 %sV%sM%s %sV%sM0 %sH%s"/><text x="%s" y="%s" text-anchor="middle">%s mm</text><text x="%s" y="%s" text-anchor="middle" transform="rotate(-90 %s %s)">%s mm</text></g>`, mm(def.Board.HeightNM+1_000_000), mm(def.Board.HeightNM+2_100_000), width, mm(def.Board.HeightNM+1_000_000), mm(def.Board.HeightNM+2_100_000), mm(def.Board.HeightNM+1_600_000), width, mm(def.Board.WidthNM/2), mm(def.Board.HeightNM+2_500_000), width, mm(-2_400_000), mm(def.Board.HeightNM/2), mm(-2_400_000), mm(def.Board.HeightNM/2), height)
 	b.WriteString("</svg>\n")
 	return []byte(b.String())
 }
@@ -140,7 +144,7 @@ func layerColor(layer string) string {
 		return "#f97316"
 	}
 	if layer == "B.Cu" {
-		return "#3b82f6"
+		return "#b45309"
 	}
 	return "#e8bd66"
 }
