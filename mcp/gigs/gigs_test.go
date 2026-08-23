@@ -89,7 +89,7 @@ func seedAssignment(t *testing.T, ctx *sdk.AppCtx, gigID, workerID int64, status
 
 func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.3.0" {
+	if manifest.Version != "0.3.1" {
 		t.Fatalf("version=%q", manifest.Version)
 	}
 	var public []sdk.RouteSpec
@@ -100,6 +100,13 @@ func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
 	}
 	if len(public) != 1 || public[0].Prefix != "/worker/" || public[0].Method != "" {
 		t.Fatalf("public routes=%+v", public)
+	}
+}
+
+func TestWorkerOfferSummaryMatchesAcceptanceBoundary(t *testing.T) {
+	html := workerPageHTML("worker-token")
+	if !strings.Contains(html, `Review the offer details, then accept to see the full instructions.`) {
+		t.Fatal("worker page does not explain that instructions appear after acceptance")
 	}
 }
 

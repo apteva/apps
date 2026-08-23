@@ -986,6 +986,9 @@ func workerPageHTML(token string) string {
 	      return hasWorkInputs() ? "Add the requested responses, then submit." : "Review the instructions, then mark complete.";
 	    }
 	    function summaryText() {
+	      if (gig.assignment_status === "offered") {
+	        return "Review the offer details, then accept to see the full instructions.";
+	      }
 	      if (gig.assignment_status === "submitted") {
 	        return hasWorkInputs()
 	          ? "Your submission is saved. You can still adjust notes or upload replacement files, then submit again."
