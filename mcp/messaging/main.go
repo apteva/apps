@@ -65,7 +65,7 @@ const (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.42
+version: 0.13.43
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through Twilio.
 author: Apteva
@@ -138,12 +138,12 @@ provides:
     - { prefix: /webhooks/twilio-inbound, method: POST, no_auth: true }
     - { prefix: /webhooks/twilio-status, method: POST, no_auth: true }
   mcp_tools:
-    - { name: send_message,           description: "Send a message. Channel is an explicit arg (email|sms|whatsapp). Email replies may include in_reply_to + references for threading." }
+    - { name: send_message,           description: "Send a message and return normalized attachment metadata. Channel is an explicit arg (email|sms|whatsapp)." }
     - { name: send_message_template,  description: "Render a saved template + send." }
-    - { name: message_get,            description: "Fetch one message by id." }
-    - { name: message_list,           description: "List messages with filters." }
-    - { name: inbound_redispatch,     description: "Re-attempt routing for an inbound message." }
-    - { name: inbound_route_set,      description: "Bind a recipient pattern to an app+route." }
+    - { name: message_get,            description: "Fetch one message with normalized attachment metadata." }
+    - { name: message_list,           description: "List messages with normalized attachment metadata and filters." }
+    - { name: inbound_redispatch,     description: "Re-attempt routing with the same normalized attachment metadata." }
+    - { name: inbound_route_set,      description: "Bind a recipient pattern to any app tool; payloads include normalized attachment metadata only." }
     - { name: inbound_route_list,     description: "List configured inbound routes." }
     - { name: inbound_route_delete,   description: "Remove an inbound route." }
     - { name: template_create,        description: "Create a template." }
@@ -320,6 +320,19 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 
 func (a *App) MCPTools() []sdk.Tool {
+	attachmentInputSchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"storage_id":     map[string]any{"type": "integer", "description": "Project-owned Storage file id."},
+			"url":            map[string]any{"type": "string", "description": "Public HTTPS source URL; Messaging applies SSRF checks."},
+			"content_base64": map[string]any{"type": "string", "description": "Base64 bytes; never returned or routed to another app."},
+			"filename":       map[string]any{"type": "string"},
+			"content_type":   map[string]any{"type": "string"},
+			"size_bytes":     map[string]any{"type": "integer"},
+			"content_id":     map[string]any{"type": "string"},
+			"disposition":    map[string]any{"type": "string", "enum": []string{"attachment", "inline"}},
+		},
+	}
 	return []sdk.Tool{
 		{
 			Name: "send_message",
@@ -328,7 +341,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Cross-channel attachment fields: attachments, attachment_storage_ids. SMS/WhatsApp-only fields: media_url, content_sid, content_variables. " +
 				"Common: template_id, vars, idempotency_key. " +
 				"Addresses are plain — emails (alice@x.com) and E.164 phone numbers (+15551234567), no scheme prefix. " +
-				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?}. " +
+				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?, attachments:[normalized metadata]}. " +
 				"Suppressed recipients return a JSON error with code=recipient_suppressed plus address, matched, kind, reason, source, and recipients.",
 			InputSchema: schemaObject(map[string]any{
 				"channel":                map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
@@ -344,8 +357,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"cc":                     map[string]any{},
 				"bcc":                    map[string]any{},
 				"headers":                map[string]any{"type": "object"},
-				"attachments":            map[string]any{"type": "array"},
-				"attachment_storage_ids": map[string]any{"type": "array"},
+				"attachments":            map[string]any{"type": "array", "items": attachmentInputSchema, "maxItems": maxAttachmentCount},
+				"attachment_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "maxItems": maxAttachmentCount},
 				"media_url":              map[string]any{"type": "string"},
 				"content_sid":            map[string]any{"type": "string"},
 				"content_variables":      map[string]any{"type": "string"},
@@ -364,21 +377,21 @@ func (a *App) MCPTools() []sdk.Tool {
 				"from":                   map[string]any{"type": "string"},
 				"to":                     map[string]any{},
 				"vars":                   map[string]any{"type": "object"},
-				"attachments":            map[string]any{"type": "array"},
-				"attachment_storage_ids": map[string]any{"type": "array"},
+				"attachments":            map[string]any{"type": "array", "items": attachmentInputSchema, "maxItems": maxAttachmentCount},
+				"attachment_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "maxItems": maxAttachmentCount},
 				"idempotency_key":        map[string]any{"type": "string"},
 			}, []string{"template_id", "channel", "from", "to"}),
 			Handler: a.toolSendMessageTemplate,
 		},
 		{
 			Name:        "message_get",
-			Description: "Fetch one message by id. Returns {message, events}.",
+			Description: "Fetch one message by id. Returns {message, events}; message.attachments contains normalized metadata and never raw bytes.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolMessageGet,
 		},
 		{
 			Name:        "message_list",
-			Description: "List messages. Filters: q? (free text across sender, recipients, subject, and body), direction? (in|out), channel?, status?, since? (RFC3339), address? (URI), limit? (default 50, max 200), offset? (default 0). Returns total for pagination.",
+			Description: "List messages with normalized attachment metadata. Filters: q? (free text across sender, recipients, subject, and body), direction? (in|out), channel?, status?, since? (RFC3339), address? (URI), limit? (default 50, max 200), offset? (default 0). Returns total for pagination.",
 			InputSchema: schemaObject(map[string]any{
 				"q":         map[string]any{"type": "string", "maxLength": 500},
 				"direction": map[string]any{"type": "string"},
@@ -393,7 +406,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "inbound_redispatch",
-			Description: "Re-attempt routing for an inbound message that previously failed or had no_match. Args: id.",
+			Description: "Re-attempt routing for an inbound message with the same normalized attachment IDs and metadata. Args: id.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolInboundRedispatch,
 		},
@@ -1048,8 +1061,12 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 
-	if body == "" && bodyHTML == "" && contentSid == "" {
-		return nil, errors.New("body, body_html, or content_sid required (directly or via template)")
+	attachmentInputs, attachmentInputErr := attachmentInputsFromArgs(args)
+	if attachmentInputErr != nil {
+		return nil, fmt.Errorf("attachments: %w", attachmentInputErr)
+	}
+	if body == "" && bodyHTML == "" && contentSid == "" && mediaURL == "" && len(attachmentInputs) == 0 {
+		return nil, errors.New("body, body_html, content_sid, media_url, or at least one attachment required (directly or via template)")
 	}
 
 	from := strArg(args, "from")
@@ -1196,9 +1213,10 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		providerMessageID, now, now, id,
 	)
 	emitMessagingEvent(ctx, pid, "message.sent", map[string]any{
-		"id":      id,
-		"channel": channel,
-		"to":      to,
+		"id":               id,
+		"channel":          channel,
+		"to":               to,
+		"attachment_count": len(attachments),
 	})
 	m, _ := dbMessageGet(ctx.AppDB(), pid, id)
 	return sendResponse(m), nil
@@ -1236,6 +1254,7 @@ func sendResponse(m *Message) map[string]any {
 		"recipients":          recips,
 		"provider_message_id": m.ProviderMessageID,
 		"status_reason":       m.StatusReason,
+		"attachments":         consumerAttachmentMetadata(m.Attachments),
 	}
 }
 
@@ -3340,15 +3359,23 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := res.LastInsertId()
+	if attachments := prepareInboundAttachments(globalCtx, pid, parsed.Attachments); len(attachments) > 0 {
+		if err := dbInsertMessageAttachments(globalCtx.AppDB(), pid, id, attachments); err != nil {
+			// The provider message itself is authoritative and must still be
+			// routed even when attachment metadata cannot be persisted.
+			globalCtx.Logger().Warn("persist inbound email attachments failed", "message_id", id, "err", err)
+		}
+	}
 	m, _ := dbMessageGet(globalCtx.AppDB(), pid, id)
 
 	if err := dispatchInbound(globalCtx, pid, m); err != nil {
 		globalCtx.Logger().Warn("dispatch failed", "id", id, "err", err)
 	}
 	emitMessagingEvent(globalCtx, pid, "message.received", map[string]any{
-		"id":      id,
-		"channel": "email",
-		"from":    from,
+		"id":               id,
+		"channel":          "email",
+		"from":             from,
+		"attachment_count": messageAttachmentCount(m),
 	})
 	httpJSON(w, map[string]any{"ok": true, "id": id})
 }
@@ -3514,6 +3541,12 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	id, _ := res.LastInsertId()
+	twilioAttachments := twilioInboundAttachments(form, messageSid, form.Get("AccountSid"), authToken)
+	if attachments := prepareInboundAttachments(globalCtx, pid, twilioAttachments); len(attachments) > 0 {
+		if err := dbInsertMessageAttachments(globalCtx.AppDB(), pid, id, attachments); err != nil {
+			globalCtx.Logger().Warn("persist inbound Twilio attachments failed", "message_id", id, "err", err)
+		}
+	}
 
 	// STOP-keyword auto-suppression. SMS/WhatsApp opt-out conventions —
 	// Twilio handles these server-side too, but mirroring locally means
@@ -3531,9 +3564,10 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 		globalCtx.Logger().Warn("dispatch failed", "id", id, "err", err)
 	}
 	emitMessagingEvent(globalCtx, pid, "message.received", map[string]any{
-		"id":      id,
-		"channel": channel,
-		"from":    from,
+		"id":               id,
+		"channel":          channel,
+		"from":             from,
+		"attachment_count": messageAttachmentCount(m),
 	})
 	// Twilio expects a 2xx within 15s or it retries. Empty TwiML body
 	// tells Twilio "I handled it; no auto-reply please."
@@ -3823,6 +3857,10 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	// Build dispatch payload.
 	hdr := map[string]any{}
 	_ = json.Unmarshal(m.Headers, &hdr)
+	attachments := m.Attachments
+	if attachments == nil {
+		attachments = dbMessageAttachments(ctx.AppDB(), pid, m.ID)
+	}
 	payload := map[string]any{
 		"message_id":        m.ID,
 		"channel":           m.Channel,
@@ -3840,6 +3878,7 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 		"references":        m.References,
 		"headers":           hdr,
 		"received_at":       m.ReceivedAt,
+		"attachments":       consumerAttachmentMetadata(attachments),
 	}
 
 	targetTool := inboundRouteTargetTool(winner.route.TargetApp, winner.route.TargetRoute)
@@ -4493,16 +4532,17 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 // ─── SES inbound parsing ───────────────────────────────────────────
 
 type parsedInbound struct {
-	From       string
-	To         []string
-	Cc         []string
-	Subject    string
-	BodyText   string
-	BodyHTML   string
-	MessageID  string
-	InReplyTo  string
-	References []string
-	Headers    map[string]string
+	From        string
+	To          []string
+	Cc          []string
+	Subject     string
+	BodyText    string
+	BodyHTML    string
+	MessageID   string
+	InReplyTo   string
+	References  []string
+	Headers     map[string]string
+	Attachments []providerAttachment
 }
 
 // sesInboundEnvelope is the parsed shape of the inner JSON SNS
@@ -4693,24 +4733,154 @@ func parseRawEml(rawBytes []byte, fallbackMessageID string) (*parsedInbound, err
 		hdrs[k] = msg.Header.Get(k)
 	}
 	body, _ := io.ReadAll(msg.Body)
-	bodyText, bodyHTML := extractBodies(msg.Header.Get("Content-Type"), msg.Header.Get("Content-Transfer-Encoding"), body)
+	bodyText, bodyHTML, attachments := extractInboundMIMEContent(
+		msg.Header.Get("Content-Type"),
+		msg.Header.Get("Content-Transfer-Encoding"),
+		msg.Header.Get("Content-Disposition"),
+		msg.Header.Get("Content-ID"),
+		body,
+		0,
+		"0",
+	)
 
 	parsed := &parsedInbound{
-		From:       hdrs["From"],
-		To:         splitAddrList(hdrs["To"]),
-		Cc:         splitAddrList(hdrs["Cc"]),
-		Subject:    decodeMIMEHeader(hdrs["Subject"]),
-		BodyText:   bodyText,
-		BodyHTML:   bodyHTML,
-		MessageID:  hdrs["Message-Id"],
-		InReplyTo:  hdrs["In-Reply-To"],
-		References: splitRefs(hdrs["References"]),
-		Headers:    hdrs,
+		From:        hdrs["From"],
+		To:          splitAddrList(hdrs["To"]),
+		Cc:          splitAddrList(hdrs["Cc"]),
+		Subject:     decodeMIMEHeader(hdrs["Subject"]),
+		BodyText:    bodyText,
+		BodyHTML:    bodyHTML,
+		MessageID:   hdrs["Message-Id"],
+		InReplyTo:   hdrs["In-Reply-To"],
+		References:  splitRefs(hdrs["References"]),
+		Headers:     hdrs,
+		Attachments: attachments,
 	}
 	if parsed.MessageID == "" && fallbackMessageID != "" {
 		parsed.MessageID = fallbackMessageID
 	}
 	return parsed, nil
+}
+
+// extractInboundMIMEContent parses bodies and file parts in one pass. File
+// bytes remain internal providerAttachment.Data until the webhook stores them;
+// only normalized MessageAttachment metadata crosses the app boundary.
+func extractInboundMIMEContent(contentType, encoding, disposition, contentID string, body []byte, depth int, partPath string) (text, html string, attachments []providerAttachment) {
+	if depth > 12 {
+		return "", "", nil
+	}
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType == "" {
+		mediaType = "text/plain"
+		params = map[string]string{}
+	}
+	mediaType = strings.ToLower(mediaType)
+	if strings.HasPrefix(mediaType, "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return "", "", nil
+		}
+		reader := multipart.NewReader(bytes.NewReader(body), boundary)
+		for index := 0; ; index++ {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				break
+			}
+			partBody, err := io.ReadAll(io.LimitReader(part, maxAttachmentInlineBytes+1))
+			if err != nil {
+				continue
+			}
+			partText, partHTML, partAttachments := extractInboundMIMEContent(
+				part.Header.Get("Content-Type"),
+				part.Header.Get("Content-Transfer-Encoding"),
+				part.Header.Get("Content-Disposition"),
+				part.Header.Get("Content-ID"),
+				partBody,
+				depth+1,
+				fmt.Sprintf("%s.%d", partPath, index),
+			)
+			if text == "" {
+				text = partText
+			}
+			if html == "" {
+				html = partHTML
+			}
+			attachments = append(attachments, partAttachments...)
+		}
+		return text, html, attachments
+	}
+
+	dispositionType, dispositionParams, _ := mime.ParseMediaType(disposition)
+	filename := decodeMIMEHeader(firstNonEmpty(dispositionParams["filename"], params["name"]))
+	contentID = strings.Trim(strings.TrimSpace(contentID), "<>")
+	isTextBody := mediaType == "text/plain" || mediaType == "text/html"
+	isFile := strings.EqualFold(dispositionType, "attachment") || filename != "" || contentID != "" ||
+		(strings.EqualFold(dispositionType, "inline") && !isTextBody)
+	decoded, decodeErr := decodeTransferBytes(encoding, body)
+	if decodeErr != nil {
+		decoded = body
+	}
+
+	if mediaType == "message/rfc822" && !isFile {
+		msg, err := mail.ReadMessage(bytes.NewReader(decoded))
+		if err != nil {
+			return "", "", nil
+		}
+		nested, err := io.ReadAll(io.LimitReader(msg.Body, maxInboundRequestBytes+1))
+		if err != nil {
+			return "", "", nil
+		}
+		return extractInboundMIMEContent(
+			msg.Header.Get("Content-Type"),
+			msg.Header.Get("Content-Transfer-Encoding"),
+			msg.Header.Get("Content-Disposition"),
+			msg.Header.Get("Content-ID"),
+			nested,
+			depth+1,
+			partPath+".message",
+		)
+	}
+
+	if isFile || (mediaType != "text/plain" && mediaType != "text/html") {
+		if filename == "" {
+			filename = "attachment-" + strings.NewReplacer(".", "-", "/", "-").Replace(partPath)
+			if extensions, _ := mime.ExtensionsByType(mediaType); len(extensions) > 0 {
+				filename += extensions[0]
+			}
+		}
+		disp := dispositionType
+		if !strings.EqualFold(disp, "inline") {
+			disp = "attachment"
+		}
+		return "", "", []providerAttachment{{
+			MessageAttachment: MessageAttachment{
+				Filename:         safeAttachmentFilename(filename),
+				ContentType:      mediaType,
+				SizeBytes:        int64(len(decoded)),
+				ContentID:        contentID,
+				Disposition:      disp,
+				Source:           "mime",
+				ProviderRef:      "mime:" + partPath,
+				ProcessingStatus: "pending",
+			},
+			Data: decoded,
+		}}
+	}
+
+	if label := strings.TrimSpace(params["charset"]); label != "" && !strings.EqualFold(label, "utf-8") && !strings.EqualFold(label, "us-ascii") {
+		if reader, err := charset.NewReaderLabel(label, bytes.NewReader(decoded)); err == nil {
+			if converted, err := io.ReadAll(reader); err == nil {
+				decoded = converted
+			}
+		}
+	}
+	if mediaType == "text/html" {
+		return "", string(decoded), nil
+	}
+	return string(decoded), "", nil
 }
 
 // fetchSESInboundFromS3 fetches the raw .eml from S3 using SigV4-

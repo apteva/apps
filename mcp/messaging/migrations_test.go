@@ -67,6 +67,34 @@ func TestInboundDedupeMigrationsUpgradeExistingDatabase(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO delivery_events (message_id, kind, provider_event_id) VALUES (?, 'delivered', 'event-1')`, messageID); err == nil {
 		t.Fatal("duplicate provider event id was accepted")
 	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := db.Exec(`INSERT INTO message_attachments
+			(project_id, message_id, filename, disposition, source, provider_ref)
+			VALUES ('project-a', ?, 'invoice.pdf', 'attachment', 'mime', 'mime:0.1')`, messageID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	applySQLFile(t, db, "migrations/011_attachment_processing.sql")
+	var attachmentCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM message_attachments WHERE message_id = ?`, messageID).Scan(&attachmentCount); err != nil {
+		t.Fatal(err)
+	}
+	if attachmentCount != 1 {
+		t.Fatalf("attachment count after migration=%d, want 1", attachmentCount)
+	}
+	var processingStatus string
+	if err := db.QueryRow(`SELECT processing_status FROM message_attachments WHERE message_id = ?`, messageID).Scan(&processingStatus); err != nil {
+		t.Fatal(err)
+	}
+	if processingStatus != "ready" {
+		t.Fatalf("processing_status=%q, want ready", processingStatus)
+	}
+	if _, err := db.Exec(`INSERT INTO message_attachments
+		(project_id, message_id, filename, disposition, source, provider_ref)
+		VALUES ('project-a', ?, 'invoice-again.pdf', 'attachment', 'mime', 'mime:0.1')`, messageID); err == nil {
+		t.Fatal("duplicate attachment provider_ref was accepted")
+	}
 }
 
 func applySQLFile(t *testing.T, db *sql.DB, path string) {
