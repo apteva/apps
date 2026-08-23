@@ -1279,6 +1279,9 @@ function InstructionOrderEditor({
             <div className="flex-1 min-w-0">
               <div className="truncate">{i.name}</div>
               <div className="text-xs text-text-muted truncate">/{i.slug} · {i.kind}</div>
+              {i.current_version?.body && (
+                <div className="text-xs text-text-muted truncate">{summariseBody(i.kind, i.current_version.body)}</div>
+              )}
             </div>
             <div className="flex gap-1">
               <Button type="button" onClick={() => move(index, -1)} disabled={index === 0} size="xs">Up</Button>
@@ -1420,7 +1423,17 @@ function formatBytes(bytes?: number): string {
 }
 
 function summariseBody(kind: string, body: Record<string, unknown>): string {
-  const response = body.response_mode && body.response_mode !== "none" ? ` · response: ${String(body.response_mode)}` : "";
+  const spec = asRecord(body.response);
+  const note = asRecord(spec?.note);
+  const files = asRecord(spec?.files);
+  const responseParts: string[] = [];
+  if (note?.enabled === true || note?.required === true) responseParts.push(note.required === true ? "note required" : "note optional");
+  if (files?.enabled === true || files?.required === true) {
+    const accept = Array.isArray(files.accept) && files.accept.length ? ` (${files.accept.join(", ")})` : "";
+    responseParts.push((files.required === true ? "files required" : "files optional") + accept);
+  }
+  if (!responseParts.length && body.response_mode && body.response_mode !== "none") responseParts.push(`legacy ${String(body.response_mode)}`);
+  const response = responseParts.length ? ` · ${responseParts.join(" + ")}` : "";
   if (kind === "text") return String(body.markdown || "").slice(0, 80) + response;
   if (kind === "warning" || kind === "checklist_item" || kind === "confirmation") return String(body.text || "");
   if (kind === "link") return String(body.label || body.url || "");
@@ -1812,7 +1825,12 @@ function NewInstructionForm({
   const [kind, setKind] = useState(instruction?.kind || "text");
   const [slug, setSlug] = useState(instruction?.slug || "");
   const [text, setText] = useState(instructionTextFromBody(instruction?.kind || "text", initialBody));
-  const [responseMode, setResponseMode] = useState<"none" | "optional" | "required">(responseModeFromBody(initialBody));
+  const [responsePreset, setResponsePreset] = useState<ResponsePreset>(responsePresetFromBody(initialBody));
+  const initialResponseFiles = responseFileSettingsFromBody(initialBody);
+  const [responseAccept, setResponseAccept] = useState(initialResponseFiles.accept);
+  const [responseMin, setResponseMin] = useState(initialResponseFiles.min);
+  const [responseMax, setResponseMax] = useState(initialResponseFiles.max);
+  const [responseMaxSize, setResponseMaxSize] = useState(initialResponseFiles.maxSize);
   const [selectedFile, setSelectedFile] = useState<StorageFile | null>(storageFileFromBody(instruction?.kind || "text", initialBody));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -1825,7 +1843,7 @@ function NewInstructionForm({
     e.preventDefault();
     setBusy(true); setErr(null);
     try {
-      const body = buildInstructionBody(kind, text, selectedFile, responseMode);
+      const body = buildInstructionBody(kind, text, selectedFile, responsePreset, responseAccept, responseMin, responseMax, responseMaxSize);
       if (instruction) {
         await api(`/instructions/${instruction.id}`, projectId, {
           method: "PATCH",
@@ -1875,13 +1893,27 @@ function NewInstructionForm({
       />
       <Field
         as="select"
-        value={responseMode}
-        onChange={(e) => setResponseMode(e.target.value as "none" | "optional" | "required")}
+        value={responsePreset}
+        onChange={(e) => setResponsePreset(e.target.value as ResponsePreset)}
       >
         <option value="none">No worker response</option>
-        <option value="optional">Optional notes/files response</option>
-        <option value="required">Required notes/files response</option>
+        <option value="note_optional">Optional note</option>
+        <option value="note_required">Required note</option>
+        <option value="files_optional">Optional files</option>
+        <option value="files_required">Required files</option>
+        <option value="files_required_note_optional">Required files + optional note</option>
+        <option value="files_required_note_required">Required files + required note</option>
+        <option value="note_files_optional">Optional note and files</option>
       </Field>
+
+      {responsePreset.includes("files") && (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+          <Field value={responseAccept} onChange={(e) => setResponseAccept(e.target.value)} placeholder="Accepted types, e.g. video/*" />
+          <Field type="number" min="0" value={responseMin} onChange={(e) => setResponseMin(e.target.value)} placeholder="Minimum files" />
+          <Field type="number" min="1" value={responseMax} onChange={(e) => setResponseMax(e.target.value)} placeholder="Maximum files (optional)" />
+          <Field type="number" min="1" value={responseMaxSize} onChange={(e) => setResponseMaxSize(e.target.value)} placeholder="Max MB per file" />
+        </div>
+      )}
 
       {(kind === "audio" || kind === "video") && (
         <StorageFilePicker
@@ -2038,10 +2070,48 @@ function instructionTextFromBody(kind: string, body: Record<string, unknown>): s
   return String(body.caption || body.transcript || "");
 }
 
-function responseModeFromBody(body: Record<string, unknown>): "none" | "optional" | "required" {
-  const mode = String(body.response_mode || "none");
-  if (mode === "optional" || mode === "required") return mode;
+type ResponsePreset =
+  | "none"
+  | "note_optional"
+  | "note_required"
+  | "files_optional"
+  | "files_required"
+  | "files_required_note_optional"
+  | "files_required_note_required"
+  | "note_files_optional";
+
+function responsePresetFromBody(body: Record<string, unknown>): ResponsePreset {
+  const response = asRecord(body.response);
+  if (response) {
+    const note = asRecord(response.note) || {};
+    const files = asRecord(response.files) || {};
+    const noteEnabled = note.enabled === true || note.required === true;
+    const filesEnabled = files.enabled === true || files.required === true;
+    const noteRequired = note.required === true;
+    const filesRequired = files.required === true;
+    if (noteEnabled && filesEnabled && noteRequired && filesRequired) return "files_required_note_required";
+    if (noteEnabled && filesEnabled && filesRequired) return "files_required_note_optional";
+    if (noteEnabled && filesEnabled) return "note_files_optional";
+    if (filesEnabled && filesRequired) return "files_required";
+    if (filesEnabled) return "files_optional";
+    if (noteEnabled && noteRequired) return "note_required";
+    if (noteEnabled) return "note_optional";
+    return "none";
+  }
+  const legacy = String(body.response_mode || "none");
+  if (legacy === "required") return "files_required_note_optional";
+  if (legacy === "optional") return "note_files_optional";
   return "none";
+}
+
+function responseFileSettingsFromBody(body: Record<string, unknown>): { accept: string; min: string; max: string; maxSize: string } {
+  const files = asRecord(asRecord(body.response)?.files);
+  return {
+    accept: Array.isArray(files?.accept) ? files.accept.map(String).join(", ") : "",
+    min: files?.min_items == null ? "1" : String(files.min_items),
+    max: files?.max_items == null ? "" : String(files.max_items),
+    maxSize: files?.max_size_mb == null ? "" : String(files.max_size_mb),
+  };
 }
 
 function storageFileFromBody(kind: string, body: Record<string, unknown>): StorageFile | null {
@@ -2060,9 +2130,29 @@ function buildInstructionBody(
   kind: string,
   text: string,
   selectedFile: StorageFile | null,
-  responseMode: "none" | "optional" | "required",
+  responsePreset: ResponsePreset,
+  responseAccept: string,
+  responseMin: string,
+  responseMax: string,
+  responseMaxSize: string,
 ): Record<string, unknown> {
-  const response = responseMode === "none" ? {} : { response_mode: responseMode };
+  const noteEnabled = responsePreset.includes("note");
+  const noteRequired = responsePreset === "note_required" || responsePreset === "files_required_note_required";
+  const filesEnabled = responsePreset.includes("files");
+  const filesRequired = responsePreset.includes("files_required");
+  const response = responsePreset === "none" ? {} : {
+    response: {
+      note: { enabled: noteEnabled, required: noteRequired },
+      files: {
+        enabled: filesEnabled,
+        required: filesRequired,
+        ...(filesEnabled && responseAccept.trim() ? { accept: responseAccept.split(",").map((item) => item.trim()).filter(Boolean) } : {}),
+        ...(filesEnabled && responseMin ? { min_items: Number(responseMin) } : {}),
+        ...(filesEnabled && responseMax ? { max_items: Number(responseMax) } : {}),
+        ...(filesEnabled && responseMaxSize ? { max_size_mb: Number(responseMaxSize) } : {}),
+      },
+    },
+  };
   if (kind === "text") return { markdown: text, ...response };
   return {
     storage_file_id: selectedFile?.id,

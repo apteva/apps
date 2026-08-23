@@ -80,6 +80,9 @@ func validateBody(kind string, body map[string]any) error {
 	if mode := strOf(body["response_mode"]); mode != "" && mode != "none" && mode != "optional" && mode != "required" {
 		return fmt.Errorf("kind %q has invalid body.response_mode %q", kind, mode)
 	}
+	if err := validateResponseSpec(kind, body); err != nil {
+		return err
+	}
 	req := func(field string) error {
 		if _, ok := body[field]; !ok {
 			return fmt.Errorf("kind %q requires body.%s", kind, field)
@@ -125,7 +128,9 @@ func validateBody(kind string, body map[string]any) error {
 // derived_result_schema.properties[result_key].
 func deriveResultField(kind string, body map[string]any) map[string]any {
 	switch kind {
-	case kindChecklistItem, kindConfirmation, kindInputYesNo:
+	case kindChecklistItem, kindConfirmation:
+		return map[string]any{"type": "boolean", "const": true}
+	case kindInputYesNo:
 		return map[string]any{"type": "boolean"}
 	case kindInputShortText, kindInputLongText:
 		f := map[string]any{"type": "string"}

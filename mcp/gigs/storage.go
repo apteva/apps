@@ -29,6 +29,13 @@ type storageUploadInitResult struct {
 	File        map[string]any `json:"file"`
 }
 
+type storageFileMetadata struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	ContentType string `json:"content_type"`
+	SizeBytes   int64  `json:"size_bytes"`
+}
+
 func storageUploadInit(ctx *sdk.AppCtx, pid, name, folder, contentType string, size int64) (*storageUploadInitResult, error) {
 	if name == "" || size <= 0 {
 		return nil, errors.New("storage upload init: name + positive size required")
@@ -110,4 +117,28 @@ func storageSignedURL(ctx *sdk.AppCtx, pid string, fileID int64, ttlSeconds int)
 		return "", fmt.Errorf("storage.files_get_url(%d) returned empty url", fileID)
 	}
 	return got.URL, nil
+}
+
+func storageGetFile(ctx *sdk.AppCtx, pid string, fileID int64) (*storageFileMetadata, error) {
+	var got struct {
+		Found bool                 `json:"found"`
+		File  *storageFileMetadata `json:"file"`
+	}
+	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "files_get", map[string]any{"id": fileID}, &got); err != nil {
+		return nil, fmt.Errorf("storage.files_get(%d): %w", fileID, err)
+	}
+	if !got.Found || got.File == nil {
+		return nil, fmt.Errorf("storage file %d was not found", fileID)
+	}
+	return got.File, nil
+}
+
+func storageDeleteFile(ctx *sdk.AppCtx, pid string, fileID int64) error {
+	var got map[string]any
+	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "files_delete", map[string]any{
+		"id": fileID,
+	}, &got); err != nil {
+		return fmt.Errorf("storage.files_delete(%d): %w", fileID, err)
+	}
+	return nil
 }

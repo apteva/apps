@@ -76,9 +76,9 @@ CREATE TABLE instruction_versions (
   version                  INTEGER NOT NULL,
   status                   TEXT    NOT NULL DEFAULT 'draft', -- draft | active | archived
   -- body_json shape depends on instruction.kind:
-  --   text:                  {markdown, response_mode?: none|optional|required}
-  --   audio:                 {storage_file_id, transcript?, response_mode?: none|optional|required}
-  --   video:                 {storage_file_id, poster_file_id?, caption?, response_mode?: none|optional|required}
+  --   text:                  {markdown, response?: {note?, files?}}
+  --   audio:                 {storage_file_id, transcript?, response?: {note?, files?}}
+  --   video:                 {storage_file_id, poster_file_id?, caption?, response?: {note?, files?}}
   --   image:                 {storage_file_id, caption?}
   --   document:              {storage_file_id, display?}
   --   link:                  {url, label}

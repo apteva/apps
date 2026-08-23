@@ -1,4 +1,4 @@
-# Gigs (v0.2.0)
+# Gigs (v0.3.0)
 
 Gigs is a generic work marketplace and execution engine. Agents can define
 standard services and packages, know the usual customer offer and worker pay,
@@ -48,9 +48,37 @@ The dashboard supports the same core workflow: create instructions, build
 template compositions, dispatch gigs from templates or selected instructions,
 assign workers, and review submitted results.
 
-Text, audio, and video instructions are read-only by default. Set
-`body.response_mode` to `optional` or `required` when a worker should add
-notes/files for that step; otherwise the worker page only shows the instruction.
+Instructions are read-only by default. Add an explicit `body.response` contract
+when a worker should return a note, files, or both for that step. Notes and files
+are independently enabled and required, so a note cannot satisfy a required
+recording upload:
+
+```json
+{
+  "markdown": "Upload the final recordings.",
+  "response": {
+    "note": {"enabled": true, "required": false},
+    "files": {
+      "enabled": true,
+      "required": true,
+      "accept": ["video/*"],
+      "min_items": 1,
+      "max_items": 20,
+      "max_size_mb": 2048
+    }
+  }
+}
+```
+
+Template composition overrides may replace `body.response` for one template;
+the resolved contract is frozen onto every dispatched gig. Legacy
+`body.response_mode=optional|required` snapshots remain readable.
+
+The worker page saves an assignment draft as notes and completed uploads change.
+Each upload is bound to the instruction key and validated against its file type,
+size, and count rules. Workers can remove or replace draft files and submit the
+whole gig once every required instruction is complete. Resubmission remains open
+until manager review; previous submitted revisions stay available for audit.
 
 `result_schema`, `media_manifest`, `checklist`, and `variables` are
 **derived** from the composition — never hand-authored.

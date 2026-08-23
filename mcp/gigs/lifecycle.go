@@ -168,8 +168,8 @@ func assignmentAcceptsWork(assignmentStatus, gigStatus string, revoked bool) boo
 	if revoked {
 		return false
 	}
-	if assignmentStatus != "offered" && assignmentStatus != "accepted" && assignmentStatus != "submitted" {
+	if assignmentStatus != "accepted" && assignmentStatus != "submitted" {
 		return false
 	}
-	return gigStatus == "offered" || gigStatus == "accepted" || gigStatus == "submitted"
+	return gigStatus == "accepted" || gigStatus == "submitted"
 }

@@ -80,7 +80,7 @@ func (a *App) templateTools() []sdk.Tool {
 		},
 		{
 			Name:        "templates_set_instructions",
-			Description: "Replace the composition on the current draft version (auto-forks a draft if the current version is active). Args: id, instructions ([{instruction_id, instruction_version_id?, result_key?, overrides?}]). Returns {template, derived}.",
+			Description: "Replace the composition on the current draft version (auto-forks a draft if the current version is active). overrides is shallow-merged into the instruction body and may replace body.response for this template use. Args: id, instructions ([{instruction_id, instruction_version_id?, result_key?, overrides?}]). Returns {template, derived}.",
 			InputSchema: schemaObject(map[string]any{
 				"id":           map[string]any{"type": "integer"},
 				"instructions": map[string]any{"type": "array"},
@@ -89,7 +89,7 @@ func (a *App) templateTools() []sdk.Tool {
 		},
 		{
 			Name:        "templates_insert_instruction",
-			Description: "Insert one instruction at sort_order. Args: id, sort_order, instruction_id, instruction_version_id?, result_key?, overrides?. Returns {template, derived}.",
+			Description: "Insert one instruction at sort_order. overrides is shallow-merged into the instruction body and may replace body.response for this template use. Args: id, sort_order, instruction_id, instruction_version_id?, result_key?, overrides?. Returns {template, derived}.",
 			InputSchema: schemaObject(map[string]any{
 				"id":                     map[string]any{"type": "integer"},
 				"sort_order":             map[string]any{"type": "integer"},
@@ -591,10 +591,27 @@ func insertCompositionRowTx(tx *sql.Tx, pid string, tvid int64, sortOrder int, r
 		}
 		ivid = currentVID.Int64
 	}
+	var versionBodyJSON string
+	if err := tx.QueryRow(`SELECT body_json FROM instruction_versions WHERE id=? AND instruction_id=?`, ivid, iid).Scan(&versionBodyJSON); errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("instruction_version %d does not belong to instruction %d", ivid, iid)
+	} else if err != nil {
+		return err
+	}
+	versionBody := map[string]any{}
+	if err := parseJSON(versionBodyJSON, &versionBody); err != nil {
+		return err
+	}
 	resultKey := strOf(ref["result_key"])
 	overrides := ref["overrides"]
 	var overridesJSON sql.NullString
 	if overrides != nil {
+		overrideMap, ok := overrides.(map[string]any)
+		if !ok {
+			return errors.New("overrides must be an object")
+		}
+		if err := validateBody(kind, mergeMaps(versionBody, overrideMap)); err != nil {
+			return fmt.Errorf("invalid overrides: %w", err)
+		}
 		overridesJSON = sql.NullString{Valid: true, String: mustJSON(overrides)}
 	}
 	if _, err := tx.Exec(

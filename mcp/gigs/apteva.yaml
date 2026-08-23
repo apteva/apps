@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.2.0
+version: 0.3.0
 description: |
   Generic work marketplace and execution engine. Define standard offers,
   service packages, worker pay grades and effective rate cards; negotiate
@@ -48,7 +48,7 @@ requires:
     - role: storage
       kind: app
       compatible_app_names: [storage]
-      capabilities: [file.read, file.write]
+      capabilities: [files.read, files.write, files.delete]
       required: true
       label: "Storage"
       hint: "Instruction media (audio/video) and worker submissions are stored here under /.gigs/."
@@ -87,13 +87,13 @@ provides:
       description: List all skills in the project.
     # ─── Instruction library ─────────────────────────────────────────
     - name: instructions_create
-      description: Create a new instruction (text/audio/video/image/document/link/script/warning/example/checklist_item/confirmation/timer_hint/input_*). Text/audio/video can set body.response_mode=none|optional|required. Returns the head row + v1.
+      description: Create a versioned instruction. Read-only kinds can define body.response with independent note and files rules; files can restrict accepted types, counts, and size. Omitting response means no worker upload or note. Returns the head row + v1.
     - name: instructions_list
       description: Filter the library by kind or search.
     - name: instructions_get
       description: Instruction + current version + derived result_field schema fragment.
     - name: instructions_update
-      description: Forks a new version (previous versions remain queryable). Text/audio/video can set body.response_mode=none|optional|required.
+      description: Forks a new version while previous versions remain queryable. body.response independently configures worker notes and files; legacy body.response_mode remains readable.
     - name: instructions_publish
       description: Move the current draft version to active.
     - name: instructions_archive
@@ -108,9 +108,9 @@ provides:
     - name: templates_get
       description: Full template incl. composition + derived result_schema + media_manifest + variables.
     - name: templates_set_instructions
-      description: Replace the composition. Returns the derived result_schema, media_manifest, variables.
+      description: Replace the composition. Per-use overrides may replace body.response for that template. Returns the derived result_schema, media_manifest, variables.
     - name: templates_insert_instruction
-      description: Insert one instruction at sort_order n (granular edit on the draft version).
+      description: Insert one instruction at sort_order n; per-use overrides may replace body.response (granular edit on the draft version).
     - name: templates_remove_instruction
       description: Remove one instruction from the draft version.
     - name: templates_reorder_instructions

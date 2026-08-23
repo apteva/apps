@@ -30,6 +30,10 @@ func (storagePlatformStub) CallAppResult(app, tool string, _ map[string]any, out
 		payload = map[string]any{"ok": true}
 	case "storage/storage_upload_complete":
 		payload = map[string]any{"file": map[string]any{"id": 91}}
+	case "storage/files_get":
+		payload = map[string]any{"found": true, "file": map[string]any{"id": 91, "name": "clip.mp4", "content_type": "video/mp4", "size_bytes": 5}}
+	case "storage/files_delete":
+		payload = map[string]any{"ok": true}
 	case "storage/storage_abort_upload":
 		payload = map[string]any{"found": true}
 	default:
@@ -85,7 +89,7 @@ func seedAssignment(t *testing.T, ctx *sdk.AppCtx, gigID, workerID int64, status
 
 func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.2.0" {
+	if manifest.Version != "0.3.0" {
 		t.Fatalf("version=%q", manifest.Version)
 	}
 	var public []sdk.RouteSpec
@@ -96,6 +100,58 @@ func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
 	}
 	if len(public) != 1 || public[0].Prefix != "/worker/" || public[0].Method != "" {
 		t.Fatalf("public routes=%+v", public)
+	}
+}
+
+func TestWorkerOfferWithholdsInstructionsUntilAccepted(t *testing.T) {
+	ctx := testCtx(t)
+	old := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = old })
+
+	workerID := seedWorker(t, ctx, "project-a", 101)
+	gigID := seedGig(t, ctx, "project-a", "offered", `{"type":"object","required":["recording"],"properties":{"recording":{"type":"string"}}}`)
+	assignmentID := seedAssignment(t, ctx, gigID, workerID, "offered", "direct", "private-offer-token")
+	if _, err := ctx.AppDB().Exec(`INSERT INTO gig_instructions
+		(gig_id,sort_order,instruction_kind,rendered_body_json,result_key)
+		VALUES (?,0,'text','{"markdown":"Private recording brief"}','recording')`, gigID); err != nil {
+		t.Fatal(err)
+	}
+
+	fetch := func() map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		(&App{}).handleWorkerGigJSON(rec, httptest.NewRequest(http.MethodGet, "/worker/private-offer-token/api/gig", nil), "private-offer-token")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var envelope map[string]map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		return envelope["gig"]
+	}
+
+	offer := fetch()
+	if composition, _ := offer["composition"].([]any); len(composition) != 0 {
+		t.Fatalf("offered composition=%v", composition)
+	}
+	if _, exposed := offer["required_result_keys"]; exposed {
+		t.Fatalf("offered response exposed required_result_keys: %v", offer["required_result_keys"])
+	}
+
+	if _, err := ctx.AppDB().Exec(`UPDATE gig_assignments SET status='accepted' WHERE id=?`, assignmentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE gigs SET status='accepted' WHERE id=?`, gigID); err != nil {
+		t.Fatal(err)
+	}
+	accepted := fetch()
+	if composition, _ := accepted["composition"].([]any); len(composition) != 1 {
+		t.Fatalf("accepted composition=%v", composition)
+	}
+	if keys, _ := accepted["required_result_keys"].([]any); len(keys) != 1 || keys[0] != "recording" {
+		t.Fatalf("accepted required_result_keys=%v", accepted["required_result_keys"])
 	}
 }
 
@@ -171,14 +227,121 @@ func TestValidateSubmissionChecksGeneratedSchema(t *testing.T) {
 	ctx := testCtx(t)
 	schema := `{"type":"object","properties":{"rating":{"type":"integer","minimum":1,"maximum":5},"choice":{"type":"string","enum":["a","b"]}},"required":["rating","choice"]}`
 	gigID := seedGig(t, ctx, "project-a", "accepted", schema)
-	if err := validateSubmission(ctx.AppDB(), gigID, map[string]any{"rating": 6.0, "choice": "a"}); err == nil {
+	if err := validateSubmission(ctx.AppDB(), gigID, 0, map[string]any{"rating": 6.0, "choice": "a"}); err == nil {
 		t.Fatal("expected maximum validation error")
 	}
-	if err := validateSubmission(ctx.AppDB(), gigID, map[string]any{"rating": 4.0, "choice": "x"}); err == nil {
+	if err := validateSubmission(ctx.AppDB(), gigID, 0, map[string]any{"rating": 4.0, "choice": "x"}); err == nil {
 		t.Fatal("expected enum validation error")
 	}
-	if err := validateSubmission(ctx.AppDB(), gigID, map[string]any{"rating": 4.0, "choice": "b"}); err != nil {
+	if err := validateSubmission(ctx.AppDB(), gigID, 0, map[string]any{"rating": 4.0, "choice": "b"}); err != nil {
 		t.Fatalf("valid submission rejected: %v", err)
+	}
+}
+
+func TestExplicitResponseSpecSeparatesRequiredFilesFromNotes(t *testing.T) {
+	ctx := testCtx(t)
+	workerID := seedWorker(t, ctx, "project-a", 101)
+	gigID := seedGig(t, ctx, "project-a", "accepted", `{"type":"object","properties":{}}`)
+	assignmentID := seedAssignment(t, ctx, gigID, workerID, "accepted", "direct", "response-token")
+	body := `{"markdown":"Upload the final recording","response":{"note":{"enabled":true,"required":false},"files":{"enabled":true,"required":true,"accept":["video/*"],"min_items":1,"max_items":3}}}`
+	if _, err := ctx.AppDB().Exec(`INSERT INTO gig_instructions
+		(gig_id,sort_order,instruction_kind,rendered_body_json,result_key)
+		VALUES (?,0,'text',?,'recording')`, gigID, body); err != nil {
+		t.Fatal(err)
+	}
+	noteOnly := map[string]any{"instruction_responses": []any{map[string]any{
+		"key": "recording", "note": "The files are ready", "files": []any{},
+	}}}
+	if err := validateSubmission(ctx.AppDB(), gigID, assignmentID, noteOnly); err == nil || !strings.Contains(err.Error(), "requires at least 1 file") {
+		t.Fatalf("note-only response err=%v", err)
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO gig_upload_sessions
+		(upload_id,assignment_id,project_id,status,storage_file_id,instruction_key,filename,content_type,size_bytes,completed_at)
+		VALUES ('response-upload',?,'project-a','completed',501,'recording','take.mp4','video/mp4',100,CURRENT_TIMESTAMP)`, assignmentID); err != nil {
+		t.Fatal(err)
+	}
+	withVideo := map[string]any{"instruction_responses": []any{map[string]any{
+		"key": "recording", "note": "", "files": []any{map[string]any{
+			"storage_file_id": 501, "filename": "take.mp4", "mime": "video/mp4",
+		}},
+	}}}
+	if err := validateSubmission(ctx.AppDB(), gigID, assignmentID, withVideo); err != nil {
+		t.Fatalf("valid video response rejected: %v", err)
+	}
+}
+
+func TestExplicitResponseSpecRejectsMalformedRules(t *testing.T) {
+	tests := []map[string]any{
+		{"markdown": "Record", "response": map[string]any{"files": "video/*"}},
+		{"markdown": "Record", "response": map[string]any{"files": map[string]any{"enabled": true, "accept": "video/*"}}},
+		{"markdown": "Record", "response": map[string]any{"files": map[string]any{"enabled": true, "max_items": 1.5}}},
+		{"markdown": "Record", "response": map[string]any{"note": map[string]any{"enabled": false, "required": true}}},
+	}
+	for i, body := range tests {
+		if err := validateBody(kindText, body); err == nil {
+			t.Fatalf("case %d malformed response accepted: %v", i, body)
+		}
+	}
+}
+
+func TestResponseSpecRejectsWrongFileTypeAtUploadInit(t *testing.T) {
+	ctx := testCtx(t)
+	old := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = old })
+	workerID := seedWorker(t, ctx, "project-a", 102)
+	gigID := seedGig(t, ctx, "project-a", "accepted", `{"type":"object","properties":{}}`)
+	seedAssignment(t, ctx, gigID, workerID, "accepted", "direct", "mime-token")
+	if _, err := ctx.AppDB().Exec(`INSERT INTO gig_instructions
+		(gig_id,sort_order,instruction_kind,rendered_body_json,result_key)
+		VALUES (?,0,'text',?,'recording')`, gigID,
+		`{"markdown":"Upload","response":{"files":{"enabled":true,"required":true,"accept":["video/*"]}}}`); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/worker/mime-token/upload/init", bytes.NewBufferString(
+		`{"instruction_key":"recording","name":"notes.pdf","content_type":"application/pdf","size_bytes":20}`))
+	rec := httptest.NewRecorder()
+	(&App{}).handleWorkerUploadInit(rec, req, "mime-token")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "not accepted") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWorkerDraftPersistsIncompleteResponses(t *testing.T) {
+	ctx := testCtx(t)
+	old := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = old })
+	workerID := seedWorker(t, ctx, "project-a", 103)
+	gigID := seedGig(t, ctx, "project-a", "accepted", `{"type":"object","properties":{}}`)
+	assignmentID := seedAssignment(t, ctx, gigID, workerID, "accepted", "direct", "draft-token")
+	if _, err := ctx.AppDB().Exec(`INSERT INTO gig_instructions
+		(gig_id,sort_order,instruction_kind,rendered_body_json,result_key)
+		VALUES (?,0,'text',?,'recording')`, gigID,
+		`{"markdown":"Upload","response":{"note":{"enabled":true},"files":{"enabled":true,"required":true,"accept":["video/*"]}}}`); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/worker/draft-token/draft", bytes.NewBufferString(
+		`{"payload":{"instruction_responses":[{"key":"recording","note":"Recording tomorrow","files":[]}]},"attachment_file_ids":[]}`))
+	rec := httptest.NewRecorder()
+	(&App{}).handleWorkerDraft(rec, req, "draft-token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	draft, err := loadWorkerDraft(ctx.AppDB(), assignmentID)
+	if err != nil || draft == nil || !strings.Contains(mustJSON(draft.Payload), "Recording tomorrow") {
+		t.Fatalf("draft=%+v err=%v", draft, err)
+	}
+}
+
+func TestRequiredConfirmationMustBeTrue(t *testing.T) {
+	ctx := testCtx(t)
+	gigID := seedGig(t, ctx, "project-a", "accepted", `{"type":"object","properties":{"confirmed":{"type":"boolean","const":true}},"required":["confirmed"]}`)
+	if err := validateSubmission(ctx.AppDB(), gigID, 0, map[string]any{"confirmed": false}); err == nil {
+		t.Fatal("false confirmation unexpectedly accepted")
+	}
+	if err := validateSubmission(ctx.AppDB(), gigID, 0, map[string]any{"confirmed": true}); err != nil {
+		t.Fatalf("true confirmation rejected: %v", err)
 	}
 }
 
@@ -190,8 +353,8 @@ func TestFirstComeSubmissionWithdrawsOtherWorkers(t *testing.T) {
 
 	w1 := seedWorker(t, ctx, "project-a", 11)
 	w2 := seedWorker(t, ctx, "project-a", 12)
-	gigID := seedGig(t, ctx, "project-a", "offered", `{"type":"object","properties":{}}`)
-	seedAssignment(t, ctx, gigID, w1, "offered", "first-come", "token-one")
+	gigID := seedGig(t, ctx, "project-a", "accepted", `{"type":"object","properties":{}}`)
+	seedAssignment(t, ctx, gigID, w1, "accepted", "first-come", "token-one")
 	secondID := seedAssignment(t, ctx, gigID, w2, "offered", "first-come", "token-two")
 
 	req := httptest.NewRequest(http.MethodPost, "/worker/token-one/submit", bytes.NewBufferString(`{"payload":{}}`))
@@ -331,8 +494,14 @@ func TestWorkerMultipartUploadIsBoundToAssignment(t *testing.T) {
 	workerID := seedWorker(t, ctx, "project-a", 15)
 	gigID := seedGig(t, ctx, "project-a", "accepted", `{"type":"object","properties":{}}`)
 	assignmentID := seedAssignment(t, ctx, gigID, workerID, "accepted", "direct", "upload-token")
+	if _, err := ctx.AppDB().Exec(`INSERT INTO gig_instructions
+		(gig_id,sort_order,instruction_kind,rendered_body_json,result_key)
+		VALUES (?,0,'text',?, 'recording')`, gigID,
+		`{"markdown":"Upload","response":{"files":{"enabled":true,"required":true,"accept":["video/*"],"min_items":1}}}`); err != nil {
+		t.Fatal(err)
+	}
 
-	initReq := httptest.NewRequest(http.MethodPost, "/worker/upload-token/upload/init", bytes.NewBufferString(`{"name":"clip.mp4","content_type":"video/mp4","size_bytes":5}`))
+	initReq := httptest.NewRequest(http.MethodPost, "/worker/upload-token/upload/init", bytes.NewBufferString(`{"instruction_key":"recording","name":"clip.mp4","content_type":"video/mp4","size_bytes":5}`))
 	initRec := httptest.NewRecorder()
 	(&App{}).handleWorkerUploadInit(initRec, initReq, "upload-token")
 	if initRec.Code != http.StatusOK {

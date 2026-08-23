@@ -42,6 +42,8 @@ func (a *App) handleWorkerRoot(w http.ResponseWriter, r *http.Request) {
 		a.handleWorkerDecline(w, r, token)
 	case "submit":
 		a.handleWorkerSubmit(w, r, token)
+	case "draft":
+		a.handleWorkerDraft(w, r, token)
 	case "upload/init":
 		a.handleWorkerUploadInit(w, r, token)
 	case "upload/part":
@@ -50,6 +52,8 @@ func (a *App) handleWorkerRoot(w http.ResponseWriter, r *http.Request) {
 		a.handleWorkerUploadComplete(w, r, token)
 	case "upload/abort":
 		a.handleWorkerUploadAbort(w, r, token)
+	case "upload/remove":
+		a.handleWorkerUploadRemove(w, r, token)
 	default:
 		httpErr(w, http.StatusNotFound, "not found")
 	}
@@ -207,6 +211,9 @@ func workerPageHTML(token string) string {
 	    const instructionResponses = {};
 	    const allAttachmentIDs = new Set();
 	    let gig = null;
+	    let pendingUploads = 0;
+	    let draftTimer = null;
+	    let draftSavePromise = Promise.resolve();
 
     fetch(API + "/api/gig")
       .then(r => r.json())
@@ -216,7 +223,7 @@ func workerPageHTML(token string) string {
           return;
         }
 	        gig = data.gig;
-	        hydrateExistingSubmission(gig.submission);
+	        hydrateExistingSubmission(gig.draft || gig.submission);
 	        render();
       })
       .catch(e => {
@@ -235,14 +242,17 @@ func workerPageHTML(token string) string {
         "<div class='meta-row'>" +
           "<span class='pill'>Deadline: " + escapeHTML(formatDeadline(gig.deadline_at)) + "</span>" +
           (gig.compensation ? "<span class='pill'>Agreed pay: " + escapeHTML(formatMoney(gig.compensation.worker_amount_minor, gig.compensation.currency)) + "</span>" : "") +
-          "<span class='pill'>" + (gig.composition || []).length + " instruction" + ((gig.composition || []).length === 1 ? "" : "s") + "</span>" +
+          (gig.assignment_status === "offered"
+            ? "<span class='pill'>Full brief after acceptance</span>"
+            : "<span class='pill'>" + (gig.composition || []).length + " instruction" + ((gig.composition || []).length === 1 ? "" : "s") + "</span>") +
         "</div>" +
 	        "<div class='summary'>" + escapeHTML(summaryText()) + "</div>";
       shell.appendChild(hero);
 
-      if (gig.assignment_status === "offered") {
-        shell.appendChild(renderOffer());
-      }
+	      if (gig.assignment_status === "offered") {
+	        shell.appendChild(renderOffer());
+	        return;
+	      }
       if (gig.assignment_status !== "offered" && !canEditAssignment()) {
         const state = document.createElement("section");
         state.className = "done";
@@ -292,8 +302,14 @@ func workerPageHTML(token string) string {
           method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
         });
         await responseJSON(res);
-        gig.assignment_status = action === "accept" ? "accepted" : "declined";
-        if (action === "accept") gig.gig_status = "accepted";
+        if (action === "accept") {
+          const refreshed = await fetch(API + "/api/gig");
+          const data = await responseJSON(refreshed);
+          gig = data.gig;
+          hydrateExistingSubmission(gig.draft || gig.submission);
+        } else {
+          gig.assignment_status = "declined";
+        }
         render();
       } catch (e) {
         buttons.forEach(button => button.disabled = false);
@@ -371,7 +387,8 @@ func workerPageHTML(token string) string {
           lbl.className = "check";
           const cb = document.createElement("input");
           cb.type = "checkbox";
-          cb.addEventListener("change", () => { result[it.result_key] = cb.checked; });
+	          cb.checked = result[it.result_key] === true;
+	          cb.addEventListener("change", () => { setResult(it.result_key, cb.checked); });
           lbl.appendChild(cb);
           const sp = document.createElement("span");
           sp.textContent = body.text || "";
@@ -390,7 +407,8 @@ func workerPageHTML(token string) string {
           }
       }
 	      card.appendChild(wrap);
-	      if (responseMode(it) !== "none") card.appendChild(renderResponseBox(it, index, key));
+	      const spec = responseSpec(it);
+	      if (spec.note.enabled || spec.files.enabled) card.appendChild(renderResponseBox(it, index, key, spec));
       return card;
     }
 
@@ -420,71 +438,109 @@ func workerPageHTML(token string) string {
       return div;
     }
 
-	    function renderResponseBox(it, index, key) {
-	      const mode = responseMode(it);
+	    function renderResponseBox(it, index, key, spec) {
 	      const box = document.createElement("section");
 	      box.className = "response";
-	      box.innerHTML =
-	        "<div class='response-title'>" + (mode === "required" ? "Required response" : "Optional response") + " for step " + (index + 1) + "</div>" +
-        "<div class='response-grid'>" +
-          "<textarea data-note placeholder='Notes for this instruction'></textarea>" +
-          "<div class='file-row'><input data-files type='file' multiple /><div class='previews' data-previews></div></div>" +
-        "</div>";
-      const note = box.querySelector("[data-note]");
-      const file = box.querySelector("[data-files]");
-      const previews = box.querySelector("[data-previews]");
-      const existing = instructionResponses[key];
-      if (existing) {
-        note.value = existing.note || "";
-        for (const f of existing.files || []) {
-          const preview = renderSubmittedFilePreview(f, "Submitted");
-          previews.appendChild(preview.card);
-          preview.addRemove(() => {
-            existing.files = existing.files.filter(item => item !== f);
-            if (f.storage_file_id) allAttachmentIDs.delete(f.storage_file_id);
-            preview.card.remove();
-            pruneInstructionResponse(key);
-            updateStatus();
-          });
-        }
-      }
-      note.addEventListener("input", () => {
-        const entry = ensureInstructionResponse(key, it, index);
-        entry.note = note.value;
-        pruneInstructionResponse(key);
-        updateStatus();
-      });
-      file.addEventListener("change", async () => {
-        const files = Array.from(file.files || []);
-        for (const f of files) {
-          const preview = renderFilePreview(f, "Uploading...");
-          previews.appendChild(preview.card);
-          setStatus("Uploading " + f.name + "...");
-          let id = null;
-          try {
-            id = await uploadFile(f, percent => preview.setProgress(percent));
-          } catch (e) {
-            preview.setStatus("Upload failed", true);
-            setStatus("Upload failed: " + e.message);
-          }
-          if (!id) continue;
-          const entry = ensureInstructionResponse(key, it, index);
-          entry.files.push({ storage_file_id: id, filename: f.name, mime: f.type });
-          allAttachmentIDs.add(id);
-          preview.setStatus("Uploaded");
-          preview.addRemove(() => {
-            entry.files = entry.files.filter(item => item.storage_file_id !== id);
-            allAttachmentIDs.delete(id);
-            preview.card.remove();
-            pruneInstructionResponse(key);
-            updateStatus();
-          });
-        }
-        file.value = "";
-        updateStatus();
-      });
-      return box;
-    }
+	      const requirements = [];
+	      if (spec.note.required) requirements.push("note required");
+	      if (spec.files.required) requirements.push("at least " + spec.files.min_items + " file(s) required");
+	      if (spec.legacy_any_required) requirements.push("note or file required");
+	      box.innerHTML = "<div class='response-title'>Response for step " + (index + 1) + (requirements.length ? " · " + escapeHTML(requirements.join(" · ")) : " · optional") + "</div><div class='response-grid'></div>";
+	      const grid = box.querySelector(".response-grid");
+	      let note = null;
+	      let file = null;
+	      let previews = null;
+	      if (spec.note.enabled) {
+	        const noteWrap = document.createElement("label");
+	        noteWrap.className = "file-row";
+	        noteWrap.innerHTML = "<span class='label'>" + escapeHTML(spec.note.label) + (spec.note.required ? " · required" : " · optional") + "</span><textarea data-note></textarea>";
+	        note = noteWrap.querySelector("[data-note]");
+	        note.placeholder = spec.note.placeholder;
+	        grid.appendChild(noteWrap);
+	      }
+	      if (spec.files.enabled) {
+	        const filesWrap = document.createElement("div");
+	        filesWrap.className = "file-row";
+	        const accepted = spec.files.accept.length ? spec.files.accept.join(", ") : "Any file type";
+	        const maximum = spec.files.max_items > 0 ? " · maximum " + spec.files.max_items : "";
+	        const maxSize = spec.files.max_size_mb > 0 ? " · up to " + spec.files.max_size_mb + " MB each" : "";
+	        filesWrap.innerHTML = "<div class='label'>Files" + (spec.files.required ? " · required" : " · optional") + "</div><div class='status'>Accepted: " + escapeHTML(accepted + maximum + maxSize) + "</div><input data-files type='file' /><div class='previews' data-previews></div>";
+	        file = filesWrap.querySelector("[data-files]");
+	        previews = filesWrap.querySelector("[data-previews]");
+	        if (spec.files.accept.length) file.accept = spec.files.accept.join(",");
+	        if (spec.files.max_items !== 1) file.multiple = true;
+	        grid.appendChild(filesWrap);
+	      }
+	      const existing = instructionResponses[key];
+	      if (existing) {
+	        if (note) note.value = existing.note || "";
+	        for (const f of existing.files || []) {
+	          if (!previews) continue;
+	          const preview = renderSubmittedFilePreview(f, gig.draft ? "Ready — not submitted" : "Submitted");
+	          previews.appendChild(preview.card);
+	          preview.addRemove(() => {
+	            existing.files = existing.files.filter(item => item !== f);
+	            if (f.storage_file_id) allAttachmentIDs.delete(f.storage_file_id);
+	            preview.card.remove();
+	            pruneInstructionResponse(key);
+	            updateStatus();
+	            discardUploadedFile(key, f.storage_file_id);
+	          });
+	        }
+	      }
+	      if (note) note.addEventListener("input", () => {
+	        const entry = ensureInstructionResponse(key, it, index);
+	        entry.note = note.value;
+	        pruneInstructionResponse(key);
+	        updateStatus();
+	      });
+	      if (file) file.addEventListener("change", async () => {
+	        const files = Array.from(file.files || []);
+	        const existingCount = (instructionResponses[key] && instructionResponses[key].files || []).length;
+	        if (spec.files.max_items > 0 && existingCount + files.length > spec.files.max_items) {
+	          setStatus("Step " + (index + 1) + " accepts at most " + spec.files.max_items + " file(s).");
+	          file.value = "";
+	          return;
+	        }
+	        for (const f of files) {
+	          if (spec.files.max_size_mb > 0 && f.size > spec.files.max_size_mb * 1024 * 1024) {
+	            setStatus("Step " + (index + 1) + " accepts files up to " + spec.files.max_size_mb + " MB each.");
+	            continue;
+	          }
+	          const preview = renderFilePreview(f, "Uploading...");
+	          previews.appendChild(preview.card);
+	          setStatus("Uploading " + f.name + "...");
+	          let id = null;
+	          pendingUploads++;
+	          updateSubmitDisabled();
+	          try {
+	            id = await uploadFile(f, key, percent => preview.setProgress(percent));
+	          } catch (e) {
+	            preview.setStatus("Upload failed", true);
+	            setStatus("Upload failed: " + e.message);
+	          } finally {
+	            pendingUploads--;
+	            updateSubmitDisabled();
+	          }
+	          if (!id) continue;
+	          const entry = ensureInstructionResponse(key, it, index);
+	          entry.files.push({ storage_file_id: id, filename: f.name, mime: f.type });
+	          allAttachmentIDs.add(id);
+	          preview.setStatus("Ready — not submitted");
+	          preview.addRemove(() => {
+	            entry.files = entry.files.filter(item => item.storage_file_id !== id);
+	            allAttachmentIDs.delete(id);
+	            preview.card.remove();
+	            pruneInstructionResponse(key);
+	            updateStatus();
+	            discardUploadedFile(key, id);
+	          });
+	        }
+	        file.value = "";
+	        updateStatus();
+	      });
+	      return box;
+	    }
 
 	    function ensureInstructionResponse(key, it, index) {
       if (!instructionResponses[key]) {
@@ -519,23 +575,23 @@ func workerPageHTML(token string) string {
 	        case "input_short_text":
 	          el = document.createElement("input"); el.type = "text"; el.placeholder = body.placeholder || "";
 	          if (existingValue != null) el.value = String(existingValue);
-	          el.addEventListener("input", () => result[key] = el.value);
+	          el.addEventListener("input", () => setResult(key, el.value));
 	          break;
 	        case "input_long_text":
 	          el = document.createElement("textarea"); el.placeholder = body.placeholder || "";
 	          if (existingValue != null) el.value = String(existingValue);
-	          el.addEventListener("input", () => result[key] = el.value);
+	          el.addEventListener("input", () => setResult(key, el.value));
 	          break;
 	        case "input_number":
 	          el = document.createElement("input"); el.type = "number";
 	          if (body.min !== undefined) el.min = body.min; if (body.max !== undefined) el.max = body.max;
 	          if (existingValue != null) el.value = String(existingValue);
-	          el.addEventListener("input", () => result[key] = parseFloat(el.value));
+	          el.addEventListener("input", () => setResult(key, el.value === "" ? undefined : parseFloat(el.value)));
 	          break;
 	        case "input_date":
 	          el = document.createElement("input"); el.type = "date";
 	          if (existingValue != null) el.value = String(existingValue);
-	          el.addEventListener("input", () => result[key] = el.value);
+	          el.addEventListener("input", () => setResult(key, el.value));
 	          break;
         case "input_choice":
           el = document.createElement("select");
@@ -545,7 +601,7 @@ func workerPageHTML(token string) string {
 	            return '<option value="' + escapeAttr(v) + '">' + escapeHTML(lab) + '</option>';
 	          }).join("");
 	          if (existingValue != null) el.value = String(existingValue);
-	          el.addEventListener("change", () => result[key] = el.value);
+	          el.addEventListener("change", () => setResult(key, el.value));
 	          break;
         case "input_multi_choice":
           el = document.createElement("div"); el.className = "options";
@@ -559,7 +615,7 @@ func workerPageHTML(token string) string {
 	            if (Array.isArray(existingValue) && existingValue.includes(v)) input.checked = true;
 	            input.addEventListener("change", () => {
 	              const ckd = Array.from(el.querySelectorAll("input:checked")).map(i => i.value);
-	              result[key] = ckd;
+	              setResult(key, ckd);
             });
             el.appendChild(wrap2);
           });
@@ -571,7 +627,7 @@ func workerPageHTML(token string) string {
 	            const b = document.createElement("button"); b.type = "button"; b.textContent = "★";
 	            if (Number(existingValue) >= i) b.classList.add("on");
 	            b.addEventListener("click", () => {
-              result[key] = i;
+              setResult(key, i);
               Array.from(el.children).forEach((c, idx) => c.classList.toggle("on", idx < i));
             });
             el.appendChild(b);
@@ -583,7 +639,7 @@ func workerPageHTML(token string) string {
 	            const b = document.createElement("button"); b.type = "button"; b.textContent = v.toUpperCase();
 	            if (typeof existingValue === "boolean" && existingValue === (v === "yes")) b.classList.add("on");
             b.addEventListener("click", () => {
-              result[key] = (v === "yes");
+              setResult(key, v === "yes");
               Array.from(el.children).forEach(c => c.classList.toggle("on", c.textContent === v.toUpperCase()));
             });
             el.appendChild(b);
@@ -600,41 +656,54 @@ func workerPageHTML(token string) string {
 	          if (k === "input_photo") fileInput.accept = "image/*";
 	          if (k === "input_audio_recording") fileInput.accept = "audio/*";
 	          if (k === "input_video_recording") fileInput.accept = "video/*";
+	          if ((k === "input_file" || k === "input_signature") && body.accept_mime) fileInput.accept = String(body.accept_mime);
 	          if (existingValue && typeof existingValue === "object") {
-	            const preview = renderSubmittedFilePreview(existingValue, "Submitted");
+	            const preview = renderSubmittedFilePreview(existingValue, gig.draft ? "Ready — not submitted" : "Submitted");
 	            previews.appendChild(preview.card);
 	            preview.addRemove(() => {
 	              delete result[key];
 	              if (existingValue.storage_file_id) allAttachmentIDs.delete(existingValue.storage_file_id);
 	              preview.card.remove();
 	              updateStatus();
+	              discardUploadedFile(key, existingValue.storage_file_id);
 	            });
 	          }
           fileInput.addEventListener("change", async () => {
             const file = fileInput.files && fileInput.files[0];
             if (!file) return;
-            previews.innerHTML = "";
+	          const previousValue = result[key] && typeof result[key] === "object" ? result[key] : null;
             const preview = renderFilePreview(file, "Uploading...");
             previews.appendChild(preview.card);
             setStatus("Uploading " + file.name + "...");
             let id = null;
+	          pendingUploads++;
+	          updateSubmitDisabled();
             try {
-              id = await uploadFile(file, percent => preview.setProgress(percent));
+	            id = await uploadFile(file, key, percent => preview.setProgress(percent));
             } catch (e) {
               preview.setStatus("Upload failed", true);
               setStatus("Upload failed: " + e.message);
+	          } finally {
+	            pendingUploads--;
+	            updateSubmitDisabled();
             }
             if (id) {
+	            Array.from(previews.children).forEach(child => { if (child !== preview.card) child.remove(); });
               result[key] = { storage_file_id: id, filename: file.name, mime: file.type };
               allAttachmentIDs.add(id);
-              preview.setStatus("Uploaded");
+	            preview.setStatus("Ready — not submitted");
               preview.addRemove(() => {
                 if (result[key] && result[key].storage_file_id === id) delete result[key];
                 allAttachmentIDs.delete(id);
                 preview.card.remove();
                 updateStatus();
+	              discardUploadedFile(key, id);
               });
-              setStatus("Uploaded.");
+	            if (previousValue && previousValue.storage_file_id && previousValue.storage_file_id !== id) {
+	              allAttachmentIDs.delete(previousValue.storage_file_id);
+	              discardUploadedFile(key, previousValue.storage_file_id);
+	            }
+	            updateStatus();
             }
           });
           el.appendChild(fileInput);
@@ -644,7 +713,7 @@ func workerPageHTML(token string) string {
           el = document.createElement("button"); el.type = "button"; el.className = "primary"; el.textContent = "Use my location";
           el.addEventListener("click", () => {
             navigator.geolocation.getCurrentPosition(p => {
-              result[key] = { lat: p.coords.latitude, lng: p.coords.longitude, accuracy_m: p.coords.accuracy };
+	            setResult(key, { lat: p.coords.latitude, lng: p.coords.longitude, accuracy_m: p.coords.accuracy });
               el.textContent = "Location captured (±" + Math.round(p.coords.accuracy) + " m)";
             }, e => setStatus("Location error: " + e.message));
           });
@@ -656,11 +725,17 @@ func workerPageHTML(token string) string {
       wrap.appendChild(el);
     }
 
-	    async function uploadFile(file, onProgress) {
+	    function setResult(key, value) {
+	      if (value === undefined || value === "") delete result[key];
+	      else result[key] = value;
+	      updateStatus();
+	    }
+
+	    async function uploadFile(file, instructionKey, onProgress) {
 	      const initRes = await fetch(publicWorkerURL("/upload/init"), {
 	        method: "POST",
 	        headers: { "Content-Type": "application/json" },
-	        body: JSON.stringify({ name: file.name, content_type: file.type, size_bytes: file.size }),
+	        body: JSON.stringify({ instruction_key: instructionKey, name: file.name, content_type: file.type, size_bytes: file.size }),
 	      });
 	      const init = await responseJSON(initRes);
 	      if (init.storage_file_id) {
@@ -698,29 +773,90 @@ func workerPageHTML(token string) string {
 	      }
 	    }
 
+	    function buildPayload() {
+	      const payload = Object.assign({}, result);
+	      const instructionPayload = Object.values(instructionResponses)
+	        .filter(r => r.note || (r.files && r.files.length))
+	        .map(r => ({
+	          key: r.key,
+	          step: r.step,
+	          sort_order: r.sort_order,
+	          instruction_kind: r.instruction_kind,
+	          note: r.note,
+	          files: r.files,
+	        }));
+	      if (instructionPayload.length) payload.instruction_responses = instructionPayload;
+	      return payload;
+	    }
+
+	    function scheduleDraftSave() {
+	      if (!gig || !canEditAssignment()) return;
+	      if (draftTimer) clearTimeout(draftTimer);
+	      draftTimer = setTimeout(() => saveDraft(false).catch(() => {}), 450);
+	    }
+
+	    async function saveDraft(showStatus) {
+	      if (!gig || !canEditAssignment()) return;
+	      if (draftTimer) {
+	        clearTimeout(draftTimer);
+	        draftTimer = null;
+	      }
+	      const payload = buildPayload();
+	      draftSavePromise = draftSavePromise.then(async () => {
+	        if (showStatus) setStatus("Saving draft...");
+	        const res = await fetch(publicWorkerURL("/draft"), {
+	          method: "POST",
+	          headers: { "Content-Type": "application/json" },
+	          body: JSON.stringify({ payload: payload, attachment_file_ids: currentAttachmentIDs(payload) }),
+	        });
+	        await responseJSON(res);
+	        gig.draft = { payload: payload, attachment_file_ids: currentAttachmentIDs(payload) };
+	      });
+	      try {
+	        await draftSavePromise;
+	      } catch (e) {
+	        draftSavePromise = Promise.resolve();
+	        setStatus("Draft save failed: " + e.message);
+	        throw e;
+	      }
+	    }
+
+	    async function discardUploadedFile(instructionKey, storageFileID) {
+	      if (!storageFileID) return;
+	      try {
+	        const res = await fetch(publicWorkerURL("/upload/remove"), {
+	          method: "POST",
+	          headers: { "Content-Type": "application/json" },
+	          body: JSON.stringify({ instruction_key: instructionKey, storage_file_id: storageFileID }),
+	        });
+	        await responseJSON(res);
+	      } catch (e) {
+	        setStatus("File removed from this draft, but storage cleanup failed: " + e.message);
+	      }
+	    }
+
+	    function updateSubmitDisabled() {
+	      const button = document.getElementById("submit");
+	      if (button) button.disabled = pendingUploads > 0;
+	    }
+
 	    async function submit() {
-	      const missing = firstMissingRequiredResponse();
-	      if (missing) {
-	        setStatus("Add notes or a file for required response step " + missing + ".");
+	      if (pendingUploads > 0) {
+	        setStatus("Wait for every file to finish uploading before submitting.");
 	        return;
 	      }
-	      const payload = Object.assign({}, result);
-      const instructionPayload = Object.values(instructionResponses)
-        .filter(r => r.note || (r.files && r.files.length))
-        .map(r => ({
-          key: r.key,
-          step: r.step,
-          sort_order: r.sort_order,
-          instruction_kind: r.instruction_kind,
-          note: r.note,
-          files: r.files,
-        }));
-      if (instructionPayload.length) payload.instruction_responses = instructionPayload;
+	      const missing = firstMissingRequiredResponse();
+	      if (missing) {
+	        setStatus(missing.message + " for step " + missing.step + ".");
+	        return;
+	      }
+	      const payload = buildPayload();
       const button = document.getElementById("submit");
       button.disabled = true;
       setStatus("Submitting...");
 	      let j = null;
 	      try {
+	        await saveDraft(false);
 	        const res = await fetch(publicWorkerURL("/submit"), {
 	          method: "POST",
 	          headers: { "Content-Type": "application/json" },
@@ -738,6 +874,7 @@ func workerPageHTML(token string) string {
 	        return;
 	      }
 		      gig.assignment_status = "submitted";
+		      gig.draft = null;
 		      button.disabled = false;
 		      button.textContent = submitButtonLabel();
 		      setStatus(hasWorkInputs() ? "Submission saved. You can keep editing and submit again." : "Completion saved.");
@@ -749,7 +886,9 @@ func workerPageHTML(token string) string {
       const parts = [];
       if (responses) parts.push(responses + " step response" + (responses === 1 ? "" : "s"));
       if (files) parts.push(files + " file" + (files === 1 ? "" : "s"));
-	      setStatus(parts.length ? parts.join(", ") + " ready." : initialStatusText());
+	      setStatus(parts.length ? parts.join(", ") + " ready — not submitted yet." : initialStatusText());
+	      scheduleDraftSave();
+	      updateSubmitDisabled();
     }
 	    function setStatus(s) {
 	      const el = document.getElementById("status");
@@ -782,14 +921,50 @@ func workerPageHTML(token string) string {
 	    function instructionTitle(it, body, index) {
 	      return it.instruction_name || body.label || body.caption || body.display || body.title || body.text || kindLabel(it.instruction_kind) || ("Instruction " + (index + 1));
 	    }
-	    function responseMode(it) {
+	    function responseSpec(it) {
 	      const body = it.rendered_body || {};
+	      if (body.response && typeof body.response === "object") {
+	        const note = body.response.note || {};
+	        const files = body.response.files || {};
+	        const noteRequired = note.required === true;
+	        const filesRequired = files.required === true;
+	        return {
+	          note: {
+	            enabled: note.enabled === true || noteRequired,
+	            required: noteRequired,
+	            label: note.label || "Notes for this instruction",
+	            placeholder: note.placeholder || "Add a note",
+	          },
+	          files: {
+	            enabled: files.enabled === true || filesRequired,
+	            required: filesRequired,
+	            accept: Array.isArray(files.accept) ? files.accept : [],
+	            min_items: Number(files.min_items || (filesRequired ? 1 : 0)),
+	            max_items: Number(files.max_items || 0),
+	            max_size_mb: Number(files.max_size_mb || 0),
+	          },
+	          legacy_any_required: false,
+	        };
+	      }
 	      const mode = String(body.response_mode || "").toLowerCase();
-	      if (mode === "optional" || mode === "required") return mode;
-	      return "none";
+	      if (mode === "optional" || mode === "required") {
+	        return {
+	          note: { enabled: true, required: false, label: "Notes for this instruction", placeholder: "Add a note" },
+	          files: { enabled: true, required: false, accept: [], min_items: 0, max_items: 0, max_size_mb: 0 },
+	          legacy_any_required: mode === "required",
+	        };
+	      }
+	      return {
+	        note: { enabled: false, required: false },
+	        files: { enabled: false, required: false, accept: [], min_items: 0, max_items: 0, max_size_mb: 0 },
+	        legacy_any_required: false,
+	      };
 	    }
 	    function hasResponseBoxes() {
-	      return (gig.composition || []).some(it => responseMode(it) !== "none");
+	      return (gig.composition || []).some(it => {
+	        const spec = responseSpec(it);
+	        return spec.note.enabled || spec.files.enabled;
+	      });
 	    }
 	    function hasStructuredFields() {
 	      return (gig.composition || []).some(it => {
@@ -824,11 +999,16 @@ func workerPageHTML(token string) string {
 	      const items = gig.composition || [];
 	      for (let i = 0; i < items.length; i++) {
 	        const it = items[i];
-	        if (responseMode(it) !== "required") continue;
+	        const spec = responseSpec(it);
 	        const entry = instructionResponses[instructionKey(it, i)];
-	        if (!entry || (!String(entry.note || "").trim() && (!entry.files || entry.files.length === 0))) return i + 1;
+	        const note = String(entry && entry.note || "").trim();
+	        const files = entry && Array.isArray(entry.files) ? entry.files : [];
+	        if (spec.legacy_any_required && !note && files.length === 0) return { step: i + 1, message: "Add a note or file" };
+	        if (spec.note.required && !note) return { step: i + 1, message: "Add the required note" };
+	        if (spec.files.required && files.length < spec.files.min_items) return { step: i + 1, message: "Upload at least " + spec.files.min_items + " file(s)" };
+	        if (files.length > 0 && files.length < spec.files.min_items) return { step: i + 1, message: "Upload at least " + spec.files.min_items + " file(s), or remove the partial upload" };
 	      }
-	      return 0;
+	      return null;
 	    }
 	    function currentAttachmentIDs(value) {
 	      const ids = new Set();
@@ -1038,6 +1218,7 @@ type workerGigPayload struct {
 	Composition        []map[string]any `json:"composition"`
 	RequiredResultKeys []string         `json:"required_result_keys,omitempty"`
 	Submission         *submission      `json:"submission,omitempty"`
+	Draft              *workerDraft     `json:"draft,omitempty"`
 	Compensation       *gigCompensation `json:"compensation,omitempty"`
 }
 
@@ -1064,13 +1245,19 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token 
 		return
 	}
 
-	// Hydrate signed URLs for media kinds.
+	// The offer page deliberately withholds the work composition until the
+	// worker accepts. Compensation and deadline remain visible so they can make
+	// that decision with the agreed terms in front of them.
 	ttl := atoi(ctx.Config().Get("signed_url_ttl_seconds"))
 	if ttl <= 0 {
 		ttl = 3600
 	}
 	rendered := make([]map[string]any, 0, len(g.Composition))
-	for _, it := range g.Composition {
+	composition := g.Composition
+	if status == "offered" {
+		composition = nil
+	}
+	for _, it := range composition {
 		m := map[string]any{
 			"sort_order":       it.SortOrder,
 			"instruction_kind": it.InstructionKind,
@@ -1095,20 +1282,34 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token 
 	if submission != nil {
 		enrichSubmissionFileURLs(ctx, pid, submission.Payload, ttl)
 	}
+	draft, err := loadWorkerDraft(ctx.AppDB(), assignID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if draft != nil {
+		enrichSubmissionFileURLs(ctx, pid, draft.Payload, ttl)
+	}
 
 	httpJSON(w, map[string]any{
 		"gig": workerGigPayload{
-			GigID:              g.ID,
-			Title:              g.Title,
-			DeadlineAt:         g.DeadlineAt,
-			GigStatus:          gigStatus,
-			AssignmentStatus:   status,
-			AssignmentMode:     mode,
-			ProjectID:          pid,
-			Composition:        rendered,
-			RequiredResultKeys: requiredResultKeys(g.DerivedResultSchema),
-			Submission:         submission,
-			Compensation:       g.Compensation,
+			GigID:            g.ID,
+			Title:            g.Title,
+			DeadlineAt:       g.DeadlineAt,
+			GigStatus:        gigStatus,
+			AssignmentStatus: status,
+			AssignmentMode:   mode,
+			ProjectID:        pid,
+			Composition:      rendered,
+			RequiredResultKeys: func() []string {
+				if status == "offered" {
+					return nil
+				}
+				return requiredResultKeys(g.DerivedResultSchema)
+			}(),
+			Submission:   submission,
+			Draft:        draft,
+			Compensation: g.Compensation,
 		},
 	})
 }
@@ -1269,6 +1470,46 @@ func (a *App) handleWorkerDecline(w http.ResponseWriter, r *http.Request, token 
 	httpJSON(w, map[string]any{"ok": true, "assignment_status": "declined"})
 }
 
+func (a *App) handleWorkerDraft(w http.ResponseWriter, r *http.Request, token string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	ctx := globalCtx
+	assignID, gigID, _, status, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "invalid or expired link")
+		return
+	}
+	if !assignmentAcceptsWork(status, gigStatus, revoked) {
+		httpErr(w, http.StatusGone, "this assignment is closed")
+		return
+	}
+	var body struct {
+		Payload     map[string]any `json:"payload"`
+		Attachments []int64        `json:"attachment_file_ids,omitempty"`
+	}
+	if err := httpDecode(r, &body); err != nil || body.Payload == nil {
+		httpErr(w, http.StatusBadRequest, "payload required")
+		return
+	}
+	if err := validateSubmissionAttachments(ctx.AppDB(), assignID, body.Attachments); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateInstructionResponses(ctx.AppDB(), gigID, assignID, body.Payload, false); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	draft, err := saveWorkerDraft(ctx.AppDB(), assignID, body.Payload, body.Attachments)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"ok": true, "draft": draft})
+}
+
 func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token string) {
 	if r.Method != http.MethodPost {
 		httpErr(w, http.StatusMethodNotAllowed, "POST only")
@@ -1292,7 +1533,7 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 		httpErr(w, http.StatusBadRequest, "payload required")
 		return
 	}
-	if err := validateSubmission(ctx.AppDB(), gigID, body.Payload); err != nil {
+	if err := validateSubmission(ctx.AppDB(), gigID, assignID, body.Payload); err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1327,8 +1568,12 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if _, err := tx.Exec(`DELETE FROM gig_assignment_drafts WHERE assignment_id=?`, assignID); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	res, err := tx.Exec(`UPDATE gig_assignments SET status='submitted', responded_at=COALESCE(responded_at,CURRENT_TIMESTAMP),
-		submitted_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('offered','accepted','submitted')
+		submitted_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('accepted','submitted')
 		AND token_revoked_at IS NULL`, assignID)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -1392,12 +1637,31 @@ func (a *App) handleWorkerUploadInit(w http.ResponseWriter, r *http.Request, tok
 		return
 	}
 	var body struct {
-		Name        string `json:"name"`
-		ContentType string `json:"content_type"`
-		SizeBytes   int64  `json:"size_bytes"`
+		InstructionKey string `json:"instruction_key"`
+		Name           string `json:"name"`
+		ContentType    string `json:"content_type"`
+		SizeBytes      int64  `json:"size_bytes"`
 	}
-	if err := httpDecode(r, &body); err != nil || strings.TrimSpace(body.Name) == "" || body.SizeBytes <= 0 {
-		httpErr(w, http.StatusBadRequest, "name and positive size_bytes required")
+	if err := httpDecode(r, &body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	body.InstructionKey = strings.TrimSpace(body.InstructionKey)
+	if strings.TrimSpace(body.Name) == "" || body.SizeBytes <= 0 || body.InstructionKey == "" {
+		httpErr(w, http.StatusBadRequest, "instruction_key, name and positive size_bytes required")
+		return
+	}
+	requirement, err := loadGigFileRequirement(ctx.AppDB(), gigID, body.InstructionKey)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if requirement == nil {
+		httpErr(w, http.StatusBadRequest, "this instruction does not accept files")
+		return
+	}
+	if err := responseAcceptsFile(requirement.Spec.Files, body.Name, body.ContentType, body.SizeBytes); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	maxBytes := int64(atoi(ctx.Config().Get("max_submission_file_mb"))) * 1024 * 1024
@@ -1420,9 +1684,20 @@ func (a *App) handleWorkerUploadInit(w http.ResponseWriter, r *http.Request, tok
 			httpErr(w, http.StatusBadGateway, "storage returned an invalid existing file")
 			return
 		}
+		metadata, metadataErr := storageGetFile(ctx, pid, fileID)
+		if metadataErr != nil {
+			httpErr(w, http.StatusBadGateway, metadataErr.Error())
+			return
+		}
+		if err := responseAcceptsFile(requirement.Spec.Files, metadata.Name, metadata.ContentType, metadata.SizeBytes); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if _, err := ctx.AppDB().Exec(`INSERT OR REPLACE INTO gig_upload_sessions
-			(upload_id,assignment_id,project_id,status,storage_file_id,completed_at)
-			VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)`, "existing:"+token+":"+fmt.Sprint(fileID), assignmentID, pid, "completed", fileID); err != nil {
+			(upload_id,assignment_id,project_id,status,storage_file_id,instruction_key,
+			 filename,content_type,size_bytes,was_existing,completed_at)
+			VALUES (?,?,?,?,?,?,?,?,?,1,CURRENT_TIMESTAMP)`, "existing:"+token+":"+body.InstructionKey+":"+fmt.Sprint(fileID), assignmentID, pid, "completed", fileID,
+			body.InstructionKey, metadata.Name, metadata.ContentType, metadata.SizeBytes); err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -1434,7 +1709,9 @@ func (a *App) handleWorkerUploadInit(w http.ResponseWriter, r *http.Request, tok
 		return
 	}
 	if _, err := ctx.AppDB().Exec(`INSERT INTO gig_upload_sessions
-		(upload_id,assignment_id,project_id,status) VALUES (?,?,?,'uploading')`, init.UploadID, assignmentID, pid); err != nil {
+		(upload_id,assignment_id,project_id,status,instruction_key,filename,content_type,size_bytes)
+		VALUES (?,?,?,'uploading',?,?,?,?)`, init.UploadID, assignmentID, pid,
+		body.InstructionKey, body.Name, body.ContentType, body.SizeBytes); err != nil {
 		_ = storageUploadAbort(ctx, pid, init.UploadID, "gigs session registration failed")
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1486,7 +1763,7 @@ func (a *App) handleWorkerUploadComplete(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	ctx := globalCtx
-	assignmentID, _, pid, assignmentStatus, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	assignmentID, gigID, pid, assignmentStatus, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil || !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked) {
 		httpErr(w, http.StatusGone, "this assignment is closed")
 		return
@@ -1507,8 +1784,37 @@ func (a *App) handleWorkerUploadComplete(w http.ResponseWriter, r *http.Request,
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	res, err := ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='completed', storage_file_id=?, completed_at=CURRENT_TIMESTAMP
-		WHERE upload_id=? AND assignment_id=? AND status='uploading'`, fileID, body.UploadID, assignmentID)
+	var instructionKey, filename, contentType string
+	var sizeBytes int64
+	if err := ctx.AppDB().QueryRow(`SELECT COALESCE(instruction_key,''),COALESCE(filename,''),COALESCE(content_type,''),COALESCE(size_bytes,0)
+		FROM gig_upload_sessions WHERE upload_id=? AND assignment_id=?`, body.UploadID, assignmentID).
+		Scan(&instructionKey, &filename, &contentType, &sizeBytes); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	metadata, metadataErr := storageGetFile(ctx, pid, fileID)
+	if metadataErr != nil {
+		_ = storageDeleteFile(ctx, pid, fileID)
+		_, _ = ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='discarded',storage_file_id=?,discarded_at=CURRENT_TIMESTAMP WHERE upload_id=?`, fileID, body.UploadID)
+		httpErr(w, http.StatusBadGateway, metadataErr.Error())
+		return
+	}
+	filename, contentType, sizeBytes = metadata.Name, metadata.ContentType, metadata.SizeBytes
+	requirement, err := loadGigFileRequirement(ctx.AppDB(), gigID, instructionKey)
+	if err != nil || requirement == nil {
+		_ = storageDeleteFile(ctx, pid, fileID)
+		_, _ = ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='discarded',storage_file_id=?,discarded_at=CURRENT_TIMESTAMP WHERE upload_id=?`, fileID, body.UploadID)
+		httpErr(w, http.StatusBadRequest, "this instruction no longer accepts files")
+		return
+	}
+	if err := responseAcceptsFile(requirement.Spec.Files, filename, contentType, sizeBytes); err != nil {
+		_ = storageDeleteFile(ctx, pid, fileID)
+		_, _ = ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='discarded',storage_file_id=?,discarded_at=CURRENT_TIMESTAMP WHERE upload_id=?`, fileID, body.UploadID)
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	res, err := ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='completed', storage_file_id=?,filename=?,content_type=?,size_bytes=?,completed_at=CURRENT_TIMESTAMP
+		WHERE upload_id=? AND assignment_id=? AND status='uploading'`, fileID, filename, contentType, sizeBytes, body.UploadID, assignmentID)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1549,6 +1855,77 @@ func (a *App) handleWorkerUploadAbort(w http.ResponseWriter, r *http.Request, to
 	}
 	_, _ = ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='aborted' WHERE upload_id=? AND assignment_id=?`, body.UploadID, assignmentID)
 	httpJSON(w, map[string]any{"ok": true})
+}
+
+func (a *App) handleWorkerUploadRemove(w http.ResponseWriter, r *http.Request, token string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	ctx := globalCtx
+	assignmentID, _, pid, assignmentStatus, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "invalid or expired link")
+		return
+	}
+	if !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked) {
+		httpErr(w, http.StatusGone, "this assignment is closed")
+		return
+	}
+	var body struct {
+		InstructionKey string `json:"instruction_key"`
+		StorageFileID  int64  `json:"storage_file_id"`
+	}
+	if err := httpDecode(r, &body); err != nil || body.StorageFileID <= 0 || strings.TrimSpace(body.InstructionKey) == "" {
+		httpErr(w, http.StatusBadRequest, "instruction_key and storage_file_id required")
+		return
+	}
+	var storedKey string
+	var wasExisting bool
+	err = ctx.AppDB().QueryRow(`SELECT COALESCE(instruction_key,''),COALESCE(was_existing,0)
+		FROM gig_upload_sessions WHERE assignment_id=? AND storage_file_id=? AND status='completed'
+		ORDER BY completed_at DESC LIMIT 1`, assignmentID, body.StorageFileID).Scan(&storedKey, &wasExisting)
+	if errors.Is(err, sql.ErrNoRows) {
+		// A previous release may not have retained an instruction-scoped
+		// upload session. The worker can still remove it from the new draft;
+		// historical submission data remains immutable.
+		httpJSON(w, map[string]any{"ok": true, "deleted": false, "retained_for_history": true})
+		return
+	}
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if storedKey != "" && storedKey != strings.TrimSpace(body.InstructionKey) {
+		httpErr(w, http.StatusBadRequest, "file belongs to a different instruction")
+		return
+	}
+	referenced, err := submissionReferencesFile(ctx.AppDB(), assignmentID, body.StorageFileID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if referenced || wasExisting {
+		httpJSON(w, map[string]any{"ok": true, "deleted": false, "retained_for_history": true})
+		return
+	}
+	res, err := ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='discarded',discarded_at=CURRENT_TIMESTAMP
+		WHERE assignment_id=? AND storage_file_id=? AND status='completed'`, assignmentID, body.StorageFileID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		httpErr(w, http.StatusConflict, "file changed; reload the page")
+		return
+	}
+	if err := storageDeleteFile(ctx, pid, body.StorageFileID); err != nil {
+		ctx.Logger().Warn("delete discarded worker upload failed", "file_id", body.StorageFileID, "err", err.Error())
+		httpJSON(w, map[string]any{"ok": true, "deleted": false, "discarded": true})
+		return
+	}
+	httpJSON(w, map[string]any{"ok": true, "deleted": true})
 }
 
 func requireWorkerUploadSession(db *sql.DB, uploadID string, assignmentID int64, pid, status string) error {
@@ -1646,8 +2023,8 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 	      JOIN workers w ON w.id = a.worker_id
 	      JOIN gigs g ON g.id=a.gig_id
 	      WHERE w.contact_id=? AND w.project_id=? AND g.project_id=?
-	        AND a.status IN ('offered','accepted','submitted')
-	        AND g.status IN ('offered','accepted','submitted')
+	        AND a.status IN ('accepted','submitted')
+	        AND g.status IN ('accepted','submitted')
 	        AND a.token_revoked_at IS NULL
 	        AND (a.token_expires_at IS NULL OR datetime(a.token_expires_at)>datetime('now'))`
 	args := []any{contactID, pid, pid}
@@ -1687,7 +2064,7 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 		_, _ = crmSendMessage(ctx, pid, contactID, nudge, "", "")
 		return nil
 	}
-	if err := validateSubmission(ctx.AppDB(), gigID, payload); err != nil {
+	if err := validateSubmission(ctx.AppDB(), gigID, assignID, payload); err != nil {
 		return err
 	}
 	tx, err := ctx.AppDB().Begin()
@@ -1714,7 +2091,7 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 	}
 	res, err := tx.Exec(
 		`UPDATE gig_assignments SET status='submitted', responded_at=COALESCE(responded_at,CURRENT_TIMESTAMP), submitted_at=CURRENT_TIMESTAMP
-		 WHERE id=? AND status IN ('offered','accepted','submitted') AND token_revoked_at IS NULL`,
+		 WHERE id=? AND status IN ('accepted','submitted') AND token_revoked_at IS NULL`,
 		assignID,
 	)
 	if err != nil {
@@ -1820,7 +2197,7 @@ func boolFromConfig(ctx *sdk.AppCtx, key string, def bool) bool {
 
 // ─── Validation ─────────────────────────────────────────────────────
 
-func validateSubmission(db *sql.DB, gigID int64, payload map[string]any) error {
+func validateSubmission(db *sql.DB, gigID, assignmentID int64, payload map[string]any) error {
 	var schemaJSON string
 	if err := db.QueryRow(
 		`SELECT derived_result_schema_json FROM gigs WHERE id=?`, gigID,
@@ -1848,7 +2225,7 @@ func validateSubmission(db *sql.DB, gigID int64, payload map[string]any) error {
 	if err := validateSchemaValue("submission", schema, payload); err != nil {
 		return err
 	}
-	if err := validateRequiredInstructionResponses(db, gigID, payload); err != nil {
+	if err := validateInstructionResponses(db, gigID, assignmentID, payload, true); err != nil {
 		return err
 	}
 	return nil
@@ -1932,6 +2309,9 @@ func validateSchemaValue(path string, schema map[string]any, value any) error {
 			return fmt.Errorf("%s contains an unsupported value", path)
 		}
 	}
+	if expected, ok := schema["const"]; ok && fmt.Sprint(expected) != fmt.Sprint(value) {
+		return fmt.Errorf("%s must be %v", path, expected)
+	}
 	return nil
 }
 
@@ -1962,56 +2342,4 @@ func requiredResultKeys(schema map[string]any) []string {
 		}
 	}
 	return out
-}
-
-func validateRequiredInstructionResponses(db *sql.DB, gigID int64, payload map[string]any) error {
-	responses := map[string]bool{}
-	if raw, ok := payload["instruction_responses"].([]any); ok {
-		for _, item := range raw {
-			m, _ := item.(map[string]any)
-			key := strOf(m["key"])
-			if key == "" {
-				continue
-			}
-			hasNote := strings.TrimSpace(strOf(m["note"])) != ""
-			hasFile := false
-			if files, ok := m["files"].([]any); ok && len(files) > 0 {
-				hasFile = true
-			}
-			responses[key] = hasNote || hasFile
-		}
-	}
-
-	rows, err := db.Query(
-		`SELECT sort_order, COALESCE(result_key, ''), rendered_body_json
-		   FROM gig_instructions
-		  WHERE gig_id=?
-		  ORDER BY sort_order`,
-		gigID,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var sortOrder int
-		var resultKey, bodyJSON string
-		if err := rows.Scan(&sortOrder, &resultKey, &bodyJSON); err != nil {
-			return err
-		}
-		body := map[string]any{}
-		_ = parseJSON(bodyJSON, &body)
-		if !strings.EqualFold(strOf(body["response_mode"]), "required") {
-			continue
-		}
-		key := resultKey
-		if key == "" {
-			key = fmt.Sprintf("step_%d", sortOrder+1)
-		}
-		if !responses[key] {
-			return fmt.Errorf("missing required response for step %d", sortOrder+1)
-		}
-	}
-	return rows.Err()
 }

@@ -394,6 +394,9 @@ func (a *App) toolGigsCreateFromInstructions(ctx *sdk.AppCtx, args map[string]an
 		if ov, ok := ref["overrides"].(map[string]any); ok {
 			body = mergeMaps(body, ov)
 		}
+		if err := validateBody(kind, body); err != nil {
+			return nil, fmt.Errorf("instructions[%d] overrides: %w", i, err)
+		}
 		resultKey := strOf(ref["result_key"])
 		if resultKey == "" {
 			resultKey = v.DefaultResultKey
