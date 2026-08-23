@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.8.28
+version: 0.8.29
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -24,6 +24,15 @@ requires:
     - db.write.app
     - platform.instances.read
     - platform.apps.call
+  apps:
+    - name: messaging
+      version: ">=0.13.43"
+      optional: true
+      reason: "Delivers outbound attachments and supplies normalized attachment metadata for CRM activities."
+    - name: storage
+      version: ">=0.10.0"
+      optional: true
+      reason: "Lets operators choose project files in the CRM composer and open persisted attachment content."
   integrations:
     - role: messaging
       kind: app
@@ -31,7 +40,7 @@ requires:
       capabilities: [message.send]
       required: false
       label: "Messaging (optional)"
-      hint: "When bound, CRM gains Send/Reply tools and accepts inbound mail/SMS/WhatsApp at /inbound, auto-attaching to contact activity. Without it, CRM is a standalone contact store."
+      hint: "When bound, CRM gains Send/Reply tools with attachments and accepts inbound mail/SMS/WhatsApp media at /inbound, auto-attaching it to contact activity. Messaging v0.13.43 or newer is required for attachment metadata. Without it, CRM is a standalone contact store."
 
 provides:
   # The same canonical Agent Skill is also discovered portably through
@@ -69,9 +78,9 @@ provides:
       description: Create or update an attribute definition.
     # Messaging-coupled tools — gate on the messaging dep being bound.
     - name: contacts_send_message
-      description: "REAL EXTERNAL SEND. For free-form messages, pass body and omit all unused template/optional fields; never generate zero or empty placeholders. Never use for sender/config testing; use messaging_senders_list. New standalone emails require a subject. Identical sends are automatically deduplicated for five minutes."
+      description: "REAL EXTERNAL SEND. Supports body/template content plus up to 20 attachments / 25 MB from Storage IDs, HTTPS URLs, or base64. Never use for sender/config testing; use messaging_senders_list. New standalone emails require a subject. Identical sends are automatically deduplicated for five minutes."
     - name: contacts_reply
-      description: "REAL EXTERNAL SEND. For free-form replies, pass body and omit all unused template/optional fields. Reply on the contact's most-recent inbound conversation, preserve email threading, and deduplicate identical replies for five minutes."
+      description: "REAL EXTERNAL SEND. Supports body/template content plus up to 20 attachments / 25 MB from Storage IDs, HTTPS URLs, or base64. Reply on the contact's most-recent inbound conversation, preserve email threading, and deduplicate identical replies for five minutes."
     - name: contacts_send_test
       description: "REAL EXTERNAL SEND for an explicitly requested delivery test; not a configuration check. Pass body and omit unused template/optional fields. Logged as *_test_sent and deduplicated for five minutes."
     - name: messaging_senders_list
@@ -81,7 +90,7 @@ provides:
     - name: messaging_whatsapp_session_check
       description: Check whether a WhatsApp contact is inside the 24-hour free-form reply window.
     - name: messaging_inbound_receive
-      description: Receive an inbound message dispatched by Messaging and attach it to CRM contact activity.
+      description: Receive an inbound message and normalized attachment metadata dispatched by Messaging and attach it to CRM contact activity.
     - name: contacts_list_messageable
       description: List contacts reachable on a given channel.
     - name: contacts_list_conversations

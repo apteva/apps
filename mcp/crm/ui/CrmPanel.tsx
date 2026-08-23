@@ -120,6 +120,35 @@ interface Activity {
   message_id_header?: string;
   messaging_id?: number | string;
   message_status?: MessageStatus;
+  attachments?: ActivityAttachment[];
+}
+interface ActivityAttachment {
+  id: number | string;
+  messaging_attachment_id?: number | string;
+  storage_id?: number | string;
+  url?: string;
+  download_url?: string;
+  filename?: string;
+  content_type?: string;
+  size_bytes?: number;
+  source?: string;
+  processing_status?: string;
+  processing_error?: string;
+}
+interface ComposeAttachment {
+  key: string;
+  storage_id?: number;
+  content_base64?: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+}
+interface StorageFile {
+  id: number | string;
+  name: string;
+  folder?: string;
+  content_type?: string;
+  size_bytes?: number;
 }
 interface MessageStatusEvent {
   kind: string;
@@ -1022,6 +1051,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       from: defaultForChannel?.address || "",
       templateId: "",
       templateVars: {},
+      attachments: [],
       whatsAppSession: { state: "idle" },
       conversationId: preset.conversationId,
       replyToActivityId: preset.replyToActivityId,
@@ -1111,6 +1141,9 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           conversation_id: composer.conversationId,
           template_id: useTemplate && composer.templateId ? Number(composer.templateId) : undefined,
           template_vars: useTemplate && composer.templateId ? composer.templateVars : undefined,
+          attachments: composer.attachments.length > 0
+            ? composer.attachments.map(({ key: _key, ...attachment }) => attachment)
+            : undefined,
           // Only include `from` when the operator picked something
           // specific. Empty string means "let the backend default
           // kick in" — pass nothing so we don't override.
@@ -1488,6 +1521,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         <ComposerModal
           composer={composer}
           contact={composerContact}
+          projectId={projectId}
           senders={verifiedSenders}
           templates={messagingTemplates}
           onCancel={() => {
@@ -1909,8 +1943,54 @@ function ActivityRow({ activity, onReply, compact }: { activity: Activity; onRep
           >Reply</button>
         )}
       </div>
-      <div className="text-sm text-text whitespace-pre-wrap">{activity.body}</div>
+      {activity.body && <div className="text-sm text-text whitespace-pre-wrap">{activity.body}</div>}
+      {activity.attachments && activity.attachments.length > 0 && (
+        <ActivityAttachments attachments={activity.attachments} />
+      )}
     </li>
+  );
+}
+
+function ActivityAttachments({ attachments }: { attachments: ActivityAttachment[] }) {
+  return (
+    <ul className="mt-2 grid gap-2 sm:grid-cols-2">
+      {attachments.map((attachment, index) => {
+        const href = attachment.download_url || attachment.url || "";
+        const ready = !attachment.processing_status || attachment.processing_status === "ready";
+        const image = ready && !!href && (attachment.content_type || "").startsWith("image/");
+        const name = attachment.filename || `attachment-${index + 1}`;
+        const content = (
+          <>
+            {image ? (
+              <img src={href} alt="" className="w-10 h-10 rounded object-cover bg-bg-input shrink-0" />
+            ) : (
+              <span className="w-10 h-10 rounded bg-bg-input flex items-center justify-center text-lg shrink-0">📎</span>
+            )}
+            <span className="min-w-0">
+              <span className="block truncate text-xs text-text">{name}</span>
+              <span className="block truncate text-[10px] text-text-dim">
+                {ready ? (attachment.content_type || "file") : (attachment.processing_status || "unavailable")}
+                {attachment.size_bytes ? ` · ${formatBytes(attachment.size_bytes)}` : ""}
+              </span>
+              {!ready && attachment.processing_error && (
+                <span className="block truncate text-[10px] text-red" title={attachment.processing_error}>{attachment.processing_error}</span>
+              )}
+            </span>
+          </>
+        );
+        return (
+          <li key={String(attachment.id || attachment.messaging_attachment_id || index)}>
+            {href && ready ? (
+              <a href={href} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 rounded border border-border p-2 hover:bg-bg-input" title={`Open ${name}`}>
+                {content}
+              </a>
+            ) : (
+              <div className="flex items-center gap-2 rounded border border-border p-2 opacity-75">{content}</div>
+            )}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -1928,6 +2008,7 @@ interface ComposerState {
   from: string;
   templateId: string;
   templateVars: Record<string, string>;
+  attachments: ComposeAttachment[];
   whatsAppSession: WhatsAppSessionState;
   conversationId?: number | string;
   replyToActivityId?: string;
@@ -1980,6 +2061,7 @@ function whatsappSessionRequiresTemplate(session: WhatsAppSessionState): boolean
 function ComposerModal({
   composer,
   contact,
+  projectId,
   senders,
   templates,
   onCancel,
@@ -1988,12 +2070,17 @@ function ComposerModal({
 }: {
   composer: ComposerState;
   contact: Contact;
+  projectId: string;
   senders: SenderOption[];
   templates: TemplateOption[];
   onCancel: () => void;
   onChange: (patch: Partial<ComposerState>) => void;
   onSend: () => void;
 }) {
+  const [storageOpen, setStorageOpen] = useState(false);
+  const [storageFiles, setStorageFiles] = useState<StorageFile[]>([]);
+  const [storageSearch, setStorageSearch] = useState("");
+  const [storageStatus, setStorageStatus] = useState("");
   const channels = availableChannels(contact);
   const isEmail = composer.channel === "email";
   const isWhatsApp = composer.channel === "whatsapp";
@@ -2007,12 +2094,73 @@ function ComposerModal({
   const whatsappChecking = isWhatsApp && composer.whatsAppSession.state === "checking";
   const canSendTemplate = !whatsappClosed || (!!composer.templateId && selectedTemplateVars.every((key) => composer.templateVars[key]?.trim()));
   const bodyRequired = !whatsappClosed;
+  const hasFreeformContent = !!composer.body.trim() || composer.attachments.length > 0;
   const canSend = !composer.busy && !!toAddr && !toAddr.startsWith("(no ") &&
     !whatsappChecking &&
     sendersForChannel.length > 0 &&
-    (bodyRequired ? !!composer.body.trim() : canSendTemplate);
+    (bodyRequired ? hasFreeformContent : canSendTemplate);
   const labelW = "w-20 shrink-0 text-text-muted text-xs uppercase tracking-wide";
   const fieldCls = "flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm";
+
+  useEffect(() => {
+    if (!storageOpen) return;
+    let cancelled = false;
+    setStorageStatus("Loading Storage files…");
+    const params = new URLSearchParams({ project_id: projectId, limit: "100" });
+    fetch(`/api/apps/storage/files?${params.toString()}`, { credentials: "same-origin" })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+        return res.json() as Promise<{ files?: StorageFile[] }>;
+      })
+      .then((result) => {
+        if (cancelled) return;
+        setStorageFiles(result.files || []);
+        setStorageStatus((result.files || []).length === 0 ? "No Storage files found." : "");
+      })
+      .catch((error) => {
+        if (!cancelled) setStorageStatus(`Storage unavailable: ${(error as Error).message}`);
+      });
+    return () => { cancelled = true; };
+  }, [projectId, storageOpen]);
+
+  const appendAttachments = (next: ComposeAttachment[]) => {
+    const unique = next.filter((candidate) => !composer.attachments.some((existing) =>
+      (candidate.storage_id && existing.storage_id === candidate.storage_id) || existing.key === candidate.key));
+    if (composer.attachments.length + unique.length > 20) {
+      onChange({ error: "You can attach at most 20 files." });
+      return;
+    }
+    const total = [...composer.attachments, ...unique].reduce((sum, item) => sum + (item.size_bytes || 0), 0);
+    if (total > 25 * 1024 * 1024) {
+      onChange({ error: "Attachments cannot exceed 25 MB in total." });
+      return;
+    }
+    onChange({ attachments: [...composer.attachments, ...unique], error: null });
+  };
+
+  const addLocalFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    try {
+      appendAttachments(await Promise.all(Array.from(files).map(fileToComposeAttachment)));
+    } catch (error) {
+      onChange({ error: (error as Error).message });
+    }
+  };
+
+  const addStorageFile = (file: StorageFile) => {
+    appendAttachments([{
+      key: `storage:${file.id}`,
+      storage_id: Number(file.id),
+      filename: file.name || `file-${file.id}`,
+      content_type: file.content_type || "application/octet-stream",
+      size_bytes: file.size_bytes || 0,
+    }]);
+  };
+
+  const visibleStorageFiles = storageFiles.filter((file) => {
+    const q = storageSearch.trim().toLowerCase();
+    return !q || `${file.folder || ""}${file.name}`.toLowerCase().includes(q);
+  });
 
   return (
     <div className="absolute inset-0 bg-black/50 flex items-center justify-center pointer-events-auto p-6">
@@ -2174,6 +2322,86 @@ function ComposerModal({
           </div>
           )}
 
+          <div className="rounded border border-border p-3 space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs uppercase tracking-wide text-text-muted">Attachments</span>
+              <label className="ml-auto text-xs px-2 py-1 border border-border rounded hover:bg-bg-input cursor-pointer">
+                Add from device
+                <input
+                  type="file"
+                  multiple
+                  className="hidden"
+                  disabled={composer.busy}
+                  onChange={(event) => {
+                    void addLocalFiles(event.currentTarget.files);
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => setStorageOpen((value) => !value)}
+                disabled={composer.busy}
+                className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-50"
+              >{storageOpen ? "Hide Storage" : "Add from Storage"}</button>
+            </div>
+
+            {composer.attachments.length > 0 && (
+              <ul className="divide-y divide-border rounded border border-border">
+                {composer.attachments.map((attachment) => (
+                  <li key={attachment.key} className="flex items-center gap-2 px-2 py-1.5 text-xs">
+                    <span aria-hidden>📎</span>
+                    <span className="min-w-0 flex-1 truncate">
+                      {attachment.filename}
+                      <span className="text-text-dim"> · {formatBytes(attachment.size_bytes)}{attachment.storage_id ? " · Storage" : ""}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onChange({ attachments: composer.attachments.filter((item) => item.key !== attachment.key), error: null })}
+                      className="text-text-dim hover:text-red"
+                      aria-label={`Remove ${attachment.filename}`}
+                    >Remove</button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {storageOpen && (
+              <div className="rounded border border-border bg-bg-input/40 p-2 space-y-2">
+                <input
+                  type="search"
+                  value={storageSearch}
+                  onChange={(event) => setStorageSearch(event.target.value)}
+                  placeholder="Filter Storage files…"
+                  className="w-full bg-bg border border-border rounded px-2 py-1 text-xs"
+                />
+                {storageStatus && <div className="text-xs text-text-dim">{storageStatus}</div>}
+                {visibleStorageFiles.length > 0 && (
+                  <ul className="max-h-40 overflow-auto divide-y divide-border">
+                    {visibleStorageFiles.map((file) => {
+                      const selected = composer.attachments.some((item) => item.storage_id === Number(file.id));
+                      return (
+                        <li key={String(file.id)}>
+                          <button
+                            type="button"
+                            disabled={selected}
+                            onClick={() => addStorageFile(file)}
+                            className="w-full flex items-center gap-2 px-2 py-1.5 text-left text-xs hover:bg-bg disabled:opacity-50"
+                          >
+                            <span className="truncate flex-1">{file.folder || "/"}{file.name}</span>
+                            <span className="text-text-dim">{formatBytes(file.size_bytes)}</span>
+                            <span className="text-accent">{selected ? "Added" : "Add"}</span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            )}
+            <p className="text-[10px] text-text-dim">Up to 20 files and 25 MB total. Email sends files; SMS and WhatsApp send media.</p>
+          </div>
+
           {composer.error && (
             <div className="rounded border border-red/40 bg-red/10 text-red text-xs px-3 py-2 whitespace-pre-wrap">
               {composer.error}
@@ -2219,6 +2447,38 @@ function availableChannels(c: Contact): string[] {
     }
   }
   return out.length > 0 ? out : ["email"];
+}
+
+async function fileToComposeAttachment(file: File): Promise<ComposeAttachment> {
+  if (file.size > 25 * 1024 * 1024) {
+    throw new Error(`${file.name} is larger than 25 MB.`);
+  }
+  const dataURL = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error(`Could not read ${file.name}.`));
+    reader.readAsDataURL(file);
+  });
+  const comma = dataURL.indexOf(",");
+  return {
+    key: `${file.name}:${file.size}:${file.lastModified}:${Math.random().toString(36).slice(2)}`,
+    filename: file.name || "attachment",
+    content_type: file.type || "application/octet-stream",
+    size_bytes: file.size,
+    content_base64: comma >= 0 ? dataURL.slice(comma + 1) : dataURL,
+  };
+}
+
+function formatBytes(value?: number): string {
+  if (!value || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
 }
 
 function addressForChannel(c: Contact, channel: string): string {

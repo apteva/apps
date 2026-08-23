@@ -228,7 +228,7 @@ func TestZeroTemplateIDWithoutMessageContentIsRejectedBeforePlatformCalls(t *tes
 	app := &App{}
 
 	_, err := app.toolSendMessage(ctx, map[string]any{"id": 1, "template_id": 0})
-	if err == nil || !strings.Contains(err.Error(), "body, template_id, or content_sid required") {
+	if err == nil || !strings.Contains(err.Error(), "body, body_html, template_id, content_sid, or attachments required") {
 		t.Fatalf("error=%v, want missing content", err)
 	}
 	if platform.whoAmICalls != 0 || platform.getInstanceCalls != 0 || len(platform.calls) != 0 {

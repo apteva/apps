@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.28
+version: 0.8.29
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -46,6 +46,15 @@ requires:
     - db.write.app
     - platform.instances.read
     - platform.apps.call
+  apps:
+    - name: messaging
+      version: ">=0.13.43"
+      optional: true
+      reason: "Delivers outbound attachments and supplies normalized attachment metadata for CRM activities."
+    - name: storage
+      version: ">=0.10.0"
+      optional: true
+      reason: "Lets operators choose project files in the CRM composer and open persisted attachment content."
   integrations:
     - role: messaging
       kind: app
@@ -53,7 +62,7 @@ requires:
       capabilities: [message.send]
       required: false
       label: "Messaging (optional)"
-      hint: "When bound, CRM gains Send/Reply tools and accepts inbound mail/SMS/WhatsApp at /inbound, auto-attaching to contact activity. Without it, CRM is a standalone contact store."
+      hint: "When bound, CRM gains Send/Reply tools with attachments and accepts inbound mail/SMS/WhatsApp media at /inbound, auto-attaching it to contact activity. Messaging v0.13.43 or newer is required for attachment metadata. Without it, CRM is a standalone contact store."
 provides:
   skills:
     - name: crm
@@ -86,9 +95,9 @@ provides:
     - name: contacts_define_attribute
       description: Create or update an attribute definition.
     - name: contacts_send_message
-      description: Real external send. For free-form messages, pass body and omit unused template and optional fields.
+      description: Real external send with body/template content and attachments from Storage IDs, HTTPS URLs, or base64.
     - name: contacts_reply
-      description: Real external reply. For free-form replies, pass body and omit unused template and optional fields.
+      description: Real external reply with body/template content and attachments from Storage IDs, HTTPS URLs, or base64.
     - name: contacts_send_test
       description: Real external test send. Pass body and omit unused template and optional fields.
     - name: messaging_senders_list
@@ -98,7 +107,7 @@ provides:
     - name: messaging_whatsapp_session_check
       description: Check whether a WhatsApp contact is inside the 24-hour free-form reply window.
     - name: messaging_inbound_receive
-      description: Receive an inbound message dispatched by Messaging and attach it to CRM contact activity.
+      description: Receive an inbound message and normalized attachment metadata dispatched by Messaging and attach it to CRM contact activity.
     - name: contacts_list_messageable
       description: List contacts reachable on a channel.
     - name: contacts_list_conversations
@@ -762,40 +771,44 @@ func (a *App) MCPTools() []sdk.Tool {
 		// Calling without messaging installed returns a clear error.
 		{
 			Name:        "contacts_send_message",
-			Description: "REAL EXTERNAL SEND: deliver a message to a contact via the bound Messaging app. Never call this to test availability or sender configuration; use messaging_senders_list for that. For a free-form message, pass body and OMIT template_id, content_sid, template_vars, and other unused optional fields; never generate zero or empty placeholders. Auto-resolves channel + address, logs one activity, and links one conversation. New standalone emails require subject; replies should use contacts_reply or conversation_id. CRM automatically deduplicates identical sends for five minutes; a caller-supplied idempotency_key overrides that window. Sender precedence: from > list.default_sender > install default. Args: id (contact id), body? (required unless template_id/content_sid), channel? (email|sms|whatsapp), subject?, body_html?, from? (verified sender override), list_id?, conversation_id?, template_id?, template_vars? or vars?, idempotency_key?. For WhatsApp: call messaging_whatsapp_session_check first; if active=false, call messaging_templates_list and send with template_id/template_vars.",
+			Description: "REAL EXTERNAL SEND: deliver a message to a contact via the bound Messaging app. Never call this to test availability or sender configuration; use messaging_senders_list for that. For a free-form message, OMIT template_id, content_sid, template_vars, and other unused optional fields. A message may contain body/body_html, a template, attachments, or any combination. attachments accepts Storage IDs, public HTTPS URLs, or base64 files; attachment_storage_ids is shorthand for Storage files (maximum 20 files / 25 MB total). Auto-resolves channel + address, logs one activity, and links one conversation. New standalone emails require subject; replies should use contacts_reply or conversation_id. CRM automatically deduplicates identical sends for five minutes; a caller-supplied idempotency_key overrides that window. Sender precedence: from > list.default_sender > install default. For WhatsApp: call messaging_whatsapp_session_check first; if active=false, call messaging_templates_list and send with template_id/template_vars.",
 			InputSchema: messageInputSchema(map[string]any{
-				"id":              map[string]any{"type": "integer", "minimum": 1},
-				"body":            map[string]any{"type": "string"},
-				"channel":         map[string]any{"type": "string"},
-				"subject":         map[string]any{"type": "string"},
-				"body_html":       map[string]any{"type": "string"},
-				"from":            map[string]any{"type": "string"},
-				"list_id":         map[string]any{"type": "integer"},
-				"conversation_id": map[string]any{"type": "integer"},
-				"template_id":     map[string]any{"type": "integer", "minimum": 0},
-				"content_sid":     map[string]any{"type": "string"},
-				"template_vars":   map[string]any{"type": "object"},
-				"vars":            map[string]any{"type": "object"},
-				"idempotency_key": map[string]any{"type": "string"},
+				"id":                     map[string]any{"type": "integer", "minimum": 1},
+				"body":                   map[string]any{"type": "string"},
+				"channel":                map[string]any{"type": "string"},
+				"subject":                map[string]any{"type": "string"},
+				"body_html":              map[string]any{"type": "string"},
+				"from":                   map[string]any{"type": "string"},
+				"list_id":                map[string]any{"type": "integer"},
+				"conversation_id":        map[string]any{"type": "integer"},
+				"template_id":            map[string]any{"type": "integer", "minimum": 0},
+				"content_sid":            map[string]any{"type": "string"},
+				"template_vars":          map[string]any{"type": "object"},
+				"vars":                   map[string]any{"type": "object"},
+				"attachments":            map[string]any{"type": "array", "items": messageAttachmentInputSchema(), "maxItems": maxMessageAttachments},
+				"attachment_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 1}, "maxItems": maxMessageAttachments},
+				"idempotency_key":        map[string]any{"type": "string"},
 			}),
 			Handler: a.toolSendMessage,
 		},
 		{
 			Name:        "contacts_reply",
-			Description: "REAL EXTERNAL SEND: reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Never use this to test configuration. For a free-form reply, pass body and OMIT template_id, content_sid, template_vars, and other unused optional fields; never generate zero or empty placeholders. Sets In-Reply-To/References for email and automatically deduplicates identical replies for five minutes unless idempotency_key is supplied. Sender precedence: from > list.default_sender > install default. Args: id, body? (required unless template_id/content_sid), conversation_id?, subject?, from?, list_id?, body_html?, template_id?, content_sid?, template_vars?, idempotency_key?. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars.",
+			Description: "REAL EXTERNAL SEND: reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Never use this to test configuration. For a free-form reply, OMIT template_id, content_sid, template_vars, and other unused optional fields. A reply may contain body/body_html, a template, attachments, or any combination. attachments accepts Storage IDs, public HTTPS URLs, or base64 files; attachment_storage_ids is shorthand for Storage files (maximum 20 files / 25 MB total). Sets In-Reply-To/References for email and automatically deduplicates identical replies for five minutes unless idempotency_key is supplied. Sender precedence: from > list.default_sender > install default. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars.",
 			InputSchema: messageInputSchema(map[string]any{
-				"id":              map[string]any{"type": "integer", "minimum": 1},
-				"body":            map[string]any{"type": "string"},
-				"conversation_id": map[string]any{"type": "integer"},
-				"subject":         map[string]any{"type": "string"},
-				"from":            map[string]any{"type": "string"},
-				"list_id":         map[string]any{"type": "integer"},
-				"body_html":       map[string]any{"type": "string"},
-				"template_id":     map[string]any{"type": "integer", "minimum": 0},
-				"content_sid":     map[string]any{"type": "string"},
-				"template_vars":   map[string]any{"type": "object"},
-				"vars":            map[string]any{"type": "object"},
-				"idempotency_key": map[string]any{"type": "string"},
+				"id":                     map[string]any{"type": "integer", "minimum": 1},
+				"body":                   map[string]any{"type": "string"},
+				"conversation_id":        map[string]any{"type": "integer"},
+				"subject":                map[string]any{"type": "string"},
+				"body_html":              map[string]any{"type": "string"},
+				"from":                   map[string]any{"type": "string"},
+				"list_id":                map[string]any{"type": "integer"},
+				"template_id":            map[string]any{"type": "integer", "minimum": 0},
+				"content_sid":            map[string]any{"type": "string"},
+				"template_vars":          map[string]any{"type": "object"},
+				"vars":                   map[string]any{"type": "object"},
+				"attachments":            map[string]any{"type": "array", "items": messageAttachmentInputSchema(), "maxItems": maxMessageAttachments},
+				"attachment_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 1}, "maxItems": maxMessageAttachments},
+				"idempotency_key":        map[string]any{"type": "string"},
 			}),
 			Handler: a.toolReply,
 		},
@@ -803,15 +816,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "contacts_send_test",
 			Description: "REAL EXTERNAL SEND to the contact: use only for an explicitly requested delivery test. This is not a sender/configuration check; use messaging_senders_list for that. For a free-form test, pass body and OMIT template_id, content_sid, template_vars, and other unused optional fields; never generate zero or empty placeholders. Uses the same provider path as contacts_send_message, is automatically deduplicated for five minutes, and is logged as *_test_sent without a conversation. New test emails require subject.",
 			InputSchema: messageInputSchema(map[string]any{
-				"id":              map[string]any{"type": "integer", "minimum": 1},
-				"body":            map[string]any{"type": "string"},
-				"channel":         map[string]any{"type": "string"},
-				"subject":         map[string]any{"type": "string"},
-				"from":            map[string]any{"type": "string"},
-				"template_id":     map[string]any{"type": "integer", "minimum": 0},
-				"content_sid":     map[string]any{"type": "string"},
-				"template_vars":   map[string]any{"type": "object"},
-				"idempotency_key": map[string]any{"type": "string"},
+				"id":                     map[string]any{"type": "integer", "minimum": 1},
+				"body":                   map[string]any{"type": "string"},
+				"channel":                map[string]any{"type": "string"},
+				"subject":                map[string]any{"type": "string"},
+				"body_html":              map[string]any{"type": "string"},
+				"from":                   map[string]any{"type": "string"},
+				"template_id":            map[string]any{"type": "integer", "minimum": 0},
+				"content_sid":            map[string]any{"type": "string"},
+				"template_vars":          map[string]any{"type": "object"},
+				"vars":                   map[string]any{"type": "object"},
+				"attachments":            map[string]any{"type": "array", "items": messageAttachmentInputSchema(), "maxItems": maxMessageAttachments},
+				"attachment_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 1}, "maxItems": maxMessageAttachments},
+				"idempotency_key":        map[string]any{"type": "string"},
 			}),
 			Handler: a.toolSendTest,
 		},
@@ -865,6 +882,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"matched_recipient": map[string]any{"type": "string"},
 				"matched_pattern":   map[string]any{"type": "string"},
 				"to_subaddress":     map[string]any{"type": "string"},
+				"attachments":       map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "maxItems": maxMessageAttachments},
 			}, []string{"channel", "from"}),
 			Handler: a.toolMessagingInboundReceive,
 		},
@@ -1324,18 +1342,19 @@ type Attribute struct {
 }
 
 type Activity struct {
-	ID              int64          `json:"id"`
-	ContactID       int64          `json:"contact_id"`
-	Kind            string         `json:"kind"`
-	Body            string         `json:"body"`
-	OccurredAt      string         `json:"occurred_at"`
-	Source          string         `json:"source,omitempty"`
-	SourceDetail    string         `json:"-"`
-	ConversationID  int64          `json:"conversation_id,omitempty"`
-	MessageIDHeader string         `json:"message_id_header,omitempty"`
-	MessagingID     int64          `json:"messaging_id,omitempty"`
-	IdempotencyKey  string         `json:"idempotency_key,omitempty"`
-	MessageStatus   *MessageStatus `json:"message_status,omitempty"`
+	ID              int64                `json:"id"`
+	ContactID       int64                `json:"contact_id"`
+	Kind            string               `json:"kind"`
+	Body            string               `json:"body"`
+	OccurredAt      string               `json:"occurred_at"`
+	Source          string               `json:"source,omitempty"`
+	SourceDetail    string               `json:"-"`
+	ConversationID  int64                `json:"conversation_id,omitempty"`
+	MessageIDHeader string               `json:"message_id_header,omitempty"`
+	MessagingID     int64                `json:"messaging_id,omitempty"`
+	IdempotencyKey  string               `json:"idempotency_key,omitempty"`
+	MessageStatus   *MessageStatus       `json:"message_status,omitempty"`
+	Attachments     []ActivityAttachment `json:"attachments"`
 }
 
 type MessageStatus struct {
@@ -3100,7 +3119,7 @@ func dbLogActivity(db *sql.DB, pid string, contactID int64, kind, body, occurred
 	}
 	return &Activity{
 		ID: id, ContactID: contactID, Kind: kind, Body: body,
-		OccurredAt: occurredAt, Source: source,
+		OccurredAt: occurredAt, Source: source, Attachments: []ActivityAttachment{},
 	}, nil
 }
 
@@ -3128,6 +3147,12 @@ func dbActivities(db *sql.DB, pid string, contactID int64, limit int) ([]*Activi
 		if err := rows.Scan(&a.ID, &a.ContactID, &a.Kind, &a.Body, &a.OccurredAt, &a.Source, &a.ConversationID); err == nil {
 			out = append(out, a)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := loadActivityAttachments(db, pid, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -3591,6 +3616,22 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 	return out
 }
 
+func messageAttachmentInputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"storage_id":     map[string]any{"type": "integer", "minimum": 1},
+			"url":            map[string]any{"type": "string"},
+			"content_base64": map[string]any{"type": "string"},
+			"filename":       map[string]any{"type": "string"},
+			"content_type":   map[string]any{"type": "string"},
+			"size_bytes":     map[string]any{"type": "integer", "minimum": 0},
+			"content_id":     map[string]any{"type": "string"},
+			"disposition":    map[string]any{"type": "string", "enum": []string{"attachment", "inline"}},
+		},
+	}
+}
+
 func messageInputSchema(props map[string]any) map[string]any {
 	out := schemaObject(props, []string{"id"})
 	out["anyOf"] = []any{
@@ -3610,6 +3651,24 @@ func messageInputSchema(props map[string]any) map[string]any {
 			"required": []string{"content_sid"},
 			"properties": map[string]any{
 				"content_sid": map[string]any{"type": "string", "minLength": 1},
+			},
+		},
+		map[string]any{
+			"required": []string{"body_html"},
+			"properties": map[string]any{
+				"body_html": map[string]any{"type": "string", "minLength": 1},
+			},
+		},
+		map[string]any{
+			"required": []string{"attachments"},
+			"properties": map[string]any{
+				"attachments": map[string]any{"type": "array", "minItems": 1, "maxItems": maxMessageAttachments},
+			},
+		},
+		map[string]any{
+			"required": []string{"attachment_storage_ids"},
+			"properties": map[string]any{
+				"attachment_storage_ids": map[string]any{"type": "array", "minItems": 1, "maxItems": maxMessageAttachments},
 			},
 		},
 	}
@@ -3653,7 +3712,11 @@ func httpJSON(w http.ResponseWriter, v any) {
 const maxJSONBodyBytes int64 = 1 << 20
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	return decodeJSONBodyLimit(w, r, dst, maxJSONBodyBytes)
+}
+
+func decodeJSONBodyLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	return json.NewDecoder(r.Body).Decode(dst)
 }
 
