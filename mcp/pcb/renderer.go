@@ -11,24 +11,36 @@ import (
 func renderSVG(def *Definition) []byte {
 	mm := func(v int64) string { return trimFloat(float64(v) / 1e6) }
 	width, height := mm(def.Board.WidthNM), mm(def.Board.HeightNM)
+	canvasWidth, canvasHeight := mm(def.Board.WidthNM+8_000_000), mm(def.Board.HeightNM+8_000_000)
 	netNames := map[string]string{}
 	for _, net := range def.Nets {
 		netNames[net.ID] = net.Name
 	}
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -4 %s %s" role="img" aria-label="PCB board preview">`, mm(def.Board.WidthNM+8_000_000), mm(def.Board.HeightNM+8_000_000))
+	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -4 %s %s" role="img" aria-label="Apteva PCB board preview">`, canvasWidth, canvasHeight)
 	b.WriteString(`
 <defs>
-  <linearGradient id="board-fill" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#123e36"/><stop offset="1" stop-color="#082820"/></linearGradient>
-  <pattern id="grid" width="2" height="2" patternUnits="userSpaceOnUse"><path d="M 2 0 L 0 0 0 2" fill="none" stroke="#8ce8c2" stroke-opacity=".055" stroke-width=".04"/></pattern>
-  <pattern id="keepout-pattern" width="1.4" height="1.4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="1.4" stroke="#ffba68" stroke-opacity=".55" stroke-width=".18"/></pattern>
-  <filter id="board-shadow" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="0" dy="1" stdDeviation="1.1" flood-color="#000" flood-opacity=".65"/></filter>
-  <filter id="copper-glow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="0" stdDeviation=".12" flood-color="#ff8b70" flood-opacity=".55"/></filter>
+  <radialGradient id="canvas-fill" cx="50%" cy="42%" r="72%"><stop stop-color="#111923"/><stop offset="1" stop-color="#080c11"/></radialGradient>
+  <linearGradient id="board-fill" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#17232d"/><stop offset="1" stop-color="#0d151c"/></linearGradient>
+  <pattern id="canvas-grid" width="2.4" height="2.4" patternUnits="userSpaceOnUse"><path d="M2.4 0H0V2.4" fill="none" stroke="#94a3b8" stroke-opacity=".045" stroke-width=".04"/></pattern>
+  <pattern id="grid" width="2" height="2" patternUnits="userSpaceOnUse"><path d="M2 0H0V2" fill="none" stroke="#cbd5e1" stroke-opacity=".05" stroke-width=".04"/></pattern>
+  <pattern id="keepout-pattern" width="1.4" height="1.4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="1.4" stroke="#fbbf24" stroke-opacity=".62" stroke-width=".18"/></pattern>
+  <filter id="board-shadow" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="0" dy="1.2" stdDeviation="1.15" flood-color="#000" flood-opacity=".72"/></filter>
+  <filter id="copper-glow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="0" stdDeviation=".11" flood-color="#f97316" flood-opacity=".42"/></filter>
 </defs>
 `)
+	fmt.Fprintf(&b, `<rect x="-4" y="-4" width="%s" height="%s" rx="2.2" fill="url(#canvas-fill)"/>`, canvasWidth, canvasHeight)
+	fmt.Fprintf(&b, `<rect x="-4" y="-4" width="%s" height="%s" rx="2.2" fill="url(#canvas-grid)" stroke="#252a31" stroke-width=".08"/>`, canvasWidth, canvasHeight)
+	b.WriteByte('\n')
+	label := strings.TrimSpace(def.Name)
+	if label == "" {
+		label = "Native PCB layout"
+	}
+	fmt.Fprintf(&b, `<g font-family="ui-sans-serif,system-ui,sans-serif"><text x="0" y="-2.25" font-size=".72" font-weight="700" fill="#f8fafc">%s</text><text x="0" y="-1.25" font-size=".38" letter-spacing=".08" fill="#94a3b8">APTEVA PCB · NATIVE LAYOUT</text><circle cx="%s" cy="-2.18" r=".18" fill="#f97316"/><text x="%s" y="-2.02" text-anchor="end" font-size=".38" fill="#cbd5e1">%d COMPONENTS · %d NETS</text></g>`, html.EscapeString(shortLabel(label, 48)), mm(def.Board.WidthNM-100_000), mm(def.Board.WidthNM-500_000), len(def.Components), len(def.Nets))
+	b.WriteByte('\n')
 	b.WriteString(`<g filter="url(#board-shadow)">` + "\n")
-	fmt.Fprintf(&b, `<rect x="0" y="0" width="%s" height="%s" rx="1.2" fill="url(#board-fill)" stroke="#72e1b6" stroke-width=".22"/>`, width, height)
+	fmt.Fprintf(&b, `<rect x="0" y="0" width="%s" height="%s" rx="1.2" fill="url(#board-fill)" stroke="#f97316" stroke-width=".20"/>`, width, height)
 	fmt.Fprintf(&b, `<rect x="0" y="0" width="%s" height="%s" rx="1.2" fill="url(#grid)"/>`, width, height)
 	b.WriteByte('\n')
 
@@ -39,7 +51,7 @@ func renderSVG(def *Definition) []byte {
 		b.WriteByte('\n')
 	}
 	for _, keepout := range def.Keepouts {
-		fmt.Fprintf(&b, `<polygon id="%s" points="%s" fill="url(#keepout-pattern)" stroke="#ffb45f" stroke-width=".14" stroke-dasharray=".5 .3"><title>%s keepout</title></polygon>`, html.EscapeString(keepout.ID), svgPoints(keepout.Polygon), html.EscapeString(keepout.Kind))
+		fmt.Fprintf(&b, `<polygon id="%s" points="%s" fill="url(#keepout-pattern)" stroke="#fbbf24" stroke-width=".14" stroke-dasharray=".5 .3"><title>%s keepout</title></polygon>`, html.EscapeString(keepout.ID), svgPoints(keepout.Polygon), html.EscapeString(keepout.Kind))
 		b.WriteByte('\n')
 	}
 
@@ -51,7 +63,7 @@ func renderSVG(def *Definition) []byte {
 		b.WriteByte('\n')
 	}
 	for _, via := range def.Vias {
-		fmt.Fprintf(&b, `<g id="%s"><circle cx="%s" cy="%s" r="%s" fill="#e2b95f" stroke="#5c3c0e" stroke-width=".10"/><circle cx="%s" cy="%s" r="%s" fill="#081b16"/><title>Via · %s · drill %s mm</title></g>`, html.EscapeString(via.ID), mm(via.XNM), mm(via.YNM), mm(via.DiameterNM/2), mm(via.XNM), mm(via.YNM), mm(via.DrillNM/2), html.EscapeString(netNames[via.NetID]), mm(via.DrillNM))
+		fmt.Fprintf(&b, `<g id="%s"><circle cx="%s" cy="%s" r="%s" fill="#d6a84f" stroke="#523a11" stroke-width=".10"/><circle cx="%s" cy="%s" r="%s" fill="#080c11"/><title>Via · %s · drill %s mm</title></g>`, html.EscapeString(via.ID), mm(via.XNM), mm(via.YNM), mm(via.DiameterNM/2), mm(via.XNM), mm(via.YNM), mm(via.DrillNM/2), html.EscapeString(netNames[via.NetID]), mm(via.DrillNM))
 		b.WriteByte('\n')
 	}
 
@@ -63,19 +75,19 @@ func renderSVG(def *Definition) []byte {
 			fallback := inferredBody(component)
 			body = &fallback
 		}
-		bodyFill := "#17242b"
-		bodyStroke := "#d8eee6"
+		bodyFill := "#111a22"
+		bodyStroke := "#cbd5e1"
 		if component.Position.Side == "back" {
-			bodyFill, bodyStroke = "#172537", "#a9c9ff"
+			bodyFill, bodyStroke = "#101b2b", "#93c5fd"
 		}
 		fmt.Fprintf(&b, `<g id="%s" transform="translate(%s %s) rotate(%s)">`, html.EscapeString(component.ID), mm(component.Position.XNM), mm(component.Position.YNM), trimFloat(float64(component.Position.RotationUdeg)/1e6))
 		fmt.Fprintf(&b, `<rect x="%s" y="%s" width="%s" height="%s" rx=".28" fill="%s" fill-opacity=".92" stroke="%s" stroke-width=".13"/>`, mm(-body.WidthNM/2), mm(-body.HeightNM/2), mm(body.WidthNM), mm(body.HeightNM), bodyFill, bodyStroke)
 		for _, pad := range component.Pads {
-			padColor := "#ef9a72"
+			padColor := "#fb923c"
 			if containsString(pad.Layers, "B.Cu") && !containsString(pad.Layers, "F.Cu") {
-				padColor = "#70a8ff"
+				padColor = "#60a5fa"
 			} else if len(pad.Layers) > 1 {
-				padColor = "#e1bd62"
+				padColor = "#d6a84f"
 			}
 			shape := strings.ToLower(pad.Shape)
 			if shape == "circle" {
@@ -91,17 +103,17 @@ func renderSVG(def *Definition) []byte {
 				fmt.Fprintf(&b, `<circle cx="%s" cy="%s" r="%s" fill="#071612" stroke="#f2dfae" stroke-width=".04"/>`, mm(pad.XNM), mm(pad.YNM), mm(pad.DrillNM/2))
 			}
 		}
-		fmt.Fprintf(&b, `<text x="0" y="%s" text-anchor="middle" font-family="ui-monospace,monospace" font-size=".86" font-weight="700" fill="#f3fff9" stroke="#071612" stroke-width=".08" paint-order="stroke">%s</text>`, mm(-body.HeightNM/2-500_000), html.EscapeString(component.Designator))
+		fmt.Fprintf(&b, `<text x="0" y="%s" text-anchor="middle" font-family="ui-monospace,monospace" font-size=".86" font-weight="700" fill="#f8fafc" stroke="#080c11" stroke-width=".08" paint-order="stroke">%s</text>`, mm(-body.HeightNM/2-500_000), html.EscapeString(component.Designator))
 		value := component.Value
 		if value == "" {
 			value = component.Name
 		}
-		fmt.Fprintf(&b, `<text x="0" y="%s" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size=".48" fill="#b8cec5">%s</text><title>%s · %s · %s</title></g>`, mm(body.HeightNM/2+650_000), html.EscapeString(shortLabel(value, 24)), html.EscapeString(component.Designator), html.EscapeString(component.Name), html.EscapeString(component.Footprint))
+		fmt.Fprintf(&b, `<text x="0" y="%s" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size=".48" fill="#94a3b8">%s</text><title>%s · %s · %s</title></g>`, mm(body.HeightNM/2+650_000), html.EscapeString(shortLabel(value, 24)), html.EscapeString(component.Designator), html.EscapeString(component.Name), html.EscapeString(component.Footprint))
 		b.WriteByte('\n')
 	}
 	b.WriteString("</g>\n")
 	// Native dimension marks make the artifact useful without a separate viewer.
-	fmt.Fprintf(&b, `<g fill="#a9bbb4" stroke="#66847a" stroke-width=".06" font-family="ui-monospace,monospace" font-size=".58"><path d="M0 %sV%sM%s %sV%sM0 %sH%s"/><text x="%s" y="%s" text-anchor="middle">%s mm</text><text x="%s" y="%s" text-anchor="middle" transform="rotate(-90 %s %s)">%s mm</text></g>`, mm(def.Board.HeightNM+1_000_000), mm(def.Board.HeightNM+2_100_000), width, mm(def.Board.HeightNM+1_000_000), mm(def.Board.HeightNM+2_100_000), mm(def.Board.HeightNM+1_600_000), width, mm(def.Board.WidthNM/2), mm(def.Board.HeightNM+2_500_000), width, mm(-2_400_000), mm(def.Board.HeightNM/2), mm(-2_400_000), mm(def.Board.HeightNM/2), height)
+	fmt.Fprintf(&b, `<g fill="#94a3b8" stroke="#64748b" stroke-width=".06" font-family="ui-monospace,monospace" font-size=".58"><path d="M0 %sV%sM%s %sV%sM0 %sH%s"/><text x="%s" y="%s" text-anchor="middle">%s mm</text><text x="%s" y="%s" text-anchor="middle" transform="rotate(-90 %s %s)">%s mm</text></g>`, mm(def.Board.HeightNM+1_000_000), mm(def.Board.HeightNM+2_100_000), width, mm(def.Board.HeightNM+1_000_000), mm(def.Board.HeightNM+2_100_000), mm(def.Board.HeightNM+1_600_000), width, mm(def.Board.WidthNM/2), mm(def.Board.HeightNM+2_500_000), width, mm(-2_400_000), mm(def.Board.HeightNM/2), mm(-2_400_000), mm(def.Board.HeightNM/2), height)
 	b.WriteString("</svg>\n")
 	return []byte(b.String())
 }
@@ -125,10 +137,10 @@ func svgPoints(points []Point) string {
 
 func layerColor(layer string) string {
 	if layer == "F.Cu" {
-		return "#ff765f"
+		return "#f97316"
 	}
 	if layer == "B.Cu" {
-		return "#66a8ff"
+		return "#3b82f6"
 	}
 	return "#e8bd66"
 }
