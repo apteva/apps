@@ -234,6 +234,59 @@ func TestSoftphonePersistsBoundedBrowserAudioDiagnostics(t *testing.T) {
 	}
 }
 
+func TestSoftphoneSendsGenericDTMFThroughTelnyxCarrier(t *testing.T) {
+	platform := &answerPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+
+	app := &App{installID: 42}
+	insertSoftphoneCall(t, app, "answered")
+	if _, err := app.db().db.Exec(`UPDATE calls SET carrier_slug='telnyx',carrier_sid='v3:test-call' WHERE id='call-soft-1'`); err != nil {
+		t.Fatal(err)
+	}
+	server := softphoneTestServer(t, app)
+	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
+	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
+	if err := wsutil.WriteClientText(browser, []byte(`{"type":"dtmf","digits":"1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	readSoftphoneEventWithin(t, browser, "dtmf.sent", 3*time.Second)
+
+	if len(platform.integrationCalls) != 1 {
+		t.Fatalf("carrier calls=%v", platform.integrationCalls)
+	}
+	call := platform.integrationCalls[0]
+	if call.Tool != "send_dtmf" || call.Input["call_control_id"] != "v3:test-call" || call.Input["digits"] != "1" || call.Input["command_id"] == "" {
+		t.Fatalf("Telnyx DTMF command=%#v", call)
+	}
+}
+
+func TestSoftphoneRejectsInvalidDTMFWithoutCallingCarrier(t *testing.T) {
+	platform := &answerPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+
+	app := &App{installID: 42}
+	insertSoftphoneCall(t, app, "answered")
+	if _, err := app.db().db.Exec(`UPDATE calls SET carrier_slug='telnyx',carrier_sid='v3:test-call' WHERE id='call-soft-1'`); err != nil {
+		t.Fatal(err)
+	}
+	server := softphoneTestServer(t, app)
+	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
+	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
+	if err := wsutil.WriteClientText(browser, []byte(`{"type":"dtmf","digits":"1; DROP TABLE calls"}`)); err != nil {
+		t.Fatal(err)
+	}
+	readSoftphoneEventWithin(t, browser, "dtmf.error", 3*time.Second)
+	if len(platform.integrationCalls) != 0 {
+		t.Fatalf("invalid DTMF reached carrier: %v", platform.integrationCalls)
+	}
+}
+
 // The bridge sends TTS pacing control frames that mean nothing to a human. They
 // must be consumed by the hub, never forwarded, or the browser would have to
 // know the realtime protocol.

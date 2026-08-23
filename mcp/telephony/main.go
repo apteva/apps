@@ -1949,6 +1949,13 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 		})
 		return err
 	case "telnyx":
+		// A Telnyx IVR answers the carrier leg before it offers the selected
+		// browser destination. Once the operator claims that call, start media on
+		// the already-answered leg; issuing answer_call twice is rejected by the
+		// carrier and leaves the browser stuck in "answering".
+		if row.AnsweredAt != "" && row.RoutingFlowVersionID != "" {
+			return a.startTelnyxStream(ctx, row)
+		}
 		input := map[string]any{
 			"call_control_id":    row.CarrierSID,
 			"command_id":         telnyxCommandID(row.ID, "answer"),

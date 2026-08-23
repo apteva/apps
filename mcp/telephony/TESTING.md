@@ -13,10 +13,9 @@ events. Neither tier requires carrier credentials by default.
 
 ## Live carrier profile
 
-The opt-in live profile places a real, billable call between two dedicated test
-numbers. The first number must be voice-capable for outbound calls. The second
-must route inbound calls to this Telephony install with `answer_mode` set to
-`human_browser`.
+The opt-in live profile places one real, billable call between two dedicated
+test numbers. The first number must be voice-capable for outbound calls. The
+second must have a healthy inbound route to this Telephony install.
 
 ```bash
 export RUN_TELEPHONY_LIVE_CARRIER=I_UNDERSTAND_THIS_PLACES_A_BILLABLE_CALL
@@ -31,23 +30,28 @@ apteva test --tier 2 --profile live-carrier .
 
 Both numbers must belong to the Telnyx connection bound to the installation.
 The source number must have a ready outbound profile. The destination number
-must have an enabled, healthy `human_browser` inbound route.
+must have an enabled, healthy inbound route.
 
-The test refuses to dial until those conditions pass. It then calls through the
-installed Telephony app and answers both call legs automatically. First,
-deterministic protocol clients send distinct PCM tones in both directions and
-measure signal identity, level, continuity, cuts, and first-audio latency.
-Then two real headless Chrome processes replace those clients. eSpeak supplies
-different clean speech WAVs as their fake microphones, and the production
-`SoftphoneSession`, capture worklet, worker/WebSocket transport, and playback
-worklet carry each voice in turn. This stage requires `bun`, `espeak`, and
-Google Chrome/Chromium; set `TELEPHONY_LIVE_CHROME` if the browser is not on the
-standard path.
+The test refuses to dial until those conditions pass. It creates or updates a
+deterministic IVR flow, publishes it, assigns it to the destination number, and
+restores the number's previous flow in cleanup. The source number calls the
+destination through Telnyx; its browser softphone sends digit `1` through
+Telephony's generic DTMF control, and the test requires the inbound call to pin
+the published flow version and select its browser destination. It then answers
+that destination automatically. First, deterministic protocol clients send
+distinct PCM tones in both directions and measure signal identity, level,
+continuity, cuts, and first-audio latency. Then two real headless Chrome
+processes replace those clients. eSpeak supplies different clean speech WAVs
+as their fake microphones, and the production `SoftphoneSession`, capture
+worklet, worker/WebSocket transport, and playback worklet carry each voice in
+turn. This stage requires `bun`, `espeak`, and Google Chrome/Chromium; set
+`TELEPHONY_LIVE_CHROME` if the browser is not on the standard path.
 
-After hangup the test verifies durable initiated/incoming, answered, and
-completed lifecycle events; waits for the Telnyx recording callback; downloads
-the recording through Telephony's provider-neutral playback endpoint; confirms
-that both tones exist; and correlates each recorded speech cadence with its
-reference WAV. The final test log contains a
+After hangup the test verifies the pinned IVR flow/version/destination, durable
+initiated/incoming, answered, and completed lifecycle events; waits for the
+Telnyx recording callback; downloads the recording through Telephony's
+provider-neutral playback endpoint; confirms that both tones exist; and
+correlates each recorded speech cadence with its reference WAV. The final test
+log contains a
 `LIVE_CARRIER_EVIDENCE` JSON object with call IDs and measured evidence. It does
 not invoke an LLM or require a person to answer either number.

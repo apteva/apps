@@ -4,9 +4,10 @@ package main
 
 // This opt-in Tier-2 test crosses a real carrier network without involving an
 // LLM or a human tester. One dedicated number calls a second number whose
-// inbound route points back to the same Telephony install. Two deterministic
-// softphone protocol clients answer the resulting call legs and exchange known
-// PCM tones in both directions.
+// inbound route points back to the same Telephony install. The test publishes
+// a real IVR, selects its browser destination with carrier DTMF, then two
+// deterministic softphone protocol clients answer the resulting call legs and
+// exchange known PCM tones in both directions.
 //
 // Required environment:
 //
@@ -18,10 +19,11 @@ package main
 //	TELEPHONY_LIVE_TO_NUMBER=+...
 //
 // FROM must be voice-capable with an outbound profile. TO must be a different,
-// dedicated number routed to this Telephony install with answer_mode set to
-// human_browser. The test places a billable call and hangs it up after the
-// audio and recording assertions. Both numbers must belong to the Telnyx
-// connection bound to the target Telephony installation.
+// dedicated number with a healthy inbound route to this Telephony install. The
+// test temporarily assigns that route to its deterministic IVR and restores
+// the previous flow afterward. It places one billable call and hangs it up
+// after the routing, audio, and recording assertions. Both numbers must belong
+// to the Telnyx connection bound to the target Telephony installation.
 
 import (
 	"bytes"
@@ -50,17 +52,20 @@ type liveCarrierConfig struct {
 }
 
 type liveCarrierCall struct {
-	ID          string         `json:"id"`
-	Direction   string         `json:"direction"`
-	ToNumber    string         `json:"to_number"`
-	FromNumber  string         `json:"from_number"`
-	Status      string         `json:"status"`
-	MediaStatus string         `json:"media_status"`
-	PeerKind    string         `json:"peer_kind"`
-	Error       string         `json:"error_message"`
-	MediaError  string         `json:"media_error_message"`
-	BrowserDiag map[string]any `json:"browser_audio_diagnostics"`
-	CarrierDiag map[string]any `json:"carrier_audio_diagnostics"`
+	ID                   string         `json:"id"`
+	Direction            string         `json:"direction"`
+	ToNumber             string         `json:"to_number"`
+	FromNumber           string         `json:"from_number"`
+	Status               string         `json:"status"`
+	MediaStatus          string         `json:"media_status"`
+	PeerKind             string         `json:"peer_kind"`
+	RoutingFlowID        string         `json:"routing_flow_id"`
+	RoutingFlowVersionID string         `json:"routing_flow_version_id"`
+	RoutingDestinationID string         `json:"routing_destination_id"`
+	Error                string         `json:"error_message"`
+	MediaError           string         `json:"media_error_message"`
+	BrowserDiag          map[string]any `json:"browser_audio_diagnostics"`
+	CarrierDiag          map[string]any `json:"carrier_audio_diagnostics"`
 }
 
 type liveConnectedNumber struct {
@@ -100,6 +105,32 @@ type liveCarrierEvidence struct {
 	RecordingSpeech map[string]liveSpeechRecordingMetrics   `json:"recording_speech"`
 	BrowserSpeech   map[string]liveBrowserDirectionEvidence `json:"browser_speech"`
 	Diagnostics     map[string]liveCallDiagnostics          `json:"diagnostics"`
+	IVR             liveIVREvidence                         `json:"ivr"`
+}
+
+type liveIVREvidence struct {
+	FlowID          string   `json:"flow_id"`
+	FlowVersionID   string   `json:"flow_version_id"`
+	DestinationID   string   `json:"destination_id"`
+	RouteID         string   `json:"route_id"`
+	Digit           string   `json:"digit"`
+	AssignedNumbers []string `json:"assigned_numbers"`
+}
+
+type liveRoutingRoute struct {
+	ID                     string `json:"id"`
+	PhoneNumber            string `json:"phone_number"`
+	FlowID                 string `json:"flow_id"`
+	PublishedFlowVersionID string `json:"published_flow_version_id"`
+}
+
+type liveIVRFixture struct {
+	FlowID          string
+	FlowVersionID   string
+	DestinationID   string
+	RouteID         string
+	PreviousFlowID  string
+	AssignedNumbers []string
 }
 
 type liveCallDiagnostics struct {
@@ -139,9 +170,10 @@ func TestLiveCarrierToneDetector(t *testing.T) {
 	}
 }
 
-func TestTier2LiveCarrierLoopback(t *testing.T) {
+func TestTier2LiveCarrierIVRConversation(t *testing.T) {
 	cfg := requireLiveCarrierConfig(t)
 	requireLiveTelnyxPreflight(t, cfg)
+	ivr := configureLiveCarrierIVR(t, cfg)
 	baseline := liveCarrierCalls(t, cfg)
 	known := make(map[string]bool, len(baseline))
 	for _, call := range baseline {
@@ -167,8 +199,18 @@ func TestTier2LiveCarrierLoopback(t *testing.T) {
 	outboundBrowser := dialLiveCarrierWS(t, cfg, outbound.MediaURL)
 
 	inboundCall := waitLiveInboundCall(t, cfg, known, 30*time.Second)
+	waitLiveCallStatus(t, cfg, outbound.CallID, "answered", 30*time.Second)
+	waitLiveCallStatus(t, cfg, inboundCall.ID, "answered", 30*time.Second)
+	// call.answered starts gather_using_speak synchronously. Leave enough time
+	// for the short prompt to begin before sending the carrier-native DTMF tone.
+	time.Sleep(750 * time.Millisecond)
+	if err := wsutil.WriteClientText(outboundBrowser, []byte(`{"type":"dtmf","digits":"1"}`)); err != nil {
+		t.Fatalf("send live IVR digit: %v", err)
+	}
+	waitLiveSoftphoneEvent(t, outboundBrowser, "dtmf.sent", 10*time.Second)
+	inboundCall = waitLiveIVRSelection(t, cfg, inboundCall.ID, ivr, 20*time.Second)
 	if inboundCall.PeerKind != peerKindHuman || inboundCall.Status != "pending" {
-		t.Fatalf("destination route must use answer_mode=human_browser; inbound call=%+v", inboundCall)
+		t.Fatalf("IVR did not offer its browser destination: %+v", inboundCall)
 	}
 	var inbound softphoneSession
 	liveCarrierJSON(t, cfg, http.MethodPost, "/softphone/answer/"+url.PathEscape(inboundCall.ID), map[string]any{}, &inbound)
@@ -190,6 +232,8 @@ func TestTier2LiveCarrierLoopback(t *testing.T) {
 		Provider: "telnyx", OutboundCallID: outbound.CallID, InboundCallID: inbound.CallID,
 		From: cfg.from, To: cfg.to, ToneResults: map[string]liveToneMetrics{},
 		LifecycleTopics: map[string][]string{}, Diagnostics: map[string]liveCallDiagnostics{},
+		IVR: liveIVREvidence{FlowID: ivr.FlowID, FlowVersionID: ivr.FlowVersionID, DestinationID: ivr.DestinationID,
+			RouteID: ivr.RouteID, Digit: "1", AssignedNumbers: ivr.AssignedNumbers},
 	}
 	evidence.ToneResults["outbound_to_inbound"] = assertLiveToneExchange(t, outboundBrowser, inboundBrowser, 523, "outbound-to-inbound")
 	evidence.ToneResults["inbound_to_outbound"] = assertLiveToneExchange(t, inboundBrowser, outboundBrowser, 941, "inbound-to-outbound")
@@ -282,13 +326,105 @@ func requireLiveTelnyxPreflight(t *testing.T, cfg liveCarrierConfig) {
 	if from.Provider != "telnyx" || from.Outbound.Status != outboundReady {
 		t.Fatalf("Telnyx source number is not outbound-ready: number=%s provider=%s status=%s", from.PhoneNumber, from.Provider, from.Outbound.Status)
 	}
-	if to.Provider != "telnyx" || to.Route == nil || !to.Route.Enabled || to.Route.AnswerMode != answerModeHumanBrowser {
-		t.Fatalf("Telnyx destination must have an enabled human_browser route: %+v", to)
+	if to.Provider != "telnyx" || to.Route == nil || !to.Route.Enabled {
+		t.Fatalf("Telnyx destination must have an enabled inbound route: %+v", to)
 	}
 	if to.RoutingHealth != "healthy" {
 		t.Fatalf("Telnyx destination routing is not healthy: number=%s health=%s", to.PhoneNumber, to.RoutingHealth)
 	}
 	t.Logf("Telnyx preflight passed: from=%s outbound=%s to=%s route=%s", cfg.from, from.Outbound.Status, cfg.to, to.RoutingHealth)
+}
+
+func configureLiveCarrierIVR(t *testing.T, cfg liveCarrierConfig) liveIVRFixture {
+	t.Helper()
+	var snapshot struct {
+		Routes []liveRoutingRoute `json:"routes"`
+	}
+	liveCarrierJSON(t, cfg, http.MethodGet, "/routing/snapshot", nil, &snapshot)
+	var route liveRoutingRoute
+	for _, candidate := range snapshot.Routes {
+		if compactPhoneNumber(candidate.PhoneNumber) == compactPhoneNumber(cfg.to) {
+			route = candidate
+			break
+		}
+	}
+	if route.ID == "" {
+		t.Fatalf("live IVR destination number %s has no Telephony inbound route", cfg.to)
+	}
+
+	suffix := strings.TrimPrefix(compactPhoneNumber(cfg.to), "+")
+	fixture := liveIVRFixture{
+		FlowID: "live_carrier_ivr_" + suffix, DestinationID: "live_carrier_browser_" + suffix,
+		RouteID: route.ID, PreviousFlowID: route.FlowID,
+	}
+	liveCarrierJSON(t, cfg, http.MethodPost, "/routing/destinations/save", map[string]any{
+		"id": fixture.DestinationID, "name": "Live carrier browser " + cfg.to, "kind": "browser", "enabled": true,
+		"config": map[string]any{"hold_prompt": "Level two IVR test is connecting the browser operator.", "timeout_sec": 30},
+	}, nil)
+	draft := map[string]any{
+		"entry": "menu",
+		"nodes": []map[string]any{
+			{"id": "menu", "type": "dtmf_menu", "label": "Automated Level 2 choice", "config": map[string]any{"prompt": "Automated routing test. Press one to connect."}, "branches": map[string]string{"1": "browser", "default": "end", "timeout": "end"}},
+			{"id": "browser", "type": "destination", "label": "Browser conversation", "config": map[string]any{"destination_id": fixture.DestinationID}},
+			{"id": "end", "type": "hangup", "label": "Invalid or missing choice"},
+		},
+	}
+	liveCarrierJSON(t, cfg, http.MethodPost, "/routing/flows/save", map[string]any{
+		"id": fixture.FlowID, "name": "Live carrier IVR " + cfg.to,
+		"description": "Deterministic Level 2 carrier, IVR, browser audio, and recording proof.", "draft": draft,
+	}, nil)
+	var published struct {
+		Valid   bool `json:"valid"`
+		Version struct {
+			ID string `json:"id"`
+		} `json:"version"`
+	}
+	liveCarrierJSON(t, cfg, http.MethodPost, "/routing/flows/publish", map[string]any{"id": fixture.FlowID}, &published)
+	if !published.Valid || published.Version.ID == "" {
+		t.Fatalf("live IVR publication returned incomplete evidence: %+v", published)
+	}
+	fixture.FlowVersionID = published.Version.ID
+	var assigned struct {
+		OK        bool   `json:"ok"`
+		Valid     bool   `json:"valid"`
+		VersionID string `json:"version_id"`
+	}
+	liveCarrierJSON(t, cfg, http.MethodPost, "/routing/flows/numbers/assign", map[string]any{
+		"flow_id": fixture.FlowID, "route_ids": []string{fixture.RouteID},
+	}, &assigned)
+	if !assigned.OK || !assigned.Valid || assigned.VersionID != fixture.FlowVersionID {
+		t.Fatalf("live IVR assignment did not pin the published version: %+v", assigned)
+	}
+	var listed struct {
+		Numbers []struct {
+			PhoneNumber string `json:"phone_number"`
+		} `json:"numbers"`
+	}
+	liveCarrierJSON(t, cfg, http.MethodGet, "/routing/flows/numbers?flow_id="+url.QueryEscape(fixture.FlowID), nil, &listed)
+	for _, number := range listed.Numbers {
+		fixture.AssignedNumbers = append(fixture.AssignedNumbers, number.PhoneNumber)
+	}
+	if len(fixture.AssignedNumbers) != 1 || compactPhoneNumber(fixture.AssignedNumbers[0]) != compactPhoneNumber(cfg.to) {
+		t.Fatalf("live IVR assignment list=%v, want [%s]", fixture.AssignedNumbers, cfg.to)
+	}
+
+	t.Cleanup(func() {
+		if fixture.PreviousFlowID != "" {
+			if err := liveCarrierPost(cfg, "/routing/flows/numbers/assign", map[string]any{
+				"flow_id": fixture.PreviousFlowID, "route_ids": []string{fixture.RouteID},
+			}, nil); err != nil {
+				t.Logf("restore previous live IVR assignment: %v", err)
+			}
+			return
+		}
+		if err := liveCarrierPost(cfg, "/routing/flows/numbers/unassign", map[string]any{
+			"flow_id": fixture.FlowID, "route_ids": []string{fixture.RouteID},
+		}, nil); err != nil {
+			t.Logf("remove temporary live IVR assignment: %v", err)
+		}
+	})
+	t.Logf("Live IVR ready: flow=%s version=%s route=%s number=%s", fixture.FlowID, fixture.FlowVersionID, fixture.RouteID, cfg.to)
+	return fixture
 }
 
 func liveCarrierAppURL(cfg liveCarrierConfig, path string) string {
@@ -597,6 +733,41 @@ func waitLiveInboundCall(t *testing.T, cfg liveCarrierConfig, known map[string]b
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("real carrier did not deliver an inbound call from %s to %s within %s", cfg.from, cfg.to, timeout)
+	return liveCarrierCall{}
+}
+
+func waitLiveCallStatus(t *testing.T, cfg liveCarrierConfig, callID, status string, timeout time.Duration) liveCarrierCall {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		call := liveCarrierCallByID(t, cfg, callID)
+		if call.Error != "" {
+			t.Fatalf("call %s failed while waiting for %s: %s", callID, status, call.Error)
+		}
+		if call.Status == status || (status == "answered" && call.Status == "in-progress") {
+			return call
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("call %s did not reach %s within %s", callID, status, timeout)
+	return liveCarrierCall{}
+}
+
+func waitLiveIVRSelection(t *testing.T, cfg liveCarrierConfig, callID string, fixture liveIVRFixture, timeout time.Duration) liveCarrierCall {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		call := liveCarrierCallByID(t, cfg, callID)
+		if call.Error != "" {
+			t.Fatalf("IVR call %s failed: %s", callID, call.Error)
+		}
+		if call.Status == "pending" && call.PeerKind == peerKindHuman && call.RoutingFlowID == fixture.FlowID &&
+			call.RoutingFlowVersionID == fixture.FlowVersionID && call.RoutingDestinationID == fixture.DestinationID {
+			return call
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("call %s did not select IVR destination %s within %s", callID, fixture.DestinationID, timeout)
 	return liveCarrierCall{}
 }
 

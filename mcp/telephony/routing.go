@@ -1423,10 +1423,19 @@ func (a *App) answerTelnyxIVR(ctx *sdk.AppCtx, row *callRow) error {
 	if row == nil {
 		return errors.New("call is unavailable")
 	}
-	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "answer_call", map[string]any{
+	input := map[string]any{
 		"call_control_id": row.CarrierSID,
 		"command_id":      telnyxCommandID(row.ID, "ivr-answer"),
-	})
+	}
+	// The IVR answers before a browser operator is selected, so recording must
+	// begin here rather than waiting for the later media-stream command.
+	if row.RecordingMode == recordingModeAlways {
+		input["record"] = "record-from-answer"
+		input["record_channels"] = telnyxRecordingChannels(row.RecordingChannels)
+		input["record_format"] = "wav"
+		input["record_track"] = "both"
+	}
+	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "answer_call", input)
 	return err
 }
 

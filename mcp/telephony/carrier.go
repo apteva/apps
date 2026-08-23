@@ -92,6 +92,56 @@ func executeCarrierTool(ctx *sdk.AppCtx, connID int64, tool string, input map[st
 	return res.Data, nil
 }
 
+// sendCarrierDTMF is the provider-neutral call-control entry point used by
+// softphones. Provider tool names differ, but callers should never have to
+// know which carrier owns the active leg.
+func (a *App) sendCarrierDTMF(ctx *sdk.AppCtx, row *callRow, digits string) error {
+	if row == nil || strings.TrimSpace(row.CarrierSID) == "" {
+		return errors.New("call has no carrier control id")
+	}
+	digits = strings.TrimSpace(digits)
+	if !validDTMFDigits(digits) {
+		return errors.New("digits must contain 1-32 DTMF characters (0-9, A-D, *, #, w or W)")
+	}
+	input := map[string]any{"digits": digits}
+	tool := ""
+	switch strings.ToLower(strings.TrimSpace(row.CarrierSlug)) {
+	case "telnyx":
+		tool = "send_dtmf"
+		input["call_control_id"] = row.CarrierSID
+		input["duration_millis"] = 250
+		// Every keypad press is a distinct command. Reusing a deterministic id
+		// for the same digit would make Telnyx correctly de-duplicate a user's
+		// second press.
+		input["command_id"] = telnyxCommandID(row.ID, "dtmf-"+digits+"-"+newCallID())
+	case "plivo":
+		tool = "send_call_dtmf"
+		input["call_uuid"] = row.CarrierSID
+	case "vonage":
+		tool = "send_call_dtmf"
+		input["uuid"] = row.CarrierSID
+	default:
+		return fmt.Errorf("carrier %q does not expose live DTMF through this integration", row.CarrierSlug)
+	}
+	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, tool, input)
+	if err != nil {
+		return fmt.Errorf("send DTMF through %s: %w", row.CarrierSlug, err)
+	}
+	return nil
+}
+
+func validDTMFDigits(digits string) bool {
+	if len(digits) == 0 || len(digits) > 32 {
+		return false
+	}
+	for _, digit := range digits {
+		if !strings.ContainsRune("0123456789ABCD*#wW", digit) {
+			return false
+		}
+	}
+	return true
+}
+
 type twilioCarrier struct {
 	app    *App
 	connID int64

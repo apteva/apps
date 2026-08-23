@@ -107,6 +107,33 @@ func TestTelnyxRoutingUsesGatherUsingSpeakContract(t *testing.T) {
 	}
 }
 
+func TestTelnyxIVRAnswerStartsRecordingAndBrowserAnswerStartsStream(t *testing.T) {
+	db := testCallsDB(t)
+	platform := &answerPlatform{}
+	ctx := sdk.NewAppCtxForTest(&sdk.Manifest{}, db.db, sdk.Config{}, platform, nil)
+	app := &App{}
+	row := &callRow{
+		ID: "call-ivr", ProjectID: "p1", CarrierSlug: "telnyx", CarrierSID: "v3:test",
+		CarrierConnectionID: 9, CallbackSecret: "secret", RecordingMode: recordingModeAlways,
+		RecordingChannels: "dual", RoutingFlowVersionID: "flow-version-1",
+		AnsweredAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := app.answerTelnyxIVR(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	answer := platform.integrationCalls[0]
+	if answer.Tool != "answer_call" || answer.Input["record"] != "record-from-answer" || answer.Input["record_channels"] != "dual" {
+		t.Fatalf("IVR answer did not start recording: %#v", answer)
+	}
+	if err := app.answerInboundCarrierCall(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	stream := platform.integrationCalls[1]
+	if stream.Tool != "start_streaming" || stream.Input["call_control_id"] != "v3:test" {
+		t.Fatalf("browser answer did not resume the answered IVR leg: %#v", stream)
+	}
+}
+
 func TestPublishingPinsImmutableVersion(t *testing.T) {
 	db := testCallsDB(t)
 	app := &App{}

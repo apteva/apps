@@ -455,6 +455,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			var control struct {
 				Type        string                   `json:"type"`
 				Nonce       float64                  `json:"nonce,omitempty"`
+				Digits      string                   `json:"digits,omitempty"`
 				Diagnostics *browserAudioDiagnostics `json:"diagnostics,omitempty"`
 			}
 			if json.Unmarshal(data, &control) != nil {
@@ -467,6 +468,22 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			case "interrupt":
 				payload, _ := json.Marshal(realtimeBridgeControl{Type: "interrupt", Source: "operator"})
 				hub.toPeer(ws.OpText, payload)
+			case "dtmf":
+				if globalCtx == nil {
+					_ = writer.Write(ws.OpText, softphoneEventDetail("dtmf.error", callID, "Telephony is not ready to send keypad input."))
+					continue
+				}
+				current, findErr := a.db().findCall(callID)
+				if findErr != nil || current == nil || isTerminalStatus(current.Status) {
+					_ = writer.Write(ws.OpText, softphoneEventDetail("dtmf.error", callID, "The call is no longer active."))
+					continue
+				}
+				if sendErr := a.sendCarrierDTMF(globalCtx.WithProject(current.ProjectID), current, control.Digits); sendErr != nil {
+					logSoftphone("softphone DTMF failed", "call", callID, "provider", current.CarrierSlug, "err", sendErr)
+					_ = writer.Write(ws.OpText, softphoneEventDetail("dtmf.error", callID, sendErr.Error()))
+					continue
+				}
+				_ = writer.Write(ws.OpText, softphoneEvent("dtmf.sent", callID))
 			case "diagnostics":
 				if control.Diagnostics != nil {
 					if err := a.db().updateBrowserAudioDiagnostics(callID, *control.Diagnostics); err != nil {
