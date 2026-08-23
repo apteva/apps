@@ -2,10 +2,11 @@ schema: apteva-app/v1
 
 name: pcb
 display_name: PCB Studio
-version: 0.1.1
+version: 0.2.0
 description: |
   Native, agent-first electronics design for Apteva. PCB Studio owns its
   canonical circuit and board model, revision engine, validation, rendering,
+  pad/footprint geometry, manufacturing validation, Gerber/Excellon writers,
   and release packaging. External services are optional data, sourcing, and
   manufacturing providers—not geometry or ECAD engines.
 
@@ -55,7 +56,7 @@ requires:
         pcb.provider_discovery: get_api_platform_overview
       required: false
       label: "PCB fabrication provider"
-      hint: Optional provider binding. v0.1 exposes provider readiness only; quote/order calls stay disabled until documented partner endpoints are available.
+      hint: Optional provider binding. v0.2 exposes provider readiness only; quote/order calls stay disabled until documented partner endpoints are available.
 
 provides:
   http_routes:
@@ -84,6 +85,7 @@ provides:
     - { name: pcb_validate, description: "Run the native ERC/DRC validator. Args: design_id, revision_id?.", requires: pcb.validate, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_render, description: "Create a deterministic SVG board preview. Args: design_id, revision_id?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_bom_generate, description: "Create a deterministic BOM CSV. Args: design_id, revision_id?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_manufacturing_generate, description: "Validate and create deterministic Gerber X2 plus Excellon manufacturing files. Args: design_id, revision_id?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_artifacts_list, description: "List artifacts for a design or revision. Args: design_id, revision_id?.", requires: pcb.read, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_release_create, description: "Validate and create a traceable native release ZIP. Failed validation blocks release. Args: design_id, revision_id?, note?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_components_search, description: "Search the optional component-data provider. Args: query, country?, currency?, limit?.", requires: pcb.read }
@@ -117,7 +119,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: main, entry: mcp/pcb }
+  source: { repo: github.com/apteva/apps, ref: pcb/v0.2.0, entry: mcp/pcb }
   port: 8080
   health_check: /health
   resources: { cpu: 0.1, memory: 128, cpu_limit: 1, memory_limit: 512 }

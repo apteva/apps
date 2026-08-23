@@ -15,6 +15,7 @@ func validateDefinition(def *Definition) ValidationReport {
 		Metrics: Metrics{
 			Components: len(def.Components), Nets: len(def.Nets),
 			Traces: len(def.Traces), Vias: len(def.Vias),
+			Zones: len(def.Zones), Keepouts: len(def.Keepouts), DifferentialPairs: len(def.DifferentialPairs),
 			BoardAreaNM2: saturatingArea(def.Board.WidthNM, def.Board.HeightNM),
 		},
 	}
@@ -34,6 +35,12 @@ func validateDefinition(def *Definition) ValidationReport {
 	}
 	if def.Rules.MinEdgeClearanceNM < 0 {
 		add("RULE_EDGE_CLEARANCE_INVALID", "error", "Board-edge clearance cannot be negative")
+	}
+	if def.Rules.MinDrillNM <= 0 {
+		add("RULE_DRILL_INVALID", "error", "Minimum plated drill must be positive")
+	}
+	if def.Rules.MinAnnularRingNM <= 0 {
+		add("RULE_ANNULAR_RING_INVALID", "error", "Minimum annular ring must be positive")
 	}
 
 	layers := map[string]Layer{}
@@ -99,6 +106,7 @@ func validateDefinition(def *Definition) ValidationReport {
 				add("PIN_PAD_MISSING", "warning", "Pin has no footprint pad mapping", component.ID, pin.ID)
 			}
 		}
+		report.Metrics.Pads += len(component.Pads)
 	}
 
 	nets := map[string]Net{}
@@ -227,6 +235,10 @@ func validateDefinition(def *Definition) ValidationReport {
 				add("TRACE_CLEARANCE", "error", "Different nets violate copper clearance", a.ID, b.ID)
 			}
 		}
+	}
+
+	for _, check := range validateManufacturing(def) {
+		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
 	}
 
 	if report.Errors > 0 {

@@ -33,11 +33,16 @@ func emptyDefinition(name string) Definition {
 			MinClearanceNM:     defaultClearance,
 			MinTraceWidthNM:    defaultTraceWidth,
 			MinEdgeClearanceNM: defaultEdgeClearance,
+			MinDrillNM:         defaultMinDrill,
+			MinAnnularRingNM:   defaultAnnularRing,
 		},
-		Components: []Component{},
-		Nets:       []Net{},
-		Traces:     []Trace{},
-		Vias:       []Via{},
+		Components:        []Component{},
+		Nets:              []Net{},
+		Traces:            []Trace{},
+		Vias:              []Via{},
+		Zones:             []Zone{},
+		Keepouts:          []Keepout{},
+		DifferentialPairs: []DifferentialPair{},
 	}
 }
 
@@ -79,6 +84,12 @@ func normalizeDefinition(raw []byte, fallbackName string) ([]byte, *Definition, 
 	if def.Rules.MinEdgeClearanceNM == 0 {
 		def.Rules.MinEdgeClearanceNM = defaultEdgeClearance
 	}
+	if def.Rules.MinDrillNM == 0 {
+		def.Rules.MinDrillNM = defaultMinDrill
+	}
+	if def.Rules.MinAnnularRingNM == 0 {
+		def.Rules.MinAnnularRingNM = defaultAnnularRing
+	}
 	if def.Components == nil {
 		def.Components = []Component{}
 	}
@@ -90,6 +101,15 @@ func normalizeDefinition(raw []byte, fallbackName string) ([]byte, *Definition, 
 	}
 	if def.Vias == nil {
 		def.Vias = []Via{}
+	}
+	if def.Zones == nil {
+		def.Zones = []Zone{}
+	}
+	if def.Keepouts == nil {
+		def.Keepouts = []Keepout{}
+	}
+	if def.DifferentialPairs == nil {
+		def.DifferentialPairs = []DifferentialPair{}
 	}
 	if err := structuralLimits(&def); err != nil {
 		return nil, nil, "", err
@@ -121,12 +141,22 @@ func structuralLimits(def *Definition) error {
 	}
 	// Native v1's clearance checker is deliberately simple and deterministic.
 	// Keep its accepted graph bounded until the spatial-indexed validator lands.
-	if len(def.Board.Layers) > 64 || len(def.Components) > 10_000 || len(def.Nets) > 20_000 || len(def.Traces) > 2_000 || len(def.Vias) > 10_000 {
+	if len(def.Board.Layers) > 64 || len(def.Components) > 10_000 || len(def.Nets) > 20_000 || len(def.Traces) > 2_000 || len(def.Vias) > 10_000 || len(def.Zones) > 2_000 || len(def.Keepouts) > 2_000 || len(def.DifferentialPairs) > 1_000 {
 		return errors.New("definition exceeds native v1 object limits")
 	}
 	for _, t := range def.Traces {
 		if len(t.Points) > 4_096 {
 			return fmt.Errorf("trace %q exceeds point limit", t.ID)
+		}
+	}
+	for _, z := range def.Zones {
+		if len(z.Polygon) > 16_384 {
+			return fmt.Errorf("zone %q exceeds point limit", z.ID)
+		}
+	}
+	for _, k := range def.Keepouts {
+		if len(k.Polygon) > 16_384 {
+			return fmt.Errorf("keepout %q exceeds point limit", k.ID)
 		}
 	}
 	return nil
@@ -141,15 +171,18 @@ func idValid(id string) bool { return nativeIDPattern.MatchString(strings.TrimSp
 
 func semanticDiff(fromID, toID int64, a, b *Definition, fromHash, toHash string) RevisionDiff {
 	return RevisionDiff{
-		FromRevisionID: fromID,
-		ToRevisionID:   toID,
-		SourceChanged:  fromHash != toHash,
-		BoardChanged:   !equalJSON(a.Board, b.Board),
-		RulesChanged:   !equalJSON(a.Rules, b.Rules),
-		Components:     diffByID(a.Components, b.Components, func(v Component) string { return v.ID }),
-		Nets:           diffByID(a.Nets, b.Nets, func(v Net) string { return v.ID }),
-		Traces:         diffByID(a.Traces, b.Traces, func(v Trace) string { return v.ID }),
-		Vias:           diffByID(a.Vias, b.Vias, func(v Via) string { return v.ID }),
+		FromRevisionID:    fromID,
+		ToRevisionID:      toID,
+		SourceChanged:     fromHash != toHash,
+		BoardChanged:      !equalJSON(a.Board, b.Board),
+		RulesChanged:      !equalJSON(a.Rules, b.Rules),
+		Components:        diffByID(a.Components, b.Components, func(v Component) string { return v.ID }),
+		Nets:              diffByID(a.Nets, b.Nets, func(v Net) string { return v.ID }),
+		Traces:            diffByID(a.Traces, b.Traces, func(v Trace) string { return v.ID }),
+		Vias:              diffByID(a.Vias, b.Vias, func(v Via) string { return v.ID }),
+		Zones:             diffByID(a.Zones, b.Zones, func(v Zone) string { return v.ID }),
+		Keepouts:          diffByID(a.Keepouts, b.Keepouts, func(v Keepout) string { return v.ID }),
+		DifferentialPairs: diffByID(a.DifferentialPairs, b.DifferentialPairs, func(v DifferentialPair) string { return v.ID }),
 	}
 }
 

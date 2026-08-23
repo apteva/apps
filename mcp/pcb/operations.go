@@ -103,6 +103,8 @@ func applyOperation(def *Definition, op Operation) error {
 		def.Nets = append(def.Nets[:idx], def.Nets[idx+1:]...)
 		def.Traces = filterTraces(def.Traces, func(v Trace) bool { return v.NetID != op.NetID })
 		def.Vias = filterVias(def.Vias, func(v Via) bool { return v.NetID != op.NetID })
+		def.Zones = filterZones(def.Zones, func(v Zone) bool { return v.NetID != op.NetID })
+		def.DifferentialPairs = filterDifferentialPairs(def.DifferentialPairs, func(v DifferentialPair) bool { return v.PositiveNetID != op.NetID && v.NegativeNetID != op.NetID })
 	case "net.connect":
 		if op.Node == nil {
 			return errors.New("node is required")
@@ -166,6 +168,48 @@ func applyOperation(def *Definition, op Operation) error {
 			return fmt.Errorf("via %q not found", op.ViaID)
 		}
 		def.Vias = append(def.Vias[:idx], def.Vias[idx+1:]...)
+	case "zone.add":
+		if op.Zone == nil {
+			return errors.New("zone is required")
+		}
+		if findZone(def.Zones, op.Zone.ID) >= 0 {
+			return fmt.Errorf("zone %q already exists", op.Zone.ID)
+		}
+		def.Zones = append(def.Zones, *op.Zone)
+	case "zone.remove":
+		idx := findZone(def.Zones, op.ZoneID)
+		if idx < 0 {
+			return fmt.Errorf("zone %q not found", op.ZoneID)
+		}
+		def.Zones = append(def.Zones[:idx], def.Zones[idx+1:]...)
+	case "keepout.add":
+		if op.Keepout == nil {
+			return errors.New("keepout is required")
+		}
+		if findKeepout(def.Keepouts, op.Keepout.ID) >= 0 {
+			return fmt.Errorf("keepout %q already exists", op.Keepout.ID)
+		}
+		def.Keepouts = append(def.Keepouts, *op.Keepout)
+	case "keepout.remove":
+		idx := findKeepout(def.Keepouts, op.KeepoutID)
+		if idx < 0 {
+			return fmt.Errorf("keepout %q not found", op.KeepoutID)
+		}
+		def.Keepouts = append(def.Keepouts[:idx], def.Keepouts[idx+1:]...)
+	case "differential_pair.add":
+		if op.DifferentialPair == nil {
+			return errors.New("differential_pair is required")
+		}
+		if findDifferentialPair(def.DifferentialPairs, op.DifferentialPair.ID) >= 0 {
+			return fmt.Errorf("differential pair %q already exists", op.DifferentialPair.ID)
+		}
+		def.DifferentialPairs = append(def.DifferentialPairs, *op.DifferentialPair)
+	case "differential_pair.remove":
+		idx := findDifferentialPair(def.DifferentialPairs, op.DifferentialPairID)
+		if idx < 0 {
+			return fmt.Errorf("differential pair %q not found", op.DifferentialPairID)
+		}
+		def.DifferentialPairs = append(def.DifferentialPairs[:idx], def.DifferentialPairs[idx+1:]...)
 	default:
 		return fmt.Errorf("unsupported operation type %q", op.Type)
 	}
@@ -204,6 +248,30 @@ func findVia(v []Via, id string) int {
 	}
 	return -1
 }
+func findZone(v []Zone, id string) int {
+	for i := range v {
+		if v[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+func findKeepout(v []Keepout, id string) int {
+	for i := range v {
+		if v[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+func findDifferentialPair(v []DifferentialPair, id string) int {
+	for i := range v {
+		if v[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
 func filterTraces(v []Trace, keep func(Trace) bool) []Trace {
 	out := v[:0]
 	for _, x := range v {
@@ -214,6 +282,24 @@ func filterTraces(v []Trace, keep func(Trace) bool) []Trace {
 	return out
 }
 func filterVias(v []Via, keep func(Via) bool) []Via {
+	out := v[:0]
+	for _, x := range v {
+		if keep(x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+func filterZones(v []Zone, keep func(Zone) bool) []Zone {
+	out := v[:0]
+	for _, x := range v {
+		if keep(x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+func filterDifferentialPairs(v []DifferentialPair, keep func(DifferentialPair) bool) []DifferentialPair {
 	out := v[:0]
 	for _, x := range v {
 		if keep(x) {

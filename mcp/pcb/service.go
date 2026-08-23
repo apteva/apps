@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"os"
 	"path/filepath"
 	"sort"
@@ -76,6 +75,22 @@ func (s *Service) BOM(designID, revisionID int64) (*Artifact, error) {
 	return s.persistArtifact(design, revision, "bom", "csv", "text/csv", renderBOM(def), map[string]any{"engine": engineVersion, "components": len(def.Components)})
 }
 
+func (s *Service) Manufacturing(designID, revisionID int64) (*Artifact, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	report := validateDefinition(def)
+	if report.Status == "failed" {
+		return nil, fmt.Errorf("revision failed validation with %d errors; manufacturing output refused", report.Errors)
+	}
+	body, err := zipManufacturingSet(def)
+	if err != nil {
+		return nil, err
+	}
+	return s.persistArtifact(design, revision, "manufacturing", "zip", "application/zip", body, map[string]any{"engine": engineVersion, "format": "Gerber X2 + Excellon", "files": manufacturingFileSummary(def), "validation_status": report.Status})
+}
+
 func (s *Service) Release(_ context.Context, designID, revisionID int64, note string) (*Artifact, error) {
 	design, revision, def, err := s.revision(designID, revisionID)
 	if err != nil {
@@ -104,6 +119,9 @@ func (s *Service) Release(_ context.Context, designID, revisionID int64, note st
 	files["validation/report.json"] = append(validation, '\n')
 	files["outputs/board.svg"] = renderSVG(def)
 	files["outputs/bom.csv"] = renderBOM(def)
+	for name, body := range manufacturingFiles(def) {
+		files["manufacturing/"+name] = body
+	}
 	hashes := map[string]string{}
 	for name, body := range files {
 		sum := sha256.Sum256(body)
@@ -137,17 +155,31 @@ func (s *Service) persistArtifact(design *Design, revision *Revision, kind, form
 		return nil, err
 	}
 	storageID := ""
-	if id, err := s.uploadStorage(name, contentType, body, design.ID, revision.ID, hash); err == nil {
-		storageID = id
-	} else if s.ctx != nil {
-		s.ctx.Logger().Warn("PCB artifact Storage upload failed; retaining local copy", "format", format, "err", err)
+	var uploadErr error
+	if s.ctx != nil {
+		storageID, uploadErr = s.uploadStorage(name, contentType, body, design.ID, revision.ID, hash)
+		if uploadErr != nil {
+			s.ctx.Logger().Error("required PCB artifact Storage upload failed", "format", format, "err", uploadErr)
+			metadata["storage_upload_status"] = "failed"
+			metadata["storage_upload_error"] = uploadErr.Error()
+		} else {
+			metadata["storage_upload_status"] = "uploaded"
+		}
+	} else {
+		metadata["storage_upload_status"] = "local-only"
 	}
 	meta, _ := json.Marshal(metadata)
 	artifact, err := s.store.SaveArtifact(s.project, Artifact{DesignID: design.ID, RevisionID: revision.ID, Kind: kind, Format: format, Name: name, ContentType: contentType, LocalPath: path, StorageFileID: storageID, SHA256: hash, SizeBytes: int64(len(body)), Metadata: meta})
 	if err == nil && s.ctx != nil {
 		s.ctx.Emit("pcb.artifact.created", map[string]any{"design_id": design.ID, "revision_id": revision.ID, "artifact_id": artifact.ID, "kind": kind, "format": format, "storage_file_id": storageID})
 	}
-	return artifact, err
+	if err != nil {
+		return nil, err
+	}
+	if uploadErr != nil {
+		return artifact, fmt.Errorf("artifact retained locally but required Storage upload failed: %w", uploadErr)
+	}
+	return artifact, nil
 }
 
 func (s *Service) uploadStorage(name, contentType string, body []byte, designID, revisionID int64, hash string) (string, error) {
@@ -158,12 +190,11 @@ func (s *Service) uploadStorage(name, contentType string, body []byte, designID,
 	if bound == nil || bound.Kind != "app" || bound.InstallID <= 0 {
 		return "", errors.New("no Storage app is bound to the storage role")
 	}
-	storageApp := strings.TrimSpace(bound.AppName)
-	if storageApp == "" {
-		// AppName resolution is best-effort in the SDK. The manifest limits
-		// this role to Storage, while authorization remains tied to InstallID.
-		storageApp = "storage"
-	}
+	// App binding values are app-install IDs. BoundIntegration.AppName is
+	// populated through the legacy agent directory and can therefore resolve
+	// to an unrelated agent with the same numeric ID. This role permits only
+	// the canonical Storage app; authorization still enforces InstallID.
+	const storageApp = "storage"
 	var out struct {
 		ID int64 `json:"id"`
 	}
@@ -207,39 +238,6 @@ func renderBOM(def *Definition) []byte {
 	}
 	w.Flush()
 	return buf.Bytes()
-}
-
-func renderSVG(def *Definition) []byte {
-	mm := func(v int64) string { return trimFloat(float64(v) / 1e6) }
-	var b strings.Builder
-	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %s %s" role="img" aria-label="PCB board preview">`, mm(def.Board.WidthNM), mm(def.Board.HeightNM))
-	b.WriteString("\n<rect width=\"100%\" height=\"100%\" rx=\"1\" fill=\"#123a32\" stroke=\"#7dd3b0\" stroke-width=\"0.2\"/>\n")
-	colors := map[string]string{"F.Cu": "#ff6b5e", "B.Cu": "#63a7ff"}
-	for _, t := range def.Traces {
-		color := colors[t.Layer]
-		if color == "" {
-			color = "#f0b95a"
-		}
-		points := make([]string, len(t.Points))
-		for i, p := range t.Points {
-			points[i] = mm(p.XNM) + "," + mm(p.YNM)
-		}
-		fmt.Fprintf(&b, "<polyline id=\"%s\" points=\"%s\" fill=\"none\" stroke=\"%s\" stroke-width=\"%s\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n", html.EscapeString(t.ID), strings.Join(points, " "), color, mm(t.WidthNM))
-	}
-	for _, v := range def.Vias {
-		fmt.Fprintf(&b, "<circle id=\"%s\" cx=\"%s\" cy=\"%s\" r=\"%s\" fill=\"#d9b45b\" stroke=\"#161b1d\" stroke-width=\"0.12\"/>\n", html.EscapeString(v.ID), mm(v.XNM), mm(v.YNM), mm(v.DiameterNM/2))
-	}
-	for _, c := range def.Components {
-		x, y := mm(c.Position.XNM), mm(c.Position.YNM)
-		fill := "#e9f3ee"
-		if c.Position.Side == "back" {
-			fill = "#b7cbd8"
-		}
-		fmt.Fprintf(&b, "<g id=\"%s\" transform=\"translate(%s %s) rotate(%s)\"><rect x=\"-1.4\" y=\"-0.9\" width=\"2.8\" height=\"1.8\" rx=\"0.2\" fill=\"%s\" stroke=\"#16211d\" stroke-width=\"0.12\"/><text x=\"0\" y=\"-1.25\" text-anchor=\"middle\" font-family=\"ui-monospace,monospace\" font-size=\"0.9\" fill=\"#f3fff9\">%s</text></g>\n", html.EscapeString(c.ID), x, y, trimFloat(float64(c.Position.RotationUdeg)/1e6), fill, html.EscapeString(c.Designator))
-	}
-	b.WriteString("</svg>\n")
-	return []byte(b.String())
 }
 
 func deterministicZip(files map[string][]byte) ([]byte, error) {

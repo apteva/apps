@@ -27,6 +27,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "pcb_validate", Description: "Run the native electrical-rule and design-rule validator.", InputSchema: designActionSchema(id), HandlerCtx: a.toolValidate},
 		{Name: "pcb_render", Description: "Persist a deterministic SVG board preview.", InputSchema: designActionSchema(id), HandlerCtx: a.toolRender},
 		{Name: "pcb_bom_generate", Description: "Persist a deterministic grouped BOM CSV.", InputSchema: designActionSchema(id), HandlerCtx: a.toolBOM},
+		{Name: "pcb_manufacturing_generate", Description: "Validate and persist a deterministic Gerber X2 plus Excellon manufacturing ZIP.", InputSchema: designActionSchema(id), HandlerCtx: a.toolManufacturing},
 		{Name: "pcb_artifacts_list", Description: "List generated PCB artifacts.", InputSchema: designActionSchema(id), HandlerCtx: a.toolArtifacts},
 		{Name: "pcb_release_create", Description: "Validate and create a traceable native release ZIP; errors block release.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "note": map[string]any{"type": "string"}}, []string{"design_id"}), HandlerCtx: a.toolRelease},
 		{Name: "pcb_components_search", Description: "Search the optional component-data integration without coupling the PCB model to it.", InputSchema: schemaObject(map[string]any{"query": map[string]any{"type": "string"}, "country": map[string]any{"type": "string"}, "currency": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, []string{"query"}), HandlerCtx: a.toolComponentsSearch},
@@ -220,6 +221,13 @@ func (a *App) toolBOM(_ context.Context, app *sdk.AppCtx, args map[string]any) (
 	}
 	return s.BOM(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
 }
+func (a *App) toolManufacturing(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	return s.Manufacturing(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
+}
 func (a *App) toolArtifacts(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	s, err := a.service(app)
 	if err != nil {
@@ -290,7 +298,7 @@ func (a *App) toolProvidersStatus(_ context.Context, app *sdk.AppCtx, _ map[stri
 		"native_engine":  map[string]any{"schema": pcbSchema, "engine": engineVersion, "external_engine_dependency": false},
 		"storage":        bindingStatus(storage, true, "native PCB artifacts are persisted through the selected Storage app binding"),
 		"component_data": bindingStatus(component, true, "available through the selected component-data connection"),
-		"pcb_fabricator": bindingStatus(fab, false, "discovery only in v0.1; quote/order disabled"),
+		"pcb_fabricator": bindingStatus(fab, false, "discovery only in v0.2; quote/order disabled"),
 	}, nil
 }
 
@@ -322,7 +330,11 @@ func bindingStatus(bound *sdk.BoundIntegration, executable bool, note string) ma
 	}
 	out := map[string]any{"bound": true, "kind": bound.Kind, "executable": executable, "note": note}
 	if bound.Kind == "app" {
-		out["app_name"] = bound.AppName
+		if bound.Role == "storage" {
+			out["app_name"] = "storage"
+		} else {
+			out["app_name"] = bound.AppName
+		}
 		out["install_id"] = bound.InstallID
 	} else {
 		out["provider"] = bound.AppSlug

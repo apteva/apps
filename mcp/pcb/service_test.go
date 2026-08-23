@@ -20,6 +20,29 @@ func TestDeterministicNativeArtifacts(t *testing.T) {
 		t.Fatalf("unexpected BOM: %s", bom)
 	}
 }
+func TestNativeManufacturingSetIsDeterministic(t *testing.T) {
+	def := manufacturablePairDefinition()
+	a, err := zipManufacturingSet(&def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := zipManufacturingSet(&def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(a, b) {
+		t.Fatal("manufacturing ZIP is not deterministic")
+	}
+	files := manufacturingFiles(&def)
+	for _, name := range []string{"gerbers/F_Cu.gbr", "gerbers/B_Cu.gbr", "gerbers/Edge_Cuts.gbr", "drill/board.drl", "board.gbrjob"} {
+		if len(files[name]) == 0 {
+			t.Errorf("missing manufacturing file %s", name)
+		}
+	}
+	if !bytes.Contains(files["gerbers/F_Cu.gbr"], []byte("G36*")) || !bytes.Contains(files["drill/board.drl"], []byte("M48")) {
+		t.Fatal("manufacturing files do not contain native Gerber/Excellon commands")
+	}
+}
 func TestReleaseIsStableAndContainsTraceability(t *testing.T) {
 	store := testStore(t)
 	d := createTestDesign(t, store, "project-a")
@@ -52,7 +75,7 @@ func TestReleaseIsStableAndContainsTraceability(t *testing.T) {
 		names = append(names, f.Name)
 	}
 	sort.Strings(names)
-	want := []string{"manifest.json", "outputs/board.svg", "outputs/bom.csv", "source/pcb.json", "validation/report.json"}
+	want := []string{"manifest.json", "manufacturing/board.gbrjob", "manufacturing/drill/board.drl", "manufacturing/gerbers/B_Cu.gbr", "manufacturing/gerbers/Edge_Cuts.gbr", "manufacturing/gerbers/F_Cu.gbr", "outputs/board.svg", "outputs/bom.csv", "source/pcb.json", "validation/report.json"}
 	if len(names) != len(want) {
 		t.Fatalf("release files: %v", names)
 	}

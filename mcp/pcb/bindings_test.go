@@ -21,7 +21,7 @@ func (p *pcbBindingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 }
 
 func (p *pcbBindingPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error) {
-	return &sdk.PlatformInstance{ID: id, Name: "storage", Status: "running", ProjectID: "project-a"}, nil
+	return &sdk.PlatformInstance{ID: id, Name: "Trading Agent", Status: "running", ProjectID: "project-a"}, nil
 }
 
 func (p *pcbBindingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
@@ -58,6 +58,9 @@ func TestStorageUploadUsesNativeAppBinding(t *testing.T) {
 	storage := bindings["storage"].(map[string]any)
 	if storage["kind"] != "app" || storage["install_id"] != int64(41) {
 		t.Fatalf("storage status does not expose native app binding: %#v", storage)
+	}
+	if storage["app_name"] != "storage" {
+		t.Fatalf("storage status trusted legacy agent-name lookup: %#v", storage)
 	}
 }
 
