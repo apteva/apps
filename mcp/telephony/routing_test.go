@@ -148,7 +148,9 @@ func TestTelnyxIVRAnswerStartsRecordingAndBrowserAnswerStartsStream(t *testing.T
 		t.Fatal(err)
 	}
 	stream := platform.integrationCalls[1]
-	if stream.Tool != "start_streaming" || stream.Input["call_control_id"] != "v3:test" {
+	if stream.Tool != "start_streaming" || stream.Input["call_control_id"] != "v3:test" ||
+		stream.Input["stream_codec"] != "L16" || stream.Input["stream_bidirectional_codec"] != "L16" ||
+		stream.Input["stream_bidirectional_sampling_rate"] != 16000 || stream.Input["stream_bidirectional_target_legs"] != "self" {
 		t.Fatalf("browser answer did not resume the answered IVR leg: %#v", stream)
 	}
 }

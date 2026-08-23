@@ -1474,15 +1474,18 @@ func (a *App) startTelnyxGather(ctx *sdk.AppCtx, row *callRow, plan *inboundRout
 }
 
 func (a *App) startTelnyxStream(ctx *sdk.AppCtx, row *callRow) error {
-	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "start_streaming", map[string]any{
-		"call_control_id":            row.CarrierSID,
-		"stream_url":                 a.publicWSStreamURL("telnyx", row.ID, row.CallbackSecret),
-		"stream_track":               "inbound_track",
-		"stream_codec":               "PCMU",
-		"stream_bidirectional_mode":  "rtp",
-		"stream_bidirectional_codec": "PCMU",
-		"command_id":                 telnyxCommandID(row.ID, "ivr-stream"),
-	})
+	input := map[string]any{
+		"call_control_id": row.CarrierSID,
+		"stream_url":      a.publicWSStreamURL("telnyx", row.ID, row.CallbackSecret),
+		"stream_track":    "inbound_track",
+		"command_id":      telnyxCommandID(row.ID, "ivr-stream"),
+	}
+	// Resuming an answered IVR must negotiate the same wire format and target
+	// leg as a normal browser call. The legacy PCMU request was rejected by the
+	// L16 bridge and caused an endless reconnect loop after the operator
+	// accepted the routed call.
+	applyTelnyxMediaProfile(input)
+	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "start_streaming", input)
 	return err
 }
 
