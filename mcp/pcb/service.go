@@ -145,7 +145,14 @@ func (s *Service) persistArtifact(design *Design, revision *Revision, kind, form
 	sum := sha256.Sum256(body)
 	hash := hex.EncodeToString(sum[:])
 	ext := format
-	name := fmt.Sprintf("%s-r%d.%s", safeFilename(design.Name), revision.Number, ext)
+	// Manufacturing and release artifacts are both ZIP files, but they contain
+	// different payloads. Include their semantic kind so one local-cache write
+	// can never overwrite the other for the same immutable revision.
+	suffix := ""
+	if kind == "manufacturing" || kind == "release" {
+		suffix = "-" + kind
+	}
+	name := fmt.Sprintf("%s-r%d%s.%s", safeFilename(design.Name), revision.Number, suffix, ext)
 	dir := filepath.Join(s.artifactRoot, fmt.Sprintf("design-%d", design.ID), fmt.Sprintf("revision-%d", revision.ID))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err

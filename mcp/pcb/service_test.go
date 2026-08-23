@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -47,9 +48,19 @@ func TestReleaseIsStableAndContainsTraceability(t *testing.T) {
 	store := testStore(t)
 	d := createTestDesign(t, store, "project-a")
 	s := &Service{store: store, project: "project-a", artifactRoot: t.TempDir()}
+	manufacturing, err := s.Manufacturing(d.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	first, err := s.Release(context.Background(), d.ID, 0, "release candidate")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if manufacturing.LocalPath == first.LocalPath || manufacturing.Name == first.Name {
+		t.Fatalf("manufacturing and release artifacts collide: %q / %q", manufacturing.LocalPath, first.LocalPath)
+	}
+	if !strings.HasSuffix(manufacturing.Name, "-r1-manufacturing.zip") || !strings.HasSuffix(first.Name, "-r1-release.zip") {
+		t.Fatalf("unexpected package names: manufacturing=%q release=%q", manufacturing.Name, first.Name)
 	}
 	firstBody, err := os.ReadFile(first.LocalPath)
 	if err != nil {
