@@ -5,7 +5,7 @@ package main
 // This opt-in Tier-2 test crosses a real carrier network without involving an
 // LLM or a human tester. One dedicated number calls a second number whose
 // inbound route points back to the same Telephony install. The test publishes
-// a real IVR, selects its browser destination with carrier DTMF, then two
+// a real IVR, selects its browser destination through a timed fallback, then two
 // deterministic softphone protocol clients answer the resulting call legs and
 // exchange known PCM tones in both directions.
 //
@@ -57,6 +57,7 @@ type liveCarrierCall struct {
 	ToNumber             string         `json:"to_number"`
 	FromNumber           string         `json:"from_number"`
 	Status               string         `json:"status"`
+	AnsweredAt           string         `json:"answered_at"`
 	MediaStatus          string         `json:"media_status"`
 	PeerKind             string         `json:"peer_kind"`
 	RoutingFlowID        string         `json:"routing_flow_id"`
@@ -113,7 +114,7 @@ type liveIVREvidence struct {
 	FlowVersionID   string   `json:"flow_version_id"`
 	DestinationID   string   `json:"destination_id"`
 	RouteID         string   `json:"route_id"`
-	Digit           string   `json:"digit"`
+	Selection       string   `json:"selection"`
 	AssignedNumbers []string `json:"assigned_numbers"`
 }
 
@@ -200,14 +201,14 @@ func TestTier2LiveCarrierIVRConversation(t *testing.T) {
 
 	inboundCall := waitLiveInboundCall(t, cfg, known, 30*time.Second)
 	waitLiveCallStatus(t, cfg, outbound.CallID, "answered", 30*time.Second)
-	waitLiveCallStatus(t, cfg, inboundCall.ID, "answered", 30*time.Second)
-	// call.answered starts gather_using_speak synchronously. Leave enough time
-	// for the short prompt to begin before sending the carrier-native DTMF tone.
-	time.Sleep(750 * time.Millisecond)
-	if err := wsutil.WriteClientText(outboundBrowser, []byte(`{"type":"dtmf","digits":"1"}`)); err != nil {
-		t.Fatalf("send live IVR digit: %v", err)
+	inboundCall = waitLiveCarrierAnswered(t, cfg, inboundCall.ID, 30*time.Second)
+	if inboundCall.Status != "pending" || inboundCall.RoutingFlowVersionID != ivr.FlowVersionID || inboundCall.RoutingDestinationID != "" {
+		t.Fatalf("inbound IVR did not remain offerable while waiting for a digit: %+v", inboundCall)
 	}
-	waitLiveSoftphoneEvent(t, outboundBrowser, "dtmf.sent", 10*time.Second)
+	// A second controlled Telnyx leg cannot emulate caller-originated DTMF: both
+	// send_dtmf and audio injected through its media stream bypass the far leg's
+	// gather detector. Exercise the real IVR timeout branch here; signed DTMF
+	// webhooks and browser keypad commands are covered by integration tests.
 	inboundCall = waitLiveIVRSelection(t, cfg, inboundCall.ID, ivr, 20*time.Second)
 	if inboundCall.PeerKind != peerKindHuman || inboundCall.Status != "pending" {
 		t.Fatalf("IVR did not offer its browser destination: %+v", inboundCall)
@@ -233,7 +234,7 @@ func TestTier2LiveCarrierIVRConversation(t *testing.T) {
 		From: cfg.from, To: cfg.to, ToneResults: map[string]liveToneMetrics{},
 		LifecycleTopics: map[string][]string{}, Diagnostics: map[string]liveCallDiagnostics{},
 		IVR: liveIVREvidence{FlowID: ivr.FlowID, FlowVersionID: ivr.FlowVersionID, DestinationID: ivr.DestinationID,
-			RouteID: ivr.RouteID, Digit: "1", AssignedNumbers: ivr.AssignedNumbers},
+			RouteID: ivr.RouteID, Selection: "timeout", AssignedNumbers: ivr.AssignedNumbers},
 	}
 	evidence.ToneResults["outbound_to_inbound"] = assertLiveToneExchange(t, outboundBrowser, inboundBrowser, 523, "outbound-to-inbound")
 	evidence.ToneResults["inbound_to_outbound"] = assertLiveToneExchange(t, inboundBrowser, outboundBrowser, 941, "inbound-to-outbound")
@@ -364,7 +365,7 @@ func configureLiveCarrierIVR(t *testing.T, cfg liveCarrierConfig) liveIVRFixture
 	draft := map[string]any{
 		"entry": "menu",
 		"nodes": []map[string]any{
-			{"id": "menu", "type": "dtmf_menu", "label": "Automated Level 2 choice", "config": map[string]any{"prompt": "Automated routing test. Press one to connect."}, "branches": map[string]string{"1": "browser", "default": "end", "timeout": "end"}},
+			{"id": "menu", "type": "dtmf_menu", "label": "Automated Level 2 choice", "config": map[string]any{"prompt": "Automated routing test. The browser conversation will begin after this prompt."}, "branches": map[string]string{"1": "browser", "default": "end", "timeout": "browser"}},
 			{"id": "browser", "type": "destination", "label": "Browser conversation", "config": map[string]any{"destination_id": fixture.DestinationID}},
 			{"id": "end", "type": "hangup", "label": "Invalid or missing choice"},
 		},
@@ -750,6 +751,25 @@ func waitLiveCallStatus(t *testing.T, cfg liveCarrierConfig, callID, status stri
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("call %s did not reach %s within %s", callID, status, timeout)
+	return liveCarrierCall{}
+}
+
+func waitLiveCarrierAnswered(t *testing.T, cfg liveCarrierConfig, callID string, timeout time.Duration) liveCarrierCall {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		call := liveCarrierCallByID(t, cfg, callID)
+		if call.Error != "" {
+			t.Fatalf("call %s failed while waiting for carrier answer: %s", callID, call.Error)
+		}
+		// An inbound IVR is carrier-answered but intentionally remains pending
+		// in Telephony until its selected browser operator accepts the offer.
+		if call.AnsweredAt != "" {
+			return call
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("call %s did not receive a carrier answer within %s", callID, timeout)
 	return liveCarrierCall{}
 }
 

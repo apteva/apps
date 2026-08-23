@@ -70,6 +70,25 @@ func TestLiveRoutingPausesAtDTMFUntilCarrierReturnsDigits(t *testing.T) {
 	}
 }
 
+func TestLiveRoutingUsesTimeoutBranchForEmptyCarrierGather(t *testing.T) {
+	def := routingDefinition{Entry: "menu", Nodes: []routingNode{
+		{ID: "menu", Type: "dtmf_menu", Branches: map[string]string{"1": "sales", "default": "end", "timeout": "browser"}},
+		{ID: "sales", Type: "destination", Config: map[string]any{"destination_id": "sales"}},
+		{ID: "browser", Type: "destination", Config: map[string]any{"destination_id": "timeout-browser"}},
+		{ID: "end", Type: "hangup"},
+	}}
+	result := simulateRoutingDefinition(def, routingSimulationContext{
+		StopAtInteraction: true,
+		Digits:            map[string]string{"menu": routingTimeoutSelection},
+	})
+	if !result.Valid || result.DestinationID != "timeout-browser" {
+		t.Fatalf("timeout result = %#v", result)
+	}
+	if got := result.Trace[0].Outcome; got != "timeout" {
+		t.Fatalf("timeout outcome = %q", got)
+	}
+}
+
 func TestTwilioRoutingPlanRendersSingleDigitGather(t *testing.T) {
 	db := testCallsDB(t)
 	app := &App{}

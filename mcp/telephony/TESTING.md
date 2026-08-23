@@ -35,10 +35,10 @@ must have an enabled, healthy inbound route.
 The test refuses to dial until those conditions pass. It creates or updates a
 deterministic IVR flow, publishes it, assigns it to the destination number, and
 restores the number's previous flow in cleanup. The source number calls the
-destination through Telnyx; its browser softphone sends digit `1` through
-Telephony's generic DTMF control, and the test requires the inbound call to pin
-the published flow version and select its browser destination. It then answers
-that destination automatically. First, deterministic protocol clients send
+destination through Telnyx, the real IVR prompt runs, and its timeout branch
+selects the browser destination. The test requires the inbound call to pin the
+published flow version before it answers that destination automatically. First,
+deterministic protocol clients send
 distinct PCM tones in both directions and measure signal identity, level,
 continuity, cuts, and first-audio latency. Then two real headless Chrome
 processes replace those clients. eSpeak supplies different clean speech WAVs
@@ -55,3 +55,12 @@ correlates each recorded speech cadence with its reference WAV. The final test
 log contains a
 `LIVE_CARRIER_EVIDENCE` JSON object with call IDs and measured evidence. It does
 not invoke an LLM or require a person to answer either number.
+
+The two-number profile deliberately uses the IVR timeout path. A second
+Call Control leg cannot faithfully emulate caller-originated keypad input:
+Telnyx accepts `send_dtmf`, and injected dual-tone audio is present in the
+carrier recording, but neither is presented to the far leg's gather detector
+as a caller keypress. Signed carrier DTMF webhooks, flow branching, and generic
+browser keypad commands are covered by the deterministic integration suite.
+A live keypad assertion needs an independent SIP user agent or a number on a
+second carrier as the caller.

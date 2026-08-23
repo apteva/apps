@@ -74,6 +74,8 @@ type routingSimulationContext struct {
 	StopAtInteraction bool              `json:"-"`
 }
 
+const routingTimeoutSelection = "__timeout__"
+
 type routingTraceStep struct {
 	NodeID   string `json:"node_id"`
 	NodeType string `json:"node_type"`
@@ -302,7 +304,13 @@ func simulateRoutingDefinition(def routingDefinition, input routingSimulationCon
 			if input.Digits != nil {
 				digit = strings.TrimSpace(input.Digits[node.ID])
 			}
-			if digit == "" && input.StopAtInteraction {
+			if digit == routingTimeoutSelection {
+				if node.Branches["timeout"] != "" {
+					trace.Outcome, next = "timeout", node.Branches["timeout"]
+				} else {
+					trace.Outcome, next = "default", node.Branches["default"]
+				}
+			} else if digit == "" && input.StopAtInteraction {
 				trace.Outcome = "waiting_for_digits"
 				result.TerminalNodeID, result.TerminalType = node.ID, node.Type
 			} else if digit != "" && node.Branches[digit] != "" {
@@ -1400,7 +1408,7 @@ func (a *App) handleIVRCallback(w http.ResponseWriter, r *http.Request) {
 	nodeID := strings.TrimSpace(r.URL.Query().Get("node"))
 	digit := strings.TrimSpace(r.FormValue("Digits"))
 	if digit == "" {
-		digit = "__timeout__"
+		digit = routingTimeoutSelection
 	}
 	route, plan, err := a.routingPlanForCall(row, map[string]string{nodeID: digit})
 	if err != nil {

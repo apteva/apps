@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.3.3
+version: 0.3.4
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -2590,7 +2590,7 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				_ = a.db().db.QueryRow(`SELECT current_node_id FROM call_route_executions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&nodeID)
 				digit := strings.TrimSpace(event.Data.Payload.Digits)
 				if digit == "" {
-					digit = "__timeout__"
+					digit = routingTimeoutSelection
 				}
 				routed, plan, planErr := a.routingPlanForCall(row, map[string]string{nodeID: digit})
 				if planErr != nil {
