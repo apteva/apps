@@ -14,29 +14,35 @@ func objectSchema(required []string, properties map[string]any) map[string]any {
 	return map[string]any{"type": "object", "required": required, "properties": properties, "additionalProperties": false}
 }
 
-func scheduleSchema() map[string]any {
-	return map[string]any{"type": "object", "required": []string{"kind"}, "properties": map[string]any{
-		"kind":     map[string]any{"type": "string", "enum": []string{"once", "interval", "cron"}},
-		"at":       map[string]any{"type": "string", "description": "RFC3339 timestamp for a one-time schedule."},
-		"after":    map[string]any{"type": "string", "description": "Relative duration such as 10m; server time is authoritative."},
-		"every":    map[string]any{"type": "string", "description": "Interval such as 1h or 24h."},
-		"cron":     map[string]any{"type": "string", "description": "Five-field cron expression."},
-		"timezone": map[string]any{"type": "string", "description": "IANA timezone, default UTC."},
+func scheduleSchema(requireKind bool) map[string]any {
+	schema := map[string]any{"type": "object", "properties": map[string]any{
+		"kind":           map[string]any{"type": "string", "enum": []string{"once", "interval", "cron"}},
+		"at":             map[string]any{"type": "string", "description": "RFC3339 timestamp for a one-time schedule."},
+		"after":          map[string]any{"type": "string", "description": "Relative duration such as 10m; server time is authoritative."},
+		"every":          map[string]any{"type": "string", "description": "Interval such as 1h or 24h."},
+		"cron":           map[string]any{"type": "string", "description": "Five-field cron expression."},
+		"timezone":       map[string]any{"type": "string", "description": "IANA timezone, default UTC."},
+		"overlap_policy": map[string]any{"type": "string", "enum": []string{"skip"}},
+		"catchup_policy": map[string]any{"type": "string", "enum": []string{"skip"}},
 	}}
+	if requireKind {
+		schema["required"] = []string{"kind"}
+	}
+	return schema
 }
 
 func (a *App) tools() []sdk.Tool {
 	wakeAlways := map[string]any{"io.apteva/wakeOnResult": "always"}
 	return []sdk.Tool{
 		{Name: "create", Description: "Create exactly one durable task before substantive work begins when an outcome is multi-step, combines multiple sources or independent checks, is scheduled, delegated, or must survive the current exchange. A multi-area review or synthesis is task work even when calls run in parallel or finish in one turn. A quick lookup means one bounded read or action with no multi-source synthesis. Creating a task does not imply delegation: the current opaque thread may create, execute, update, and complete its own task. The current thread becomes creator; immediate work defaults to that creator, while scheduled work defaults to the agent's configured default thread. assigned_thread_id overrides either default.", InputSchema: objectSchema([]string{"title"}, map[string]any{
-			"title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "assigned_thread_id": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"}, "schedule": scheduleSchema(),
+			"title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "assigned_thread_id": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"}, "schedule": scheduleSchema(true),
 		}), Meta: wakeAlways, HandlerCtx: a.toolCreate},
 		{Name: "list", Description: "List this agent's durable task inventory across all of its threads. Tasks are independent of conversations; creator, assignee, and executor thread IDs are provenance only and never limit visibility. Use this directly for task and schedule questions instead of asking another thread. The result is authoritative; do not repeat the same list call.", InputSchema: objectSchema(nil, map[string]any{
 			"states": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "include_runs": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer"},
 		}), HandlerCtx: a.toolList},
 		{Name: "get", Description: "Read the authoritative task and its chronological event history. Every thread receiving a task event, including a delegated worker, must call this before any domain action. Main may grant this read-only tool to a worker without granting Tasks mutation tools.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}}), HandlerCtx: a.toolGet},
-		{Name: "update", Description: "Record task-level state and progress at meaningful phase boundaries. Keep the task running while any executor is actively working, including a delegated worker. Use waiting only when no executor can progress until an external event; when work resumes, return to running with a concrete current_step. Multi-stage or delegated work should usually have at least two or three intermediate milestones, while short work may move directly from its first update to completion. Do not update after every tool call or mirror task progress into global status.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{
-			"task_id": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "state": map[string]any{"type": "string", "enum": []string{"queued", "running", "waiting", "blocked", "failed"}}, "progress": map[string]any{"type": "integer", "minimum": 0, "maximum": 100}, "current_step": map[string]any{"type": "string"}, "error": map[string]any{"type": "string"}, "result_reference": map[string]any{"type": "string"}, "schedule": scheduleSchema(),
+		{Name: "update", Description: "Atomically edit a task definition and/or record meaningful execution progress while preserving every omitted field. title and description rename or revise the task. schedule is a partial patch: omit kind, expression, timezone, or policies to preserve their current values; editing a paused recurring schedule keeps it paused. Edit the recurring parent task, not an already-materialized occurrence, so future occurrences inherit the new definition. Keep the task running while any executor is actively working, including a delegated worker. Use waiting only when no executor can progress until an external event; when work resumes, return to running with a concrete current_step. Multi-stage or delegated work should usually have at least two or three intermediate milestones. Do not update after every tool call or mirror task progress into global status.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{
+			"task_id": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "state": map[string]any{"type": "string", "enum": []string{"queued", "running", "waiting", "blocked", "failed"}}, "progress": map[string]any{"type": "integer", "minimum": 0, "maximum": 100}, "current_step": map[string]any{"type": "string"}, "error": map[string]any{"type": "string"}, "result_reference": map[string]any{"type": "string"}, "schedule": scheduleSchema(false),
 		}), Meta: wakeAlways, HandlerCtx: a.toolUpdate},
 		{Name: "assign", Description: "Assign a task to an existing opaque thread id belonging to the same agent. This records ownership and sends an event containing the authoritative task ID, which wakes a paused worker; it never creates a thread. Main must use the platform spawn tool first, grant the worker tasks_get plus only required domain tools, and retain all Tasks mutation tools. The worker must call tasks_get before any domain action.", InputSchema: objectSchema([]string{"task_id", "thread_id"}, map[string]any{"task_id": map[string]any{"type": "string"}, "thread_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolAssign},
 		{Name: "complete", Description: "Complete an assigned task once with its concrete result. Completion sets progress to 100 and current_step to Completed. Include result_reference when a durable output ID or URL exists. Tasks sends a structured terminal receipt to its creator thread when different; do not duplicate that delivery.", InputSchema: objectSchema([]string{"task_id", "result"}, map[string]any{"task_id": map[string]any{"type": "string"}, "result": map[string]any{"type": "string"}, "result_reference": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolComplete},
@@ -80,6 +86,42 @@ func decodeSchedule(v any) (*ScheduleInput, error) {
 	// and must retain the tool contract's immediate-task default.
 	if strings.TrimSpace(input.At) == "" && strings.TrimSpace(input.After) == "" &&
 		strings.TrimSpace(input.Every) == "" && strings.TrimSpace(input.Cron) == "" {
+		return nil, nil
+	}
+	return &input, nil
+}
+
+func decodeSchedulePatch(v any) (*ScheduleInput, error) {
+	if v == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var input ScheduleInput
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return nil, err
+	}
+	input.Kind = strings.ToLower(strings.TrimSpace(input.Kind))
+	input.At = strings.TrimSpace(input.At)
+	input.After = strings.TrimSpace(input.After)
+	input.Every = strings.TrimSpace(input.Every)
+	input.Cron = strings.TrimSpace(input.Cron)
+	input.Timezone = strings.TrimSpace(input.Timezone)
+	input.OverlapPolicy = strings.TrimSpace(input.OverlapPolicy)
+	input.CatchupPolicy = strings.TrimSpace(input.CatchupPolicy)
+	if input.Kind == "" && input.At == "" && input.After == "" && input.Every == "" &&
+		input.Cron == "" && input.Timezone == "" && input.OverlapPolicy == "" && input.CatchupPolicy == "" {
+		return nil, nil
+	}
+	// This is the placeholder emitted by structured providers for an omitted
+	// schedule object. A real UTC-only edit can include the current expression.
+	defaultOverlap := input.OverlapPolicy == "" || strings.EqualFold(input.OverlapPolicy, "skip")
+	defaultCatchup := input.CatchupPolicy == "" || strings.EqualFold(input.CatchupPolicy, "skip")
+	if input.Kind == scheduleOnce && input.At == "" && input.After == "" && input.Every == "" &&
+		input.Cron == "" && (input.Timezone == "" || input.Timezone == "UTC") &&
+		defaultOverlap && defaultCatchup {
 		return nil, nil
 	}
 	return &input, nil
@@ -176,16 +218,18 @@ func (a *App) toolUpdate(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if err != nil {
 		return nil, err
 	}
-	if schedule, scheduleErr := decodeSchedule(args["schedule"]); scheduleErr != nil {
+	schedule, scheduleErr := decodeSchedulePatch(args["schedule"])
+	if scheduleErr != nil {
 		return nil, scheduleErr
-	} else if schedule != nil {
-		return a.store.SetSchedule(task.ID, caller.ThreadID, *schedule)
 	}
 	input := UpdateTaskInput{}
 	// Structured-output providers may materialize every optional string as "".
 	// Treat those placeholders as omitted so a progress-only update cannot erase
 	// the authoritative task body or other durable metadata. HTTP PATCH/PUT still
 	// supports explicit empty-string updates because it bypasses this MCP adapter.
+	if v, ok := args["title"].(string); ok && v != "" {
+		input.Title = &v
+	}
 	if v, ok := args["description"].(string); ok && v != "" {
 		input.Description = &v
 	}
@@ -203,6 +247,25 @@ func (a *App) toolUpdate(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	}
 	if v, ok := args["result_reference"].(string); ok && v != "" {
 		input.ResultReference = &v
+	}
+	if schedule != nil {
+		// Some structured providers fill an omitted optional enum with its first
+		// value. A partial timezone/policy edit has no once expression, so that
+		// synthetic kind must not replace an existing recurring kind.
+		if schedule.Kind == scheduleOnce && schedule.At == "" && schedule.After == "" && task.ScheduleKind != scheduleOnce {
+			schedule.Kind = ""
+		}
+		input.Schedule = schedule
+	}
+	definitionEdit := input.Title != nil || input.Description != nil || input.Schedule != nil
+	if definitionEdit && input.State != nil && input.Progress != nil && *input.Progress == 0 &&
+		strings.TrimSpace(stringArg(args, "current_step")) == "" && strings.TrimSpace(stringArg(args, "error")) == "" {
+		// Codex structured output materializes omitted execution fields as this
+		// tuple during a definition-only edit, with an arbitrary enum value for
+		// state. Preserve the lifecycle; an intentional state change must include
+		// its concrete current_step or error.
+		input.State = nil
+		input.Progress = nil
 	}
 	if input.State != nil && strings.EqualFold(strings.TrimSpace(*input.State), stateRunning) && strings.TrimSpace(task.ExecutionThreadID) == "" {
 		executionThreadID := strings.TrimSpace(task.AssignedThreadID)

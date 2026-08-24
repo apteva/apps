@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -275,6 +276,43 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	if err != nil {
 		return nil, false, err
 	}
+	title := current.Title
+	if input.Title != nil {
+		title = strings.TrimSpace(*input.Title)
+		if title == "" {
+			return nil, false, errors.New("title cannot be empty")
+		}
+	}
+	description := current.Description
+	if input.Description != nil {
+		description = *input.Description
+	}
+
+	scheduleKind, scheduleExpression, scheduleTimezone := current.ScheduleKind, current.ScheduleExpression, current.ScheduleTimezone
+	scheduleOverlap, scheduleCatchup, scheduleEnabled := current.ScheduleOverlapPolicy, current.ScheduleCatchupPolicy, current.ScheduleEnabled
+	nextRunAt := current.NextRunAt
+	scheduleChanged, addingSchedule := false, false
+	if input.Schedule != nil {
+		if terminalState(current.State) {
+			return nil, false, errTerminalTask
+		}
+		if current.ParentTaskID != "" {
+			return nil, false, errors.New("cannot edit an occurrence schedule; update its recurring parent task")
+		}
+		n, changed, scheduleErr := mergeSchedulePatch(current, *input.Schedule, time.Now().UTC())
+		if scheduleErr != nil {
+			return nil, false, scheduleErr
+		}
+		scheduleChanged = changed
+		addingSchedule = current.ScheduleKind == ""
+		scheduleKind, scheduleExpression, scheduleTimezone = n.Kind, n.Expression, n.Timezone
+		scheduleOverlap, scheduleCatchup = n.OverlapPolicy, n.CatchupPolicy
+		if addingSchedule {
+			scheduleEnabled = true
+		}
+		next := n.NextRunAt.UTC()
+		nextRunAt = &next
+	}
 	state := current.State
 	if input.State != nil {
 		state = strings.ToLower(strings.TrimSpace(*input.State))
@@ -284,8 +322,13 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 		if !validTransition(current.State, state) {
 			return nil, false, errTerminalTask
 		}
+	} else if addingSchedule {
+		state = stateWaiting
 	}
 	progress := current.Progress
+	if addingSchedule && input.Progress == nil {
+		progress = nil
+	}
 	if input.ClearProgress {
 		progress = nil
 	}
@@ -300,13 +343,11 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 		v := 100
 		progress = &v
 	}
-	description := current.Description
-	if input.Description != nil {
-		description = *input.Description
-	}
 	step, assigned, execution, result, resultReference, failure := current.CurrentStep, current.AssignedThreadID, current.ExecutionThreadID, current.Result, current.ResultReference, current.Error
 	if input.CurrentStep != nil {
 		step = strings.TrimSpace(*input.CurrentStep)
+	} else if addingSchedule {
+		step = ""
 	} else if state == stateCompleted {
 		step = "Completed"
 	}
@@ -331,7 +372,10 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	if input.Error != nil {
 		failure = strings.TrimSpace(*input.Error)
 	}
-	changed := description != current.Description || state != current.State || !equalProgress(progress, current.Progress) || step != current.CurrentStep || assigned != current.AssignedThreadID || execution != current.ExecutionThreadID || result != current.Result || resultReference != current.ResultReference || failure != current.Error
+	changed := title != current.Title || description != current.Description || scheduleChanged ||
+		state != current.State || !equalProgress(progress, current.Progress) || step != current.CurrentStep ||
+		assigned != current.AssignedThreadID || execution != current.ExecutionThreadID || result != current.Result ||
+		resultReference != current.ResultReference || failure != current.Error
 	if !changed {
 		return current, false, nil
 	}
@@ -363,7 +407,31 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	if acceptedAt != nil {
 		acceptedValue = acceptedAt.Format(time.RFC3339Nano)
 	}
-	_, err = tx.Exec(`UPDATE tasks SET description=?, state=?, progress=?, current_step=?, assigned_thread_id=?, execution_thread_id=?, accepted_at=?, telemetry_reference=?, result=?, result_reference=?, error=?, updated_at=?, started_at=?, completed_at=? WHERE id=?`, description, state, progressValue, step, assigned, execution, acceptedValue, telemetryReference, result, resultReference, failure, now.Format(time.RFC3339Nano), started, completed, id)
+	var nextRunValue any
+	if nextRunAt != nil {
+		nextRunValue = nextRunAt.UTC().Format(time.RFC3339Nano)
+	}
+	enabledValue := 0
+	if scheduleEnabled {
+		enabledValue = 1
+	}
+	if input.Schedule != nil {
+		_, err = tx.Exec(`UPDATE tasks SET title=?, description=?, state=?, progress=?, current_step=?,
+			assigned_thread_id=?, execution_thread_id=?, accepted_at=?, telemetry_reference=?, result=?,
+			result_reference=?, error=?, schedule_kind=?, schedule_expression=?, schedule_timezone=?,
+			schedule_enabled=?, schedule_overlap_policy=?, schedule_catchup_policy=?, next_run_at=?,
+			updated_at=?, started_at=?, completed_at=? WHERE id=?`, title, description, state,
+			progressValue, step, assigned, execution, acceptedValue, telemetryReference, result, resultReference,
+			failure, scheduleKind, scheduleExpression, scheduleTimezone, enabledValue, scheduleOverlap,
+			scheduleCatchup, nextRunValue, now.Format(time.RFC3339Nano), started, completed, id)
+	} else {
+		_, err = tx.Exec(`UPDATE tasks SET title=?, description=?, state=?, progress=?, current_step=?,
+			assigned_thread_id=?, execution_thread_id=?, accepted_at=?, telemetry_reference=?, result=?,
+			result_reference=?, error=?, updated_at=?, started_at=?, completed_at=?
+			WHERE id=?`, title, description, state, progressValue, step, assigned, execution,
+			acceptedValue, telemetryReference, result, resultReference, failure, now.Format(time.RFC3339Nano),
+			started, completed, id)
+	}
 	if err != nil {
 		return nil, false, err
 	}
@@ -385,10 +453,33 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 		}
 	}
 	eventType := "updated"
-	if state != current.State {
+	if scheduleChanged {
+		eventType = "schedule_updated"
+	} else if state != current.State {
 		eventType = "state_changed"
 	}
-	event, err := insertEvent(tx, TaskEvent{TaskID: id, AgentID: current.AgentID, EventType: eventType, ThreadID: actorThread, FromState: current.State, ToState: state, Data: map[string]any{"progress": progressValue, "current_step": step, "assigned_thread_id": assigned, "execution_thread_id": execution, "description_changed": description != current.Description, "result_reference": resultReference}})
+	changedFields := []string{}
+	for field, fieldChanged := range map[string]bool{
+		"title": title != current.Title, "description": description != current.Description,
+		"schedule": scheduleChanged, "state": state != current.State,
+		"progress": !equalProgress(progress, current.Progress), "current_step": step != current.CurrentStep,
+		"assigned_thread_id":  assigned != current.AssignedThreadID,
+		"execution_thread_id": execution != current.ExecutionThreadID,
+		"result":              result != current.Result, "result_reference": resultReference != current.ResultReference,
+		"error": failure != current.Error,
+	} {
+		if fieldChanged {
+			changedFields = append(changedFields, field)
+		}
+	}
+	sort.Strings(changedFields)
+	event, err := insertEvent(tx, TaskEvent{TaskID: id, AgentID: current.AgentID, EventType: eventType, ThreadID: actorThread, FromState: current.State, ToState: state, Data: map[string]any{
+		"progress": progressValue, "current_step": step, "assigned_thread_id": assigned,
+		"execution_thread_id": execution, "title_changed": title != current.Title,
+		"description_changed": description != current.Description, "schedule_changed": scheduleChanged,
+		"schedule_kind": scheduleKind, "schedule_timezone": scheduleTimezone,
+		"next_run_at": nextRunValue, "changed_fields": changedFields, "result_reference": resultReference,
+	}})
 	if err != nil {
 		return nil, false, err
 	}

@@ -348,6 +348,7 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"task": task, "events": events})
 	case http.MethodPatch, http.MethodPut:
 		var body struct {
+			Title            *string        `json:"title"`
 			Description      *string        `json:"description"`
 			State            *string        `json:"state"`
 			Progress         *int           `json:"progress"`
@@ -363,16 +364,12 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if body.Schedule != nil {
-			updated, err := a.store.SetSchedule(task.ID, "api", *body.Schedule)
-			if err != nil {
-				writeTaskError(w, err)
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"task": updated})
-			return
-		}
-		updated, changed, err := a.store.Update(task.ID, "api", UpdateTaskInput{Description: body.Description, State: body.State, Progress: body.Progress, ClearProgress: body.ClearProgress, CurrentStep: body.CurrentStep, AssignedThreadID: body.AssignedThreadID, Result: body.Result, ResultReference: body.ResultReference, Error: body.Error})
+		updated, changed, err := a.store.Update(task.ID, "api", UpdateTaskInput{
+			Title: body.Title, Description: body.Description, State: body.State, Progress: body.Progress,
+			ClearProgress: body.ClearProgress, CurrentStep: body.CurrentStep,
+			AssignedThreadID: body.AssignedThreadID, Result: body.Result,
+			ResultReference: body.ResultReference, Error: body.Error, Schedule: body.Schedule,
+		})
 		if err != nil {
 			writeTaskError(w, err)
 			return

@@ -29,7 +29,7 @@ apteva test ./scenarios/ --max-budget-usd 0.50
 | `02-list-and-update.yaml` | One recurring task is created, listed directly from Tasks, and paused without a setup-task duplicate. |
 | `03-brief-chat-no-task.yaml` | A simple saved-conversation reply stays task-free and is delivered exactly once. |
 | `04-chat-one-time-schedule.yaml` | Chat creates one future task owned by the default durable thread and does not execute it early. |
-| `05-chat-recurring-schedule.yaml` | Chat creates one recurring schedule without setup work, delegation messages, or early execution. |
+| `05-chat-recurring-schedule.yaml` | Chat creates one recurring schedule without setup work, worker delegation, or early execution; Core may report the durable schedule to main. |
 | `06-scheduled-execution-and-receipt.yaml` | Due work executes on the default thread and its terminal receipt returns one requested result to the creator conversation. |
 | `07-chat-lists-agent-inventory.yaml` | Chat lists the agent-wide Tasks inventory directly without a thread-to-thread status query. |
 | `08-chat-natural-multisource-task.yaml` | A natural multi-area review creates and completes one conversation-owned task without task-oriented wording. |
@@ -38,6 +38,7 @@ apteva test ./scenarios/ --max-budget-usd 0.50
 | `11-delegated-multistage-progress.yaml` | A four-message delegated occurrence stays running while its Core-spawned worker records meaningful progress milestones. |
 | `12-concurrent-multitask-workers.yaml` | Four tasks and four Core workers race assignments and reports without crossing progress, executors, or results. |
 | `13-authoritative-worker-task-fetch.yaml` | A general read-only worker fetches execution-critical values from the authoritative task before acting, with no corrective parent handoff. |
+| `14-edit-recurring-definition.yaml` | A paused recurring task is renamed and its description, interval, and timezone are edited atomically without resuming it or creating a replacement. |
 
 Scenario 13 also mounts a spawnable in-process `creator-sandbox` MCP. Its
 `verify_post` tool performs no external action; the assertion requires the

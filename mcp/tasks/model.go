@@ -98,6 +98,7 @@ type CreateTaskInput struct {
 }
 
 type UpdateTaskInput struct {
+	Title             *string
 	Description       *string
 	State             *string
 	Progress          *int
@@ -108,6 +109,7 @@ type UpdateTaskInput struct {
 	Result            *string
 	ResultReference   *string
 	Error             *string
+	Schedule          *ScheduleInput
 }
 
 type TaskFilter struct {

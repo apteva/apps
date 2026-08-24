@@ -117,6 +117,7 @@
         "path": "/tasks/{item.id}",
         "encoding": "json",
         "body": {
+          "title": "$input.title",
           "description": "$input.description",
           "state": "$input.state",
           "progress": "$input.progress",
@@ -124,6 +125,7 @@
         }
       },
       "fields": [
+        {"name": "title", "type": "string", "label": "Title", "default": "$item.title", "required": true},
         {"name": "description", "type": "multiline", "label": "Description", "default": "$item.description"},
         {
           "name": "state",

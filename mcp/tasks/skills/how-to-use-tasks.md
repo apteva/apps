@@ -84,6 +84,15 @@ milestones so the task does not sit at its initial percentage throughout the
 work. Percentages represent completed work and remain monotonic; changing
 threads or entering `waiting` does not by itself increase progress.
 
+`tasks_update` also edits an existing task definition. Call `tasks_get` first,
+then send the changed `title`, `description`, and/or partial `schedule` together
+in one update; omitted fields are preserved atomically. For a recurring task,
+update the recurring parent ID rather than an occurrence ID. Editing its
+schedule preserves whether it is paused, and future occurrences inherit the
+new title and description. Occurrences already materialized remain immutable
+snapshots. Never create a placeholder task to rename or reschedule an existing
+one.
+
 For example, a four-message delegated inbox review could record:
 
 - `running` · 10% · `Listing unread Gmail messages`

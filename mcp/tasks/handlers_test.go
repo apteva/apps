@@ -115,6 +115,7 @@ func TestEmptyStructuredScheduleRemainsImmediate(t *testing.T) {
 	caller := callerContext(7, "thread-immediate", "project-a")
 	emptySchedule := map[string]any{
 		"kind": "once", "at": "", "after": "", "every": "", "cron": "", "timezone": "UTC",
+		"overlap_policy": "skip", "catchup_policy": "skip",
 	}
 	raw, err := app.toolCreate(caller, appCtx, map[string]any{
 		"title": "Immediate work", "schedule": emptySchedule,
@@ -239,6 +240,85 @@ func TestStructuredProgressUpdatePreservesAuthoritativeDescriptionForWorker(t *t
 	got := gotRaw.(map[string]any)["task"].(*Task)
 	if got.Description != description {
 		t.Fatalf("progress update erased authoritative worker description: got %q, want %q", got.Description, description)
+	}
+}
+
+func TestToolUpdateAtomicallyEditsPausedRecurringDefinition(t *testing.T) {
+	app, appCtx, _ := newTestApp(t)
+	creator := callerContext(7, "schedule-owner", "project-a")
+	raw, err := app.toolCreate(creator, appCtx, map[string]any{
+		"title": "Old recurring title", "description": "Old recurring body",
+		"schedule": map[string]any{"kind": "interval", "every": "10m", "timezone": "UTC"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := raw.(map[string]any)["task"].(*Task)
+	if _, err := app.store.Pause(parent.ID, "schedule-owner"); err != nil {
+		t.Fatal(err)
+	}
+	parent, _ = app.store.Get(parent.ID)
+
+	oldOccurrence, _, err := app.store.Create(CreateTaskInput{
+		AgentID: 7, ProjectID: "project-a", Title: parent.Title, Description: parent.Description,
+		State: stateCompleted, AssignedThreadID: "schedule-owner", ParentTaskID: parent.ID,
+		OccurrenceKey: "old-definition-snapshot",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updatedRaw, err := app.toolUpdate(creator, appCtx, map[string]any{
+		"task_id": parent.ID, "title": "New recurring title", "description": "New recurring body",
+		// Reproduce provider placeholders while changing only interval cadence and timezone.
+		"schedule": map[string]any{"kind": "once", "at": "", "after": "", "every": "20m", "cron": "", "timezone": "Europe/Madrid"},
+		"state":    stateRunning, "progress": 0, "current_step": "", "error": "", "result_reference": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := updatedRaw.(*Task)
+	if updated.Title != "New recurring title" || updated.Description != "New recurring body" ||
+		updated.ScheduleKind != scheduleInterval || updated.ScheduleExpression != "20m0s" ||
+		updated.ScheduleTimezone != "Europe/Madrid" || updated.ScheduleEnabled || updated.State != stateWaiting {
+		t.Fatalf("atomic recurring definition edit lost fields or pause state: %+v", updated)
+	}
+	oldOccurrence, _ = app.store.Get(oldOccurrence.ID)
+	if oldOccurrence.Title != "Old recurring title" || oldOccurrence.Description != "Old recurring body" {
+		t.Fatalf("materialized occurrence was retroactively rewritten: %+v", oldOccurrence)
+	}
+
+	beforeInvalid := updated.UpdatedAt
+	badTitle := "Must not commit"
+	badSchedule := ScheduleInput{Every: "30s"}
+	if _, _, err := app.store.Update(parent.ID, "schedule-owner", UpdateTaskInput{Title: &badTitle, Schedule: &badSchedule}); err == nil {
+		t.Fatal("invalid schedule should reject the complete definition edit")
+	}
+	afterInvalid, _ := app.store.Get(parent.ID)
+	if afterInvalid.Title != updated.Title || !afterInvalid.UpdatedAt.Equal(beforeInvalid) {
+		t.Fatalf("failed atomic edit partially committed: %+v", afterInvalid)
+	}
+
+	if _, err := app.store.RunNow(parent.ID, "schedule-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.scheduler.Tick(time.Now().UTC().Add(time.Second), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	parentID := parent.ID
+	runs, err := app.store.List(TaskFilter{ProjectID: "project-a", AgentID: 7, ParentTaskID: &parentID, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var future *Task
+	for i := range runs {
+		if runs[i].ID != oldOccurrence.ID {
+			future = &runs[i]
+			break
+		}
+	}
+	if future == nil || future.Title != updated.Title || future.Description != updated.Description {
+		t.Fatalf("future occurrence did not inherit edited parent definition: %+v", runs)
 	}
 }
 
@@ -553,6 +633,47 @@ func TestHTTPDescriptionUpdatesAreAppliedStrictAndNoOpSafe(t *testing.T) {
 	}
 }
 
+func TestHTTPAtomicallyEditsRecurringDefinitionAndPreservesPause(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	task, _, err := app.store.Create(CreateTaskInput{
+		AgentID: 7, ProjectID: "project-a", Title: "Old title", Description: "Old body",
+		AssignedThreadID: "opaque-default", Schedule: &ScheduleInput{Kind: scheduleCron, Cron: "0 9 * * *", Timezone: "UTC"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.Pause(task.ID, "api"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tasks/", app.handleTask)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	body := bytes.NewBufferString(`{"title":"New title","description":"New body","schedule":{"timezone":"Europe/Madrid"}}`)
+	req, _ := http.NewRequest(http.MethodPatch, server.URL+"/tasks/"+task.ID, body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Apteva-Project-ID", "project-a")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Task    Task `json:"task"`
+		Changed bool `json:"changed"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || !payload.Changed || payload.Task.Title != "New title" ||
+		payload.Task.Description != "New body" || payload.Task.ScheduleKind != scheduleCron ||
+		payload.Task.ScheduleExpression != "0 9 * * *" || payload.Task.ScheduleTimezone != "Europe/Madrid" ||
+		payload.Task.ScheduleEnabled {
+		t.Fatalf("HTTP recurring definition edit status=%d payload=%+v", resp.StatusCode, payload)
+	}
+}
+
 func TestRecurringOccurrenceLifecycleRollsUpDownstreamOutcome(t *testing.T) {
 	app, appCtx, _ := newTestApp(t)
 	creator := callerContext(7, "schedule-owner", "project-a")
@@ -632,7 +753,7 @@ func TestUnacceptedDispatchFailsAndMarksParentUnhealthy(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.3.0" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.3.1" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]
@@ -661,6 +782,9 @@ func TestManifestAndToolContract(t *testing.T) {
 		"must not substitute parent context for the record",
 		"stops before making external changes",
 		"should not paraphrase the task into a second source of truth",
+		"omitted fields are preserved atomically",
+		"update the recurring parent ID rather than an occurrence ID",
+		"Never create a placeholder task",
 	} {
 		if !strings.Contains(normalizedManifestSkill, required) {
 			t.Fatalf("embedded Tasks skill missing classification rule %q", required)
@@ -716,10 +840,18 @@ func TestManifestAndToolContract(t *testing.T) {
 			}
 		}
 		if tool.Name == "update" {
-			for _, required := range []string{"Keep the task running while any executor is actively working", "Use waiting only when no executor can progress", "at least two or three intermediate milestones"} {
+			for _, required := range []string{"Atomically edit a task definition", "preserving every omitted field", "partial patch", "keeps it paused", "recurring parent task", "Keep the task running while any executor is actively working", "Use waiting only when no executor can progress", "at least two or three intermediate milestones"} {
 				if !strings.Contains(tool.Description, required) {
 					t.Fatalf("update tool description missing progress rule %q: %s", required, tool.Description)
 				}
+			}
+			properties, _ := tool.InputSchema["properties"].(map[string]any)
+			if _, ok := properties["title"]; !ok {
+				t.Fatalf("update tool cannot rename a task: %+v", properties)
+			}
+			schedule, _ := properties["schedule"].(map[string]any)
+			if required, ok := schedule["required"].([]string); ok && len(required) > 0 {
+				t.Fatalf("update schedule must be a partial patch: %+v", schedule)
 			}
 		}
 	}
@@ -747,6 +879,9 @@ func TestManifestAndToolContract(t *testing.T) {
 		"must not substitute parent context for the record",
 		"stops before making external changes",
 		"should not paraphrase the task into a second source of truth",
+		"omitted fields are preserved atomically",
+		"update the recurring parent ID rather than an occurrence ID",
+		"Never create a placeholder task",
 		"Keep a task `running` while any executor is actively working",
 		"at least two or three intermediate milestones",
 		"changing threads or entering `waiting` does not by itself increase progress",

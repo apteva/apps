@@ -100,6 +100,75 @@ func normalizeSchedule(input ScheduleInput, now time.Time) (normalizedSchedule, 
 	return n, nil
 }
 
+// mergeSchedulePatch expands a partial definition edit against the persisted
+// schedule. Empty fields preserve their current values. The scheduler's next
+// timestamp only moves when cadence semantics change; metadata-only edits keep
+// the existing timestamp.
+func mergeSchedulePatch(task *Task, patch ScheduleInput, now time.Time) (normalizedSchedule, bool, error) {
+	kind := strings.ToLower(strings.TrimSpace(patch.Kind))
+	if kind == "" {
+		kind = task.ScheduleKind
+	}
+	if kind == "" {
+		return normalizedSchedule{}, false, errors.New("schedule kind is required when adding a schedule")
+	}
+	timezone := strings.TrimSpace(patch.Timezone)
+	if timezone == "" {
+		timezone = task.ScheduleTimezone
+	}
+	overlap := strings.ToLower(strings.TrimSpace(patch.OverlapPolicy))
+	if overlap == "" {
+		overlap = task.ScheduleOverlapPolicy
+	}
+	catchup := strings.ToLower(strings.TrimSpace(patch.CatchupPolicy))
+	if catchup == "" {
+		catchup = task.ScheduleCatchupPolicy
+	}
+
+	full := ScheduleInput{Kind: kind, Timezone: timezone, OverlapPolicy: overlap, CatchupPolicy: catchup}
+	sameKind := kind == task.ScheduleKind
+	switch kind {
+	case scheduleOnce:
+		full.At, full.After = strings.TrimSpace(patch.At), strings.TrimSpace(patch.After)
+		if full.At == "" && full.After == "" && sameKind {
+			full.At = task.ScheduleExpression
+		}
+	case scheduleInterval:
+		full.Every = strings.TrimSpace(patch.Every)
+		if full.Every == "" && sameKind {
+			full.Every = task.ScheduleExpression
+		}
+	case scheduleCron:
+		full.Cron = strings.TrimSpace(patch.Cron)
+		if full.Cron == "" && sameKind {
+			full.Cron = task.ScheduleExpression
+		}
+	}
+
+	n, err := normalizeSchedule(full, now)
+	if err != nil {
+		return n, false, err
+	}
+	changed := n.Kind != task.ScheduleKind || n.Expression != task.ScheduleExpression ||
+		n.Timezone != task.ScheduleTimezone || n.OverlapPolicy != task.ScheduleOverlapPolicy ||
+		n.CatchupPolicy != task.ScheduleCatchupPolicy
+	if !changed {
+		if task.NextRunAt != nil {
+			n.NextRunAt = *task.NextRunAt
+		}
+		return n, false, nil
+	}
+
+	// Timezone and policy metadata do not shift interval or absolute one-time
+	// cadence. Cron timezone changes do because they alter the next wall-clock run.
+	cadenceChanged := n.Kind != task.ScheduleKind || n.Expression != task.ScheduleExpression ||
+		(n.Kind == scheduleCron && n.Timezone != task.ScheduleTimezone)
+	if !cadenceChanged && task.NextRunAt != nil {
+		n.NextRunAt = *task.NextRunAt
+	}
+	return n, true, nil
+}
+
 func nextOccurrence(task *Task, scheduledFor, now time.Time) (*time.Time, error) {
 	switch task.ScheduleKind {
 	case scheduleOnce:
@@ -131,23 +200,8 @@ func nextOccurrence(task *Task, scheduledFor, now time.Time) (*time.Time, error)
 }
 
 func (s *taskStore) SetSchedule(id, actor string, input ScheduleInput) (*Task, error) {
-	n, err := normalizeSchedule(input, time.Now().UTC())
-	if err != nil {
-		return nil, err
-	}
-	task, err := s.Get(id)
-	if err != nil {
-		return nil, err
-	}
-	if terminalState(task.State) {
-		return nil, errTerminalTask
-	}
-	now := time.Now().UTC()
-	_, err = s.db.Exec(`UPDATE tasks SET state='waiting', progress=NULL, current_step='', schedule_kind=?, schedule_expression=?, schedule_timezone=?, schedule_enabled=1, schedule_overlap_policy=?, schedule_catchup_policy=?, next_run_at=?, updated_at=? WHERE id=?`, n.Kind, n.Expression, n.Timezone, n.OverlapPolicy, n.CatchupPolicy, n.NextRunAt.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id)
-	if err != nil {
-		return nil, err
-	}
-	return s.recordSimpleEvent(id, actor, "schedule_updated", task.State, stateWaiting, map[string]any{"schedule_kind": n.Kind, "next_run_at": n.NextRunAt})
+	task, _, err := s.Update(id, actor, UpdateTaskInput{Schedule: &input})
+	return task, err
 }
 
 func (s *taskStore) Pause(id, actor string) (*Task, error) {
