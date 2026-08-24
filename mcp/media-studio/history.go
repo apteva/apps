@@ -167,6 +167,7 @@ func (a *App) toolMediaGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	enrichGenerationStorageURLs(ctx, row)
 	return map[string]any{"generation": row}, nil
 }
 
@@ -248,9 +249,11 @@ func queryHistory(ctx *sdk.AppCtx, pid string, query historyQuery) (map[string]a
 			&actualDuration, &status, &requestJSON, &createdAt); err != nil {
 			continue
 		}
-		out = append(out, generationMap(pid, id, count, durationMs, kind, prompt, revised,
+		generation := generationMap(pid, id, count, durationMs, kind, prompt, revised,
 			provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64,
-			extraJSON, cacheKey, status, requestJSON, createdAt, costUSD, estimatedDuration, actualDuration))
+			extraJSON, cacheKey, status, requestJSON, createdAt, costUSD, estimatedDuration, actualDuration)
+		enrichGenerationStorageURLs(ctx.WithProject(pid), generation)
+		out = append(out, generation)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -313,7 +316,12 @@ func queryGenerationByCacheKey(ctx *sdk.AppCtx, pid, kind, cacheKey string) (map
 	if err != nil {
 		return nil, err
 	}
-	return queryGenerationByID(ctx, pid, id)
+	row, err := queryGenerationByID(ctx, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	enrichGenerationStorageURLs(ctx.WithProject(pid), row)
+	return row, nil
 }
 
 func generationMap(pid string, id, count, durationMs int64, kind, prompt, revised, provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON, cacheKey, status, requestJSON, createdAt string, costUSD, estimatedDuration, actualDuration float64) map[string]any {
@@ -321,9 +329,11 @@ func generationMap(pid string, id, count, durationMs int64, kind, prompt, revise
 	_ = json.Unmarshal([]byte(storageIDsJSON), &storageIDs)
 	var upstreamURLs []string
 	_ = json.Unmarshal([]byte(upstreamURLsJSON), &upstreamURLs)
-	storageURLs := make([]string, 0, len(storageIDs))
-	for _, sid := range storageIDs {
-		storageURLs = append(storageURLs, storageContentURL(sid, pid))
+	storageURLs := []string{}
+	if len(storageIDs) > 0 {
+		// Storage owns the durable copy. Provider URLs may expire and must
+		// not be surfaced as an alternative downstream contract.
+		upstreamURLs = []string{}
 	}
 	localURL := ""
 	if len(storageIDs) == 0 {
@@ -354,6 +364,24 @@ func generationMap(pid string, id, count, durationMs int64, kind, prompt, revise
 		"created_at":                 createdAt,
 	}
 	return out
+}
+
+// enrichGenerationStorageURLs refreshes signed URLs for user-facing history,
+// detail, and cache-hit responses. Internal generation lookups deliberately
+// remain ID-only so operations such as delete and draft loading do not mint
+// URLs they never return.
+func enrichGenerationStorageURLs(ctx *sdk.AppCtx, generation map[string]any) {
+	ids, _ := generation["storage_ids"].([]int64)
+	if len(ids) == 0 || ctx == nil || ctx.IntegrationFor("storage") == nil {
+		return
+	}
+	urls, err := storageHTTPSURLs(ctx, ids)
+	if err != nil {
+		generation["storage_urls"] = []string{}
+		generation["storage_url_error"] = err.Error()
+		return
+	}
+	generation["storage_urls"] = urls
 }
 
 // ─── HTTP /generations — panel gallery ─────────────────────────────
@@ -420,6 +448,7 @@ func (a *App) handleGetGeneration(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	enrichGenerationStorageURLs(ctx.WithProject(pid), row)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"generation": row})
 }

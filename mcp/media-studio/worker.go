@@ -393,6 +393,20 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 			return
 		}
 	}
+	storageURLs := []string{}
+	if len(storageIDs) > 0 {
+		var err error
+		storageURLs, err = storageHTTPSURLs(scopedApp, storageIDs)
+		if err != nil {
+			urlWarning := "Storage HTTPS URL unavailable: " + err.Error()
+			if storageWarning == "" {
+				storageWarning = urlWarning
+			} else {
+				storageWarning += "; " + urlWarning
+			}
+			app.Logger().Warn("storage HTTPS URL mint failed", "job_id", p.ID, "storage_ids", storageIDs, "err", err)
+		}
+	}
 	if storageWarning != "" {
 		extras["storage_warning"] = storageWarning
 	}
@@ -436,6 +450,8 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 		"actual_duration_seconds":    actualSeconds,
 		"generation_id":              generationID,
 		"storage_id":                 storageID,
+		"storage_ids":                storageIDs,
+		"storage_urls":               storageURLs,
 	}
 	if storageWarning != "" {
 		event["warning"] = storageWarning

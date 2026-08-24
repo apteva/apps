@@ -8,8 +8,9 @@ type buildResultArgs struct {
 	Revised                  string
 	Model                    string
 	Provider                 string
-	ProjectID                string
 	StorageIDs               []int64
+	StorageURLs              []string
+	StorageURLError          string
 	UpstreamURLs             []string
 	FirstThumbB64            string
 	Count                    int
@@ -28,11 +29,14 @@ type buildResultArgs struct {
 // blocks pointing at the storage URL (or the upstream URL as fallback
 // when storage is unbound).
 func buildMCPResult(a buildResultArgs) map[string]any {
-	storageURLs := make([]string, 0, len(a.StorageIDs))
-	for _, id := range a.StorageIDs {
-		storageURLs = append(storageURLs, storageContentURL(id, a.ProjectID))
-	}
 	hasStorage := len(a.StorageIDs) > 0
+	storageURLs := a.StorageURLs
+	upstreamURLs := a.UpstreamURLs
+	if hasStorage {
+		// Once Storage owns the bytes, do not leak provider URLs that may
+		// expire or have weaker transport guarantees.
+		upstreamURLs = []string{}
+	}
 
 	content := []map[string]any{}
 
@@ -64,7 +68,13 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 	if hasStorage {
 		summary += "\nSaved to storage:"
 		for i, id := range a.StorageIDs {
-			summary += fmt.Sprintf("\n  - id=%d url=%s", id, storageURLs[i])
+			summary += fmt.Sprintf("\n  - id=%d", id)
+			if i < len(storageURLs) {
+				summary += " url=" + storageURLs[i]
+			}
+		}
+		if a.StorageURLError != "" {
+			summary += "\nStorage URL unavailable: " + a.StorageURLError
 		}
 		if a.StorageFolder != "" {
 			summary += "\nFolder: " + a.StorageFolder
@@ -87,13 +97,17 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 	if mime == "" {
 		mime = defaultMime(a.Kind)
 	}
-	for i, id := range a.StorageIDs {
+	for i, storageURL := range storageURLs {
+		name := "storage"
+		if i < len(a.StorageIDs) {
+			name = fmt.Sprintf("storage:%d", a.StorageIDs[i])
+		}
 		content = append(content, map[string]any{
 			"type": "resource",
 			"resource": map[string]any{
-				"uri":      storageURLs[i],
+				"uri":      storageURL,
 				"mimeType": mime,
-				"name":     fmt.Sprintf("storage:%d", id),
+				"name":     name,
 			},
 		})
 	}
@@ -106,7 +120,7 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 		"provider":                   a.Provider,
 		"storage_ids":                a.StorageIDs,
 		"storage_urls":               storageURLs,
-		"upstream_urls":              a.UpstreamURLs,
+		"upstream_urls":              upstreamURLs,
 		"cost_usd":                   a.CostUSD,
 		"generation_id":              a.GenerationID,
 		"provider_request_id":        a.ProviderRequestID,
@@ -114,6 +128,9 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 		"estimated_duration_seconds": a.EstimatedDurationSeconds,
 		"actual_duration_seconds":    a.ActualDurationSeconds,
 		"chat_component":             generationChatComponent(a.GenerationID, 0),
+	}
+	if a.StorageURLError != "" {
+		meta["storage_url_error"] = a.StorageURLError
 	}
 	return map[string]any{
 		"content": content,

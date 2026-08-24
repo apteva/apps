@@ -84,7 +84,7 @@ func TestToolMediaGenerateDeepgramTTSWithStorage(t *testing.T) {
 	if input["text"] != "Hello" || input["model"] != "aura-2-thalia-en" || input["encoding"] != "mp3" {
 		t.Fatalf("Deepgram input = %+v", input)
 	}
-	if len(pf.callAppCalls) != 1 || pf.callAppCalls[0].Input["content_type"] != "audio/mpeg" {
+	if len(pf.callAppCalls) != 2 || pf.callAppCalls[0].Input["content_type"] != "audio/mpeg" || pf.callAppCalls[1].Tool != "files_get_url" {
 		t.Fatalf("Storage call = %+v", pf.callAppCalls)
 	}
 	meta := out.(map[string]any)["_meta"].(map[string]any)

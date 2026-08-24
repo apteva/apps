@@ -172,7 +172,7 @@ func TestToolMediaGenerateMiniMaxTTS(t *testing.T) {
 	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "text_to_speech" {
 		t.Fatalf("execute calls = %+v", pf.executeCalls)
 	}
-	if len(pf.callAppCalls) != 1 || pf.callAppCalls[0].Input["content_type"] != "audio/mpeg" {
+	if len(pf.callAppCalls) != 2 || pf.callAppCalls[0].Input["content_type"] != "audio/mpeg" || pf.callAppCalls[1].Tool != "files_get_url" {
 		t.Fatalf("storage calls = %+v", pf.callAppCalls)
 	}
 }
@@ -286,7 +286,7 @@ func TestCartesiaAndMiniMaxProviderQualificationAndModels(t *testing.T) {
 	}
 	if !audioProviderSupports("cartesia", "voice.create") ||
 		!audioProviderSupports("minimax-audio", "voice.create") ||
-		!strings.Contains(string(mustReadTestFile(t, "apteva.yaml")), "version: 0.10.59") {
+		!strings.Contains(string(mustReadTestFile(t, "apteva.yaml")), "version: 0.10.60") {
 		t.Fatal("provider or manifest capability missing")
 	}
 }

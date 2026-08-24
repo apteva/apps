@@ -415,6 +415,16 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			}
 		}
 	}
+	storageURLs := []string{}
+	storageURLError := ""
+	if len(storageIDs) > 0 {
+		var err error
+		storageURLs, err = storageHTTPSURLs(ctx, storageIDs)
+		if err != nil {
+			storageURLError = err.Error()
+			ctx.Logger().Warn("storage HTTPS URL mint failed", "storage_ids", storageIDs, "err", err)
+		}
+	}
 
 	size := strArg(args, "size", "")
 	extraJSON := encodeExtras(kind, args)
@@ -465,9 +475,14 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 	}
 
-	ctx.Emit("media.generated", map[string]any{
+	event := map[string]any{
 		"kind": kind, "prompt": prompt, "model": model, "count": len(media), "storage_folder": storageFolder,
-	})
+		"storage_ids": storageIDs, "storage_urls": storageURLs,
+	}
+	if storageURLError != "" {
+		event["storage_url_error"] = storageURLError
+	}
+	ctx.Emit("media.generated", event)
 
 	return buildMCPResult(buildResultArgs{
 		Kind:                     kind,
@@ -475,8 +490,9 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		Revised:                  revisedPrompt,
 		Model:                    model,
 		Provider:                 bound.AppSlug,
-		ProjectID:                pid,
 		StorageIDs:               storageIDs,
+		StorageURLs:              storageURLs,
+		StorageURLError:          storageURLError,
 		UpstreamURLs:             upstreamURLs,
 		FirstThumbB64:            firstThumbB64,
 		Count:                    len(media),
@@ -820,27 +836,31 @@ func cachedGenerationResult(row map[string]any) map[string]any {
 			},
 		})
 	}
+	meta := map[string]any{
+		"kind":                       kind,
+		"prompt":                     prompt,
+		"revised_prompt":             strAny(row["revised_prompt"]),
+		"model":                      model,
+		"provider":                   provider,
+		"storage_ids":                storageIDs,
+		"storage_urls":               storageURLs,
+		"upstream_urls":              upstreamURLs,
+		"cost_usd":                   costUSD,
+		"count":                      count,
+		"generation_id":              int64Any(row["id"]),
+		"provider_request_id":        providerRequestID,
+		"cache_hit":                  true,
+		"cache_key":                  strAny(row["cache_key"]),
+		"estimated_duration_seconds": estimatedSeconds,
+		"actual_duration_seconds":    actualSeconds,
+		"chat_component":             generationChatComponent(int64Any(row["id"]), 0),
+	}
+	if storageURLError := strAny(row["storage_url_error"]); storageURLError != "" {
+		meta["storage_url_error"] = storageURLError
+	}
 	return map[string]any{
 		"content": content,
-		"_meta": map[string]any{
-			"kind":                       kind,
-			"prompt":                     prompt,
-			"revised_prompt":             strAny(row["revised_prompt"]),
-			"model":                      model,
-			"provider":                   provider,
-			"storage_ids":                storageIDs,
-			"storage_urls":               storageURLs,
-			"upstream_urls":              upstreamURLs,
-			"cost_usd":                   costUSD,
-			"count":                      count,
-			"generation_id":              int64Any(row["id"]),
-			"provider_request_id":        providerRequestID,
-			"cache_hit":                  true,
-			"cache_key":                  strAny(row["cache_key"]),
-			"estimated_duration_seconds": estimatedSeconds,
-			"actual_duration_seconds":    actualSeconds,
-			"chat_component":             generationChatComponent(int64Any(row["id"]), 0),
-		},
+		"_meta":   meta,
 	}
 }
 

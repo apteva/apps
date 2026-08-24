@@ -222,6 +222,13 @@ func (p *recordingPlatform) CallApp(appName, tool string, input map[string]any) 
 	if ok {
 		return keyed, nil
 	}
+	if appName == "storage" && tool == "files_get_url" {
+		id := int64Any(input["id"])
+		return json.RawMessage(fmt.Sprintf(
+			`{"url":"https://storage.example.test/files/%d/content?sig=test&exp=2000000000","expires_at":2000000000,"file_id":%d}`,
+			id, id,
+		)), nil
+	}
 	return p.nextCallResult, nil
 }
 
@@ -490,8 +497,8 @@ func TestToolMediaGenerate_Image_HappyPath_WithStorage(t *testing.T) {
 		t.Errorf("default output_format = %v, want jpeg", pf.executeCalls[0].Input["output_format"])
 	}
 
-	if len(pf.callAppCalls) != 1 {
-		t.Fatalf("expected 1 CallApp, got %d", len(pf.callAppCalls))
+	if len(pf.callAppCalls) != 2 {
+		t.Fatalf("expected upload + signed URL CallApp calls, got %d", len(pf.callAppCalls))
 	}
 	if pf.callAppCalls[0].AppName != "storage" || pf.callAppCalls[0].Tool != "files_upload" {
 		t.Errorf("storage call = %+v", pf.callAppCalls[0])
@@ -577,8 +584,8 @@ func TestToolMediaGenerate_Image_CustomStorageFolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("toolMediaGenerate: %v", err)
 	}
-	if len(pf.callAppCalls) != 1 {
-		t.Fatalf("expected 1 storage call, got %d", len(pf.callAppCalls))
+	if len(pf.callAppCalls) != 2 {
+		t.Fatalf("expected upload + signed URL storage calls, got %d", len(pf.callAppCalls))
 	}
 	if folder, _ := pf.callAppCalls[0].Input["folder"].(string); folder != "/campaigns/launch/" {
 		t.Fatalf("storage folder = %q, want /campaigns/launch/", folder)
@@ -1251,8 +1258,8 @@ func TestToolMediaGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
 		t.Fatalf("toolMediaGenerate: %v", err)
 	}
 
-	if len(pf.callAppCalls) != 1 {
-		t.Fatalf("expected 1 storage call, got %d", len(pf.callAppCalls))
+	if len(pf.callAppCalls) != 2 {
+		t.Fatalf("expected upload + signed URL storage calls, got %d", len(pf.callAppCalls))
 	}
 	got := pf.callAppCalls[0]
 	if got.Tool != "files_upload" {
@@ -1311,8 +1318,8 @@ func TestToolMediaGenerate_VeniceB64_DefaultsToJPEG(t *testing.T) {
 		t.Fatalf("toolMediaGenerate: %v", err)
 	}
 
-	if len(pf.callAppCalls) != 1 {
-		t.Fatalf("expected 1 storage call, got %d", len(pf.callAppCalls))
+	if len(pf.callAppCalls) != 2 {
+		t.Fatalf("expected upload + signed URL storage calls, got %d", len(pf.callAppCalls))
 	}
 	if got := pf.executeCalls[0].Input["format"]; got != "jpeg" {
 		t.Fatalf("default Venice format = %v, want jpeg", got)
@@ -1382,8 +1389,8 @@ func TestToolMediaGenerate_VeniceB64_EnforcesRequestedJPEG(t *testing.T) {
 	if got := pf.executeCalls[0].Input["format"]; got != "jpeg" {
 		t.Fatalf("Venice format = %v, want jpeg", got)
 	}
-	if len(pf.callAppCalls) != 1 {
-		t.Fatalf("expected 1 storage call, got %d", len(pf.callAppCalls))
+	if len(pf.callAppCalls) != 2 {
+		t.Fatalf("expected upload + signed URL storage calls, got %d", len(pf.callAppCalls))
 	}
 	got := pf.callAppCalls[0]
 	if got.Tool != "files_upload" {
@@ -1437,7 +1444,7 @@ func TestToolMediaGenerate_URLImage_EnforcesRequestedJPEGBeforeStorage(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pf.callAppCalls) != 1 || pf.callAppCalls[0].Tool != "files_upload" {
+	if len(pf.callAppCalls) != 2 || pf.callAppCalls[0].Tool != "files_upload" || pf.callAppCalls[1].Tool != "files_get_url" {
 		t.Fatalf("converted URL response must use files_upload: %+v", pf.callAppCalls)
 	}
 	input := pf.callAppCalls[0].Input
@@ -1509,11 +1516,11 @@ func TestToolMediaGenerate_WithStorage_OmitsInlineImage_AddsURLs(t *testing.T) {
 	if !ok || len(urls) != 1 {
 		t.Fatalf("storage_urls missing or wrong length: %+v", meta["storage_urls"])
 	}
-	if !strings.Contains(urls[0], "/api/apps/storage/files/1234/content") {
-		t.Errorf("storage URL format unexpected: %q", urls[0])
+	if !strings.HasPrefix(urls[0], "https://") || !strings.Contains(urls[0], "/files/1234/content") {
+		t.Errorf("storage URL is not an absolute HTTPS URL: %q", urls[0])
 	}
-	if !strings.Contains(urls[0], "project_id=test-proj") {
-		t.Errorf("storage URL missing project_id: %q", urls[0])
+	if upstream := meta["upstream_urls"].([]string); len(upstream) != 0 {
+		t.Errorf("stored result leaked provider URLs: %+v", upstream)
 	}
 
 	content := res["content"].([]map[string]any)
@@ -1526,7 +1533,7 @@ func TestToolMediaGenerate_WithStorage_OmitsInlineImage_AddsURLs(t *testing.T) {
 	var foundURL bool
 	for _, c := range content {
 		if c["type"] == "text" {
-			if s, _ := c["text"].(string); strings.Contains(s, "/api/apps/storage/files/1234/content") {
+			if s, _ := c["text"].(string); strings.Contains(s, "https://storage.example.test/files/1234/content") {
 				foundURL = true
 			}
 		}
@@ -1540,7 +1547,7 @@ func TestToolMediaGenerate_WithStorage_OmitsInlineImage_AddsURLs(t *testing.T) {
 		if c["type"] == "resource" {
 			r := c["resource"].(map[string]any)
 			uri, _ := r["uri"].(string)
-			if strings.HasPrefix(uri, "/api/apps/storage/") {
+			if strings.HasPrefix(uri, "https://") {
 				foundResource = true
 			}
 		}
@@ -1574,11 +1581,13 @@ func TestHandleGenerate_GlobalInstallThreadsProjectToStorage(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if len(pf.callAppCalls) != 1 {
-		t.Fatalf("expected 1 storage call, got %d", len(pf.callAppCalls))
+	if len(pf.callAppCalls) != 2 {
+		t.Fatalf("expected upload + signed URL calls, got %d", len(pf.callAppCalls))
 	}
-	if got := pf.callAppCalls[0].Input["_project_id"]; got != "panel-proj" {
-		t.Fatalf("storage _project_id = %v, want panel-proj; input=%+v", got, pf.callAppCalls[0].Input)
+	for _, call := range pf.callAppCalls {
+		if got := call.Input["_project_id"]; got != "panel-proj" {
+			t.Fatalf("storage %s _project_id = %v, want panel-proj; input=%+v", call.Tool, got, call.Input)
+		}
 	}
 	var storedProject string
 	if err := globalCtx.AppDB().QueryRow(`SELECT project_id FROM generations ORDER BY id DESC LIMIT 1`).Scan(&storedProject); err != nil {
@@ -1638,18 +1647,36 @@ func TestToolMediaHistory_IncludesStorageURLs(t *testing.T) {
 	if !ok || len(urls) != 2 {
 		t.Fatalf("storage_urls = %+v", gens[0]["storage_urls"])
 	}
-	if !strings.Contains(urls[0], "/files/42/content") || !strings.Contains(urls[1], "/files/99/content") {
+	if urls[0] != "https://storage.example.test/files/42/content?sig=test&exp=2000000000" ||
+		urls[1] != "https://storage.example.test/files/99/content?sig=test&exp=2000000000" {
 		t.Errorf("URLs malformed: %+v", urls)
 	}
 }
 
-// --- storageContentURL ---------------------------------------------
+// --- storageHTTPSURLs ----------------------------------------------
 
-func TestStorageContentURL(t *testing.T) {
-	got := storageContentURL(123, "proj-abc")
-	want := "/api/apps/storage/files/123/content?project_id=proj-abc"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
+func TestStorageHTTPSURLs_UsesBoundStorageAndRequiresHTTPS(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newMediaStudioCtx(t, pf)
+	got, err := storageHTTPSURLs(ctx, []int64{123})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "https://storage.example.test/files/123/content?sig=test&exp=2000000000" {
+		t.Fatalf("storage URLs = %+v", got)
+	}
+	if len(pf.callAppCalls) != 1 || pf.callAppCalls[0].Tool != "files_get_url" {
+		t.Fatalf("storage calls = %+v", pf.callAppCalls)
+	}
+	if gotProject := pf.callAppCalls[0].Input["_project_id"]; gotProject != "test-proj" {
+		t.Fatalf("_project_id = %v", gotProject)
+	}
+
+	pf.perAppCallResults = map[string]json.RawMessage{
+		"storage:files_get_url": json.RawMessage(`{"url":"/api/apps/storage/files/123/content"}`),
+	}
+	if _, err := storageHTTPSURLs(ctx, []int64{123}); err == nil || !strings.Contains(err.Error(), "non-HTTPS") {
+		t.Fatalf("relative URL error = %v", err)
 	}
 }
 
@@ -2741,7 +2768,13 @@ func TestFinalizeJob_IsIdempotentAfterCompletion(t *testing.T) {
 	pf.nextCallResult = json.RawMessage(
 		`{"result":{"content":[{"type":"text","text":"{\"id\":5150}"}]}}`,
 	)
-	ctx := newMediaStudioCtx(t, pf)
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml",
+		tk.WithProjectID("test-proj"),
+		tk.WithEmitter(rec),
+		tk.WithPlatform(pf),
+	)
+	globalCtx = ctx
 	app := &App{}
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO video_jobs (project_id, connection_id, queue_id, provider, model, prompt, status)
@@ -2756,8 +2789,18 @@ func TestFinalizeJob_IsIdempotentAfterCompletion(t *testing.T) {
 	app.finalizeJob(ctx, p, "VklERU8=", "video/mp4")
 	var generations int
 	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM generations WHERE project_id='test-proj'`).Scan(&generations)
-	if generations != 1 || len(pf.callAppCalls) != 1 {
+	if generations != 1 || len(pf.callAppCalls) != 2 {
 		t.Fatalf("generations=%d storage calls=%d", generations, len(pf.callAppCalls))
+	}
+	events := rec.EventsByTopic("media.generated")
+	if len(events) != 1 {
+		t.Fatalf("media.generated events = %+v", events)
+	}
+	data := events[0].Data.(map[string]any)
+	ids, _ := data["storage_ids"].([]int64)
+	urls, _ := data["storage_urls"].([]string)
+	if len(ids) != 1 || ids[0] != 5150 || len(urls) != 1 || !strings.HasPrefix(urls[0], "https://") {
+		t.Fatalf("async storage contract ids=%+v urls=%+v", ids, urls)
 	}
 }
 

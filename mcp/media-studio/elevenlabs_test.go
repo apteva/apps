@@ -196,7 +196,7 @@ func TestToolMediaGenerate_ElevenLabsTTS_WithStorage(t *testing.T) {
 	if pf.executeCalls[0].Input["voice_id"] != "voice-123" {
 		t.Fatalf("voice_id missing in provider args: %+v", pf.executeCalls[0].Input)
 	}
-	if len(pf.callAppCalls) != 1 || pf.callAppCalls[0].Tool != "files_upload" {
+	if len(pf.callAppCalls) != 2 || pf.callAppCalls[0].Tool != "files_upload" || pf.callAppCalls[1].Tool != "files_get_url" {
 		t.Fatalf("storage calls = %+v", pf.callAppCalls)
 	}
 	if pf.callAppCalls[0].Input["folder"] != "/.generated/audio/" {
