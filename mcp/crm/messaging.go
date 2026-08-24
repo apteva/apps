@@ -232,6 +232,9 @@ func dbConversationsList(db *sql.DB, pid string, contactID int64, channel, statu
 			out = append(out, c)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -409,6 +412,12 @@ func dbConversationActivities(db *sql.DB, pid string, conversationID int64, limi
 			out = append(out, a)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := loadActivityAttachments(db, pid, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -431,15 +440,16 @@ type messagingMessageGetResponse struct {
 }
 
 type messagingMessageForCRM struct {
-	ID                int64          `json:"id"`
-	Direction         string         `json:"direction"`
-	Status            string         `json:"status"`
-	StatusReason      string         `json:"status_reason"`
-	ProviderMessageID string         `json:"provider_message_id"`
-	SentAt            string         `json:"sent_at"`
-	ReceivedAt        string         `json:"received_at"`
-	LastEventAt       string         `json:"last_event_at"`
-	EventCounts       map[string]int `json:"event_counts"`
+	ID                int64                 `json:"id"`
+	Direction         string                `json:"direction"`
+	Status            string                `json:"status"`
+	StatusReason      string                `json:"status_reason"`
+	ProviderMessageID string                `json:"provider_message_id"`
+	SentAt            string                `json:"sent_at"`
+	ReceivedAt        string                `json:"received_at"`
+	LastEventAt       string                `json:"last_event_at"`
+	EventCounts       map[string]int        `json:"event_counts"`
+	Attachments       []messagingAttachment `json:"attachments"`
 }
 
 type messagingEventForCRM struct {
@@ -466,6 +476,7 @@ func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities
 		return
 	}
 	statuses := map[int64]*MessageStatus{}
+	attachments := map[int64][]messagingAttachment{}
 	var statusesMu sync.Mutex
 	jobs := make(chan int64)
 	var workers sync.WaitGroup
@@ -510,6 +521,7 @@ func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities
 				}
 				statusesMu.Lock()
 				statuses[id] = ms
+				attachments[id] = out.Message.Attachments
 				statusesMu.Unlock()
 			}
 		}()
@@ -522,8 +534,14 @@ func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities
 	for _, a := range activities {
 		if a != nil && a.MessagingID != 0 {
 			a.MessageStatus = statuses[a.MessagingID]
+			if len(a.Attachments) == 0 && len(attachments[a.MessagingID]) > 0 {
+				if err := upsertActivityAttachments(ctx.AppDB(), pid, a.ID, attachments[a.MessagingID]); err != nil {
+					ctx.Logger().Warn("crm attachment metadata backfill failed", "activity_id", a.ID, "err", err)
+				}
+			}
 		}
 	}
+	_ = loadActivityAttachments(ctx.AppDB(), pid, activities)
 }
 
 // ─── Atomic activity insert with conversation linkage ──────────────
@@ -540,6 +558,7 @@ type logMessageActivityInput struct {
 	MessageIDHeader string // outbound: Message-Id we sent; inbound: Message-Id we received
 	MessagingID     int64  // messaging-app row id; used for inbound dedup
 	IdempotencyKey  string // outbound caller key or CRM-generated short-window key
+	Attachments     []messagingAttachment
 }
 
 func logMessageActivity(db *sql.DB, in logMessageActivityInput) (*Activity, error) {
@@ -593,6 +612,9 @@ func logMessageActivity(db *sql.DB, in logMessageActivityInput) (*Activity, erro
 		return nil, err
 	}
 	aid, _ := res.LastInsertId()
+	if err := insertActivityAttachmentsTx(tx, in.ProjectID, aid, in.Attachments); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(
 		`UPDATE contacts SET last_contact_at = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ? AND project_id = ?`,
@@ -612,7 +634,7 @@ func logMessageActivity(db *sql.DB, in logMessageActivityInput) (*Activity, erro
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return &Activity{
+	activity := &Activity{
 		ID: aid, ContactID: in.ContactID, Kind: in.Kind, Body: in.Body,
 		OccurredAt: in.OccurredAt, Source: in.Source,
 		SourceDetail:    string(sdJSON),
@@ -620,7 +642,11 @@ func logMessageActivity(db *sql.DB, in logMessageActivityInput) (*Activity, erro
 		MessageIDHeader: in.MessageIDHeader,
 		MessagingID:     in.MessagingID,
 		IdempotencyKey:  in.IdempotencyKey,
-	}, nil
+	}
+	if err := loadActivityAttachments(db, in.ProjectID, []*Activity{activity}); err != nil {
+		return nil, err
+	}
+	return activity, nil
 }
 
 var errDuplicateMessagingID = errors.New("duplicate messaging_id (inbound already logged)")
@@ -629,7 +655,7 @@ func dbActivityByMessagingID(db *sql.DB, pid string, messagingID int64) (*Activi
 	if messagingID <= 0 {
 		return nil, nil
 	}
-	return scanActivityRow(db.QueryRow(
+	a, err := scanActivityRow(db.QueryRow(
 		`SELECT id, contact_id, kind, body, occurred_at, COALESCE(source,''),
 		        COALESCE(source_detail,''), COALESCE(conversation_id,0),
 		        COALESCE(message_id_header,''), COALESCE(messaging_id,0),
@@ -638,13 +664,17 @@ func dbActivityByMessagingID(db *sql.DB, pid string, messagingID int64) (*Activi
 		 WHERE project_id = ? AND messaging_id = ?`,
 		pid, messagingID,
 	))
+	if err == nil && a != nil {
+		err = loadActivityAttachments(db, pid, []*Activity{a})
+	}
+	return a, err
 }
 
 func dbActivityByIdempotencyKey(db *sql.DB, pid, key, since string) (*Activity, error) {
 	if strings.TrimSpace(key) == "" {
 		return nil, nil
 	}
-	return scanActivityRow(db.QueryRow(
+	a, err := scanActivityRow(db.QueryRow(
 		`SELECT id, contact_id, kind, body, occurred_at, COALESCE(source,''),
 		        COALESCE(source_detail,''), COALESCE(conversation_id,0),
 		        COALESCE(message_id_header,''), COALESCE(messaging_id,0),
@@ -657,6 +687,10 @@ func dbActivityByIdempotencyKey(db *sql.DB, pid, key, since string) (*Activity, 
 		 LIMIT 1`,
 		pid, key, since, since,
 	))
+	if err == nil && a != nil {
+		err = loadActivityAttachments(db, pid, []*Activity{a})
+	}
+	return a, err
 }
 
 func scanActivityRow(row *sql.Row) (*Activity, error) {
@@ -1302,10 +1336,28 @@ func validateOutboundMessageArgs(args map[string]any) (int64, string, int64, str
 		}
 		contentSID = strings.TrimSpace(contentSID)
 	}
-	if strings.TrimSpace(body) == "" && templateID == 0 && contentSID == "" {
-		return 0, "", 0, "", errors.New("body, template_id, or content_sid required")
+	if err := validateOutboundAttachments(args); err != nil {
+		return 0, "", 0, "", err
+	}
+	if strings.TrimSpace(body) == "" && strings.TrimSpace(strArg(args, "body_html")) == "" &&
+		templateID == 0 && contentSID == "" && !hasOutboundAttachments(args) {
+		return 0, "", 0, "", errors.New("body, body_html, template_id, content_sid, or attachments required")
 	}
 	return cid, body, templateID, contentSID, nil
+}
+
+func hasOutboundAttachments(args map[string]any) bool {
+	for _, key := range []string{"attachments", "attachment_storage_ids"} {
+		b, err := json.Marshal(args[key])
+		if err != nil {
+			continue
+		}
+		var items []any
+		if json.Unmarshal(b, &items) == nil && len(items) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func validateStandaloneEmailArgs(args map[string]any, channel string, templateID int64) error {
@@ -1325,23 +1377,43 @@ func outboundContentFingerprint(
 	sendArgs map[string]any,
 ) string {
 	fingerprint := map[string]any{
-		"project_id":      pid,
-		"contact_id":      contactID,
-		"test":            isTest,
-		"channel":         sendArgs["channel"],
-		"to":              sendArgs["to"],
-		"from":            sendArgs["from"],
-		"subject":         sendArgs["subject"],
-		"body":            sendArgs["body"],
-		"body_html":       sendArgs["body_html"],
-		"template_id":     sendArgs["template_id"],
-		"content_sid":     sendArgs["content_sid"],
-		"vars":            sendArgs["vars"],
-		"conversation_id": sendArgs["conversation_id"],
+		"project_id":             pid,
+		"contact_id":             contactID,
+		"test":                   isTest,
+		"channel":                sendArgs["channel"],
+		"to":                     sendArgs["to"],
+		"from":                   sendArgs["from"],
+		"subject":                sendArgs["subject"],
+		"body":                   sendArgs["body"],
+		"body_html":              sendArgs["body_html"],
+		"template_id":            sendArgs["template_id"],
+		"content_sid":            sendArgs["content_sid"],
+		"vars":                   sendArgs["vars"],
+		"conversation_id":        sendArgs["conversation_id"],
+		"attachments":            fingerprintAttachments(sendArgs["attachments"]),
+		"attachment_storage_ids": sendArgs["attachment_storage_ids"],
 	}
 	encoded, _ := json.Marshal(fingerprint)
 	sum := sha256.Sum256(encoded)
 	return fmt.Sprintf("%x", sum[:16])
+}
+
+func fingerprintAttachments(raw any) any {
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var items []map[string]any
+	if json.Unmarshal(b, &items) != nil {
+		return raw
+	}
+	for _, item := range items {
+		if encoded := strings.TrimSpace(anyString(item["content_base64"])); encoded != "" {
+			sum := sha256.Sum256([]byte(encoded))
+			item["content_base64"] = fmt.Sprintf("sha256:%x", sum[:])
+		}
+	}
+	return items
 }
 
 func automaticOutboundIdempotencyKey(fingerprint string, now time.Time) string {
@@ -1465,6 +1537,12 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	if convoID := int64Arg(args, "conversation_id"); convoID > 0 {
 		sendArgs["conversation_id"] = convoID
 	}
+	if raw, ok := args["attachments"]; ok {
+		sendArgs["attachments"] = raw
+	}
+	if raw, ok := args["attachment_storage_ids"]; ok {
+		sendArgs["attachment_storage_ids"] = raw
+	}
 
 	type idempotencyCandidate struct {
 		key   string
@@ -1562,6 +1640,11 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	if sendErr == nil {
 		sendErr = messagingSendResponseError(resp)
 	}
+	attachments, attachmentErr := messagingAttachmentsFromAny(resp["attachments"])
+	if attachmentErr != nil {
+		ctx.Logger().Warn("crm ignored malformed messaging attachment metadata", "err", attachmentErr)
+		attachments = []messagingAttachment{}
+	}
 
 	if sendErr != nil {
 		if !isTest {
@@ -1590,6 +1673,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 				ConversationID:  convoID,
 				MessageIDHeader: providerMsgID,
 				MessagingID:     msgID,
+				Attachments:     attachments,
 			})
 		}
 		return nil, fmt.Errorf("messaging.send_message: %w", sendErr)
@@ -1607,6 +1691,12 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	if existingActivity != nil {
 		if existingActivity.ContactID != cid {
 			return nil, errors.New("messaging idempotency result belongs to a different CRM contact")
+		}
+		if err := upsertActivityAttachments(ctx.AppDB(), pid, existingActivity.ID, attachments); err != nil {
+			return nil, fmt.Errorf("attachment reconciliation: %w", err)
+		}
+		if err := loadActivityAttachments(ctx.AppDB(), pid, []*Activity{existingActivity}); err != nil {
+			return nil, err
 		}
 		return outboundSendResult(
 			existingActivity,
@@ -1669,6 +1759,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		MessageIDHeader: providerMsgID,
 		MessagingID:     msgID,
 		IdempotencyKey:  idempotencyKey,
+		Attachments:     attachments,
 	})
 	if errors.Is(err, errDuplicateMessagingID) {
 		if createdConversationID > 0 {
@@ -1691,6 +1782,12 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		}
 		if existingActivity.ContactID != cid {
 			return nil, errors.New("messaging idempotency result belongs to a different CRM contact")
+		}
+		if err := upsertActivityAttachments(ctx.AppDB(), pid, existingActivity.ID, attachments); err != nil {
+			return nil, fmt.Errorf("attachment reconciliation: %w", err)
+		}
+		if err := loadActivityAttachments(ctx.AppDB(), pid, []*Activity{existingActivity}); err != nil {
+			return nil, err
 		}
 		return outboundSendResult(
 			existingActivity,
@@ -1722,11 +1819,12 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		}
 	}
 	ctx.Emit("contact.activity.added", map[string]any{
-		"contact_id":      cid,
-		"activity_id":     act.ID,
-		"conversation_id": act.ConversationID,
-		"kind":            kind,
-		"source":          act.Source,
+		"contact_id":       cid,
+		"activity_id":      act.ID,
+		"conversation_id":  act.ConversationID,
+		"kind":             kind,
+		"source":           act.Source,
+		"attachment_count": len(act.Attachments),
 	})
 
 	return outboundSendResult(
@@ -1808,6 +1906,12 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		sendArgs["template_vars"] = vars
 	} else if vars, ok := args["vars"].(map[string]any); ok {
 		sendArgs["vars"] = vars
+	}
+	if raw, ok := args["attachments"]; ok {
+		sendArgs["attachments"] = raw
+	}
+	if raw, ok := args["attachment_storage_ids"]; ok {
+		sendArgs["attachment_storage_ids"] = raw
 	}
 	if subj := strArg(args, "subject"); subj != "" {
 		sendArgs["subject"] = subj
@@ -2499,22 +2603,23 @@ func (a *App) toolRoutingRulesDelete(ctx *sdk.AppCtx, args map[string]any) (any,
 // inboundPayload mirrors what messaging.dispatchInbound POSTs to us.
 // Field names match messaging/main.go:2466-2483.
 type inboundPayload struct {
-	MessageID        int64          `json:"message_id"`
-	Channel          string         `json:"channel"`
-	From             string         `json:"from"`
-	To               []string       `json:"to"`
-	CC               []string       `json:"cc"`
-	Subject          string         `json:"subject"`
-	BodyText         string         `json:"body_text"`
-	BodyHTML         string         `json:"body_html"`
-	MessageIDHeader  string         `json:"message_id_header"`
-	InReplyTo        string         `json:"in_reply_to"`
-	References       []string       `json:"references"`
-	Headers          map[string]any `json:"headers"`
-	ReceivedAt       string         `json:"received_at"`
-	MatchedRecipient string         `json:"matched_recipient"`
-	MatchedPattern   string         `json:"matched_pattern"`
-	ToSubaddress     string         `json:"to_subaddress"`
+	MessageID        int64                 `json:"message_id"`
+	Channel          string                `json:"channel"`
+	From             string                `json:"from"`
+	To               []string              `json:"to"`
+	CC               []string              `json:"cc"`
+	Subject          string                `json:"subject"`
+	BodyText         string                `json:"body_text"`
+	BodyHTML         string                `json:"body_html"`
+	MessageIDHeader  string                `json:"message_id_header"`
+	InReplyTo        string                `json:"in_reply_to"`
+	References       []string              `json:"references"`
+	Headers          map[string]any        `json:"headers"`
+	ReceivedAt       string                `json:"received_at"`
+	MatchedRecipient string                `json:"matched_recipient"`
+	MatchedPattern   string                `json:"matched_pattern"`
+	ToSubaddress     string                `json:"to_subaddress"`
+	Attachments      []messagingAttachment `json:"attachments"`
 }
 
 func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
@@ -2571,6 +2676,11 @@ func (a *App) toolMessagingInboundReceive(ctx *sdk.AppCtx, args map[string]any) 
 	} else {
 		body.Headers = map[string]any{}
 	}
+	attachments, err := messagingAttachmentsFromAny(args["attachments"])
+	if err != nil {
+		return nil, err
+	}
+	body.Attachments = attachments
 	if body.Channel == "" || body.From == "" {
 		return nil, errors.New("channel and from required")
 	}
@@ -2619,6 +2729,9 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			pid, body.MessageID,
 		).Scan(&activityID, &contactID, &conversationID)
 		if err == nil {
+			if err := upsertActivityAttachments(db, pid, activityID, body.Attachments); err != nil {
+				return nil, fmt.Errorf("attachment dedup reconciliation: %w", err)
+			}
 			return map[string]any{
 				"ok":              true,
 				"deduped":         true,
@@ -2738,10 +2851,21 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 		ConversationID:  convoID,
 		MessageIDHeader: body.MessageIDHeader,
 		MessagingID:     body.MessageID,
+		Attachments:     body.Attachments,
 	})
 	if errors.Is(err, errDuplicateMessagingID) {
 		// Idempotent re-delivery — already logged. Return ok so messaging
 		// stops retrying.
+		existing, lookupErr := dbActivityByMessagingID(db, pid, body.MessageID)
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if existing != nil {
+			if err := upsertActivityAttachments(db, pid, existing.ID, body.Attachments); err != nil {
+				return nil, err
+			}
+			return map[string]any{"ok": true, "deduped": true, "activity_id": existing.ID, "contact_id": existing.ContactID, "conversation_id": existing.ConversationID}, nil
+		}
 		return map[string]any{"ok": true, "deduped": true}, nil
 	}
 	if err != nil {
@@ -2802,26 +2926,28 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 		})
 	}
 	emitCRMEvent(ctx, pid, "contact.activity.added", map[string]any{
-		"contact_id":      contact.ID,
-		"activity_id":     act.ID,
-		"conversation_id": act.ConversationID,
-		"kind":            act.Kind,
-		"source":          act.Source,
+		"contact_id":       contact.ID,
+		"activity_id":      act.ID,
+		"conversation_id":  act.ConversationID,
+		"kind":             act.Kind,
+		"source":           act.Source,
+		"attachment_count": len(act.Attachments),
 	})
 	threadState := "existing"
 	if threadCreated {
 		threadState = "new"
 	}
 	emitCRMEvent(ctx, pid, "conversation.message.received", map[string]any{
-		"contact_id":      contact.ID,
-		"conversation_id": convoID,
-		"activity_id":     act.ID,
-		"kind":            act.Kind,
-		"channel":         body.Channel,
-		"source":          act.Source,
-		"thread_state":    threadState,
-		"thread_created":  threadCreated,
-		"messaging_id":    body.MessageID,
+		"contact_id":       contact.ID,
+		"conversation_id":  convoID,
+		"activity_id":      act.ID,
+		"kind":             act.Kind,
+		"channel":          body.Channel,
+		"source":           act.Source,
+		"thread_state":     threadState,
+		"thread_created":   threadCreated,
+		"messaging_id":     body.MessageID,
+		"attachment_count": len(act.Attachments),
 	})
 
 	out := map[string]any{
@@ -3087,7 +3213,7 @@ func (a *App) handleHTTPSendMessage(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "id required")
 		return
 	}
-	args, err := mustReadJSONArgs(w, r)
+	args, err := mustReadJSONArgsLimit(w, r, maxMessageJSONBodyBytes)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
@@ -3114,7 +3240,7 @@ func (a *App) handleHTTPReply(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "id required")
 		return
 	}
-	args, err := mustReadJSONArgs(w, r)
+	args, err := mustReadJSONArgsLimit(w, r, maxMessageJSONBodyBytes)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
@@ -3484,8 +3610,12 @@ func (a *App) handleHTTPRoutingRuleItem(w http.ResponseWriter, r *http.Request) 
 }
 
 func mustReadJSONArgs(w http.ResponseWriter, r *http.Request) (map[string]any, error) {
+	return mustReadJSONArgsLimit(w, r, maxJSONBodyBytes)
+}
+
+func mustReadJSONArgsLimit(w http.ResponseWriter, r *http.Request, limit int64) (map[string]any, error) {
 	out := map[string]any{}
-	if err := decodeJSONBody(w, r, &out); err != nil {
+	if err := decodeJSONBodyLimit(w, r, &out, limit); err != nil {
 		return nil, err
 	}
 	if out == nil {

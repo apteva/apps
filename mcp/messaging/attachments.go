@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -10,7 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -23,19 +26,21 @@ const (
 )
 
 type MessageAttachment struct {
-	ID          int64  `json:"id"`
-	ProjectID   string `json:"project_id,omitempty"`
-	MessageID   int64  `json:"message_id,omitempty"`
-	StorageID   int64  `json:"storage_id,omitempty"`
-	URL         string `json:"url,omitempty"`
-	Filename    string `json:"filename"`
-	ContentType string `json:"content_type,omitempty"`
-	SizeBytes   int64  `json:"size_bytes,omitempty"`
-	ContentID   string `json:"content_id,omitempty"`
-	Disposition string `json:"disposition"`
-	Source      string `json:"source"`
-	ProviderRef string `json:"provider_ref,omitempty"`
-	CreatedAt   string `json:"created_at,omitempty"`
+	ID               int64  `json:"id"`
+	ProjectID        string `json:"project_id,omitempty"`
+	MessageID        int64  `json:"message_id,omitempty"`
+	StorageID        int64  `json:"storage_id,omitempty"`
+	URL              string `json:"url,omitempty"`
+	Filename         string `json:"filename"`
+	ContentType      string `json:"content_type,omitempty"`
+	SizeBytes        int64  `json:"size_bytes,omitempty"`
+	ContentID        string `json:"content_id,omitempty"`
+	Disposition      string `json:"disposition"`
+	Source           string `json:"source"`
+	ProviderRef      string `json:"provider_ref,omitempty"`
+	ProcessingStatus string `json:"processing_status"`
+	ProcessingError  string `json:"processing_error,omitempty"`
+	CreatedAt        string `json:"created_at,omitempty"`
 }
 
 type attachmentInput struct {
@@ -106,8 +111,21 @@ func attachmentInputsFromArgs(args map[string]any) ([]attachmentInput, error) {
 				in.Source = "inline"
 			}
 		}
-		if in.StorageID == 0 && in.URL == "" && in.ContentBase64 == "" {
-			return errors.New("attachment requires storage_id, url, or content_base64")
+		sourceCount := 0
+		if in.StorageID > 0 {
+			sourceCount++
+		}
+		if in.URL != "" {
+			sourceCount++
+		}
+		if in.ContentBase64 != "" {
+			sourceCount++
+		}
+		if sourceCount == 0 {
+			return errors.New("attachment requires exactly one of storage_id, url, or content_base64")
+		}
+		if sourceCount > 1 {
+			return errors.New("attachment must use exactly one of storage_id, url, or content_base64")
 		}
 		if in.Filename == "" {
 			switch {
@@ -175,14 +193,15 @@ func attachmentInputsFromArgs(args map[string]any) ([]attachmentInput, error) {
 func resolveAttachment(ctx *sdk.AppCtx, pid, channel string, in attachmentInput) (providerAttachment, error) {
 	att := providerAttachment{
 		MessageAttachment: MessageAttachment{
-			StorageID:   in.StorageID,
-			URL:         in.URL,
-			Filename:    in.Filename,
-			ContentType: in.ContentType,
-			SizeBytes:   in.SizeBytes,
-			ContentID:   in.ContentID,
-			Disposition: in.Disposition,
-			Source:      in.Source,
+			StorageID:        in.StorageID,
+			URL:              in.URL,
+			Filename:         in.Filename,
+			ContentType:      in.ContentType,
+			SizeBytes:        in.SizeBytes,
+			ContentID:        in.ContentID,
+			Disposition:      in.Disposition,
+			Source:           in.Source,
+			ProcessingStatus: "ready",
 		},
 	}
 	if in.ContentBase64 != "" {
@@ -213,10 +232,13 @@ func resolveAttachment(ctx *sdk.AppCtx, pid, channel string, in attachmentInput)
 			att.Source = "upload"
 		} else if channel != channelEmail {
 			return att, errors.New("phone-channel attachments with content_base64 require the storage app so Messaging can mint a Twilio-reachable media URL")
+		} else {
+			att.ProcessingStatus = "unavailable"
+			att.ProcessingError = "storage app is not bound; attachment bytes were sent but could not be retained for other apps"
 		}
 	}
 	switch {
-	case att.StorageID > 0 && channel == channelEmail:
+	case att.StorageID > 0 && channel == channelEmail && len(att.Data) == 0:
 		content, err := getAttachmentContent(ctx, pid, att.StorageID)
 		if err != nil {
 			return att, err
@@ -229,6 +251,9 @@ func resolveAttachment(ctx *sdk.AppCtx, pid, channel string, in attachmentInput)
 			att.ContentType = content.ContentType
 		}
 		att.SizeBytes = content.SizeBytes
+	case att.StorageID > 0 && channel == channelEmail:
+		// Inline/base64 bytes were already uploaded above and remain in
+		// memory for this provider send; no need to download them again.
 	case att.StorageID > 0:
 		u, err := getAttachmentURL(ctx, pid, att.StorageID)
 		if err != nil {
@@ -246,6 +271,13 @@ func resolveAttachment(ctx *sdk.AppCtx, pid, channel string, in attachmentInput)
 		}
 		att.SizeBytes = size
 	case att.URL != "":
+		u, err := url.Parse(strings.TrimSpace(att.URL))
+		if err != nil {
+			return att, errors.New("invalid attachment URL")
+		}
+		if err := validatePublicHTTPURL(u); err != nil {
+			return att, fmt.Errorf("attachment URL: %w", err)
+		}
 		att.MediaURL = att.URL
 	}
 	if att.ContentType == "" {
@@ -338,6 +370,236 @@ func uploadAttachmentToStorage(ctx *sdk.AppCtx, pid string, att providerAttachme
 	}, nil
 }
 
+// prepareInboundAttachments turns provider bytes into durable, app-facing
+// metadata. Storage is the durable boundary: routed apps receive IDs and
+// descriptive metadata, never MIME bytes, base64, provider credentials, or
+// signed Storage URLs. A failed file does not fail the parent message.
+func prepareInboundAttachments(ctx *sdk.AppCtx, pid string, inputs []providerAttachment) []providerAttachment {
+	if len(inputs) > maxAttachmentCount {
+		inputs = inputs[:maxAttachmentCount]
+	}
+	out := make([]providerAttachment, 0, len(inputs))
+	var totalBytes int64
+	for i := range inputs {
+		att := inputs[i]
+		att.Filename = safeAttachmentFilename(att.Filename)
+		if att.Filename == "" {
+			att.Filename = fmt.Sprintf("attachment-%d", i+1)
+		}
+		att.ContentType = strings.TrimSpace(att.ContentType)
+		if att.ContentType == "" && len(att.Data) > 0 {
+			att.ContentType = http.DetectContentType(att.Data)
+		}
+		if att.ContentType == "" {
+			att.ContentType = "application/octet-stream"
+		}
+		att.ContentID = strings.Trim(strings.TrimSpace(att.ContentID), "<>")
+		att.Disposition = normaliseAttachmentDisposition(att.Disposition)
+		if att.Source == "" {
+			att.Source = "provider"
+		}
+		if att.ProcessingStatus == "" {
+			att.ProcessingStatus = "ready"
+		}
+		if len(att.Data) > 0 {
+			att.SizeBytes = int64(len(att.Data))
+			totalBytes += att.SizeBytes
+			switch {
+			case att.SizeBytes > maxAttachmentInlineBytes:
+				att.ProcessingStatus = "failed"
+				att.ProcessingError = fmt.Sprintf("attachment exceeds %d bytes", maxAttachmentInlineBytes)
+			case totalBytes > maxAttachmentTotalBytes:
+				att.ProcessingStatus = "failed"
+				att.ProcessingError = fmt.Sprintf("attachments exceed %d bytes in total", maxAttachmentTotalBytes)
+			case !isAppDepBound(ctx, "storage"):
+				att.ProcessingStatus = "unavailable"
+				att.ProcessingError = "storage app is not bound; inbound bytes could not be made durable"
+			default:
+				stored, err := uploadAttachmentToStorage(ctx, pid, att)
+				if err != nil {
+					att.ProcessingStatus = "failed"
+					att.ProcessingError = truncate(err.Error(), 500)
+				} else {
+					att.StorageID = stored.StorageID
+					att.URL = ""
+					att.Filename = firstNonEmpty(stored.Filename, att.Filename)
+					att.ContentType = firstNonEmpty(stored.ContentType, att.ContentType)
+					att.SizeBytes = firstPositiveInt64(stored.SizeBytes, att.SizeBytes)
+					att.Source = "storage"
+					att.ProcessingStatus = "ready"
+					att.ProcessingError = ""
+				}
+			}
+		}
+		// Provider bytes are transport-only and must never survive into a
+		// routed payload or tool response.
+		att.Data = nil
+		att.MediaURL = ""
+		out = append(out, att)
+	}
+	return out
+}
+
+// consumerAttachmentMetadata returns a stable non-nil slice for app-to-app
+// contracts and strips the internal project owner field. The type contains no
+// byte-bearing field, so it is safe to use in send results and route payloads.
+func consumerAttachmentMetadata(in []MessageAttachment) []MessageAttachment {
+	out := make([]MessageAttachment, len(in))
+	copy(out, in)
+	for i := range out {
+		out[i].ProjectID = ""
+		if out[i].ProcessingStatus == "" {
+			out[i].ProcessingStatus = "ready"
+		}
+	}
+	return out
+}
+
+func messageAttachmentCount(message *Message) int {
+	if message == nil {
+		return 0
+	}
+	return len(message.Attachments)
+}
+
+func fetchTwilioInboundMedia(ctx context.Context, rawURL, accountSID, authToken string) ([]byte, string, string, error) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return nil, "", "", errors.New("invalid Twilio media URL")
+	}
+	if err := validatePublicHTTPURL(u); err != nil {
+		return nil, "", "", fmt.Errorf("Twilio media URL: %w", err)
+	}
+	if !strings.EqualFold(u.Scheme, "https") || !isTrustedTwilioMediaHost(u.Hostname()) {
+		return nil, "", "", errors.New("Twilio media URL must use HTTPS on a Twilio-owned host")
+	}
+	client := newPublicHTTPClient(10 * time.Second)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many Twilio media redirects")
+		}
+		if !strings.EqualFold(req.URL.Scheme, "https") {
+			return errors.New("Twilio media redirect must use HTTPS")
+		}
+		if err := validatePublicHTTPURL(req.URL); err != nil {
+			return fmt.Errorf("Twilio media redirect: %w", err)
+		}
+		if !isTrustedTwilioMediaHost(req.URL.Hostname()) {
+			return errors.New("Twilio media redirect must remain on a Twilio-owned host")
+		}
+		if isTwilioCredentialHost(req.URL.Hostname()) {
+			req.SetBasicAuth(accountSID, authToken)
+		} else {
+			req.Header.Del("Authorization")
+		}
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if isTwilioCredentialHost(u.Hostname()) {
+		req.SetBasicAuth(accountSID, authToken)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("fetch Twilio media: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, "", "", fmt.Errorf("fetch Twilio media: status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAttachmentInlineBytes+1))
+	if err != nil {
+		return nil, "", "", err
+	}
+	if int64(len(data)) > maxAttachmentInlineBytes {
+		return nil, "", "", fmt.Errorf("Twilio media exceeds %d bytes", maxAttachmentInlineBytes)
+	}
+	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil {
+		contentType = mediaType
+	}
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+	filename := ""
+	if _, params, err := mime.ParseMediaType(resp.Header.Get("Content-Disposition")); err == nil {
+		filename = safeAttachmentFilename(params["filename"])
+	}
+	if filename == "" {
+		filename = filenameFromURL(resp.Request.URL.String())
+	}
+	return data, contentType, filename, nil
+}
+
+var twilioMediaFetcher = fetchTwilioInboundMedia
+
+func twilioInboundAttachments(form url.Values, messageSID, accountSID, authToken string) []providerAttachment {
+	count, _ := strconv.Atoi(strings.TrimSpace(form.Get("NumMedia")))
+	if count <= 0 {
+		return nil
+	}
+	if count > maxAttachmentCount {
+		count = maxAttachmentCount
+	}
+	out := make([]providerAttachment, count)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	for i := 0; i < count; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			rawURL := strings.TrimSpace(form.Get(fmt.Sprintf("MediaUrl%d", i)))
+			contentType := strings.TrimSpace(form.Get(fmt.Sprintf("MediaContentType%d", i)))
+			att := providerAttachment{MessageAttachment: MessageAttachment{
+				Filename:         fmt.Sprintf("media-%d", i+1),
+				ContentType:      contentType,
+				Disposition:      "attachment",
+				Source:           "twilio",
+				ProviderRef:      fmt.Sprintf("twilio:%s:%d", messageSID, i),
+				ProcessingStatus: "pending",
+			}}
+			if rawURL == "" {
+				att.ProcessingStatus = "failed"
+				att.ProcessingError = fmt.Sprintf("MediaUrl%d is missing", i)
+				out[i] = att
+				return
+			}
+			data, fetchedType, filename, err := twilioMediaFetcher(ctx, rawURL, accountSID, authToken)
+			if err != nil {
+				att.ProcessingStatus = "failed"
+				att.ProcessingError = truncate(err.Error(), 500)
+				out[i] = att
+				return
+			}
+			att.Data = data
+			att.SizeBytes = int64(len(data))
+			att.Filename = firstNonEmpty(filename, att.Filename)
+			att.ContentType = firstNonEmpty(contentType, fetchedType)
+			out[i] = att
+		}()
+	}
+	wg.Wait()
+	return out
+}
+
+func isTrustedTwilioMediaHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	return host == "twilio.com" || strings.HasSuffix(host, ".twilio.com") ||
+		host == "twiliocdn.com" || strings.HasSuffix(host, ".twiliocdn.com")
+}
+
+func isTwilioCredentialHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	return host == "twilio.com" || strings.HasSuffix(host, ".twilio.com")
+}
+
 func fetchURLAttachment(rawURL string) ([]byte, string, int64, error) {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
@@ -376,13 +638,18 @@ func fetchURLAttachment(rawURL string) ([]byte, string, int64, error) {
 
 func dbInsertMessageAttachments(db *sql.DB, pid string, messageID int64, attachments []providerAttachment) error {
 	for _, att := range attachments {
-		_, err := db.Exec(`INSERT INTO message_attachments
+		status := strings.TrimSpace(att.ProcessingStatus)
+		if status == "" {
+			status = "ready"
+		}
+		_, err := db.Exec(`INSERT OR IGNORE INTO message_attachments
 			(project_id, message_id, storage_id, url, filename, content_type, size_bytes,
-			 content_id, disposition, source, provider_ref)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 content_id, disposition, source, provider_ref, processing_status, processing_error)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			pid, messageID, nullableInt64(att.StorageID), nullableString(att.URL),
 			att.Filename, nullableString(att.ContentType), att.SizeBytes,
 			nullableString(att.ContentID), att.Disposition, att.Source, nullableString(att.ProviderRef),
+			status, nullableString(att.ProcessingError),
 		)
 		if err != nil {
 			return err
@@ -394,7 +661,8 @@ func dbInsertMessageAttachments(db *sql.DB, pid string, messageID int64, attachm
 func dbMessageAttachments(db *sql.DB, pid string, messageID int64) []MessageAttachment {
 	rows, err := db.Query(`SELECT id, project_id, message_id, COALESCE(storage_id,0), COALESCE(url,''),
 		filename, COALESCE(content_type,''), COALESCE(size_bytes,0), COALESCE(content_id,''),
-		disposition, source, COALESCE(provider_ref,''), COALESCE(created_at,'')
+		disposition, source, COALESCE(provider_ref,''), COALESCE(processing_status,'ready'),
+		COALESCE(processing_error,''), COALESCE(created_at,'')
 		FROM message_attachments
 		WHERE message_id = ? AND (? = '' OR project_id = ?)
 		ORDER BY id ASC`, messageID, pid, pid)
@@ -406,7 +674,8 @@ func dbMessageAttachments(db *sql.DB, pid string, messageID int64) []MessageAtta
 	for rows.Next() {
 		var a MessageAttachment
 		if err := rows.Scan(&a.ID, &a.ProjectID, &a.MessageID, &a.StorageID, &a.URL, &a.Filename,
-			&a.ContentType, &a.SizeBytes, &a.ContentID, &a.Disposition, &a.Source, &a.ProviderRef, &a.CreatedAt); err == nil {
+			&a.ContentType, &a.SizeBytes, &a.ContentID, &a.Disposition, &a.Source, &a.ProviderRef,
+			&a.ProcessingStatus, &a.ProcessingError, &a.CreatedAt); err == nil {
 			out = append(out, a)
 		}
 	}
@@ -426,7 +695,8 @@ func dbMessageAttachmentsBatch(db *sql.DB, pid string, messageIDs []int64) map[i
 	args = append(args, pid, pid)
 	rows, err := db.Query(`SELECT id, project_id, message_id, COALESCE(storage_id,0), COALESCE(url,''),
 		filename, COALESCE(content_type,''), COALESCE(size_bytes,0), COALESCE(content_id,''),
-		disposition, source, COALESCE(provider_ref,''), COALESCE(created_at,'')
+		disposition, source, COALESCE(provider_ref,''), COALESCE(processing_status,'ready'),
+		COALESCE(processing_error,''), COALESCE(created_at,'')
 		FROM message_attachments
 		WHERE message_id IN (`+placeholders+`) AND (? = '' OR project_id = ?)
 		ORDER BY message_id, id`, args...)
@@ -438,7 +708,8 @@ func dbMessageAttachmentsBatch(db *sql.DB, pid string, messageIDs []int64) map[i
 		var attachment MessageAttachment
 		if rows.Scan(&attachment.ID, &attachment.ProjectID, &attachment.MessageID, &attachment.StorageID, &attachment.URL,
 			&attachment.Filename, &attachment.ContentType, &attachment.SizeBytes, &attachment.ContentID, &attachment.Disposition,
-			&attachment.Source, &attachment.ProviderRef, &attachment.CreatedAt) == nil {
+			&attachment.Source, &attachment.ProviderRef, &attachment.ProcessingStatus, &attachment.ProcessingError,
+			&attachment.CreatedAt) == nil {
 			out[attachment.MessageID] = append(out[attachment.MessageID], attachment)
 		}
 	}

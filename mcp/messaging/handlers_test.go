@@ -204,6 +204,78 @@ func TestDispatchInbound_CRMLegacyRouteCallsInboundToolWithProject(t *testing.T)
 	if call.Input["_project_id"] != "test-proj" {
 		t.Fatalf("_project_id=%v, want test-proj", call.Input["_project_id"])
 	}
+	attachments, ok := call.Input["attachments"].([]MessageAttachment)
+	if !ok || len(attachments) != 0 {
+		t.Fatalf("attachments=%T %+v, want stable empty metadata array", call.Input["attachments"], call.Input["attachments"])
+	}
+}
+
+func TestDispatchInbound_GenericRouteIncludesStableAttachmentMetadata(t *testing.T) {
+	plat := &stubPlatform{callAppReply: json.RawMessage(`{"ok":true}`)}
+	ctx := newTestCtx(t, plat)
+	if _, err := dbInboundRouteUpsert(ctx.AppDB(), "test-proj", channelEmail, "*", "support", "/receive", 0); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO messages
+			(project_id, channel, direction, from_addr, to_addrs, status, route_status, received_at)
+		 VALUES ('test-proj', 'email', 'in', 'sender@example.com', '["support@example.com"]', 'received', 'pending', '2026-08-23T10:00:00Z')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, _ := res.LastInsertId()
+	if err := dbInsertMessageAttachments(ctx.AppDB(), "test-proj", messageID, []providerAttachment{{
+		MessageAttachment: MessageAttachment{
+			StorageID:        731,
+			Filename:         "invoice.pdf",
+			ContentType:      "application/pdf",
+			SizeBytes:        48291,
+			Disposition:      "attachment",
+			Source:           "storage",
+			ProviderRef:      "mime:0.2",
+			ProcessingStatus: "ready",
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	message, err := dbMessageGet(ctx.AppDB(), "test-proj", messageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := dispatchInbound(ctx, "test-proj", message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(plat.callAppCalls) != 2 {
+		t.Fatalf("calls=%d, want two dispatches", len(plat.callAppCalls))
+	}
+	var firstID int64
+	for i, call := range plat.callAppCalls {
+		if call.App != "support" || call.Tool != "/receive" {
+			t.Fatalf("call=%+v", call)
+		}
+		attachments, ok := call.Input["attachments"].([]MessageAttachment)
+		if !ok || len(attachments) != 1 {
+			t.Fatalf("attachments=%T %+v", call.Input["attachments"], call.Input["attachments"])
+		}
+		att := attachments[0]
+		if i == 0 {
+			firstID = att.ID
+		}
+		if att.ID == 0 || att.ID != firstID || att.MessageID != messageID || att.StorageID != 731 {
+			t.Fatalf("unstable attachment on attempt %d: %+v", i+1, att)
+		}
+		if att.ProjectID != "" {
+			t.Fatalf("internal project id leaked: %+v", att)
+		}
+		raw, _ := json.Marshal(call.Input)
+		if bytes.Contains(raw, []byte("content_base64")) {
+			t.Fatalf("routed payload contains byte-bearing field: %s", raw)
+		}
+	}
 }
 
 func TestDispatchInbound_SuppressedSenderSkipsRoute(t *testing.T) {
@@ -847,7 +919,10 @@ func TestSendMessage_EmailReplyUsesRawMIMEHeaders(t *testing.T) {
 }
 
 func TestSendMessage_EmailAttachmentUsesRawMIMEAndPersistsAttachment(t *testing.T) {
-	plat := &stubPlatform{}
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{"email_provider": float64(1), "storage": float64(2)},
+		callAppReply:     json.RawMessage(`{"id":902,"name":"note.txt","content_type":"text/plain","size_bytes":16}`),
+	}
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
@@ -871,6 +946,17 @@ func TestSendMessage_EmailAttachmentUsesRawMIMEAndPersistsAttachment(t *testing.
 	r := out.(map[string]any)
 	if r["provider_message_id"] != "ses-raw-123" {
 		t.Fatalf("provider_message_id=%v, want ses-raw-123", r["provider_message_id"])
+	}
+	responseAttachments, ok := r["attachments"].([]MessageAttachment)
+	if !ok || len(responseAttachments) != 1 {
+		t.Fatalf("response attachments=%T %+v", r["attachments"], r["attachments"])
+	}
+	if responseAttachments[0].Filename != "note.txt" || responseAttachments[0].StorageID != 902 || responseAttachments[0].ProcessingStatus != "ready" {
+		t.Fatalf("response attachment=%+v", responseAttachments[0])
+	}
+	responseJSON, _ := json.Marshal(r)
+	if bytes.Contains(responseJSON, []byte("content_base64")) || bytes.Contains(responseJSON, []byte(base64.StdEncoding.EncodeToString([]byte("hello attachment")))) {
+		t.Fatalf("send response leaked attachment bytes: %s", responseJSON)
 	}
 	if len(plat.executeCalls) != 1 || plat.executeCalls[0].Tool != "send_raw_email" {
 		t.Fatalf("provider calls=%+v, want one send_raw_email", plat.executeCalls)
@@ -901,6 +987,42 @@ func TestSendMessage_EmailAttachmentUsesRawMIMEAndPersistsAttachment(t *testing.
 	}
 	if msg.Attachments[0].Filename != "note.txt" || msg.Attachments[0].ContentType != "text/plain" {
 		t.Fatalf("attachment metadata=%+v", msg.Attachments[0])
+	}
+}
+
+func TestSendMessage_AllowsAttachmentOnly(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	app := &App{}
+	out, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "email",
+		"from":    fromAcme,
+		"to":      "alice@example.com",
+		"subject": "document",
+		"attachments": []any{map[string]any{
+			"filename":       "empty-body.txt",
+			"content_type":   "text/plain",
+			"content_base64": base64.StdEncoding.EncodeToString([]byte("file body")),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := out.(map[string]any)["attachments"].([]MessageAttachment)
+	if len(attachments) != 1 || attachments[0].Filename != "empty-body.txt" {
+		t.Fatalf("attachments=%+v", attachments)
+	}
+}
+
+func TestAttachmentInputRejectsAmbiguousSource(t *testing.T) {
+	_, err := attachmentInputsFromArgs(map[string]any{
+		"attachments": []any{map[string]any{
+			"storage_id":     float64(1),
+			"url":            "https://example.com/file.pdf",
+			"content_base64": "Zm9v",
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("expected exactly-one-source error, got %v", err)
 	}
 }
 

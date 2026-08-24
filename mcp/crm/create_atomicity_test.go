@@ -194,13 +194,19 @@ func TestMessageToolSchemasRequirePositiveIDAndContent(t *testing.T) {
 		if _, ok := properties["idempotency_key"]; !ok {
 			t.Fatalf("%s schema missing idempotency_key", tool.Name)
 		}
+		if _, ok := properties["attachments"]; !ok {
+			t.Fatalf("%s schema missing attachments", tool.Name)
+		}
+		if _, ok := properties["attachment_storage_ids"]; !ok {
+			t.Fatalf("%s schema missing attachment_storage_ids", tool.Name)
+		}
 		templateSchema, ok := properties["template_id"].(map[string]any)
 		if !ok || int64FromAny(templateSchema["minimum"]) != 0 {
 			t.Fatalf("%s template_id schema=%#v, want compatibility minimum 0", tool.Name, templateSchema)
 		}
 		anyOf, ok := tool.InputSchema["anyOf"].([]any)
-		if !ok || len(anyOf) != 3 {
-			t.Fatalf("%s anyOf=%#v, want body/template_id/content_sid alternatives", tool.Name, tool.InputSchema["anyOf"])
+		if !ok || len(anyOf) != 6 {
+			t.Fatalf("%s anyOf=%#v, want body/body_html/template/attachment alternatives", tool.Name, tool.InputSchema["anyOf"])
 		}
 		var templateBranch map[string]any
 		for _, rawBranch := range anyOf {
