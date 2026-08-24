@@ -222,8 +222,24 @@ func (s *store) ListConversationsForAgent(projectID string, agentID int64, limit
 }
 
 func (s *store) ListConversationsForUser(projectID string, userID int64, limit int) ([]Conversation, error) {
+	return s.listConversationsForUser(projectID, userID, 0, false, limit)
+}
+
+// ListConversationsForUserAndAgent applies the panel's optional agent scope
+// after the ordinary user/project visibility check. Participation is the
+// authority here, deliberately not lead_agent_id: rooms include every agent
+// participant, and a stale lead value cannot keep a removed agent visible.
+func (s *store) ListConversationsForUserAndAgent(projectID string, userID, agentID int64, limit int) ([]Conversation, error) {
+	return s.listConversationsForUser(projectID, userID, agentID, false, limit)
+}
+
+func (s *store) listConversationsForUser(projectID string, userID, agentID int64, archived bool, limit int) ([]Conversation, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
+	}
+	archivePredicate := "c.archived_at IS NULL"
+	if archived {
+		archivePredicate = "c.archived_at IS NOT NULL"
 	}
 	// Owner OR explicit participant. External-origin conversations have
 	// owner 0 and surface to every project member through the dashboard
@@ -232,9 +248,13 @@ func (s *store) ListConversationsForUser(projectID string, userID int64, limit i
 		SELECT DISTINCT `+prefixCols("c.", conversationCols)+`
 		FROM conversations c
 		LEFT JOIN participants p ON p.conversation_id = c.id
-		WHERE c.project_id = ? AND c.archived_at IS NULL
+		WHERE c.project_id = ? AND `+archivePredicate+`
 		  AND (c.owner_user_id = ? OR p.user_id = ? OR c.owner_user_id = 0)
-		ORDER BY c.updated_at DESC LIMIT ?`, projectID, userID, userID, limit)
+		  AND (? = 0 OR EXISTS (
+		      SELECT 1 FROM participants ap
+		      WHERE ap.conversation_id = c.id AND ap.agent_id = ?
+		  ))
+		ORDER BY c.updated_at DESC LIMIT ?`, projectID, userID, userID, agentID, agentID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -422,29 +442,11 @@ func (s *store) SetConversationArchived(id string, archived bool) (*Conversation
 }
 
 func (s *store) ListArchivedForUser(projectID string, userID int64, limit int) ([]Conversation, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	rows, err := s.db.Query(`
-		SELECT DISTINCT `+prefixCols("c.", conversationCols)+`
-		FROM conversations c
-		LEFT JOIN participants p ON p.conversation_id = c.id
-		WHERE c.project_id = ? AND c.archived_at IS NOT NULL
-		  AND (c.owner_user_id = ? OR p.user_id = ? OR c.owner_user_id = 0)
-		ORDER BY c.updated_at DESC LIMIT ?`, projectID, userID, userID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Conversation
-	for rows.Next() {
-		c, err := scanConversation(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *c)
-	}
-	return out, rows.Err()
+	return s.listConversationsForUser(projectID, userID, 0, true, limit)
+}
+
+func (s *store) ListArchivedForUserAndAgent(projectID string, userID, agentID int64, limit int) ([]Conversation, error) {
+	return s.listConversationsForUser(projectID, userID, agentID, true, limit)
 }
 
 // UserCanAccessConversation is the resource-level authorization check used by
@@ -766,6 +768,10 @@ type UnreadEntry struct {
 }
 
 func (s *store) UnreadSummary(projectID string, userID int64) ([]UnreadEntry, error) {
+	return s.UnreadSummaryForAgent(projectID, userID, 0)
+}
+
+func (s *store) UnreadSummaryForAgent(projectID string, userID, agentID int64) ([]UnreadEntry, error) {
 	rows, err := s.db.Query(`
 		SELECT c.id,
 		       COALESCE((SELECT MAX(m.id) FROM messages m
@@ -778,8 +784,12 @@ func (s *store) UnreadSummary(projectID string, userID int64) ([]UnreadEntry, er
 		LEFT JOIN read_marks r ON r.conversation_id = c.id AND r.user_id = ?
 		LEFT JOIN participants p ON p.conversation_id = c.id AND p.user_id = ?
 		WHERE c.project_id = ? AND c.archived_at IS NULL
-		  AND (c.owner_user_id = ? OR p.user_id = ? OR c.owner_user_id = 0)`,
-		userID, userID, projectID, userID, userID)
+		  AND (c.owner_user_id = ? OR p.user_id = ? OR c.owner_user_id = 0)
+		  AND (? = 0 OR EXISTS (
+		      SELECT 1 FROM participants ap
+		      WHERE ap.conversation_id = c.id AND ap.agent_id = ?
+		  ))`,
+		userID, userID, projectID, userID, userID, agentID, agentID)
 	if err != nil {
 		return nil, err
 	}

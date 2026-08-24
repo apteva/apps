@@ -58,7 +58,10 @@ chat route, webhook verification secret, and external participant identity.
   /message-action /seen /telegram-connections /telegram-bindings
   /telegram-intake /telegram-access /telegram-invites, plus the secret-verified
   /telegram-webhook/*. (Reserved prefixes /health /manifest
-  /mcp /events /ui/ are avoided — guarded by a test.)
+  /mcp /events /ui/ are avoided — guarded by a test.) `/chats`, `/inbox`, and
+  `/unread-summary` accept an optional `agent_id` projection. It is intersected
+  with the authenticated user/project scope and matches explicit participants,
+  never merely `lead_agent_id`.
 - **Adapters**: `web` (the SSE hub), authenticated agent/app callbacks, and
   `telegram`. Telegram executes Bot API tools through the bound platform
   connection; raw bot credentials never enter app config or SQLite.

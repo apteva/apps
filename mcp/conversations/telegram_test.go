@@ -984,8 +984,8 @@ func TestTelegramResponseFeedbackFailureDoesNotBlockInboundDelivery(t *testing.T
 	if err != nil || len(transcript) != 1 || transcript[0].Content != "still deliver this" {
 		t.Fatalf("inbound transcript = %+v err=%v", transcript, err)
 	}
-	if len(platform.spawns) != 1 {
-		t.Fatalf("inbound message was not forwarded to the agent: spawns=%+v", platform.spawns)
+	if len(platform.ensures) != 1 || len(platform.spawns) != 0 {
+		t.Fatalf("inbound message did not use atomic ensure: ensures=%+v spawns=%+v", platform.ensures, platform.spawns)
 	}
 }
 

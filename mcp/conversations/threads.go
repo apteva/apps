@@ -4,9 +4,9 @@ package main
 //
 // Every conversation gets its own core thread ("chat-<conversation id>",
 // the same convention channel-chat uses so a future data migration keeps
-// thread identities). Every inbound delivery uses the SDK's idempotent
-// SpawnThread.Events contract. The first call creates the thread; later calls
-// atomically queue a stable event on the existing thread:
+// thread identities). Every inbound delivery uses the SDK's atomic
+// EnsureThread contract. The first call creates the thread; later calls
+// reconcile its complete app-owned profile and queue a stable event:
 //
 //   - DirectiveSuffix rides on top of the agent's main directive —
 //     the composition happens core-side, so the suffix only carries the
@@ -14,10 +14,9 @@ package main
 //   - MCP is left nil on purpose: the platform fills in the agent's
 //     spawnable MCP set (the callback's server-side default), which is
 //     the sidecar-visible equivalent of channel-chat's filtered list.
-//   - SDK 0.63's EnsureThread reconciles a changed suffix when the platform
-//     implements it. Older platforms still receive the stable event through
-//     SpawnThread; the desired/applied hashes remain durable for a later
-//     reconciliation instead of pretending the profile changed.
+//   - SDK 0.63's EnsureThread is authoritative when the platform implements
+//     it. SpawnThread is used only for an older platform that explicitly lacks
+//     the ensure endpoint.
 //
 // Spawn receipts are part of the delivery contract. Conversations only
 // considers any inbound event delivered when the platform reports its
@@ -48,6 +47,12 @@ func conversationThreadEventID(conversationID string, messageID, agentID int64) 
 // spawnedThreads caches eventless ensure calls. Inbound messages deliberately
 // bypass it because each needs its own stable-event receipt.
 var spawnedThreads sync.Map
+
+// legacyThreadPlatforms remembers an explicitly unsupported EnsureThread
+// endpoint for the lifetime of this app process. The key is the App instance,
+// so tests and independently mounted installs cannot affect each other. A
+// restart probes again, allowing a server upgrade to adopt EnsureThread.
+var legacyThreadPlatforms sync.Map
 
 // conversationThreadTools are the tools a conversation needs immediately.
 // Tools are an additive preload, not the authorization boundary: the persisted
@@ -84,9 +89,23 @@ func conversationThreadDirective(conv *Conversation) string {
 	return b.String()
 }
 
-func threadSuffixHash(suffix string) string {
-	sum := sha256.Sum256([]byte(suffix))
+func conversationThreadProfileHash(suffix string) string {
+	// MCP nil is intentional: the server atomically resolves the agent's
+	// trusted spawnable MCP set in the same EnsureThread operation.
+	profile := suffix + "\x00tools\x00" + strings.Join(conversationThreadTools, "\x00") +
+		"\x00mcp\x00platform-agent-spawnable\x00ephemeral\x00false"
+	sum := sha256.Sum256([]byte(profile))
 	return hex.EncodeToString(sum[:8])
+}
+
+func threadEnsureUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "http 404") ||
+		strings.Contains(message, "http 405") ||
+		strings.Contains(message, "http 501")
 }
 
 // ensureConversationThread returns the conversation's live thread id,
@@ -99,8 +118,8 @@ func (a *App) ensureConversationThread(app *sdk.AppCtx, conv *Conversation) stri
 
 // ensureConversationThreadForAgent gives every participating agent an
 // isolated thread for the room. Core namespaces thread ids by agent. When
-// initialEvent is non-nil and a spawn is needed, its receipt must explicitly
-// acknowledge the event before initialDelivered is true.
+// initialEvent is non-nil, its receipt must explicitly acknowledge the event
+// before initialDelivered is true.
 func (a *App) ensureConversationThreadForAgent(
 	app *sdk.AppCtx,
 	conv *Conversation,
@@ -122,45 +141,21 @@ func (a *App) ensureConversationThreadForAgent(
 	threadID = conversationThreadID(conv.ID)
 	suffix := conversationThreadDirective(conv)
 	cacheKey := fmt.Sprintf("%d/%s", agentID, conv.ID)
-	wantHash := threadSuffixHash(suffix)
+	wantHash := conversationThreadProfileHash(suffix)
 	state, _ := a.store.AgentThread(conv.ID, agentID)
 	if state != nil && state.ThreadID != "" {
 		threadID = state.ThreadID
 	}
-	// Eventless callers may use the process cache. Inbound delivery always
-	// submits its stable event through SpawnThread so every attempt has an
-	// accepted-or-duplicate receipt.
+	// Eventless callers may use the process cache. Every inbound delivery goes
+	// through EnsureThread so the desired profile and stable event are one
+	// atomic operation with an accepted-or-duplicate receipt.
 	if initialEvent == nil {
 		if prev, ok := spawnedThreads.Load(cacheKey); ok && prev.(string) == wantHash {
 			return threadID, false, nil
 		}
 	}
-	// Reconcile only on a newly observed drift. This avoids probing an older
-	// server on every message: one unsupported attempt is remembered with the
-	// desired hash, while stable-event SpawnThread still delivers the turn.
-	if state != nil && state.AppliedHash != wantHash && state.DesiredHash != wantHash {
-		if profiles, ok := app.PlatformAPI().(sdk.ThreadProfileClient); ok {
-			request := sdk.ThreadEnsureRequest{ThreadSpawnRequest: sdk.ThreadSpawnRequest{
-				AgentID: agentID, ThreadID: threadID, DirectiveSuffix: suffix,
-				Tools: append([]string(nil), conversationThreadTools...),
-			}, ProfileHash: wantHash}
-			if initialEvent != nil {
-				request.Events = []sdk.ThreadEvent{*initialEvent}
-			}
-			result, ensureErr := profiles.EnsureThread(request)
-			if ensureErr == nil && (initialEvent == nil || ensuredThreadEventAcknowledged(result, initialEvent.ID)) {
-				spawnedThreads.Store(cacheKey, wantHash)
-				_ = a.store.RecordAgentThread(conv.ID, agentID, threadID, wantHash, wantHash, "")
-				return threadID, initialEvent != nil, nil
-			}
-			if ensureErr == nil {
-				ensureErr = fmt.Errorf("platform did not acknowledge reconciled event %q", initialEvent.ID)
-			}
-			_ = a.store.RecordAgentThread(conv.ID, agentID, threadID, wantHash, "", ensureErr.Error())
-		}
-	}
 
-	spawn := sdk.ThreadSpawnRequest{
+	desired := sdk.ThreadSpawnRequest{
 		AgentID:         agentID,
 		ThreadID:        threadID,
 		DirectiveSuffix: suffix,
@@ -169,18 +164,53 @@ func (a *App) ensureConversationThreadForAgent(
 		// set. Tools preloads only the conversation-facing subset above.
 	}
 	if initialEvent != nil {
-		spawn.Events = []sdk.ThreadEvent{*initialEvent}
+		desired.Events = []sdk.ThreadEvent{*initialEvent}
 	}
-	// Persist ownership before Core can execute the newly spawned thread. A
-	// failed spawn keeps a safe, retryable binding rather than briefly treating
-	// the thread as an unbound global caller.
+	// Persist ownership before Core can execute the newly ensured thread. Any
+	// failure keeps a safe, retryable binding rather than briefly treating the
+	// thread as an unbound global caller.
 	if err := a.store.RecordAgentThread(conv.ID, agentID, threadID, wantHash, "", ""); err != nil {
 		return threadID, false, fmt.Errorf("record conversation thread binding: %w", err)
 	}
-	result, err := tc.SpawnThread(spawn)
+
+	if _, legacy := legacyThreadPlatforms.Load(a); !legacy {
+		if profiles, ok := app.PlatformAPI().(sdk.ThreadProfileClient); ok {
+			result, ensureErr := profiles.EnsureThread(sdk.ThreadEnsureRequest{
+				ThreadSpawnRequest: desired,
+				ProfileHash:        wantHash,
+			})
+			if ensureErr == nil {
+				if initialEvent != nil && !ensuredThreadEventAcknowledged(result, initialEvent.ID) {
+					err := fmt.Errorf("platform did not acknowledge ensured event %q", initialEvent.ID)
+					_ = a.store.RecordAgentThread(conv.ID, agentID, threadID, wantHash, "", err.Error())
+					return threadID, false, err
+				}
+				spawnedThreads.Store(cacheKey, wantHash)
+				_ = a.store.RecordAgentThread(conv.ID, agentID, threadID, wantHash, wantHash, "")
+				if agentID == conv.LeadAgentID && conv.ThreadID != threadID {
+					if err := a.store.SetConversationThread(conv.ID, threadID); err == nil {
+						conv.ThreadID = threadID
+					}
+				}
+				return threadID, initialEvent != nil, nil
+			}
+			if !threadEnsureUnsupported(ensureErr) {
+				_ = a.store.RecordAgentThread(conv.ID, agentID, threadID, wantHash, "", ensureErr.Error())
+				return threadID, false, ensureErr
+			}
+			legacyThreadPlatforms.Store(a, true)
+		} else {
+			legacyThreadPlatforms.Store(a, true)
+		}
+	}
+
+	// Compatibility path for pre-EnsureThread servers only. Stable event IDs
+	// retain exactly-once delivery semantics, but an existing legacy thread
+	// cannot prove that its profile was reconciled.
+	result, err := tc.SpawnThread(desired)
 	if err != nil {
 		_ = a.store.RecordAgentThread(conv.ID, agentID, threadID, wantHash, "", err.Error())
-		app.Logger().Warn("conversation thread delivery failed — queued for retry",
+		app.Logger().Warn("legacy conversation thread delivery failed — queued for retry",
 			"agent", agentID, "conversation", conv.ID, "err", err)
 		return threadID, false, err
 	}
@@ -195,7 +225,7 @@ func (a *App) ensureConversationThreadForAgent(
 	spawnedThreads.Store(cacheKey, wantHash)
 	appliedHash := ""
 	lastError := "thread profile reconciliation pending platform support"
-	if state == nil || result.Status == "created" || result.Status == "updated" || result.Status == "reconciled" {
+	if result.Status == "created" || result.Status == "updated" || result.Status == "reconciled" {
 		appliedHash = wantHash
 		lastError = ""
 	}

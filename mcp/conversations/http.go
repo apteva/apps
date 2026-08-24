@@ -71,6 +71,22 @@ func requestIdentity(r *http.Request) (int64, string, error) {
 	return userID, projectID, nil
 }
 
+// requestAgentScope parses the optional panel projection. It is only an
+// additional filter: handlers must establish the authenticated user and
+// trusted project first, and store queries intersect this id with explicit
+// participants inside that authorized result set.
+func requestAgentScope(r *http.Request) (int64, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("agent_id"))
+	if raw == "" {
+		return 0, nil
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("agent_id must be a positive integer")
+	}
+	return id, nil
+}
+
 func (a *App) authorizeConversation(r *http.Request, id string) (*Conversation, error) {
 	userID, projectID, err := requestIdentity(r)
 	if err != nil {
@@ -121,12 +137,17 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, identityErr.Error(), http.StatusUnauthorized)
 			return
 		}
+		agentID, scopeErr := requestAgentScope(r)
+		if scopeErr != nil {
+			http.Error(w, scopeErr.Error(), http.StatusBadRequest)
+			return
+		}
 		var conversations []Conversation
 		var err error
 		if r.URL.Query().Get("archived") == "1" {
-			conversations, err = a.store.ListArchivedForUser(projectID, userID, 100)
+			conversations, err = a.store.ListArchivedForUserAndAgent(projectID, userID, agentID, 100)
 		} else {
-			conversations, err = a.store.ListConversationsForUser(projectID, userID, 100)
+			conversations, err = a.store.ListConversationsForUserAndAgent(projectID, userID, agentID, 100)
 		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -752,8 +773,13 @@ func (a *App) handleInbox(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, identityErr.Error(), http.StatusUnauthorized)
 		return
 	}
+	agentID, scopeErr := requestAgentScope(r)
+	if scopeErr != nil {
+		http.Error(w, scopeErr.Error(), http.StatusBadRequest)
+		return
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	items, err := a.store.Inbox(projectID, userID, limit)
+	items, err := a.store.InboxForAgent(projectID, userID, agentID, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -849,7 +875,12 @@ func (a *App) handleUnreadSummary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, identityErr.Error(), http.StatusUnauthorized)
 		return
 	}
-	entries, err := a.store.UnreadSummary(projectID, userID)
+	agentID, scopeErr := requestAgentScope(r)
+	if scopeErr != nil {
+		http.Error(w, scopeErr.Error(), http.StatusBadRequest)
+		return
+	}
+	entries, err := a.store.UnreadSummaryForAgent(projectID, userID, agentID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

@@ -114,7 +114,7 @@ func (*agentAdapter) Deliver(app *sdk.AppCtx, target string, _ *Conversation, ms
 }
 
 // agentInboundAdapter is the user-message side of the same durable ledger.
-// Every retry uses SpawnThread.Events with the same event id; accepted and
+// Every retry uses EnsureThread.Events with the same event id; accepted and
 // duplicate receipts are both success, so a timeout cannot create two turns.
 type agentInboundAdapter struct{ app *App }
 
