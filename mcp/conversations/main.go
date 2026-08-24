@@ -32,7 +32,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.16.0
+version: 0.17.0
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts, status). Inbox items are messages — an
@@ -97,6 +97,15 @@ provides:
       entry: /ui/ConversationsPanel.mjs
 
   ui_components:
+    - name: agent-conversations
+      label: Agent conversations
+      description: Chat with one agent through its durable conversations.
+      entry: /ui/AgentConversationsWidget.mjs
+      slots: [dashboard.build]
+      suggested: true
+      visibility: attached
+      supported_sizes: [full]
+      default_size: full
     - name: inbox-overview
       label: Inbox
       description: Pending approvals, alerts, and reports from agents.

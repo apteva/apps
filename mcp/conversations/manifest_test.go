@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // TestManifestMatchesAptevaYAML — the release mechanics require the
@@ -60,6 +62,26 @@ func TestManifestToolsMatchCode(t *testing.T) {
 			t.Errorf("MCPTools() implements %q but the manifest does not declare it", name)
 		}
 	}
+}
+
+func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	for _, component := range manifest.Provides.UIComponents {
+		if component.Name != "agent-conversations" {
+			continue
+		}
+		if component.Entry != "/ui/AgentConversationsWidget.mjs" ||
+			len(component.Slots) != 1 || component.Slots[0] != sdk.UIComponentSlotDashboardBuild ||
+			component.Visibility != sdk.UIComponentVisibilityAttached ||
+			component.DefaultSize != "full" {
+			t.Fatalf("agent-conversations component=%+v", component)
+		}
+		if _, err := os.Stat("ui/AgentConversationsWidget.mjs"); err != nil {
+			t.Fatalf("widget bundle: %v", err)
+		}
+		return
+	}
+	t.Fatal("agent-conversations component missing")
 }
 
 func TestConversationOwnershipIsTaughtAtEveryModelSurface(t *testing.T) {

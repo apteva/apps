@@ -16,18 +16,21 @@
 // want IDE completions, drop a tsconfig + @types/react under the
 // app you're editing.
 
-import { readdir } from "fs/promises";
+import { readdir, unlink } from "fs/promises";
 import { existsSync } from "fs";
 import { join, dirname, basename } from "path";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const MCP_DIR = join(ROOT, "mcp");
+const appFlag = Bun.argv.indexOf("--app");
+const requestedApp = appFlag >= 0 ? Bun.argv[appFlag + 1] : "";
 
 async function findPanels(): Promise<string[]> {
   const apps = await readdir(MCP_DIR, { withFileTypes: true });
   const out: string[] = [];
   for (const a of apps) {
     if (!a.isDirectory()) continue;
+    if (requestedApp && a.name !== requestedApp) continue;
     const uiDir = join(MCP_DIR, a.name, "ui");
     if (!existsSync(uiDir)) continue;
     const entries = await readdir(uiDir);
@@ -55,43 +58,58 @@ async function main() {
   console.log(`Found ${panels.length} panel source(s):`);
   for (const p of panels) console.log("  ", p.replace(ROOT, ""));
 
-  for (const src of panels) {
-    const outFile = src.replace(/\.tsx$/, ".mjs");
-    const outDir = dirname(outFile);
+  const grouped = new Map<string, string[]>();
+  for (const panel of panels) {
+    const directory = dirname(panel);
+    grouped.set(directory, [...(grouped.get(directory) || []), panel]);
+  }
+
+  const build = async (sources: string[], split: boolean) => {
+    const outDir = dirname(sources[0]);
+    if (split) {
+      for (const file of await readdir(outDir)) {
+        if (file.startsWith("shared-") && (file.endsWith(".mjs") || file.endsWith(".mjs.map"))) {
+          await unlink(join(outDir, file));
+        }
+      }
+    }
     const result = await Bun.build({
-      entrypoints: [src],
+      entrypoints: sources,
       outdir: outDir,
       target: "browser",
       format: "esm",
       minify: true,
       sourcemap: "external",
-      // External both prod and dev jsx-runtime — even though we
-      // pin NODE_ENV=production below, anyone re-running this
-      // script in a dev shell shouldn't accidentally bake a
-      // dev-runtime panel that 404s in the dashboard's importmap.
-      // External React + the ui-kit. Both are served by the dashboard
-      // host at fixed importmap paths (/vendor/react.mjs,
-      // /vendor/ui-kit.mjs). Keeping them external means panels load
-      // cheaply and every panel sees the same React instance + the
-      // same Card / CardHeader / StatusPill primitives.
+      splitting: split,
       external: ["react", "react/jsx-runtime", "react/jsx-dev-runtime", "@apteva/ui-kit"],
-      // Substitute process.env.NODE_ENV so React's package
-      // entrypoint picks the prod jsx-runtime path. Without this
-      // Bun emits `import { jsx } from "react/jsx-dev-runtime"`
-      // which the host importmap doesn't expose.
       define: {
         "process.env.NODE_ENV": '"production"',
       },
-      naming: "[name].mjs",
+      naming: split
+        ? { entry: "[name].mjs", chunk: "shared-[hash].mjs" }
+        : "[name].mjs",
     });
     if (!result.success) {
-      console.error(`✗ ${basename(src)}`);
+      console.error(`✗ ${sources.map(basename).join(", ")}`);
       for (const log of result.logs) console.error("  ", log);
       process.exit(1);
     }
-    const out = result.outputs.find((o) => o.path.endsWith(".mjs"));
-    const size = out ? (out.size / 1024).toFixed(1) + " KB" : "?";
-    console.log(`✓ ${src.replace(ROOT, "")} → ${basename(outFile)} (${size})`);
+    for (const src of sources) {
+      const outputName = basename(src).replace(/\.tsx$/, ".mjs");
+      const out = result.outputs.find((item) => basename(item.path) === outputName);
+      const size = out ? (out.size / 1024).toFixed(1) + " KB" : "?";
+      console.log(`✓ ${src.replace(ROOT, "")} → ${outputName} (${size})`);
+    }
+  };
+
+  for (const [uiDir, sources] of grouped) {
+    if (existsSync(join(uiDir, "split-bundle.json"))) {
+      await build(sources, true);
+      continue;
+    }
+    for (const src of sources) {
+      await build([src], false);
+    }
   }
 
   // Verification — every named import in every built panel must be

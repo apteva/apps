@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import createDOMPurify from "dompurify";
 import { marked } from "marked";
+import ConversationChatView from "./ConversationChatView";
 
 const API = "/api/apps/conversations";
 
@@ -62,14 +63,14 @@ function closeOpenMarkdown(s: string): string {
 
 // ─── types (mirror the app's wire shapes) ────────────────────────────
 
-interface NativePanelProps {
+export interface NativePanelProps {
   appName: string;
   installId: number;
   projectId: string;
   instanceId?: number;
 }
 
-interface Conversation {
+export interface Conversation {
   id: string;
   project_id: string;
   lead_agent_id: number;
@@ -89,7 +90,7 @@ interface CardComponent {
   props: Record<string, unknown>;
 }
 
-interface Message {
+export interface Message {
   id: number;
   conversation_id: string;
   role: "user" | "agent" | "system";
@@ -218,12 +219,12 @@ function scopedPath(path: string, projectId: string): string {
   return `${path}${path.includes("?") ? "&" : "?"}project_id=${encodeURIComponent(projectId)}`;
 }
 
-function agentScopedPath(path: string, instanceId?: number): string {
+export function agentScopedPath(path: string, instanceId?: number): string {
   if (instanceId === undefined) return path;
   return `${path}${path.includes("?") ? "&" : "?"}agent_id=${encodeURIComponent(instanceId)}`;
 }
 
-async function apiGet<T>(path: string, projectId: string): Promise<T> {
+export async function apiGet<T>(path: string, projectId: string): Promise<T> {
   const res = await fetch(`${API}${scopedPath(path, projectId)}`, { credentials: "same-origin" });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -240,7 +241,7 @@ async function apiSend<T>(method: string, path: string, body: unknown, projectId
   return res.json();
 }
 
-const apiPost = <T,>(path: string, body: unknown, projectId: string) => apiSend<T>("POST", path, body, projectId);
+export const apiPost = <T,>(path: string, body: unknown, projectId: string) => apiSend<T>("POST", path, body, projectId);
 const apiPatch = <T,>(path: string, body: unknown, projectId: string) => apiSend<T>("PATCH", path, body, projectId);
 const apiDelete = <T,>(path: string, projectId: string) => apiSend<T>("DELETE", path, undefined, projectId);
 
@@ -1420,7 +1421,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
   return { messages, bubble, connected, mergeMessages };
 }
 
-function ChatColumn({
+export function ConversationChat({
   conversation,
   archived,
   onOpenDetails,
@@ -1429,7 +1430,7 @@ function ChatColumn({
 }: {
   conversation: Conversation;
   archived: boolean;
-  onOpenDetails: () => void;
+  onOpenDetails?: () => void;
   onActed: () => void;
   onRemoved: () => void;
 }) {
@@ -1514,168 +1515,42 @@ function ChatColumn({
   };
 
   return (
-    <section className="min-h-0 flex-1 flex flex-col">
-      <div className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <h2 className="text-sm font-semibold text-text truncate">{conversation.title}</h2>
-            {conversation.audience === "public" && <PublicTag />}
-          </div>
-          <p className="text-xs text-text-muted truncate">
-            {conversation.lead_agent_name || `agent ${conversation.lead_agent_id}`}
-            {conversation.origin !== "web" ? ` · via ${conversation.origin}` : ""}
-          </p>
-        </div>
-        <span
-          className={`ml-auto shrink-0 w-2 h-2 rounded-full ${connected ? "bg-success" : "bg-border"}`}
-          title={connected ? "Live" : "Reconnecting — the 5s poll keeps history current"}
-        />
-        {!archived && (
-          <button
-            type="button"
-            onClick={onOpenDetails}
-            className="shrink-0 inline-flex h-8 w-8 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text"
-            aria-label="Conversation details"
-            title="Details"
-          >
-            <Glyph d={GLYPH_MORE} size={16} />
-          </button>
-        )}
-      </div>
-
-      <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-3">
-        {messages.length === 0 && !bubble ? (
-          <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
-            <span className="text-text-dim">
-              <Glyph d={GLYPH_CHAT} size={32} />
-            </span>
-            <p className="text-sm">No messages yet — say something.</p>
-          </div>
-        ) : (
-          <>
-            {messages.map((m) => (
-              <MessageRow key={m.id} message={m} onAction={onAction} />
-            ))}
-            {bubble &&
-              (bubble.text ? (
-                <StreamingBubble text={bubble.text} />
-              ) : (
-                <ThinkingMessagePlaceholder />
-              ))}
-          </>
-        )}
-        <div ref={bottomRef} />
-      </div>
-
-      {archived ? (
-        <footer className="shrink-0 border-t border-border p-3 flex items-center gap-2">
-          <span className="text-xs text-text-muted">Archived conversation — read only.</span>
-          <span className="ml-auto flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setArchived(false)}
-              disabled={archiveBusy}
-              className="inline-flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
-            >
-              <Glyph d={GLYPH_RESTORE} size={13} />
-              Unarchive
-            </button>
-            {confirmDelete ? (
-              <>
-                <button
-                  type="button"
-                  onClick={deleteConversation}
-                  disabled={archiveBusy}
-                  className="rounded bg-error px-2.5 py-1.5 text-xs font-semibold text-bg disabled:opacity-40"
-                >
-                  Confirm delete
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setConfirmDelete(false)}
-                  disabled={archiveBusy}
-                  className="rounded border border-border px-2.5 py-1.5 text-xs text-text-muted hover:text-text"
-                >
-                  Cancel
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(true)}
-                disabled={archiveBusy}
-                className="inline-flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-error hover:bg-bg-input disabled:opacity-40"
-              >
-                <Glyph d={GLYPH_TRASH} size={13} />
-                Delete
-              </button>
-            )}
-          </span>
-        </footer>
-      ) : (
-        // The composer is the dashboard ChatPanel's, verbatim classes
-        // included — those classes are already in the dashboard's
-        // compiled CSS, which is the stylesheet panels render under.
-        // Omitted relative to the dashboard: image attachments and
-        // voice (no app backend for either yet).
-        <footer className="chat-composer-safe shrink-0 px-2 pt-2 pb-2 sm:px-5">
-          {sendError && <p className="mx-1 mb-1 text-xs text-error">{sendError}</p>}
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              send();
-            }}
-            className="flex min-h-[54px] items-center gap-1.5 rounded-lg border border-border bg-bg-card/95 px-2 py-1.5 shadow-lg backdrop-blur-sm transition-colors focus-within:border-accent/60 sm:min-h-[58px] sm:gap-3 sm:px-4 sm:py-2"
-          >
-            <textarea
-              ref={inputRef}
-              value={draft}
-              onChange={(e) => {
-                setDraft(e.target.value);
-                const el = e.target as HTMLTextAreaElement;
-                el.style.height = "auto";
-                el.style.height = Math.min(el.scrollHeight, 144) + "px";
-              }}
-              onKeyDown={(e) => {
-                // Enter sends, Shift+Enter newline — dashboard convention.
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              rows={1}
-              style={{ lineHeight: "20px", minHeight: "36px" }}
-              placeholder={connected ? "Message the agent…" : "Reconnecting — messages still send"}
-              className="block min-w-0 flex-1 resize-none bg-transparent py-2 text-base text-text placeholder:text-text-dim focus:outline-none sm:text-sm"
-              autoFocus={
-                typeof window !== "undefined" &&
-                window.matchMedia("(hover: hover) and (pointer: fine)").matches
-              }
-            />
-            <button
-              type="submit"
-              disabled={sending || !draft.trim()}
-              className="touch-target flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-accent text-bg transition-all disabled:cursor-not-allowed disabled:opacity-20 enabled:hover:bg-accent-hover enabled:active:scale-95 sm:h-9 sm:w-9"
-              aria-label="Send"
-              title="Send (Enter)"
-            >
-              <svg
-                viewBox="0 0 20 20"
-                className="w-4 h-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M10 17V3" />
-                <path d="M5 8l5-5 5 5" />
-              </svg>
-            </button>
-          </form>
-        </footer>
-      )}
-    </section>
+    <ConversationChatView
+      title={conversation.title}
+      subtitle={`${conversation.lead_agent_name || `agent ${conversation.lead_agent_id}`}${conversation.origin !== "web" ? ` · via ${conversation.origin}` : ""}`}
+      publicAudience={conversation.audience === "public"}
+      connected={connected}
+      archived={archived}
+      messageNodes={messages.map((message) => (
+        <MessageRow key={message.id} message={message} onAction={onAction} />
+      ))}
+      hasMessages={messages.length > 0}
+      streamNode={bubble ? (bubble.text ? <StreamingBubble text={bubble.text} /> : <ThinkingMessagePlaceholder />) : null}
+      bottomRef={bottomRef}
+      inputRef={inputRef}
+      draft={draft}
+      sending={sending}
+      sendError={sendError}
+      archiveBusy={archiveBusy}
+      confirmDelete={confirmDelete}
+      onDraftChange={(value, element) => {
+        setDraft(value);
+        element.style.height = "auto";
+        element.style.height = Math.min(element.scrollHeight, 144) + "px";
+      }}
+      onComposerKeyDown={(event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          send();
+        }
+      }}
+      onSend={send}
+      onOpenDetails={onOpenDetails}
+      onUnarchive={() => setArchived(false)}
+      onRequestDelete={() => setConfirmDelete(true)}
+      onCancelDelete={() => setConfirmDelete(false)}
+      onDelete={deleteConversation}
+    />
   );
 }
 
@@ -2585,7 +2460,7 @@ export default function ConversationsPanel({ projectId, instanceId }: NativePane
             </div>
           </aside>
           {selected ? (
-            <ChatColumn
+            <ConversationChat
               conversation={selected}
               archived={showArchived}
               onOpenDetails={openDetails}
