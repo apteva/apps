@@ -1,4 +1,4 @@
-# Auth (v0.9.3)
+# Auth (v0.9.4)
 
 Identity and authorization layer for Apteva-deployed SaaS. One project-scoped
 install owns multiple organizations; each has isolated users, clients, signing
@@ -58,6 +58,21 @@ to authenticate normally.
 The generic policy exchange requires Apteva Server `0.14.1` or newer. Auth also
 verifies the server echoed the requested OAuth client policy, so a legacy
 server response is discarded rather than returned to the browser.
+
+## Platform-managed browser origins
+
+`clients.allowed_origins` remains the source of truth for browser access. Auth
+registers every active OAuth client with Apteva's platform-managed CORS service
+under `oauth-client-<client_id>`. Client creation registers the complete set,
+`auth_clients_update` replaces the resulting complete set after additions or
+removals, disabling a client deletes its registration, and mount reconciles
+existing clients while deleting stale Auth-owned keys.
+
+Registration errors are reported as `browser_origins_synced: false` with
+`browser_origins_error` after the database mutation succeeds. This preserves
+one-time confidential client secrets and makes reconciliation retryable from
+the database. Platforms and test doubles without the optional SDK capability
+continue unchanged.
 
 ## Pipeline of an Apteva-deployed SaaS
 
