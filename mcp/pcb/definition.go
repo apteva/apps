@@ -115,6 +115,32 @@ func normalizeDefinition(raw []byte, fallbackName string) ([]byte, *Definition, 
 	if def.NetClasses == nil {
 		def.NetClasses = []NetClass{}
 	}
+	if def.Wiring != nil {
+		if def.Wiring.Schema == "" {
+			def.Wiring.Schema = wiringSchema
+		}
+		if def.Wiring.Canvas.Width == 0 {
+			def.Wiring.Canvas.Width = 1200
+		}
+		if def.Wiring.Canvas.Height == 0 {
+			def.Wiring.Canvas.Height = 720
+		}
+		if def.Wiring.Canvas.Grid == 0 {
+			def.Wiring.Canvas.Grid = 10
+		}
+		if def.Wiring.Parts == nil {
+			def.Wiring.Parts = []WiringPart{}
+		}
+		if def.Wiring.Wires == nil {
+			def.Wiring.Wires = []WiringWire{}
+		}
+		if def.Wiring.Annotations == nil {
+			def.Wiring.Annotations = []WiringAnnotation{}
+		}
+		if def.Wiring.Steps == nil {
+			def.Wiring.Steps = []WiringStep{}
+		}
+	}
 	if err := structuralLimits(&def); err != nil {
 		return nil, nil, "", err
 	}
@@ -147,6 +173,9 @@ func structuralLimits(def *Definition) error {
 	// Keep its accepted graph bounded until the spatial-indexed validator lands.
 	if len(def.Board.Layers) > 64 || len(def.Components) > 10_000 || len(def.Nets) > 20_000 || len(def.Traces) > 2_000 || len(def.Vias) > 10_000 || len(def.Zones) > 2_000 || len(def.Keepouts) > 2_000 || len(def.DifferentialPairs) > 1_000 || len(def.NetClasses) > 1_000 {
 		return errors.New("definition exceeds native v1 object limits")
+	}
+	if def.Wiring != nil && (len(def.Wiring.Parts) > 1_000 || len(def.Wiring.Wires) > 5_000 || len(def.Wiring.Steps) > 1_000) {
+		return errors.New("wiring definition exceeds native v1 object limits")
 	}
 	for _, t := range def.Traces {
 		if len(t.Points) > 4_096 {
@@ -189,6 +218,7 @@ func semanticDiff(fromID, toID int64, a, b *Definition, fromHash, toHash string)
 		DifferentialPairs: diffByID(a.DifferentialPairs, b.DifferentialPairs, func(v DifferentialPair) string { return v.ID }),
 		NetClasses:        diffByID(a.NetClasses, b.NetClasses, func(v NetClass) string { return v.ID }),
 		SimulationChanged: !equalJSON(a.Simulation, b.Simulation),
+		WiringChanged:     !equalJSON(a.Wiring, b.Wiring),
 	}
 }
 

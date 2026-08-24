@@ -8,7 +8,7 @@ import (
 func TestManifestMatchesRuntimeSurface(t *testing.T) {
 	app := &App{}
 	m := app.Manifest()
-	if m.Name != "pcb" || m.Version != "0.4.0" {
+	if m.Name != "pcb" || m.Version != "0.5.0" {
 		t.Fatalf("unexpected manifest identity: %s %s", m.Name, m.Version)
 	}
 	declared := map[string]bool{}

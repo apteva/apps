@@ -59,7 +59,7 @@ func runFirmwareLab(def *Definition, options FirmwareOptions) (*FirmwareRunResul
 		options.Language = "arduino"
 	}
 	if strings.ToLower(options.Language) != "arduino" && strings.ToLower(options.Language) != "cpp" {
-		return nil, fmt.Errorf("v0.4 firmware lab supports Arduino-compatible C++")
+		return nil, fmt.Errorf("v0.5 firmware lab supports Arduino-compatible C++")
 	}
 	if options.Board == "" {
 		options.Board = inferFirmwareBoard(def)
@@ -74,7 +74,7 @@ func runFirmwareLab(def *Definition, options FirmwareOptions) (*FirmwareRunResul
 	for key, value := range options.SensorValues {
 		values[strings.ToLower(key)] = value
 	}
-	result := &FirmwareRunResult{Schema: firmwareSchema, Engine: engineVersion, Status: "passed", Language: "arduino", Board: options.Board, Runtime: "apteva-arduino-behavioral/0.4", Iterations: options.Iterations, SerialOutput: []string{}, PinModes: map[string]string{}, PinStates: map[string]string{}, I2CTransactions: []I2CTransaction{}, Variables: map[string]float64{}, Warnings: []string{}}
+	result := &FirmwareRunResult{Schema: firmwareSchema, Engine: engineVersion, Status: "passed", Language: "arduino", Board: options.Board, Runtime: "apteva-arduino-behavioral/0.5", Iterations: options.Iterations, SerialOutput: []string{}, PinModes: map[string]string{}, PinStates: map[string]string{}, I2CTransactions: []I2CTransaction{}, Variables: map[string]float64{}, Warnings: []string{}}
 	_, _, _, devices := compileSimulationModel(def, nil)
 	result.VirtualDevices = devices
 	setup, setupOK := extractFirmwareFunction(options.Source, "setup")

@@ -67,6 +67,6 @@ func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{{Pattern: "/api/designs", Handler: a.handleDesigns}, {Pattern: "/api/designs/", Handler: a.handleDesign}, {Pattern: "/api/revisions/", Handler: a.handleRevision}, {Pattern: "/api/artifacts/", Handler: a.handleArtifact}, {Pattern: "/api/examples", Handler: a.handleExamples}, {Pattern: "/api/providers", Handler: a.handleProviders}}
+	return []sdk.Route{{Pattern: "/api/designs", Handler: a.handleDesigns}, {Pattern: "/api/designs/", Handler: a.handleDesign}, {Pattern: "/api/revisions/", Handler: a.handleRevision}, {Pattern: "/api/artifacts/", Handler: a.handleArtifact}, {Pattern: "/api/examples", Handler: a.handleExamples}, {Pattern: "/api/wiring/library", Handler: a.handleWiringLibrary}, {Pattern: "/api/wiring/examples/arduino-led", Handler: a.handleWiringExample}, {Pattern: "/api/providers", Handler: a.handleProviders}}
 }
 func main() { sdk.Run(&App{}) }

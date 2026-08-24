@@ -38,6 +38,11 @@ type FirmwareRun struct {
 	Artifact *Artifact          `json:"artifact"`
 }
 
+type WiringSimulationRun struct {
+	Result   *WiringSimulation `json:"result"`
+	Artifact *Artifact         `json:"artifact"`
+}
+
 type FabricationVerificationRun struct {
 	Result   *FabricationVerification `json:"result"`
 	Artifact *Artifact                `json:"artifact"`
@@ -88,6 +93,74 @@ func (s *Service) BOM(designID, revisionID int64) (*Artifact, error) {
 		return nil, err
 	}
 	return s.persistArtifact(design, revision, "bom", "csv", "text/csv", renderBOM(def), map[string]any{"engine": engineVersion, "components": len(def.Components)})
+}
+
+func (s *Service) WiringValidate(designID, revisionID int64) (*WiringValidation, error) {
+	_, _, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	if def.Wiring == nil {
+		return nil, errors.New("revision has no wiring workspace")
+	}
+	report := validateWiring(def.Wiring)
+	return &report, nil
+}
+
+func (s *Service) WiringExport(designID, revisionID int64, format string) (*Artifact, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	if def.Wiring == nil {
+		return nil, errors.New("revision has no wiring workspace")
+	}
+	report := validateWiring(def.Wiring)
+	if report.Status == "failed" {
+		return nil, fmt.Errorf("wiring failed validation with %d errors; export refused", report.Errors)
+	}
+	format = strings.ToLower(strings.TrimSpace(format))
+	kind := "wiring"
+	contentType := ""
+	var body []byte
+	switch format {
+	case "svg":
+		body, contentType = renderWiringSVG(def, nil), "image/svg+xml"
+	case "png":
+		body, contentType = renderWiringPNG(def), "image/png"
+	case "tutorial-json", "json":
+		format, body, contentType = "json", wiringTutorialJSON(def), "application/json"
+	case "tutorial-zip", "zip":
+		format, contentType = "zip", "application/zip"
+		body, err = deterministicZip(wiringTutorialFiles(def))
+	default:
+		return nil, fmt.Errorf("unsupported wiring export format %q", format)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.persistArtifact(design, revision, kind, format, contentType, body, map[string]any{"engine": engineVersion, "schema": wiringSchema, "validation_status": report.Status})
+}
+
+func (s *Service) WiringSimulate(designID, revisionID int64, source string, iterations int) (*WiringSimulationRun, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	result, err := simulateWiring(def, source, iterations)
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.MarshalIndent(result, "", "  ")
+	body = append(body, '\n')
+	artifact, err := s.persistArtifact(design, revision, "wiring-simulation", "json", "application/json", body, map[string]any{"engine": engineVersion, "schema": wiringSimulationSchema, "status": result.Status})
+	if err != nil {
+		return &WiringSimulationRun{Result: result, Artifact: artifact}, err
+	}
+	if s.ctx != nil {
+		s.ctx.Emit("pcb.wiring.simulation.completed", map[string]any{"design_id": design.ID, "revision_id": revision.ID, "artifact_id": artifact.ID, "status": result.Status})
+	}
+	return &WiringSimulationRun{Result: result, Artifact: artifact}, nil
 }
 
 func (s *Service) RouteSuggest(designID, revisionID int64, options RouteOptions) (*RoutePlan, error) {
@@ -292,6 +365,11 @@ func (s *Service) Release(_ context.Context, designID, revisionID int64, note st
 	files["verification/fabrication.json"] = append(verificationBody, '\n')
 	files["outputs/board.svg"] = renderSVG(def)
 	files["outputs/bom.csv"] = renderBOM(def)
+	if def.Wiring != nil {
+		files["wiring/illustration.svg"] = renderWiringSVG(def, nil)
+		files["wiring/illustration.png"] = renderWiringPNG(def)
+		files["wiring/tutorial.json"] = wiringTutorialJSON(def)
+	}
 	for name, body := range manufacturing {
 		files["manufacturing/"+name] = body
 	}
@@ -330,7 +408,7 @@ func (s *Service) persistArtifact(design *Design, revision *Revision, kind, form
 	// probe set, or different sketch can never overwrite an earlier local
 	// result. Manufacturing and release names remain stable for downstream
 	// handoff conventions.
-	if kind == "simulation" || kind == "firmware" {
+	if kind == "simulation" || kind == "firmware" || kind == "wiring-simulation" {
 		digest := hash
 		if len(digest) > 12 {
 			digest = digest[:12]
