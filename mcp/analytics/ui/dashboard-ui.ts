@@ -28,6 +28,51 @@ export function selectDashboardID(rows: DashboardChoice[], preferredID: number, 
 		|| 0;
 }
 
+export interface ObjectiveQueryLike {
+	aggregation?: string;
+	app?: string;
+	topic?: string;
+	source?: string;
+	value?: string;
+	by?: string;
+	where?: Record<string, unknown>;
+}
+
+export function metricAggregation(config: Record<string, unknown>): string {
+	const explicit = typeof config.aggregation === "string" ? config.aggregation.toLowerCase().trim() : "";
+	if (explicit === "avg") return "average";
+	if (explicit) return explicit;
+	if (typeof config.by === "string" && config.by && !(typeof config.value === "string" && config.value)) return "distinct";
+	if (typeof config.value === "string" && config.value) return "sum";
+	return "count";
+}
+
+export function objectiveTargetIDs(config: Record<string, unknown>): number[] {
+	if (!Array.isArray(config.objective_target_ids)) return [];
+	return [...new Set(config.objective_target_ids.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
+}
+
+function stableRecord(value: unknown): string {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return "{}";
+	return JSON.stringify(Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))));
+}
+
+export function objectiveMatchesMetric(config: Record<string, unknown>, query: ObjectiveQueryLike): boolean {
+	const aggregation = metricAggregation(config);
+	const targetAggregation = query.aggregation === "avg" ? "average" : (query.aggregation || "count");
+	if (aggregation !== targetAggregation) return false;
+	for (const key of ["app", "topic", "source"] as const) {
+		if (String(config[key] ?? "") !== String(query[key] ?? "")) return false;
+	}
+	if (["sum", "average", "min", "max", "latest", "change"].includes(aggregation)) {
+		if (String(config.value ?? "") !== String(query.value ?? "")) return false;
+	}
+	if (aggregation === "distinct") {
+		if (String(config.by ?? config.value ?? "") !== String(query.by ?? "")) return false;
+	}
+	return stableRecord(config.where) === stableRecord(query.where);
+}
+
 export function formatMetric(value: number, config: Record<string, unknown>): string {
 	const raw = Number.isFinite(value) ? value : 0;
 	const configuredScale = Number(config.scale ?? 1);

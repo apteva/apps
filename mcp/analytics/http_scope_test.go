@@ -153,6 +153,58 @@ func TestDashboardQueryBatchesWidgetsAndPreservesIndividualErrors(t *testing.T) 
 	}
 }
 
+func TestDashboardQueryIncludesLinkedGoalProgressWithoutWritingHistory(t *testing.T) {
+	app := withHTTPTestContext(t)
+	db := globalCtx.AppDB()
+	insertObjectiveEvent(t, db, "p1", 2_000, `{"amount_usd":10}`)
+	insertObjectiveEvent(t, db, "p1", 3_000, `{"amount_usd":14}`)
+	objective, err := createObjective(db, "p1", objectiveFixture("MRR", "latest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID := objective.Targets[0].ID
+	dashboard, err := createDashboard(db, "p1", "Finance", "", nil, []DashboardWidget{{
+		Type: "stat", Title: "MRR", Config: map[string]any{
+			"app": "billing", "topic": "payment_received", "window": "all", "aggregation": "latest",
+			"value": "props.amount_usd", "objective_target_ids": []int64{targetID},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	target := "/query-dashboard?project_id=p1&include_goals=true&dashboard_id=" + itoa64ForTest(dashboard.ID) + "&filters=%7B%7D"
+	app.handleDashboardQuery(rec, scopedRequest(http.MethodGet, target, "p1", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dashboard query status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Widgets []dashboardWidgetResult `json:"widgets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Widgets) != 1 {
+		t.Fatalf("widgets=%#v", payload.Widgets)
+	}
+	goals, ok := payload.Widgets[0].Data["goals"].([]any)
+	if !ok || len(goals) != 1 {
+		t.Fatalf("goal payload=%#v", payload.Widgets[0].Data["goals"])
+	}
+	goal, ok := goals[0].(map[string]any)
+	if !ok || goal["objective_name"] != "MRR" || goal["actual_value"] != float64(14) {
+		t.Fatalf("goal=%#v", goals[0])
+	}
+	var cached int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM objective_progress WHERE target_id=?`, targetID).Scan(&cached); err != nil {
+		t.Fatal(err)
+	}
+	if cached != 0 {
+		t.Fatalf("query-dashboard wrote %d objective progress row(s)", cached)
+	}
+}
+
 func itoa64ForTest(v int64) string {
 	return strconv.FormatInt(v, 10)
 }

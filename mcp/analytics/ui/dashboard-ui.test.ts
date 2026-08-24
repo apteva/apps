@@ -1,9 +1,53 @@
 import { describe, expect, test } from "bun:test";
-import { batchResultsByID, formatMetric, formatObjectivePeriod, formatObjectiveValue, isCurrentRequest, objectiveMonthBounds, objectiveProgressWidth, partitionDashboardWidgets, resolveMetricConfig, resolvedWindow, scopedAppURL } from "./dashboard-ui";
+import {
+	batchResultsByID,
+	formatMetric,
+	formatObjectivePeriod,
+	formatObjectiveValue,
+	isCurrentRequest,
+	metricAggregation,
+	objectiveMatchesMetric,
+	objectiveMonthBounds,
+	objectiveProgressWidth,
+	objectiveTargetIDs,
+	partitionDashboardWidgets,
+	resolveMetricConfig,
+	resolvedWindow,
+	scopedAppURL,
+} from "./dashboard-ui";
 
 describe("dashboard UI helpers", () => {
 	test("formats normalized Patreon money with an explicit USD unit", () => {
 		expect(formatMetric(1715.62, { format: "currency", currency: "USD" })).toBe("$1,715.62");
+	});
+
+	test("normalizes generic metric aggregations for goal matching", () => {
+		expect(metricAggregation({ value: "props.mrr" })).toBe("sum");
+		expect(metricAggregation({ by: "props.member_id" })).toBe("distinct");
+		expect(metricAggregation({ aggregation: "avg", value: "props.mrr" })).toBe("average");
+	});
+
+	test("matches goals to equivalent metrics regardless of where-key order", () => {
+		const metric = {
+			aggregation: "latest",
+			app: "billing",
+			topic: "subscription_snapshot",
+			value: "props.mrr",
+			where: { "props.plan": "pro", "props.region": "eu" },
+		};
+		expect(objectiveMatchesMetric(metric, {
+			aggregation: "latest",
+			app: "billing",
+			topic: "subscription_snapshot",
+			value: "props.mrr",
+			where: { "props.region": "eu", "props.plan": "pro" },
+		})).toBe(true);
+		expect(objectiveMatchesMetric(metric, { aggregation: "sum", app: "billing", topic: "subscription_snapshot", value: "props.mrr" })).toBe(false);
+		expect(objectiveMatchesMetric(metric, { aggregation: "latest", app: "billing", topic: "other", value: "props.mrr" })).toBe(false);
+	});
+
+	test("accepts only unique positive integer goal target IDs", () => {
+		expect(objectiveTargetIDs({ objective_target_ids: [17, "17", 0, -4, 9.5, "bad", 23] })).toEqual([17, 23]);
 	});
 
 	test("formats generic scaled, compact, decimal, and unit metrics", () => {

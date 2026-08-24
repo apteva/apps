@@ -19,7 +19,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Archive, Plus, RefreshCw } from "lucide-react";
-import { batchResultsByID, formatMetric, formatObjectivePeriod, formatObjectiveValue, isCurrentRequest, objectiveMonthBounds, objectiveProgressWidth, partitionDashboardWidgets, resolveMetricConfig, resolvedWindow, scopedAppURL } from "./dashboard-ui";
+import { batchResultsByID, formatMetric, formatObjectivePeriod, formatObjectiveValue, isCurrentRequest, objectiveMatchesMetric, objectiveMonthBounds, objectiveProgressWidth, objectiveTargetIDs, partitionDashboardWidgets, resolveMetricConfig, resolvedWindow, scopedAppURL } from "./dashboard-ui";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps are independently
@@ -224,7 +224,7 @@ interface EventViolation {
 }
 
 interface ObjectiveMetricQuery {
-  aggregation: "count" | "sum" | "distinct";
+  aggregation: "count" | "distinct" | "sum" | "average" | "min" | "max" | "latest" | "change";
   app?: string;
   topic?: string;
   source?: "track" | "auto";
@@ -258,6 +258,16 @@ interface ObjectiveTarget {
   timezone: string;
   query: ObjectiveMetricQuery;
   last_progress?: TargetProgress;
+}
+
+interface DashboardGoalProgress extends TargetProgress {
+  objective_name: string;
+  objective_status: string;
+}
+
+interface ObjectiveTargetChoice extends ObjectiveTarget {
+  objective_name: string;
+  objective_status: string;
 }
 
 interface Objective {
@@ -512,6 +522,8 @@ function currentMonth(): string {
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
+const NUMERIC_OBJECTIVE_AGGREGATIONS: ObjectiveMetricQuery["aggregation"][] = ["sum", "average", "min", "max", "latest", "change"];
+
 function ObjectivesTab({ projectId }: { projectId: string }) {
   const [objectives, setObjectives] = useState<Objective[]>([]);
   const [dims, setDims] = useState<Dimensions>({ apps: [], topics: [] });
@@ -591,7 +603,7 @@ function ObjectivesTab({ projectId }: { projectId: string }) {
     const query: ObjectiveMetricQuery = { aggregation };
     if (app.trim()) query.app = app.trim();
     if (topic.trim()) query.topic = topic.trim();
-    if (aggregation === "sum") query.value = value.trim();
+    if (NUMERIC_OBJECTIVE_AGGREGATIONS.includes(aggregation)) query.value = value.trim();
     if (aggregation === "distinct") query.by = by.trim();
     if (whereKey.trim() && whereValue.trim()) query.where = { [whereKey.trim()]: whereValue.trim() };
     setBusy(true);
@@ -606,7 +618,7 @@ function ObjectivesTab({ projectId }: { projectId: string }) {
           status: "active",
           targets: [{
             name: targetName.trim(),
-            metric_key: aggregation === "sum" ? "custom_sum" : aggregation === "distinct" ? "custom_distinct" : "custom_count",
+            metric_key: aggregation === "distinct" ? "custom_distinct" : aggregation === "count" ? "custom_count" : `custom_${aggregation}`,
             target_value: numericTarget,
             unit,
             currency: unit === "money" ? currency.trim().toUpperCase() : "",
@@ -684,10 +696,10 @@ function ObjectivesTab({ projectId }: { projectId: string }) {
             <label className={labelCls}>Objective name<input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></label>
             <label className={labelCls}>Target name<input className={inputCls} value={targetName} onChange={(e) => setTargetName(e.target.value)} /></label>
             <label className={labelCls}>Month<input type="month" className={inputCls} value={month} onChange={(e) => setMonth(e.target.value)} /></label>
-            <label className={labelCls}>Aggregation<select className={inputCls} value={aggregation} onChange={(e) => setAggregation(e.target.value as ObjectiveMetricQuery["aggregation"])}><option value="count">Count</option><option value="sum">Sum</option><option value="distinct">Distinct</option></select></label>
+            <label className={labelCls}>Aggregation<select className={inputCls} value={aggregation} onChange={(e) => setAggregation(e.target.value as ObjectiveMetricQuery["aggregation"])}><option value="count">Count</option><option value="distinct">Distinct</option><option value="sum">Sum</option><option value="average">Average</option><option value="min">Minimum</option><option value="max">Maximum</option><option value="latest">Latest</option><option value="change">Change</option></select></label>
             <label className={labelCls}>App<input list="objective-apps" className={inputCls} value={app} onChange={(e) => setApp(e.target.value)} /><datalist id="objective-apps">{dims.apps.map((v) => <option key={v} value={v} />)}</datalist></label>
             <label className={labelCls}>Event topic<input list="objective-topics" className={inputCls} value={topic} onChange={(e) => setTopic(e.target.value)} /><datalist id="objective-topics">{dims.topics.map((v) => <option key={v} value={v} />)}</datalist></label>
-            {aggregation === "sum" && <label className={labelCls}>Value field<input className={inputCls} value={value} onChange={(e) => setValue(e.target.value)} /></label>}
+            {NUMERIC_OBJECTIVE_AGGREGATIONS.includes(aggregation) && <label className={labelCls}>Value field<input className={inputCls} value={value} onChange={(e) => setValue(e.target.value)} /></label>}
             {aggregation === "distinct" && <label className={labelCls}>Distinct field<input className={inputCls} value={by} onChange={(e) => setBy(e.target.value)} /></label>}
             <label className={labelCls}>Target value<input type="number" step="any" className={inputCls} value={targetValue} onChange={(e) => setTargetValue(e.target.value)} /></label>
             <label className={labelCls}>Direction<select className={inputCls} value={direction} onChange={(e) => setDirection(e.target.value as ObjectiveTarget["direction"])}><option value="at_least">At least</option><option value="at_most">At most</option></select></label>
@@ -1174,7 +1186,53 @@ function widgetPreset(type: DashboardWidget["type"], position: number): Partial<
   }
 }
 
-function WidgetView({ widget, data, filters }: { widget: DashboardWidget; data: any; filters: Record<string, string> }) {
+function GoalProgressRows({ goals, error, compact = false }: { goals?: DashboardGoalProgress[]; error?: string; compact?: boolean }) {
+  if (error) return <div className="text-error text-xs" role="alert">{error}</div>;
+  if (!goals?.length) return null;
+  return <div className="flex flex-col gap-2 border-t border-border pt-2">
+    {goals.slice(0, compact ? 1 : 10).map((goal) => {
+      const progress = objectiveProgressWidth(goal.progress_percent);
+      const actual = goal.actual_value == null ? "—" : formatObjectiveValue(goal.actual_value, goal.unit, goal.currency);
+      const target = formatObjectiveValue(goal.target_value, goal.unit, goal.currency);
+      return <div key={goal.target_id} className="min-w-0">
+        <div className="flex items-center gap-2 text-xs">
+          <span className="truncate text-text-muted" title={`${goal.objective_name}: ${goal.name}`}>{goal.objective_name}: {goal.name}</span>
+          <span className="ml-auto shrink-0 tabular-nums text-text">{actual} / {target}</span>
+        </div>
+        <div className="mt-1 h-1.5 overflow-hidden rounded bg-bg-input" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
+          <div className={`h-full ${goal.status === "error" ? "bg-error" : goal.achieved ? "bg-success" : "bg-accent"}`} style={{ width: `${progress}%` }} />
+        </div>
+        {!compact && <div className="mt-1 flex items-center justify-between text-[10px] text-text-dim">
+          <span>{formatObjectivePeriod(goal.period_start, goal.period_end)}</span>
+          <span>{goal.error || goal.period_state}</span>
+        </div>}
+      </div>;
+    })}
+  </div>;
+}
+
+function GoalPicker({ widget, targets, onChange }: { widget: DashboardWidget; targets: ObjectiveTargetChoice[]; onChange: (ids: number[]) => void }) {
+  const selected = objectiveTargetIDs(widget.config);
+  const ordered = [...targets].sort((a, b) => Number(objectiveMatchesMetric(widget.config, b.query)) - Number(objectiveMatchesMetric(widget.config, a.query)) || a.objective_name.localeCompare(b.objective_name) || a.name.localeCompare(b.name));
+  return <details className="relative">
+    <summary className="cursor-pointer select-none text-xs text-text-dim hover:text-text">Goals{selected.length ? ` (${selected.length})` : ""}</summary>
+    <div className="absolute right-0 z-20 mt-1 max-h-64 w-72 overflow-auto rounded border border-border bg-bg-card p-2 shadow-lg">
+      {!ordered.length ? <div className="p-2 text-xs text-text-dim">Create an objective first.</div> : ordered.map((target) => {
+        const suggested = objectiveMatchesMetric(widget.config, target.query);
+        return <label key={target.id} className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-xs hover:bg-bg-hover">
+          <input type="checkbox" className="mt-0.5" checked={selected.includes(target.id)} onChange={(event) => onChange(event.target.checked ? [...selected, target.id] : selected.filter((id) => id !== target.id))} />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-text">{target.objective_name}: {target.name}</span>
+            <span className="block truncate text-text-dim">{target.query.aggregation} · {target.query.topic || target.query.app || "all events"}</span>
+          </span>
+          {suggested && <span className="shrink-0 text-[9px] uppercase text-accent">Match</span>}
+        </label>;
+      })}
+    </div>
+  </details>;
+}
+
+function WidgetView({ widget, data, filters, objectiveTargets, onGoalLinksChange }: { widget: DashboardWidget; data: any; filters: Record<string, string>; objectiveTargets: ObjectiveTargetChoice[]; onGoalLinksChange: (ids: number[]) => void }) {
 	const metricConfig = resolveMetricConfig(widget.config, filters);
   const body = !data ? (
     <Empty label="Loading widget…" />
@@ -1195,9 +1253,11 @@ function WidgetView({ widget, data, filters }: { widget: DashboardWidget; data: 
     <section className="border border-border rounded p-4 flex flex-col gap-3">
       <div className="flex items-center gap-2">
         <div className="text-text-dim text-xs uppercase truncate">{widget.title}</div>
+        {(widget.type === "stat" || widget.type === "timeseries") && <GoalPicker widget={widget} targets={objectiveTargets} onChange={onGoalLinksChange} />}
         <span className="ml-auto text-text-dim text-xs">{resolvedWindow(widget.config, filters)}</span>
       </div>
       {body}
+      <GoalProgressRows goals={data?.goals} error={data?.goal_error} />
     </section>
   );
 }
@@ -1236,6 +1296,7 @@ function DashboardsTab({ projectId }: { projectId: string }) {
   const [widgetData, setWidgetData] = useState<Record<number, any>>({});
   const [filterValues, setFilterValues] = useState<Record<string, string>>({});
   const [filterOptions, setFilterOptions] = useState<Record<string, Array<{ value: string; label: string; count?: number }>>>({});
+  const [objectiveTargets, setObjectiveTargets] = useState<ObjectiveTargetChoice[]>([]);
   const [status, setStatus] = useState("");
   const reloadTimer = useRef<number | null>(null);
   const dashboardRequestRef = useRef(0);
@@ -1262,6 +1323,19 @@ function DashboardsTab({ projectId }: { projectId: string }) {
       setStatus((e as Error).message);
     }
   }, [scopedURL, selectedId]);
+
+  const loadObjectiveTargets = useCallback(async () => {
+    try {
+      const r = await fetch(scopedURL(`${API}/objectives?limit=500`), { credentials: "same-origin" });
+      if (!r.ok) return;
+      const objectives: Objective[] = (await r.json()).objectives ?? [];
+      setObjectiveTargets(objectives.flatMap((objective) => objective.targets.map((target) => ({
+        ...target,
+        objective_name: objective.name,
+        objective_status: objective.status,
+      }))));
+    } catch { /* goal linking remains optional */ }
+  }, [scopedURL]);
 
   const loadDashboard = useCallback(async (id: number) => {
 	const sequence = ++dashboardRequestRef.current;
@@ -1311,7 +1385,7 @@ function DashboardsTab({ projectId }: { projectId: string }) {
 	const sequence = ++widgetRequestRef.current;
     setStatus("refreshing…");
     try {
-	  const queryURL = `${API}/query-dashboard?dashboard_id=${d.id}&filters=${encodeURIComponent(JSON.stringify(filters))}`;
+	  const queryURL = `${API}/query-dashboard?dashboard_id=${d.id}&include_goals=true&filters=${encodeURIComponent(JSON.stringify(filters))}`;
 	  const r = await fetch(scopedURL(queryURL), { credentials: "same-origin" });
 	  if (!r.ok) throw new Error(await r.text());
 	  const payload = await r.json();
@@ -1325,7 +1399,8 @@ function DashboardsTab({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     loadList();
-  }, [loadList]);
+    loadObjectiveTargets();
+  }, [loadList, loadObjectiveTargets]);
 
   useEffect(() => {
     loadDashboard(selectedId);
@@ -1375,6 +1450,20 @@ function DashboardsTab({ projectId }: { projectId: string }) {
     });
     if (r.ok) loadDashboard(selected.id);
     else setStatus(await r.text());
+  };
+
+  const updateGoalLinks = async (widget: DashboardWidget, ids: number[]) => {
+    const r = await fetch(scopedURL(`${API}/widgets/${widget.id}`), {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...widget, config: { ...widget.config, objective_target_ids: ids } }),
+    });
+    if (!r.ok) {
+      setStatus(await r.text());
+      return;
+    }
+    if (selected) await loadDashboard(selected.id);
   };
 
 	const { stats: statWidgets, charts: chartWidgets } = partitionDashboardWidgets(selected?.widgets ?? []);
@@ -1490,12 +1579,12 @@ function DashboardsTab({ projectId }: { projectId: string }) {
             {status && <div className="text-text-dim text-xs">{status}</div>}
 			{statWidgets.length > 0 && <div className="analytics-stat-grid grid gap-4">
 			  {statWidgets.map((widget) => (
-				<WidgetView key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} />
+				<WidgetView key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} objectiveTargets={objectiveTargets} onGoalLinksChange={(ids) => updateGoalLinks(widget, ids)} />
 			  ))}
 			</div>}
 			<div className="analytics-chart-grid grid gap-4">
 			  {chartWidgets.map((widget) => (
-				<WidgetView key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} />
+				<WidgetView key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} objectiveTargets={objectiveTargets} onGoalLinksChange={(ids) => updateGoalLinks(widget, ids)} />
 			  ))}
 			</div>
           </>

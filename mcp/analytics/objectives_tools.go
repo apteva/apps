@@ -12,11 +12,11 @@ func (a *App) objectiveTools() []sdk.Tool {
 	querySchema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"aggregation": map[string]any{"type": "string", "enum": []string{"count", "sum", "distinct"}},
+			"aggregation": map[string]any{"type": "string", "enum": []string{"count", "distinct", "sum", "average", "min", "max", "latest", "change"}},
 			"app":         map[string]any{"type": "string"},
 			"topic":       map[string]any{"type": "string"},
 			"source":      map[string]any{"type": "string", "enum": []string{"track", "auto"}},
-			"value":       map[string]any{"type": "string", "description": "Numeric field for sum, for example props.amount_usd."},
+			"value":       map[string]any{"type": "string", "description": "Numeric field for sum, average, min, max, latest or change; for example props.amount_usd."},
 			"by":          map[string]any{"type": "string", "description": "Field for distinct, for example session_id or props.subscriber_id."},
 			"where":       map[string]any{"type": "object", "description": "Equality filters keyed by props.X."},
 		},
@@ -49,7 +49,7 @@ func (a *App) objectiveTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "analytics_objectives_create",
-			Description: "Create an objective with one or more targets over data already ingested into the current project's Analytics event store. Queries support count, sum and distinct; project and period scope come from the platform and target.",
+			Description: "Create an objective with one or more targets over data already ingested into the current project's Analytics event store. Queries support count, distinct, sum, average, min, max, latest and change; project and period scope come from the platform and target.",
 			InputSchema: schemaObject(writeProps, []string{"name", "targets"}),
 			Handler:     a.toolObjectiveCreate,
 		},

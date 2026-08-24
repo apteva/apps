@@ -178,13 +178,15 @@ func (a *App) handleDashboardQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ProjectID   string         `json:"project_id"`
-		DashboardID int64          `json:"dashboard_id"`
-		Filters     map[string]any `json:"filters"`
+		ProjectID    string         `json:"project_id"`
+		DashboardID  int64          `json:"dashboard_id"`
+		Filters      map[string]any `json:"filters"`
+		IncludeGoals bool           `json:"include_goals"`
 	}
 	if r.Method == http.MethodGet {
 		body.ProjectID = r.URL.Query().Get("project_id")
 		body.DashboardID = parseInt64(r.URL.Query().Get("dashboard_id"))
+		body.IncludeGoals = r.URL.Query().Get("include_goals") == "true"
 		if raw := r.URL.Query().Get("filters"); raw != "" {
 			if err := json.Unmarshal([]byte(raw), &body.Filters); err != nil {
 				http.Error(w, "invalid filters", http.StatusBadRequest)
@@ -208,6 +210,15 @@ func (a *App) handleDashboardQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	goalsByWidget := map[int64][]DashboardGoalProgress{}
+	goalErrors := map[int64]string{}
+	if body.IncludeGoals {
+		goalsByWidget, goalErrors, err = dashboardGoalsForWidgets(globalCtx.AppDB(), projectID, dashboard.Widgets)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	results := make([]dashboardWidgetResult, 0, len(dashboard.Widgets))
 	for _, widget := range dashboard.Widgets {
 		data, err := evaluateWidget(globalCtx.AppDB(), projectID, widget, body.Filters)
@@ -215,6 +226,13 @@ func (a *App) handleDashboardQuery(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			result.Data = nil
 			result.Error = err.Error()
+		} else if body.IncludeGoals {
+			if goals := goalsByWidget[widget.ID]; len(goals) > 0 {
+				result.Data["goals"] = goals
+			}
+			if goalError := goalErrors[widget.ID]; goalError != "" {
+				result.Data["goal_error"] = goalError
+			}
 		}
 		results = append(results, result)
 	}
@@ -404,6 +422,10 @@ func (a *App) handleWidgetCreate(w http.ResponseWriter, r *http.Request, project
 	if body.Title == "" {
 		body.Title = defaultWidgetTitle(body.Type)
 	}
+	if err := validateDashboardGoalLinks(globalCtx.AppDB(), projectID, body.Config); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	widget, err := insertWidget(globalCtx.AppDB(), dashboardID, body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -424,6 +446,10 @@ func (a *App) handleWidgetUpdate(w http.ResponseWriter, r *http.Request, project
 	}
 	if body.Title == "" {
 		body.Title = defaultWidgetTitle(body.Type)
+	}
+	if err := validateDashboardGoalLinks(globalCtx.AppDB(), projectID, body.Config); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	cfg, _ := json.Marshal(nonNilConfig(body.Config))
 	result, err := globalCtx.AppDB().Exec(

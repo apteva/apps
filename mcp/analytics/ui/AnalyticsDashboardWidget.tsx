@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { batchResultsByID, defaultDashboardFilters, formatMetric, resolveMetricConfig, scopedAppURL, selectDashboardID } from "./dashboard-ui";
+import { batchResultsByID, defaultDashboardFilters, formatMetric, formatObjectiveValue, objectiveProgressWidth, resolveMetricConfig, scopedAppURL, selectDashboardID } from "./dashboard-ui";
 
 interface HostProps {
   appName?: string;
@@ -110,7 +110,28 @@ function Sparkline({ rows, config }: { rows: Array<Record<string, unknown>>; con
   );
 }
 
-function MetricCard({ widget, data, filters }: { widget: DashboardWidget; data?: Record<string, any>; filters: Record<string, string> }) {
+function GoalProgressRows({ goals, error, limit }: { goals?: Array<Record<string, any>>; error?: string; limit: number }) {
+  if (error) return <div className="mt-2 truncate text-[10px] text-error" title={error}>{error}</div>;
+  if (!goals?.length) return null;
+  return <div className="mt-2 space-y-2 border-t border-border pt-2">
+    {goals.slice(0, limit).map((goal) => {
+      const progress = objectiveProgressWidth(goal.progress_percent);
+      const actual = goal.actual_value == null ? "—" : formatObjectiveValue(goal.actual_value, goal.unit, goal.currency);
+      const target = formatObjectiveValue(goal.target_value, goal.unit, goal.currency);
+      return <div key={goal.target_id} className="min-w-0">
+        <div className="flex items-center gap-2 text-[10px]">
+          <span className="min-w-0 flex-1 truncate text-text-muted" title={`${goal.objective_name}: ${goal.name}`}>{goal.objective_name}: {goal.name}</span>
+          <span className="shrink-0 tabular-nums text-text">{actual} / {target}</span>
+        </div>
+        <div className="mt-1 h-1 overflow-hidden rounded bg-bg-input" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
+          <div className={`h-full ${goal.status === "error" ? "bg-error" : goal.achieved ? "bg-success" : "bg-accent"}`} style={{ width: `${progress}%` }} />
+        </div>
+      </div>;
+    })}
+  </div>;
+}
+
+function MetricCard({ widget, data, filters, goalLimit }: { widget: DashboardWidget; data?: Record<string, any>; filters: Record<string, string>; goalLimit: number }) {
   const config = resolveMetricConfig(widget.config, filters);
   const aggregation = String(data?.aggregation ?? widget.config.aggregation ?? "");
   return (
@@ -131,13 +152,14 @@ function MetricCard({ widget, data, filters }: { widget: DashboardWidget; data?:
               </span>
             )}
           </div>
+          <GoalProgressRows goals={data?.goals} error={data?.goal_error} limit={goalLimit} />
         </>
       )}
     </article>
   );
 }
 
-function DetailCard({ widget, data, filters }: { widget: DashboardWidget; data?: Record<string, any>; filters: Record<string, string> }) {
+function DetailCard({ widget, data, filters, goalLimit }: { widget: DashboardWidget; data?: Record<string, any>; filters: Record<string, string>; goalLimit: number }) {
   const config = resolveMetricConfig(widget.config, filters);
   return (
     <article className="min-w-0 rounded border border-border px-3 py-3">
@@ -170,6 +192,7 @@ function DetailCard({ widget, data, filters }: { widget: DashboardWidget; data?:
           {data && !(data.top ?? []).length && <Empty>No values in this window.</Empty>}
         </div>
       )}
+      <GoalProgressRows goals={data?.goals} error={data?.goal_error} limit={goalLimit} />
     </article>
   );
 }
@@ -204,6 +227,7 @@ export default function AnalyticsDashboardWidget(props: HostProps) {
   const projectID = props.projectId || "";
   const full = props.widgetSize === "full";
   const showTrends = settingBoolean(props.widgetSettings, "show_trends", true);
+  const showGoals = settingBoolean(props.widgetSettings, "show_goals", true);
   const maxMetrics = Math.floor(Math.max(1, Math.min(6, settingNumber(props.widgetSettings, "max_metrics", 3))));
   const preferredDashboardID = Math.floor(settingNumber(props.widgetSettings, "dashboard_id", 0));
   const storageKey = `apteva:analytics:dashboard-widget:${props.widgetId || projectID || "global"}`;
@@ -299,7 +323,7 @@ export default function AnalyticsDashboardWidget(props: HostProps) {
     const sequence = ++querySequence.current;
     try {
       const payload = await getJSON<{ widgets?: Array<{ widget_id: number; data?: Record<string, unknown>; error?: string }> }>(
-        `/query-dashboard?dashboard_id=${dashboard.id}&filters=${encodeURIComponent(JSON.stringify(filterValues))}`,
+        `/query-dashboard?dashboard_id=${dashboard.id}&include_goals=${showGoals}&filters=${encodeURIComponent(JSON.stringify(filterValues))}`,
       );
       if (sequence !== querySequence.current) return;
       setWidgetData(batchResultsByID(payload.widgets ?? []));
@@ -307,7 +331,7 @@ export default function AnalyticsDashboardWidget(props: HostProps) {
     } catch (reason) {
       if (sequence === querySequence.current) setError(reason instanceof Error ? reason.message : String(reason));
     }
-  }, [dashboard, filterValues, getJSON, projectID, props.preview]);
+  }, [dashboard, filterValues, getJSON, projectID, props.preview, showGoals]);
 
   useEffect(() => { void refresh(); }, [refresh, props.eventRevision]);
   useEffect(() => {
@@ -366,11 +390,11 @@ export default function AnalyticsDashboardWidget(props: HostProps) {
       ) : (
         <div className="min-h-0 flex-1 overflow-auto p-3">
           <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.max(1, Math.min(3, visibleWidgets.filter((widget) => widget.type === "stat").length))}, minmax(0, 1fr))` }}>
-            {visibleWidgets.filter((widget) => widget.type === "stat").map((widget) => <MetricCard key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} />)}
+            {visibleWidgets.filter((widget) => widget.type === "stat").map((widget) => <MetricCard key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} goalLimit={full ? 10 : 1} />)}
           </div>
           {showTrends && (
             <div className={`mt-2 grid gap-2 ${full ? "grid-cols-2" : "grid-cols-1"}`}>
-              {visibleWidgets.filter((widget) => widget.type !== "stat").map((widget) => <DetailCard key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} />)}
+              {visibleWidgets.filter((widget) => widget.type !== "stat").map((widget) => <DetailCard key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} goalLimit={full ? 10 : 1} />)}
             </div>
           )}
         </div>
