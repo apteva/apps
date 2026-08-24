@@ -1,5 +1,15 @@
 # PCB Studio App Proposal
 
+## Version 0.4 implementation status
+
+The first native routing and simulation milestone is implemented. PCB Studio now owns deterministic grid/A* autorouting with net-class rules and reviewable typed operations; failed or constraint-invalid route proposals are blocked by default. It also owns a deterministic DC, RC-transient, and digital-event simulator with sources, probes, fault injection, waveform artifacts, and behavioral regulator, passive, LED, and sensor models.
+
+An Arduino-compatible virtual hardware runtime executes bounded sketches against Serial, GPIO, I2C, timing, and modeled sensors. An optional native Functions app binding provides the contract for project-owned full compiler/runtime adapters without making PCB Studio dependent on a third-party engine. Route, Simulate, and Firmware workspaces expose these capabilities in the Apteva panel, while MCP and HTTP surfaces make the same operations agent-accessible. Simulation, firmware, manufacturing, and fabrication-verification artifacts persist through the required native Storage binding.
+
+Version 0.4 adds an interactive snapped layout editor for component movement, rotation, nudging, manual trace and via authoring, deletion, and undo/redo. Changes remain staged until committed as an immutable revision. It also adds an independent Apteva-owned Gerber/Excellon parser and reconciliation gate; both manufacturing packages and releases are rejected if generated syntax, bounds, outline, drill, geometry, or Gerber-job checks fail.
+
+This is an engineering-preview milestone, not a claim that arbitrary boards are production-ready. Fabrication remains gated by native footprint, connectivity, clearance, keepout, drill, annular-ring, and differential-pair checks. Advanced coupled differential-pair routing, SPICE-class analog models, thermal/RF simulation, a full C++ toolchain image, and real-board coupon validation remain later milestones.
+
 Status: Proposed
 
 Internal name: `pcb`

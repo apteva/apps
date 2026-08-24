@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -20,20 +22,23 @@ import (
 // callbacks (inbox_post's callback_tool).
 type recordingPlatform struct {
 	tk.BasePlatformClient
-	events                []capturedEvent
-	threadEvents          []capturedThreadEvent
-	appCalls              []capturedAppCall
-	spawns                []sdk.ThreadSpawnRequest
-	ensures               []sdk.ThreadEnsureRequest
-	identity              *sdk.InstallIdentity
-	connections           map[int64]*sdk.PlatformConnection
-	integrationMu         sync.Mutex
-	integrationCalls      []capturedIntegrationCall
-	integrationHandler    func(int64, string, map[string]any) (*sdk.ExecuteResult, error)
-	failSend              bool
-	failSpawn             bool
-	duplicateSpawnReceipt bool
-	omitSpawnReceipt      bool
+	events                 []capturedEvent
+	threadEvents           []capturedThreadEvent
+	appCalls               []capturedAppCall
+	spawns                 []sdk.ThreadSpawnRequest
+	ensures                []sdk.ThreadEnsureRequest
+	identity               *sdk.InstallIdentity
+	connections            map[int64]*sdk.PlatformConnection
+	integrationMu          sync.Mutex
+	integrationCalls       []capturedIntegrationCall
+	integrationHandler     func(int64, string, map[string]any) (*sdk.ExecuteResult, error)
+	failSend               bool
+	failSpawn              bool
+	ensureErr              error
+	duplicateEnsureReceipt bool
+	omitEnsureReceipt      bool
+	duplicateSpawnReceipt  bool
+	omitSpawnReceipt       bool
 }
 
 type capturedEvent struct {
@@ -124,10 +129,19 @@ func (p *recordingPlatform) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.Thread
 
 func (p *recordingPlatform) EnsureThread(req sdk.ThreadEnsureRequest) (*sdk.ThreadEnsureResult, error) {
 	p.ensures = append(p.ensures, req)
+	if p.ensureErr != nil {
+		return nil, p.ensureErr
+	}
 	result := &sdk.ThreadEnsureResult{Status: "reconciled", Reconciled: true,
 		Thread: sdk.ThreadRef{AgentID: req.AgentID, ThreadID: req.ThreadID}, ProfileHash: req.ProfileHash}
-	for _, event := range req.Events {
-		result.Events.Accepted = append(result.Events.Accepted, event.ID)
+	if !p.omitEnsureReceipt {
+		for _, event := range req.Events {
+			if p.duplicateEnsureReceipt {
+				result.Events.Duplicates = append(result.Events.Duplicates, event.ID)
+			} else {
+				result.Events.Accepted = append(result.Events.Accepted, event.ID)
+			}
+		}
 	}
 	return result, nil
 }
@@ -658,7 +672,7 @@ func TestUnknownDeliveryTargetDeadLettersAndCanBeRequeued(t *testing.T) {
 func TestUserMessageForwardFailureIsDurablyQueued(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
 	platform.failSend = true
-	platform.failSpawn = true
+	platform.ensureErr = errors.New("platform /api/apps/callback/threads/ensure: http 502: unavailable")
 	mountedCtx = ctx
 	conv := mkConversation(t, app, 41)
 
@@ -701,60 +715,63 @@ func postUserMessage(t *testing.T, app *App, conv *Conversation, content string)
 	}
 }
 
-func TestFirstMessageSpawnsConversationThread(t *testing.T) {
+func TestFirstMessageAtomicallyEnsuresConversationThread(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
 	mountedCtx = ctx
 	conv := mkConversation(t, app, 41)
 
 	postUserMessage(t, app, conv, "hello")
 
-	if len(platform.spawns) != 1 {
-		t.Fatalf("spawns = %d, want 1", len(platform.spawns))
+	if len(platform.ensures) != 1 || len(platform.spawns) != 0 {
+		t.Fatalf("ensures=%d spawns=%d, want authoritative ensure only", len(platform.ensures), len(platform.spawns))
 	}
-	spawn := platform.spawns[0]
+	ensure := platform.ensures[0]
 	// channel-chat's naming convention, so thread identities survive the
 	// eventual data migration.
-	if spawn.ThreadID != "chat-"+conv.ID || spawn.AgentID != 41 {
-		t.Fatalf("spawned %s on agent %d, want chat-%s on 41", spawn.ThreadID, spawn.AgentID, conv.ID)
+	if ensure.ThreadID != "chat-"+conv.ID || ensure.AgentID != 41 {
+		t.Fatalf("ensured %s on agent %d, want chat-%s on 41", ensure.ThreadID, ensure.AgentID, conv.ID)
 	}
 	// The suffix must carry the reply contract and the conversation id;
 	// composition with main's directive happens core-side.
-	if !strings.Contains(spawn.DirectiveSuffix, conv.ID) ||
-		!strings.Contains(spawn.DirectiveSuffix, "conversations_send") {
-		t.Fatalf("directive suffix missing reply contract: %q", spawn.DirectiveSuffix)
+	if !strings.Contains(ensure.DirectiveSuffix, conv.ID) ||
+		!strings.Contains(ensure.DirectiveSuffix, "conversations_send") {
+		t.Fatalf("directive suffix missing reply contract: %q", ensure.DirectiveSuffix)
 	}
 	// MCP nil → the platform fills the agent's spawnable set server-side.
-	if spawn.MCP != nil {
-		t.Fatalf("MCP should be nil (platform default), got %v", spawn.MCP)
+	if ensure.MCP != nil {
+		t.Fatalf("MCP should be nil (platform default), got %v", ensure.MCP)
 	}
-	if got, want := strings.Join(spawn.Tools, ","), strings.Join(conversationThreadTools, ","); got != want {
+	if ensure.ProfileHash != conversationThreadProfileHash(ensure.DirectiveSuffix) {
+		t.Fatalf("profile hash=%q does not cover the desired conversation profile", ensure.ProfileHash)
+	}
+	if got, want := strings.Join(ensure.Tools, ","), strings.Join(conversationThreadTools, ","); got != want {
 		t.Fatalf("conversation tool preload=%q want=%q", got, want)
 	}
 	for _, forbidden := range []string{"conversations_create", "conversations_list", "conversations_report", "conversations_inbox_post"} {
-		if slices.Contains(spawn.Tools, forbidden) {
-			t.Fatalf("conversation preload contains global/app-only tool %q: %v", forbidden, spawn.Tools)
+		if slices.Contains(ensure.Tools, forbidden) {
+			t.Fatalf("conversation preload contains global/app-only tool %q: %v", forbidden, ensure.Tools)
 		}
 	}
 	for _, required := range []string{"bound only to conversation " + conv.ID, "never send, read, approve, or alert against another conversation id", "do not grant the child Conversations tools"} {
-		if !strings.Contains(spawn.DirectiveSuffix, required) {
-			t.Fatalf("conversation directive missing %q: %s", required, spawn.DirectiveSuffix)
+		if !strings.Contains(ensure.DirectiveSuffix, required) {
+			t.Fatalf("conversation directive missing %q: %s", required, ensure.DirectiveSuffix)
 		}
 	}
 
-	// The initial event was included in the atomic spawn, not sent in a
+	// The initial event was included in the atomic ensure, not sent in a
 	// second request and not sent to main.
 	if len(platform.events) != 0 {
 		t.Fatalf("SendEvent(main) called %d times, want 0", len(platform.events))
 	}
 	if len(platform.threadEvents) != 0 {
-		t.Fatalf("thread events = %+v, want none after atomic spawn", platform.threadEvents)
+		t.Fatalf("thread events = %+v, want none after atomic ensure", platform.threadEvents)
 	}
-	if len(spawn.Events) != 1 {
-		t.Fatalf("spawn events = %+v, want one initial event", spawn.Events)
+	if len(ensure.Events) != 1 {
+		t.Fatalf("ensure events = %+v, want one initial event", ensure.Events)
 	}
 	wantEventID := fmt.Sprintf("conversation:%s:message:1:agent:41", conv.ID)
-	if spawn.Events[0].ID != wantEventID || spawn.Events[0].Message != "[chat] hello" {
-		t.Fatalf("initial event = %+v, want id=%q message=%q", spawn.Events[0], wantEventID, "[chat] hello")
+	if ensure.Events[0].ID != wantEventID || ensure.Events[0].Message != "[chat] hello" {
+		t.Fatalf("initial event = %+v, want id=%q message=%q", ensure.Events[0], wantEventID, "[chat] hello")
 	}
 
 	// The thread id persists on the conversation row.
@@ -764,7 +781,7 @@ func TestFirstMessageSpawnsConversationThread(t *testing.T) {
 	}
 }
 
-func TestEveryMessageUsesIdempotentSpawnEvent(t *testing.T) {
+func TestEveryMessageUsesAtomicIdempotentEnsureEvent(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
 	mountedCtx = ctx
 	conv := mkConversation(t, app, 41)
@@ -772,13 +789,13 @@ func TestEveryMessageUsesIdempotentSpawnEvent(t *testing.T) {
 	postUserMessage(t, app, conv, "one")
 	postUserMessage(t, app, conv, "two")
 
-	// Every inbound turn uses SpawnThread.Events with a stable id. This gives
+	// Every inbound turn uses EnsureThread.Events with a stable id. This gives
 	// later messages the same accepted-or-duplicate receipt as the first.
-	if len(platform.spawns) != 2 {
-		t.Fatalf("spawns = %d, want 2", len(platform.spawns))
+	if len(platform.ensures) != 2 || len(platform.spawns) != 0 {
+		t.Fatalf("ensures=%d spawns=%d, want two ensures and no legacy spawn", len(platform.ensures), len(platform.spawns))
 	}
-	if len(platform.spawns[1].Events) != 1 || platform.spawns[1].Events[0].Message != "[chat] two" {
-		t.Fatalf("second spawn events = %+v", platform.spawns[1].Events)
+	if len(platform.ensures[1].Events) != 1 || platform.ensures[1].Events[0].Message != "[chat] two" {
+		t.Fatalf("second ensure events = %+v", platform.ensures[1].Events)
 	}
 	if len(platform.threadEvents) != 0 {
 		t.Fatalf("non-idempotent thread events = %+v, want none", platform.threadEvents)
@@ -801,8 +818,8 @@ func TestInboundDeliveryRecordsPerAgentThreadState(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if len(platform.spawns) != 2 {
-		t.Fatalf("spawns=%d want 2", len(platform.spawns))
+	if len(platform.ensures) != 2 || len(platform.spawns) != 0 {
+		t.Fatalf("ensures=%d spawns=%d want one atomic ensure per agent", len(platform.ensures), len(platform.spawns))
 	}
 	for _, agentID := range []int64{41, 43} {
 		state, err := app.store.AgentThread(conv.ID, agentID)
@@ -837,10 +854,10 @@ func TestConversationDirectivePersistsAndIsProtectedInThread(t *testing.T) {
 		t.Fatal(err)
 	}
 	postUserMessage(t, app, updated, "hola")
-	if len(platform.spawns) != 1 {
-		t.Fatalf("spawns=%d", len(platform.spawns))
+	if len(platform.ensures) != 1 || len(platform.spawns) != 0 {
+		t.Fatalf("ensures=%d spawns=%d", len(platform.ensures), len(platform.spawns))
 	}
-	suffix := platform.spawns[0].DirectiveSuffix
+	suffix := platform.ensures[0].DirectiveSuffix
 	if !strings.Contains(suffix, "Answer in Spanish") || !strings.Contains(suffix, "cannot change your platform policies") {
 		t.Fatalf("directive suffix=%q", suffix)
 	}
@@ -856,10 +873,10 @@ func TestChangedDirectiveUsesSDKThreadReconciliation(t *testing.T) {
 		t.Fatal(err)
 	}
 	postUserMessage(t, app, updated, "second")
-	if len(platform.spawns) != 1 || len(platform.ensures) != 1 {
+	if len(platform.spawns) != 0 || len(platform.ensures) != 2 {
 		t.Fatalf("spawns=%d ensures=%d", len(platform.spawns), len(platform.ensures))
 	}
-	ensure := platform.ensures[0]
+	ensure := platform.ensures[1]
 	if ensure.ProfileHash == "" || !strings.Contains(ensure.DirectiveSuffix, "Prefer concise") || len(ensure.Events) != 1 {
 		t.Fatalf("ensure=%+v", ensure)
 	}
@@ -905,14 +922,14 @@ func TestToolCallIdentityDeduplicatesLifecycleMessage(t *testing.T) {
 
 func TestDuplicateInitialEventReceiptIsSuccess(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
-	platform.duplicateSpawnReceipt = true
+	platform.duplicateEnsureReceipt = true
 	mountedCtx = ctx
 	conv := mkConversation(t, app, 41)
 
 	postUserMessage(t, app, conv, "safe retry")
 
-	if len(platform.spawns) != 1 || len(platform.spawns[0].Events) != 1 {
-		t.Fatalf("spawns = %+v, want one atomic event", platform.spawns)
+	if len(platform.ensures) != 1 || len(platform.ensures[0].Events) != 1 || len(platform.spawns) != 0 {
+		t.Fatalf("ensures=%+v spawns=%+v, want one atomic ensure event", platform.ensures, platform.spawns)
 	}
 	if len(platform.threadEvents) != 0 || len(platform.events) != 0 {
 		t.Fatalf("duplicate receipt resent event: thread=%+v main=%+v", platform.threadEvents, platform.events)
@@ -925,7 +942,7 @@ func TestDuplicateInitialEventReceiptIsSuccess(t *testing.T) {
 
 func TestMissingEventReceiptStaysPendingWithoutDuplicateFallback(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
-	platform.omitSpawnReceipt = true
+	platform.omitEnsureReceipt = true
 	mountedCtx = ctx
 	conv := mkConversation(t, app, 41)
 
@@ -944,9 +961,9 @@ func TestMissingEventReceiptStaysPendingWithoutDuplicateFallback(t *testing.T) {
 	}
 }
 
-func TestSpawnFailureNeverFallsBackToMainAndRetryKeepsEventID(t *testing.T) {
+func TestEnsureFailureNeverFallsBackAndRetryKeepsEventID(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
-	platform.failSpawn = true
+	platform.ensureErr = errors.New("platform /api/apps/callback/threads/ensure: http 502: unavailable")
 	mountedCtx = ctx
 	conv := mkConversation(t, app, 41)
 
@@ -964,15 +981,64 @@ func TestSpawnFailureNeverFallsBackToMainAndRetryKeepsEventID(t *testing.T) {
 	if err != nil || delivery.Status != "pending" {
 		t.Fatalf("queued delivery = %+v err=%v", delivery, err)
 	}
+	if len(platform.ensures) != 1 || len(platform.spawns) != 0 {
+		t.Fatalf("non-legacy ensure failure fell back: ensures=%+v spawns=%+v", platform.ensures, platform.spawns)
+	}
 	// Retry the same durable row after the agent returns.
-	platform.failSpawn = false
+	platform.ensureErr = nil
 	app.attemptDelivery(ctx, "agent-inbound:41", conv, &transcript[0])
-	if len(platform.spawns) != 1 || len(platform.spawns[0].Events) != 1 {
-		t.Fatalf("recovery spawns=%+v", platform.spawns)
+	if len(platform.ensures) != 2 || len(platform.ensures[1].Events) != 1 || len(platform.spawns) != 0 {
+		t.Fatalf("recovery ensures=%+v spawns=%+v", platform.ensures, platform.spawns)
 	}
 	wantID := conversationThreadEventID(conv.ID, transcript[0].ID, 41)
-	if platform.spawns[0].Events[0].ID != wantID {
-		t.Fatalf("retry event id=%q want %q", platform.spawns[0].Events[0].ID, wantID)
+	if platform.ensures[1].Events[0].ID != wantID {
+		t.Fatalf("retry event id=%q want %q", platform.ensures[1].Events[0].ID, wantID)
+	}
+}
+
+func TestUnsupportedEnsureFallsBackToLegacySpawnOnly(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	platform.ensureErr = errors.New("platform /api/apps/callback/threads/ensure: http 404: not found")
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+
+	postUserMessage(t, app, conv, "first")
+	postUserMessage(t, app, conv, "second")
+
+	// The app probes once per mount, then remembers this is an older server.
+	if len(platform.ensures) != 1 || len(platform.spawns) != 2 {
+		t.Fatalf("ensures=%d spawns=%d, want one legacy probe and two fallback deliveries",
+			len(platform.ensures), len(platform.spawns))
+	}
+	for i, spawn := range platform.spawns {
+		if len(spawn.Events) != 1 {
+			t.Fatalf("spawn %d events=%+v", i, spawn.Events)
+		}
+	}
+	if platform.spawns[0].Events[0].ID == platform.spawns[1].Events[0].ID {
+		t.Fatalf("distinct messages reused event id %q", platform.spawns[0].Events[0].ID)
+	}
+}
+
+func TestThreadEnsureUnsupportedRecognizesOnlyLegacyHTTPStatuses(t *testing.T) {
+	for _, tc := range []struct {
+		message string
+		want    bool
+	}{
+		{"platform ensure: http 404: not found", true},
+		{"platform ensure: HTTP 405: method not allowed", true},
+		{"platform ensure: http 501: not implemented", true},
+		{"platform ensure: http 500: internal error", false},
+		{"platform ensure: http 502: unavailable", false},
+		{"connection refused", false},
+		{"unsupported profile value", false},
+	} {
+		if got := threadEnsureUnsupported(errors.New(tc.message)); got != tc.want {
+			t.Errorf("threadEnsureUnsupported(%q)=%t want %t", tc.message, got, tc.want)
+		}
+	}
+	if threadEnsureUnsupported(nil) {
+		t.Fatal("nil error reported unsupported")
 	}
 }
 
@@ -1256,6 +1322,153 @@ func TestCreateRoomConversationViaHTTP(t *testing.T) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || got.Kind != "direct" {
 		t.Fatalf("legacy create kind=%q err=%v, want direct", got.Kind, err)
+	}
+}
+
+func TestAgentScopedPanelEndpoints(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	mountedCtx = ctx
+
+	create := func(projectID string, ownerUserID, leadAgentID int64, title string) *Conversation {
+		t.Helper()
+		conv, err := app.store.CreateConversation(CreateConversationInput{
+			ProjectID: projectID, OwnerUserID: ownerUserID, LeadAgentID: leadAgentID, Title: title,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		return conv
+	}
+
+	helperLead := create(testProject, 1, 41, "Helper direct")
+	room := create(testProject, 1, 42, "Helper room")
+	if err := app.store.AddAgentParticipant(room.ID, 41); err != nil {
+		t.Fatalf("add helper to room: %v", err)
+	}
+	staleLead := create(testProject, 1, 41, "Stale helper lead")
+	if _, err := app.store.db.Exec(`DELETE FROM participants WHERE conversation_id=? AND agent_id=?`, staleLead.ID, 41); err != nil {
+		t.Fatalf("remove stale helper participant: %v", err)
+	}
+	otherAgent := create(testProject, 1, 42, "Other agent")
+	archivedHelper := create(testProject, 1, 42, "Archived helper room")
+	if err := app.store.AddAgentParticipant(archivedHelper.ID, 41); err != nil {
+		t.Fatalf("add helper to archived room: %v", err)
+	}
+	if _, err := app.store.SetConversationArchived(archivedHelper.ID, true); err != nil {
+		t.Fatalf("archive helper room: %v", err)
+	}
+	privateOtherUser := create(testProject, 2, 41, "Other user's helper chat")
+	otherProject := create("proj-other", 1, 41, "Other project helper chat")
+
+	for _, conv := range []*Conversation{helperLead, room, staleLead, otherAgent, privateOtherUser, otherProject} {
+		if _, err := app.store.AppendMessage(&Message{
+			ConversationID: conv.ID,
+			Role:           "agent",
+			AgentID:        conv.LeadAgentID,
+			Content:        "Needs attention",
+			ComponentKind:  kindAlert,
+			Severity:       "warn",
+			Components:     []Component{alertCard("Needs attention", "warn")},
+		}); err != nil {
+			t.Fatalf("seed message for %s: %v", conv.Title, err)
+		}
+	}
+
+	get := func(handler http.HandlerFunc, target string, authorize bool) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		if authorize {
+			authorizeTestRequest(req)
+		}
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		return rec
+	}
+	chatIDs := func(rec *httptest.ResponseRecorder) map[string]bool {
+		t.Helper()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("chats status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var entries []chatListEntry
+		if err := json.Unmarshal(rec.Body.Bytes(), &entries); err != nil {
+			t.Fatalf("decode chats: %v", err)
+		}
+		ids := map[string]bool{}
+		for _, entry := range entries {
+			ids[entry.ID] = true
+		}
+		return ids
+	}
+	assertIDs := func(label string, got map[string]bool, want ...string) {
+		t.Helper()
+		expected := map[string]bool{}
+		for _, id := range want {
+			expected[id] = true
+		}
+		if !reflect.DeepEqual(got, expected) {
+			t.Fatalf("%s ids=%v want=%v", label, got, expected)
+		}
+	}
+
+	// No scope preserves the project-wide panel. The user and project
+	// authorization predicates remain in force.
+	assertIDs("project-wide", chatIDs(get(app.handleChats, "/chats", true)),
+		helperLead.ID, room.ID, staleLead.ID, otherAgent.ID)
+
+	// Agent scope is explicit participation, not lead ownership.
+	assertIDs("helper active", chatIDs(get(app.handleChats, "/chats?agent_id=41", true)),
+		helperLead.ID, room.ID)
+	assertIDs("helper archived", chatIDs(get(app.handleChats, "/chats?archived=1&agent_id=41", true)),
+		archivedHelper.ID)
+	assertIDs("unknown agent", chatIDs(get(app.handleChats, "/chats?agent_id=999", true)))
+
+	// A caller-controlled query project cannot override the trusted project
+	// header and reveal a conversation from another project.
+	assertIDs("trusted project", chatIDs(get(app.handleChats, "/chats?project_id=proj-other&agent_id=41", true)),
+		helperLead.ID, room.ID)
+
+	unreadRec := get(app.handleUnreadSummary, "/unread-summary?agent_id=41", true)
+	if unreadRec.Code != http.StatusOK {
+		t.Fatalf("unread status=%d body=%s", unreadRec.Code, unreadRec.Body.String())
+	}
+	var unread []UnreadEntry
+	if err := json.Unmarshal(unreadRec.Body.Bytes(), &unread); err != nil {
+		t.Fatalf("decode unread: %v", err)
+	}
+	unreadIDs := map[string]bool{}
+	for _, entry := range unread {
+		unreadIDs[entry.ConversationID] = true
+	}
+	assertIDs("helper unread", unreadIDs, helperLead.ID, room.ID)
+
+	inboxRec := get(app.handleInbox, "/inbox?limit=100&agent_id=41", true)
+	if inboxRec.Code != http.StatusOK {
+		t.Fatalf("inbox status=%d body=%s", inboxRec.Code, inboxRec.Body.String())
+	}
+	var inbox []InboxItem
+	if err := json.Unmarshal(inboxRec.Body.Bytes(), &inbox); err != nil {
+		t.Fatalf("decode inbox: %v", err)
+	}
+	inboxIDs := map[string]bool{}
+	for _, item := range inbox {
+		inboxIDs[item.Message.ConversationID] = true
+	}
+	assertIDs("helper inbox", inboxIDs, helperLead.ID, room.ID)
+
+	for _, tc := range []struct {
+		handler http.HandlerFunc
+		target  string
+	}{
+		{app.handleChats, "/chats?agent_id=nope"},
+		{app.handleUnreadSummary, "/unread-summary?agent_id=0"},
+		{app.handleInbox, "/inbox?agent_id=-1"},
+	} {
+		if rec := get(tc.handler, tc.target, true); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s status=%d want 400", tc.target, rec.Code)
+		}
+	}
+	if rec := get(app.handleChats, "/chats?agent_id=41", false); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated scoped list status=%d want 401", rec.Code)
 	}
 }
 

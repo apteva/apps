@@ -8,7 +8,7 @@ import (
 func TestManifestMatchesRuntimeSurface(t *testing.T) {
 	app := &App{}
 	m := app.Manifest()
-	if m.Name != "pcb" || m.Version != "0.2.3" {
+	if m.Name != "pcb" || m.Version != "0.4.0" {
 		t.Fatalf("unexpected manifest identity: %s %s", m.Name, m.Version)
 	}
 	declared := map[string]bool{}
@@ -44,9 +44,10 @@ func TestManifestUsesNativeDependencyBindings(t *testing.T) {
 		kind     string
 		required bool
 	}{
-		"storage":        {kind: "app", required: true},
-		"component_data": {kind: "integration", required: false},
-		"pcb_fabricator": {kind: "integration", required: false},
+		"storage":           {kind: "app", required: true},
+		"firmware_executor": {kind: "app", required: false},
+		"component_data":    {kind: "integration", required: false},
+		"pcb_fabricator":    {kind: "integration", required: false},
 	}
 	if len(m.Requires.Integrations) != len(want) {
 		t.Fatalf("got %d native binding roles, want %d", len(m.Requires.Integrations), len(want))

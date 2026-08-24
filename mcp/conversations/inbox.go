@@ -86,6 +86,10 @@ func inboxPriority(m *Message) int {
 // component_kind column is the whole reason the LIKE-scan era ends
 // here.
 func (s *store) Inbox(projectID string, userID int64, limit int) ([]InboxItem, error) {
+	return s.InboxForAgent(projectID, userID, 0, limit)
+}
+
+func (s *store) InboxForAgent(projectID string, userID, agentID int64, limit int) ([]InboxItem, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -96,10 +100,14 @@ func (s *store) Inbox(projectID string, userID int64, limit int) ([]InboxItem, e
 		LEFT JOIN participants p ON p.conversation_id=c.id AND p.user_id=?
 		WHERE c.project_id=? AND c.archived_at IS NULL
 		  AND (c.owner_user_id=? OR p.user_id=? OR c.owner_user_id=0)
+		  AND (? = 0 OR EXISTS (
+		      SELECT 1 FROM participants ap
+		      WHERE ap.conversation_id = c.id AND ap.agent_id = ?
+		  ))
 		  AND m.component_kind IN (?, ?, ?)
 		  AND (m.component_kind != ? OR m.action_status='pending')
 		  AND m.components_json NOT LIKE '%"dismissed":true%'
-		ORDER BY m.id DESC LIMIT ?`, userID, projectID, userID, userID,
+		ORDER BY m.id DESC LIMIT ?`, userID, projectID, userID, userID, agentID, agentID,
 		kindApproval, kindAlert, kindReport, kindApproval, limit)
 	if err != nil {
 		return nil, err

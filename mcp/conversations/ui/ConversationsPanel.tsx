@@ -218,6 +218,11 @@ function scopedPath(path: string, projectId: string): string {
   return `${path}${path.includes("?") ? "&" : "?"}project_id=${encodeURIComponent(projectId)}`;
 }
 
+function agentScopedPath(path: string, instanceId?: number): string {
+  if (instanceId === undefined) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}agent_id=${encodeURIComponent(instanceId)}`;
+}
+
 async function apiGet<T>(path: string, projectId: string): Promise<T> {
   const res = await fetch(`${API}${scopedPath(path, projectId)}`, { credentials: "same-origin" });
   if (!res.ok) throw new Error(await res.text());
@@ -1689,22 +1694,27 @@ function priorityBadge(item: InboxItem): { label: string; cls: string } {
 function InboxTab({
   onOpenConversation,
   projectId,
+  instanceId,
 }: {
   onOpenConversation: (conversationID: string) => void;
   projectId: string;
+  instanceId?: number;
 }) {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [note, setNote] = useState("");
 
   const load = useCallback(async () => {
     try {
-      const inbox = await apiGet<InboxItem[]>("/inbox?limit=100", projectId);
+      const inbox = await apiGet<InboxItem[]>(
+        agentScopedPath("/inbox?limit=100", instanceId),
+        projectId,
+      );
       setItems(inbox);
       setNote(`${inbox.length} item${inbox.length === 1 ? "" : "s"}`);
     } catch (err) {
       setNote(err instanceof Error ? err.message : String(err));
     }
-  }, [projectId]);
+  }, [projectId, instanceId]);
 
   useEffect(() => {
     load();
@@ -2289,7 +2299,7 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
 
 // ─── root panel ──────────────────────────────────────────────────────
 
-export default function ConversationsPanel({ projectId }: NativePanelProps) {
+export default function ConversationsPanel({ projectId, instanceId }: NativePanelProps) {
   const [tab, setTab] = useState<"chats" | "inbox" | "telegram">("chats");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [unread, setUnread] = useState<Map<string, UnreadEntry>>(new Map());
@@ -2307,9 +2317,12 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
   const loadConversations = useCallback(async () => {
     try {
       const [chats, unreadEntries, inbox] = await Promise.all([
-        apiGet<Conversation[]>(`/chats${showArchived ? "?archived=1" : ""}`, projectId),
-        apiGet<UnreadEntry[]>("/unread-summary", projectId),
-        apiGet<InboxItem[]>("/inbox?limit=100", projectId),
+        apiGet<Conversation[]>(
+          agentScopedPath(`/chats${showArchived ? "?archived=1" : ""}`, instanceId),
+          projectId,
+        ),
+        apiGet<UnreadEntry[]>(agentScopedPath("/unread-summary", instanceId), projectId),
+        apiGet<InboxItem[]>(agentScopedPath("/inbox?limit=100", instanceId), projectId),
       ]);
       const scoped = projectId
         ? chats.filter((c) => !c.project_id || c.project_id === projectId)
@@ -2323,7 +2336,7 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
     } catch {
       /* transient */
     }
-  }, [projectId, showArchived]);
+  }, [projectId, instanceId, showArchived]);
 
   useEffect(() => {
     loadConversations();
@@ -2458,7 +2471,11 @@ export default function ConversationsPanel({ projectId }: NativePanelProps) {
       </header>
 
       {tab === "inbox" ? (
-        <InboxTab onOpenConversation={openConversation} projectId={projectId} />
+        <InboxTab
+          onOpenConversation={openConversation}
+          projectId={projectId}
+          instanceId={instanceId}
+        />
       ) : tab === "telegram" ? (
         <TelegramTab projectId={projectId} conversations={conversations.filter((item) => !item.project_id || item.project_id === projectId)} />
       ) : (

@@ -81,6 +81,19 @@ func sensorNodeExample() Definition {
 	addTwoPad("c3", "C3", "Sensor decoupling capacitor", "100nF", "CL05B104KO5NNNC", "C_0402", "v3v3", "gnd", 56_000_000, 13_000_000)
 	addTwoPad("c4", "C4", "MCU decoupling capacitor", "100nF", "CL05B104KO5NNNC", "C_0402", "v3v3", "gnd", 29_000_000, 10_000_000)
 	addTwoPad("d2", "D2", "Status LED", "green", "LTST-C190KGKT", "LED_0603", "led_anode", "gnd", 52_000_000, 24_000_000)
+	for index := range def.Components {
+		component := &def.Components[index]
+		switch component.ID {
+		case "u1":
+			component.Model = &ElectricalModel{Kind: "mcu", LogicHighV: 3.3, PinRoles: map[string]string{"ground": "gnd", "sda": "sda", "scl": "scl", "gpio": "led"}}
+		case "u2":
+			component.Model = &ElectricalModel{Kind: "sensor", I2CAddress: 0x70, PinRoles: map[string]string{"vdd": "vdd", "ground": "gnd", "sda": "sda", "scl": "scl"}}
+		case "u3":
+			component.Model = &ElectricalModel{Kind: "regulator", VoltageV: 3.3, DropoutVoltageV: 0.25, PinRoles: map[string]string{"in": "vin", "out": "vout", "ground": "gnd"}}
+		case "d2":
+			component.Model = &ElectricalModel{Kind: "led", ForwardVoltageV: 2.0, PinRoles: map[string]string{"anode": "1", "cathode": "2"}}
+		}
+	}
 
 	order := []string{"usb5v", "gnd", "v3v3", "usb_dp", "usb_dm", "cc1", "cc2", "i2c_sda", "i2c_scl", "led_drive", "led_anode"}
 	for _, netID := range order {
@@ -111,6 +124,12 @@ func sensorNodeExample() Definition {
 	}
 	def.Keepouts = []Keepout{{ID: "esp32_antenna", Kind: "antenna", OwnerID: "u1", Polygon: []Point{{XNM: 29_000_000, YNM: 1_000_000}, {XNM: 42_000_000, YNM: 1_000_000}, {XNM: 42_000_000, YNM: 7_000_000}, {XNM: 29_000_000, YNM: 7_000_000}}}}
 	def.DifferentialPairs = []DifferentialPair{{ID: "usb2", PositiveNetID: "usb_dp", NegativeNetID: "usb_dm", TargetOhms: 90, GapNM: 450_000, GapToleranceNM: 50_000, MaxSkewNM: 100_000}}
+	def.NetClasses = []NetClass{
+		{ID: "power", NetIDs: []string{"usb5v", "v3v3", "gnd"}, TraceWidthNM: 400_000, ClearanceNM: 250_000, ViaDiameterNM: 700_000, ViaDrillNM: 300_000, Priority: 100},
+		{ID: "usb", NetIDs: []string{"usb_dp", "usb_dm"}, TraceWidthNM: 250_000, ClearanceNM: 200_000, ViaDiameterNM: 650_000, ViaDrillNM: 300_000, Priority: 90},
+		{ID: "signals", NetIDs: []string{"cc1", "cc2", "i2c_sda", "i2c_scl", "led_drive", "led_anode"}, TraceWidthNM: 250_000, ClearanceNM: 200_000, ViaDiameterNM: 650_000, ViaDrillNM: 300_000, Priority: 10},
+	}
+	def.Simulation = &SimulationSpec{DurationUS: 10_000, StepUS: 100, Sources: []SimulationSource{{ID: "usb-power", NetID: "usb5v", Kind: "dc", Value: 5}}, Probes: []SimulationProbe{{ID: "usb5v", NetID: "usb5v", Kind: "voltage"}, {ID: "rail-3v3", NetID: "v3v3", Kind: "voltage"}, {ID: "i2c-sda", NetID: "i2c_sda", Kind: "digital"}, {ID: "i2c-scl", NetID: "i2c_scl", Kind: "digital"}}, Devices: []SimulationDevice{{ID: "shtc3", ComponentID: "u2", Kind: "i2c_sensor", Address: 0x70, Nets: map[string]string{"vdd": "v3v3", "ground": "gnd", "sda": "i2c_sda", "scl": "i2c_scl"}, Values: map[string]float64{"temperature_c": 23.5, "humidity_percent": 45}}}}
 
 	// Each F.Cu ground pad gets a short thermal via into the B.Cu plane.
 	for _, component := range def.Components {

@@ -210,10 +210,44 @@ func applyOperation(def *Definition, op Operation) error {
 			return fmt.Errorf("differential pair %q not found", op.DifferentialPairID)
 		}
 		def.DifferentialPairs = append(def.DifferentialPairs[:idx], def.DifferentialPairs[idx+1:]...)
+	case "net_class.add":
+		if op.NetClass == nil {
+			return errors.New("net_class is required")
+		}
+		if findNetClass(def.NetClasses, op.NetClass.ID) >= 0 {
+			return fmt.Errorf("net class %q already exists", op.NetClass.ID)
+		}
+		def.NetClasses = append(def.NetClasses, *op.NetClass)
+	case "net_class.replace":
+		if op.NetClass == nil {
+			return errors.New("net_class is required")
+		}
+		idx := findNetClass(def.NetClasses, op.NetClass.ID)
+		if idx < 0 {
+			return fmt.Errorf("net class %q not found", op.NetClass.ID)
+		}
+		def.NetClasses[idx] = *op.NetClass
+	case "net_class.remove":
+		idx := findNetClass(def.NetClasses, op.NetClassID)
+		if idx < 0 {
+			return fmt.Errorf("net class %q not found", op.NetClassID)
+		}
+		def.NetClasses = append(def.NetClasses[:idx], def.NetClasses[idx+1:]...)
+	case "simulation.set":
+		def.Simulation = op.Simulation
 	default:
 		return fmt.Errorf("unsupported operation type %q", op.Type)
 	}
 	return nil
+}
+
+func findNetClass(v []NetClass, id string) int {
+	for i := range v {
+		if v[i].ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 func findComponent(v []Component, id string) int {

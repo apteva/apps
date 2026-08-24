@@ -5,7 +5,7 @@ import "encoding/json"
 const (
 	pcbSchema            = "apteva-pcb/v1"
 	releaseSchema        = "apteva-pcb-release/v1"
-	engineVersion        = "pcb-native/0.2.3"
+	engineVersion        = "pcb-native/0.4.0"
 	defaultClearance     = int64(200_000)
 	defaultTraceWidth    = int64(200_000)
 	defaultEdgeClearance = int64(250_000)
@@ -77,16 +77,33 @@ type Pad struct {
 }
 
 type Component struct {
-	ID         string   `json:"id"`
-	Designator string   `json:"designator"`
-	Name       string   `json:"name"`
-	Value      string   `json:"value,omitempty"`
-	MPN        string   `json:"mpn,omitempty"`
-	Footprint  string   `json:"footprint,omitempty"`
-	Position   Position `json:"position"`
-	Pins       []Pin    `json:"pins,omitempty"`
-	Body       *Body    `json:"body,omitempty"`
-	Pads       []Pad    `json:"pads,omitempty"`
+	ID         string           `json:"id"`
+	Designator string           `json:"designator"`
+	Name       string           `json:"name"`
+	Value      string           `json:"value,omitempty"`
+	MPN        string           `json:"mpn,omitempty"`
+	Footprint  string           `json:"footprint,omitempty"`
+	Position   Position         `json:"position"`
+	Pins       []Pin            `json:"pins,omitempty"`
+	Body       *Body            `json:"body,omitempty"`
+	Pads       []Pad            `json:"pads,omitempty"`
+	Model      *ElectricalModel `json:"electrical_model,omitempty"`
+}
+
+// ElectricalModel is a small, provider-neutral behavioral model owned by PCB
+// Studio. It intentionally describes electrical intent instead of referencing
+// a SPICE or vendor engine. Pin roles map semantic names (in, out, ground,
+// anode, cathode, sda, scl, gpio...) to the component's stable pin IDs.
+type ElectricalModel struct {
+	Kind            string            `json:"kind"` // resistor | capacitor | voltage_source | regulator | led | switch | mcu | sensor | digital
+	PinRoles        map[string]string `json:"pin_roles,omitempty"`
+	ResistanceOhms  float64           `json:"resistance_ohms,omitempty"`
+	CapacitanceF    float64           `json:"capacitance_f,omitempty"`
+	VoltageV        float64           `json:"voltage_v,omitempty"`
+	ForwardVoltageV float64           `json:"forward_voltage_v,omitempty"`
+	DropoutVoltageV float64           `json:"dropout_voltage_v,omitempty"`
+	LogicHighV      float64           `json:"logic_high_v,omitempty"`
+	I2CAddress      int               `json:"i2c_address,omitempty"`
 }
 
 type Node struct {
@@ -152,6 +169,53 @@ type DifferentialPair struct {
 	MaxSkewNM      int64  `json:"max_skew_nm"`
 }
 
+// NetClass captures native routing policy. A net can be listed in at most one
+// class; unlisted nets inherit Rules and the router's default via geometry.
+type NetClass struct {
+	ID            string   `json:"id"`
+	NetIDs        []string `json:"net_ids"`
+	TraceWidthNM  int64    `json:"trace_width_nm,omitempty"`
+	ClearanceNM   int64    `json:"clearance_nm,omitempty"`
+	ViaDiameterNM int64    `json:"via_diameter_nm,omitempty"`
+	ViaDrillNM    int64    `json:"via_drill_nm,omitempty"`
+	Priority      int      `json:"priority,omitempty"`
+}
+
+// SimulationSpec stores revisioned stimuli and probes. Tool calls may add
+// temporary overrides, but saved tutorial designs remain fully reproducible.
+type SimulationSpec struct {
+	DurationUS int64              `json:"duration_us,omitempty"`
+	StepUS     int64              `json:"step_us,omitempty"`
+	Sources    []SimulationSource `json:"sources,omitempty"`
+	Probes     []SimulationProbe  `json:"probes,omitempty"`
+	Devices    []SimulationDevice `json:"devices,omitempty"`
+}
+
+type SimulationSource struct {
+	ID        string  `json:"id"`
+	NetID     string  `json:"net_id"`
+	Kind      string  `json:"kind"` // dc | digital | clock
+	Value     float64 `json:"value,omitempty"`
+	StartUS   int64   `json:"start_us,omitempty"`
+	PeriodUS  int64   `json:"period_us,omitempty"`
+	DutyCycle float64 `json:"duty_cycle,omitempty"`
+}
+
+type SimulationProbe struct {
+	ID    string `json:"id"`
+	NetID string `json:"net_id"`
+	Kind  string `json:"kind,omitempty"` // voltage | digital
+}
+
+type SimulationDevice struct {
+	ID          string             `json:"id"`
+	ComponentID string             `json:"component_id,omitempty"`
+	Kind        string             `json:"kind"` // i2c_sensor | uart | gpio
+	Nets        map[string]string  `json:"nets,omitempty"`
+	Address     int                `json:"address,omitempty"`
+	Values      map[string]float64 `json:"values,omitempty"`
+}
+
 type Definition struct {
 	Schema            string             `json:"schema"`
 	Name              string             `json:"name,omitempty"`
@@ -164,6 +228,8 @@ type Definition struct {
 	Zones             []Zone             `json:"zones,omitempty"`
 	Keepouts          []Keepout          `json:"keepouts,omitempty"`
 	DifferentialPairs []DifferentialPair `json:"differential_pairs,omitempty"`
+	NetClasses        []NetClass         `json:"net_classes,omitempty"`
+	Simulation        *SimulationSpec    `json:"simulation,omitempty"`
 }
 
 type Operation struct {
@@ -186,6 +252,9 @@ type Operation struct {
 	KeepoutID          string            `json:"keepout_id,omitempty"`
 	DifferentialPair   *DifferentialPair `json:"differential_pair,omitempty"`
 	DifferentialPairID string            `json:"differential_pair_id,omitempty"`
+	NetClass           *NetClass         `json:"net_class,omitempty"`
+	NetClassID         string            `json:"net_class_id,omitempty"`
+	Simulation         *SimulationSpec   `json:"simulation,omitempty"`
 }
 
 type Check struct {
@@ -287,4 +356,6 @@ type RevisionDiff struct {
 	Zones             map[string][]string `json:"zones"`
 	Keepouts          map[string][]string `json:"keepouts"`
 	DifferentialPairs map[string][]string `json:"differential_pairs"`
+	NetClasses        map[string][]string `json:"net_classes"`
+	SimulationChanged bool                `json:"simulation_changed"`
 }

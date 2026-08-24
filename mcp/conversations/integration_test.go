@@ -67,13 +67,14 @@ func mcpErrAsThread(t *testing.T, sc *tk.Sidecar, tool string, args map[string]a
 }
 
 type telegramGatewayFixture struct {
-	mu            sync.Mutex
-	webhookURL    string
-	webhookSecret string
-	sent          []map[string]any
-	nextMessageID int64
-	spawnEventIDs []string
-	threadEvents  int
+	mu             sync.Mutex
+	webhookURL     string
+	webhookSecret  string
+	sent           []map[string]any
+	nextMessageID  int64
+	ensureEventIDs []string
+	threadPaths    []string
+	threadEvents   int
 }
 
 func spawnTelegramHTTPTestSidecar(t *testing.T) (*tk.Sidecar, *telegramGatewayFixture) {
@@ -131,9 +132,10 @@ func spawnTelegramHTTPTestSidecar(t *testing.T) (*tk.Sidecar, *telegramGatewayFi
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			accepted := make([]string, 0, len(body.Events))
 			fixture.mu.Lock()
+			fixture.threadPaths = append(fixture.threadPaths, r.URL.Path)
 			for _, event := range body.Events {
 				accepted = append(accepted, event.ID)
-				fixture.spawnEventIDs = append(fixture.spawnEventIDs, event.ID)
+				fixture.ensureEventIDs = append(fixture.ensureEventIDs, event.ID)
 			}
 			fixture.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -457,9 +459,11 @@ func TestSidecar_TelegramPublicOnboardingWebhookAndOutboundFlow(t *testing.T) {
 	sc.MCPAs("send", map[string]any{"conversation_id": convID, "text": "real sidecar outbound"}, 41, conversationThreadID(convID), itProject)
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
-	if len(fixture.spawnEventIDs) != 1 || fixture.threadEvents != 0 ||
-		!strings.Contains(fixture.spawnEventIDs[0], ":message:1:agent:41") {
-		t.Fatalf("atomic inbound delivery: spawn ids=%v follow-up thread events=%d", fixture.spawnEventIDs, fixture.threadEvents)
+	if len(fixture.ensureEventIDs) != 1 || fixture.threadEvents != 0 ||
+		!strings.Contains(fixture.ensureEventIDs[0], ":message:1:agent:41") ||
+		len(fixture.threadPaths) != 1 || fixture.threadPaths[0] != "/api/apps/callback/threads/ensure" {
+		t.Fatalf("atomic inbound delivery: paths=%v ensure ids=%v follow-up thread events=%d",
+			fixture.threadPaths, fixture.ensureEventIDs, fixture.threadEvents)
 	}
 	if len(fixture.sent) != 1 || fixture.sent[0]["chat_id"] != "12345" || fixture.sent[0]["text"] != "real sidecar outbound" || fixture.sent[0]["parse_mode"] != "HTML" {
 		t.Fatalf("Telegram outbound = %+v", fixture.sent)

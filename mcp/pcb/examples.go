@@ -11,7 +11,7 @@ func pcbExamples() map[string]any {
 	def.Traces = []Trace{{ID: "trace-signal", NetID: "signal", Layer: "F.Cu", WidthNM: 300_000, Points: []Point{{XNM: 13_000_000, YNM: 12_000_000}, {XNM: 27_000_000, YNM: 12_000_000}}}}
 	return map[string]any{
 		"schema": pcbSchema, "engine": engineVersion, "units": map[string]string{"geometry": "integer nanometres", "rotation": "integer microdegrees"}, "example": def, "manufacturable_sensor_node": sensorNodeExample(),
-		"operations":    []string{"board.set", "rules.set", "component.add", "component.replace", "component.remove", "placement.set", "net.add", "net.replace", "net.remove", "net.connect", "net.disconnect", "trace.add", "trace.remove", "via.add", "via.remove", "zone.add", "zone.remove", "keepout.add", "keepout.remove", "differential_pair.add", "differential_pair.remove"},
-		"compatibility": map[string]any{"native": "apteva-pcb/v1 JSON", "v0_2_export": []string{"interactive SVG", "BOM CSV", "Gerber X2", "Excellon", "release ZIP"}, "adapter_contract": "Import/export adapters are deterministic Apteva-owned parsers and writers; no external ECAD engine is required."},
+		"operations":    []string{"board.set", "rules.set", "component.add", "component.replace", "component.remove", "placement.set", "net.add", "net.replace", "net.remove", "net.connect", "net.disconnect", "trace.add", "trace.remove", "via.add", "via.remove", "zone.add", "zone.remove", "keepout.add", "keepout.remove", "differential_pair.add", "differential_pair.remove", "net_class.add", "net_class.replace", "net_class.remove", "simulation.set"},
+		"compatibility": map[string]any{"native": "apteva-pcb/v1 JSON", "v0_4_export": []string{"interactive SVG", "BOM CSV", "Gerber X2", "Excellon", "Gerber job JSON", "fabrication-verification JSON", "release ZIP", "simulation JSON", "firmware-run JSON"}, "adapter_contract": "Import/export adapters are deterministic Apteva-owned parsers and writers; no external ECAD engine is required."},
 	}
 }

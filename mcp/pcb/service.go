@@ -28,6 +28,21 @@ type Service struct {
 	artifactRoot string
 }
 
+type SimulationRun struct {
+	Result   *SimulationResult `json:"result"`
+	Artifact *Artifact         `json:"artifact"`
+}
+
+type FirmwareRun struct {
+	Result   *FirmwareRunResult `json:"result"`
+	Artifact *Artifact          `json:"artifact"`
+}
+
+type FabricationVerificationRun struct {
+	Result   *FabricationVerification `json:"result"`
+	Artifact *Artifact                `json:"artifact"`
+}
+
 func (s *Service) revision(designID, revisionID int64) (*Design, *Revision, *Definition, error) {
 	design, err := s.store.GetDesign(s.project, designID)
 	if err != nil {
@@ -75,6 +90,134 @@ func (s *Service) BOM(designID, revisionID int64) (*Artifact, error) {
 	return s.persistArtifact(design, revision, "bom", "csv", "text/csv", renderBOM(def), map[string]any{"engine": engineVersion, "components": len(def.Components)})
 }
 
+func (s *Service) RouteSuggest(designID, revisionID int64, options RouteOptions) (*RoutePlan, error) {
+	_, _, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	return suggestRoutes(def, options)
+}
+
+func (s *Service) RouteApply(designID, revisionID int64, options RouteOptions, note, author string, allowPartial bool) (*Revision, *RoutePlan, error) {
+	design, parent, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	plan, err := suggestRoutes(def, options)
+	if err != nil {
+		return nil, nil, err
+	}
+	if plan.Status == "failed" || plan.Status == "partial" && !allowPartial {
+		return nil, plan, fmt.Errorf("route plan is %s with %d failures; review it or set allow_partial", plan.Status, len(plan.Failures))
+	}
+	if len(plan.Operations) == 0 {
+		return nil, plan, errors.New("route plan contains no changes")
+	}
+	canonical, _, hash, err := applyOperations(def, plan.Operations)
+	if err != nil {
+		return nil, plan, err
+	}
+	operations, _ := json.Marshal(plan.Operations)
+	revision, err := s.store.CreateRevision(s.project, design.ID, parent.ID, canonical, operations, hash, strings.TrimSpace(note), author)
+	if err == nil && s.ctx != nil {
+		s.ctx.Emit("pcb.revision.created", revisionEvent(revision))
+		s.ctx.Emit("pcb.routing.completed", map[string]any{"design_id": design.ID, "revision_id": revision.ID, "status": plan.Status, "routed_nets": plan.RoutedNets, "trace_count": plan.Metrics.TraceCount, "via_count": plan.Metrics.ViaCount})
+	}
+	return revision, plan, err
+}
+
+func (s *Service) RouteRemove(designID, revisionID int64, netIDs []string, note, author string) (*Revision, error) {
+	design, parent, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	want := map[string]bool{}
+	for _, id := range netIDs {
+		want[id] = true
+	}
+	operations := []Operation{}
+	for _, trace := range def.Traces {
+		if strings.HasPrefix(trace.ID, "auto-") && (len(want) == 0 || want[trace.NetID]) {
+			operations = append(operations, Operation{Type: "trace.remove", TraceID: trace.ID})
+		}
+	}
+	for _, via := range def.Vias {
+		if strings.HasPrefix(via.ID, "auto-") && (len(want) == 0 || want[via.NetID]) {
+			operations = append(operations, Operation{Type: "via.remove", ViaID: via.ID})
+		}
+	}
+	if len(operations) == 0 {
+		return nil, errors.New("no matching autorouted copper to remove")
+	}
+	canonical, _, hash, err := applyOperations(def, operations)
+	if err != nil {
+		return nil, err
+	}
+	operationsJSON, _ := json.Marshal(operations)
+	revision, err := s.store.CreateRevision(s.project, design.ID, parent.ID, canonical, operationsJSON, hash, strings.TrimSpace(note), author)
+	if err == nil && s.ctx != nil {
+		s.ctx.Emit("pcb.revision.created", revisionEvent(revision))
+	}
+	return revision, err
+}
+
+func (s *Service) Simulate(designID, revisionID int64, options SimulationOptions) (*SimulationRun, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	result, err := simulateDefinition(def, options)
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.MarshalIndent(result, "", "  ")
+	body = append(body, '\n')
+	artifact, err := s.persistArtifact(design, revision, "simulation", "json", "application/json", body, map[string]any{"engine": engineVersion, "schema": simulationSchema, "samples": result.Samples, "status": result.Status})
+	if err != nil {
+		return &SimulationRun{Result: result, Artifact: artifact}, err
+	}
+	if s.ctx != nil {
+		s.ctx.Emit("pcb.simulation.completed", map[string]any{"design_id": design.ID, "revision_id": revision.ID, "artifact_id": artifact.ID, "status": result.Status, "samples": result.Samples})
+	}
+	return &SimulationRun{Result: result, Artifact: artifact}, nil
+}
+
+func (s *Service) Firmware(designID, revisionID int64, options FirmwareOptions) (*FirmwareRun, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	result, err := runFirmwareLab(def, options)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(options.ExecutorFunction) != "" {
+		if s.ctx == nil || s.ctx.PlatformAPI() == nil {
+			return nil, errors.New("firmware executor platform client unavailable")
+		}
+		bound := s.ctx.IntegrationFor("firmware_executor")
+		if bound == nil || bound.Kind != "app" || bound.InstallID <= 0 {
+			return nil, errors.New("executor_function requires a bound Functions app")
+		}
+		var external map[string]any
+		err = s.ctx.PlatformAPI().CallAppResult("functions", "functions_invoke", map[string]any{"name": options.ExecutorFunction, "event": map[string]any{"action": "compile_and_run_arduino", "language": options.Language, "board": result.Board, "source": options.Source, "iterations": options.Iterations, "virtual_devices": result.VirtualDevices, "_project_id": s.project}}, &external)
+		if err != nil {
+			return nil, fmt.Errorf("firmware executor: %w", err)
+		}
+		result.Executor = map[string]any{"app": "functions", "install_id": bound.InstallID, "function": options.ExecutorFunction, "response": external}
+		result.Runtime = "apteva-functions + " + result.Runtime
+	}
+	body := firmwareResultJSON(result)
+	artifact, err := s.persistArtifact(design, revision, "firmware", "json", "application/json", body, map[string]any{"engine": engineVersion, "schema": firmwareSchema, "runtime": result.Runtime, "board": result.Board})
+	if err != nil {
+		return &FirmwareRun{Result: result, Artifact: artifact}, err
+	}
+	if s.ctx != nil {
+		s.ctx.Emit("pcb.firmware.completed", map[string]any{"design_id": design.ID, "revision_id": revision.ID, "artifact_id": artifact.ID, "status": result.Status, "board": result.Board})
+	}
+	return &FirmwareRun{Result: result, Artifact: artifact}, nil
+}
+
 func (s *Service) Manufacturing(designID, revisionID int64) (*Artifact, error) {
 	design, revision, def, err := s.revision(designID, revisionID)
 	if err != nil {
@@ -84,11 +227,34 @@ func (s *Service) Manufacturing(designID, revisionID int64) (*Artifact, error) {
 	if report.Status == "failed" {
 		return nil, fmt.Errorf("revision failed validation with %d errors; manufacturing output refused", report.Errors)
 	}
-	body, err := zipManufacturingSet(def)
+	files := manufacturingFiles(def)
+	verification := verifyManufacturingFiles(def, files)
+	if verification.Status == "failed" {
+		return nil, fmt.Errorf("independent fabrication verification failed with %d errors; manufacturing output refused", verification.Errors)
+	}
+	body, err := deterministicZip(files)
 	if err != nil {
 		return nil, err
 	}
-	return s.persistArtifact(design, revision, "manufacturing", "zip", "application/zip", body, map[string]any{"engine": engineVersion, "format": "Gerber X2 + Excellon", "files": manufacturingFileSummary(def), "validation_status": report.Status})
+	return s.persistArtifact(design, revision, "manufacturing", "zip", "application/zip", body, map[string]any{"engine": engineVersion, "format": "Gerber X2 + Excellon", "files": manufacturingFileSummary(def), "validation_status": report.Status, "fabrication_verification_status": verification.Status, "parsed_draws": verification.Summary["draws"], "parsed_holes": verification.Summary["holes"]})
+}
+
+func (s *Service) VerifyManufacturing(designID, revisionID int64) (*FabricationVerificationRun, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	result := verifyManufacturingFiles(def, manufacturingFiles(def))
+	body, _ := json.MarshalIndent(result, "", "  ")
+	body = append(body, '\n')
+	artifact, err := s.persistArtifact(design, revision, "verification", "json", "application/json", body, map[string]any{"engine": engineVersion, "schema": fabricationVerificationSchema, "status": result.Status, "errors": result.Errors})
+	if err != nil {
+		return &FabricationVerificationRun{Result: result, Artifact: artifact}, err
+	}
+	if s.ctx != nil {
+		s.ctx.Emit("pcb.fabrication.verified", map[string]any{"design_id": design.ID, "revision_id": revision.ID, "artifact_id": artifact.ID, "status": result.Status, "errors": result.Errors})
+	}
+	return &FabricationVerificationRun{Result: result, Artifact: artifact}, nil
 }
 
 func (s *Service) Release(_ context.Context, designID, revisionID int64, note string) (*Artifact, error) {
@@ -110,6 +276,11 @@ func (s *Service) Release(_ context.Context, designID, revisionID int64, note st
 	if report.Status == "failed" {
 		return nil, fmt.Errorf("revision failed validation with %d errors; release refused", report.Errors)
 	}
+	manufacturing := manufacturingFiles(def)
+	verification := verifyManufacturingFiles(def, manufacturing)
+	if verification.Status == "failed" {
+		return nil, fmt.Errorf("independent fabrication verification failed with %d errors; release refused", verification.Errors)
+	}
 	files := map[string][]byte{}
 	source, _ := json.MarshalIndent(def, "", "  ")
 	files["source/pcb.json"] = append(source, '\n')
@@ -117,9 +288,11 @@ func (s *Service) Release(_ context.Context, designID, revisionID int64, note st
 		"design_id": design.ID, "revision_id": revision.ID, "report": report,
 	}, "", "  ")
 	files["validation/report.json"] = append(validation, '\n')
+	verificationBody, _ := json.MarshalIndent(verification, "", "  ")
+	files["verification/fabrication.json"] = append(verificationBody, '\n')
 	files["outputs/board.svg"] = renderSVG(def)
 	files["outputs/bom.csv"] = renderBOM(def)
-	for name, body := range manufacturingFiles(def) {
+	for name, body := range manufacturing {
 		files["manufacturing/"+name] = body
 	}
 	hashes := map[string]string{}
@@ -127,7 +300,7 @@ func (s *Service) Release(_ context.Context, designID, revisionID int64, note st
 		sum := sha256.Sum256(body)
 		hashes[name] = hex.EncodeToString(sum[:])
 	}
-	manifest := map[string]any{"schema": releaseSchema, "engine": engineVersion, "design_id": design.ID, "design_name": design.Name, "revision_id": revision.ID, "revision_number": revision.Number, "source_sha256": revision.SourceSHA256, "validation_status": report.Status, "note": strings.TrimSpace(note), "created_at": revision.CreatedAt, "files": hashes, "compatibility": map[string]any{"native_format": pcbSchema, "original_sources_preserved": true}}
+	manifest := map[string]any{"schema": releaseSchema, "engine": engineVersion, "design_id": design.ID, "design_name": design.Name, "revision_id": revision.ID, "revision_number": revision.Number, "source_sha256": revision.SourceSHA256, "validation_status": report.Status, "fabrication_verification_status": verification.Status, "note": strings.TrimSpace(note), "created_at": revision.CreatedAt, "files": hashes, "compatibility": map[string]any{"native_format": pcbSchema, "original_sources_preserved": true}}
 	manifestBody, _ := json.MarshalIndent(manifest, "", "  ")
 	files["manifest.json"] = append(manifestBody, '\n')
 	body, err := deterministicZip(files)
@@ -149,8 +322,20 @@ func (s *Service) persistArtifact(design *Design, revision *Revision, kind, form
 	// different payloads. Include their semantic kind so one local-cache write
 	// can never overwrite the other for the same immutable revision.
 	suffix := ""
-	if kind == "manufacturing" || kind == "release" {
-		suffix = "-" + kind
+	if kind != "preview" && kind != "bom" {
+		suffix = "-" + safeFilename(kind)
+	}
+	// Simulations and firmware runs are repeatable experiments on the same
+	// immutable revision. Content-address their names so a fault run, changed
+	// probe set, or different sketch can never overwrite an earlier local
+	// result. Manufacturing and release names remain stable for downstream
+	// handoff conventions.
+	if kind == "simulation" || kind == "firmware" {
+		digest := hash
+		if len(digest) > 12 {
+			digest = digest[:12]
+		}
+		suffix += "-" + digest
 	}
 	name := fmt.Sprintf("%s-r%d%s.%s", safeFilename(design.Name), revision.Number, suffix, ext)
 	dir := filepath.Join(s.artifactRoot, fmt.Sprintf("design-%d", design.ID), fmt.Sprintf("revision-%d", revision.ID))
