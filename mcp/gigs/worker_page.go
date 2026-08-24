@@ -121,12 +121,12 @@ func workerPageHTML(token string) string {
   .section-title h2 { margin: 0; font-size: 18px; }
   .section-title span { color: var(--muted); font-size: 13px; }
   .instructions { display: grid; gap: 14px; }
-  .instr { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-  .instr-head { display: flex; gap: 12px; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
-  .num { width: 34px; height: 34px; border-radius: 50%; background: var(--fg); color: var(--bg); display: inline-flex; align-items: center; justify-content: center; font-weight: 700; flex: 0 0 auto; }
+  .instr { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; box-shadow: 0 8px 28px rgba(32, 26, 20, 0.06); }
+  .instr-head { display: flex; gap: 12px; align-items: center; padding: 16px 18px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface-2), var(--surface) 45%); }
+  .num { width: 36px; height: 36px; border-radius: 11px; border: 1px solid color-mix(in srgb, var(--accent), transparent 68%); background: color-mix(in srgb, var(--accent), transparent 86%); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; font-weight: 750; flex: 0 0 auto; }
   .kind { color: var(--muted); font-size: 12px; text-transform: uppercase; }
   .instr-title { font-size: 16px; font-weight: 650; }
-  .instr-body { padding: 16px; display: grid; gap: 14px; }
+  .instr-body { padding: 18px; display: grid; gap: 14px; }
   .instruction-copy { white-space: pre-wrap; font-size: 16px; line-height: 1.55; }
   .media-frame { border: 1px solid var(--line); background: #050505; border-radius: 8px; padding: 10px; }
   audio, video, img { width: 100%; max-width: 100%; border-radius: 6px; display: block; }
@@ -140,7 +140,7 @@ func workerPageHTML(token string) string {
   .script p { margin: 4px 0; }
   .check { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; cursor: pointer; }
   .check input { margin-top: 4px; transform: scale(1.2); }
-  .response { border-top: 1px solid var(--line); background: color-mix(in srgb, var(--surface-2), var(--surface) 45%); padding: 14px 16px 16px; display: grid; gap: 12px; }
+  .response { border-top: 1px solid var(--line); background: color-mix(in srgb, var(--surface-2), var(--surface) 62%); padding: 18px; display: grid; gap: 14px; }
   .response-title { font-size: 13px; color: var(--muted); font-weight: 650; text-transform: uppercase; }
   .response-grid { display: grid; gap: 10px; }
   input[type=text], input[type=number], input[type=date], textarea, select {
@@ -148,23 +148,43 @@ func workerPageHTML(token string) string {
     border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--fg);
   }
   textarea { min-height: 92px; resize: vertical; font-family: inherit; }
-  .file-row { display: grid; gap: 8px; }
-  input[type=file] { width: 100%; border: 1px dashed var(--line); border-radius: 8px; background: var(--surface); padding: 12px; color: var(--muted); }
+  .file-row { display: grid; gap: 10px; }
+  .file-rules { display: flex; flex-wrap: wrap; gap: 6px; }
+  .file-rule { display: inline-flex; align-items: center; min-height: 26px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 12px; }
+  .upload-dropzone { min-height: 138px; border: 1.5px dashed color-mix(in srgb, var(--line), var(--muted) 35%); border-radius: 13px; background: color-mix(in srgb, var(--surface), var(--surface-2) 24%); display: grid; place-items: center; padding: 20px; text-align: center; cursor: pointer; transition: border-color 150ms ease, background 150ms ease, transform 150ms ease; }
+  .upload-dropzone:hover, .upload-dropzone:focus-within, .upload-dropzone.is-dragging { border-color: var(--accent); background: color-mix(in srgb, var(--accent), var(--surface) 94%); }
+  .upload-dropzone.is-dragging { transform: translateY(-1px); }
+  .upload-dropzone.hidden { display: none; }
+  .file-input { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .upload-inner { display: grid; justify-items: center; gap: 7px; }
+  .upload-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 12px; background: color-mix(in srgb, var(--accent), transparent 86%); color: var(--accent); }
+  .upload-icon svg { width: 22px; height: 22px; }
+  .upload-title { color: var(--fg); font-size: 15px; font-weight: 700; }
+  .upload-copy { color: var(--muted); font-size: 13px; }
+  .upload-action { color: var(--accent); font-weight: 700; }
   .previews { display: grid; gap: 10px; }
-  .preview-card { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
-  .preview-media { background: #050505; }
+  .preview-card { width: 100%; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); overflow: hidden; }
+  .preview-top { min-height: 72px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px; }
+  .preview-kind-icon { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 10px; background: var(--surface-2); color: var(--muted); }
+  .preview-kind-icon svg { width: 22px; height: 22px; }
+  .preview-details { min-width: 0; display: grid; gap: 5px; }
+  .preview-name { overflow: hidden; color: var(--fg); font-size: 14px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+  .preview-media { border-top: 1px solid var(--line); background: #050505; }
   .preview-media.collapsed { display: none; }
-  .preview-card.video-preview { max-width: 360px; }
-  .preview-card.video-preview .preview-media video { max-height: 220px; object-fit: contain; background: #050505; }
+  .preview-card.video-preview .preview-media video { max-height: 420px; object-fit: contain; background: #050505; }
   .preview-media video, .preview-media audio, .preview-media img { width: 100%; border-radius: 0; }
   .preview-media audio { padding: 10px; background: var(--surface); }
   .preview-file { padding: 14px; color: var(--fg); background: var(--surface-2); word-break: break-word; }
-  .preview-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 8px 10px; color: var(--muted); font-size: 13px; }
+  .preview-status { width: fit-content; color: var(--muted); font-size: 12px; }
+  .preview-status.success { color: var(--ok); }
   .preview-progress { height: 4px; background: var(--surface-2); }
   .preview-progress span { display: block; width: 0; height: 100%; background: var(--accent); transition: width 160ms ease; }
-  .preview-actions { display: flex; gap: 8px; padding: 0 10px 10px; }
+  .preview-progress.complete { display: none; }
+  .preview-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
   .preview-status.error { color: var(--crit); }
-  .preview-toggle { margin: 0 10px 10px; justify-self: start; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--fg); padding: 7px 10px; font: inherit; font-size: 13px; cursor: pointer; }
+  .preview-action { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--fg); padding: 7px 10px; font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
+  .preview-action:hover { background: var(--surface-2); }
+  .preview-action.danger { color: var(--crit); }
   .single-input { display: grid; gap: 8px; }
   .uploaded { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; color: var(--muted); font-size: 13px; }
   .uploaded li { display: flex; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; background: var(--surface); }
@@ -199,6 +219,9 @@ func workerPageHTML(token string) string {
     .offer-actions button { width: 100%; }
     .submit-bar .row { display: grid; }
     .status { min-height: 18px; }
+    .preview-top { grid-template-columns: auto minmax(0, 1fr); }
+    .preview-actions { grid-column: 1 / -1; justify-content: stretch; }
+    .preview-actions button { flex: 1; }
   }
 </style>
 </head>
@@ -443,13 +466,15 @@ func workerPageHTML(token string) string {
 	      box.className = "response";
 	      const requirements = [];
 	      if (spec.note.required) requirements.push("note required");
-	      if (spec.files.required) requirements.push("at least " + spec.files.min_items + " file(s) required");
+	      if (spec.files.required) requirements.push(spec.files.min_items === 1 ? "1 file required" : spec.files.min_items + " files required");
 	      if (spec.legacy_any_required) requirements.push("note or file required");
 	      box.innerHTML = "<div class='response-title'>Response for step " + (index + 1) + (requirements.length ? " · " + escapeHTML(requirements.join(" · ")) : " · optional") + "</div><div class='response-grid'></div>";
 	      const grid = box.querySelector(".response-grid");
 	      let note = null;
 	      let file = null;
 	      let previews = null;
+	      let dropzone = null;
+	      let filesInFlight = 0;
 	      if (spec.note.enabled) {
 	        const noteWrap = document.createElement("label");
 	        noteWrap.className = "file-row";
@@ -461,11 +486,18 @@ func workerPageHTML(token string) string {
 	      if (spec.files.enabled) {
 	        const filesWrap = document.createElement("div");
 	        filesWrap.className = "file-row";
-	        const accepted = spec.files.accept.length ? spec.files.accept.join(", ") : "Any file type";
-	        const maximum = spec.files.max_items > 0 ? " · maximum " + spec.files.max_items : "";
-	        const maxSize = spec.files.max_size_mb > 0 ? " · up to " + spec.files.max_size_mb + " MB each" : "";
-	        filesWrap.innerHTML = "<div class='label'>Files" + (spec.files.required ? " · required" : " · optional") + "</div><div class='status'>Accepted: " + escapeHTML(accepted + maximum + maxSize) + "</div><input data-files type='file' /><div class='previews' data-previews></div>";
+	        const noun = uploadFileNoun(spec.files.accept);
+	        const ruleParts = [spec.files.accept.length ? uploadAcceptLabel(spec.files.accept) : "Any file type"];
+	        if (spec.files.max_items > 0) ruleParts.push(spec.files.max_items + " " + (spec.files.max_items === 1 ? "file" : "files") + " maximum");
+	        if (spec.files.max_size_mb > 0) ruleParts.push("Up to " + spec.files.max_size_mb + " MB each");
+	        filesWrap.innerHTML = "<div class='label'>Files" + (spec.files.required ? " · required" : " · optional") + "</div>" +
+	          "<div class='file-rules'>" + ruleParts.map(rule => "<span class='file-rule'>" + escapeHTML(rule) + "</span>").join("") + "</div>" +
+	          "<label class='upload-dropzone' data-dropzone><input class='file-input' data-files type='file' />" +
+	          "<span class='upload-inner'><span class='upload-icon' aria-hidden='true'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M12 16V4'/><path d='m7 9 5-5 5 5'/><path d='M5 20h14'/></svg></span>" +
+	          "<span class='upload-title'>Drop " + escapeHTML(noun) + " here</span><span class='upload-copy'>or <span class='upload-action'>choose " + escapeHTML(noun) + "</span> from your device</span></span></label>" +
+	          "<div class='previews' data-previews></div>";
 	        file = filesWrap.querySelector("[data-files]");
+	        dropzone = filesWrap.querySelector("[data-dropzone]");
 	        previews = filesWrap.querySelector("[data-previews]");
 	        if (spec.files.accept.length) file.accept = spec.files.accept.join(",");
 	        if (spec.files.max_items !== 1) file.multiple = true;
@@ -476,7 +508,7 @@ func workerPageHTML(token string) string {
 	        if (note) note.value = existing.note || "";
 	        for (const f of existing.files || []) {
 	          if (!previews) continue;
-	          const preview = renderSubmittedFilePreview(f, gig.draft ? "Ready — not submitted" : "Submitted");
+	          const preview = renderSubmittedFilePreview(f, gig.draft ? "Ready to submit" : "Submitted");
 	          previews.appendChild(preview.card);
 	          preview.addRemove(() => {
 	            existing.files = existing.files.filter(item => item !== f);
@@ -485,6 +517,7 @@ func workerPageHTML(token string) string {
 	            pruneInstructionResponse(key);
 	            updateStatus();
 	            discardUploadedFile(key, f.storage_file_id);
+	            updateFilePickerState();
 	          });
 	        }
 	      }
@@ -494,17 +527,27 @@ func workerPageHTML(token string) string {
 	        pruneInstructionResponse(key);
 	        updateStatus();
 	      });
-	      if (file) file.addEventListener("change", async () => {
-	        const files = Array.from(file.files || []);
+	      function updateFilePickerState() {
+	        if (!dropzone) return;
+	        const existingCount = (instructionResponses[key] && instructionResponses[key].files || []).length;
+	        const atLimit = spec.files.max_items > 0 && existingCount + filesInFlight >= spec.files.max_items;
+	        dropzone.classList.toggle("hidden", atLimit);
+	      }
+	      async function processSelectedFiles(files) {
+	        if (!file || files.length === 0) return;
 	        const existingCount = (instructionResponses[key] && instructionResponses[key].files || []).length;
 	        if (spec.files.max_items > 0 && existingCount + files.length > spec.files.max_items) {
 	          setStatus("Step " + (index + 1) + " accepts at most " + spec.files.max_items + " file(s).");
 	          file.value = "";
 	          return;
 	        }
+	        filesInFlight += files.length;
+	        updateFilePickerState();
 	        for (const f of files) {
 	          if (spec.files.max_size_mb > 0 && f.size > spec.files.max_size_mb * 1024 * 1024) {
 	            setStatus("Step " + (index + 1) + " accepts files up to " + spec.files.max_size_mb + " MB each.");
+	            filesInFlight--;
+	            updateFilePickerState();
 	            continue;
 	          }
 	          const preview = renderFilePreview(f, "Uploading...");
@@ -520,13 +563,15 @@ func workerPageHTML(token string) string {
 	            setStatus("Upload failed: " + e.message);
 	          } finally {
 	            pendingUploads--;
+	            filesInFlight--;
 	            updateSubmitDisabled();
+	            updateFilePickerState();
 	          }
 	          if (!id) continue;
 	          const entry = ensureInstructionResponse(key, it, index);
 	          entry.files.push({ storage_file_id: id, filename: f.name, mime: f.type });
 	          allAttachmentIDs.add(id);
-	          preview.setStatus("Ready — not submitted");
+	          preview.setStatus("Ready to submit");
 	          preview.addRemove(() => {
 	            entry.files = entry.files.filter(item => item.storage_file_id !== id);
 	            allAttachmentIDs.delete(id);
@@ -534,12 +579,42 @@ func workerPageHTML(token string) string {
 	            pruneInstructionResponse(key);
 	            updateStatus();
 	            discardUploadedFile(key, id);
+	            updateFilePickerState();
 	          });
+	          updateFilePickerState();
 	        }
 	        file.value = "";
 	        updateStatus();
+	      }
+	      if (file) file.addEventListener("change", () => {
+	        processSelectedFiles(Array.from(file.files || []));
 	      });
+	      if (dropzone) {
+	        ["dragenter", "dragover"].forEach(name => dropzone.addEventListener(name, event => {
+	          event.preventDefault();
+	          dropzone.classList.add("is-dragging");
+	        }));
+	        ["dragleave", "drop"].forEach(name => dropzone.addEventListener(name, event => {
+	          event.preventDefault();
+	          dropzone.classList.remove("is-dragging");
+	        }));
+	        dropzone.addEventListener("drop", event => processSelectedFiles(Array.from(event.dataTransfer && event.dataTransfer.files || [])));
+	      }
+	      updateFilePickerState();
 	      return box;
+	    }
+
+	    function uploadFileNoun(accept) {
+	      if (accept.length && accept.every(value => value.startsWith("video/"))) return "a video";
+	      if (accept.length && accept.every(value => value.startsWith("audio/"))) return "an audio file";
+	      if (accept.length && accept.every(value => value.startsWith("image/"))) return "an image";
+	      return "files";
+	    }
+	    function uploadAcceptLabel(accept) {
+	      if (accept.length && accept.every(value => value.startsWith("video/"))) return "Video files";
+	      if (accept.length && accept.every(value => value.startsWith("audio/"))) return "Audio files";
+	      if (accept.length && accept.every(value => value.startsWith("image/"))) return "Images";
+	      return accept.join(", ");
 	    }
 
 	    function ensureInstructionResponse(key, it, index) {
@@ -1063,35 +1138,22 @@ func workerPageHTML(token string) string {
 	        node = document.createElement("img");
 	        node.alt = file.name;
 	        node.src = url;
-	      } else {
-	        node = document.createElement("div");
-	        node.className = "preview-file";
-	        node.textContent = file.name;
 	      }
-	      media.appendChild(node);
-	      const meta = document.createElement("div");
-	      meta.className = "preview-meta";
-	      const name = document.createElement("span");
-	      name.textContent = file.name;
-	      const state = document.createElement("span");
-	      state.className = "preview-status";
-	      state.textContent = status || "Selected";
-	      meta.appendChild(name);
-	      meta.appendChild(state);
-	      card.appendChild(media);
-	      card.appendChild(meta);
+	      if (node) media.appendChild(node);
+	      const header = appendPreviewHeader(card, file.name, file.type, status || "Selected");
 	      const progress = document.createElement("div");
 	      progress.className = "preview-progress";
 	      progress.innerHTML = "<span></span>";
 	      card.appendChild(progress);
+	      if (node) card.appendChild(media);
 	      if (file.type.startsWith("video/")) {
-	        card.appendChild(videoPreviewToggle(media));
+	        header.actions.appendChild(videoPreviewToggle(media));
 	      }
 	      return {
 	        card,
 	        setStatus(text, isError) {
-	          state.textContent = text;
-	          state.classList.toggle("error", Boolean(isError));
+	          header.setStatus(text, isError);
+	          progress.classList.toggle("complete", !isError && (text === "Ready to submit" || text === "Submitted"));
 	        },
 	        setProgress(percent) {
 	          progress.firstElementChild.style.width = Math.max(0, Math.min(100, percent)) + "%";
@@ -1131,25 +1193,59 @@ func workerPageHTML(token string) string {
 	        if (url) {
 	          node.href = url;
 	          node.target = "_blank";
-	          node.rel = "noreferrer";
+	        node.rel = "noreferrer";
 	        }
 	      }
 	      media.appendChild(node);
-	      const meta = document.createElement("div");
-	      meta.className = "preview-meta";
-	      const name = document.createElement("span");
-	      name.textContent = file.filename || ("Storage file #" + (file.storage_file_id || ""));
-	      const state = document.createElement("span");
-	      state.className = "preview-status";
-	      state.textContent = status || "Submitted";
-	      meta.appendChild(name);
-	      meta.appendChild(state);
+	      const header = appendPreviewHeader(card, file.filename || ("Storage file #" + (file.storage_file_id || "")), mime, status || "Submitted");
 	      card.appendChild(media);
-	      card.appendChild(meta);
 	      if (url && mime.startsWith("video/")) {
-	        card.appendChild(videoPreviewToggle(media));
+	        header.actions.appendChild(videoPreviewToggle(media));
 	      }
-	      return { card, setStatus(text) { state.textContent = text; }, addRemove(handler) { addPreviewRemove(card, handler); } };
+	      return { card, setStatus(text) { header.setStatus(text, false); }, addRemove(handler) { addPreviewRemove(card, handler); } };
+	    }
+	    function appendPreviewHeader(card, filename, mime, status) {
+	      const top = document.createElement("div");
+	      top.className = "preview-top";
+	      const icon = document.createElement("div");
+	      icon.className = "preview-kind-icon";
+	      icon.setAttribute("aria-hidden", "true");
+	      icon.innerHTML = previewFileIcon(mime);
+	      const details = document.createElement("div");
+	      details.className = "preview-details";
+	      const name = document.createElement("div");
+	      name.className = "preview-name";
+	      name.title = filename;
+	      name.textContent = filename;
+	      const state = document.createElement("div");
+	      state.className = "preview-status";
+	      details.appendChild(name);
+	      details.appendChild(state);
+	      const actions = document.createElement("div");
+	      actions.className = "preview-actions";
+	      top.appendChild(icon);
+	      top.appendChild(details);
+	      top.appendChild(actions);
+	      card.appendChild(top);
+	      const setStatus = (text, isError) => {
+	        state.textContent = text;
+	        state.classList.toggle("error", Boolean(isError));
+	        state.classList.toggle("success", !isError && (text === "Ready to submit" || text === "Submitted"));
+	      };
+	      setStatus(status, false);
+	      return { actions, setStatus };
+	    }
+	    function previewFileIcon(mime) {
+	      if (String(mime || "").startsWith("video/")) {
+	        return "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='5' width='14' height='14' rx='3'/><path d='m17 10 4-2v8l-4-2'/></svg>";
+	      }
+	      if (String(mime || "").startsWith("image/")) {
+	        return "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4' width='18' height='16' rx='3'/><circle cx='9' cy='10' r='2'/><path d='m4 17 5-5 4 4 2-2 5 5'/></svg>";
+	      }
+	      if (String(mime || "").startsWith("audio/")) {
+	        return "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M9 18V5l10-2v13'/><circle cx='6' cy='18' r='3'/><circle cx='16' cy='16' r='3'/></svg>";
+	      }
+	      return "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M6 3h8l4 4v14H6z'/><path d='M14 3v5h5'/></svg>";
 	    }
 	    function addPreviewRemove(card, handler) {
 	      let actions = card.querySelector(".preview-actions");
@@ -1160,7 +1256,7 @@ func workerPageHTML(token string) string {
 	      }
 	      const button = document.createElement("button");
 	      button.type = "button";
-	      button.className = "text-button";
+	      button.className = "preview-action danger";
 	      button.textContent = "Remove";
 	      button.addEventListener("click", handler);
 	      actions.appendChild(button);
@@ -1168,11 +1264,11 @@ func workerPageHTML(token string) string {
 	    function videoPreviewToggle(media) {
 	      const button = document.createElement("button");
 	      button.type = "button";
-	      button.className = "preview-toggle";
-	      button.textContent = "Show video preview";
+	      button.className = "preview-action";
+	      button.textContent = "Preview";
 	      button.addEventListener("click", () => {
 	        const hidden = media.classList.toggle("collapsed");
-	        button.textContent = hidden ? "Show video preview" : "Hide video preview";
+	        button.textContent = hidden ? "Preview" : "Hide preview";
 	      });
 	      return button;
 	    }

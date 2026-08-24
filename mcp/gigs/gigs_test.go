@@ -110,6 +110,24 @@ func TestWorkerOfferSummaryMatchesAcceptanceBoundary(t *testing.T) {
 	}
 }
 
+func TestWorkerPageUsesCustomUploadDropzoneAndCompactPreview(t *testing.T) {
+	html := workerPageHTML("worker-token")
+	for _, want := range []string{
+		`class='upload-dropzone' data-dropzone`,
+		`Drop " + escapeHTML(noun) + " here`,
+		`dropzone.addEventListener("drop"`,
+		`top.className = "preview-top"`,
+		`button.textContent = "Preview"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("worker page missing upload UI marker %q", want)
+		}
+	}
+	if strings.Contains(html, `<input data-files type='file'`) {
+		t.Fatal("worker page exposes the browser-native file input instead of the custom dropzone")
+	}
+}
+
 func TestWorkerOfferWithholdsInstructionsUntilAccepted(t *testing.T) {
 	ctx := testCtx(t)
 	old := globalCtx
