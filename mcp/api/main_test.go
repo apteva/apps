@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -19,9 +20,65 @@ import (
 
 const testProject = "test-project"
 
+type recordingCORSPlatform struct {
+	tk.BasePlatformClient
+	registrations map[string]sdk.BrowserOriginRegistration
+	policies      map[string]sdk.BrowserOriginPolicy
+	deleted       []string
+}
+
+func newRecordingCORSPlatform() *recordingCORSPlatform {
+	return &recordingCORSPlatform{
+		registrations: map[string]sdk.BrowserOriginRegistration{},
+		policies:      map[string]sdk.BrowserOriginPolicy{},
+	}
+}
+
+func (p *recordingCORSPlatform) ReplaceBrowserOrigins(key string, origins []string) (*sdk.BrowserOriginRegistration, error) {
+	return p.ReplaceBrowserOriginPolicy(key, sdk.BrowserOriginPolicy{
+		Origins: origins, Preflight: sdk.BrowserPreflightPlatform, Credentials: true,
+	})
+}
+
+func (p *recordingCORSPlatform) ReplaceBrowserOriginPolicy(key string, policy sdk.BrowserOriginPolicy) (*sdk.BrowserOriginRegistration, error) {
+	policy.Origins = append([]string{}, policy.Origins...)
+	p.policies[key] = policy
+	registration := sdk.BrowserOriginRegistration{
+		Key: key, Origins: append([]string{}, policy.Origins...), Preflight: policy.Preflight, Credentials: policy.Credentials,
+	}
+	p.registrations[key] = registration
+	return &registration, nil
+}
+
+func (p *recordingCORSPlatform) DeleteBrowserOrigins(key string) error {
+	delete(p.registrations, key)
+	delete(p.policies, key)
+	p.deleted = append(p.deleted, key)
+	return nil
+}
+
+func (p *recordingCORSPlatform) ListBrowserOriginRegistrations() ([]sdk.BrowserOriginRegistration, error) {
+	out := make([]sdk.BrowserOriginRegistration, 0, len(p.registrations))
+	for _, registration := range p.registrations {
+		out = append(out, registration)
+	}
+	return out, nil
+}
+
 func mountTestApp(t *testing.T) (*App, *sdk.AppCtx) {
 	t.Helper()
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject))
+	app := &App{}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatalf("OnMount: %v", err)
+	}
+	t.Cleanup(func() { _ = app.OnUnmount(ctx) })
+	return app, ctx
+}
+
+func mountTestAppWithPlatform(t *testing.T, platform sdk.PlatformClient) (*App, *sdk.AppCtx) {
+	t.Helper()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject), tk.WithPlatform(platform))
 	app := &App{}
 	if err := app.OnMount(ctx); err != nil {
 		t.Fatalf("OnMount: %v", err)
@@ -36,8 +93,8 @@ func TestManifest(t *testing.T) {
 	if m.Name != "api" {
 		t.Fatalf("name = %q, want api", m.Name)
 	}
-	if m.Version != "0.4.0" {
-		t.Fatalf("version = %q, want 0.4.0", m.Version)
+	if m.Version != "0.5.0" {
+		t.Fatalf("version = %q, want 0.5.0", m.Version)
 	}
 	if len(m.Provides.HTTPRoutes) == 0 {
 		t.Fatal("manifest should expose HTTP routes")
@@ -366,5 +423,212 @@ func createFunctionRoute(t *testing.T, app *App, ctx *sdk.AppCtx, path, function
 		"target_kind": "function", "target_ref": function,
 	}); err != nil {
 		t.Fatalf("add function route: %v", err)
+	}
+}
+
+func TestManagedCORSPolicyLifecycle(t *testing.T) {
+	platform := newRecordingCORSPlatform()
+	app, ctx := mountTestAppWithPlatform(t, platform)
+
+	created, err := app.toolAPICreate(ctx, map[string]any{
+		"slug": "browser",
+		"cors": map[string]any{
+			"enabled": true, "origins": []any{"https://APP.example/"}, "credentials": false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create API: %v", err)
+	}
+	if synced := created.(map[string]any)["browser_origins_synced"]; synced != true {
+		t.Fatalf("create sync=%v output=%v", synced, created)
+	}
+	want := sdk.BrowserOriginPolicy{
+		Origins: []string{"https://app.example"}, Preflight: sdk.BrowserPreflightApp, Credentials: false,
+	}
+	if got := platform.policies["api-1"]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("create policy=%+v want=%+v", got, want)
+	}
+
+	routeOut, err := app.toolRouteAdd(ctx, map[string]any{
+		"api_slug": "browser", "method": "POST", "path_pattern": "/orders",
+		"target_kind": "http", "target_ref": "https://upstream.example",
+		"cors": map[string]any{"origins": []any{"https://checkout.example"}},
+	})
+	if err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	if got := platform.policies["api-1"].Origins; !reflect.DeepEqual(got, []string{"https://checkout.example"}) {
+		t.Fatalf("route policy origins=%v", got)
+	}
+	routeID := routeOut.(map[string]any)["route"].(*APIRoute).ID
+	if _, err := app.toolRouteDelete(ctx, map[string]any{"id": routeID}); err != nil {
+		t.Fatalf("delete route: %v", err)
+	}
+	if got := platform.policies["api-1"].Origins; !reflect.DeepEqual(got, []string{"https://app.example"}) {
+		t.Fatalf("post-delete policy origins=%v", got)
+	}
+
+	if _, err := app.toolAPIUpdate(ctx, map[string]any{"slug": "browser", "status": "disabled"}); err != nil {
+		t.Fatalf("disable API: %v", err)
+	}
+	if _, ok := platform.registrations["api-1"]; ok {
+		t.Fatal("disabled API registration still exists")
+	}
+	if !containsFold(platform.deleted, "api-1") {
+		t.Fatalf("deleted keys=%v", platform.deleted)
+	}
+}
+
+func TestManagedCORSReconcilesExistingAndStaleRegistrations(t *testing.T) {
+	platform := newRecordingCORSPlatform()
+	platform.registrations["api-999"] = sdk.BrowserOriginRegistration{Key: "api-999", Origins: []string{"https://stale.example"}}
+	platform.registrations["other-client"] = sdk.BrowserOriginRegistration{Key: "other-client", Origins: []string{"https://keep.example"}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject), tk.WithPlatform(platform))
+	if _, err := dbCreateAPI(ctx.AppDB(), apiInput{
+		ProjectID: testProject, Slug: "existing", CORSJSON: `{"enabled":true,"origins":["https://existing.example"]}`,
+	}); err != nil {
+		t.Fatalf("seed API: %v", err)
+	}
+	app := &App{}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatalf("OnMount: %v", err)
+	}
+	if got := platform.policies["api-1"].Origins; !reflect.DeepEqual(got, []string{"https://existing.example"}) {
+		t.Fatalf("reconciled origins=%v", got)
+	}
+	if _, ok := platform.registrations["api-999"]; ok {
+		t.Fatal("stale API registration was not removed")
+	}
+	if _, ok := platform.registrations["other-client"]; !ok {
+		t.Fatal("non-API registration was removed")
+	}
+}
+
+func TestGatewayDelegatedPreflightUsesRequestedRouteWithoutAuth(t *testing.T) {
+	app, ctx := mountTestApp(t)
+	if _, err := app.toolAPICreate(ctx, map[string]any{
+		"slug": "secure-browser",
+		"auth": map[string]any{"kind": "api_key"},
+		"cors": map[string]any{
+			"enabled":       true,
+			"origins":       []any{"https://console.example"},
+			"allow_headers": []any{"content-type", "x-api-key"},
+			"allow_methods": []any{"POST"},
+		},
+	}); err != nil {
+		t.Fatalf("create API: %v", err)
+	}
+	if _, err := app.toolRouteAdd(ctx, map[string]any{
+		"api_slug": "secure-browser", "method": "POST", "path_pattern": "/orders",
+		"target_kind": "http", "target_ref": "https://upstream.example",
+	}); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodOptions, "/gw/secure-browser/orders?project_id="+testProject, nil)
+	req.Header.Set("Origin", "https://console.example")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "Content-Type, X-API-Key")
+	rec := httptest.NewRecorder()
+	app.handleGateway(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://console.example" {
+		t.Fatalf("allow origin=%q", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("unexpected credentials=%q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodOptions, "/gw/secure-browser/orders?project_id="+testProject, nil)
+	req.Header.Set("Origin", "https://attacker.example")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	rec = httptest.NewRecorder()
+	app.handleGateway(rec, req)
+	if rec.Code != http.StatusForbidden || rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("attacker preflight status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
+	}
+}
+
+func TestGatewayEnforcesActualOriginAndOwnsResponseHeaders(t *testing.T) {
+	app, ctx := mountTestApp(t)
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Access-Control-Allow-Origin", "https://attacker.example")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	if _, err := app.toolAPICreate(ctx, map[string]any{
+		"slug": "browser-api",
+		"cors": map[string]any{"enabled": true, "origins": []any{"https://app.example"}, "credentials": false},
+	}); err != nil {
+		t.Fatalf("create API: %v", err)
+	}
+	if _, err := app.toolRouteAdd(ctx, map[string]any{
+		"api_slug": "browser-api", "method": "POST", "path_pattern": "/write",
+		"target_kind": "http", "target_ref": upstream.URL,
+	}); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/gw/browser-api/write?project_id="+testProject, strings.NewReader("{}"))
+	req.Header.Set("Origin", "https://app.example")
+	rec := httptest.NewRecorder()
+	app.handleGateway(rec, req)
+	if rec.Code != http.StatusOK || rec.Header().Get("Access-Control-Allow-Origin") != "https://app.example" {
+		t.Fatalf("allowed request status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("upstream credentials header escaped guard: %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/gw/browser-api/write?project_id="+testProject, strings.NewReader("{}"))
+	req.Header.Set("Origin", "https://attacker.example")
+	rec = httptest.NewRecorder()
+	app.handleGateway(rec, req)
+	if rec.Code != http.StatusForbidden || calls != 1 {
+		t.Fatalf("attacker request status=%d upstream_calls=%d body=%s", rec.Code, calls, rec.Body.String())
+	}
+}
+
+type flushingRecorder struct {
+	*httptest.ResponseRecorder
+	flushed bool
+}
+
+func (r *flushingRecorder) Flush() { r.flushed = true }
+
+func TestGatewayCORSWriterPreservesStreaming(t *testing.T) {
+	underlying := &flushingRecorder{ResponseRecorder: httptest.NewRecorder()}
+	writer := &gatewayCORSResponseWriter{
+		ResponseWriter: underlying,
+		origin:         "https://app.example",
+		policy:         gatewayCORSPolicy{Credentials: false},
+	}
+	writer.Header().Set("Access-Control-Allow-Credentials", "true")
+
+	var flusher http.Flusher = writer
+	flusher.Flush()
+
+	if !underlying.flushed {
+		t.Fatal("CORS writer did not forward Flush")
+	}
+	if got := underlying.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example" {
+		t.Fatalf("allow origin=%q", got)
+	}
+	if got := underlying.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("credential ceiling escaped during flush: %q", got)
+	}
+}
+
+func TestGatewayRejectsWildcardCORSConfiguration(t *testing.T) {
+	app, ctx := mountTestApp(t)
+	if _, err := app.toolAPICreate(ctx, map[string]any{
+		"slug": "wildcard", "cors": map[string]any{"enabled": true, "allow_origin": "*"},
+	}); err == nil || !strings.Contains(err.Error(), "wildcard") {
+		t.Fatalf("wildcard error=%v", err)
 	}
 }

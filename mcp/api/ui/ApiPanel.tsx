@@ -368,6 +368,8 @@ function DetailsView({ api, busy, onSave, onDelete }: {
   const [allowHTTP, setAllowHTTP] = useState(!!api.allow_http);
   const [authKind, setAuthKind] = useState(parseAuthKind(api.auth_json));
   const [corsEnabled, setCORSEnabled] = useState(corsEnabledFrom(api.cors_json));
+  const [corsOrigins, setCORSOrigins] = useState(corsOriginsFrom(api.cors_json).join("\n"));
+  const [corsCredentials, setCORSCredentials] = useState(corsCredentialsFrom(api.cors_json));
 
   useEffect(() => {
     setName(api.name);
@@ -378,6 +380,8 @@ function DetailsView({ api, busy, onSave, onDelete }: {
     setAllowHTTP(!!api.allow_http);
     setAuthKind(parseAuthKind(api.auth_json));
     setCORSEnabled(corsEnabledFrom(api.cors_json));
+    setCORSOrigins(corsOriginsFrom(api.cors_json).join("\n"));
+    setCORSCredentials(corsCredentialsFrom(api.cors_json));
   }, [api]);
 
   return (
@@ -393,7 +397,11 @@ function DetailsView({ api, busy, onSave, onDelete }: {
           status,
           allow_http: allowHTTP,
           auth: { kind: authKind },
-          cors: corsEnabled ? { enabled: "true" } : {},
+          cors: corsEnabled ? {
+            enabled: true,
+            origins: corsOrigins.split(/[\s,]+/).map((origin) => origin.trim()).filter(Boolean),
+            credentials: corsCredentials,
+          } : {},
         });
       }}
     >
@@ -427,6 +435,26 @@ function DetailsView({ api, busy, onSave, onDelete }: {
           </div>
         </Field>
       </div>
+      {corsEnabled && (
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_220px] gap-4">
+          <Field label="Allowed browser origins">
+            <textarea
+              className={inputCls}
+              value={corsOrigins}
+              onChange={(e) => setCORSOrigins(e.target.value)}
+              placeholder={"https://app.example.com\nhttp://localhost:3000"}
+              rows={3}
+              required
+            />
+          </Field>
+          <Field label="Browser credentials">
+            <label className="flex items-center gap-2 h-9 text-sm">
+              <input type="checkbox" checked={corsCredentials} onChange={(e) => setCORSCredentials(e.target.checked)} />
+              Allow cookies or credentials
+            </label>
+          </Field>
+        </div>
+      )}
       <Field label="Description"><textarea className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} rows={3} /></Field>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-px border border-border bg-border text-sm">
         <StatusCell label="DNS status" value={api.dns_status || "-"} />
@@ -615,7 +643,19 @@ function parseAuthKind(s?: string): string {
 
 function corsEnabledFrom(s?: string): boolean {
   const obj = parseJSON(s);
-  return obj.enabled === true || obj.enabled === "true";
+  return obj.enabled === true || obj.enabled === "true" || corsOriginsFrom(s).length > 0;
+}
+
+function corsOriginsFrom(s?: string): string[] {
+  const obj = parseJSON(s);
+  if (Array.isArray(obj.origins)) return obj.origins.filter((origin): origin is string => typeof origin === "string");
+  if (typeof obj.allow_origin === "string" && obj.allow_origin !== "*") return [obj.allow_origin];
+  return [];
+}
+
+function corsCredentialsFrom(s?: string): boolean {
+  const obj = parseJSON(s);
+  return obj.credentials === true || obj.credentials === "true" || obj.allow_credentials === true || obj.allow_credentials === "true";
 }
 
 function eventsSummary(s?: string): string {
