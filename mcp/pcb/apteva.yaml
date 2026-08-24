@@ -2,13 +2,15 @@ schema: apteva-app/v1
 
 name: pcb
 display_name: PCB Studio
-version: 0.2.3
+version: 0.3.0
 description: |
   Native, agent-first electronics design for Apteva. PCB Studio owns its
   canonical circuit and board model, revision engine, validation, rendering,
   pad/footprint geometry, manufacturing validation, Gerber/Excellon writers,
-  and release packaging. External services are optional data, sourcing, and
-  manufacturing providers—not geometry or ECAD engines.
+  deterministic autorouting, electrical simulation, Arduino-compatible virtual
+  hardware, and release packaging. External services are optional data,
+  sourcing, manufacturing, and isolated compilation providers—not geometry,
+  routing, simulation, or ECAD engines.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/pcb
@@ -48,6 +50,13 @@ requires:
       required: false
       label: "Electronic component data"
       hint: Optional. Bind Nexar/Octopart for live component search, authorized distributor offers, stock, and BOM matching.
+    - role: firmware_executor
+      kind: app
+      compatible_app_names: [functions]
+      capabilities: [functions.invoke]
+      required: false
+      label: "Firmware execution sandbox"
+      hint: Optional. Bind Functions to invoke a project-owned Arduino compiler/runtime adapter. PCB Studio's deterministic behavioral GPIO, serial, I2C, and sensor runtime works without it.
     - role: pcb_fabricator
       kind: integration
       compatible_slugs: [jlcpcb]
@@ -56,7 +65,7 @@ requires:
         pcb.provider_discovery: get_api_platform_overview
       required: false
       label: "PCB fabrication provider"
-      hint: Optional provider binding. v0.2 exposes provider readiness only; quote/order calls stay disabled until documented partner endpoints are available.
+      hint: Optional provider binding. v0.3 exposes provider readiness only; quote/order calls stay disabled until documented partner endpoints are available.
 
 provides:
   http_routes:
@@ -72,6 +81,9 @@ provides:
     - { name: pcb.write, resource: pcb_design, description: "Create and revise PCB designs." }
     - { name: pcb.validate, resource: pcb_design, description: "Run native ERC and DRC checks." }
     - { name: pcb.export, resource: pcb_design, description: "Create previews, BOMs, and release packages." }
+    - { name: pcb.route, resource: pcb_design, description: "Analyze, suggest, apply, optimize, and remove native PCB routing." }
+    - { name: pcb.simulate, resource: pcb_design, description: "Configure and run native electrical simulations and inspect results." }
+    - { name: pcb.firmware, resource: pcb_design, description: "Execute Arduino-compatible firmware against virtual PCB hardware." }
   mcp_tools:
     - { name: pcb_examples, description: Return canonical apteva-pcb/v1 examples and supported typed operations., requires: pcb.read }
     - { name: pcb_designs_create, description: "Create a PCB design and immutable first revision. Args: name, definition?, note?.", requires: pcb.write }
@@ -82,6 +94,20 @@ provides:
     - { name: pcb_revisions_get, description: "Fetch one immutable revision. Args: id.", requires: pcb.read }
     - { name: pcb_revisions_diff, description: "Compare two native PCB revisions. Args: from_revision_id, to_revision_id.", requires: pcb.read }
     - { name: pcb_operations_apply, description: "Atomically apply typed native operations and create a revision. Args: design_id, expected_parent_id, operations, note?.", requires: pcb.write, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_route_analyze, description: "Analyze routability and return a deterministic reviewable route plan. Args: design_id, revision_id?, options?.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_route_suggest, description: "Suggest clearance-safe native traces and vias without changing the design. Args: design_id, revision_id?, options?.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_route_apply, description: "Apply a native route plan as an immutable revision. Args: design_id, revision_id?, options?, allow_partial?, note?.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_route_selected, description: "Route selected net_ids in options and create a revision.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_route_all, description: "Route every incomplete net and create a revision.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_route_optimize, description: "Replace selected existing routing with a deterministic optimized route revision.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_route_remove, description: "Remove PCB Studio-generated autoroutes and create a revision.", requires: pcb.route, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_simulation_create, description: "Save revisioned native simulation sources, probes, and virtual devices.", requires: pcb.simulate, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_simulation_run, description: "Run DC, transient RC, and event-driven digital simulation and persist waveforms.", requires: pcb.simulate, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_simulation_probe, description: "Run the electrical model with temporary probes.", requires: pcb.simulate, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_simulation_fault_set, description: "Run simulation with open-component or short-net fault injection.", requires: pcb.simulate, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_simulation_results_get, description: "Load a persisted native simulation result artifact.", requires: pcb.simulate }
+    - { name: pcb_simulation_compare, description: "Compare final states from two simulation artifacts.", requires: pcb.simulate }
+    - { name: pcb_firmware_run, description: "Run Arduino-compatible firmware against virtual GPIO, serial, I2C, and sensor models.", requires: pcb.firmware, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_validate, description: "Run the native ERC/DRC validator. Args: design_id, revision_id?.", requires: pcb.validate, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_render, description: "Create a deterministic SVG board preview. Args: design_id, revision_id?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_bom_generate, description: "Create a deterministic BOM CSV. Args: design_id, revision_id?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
@@ -108,18 +134,21 @@ provides:
     - name: how-to-use-pcb
       command: /pcb
       body_file: skills/how-to-use-pcb.md
-      description: Design and validate native Apteva circuit boards, source components, and create releases.
+      description: Design, route, simulate, validate, and fabricate native Apteva circuit boards, including virtual firmware experiments.
       metadata: { category: design, icon: "⚡" }
   publishes:
     - { name: pcb.design.created, description: A PCB design and its first immutable revision were created. }
     - { name: pcb.revision.created, description: A native PCB revision was created. }
     - { name: pcb.validation.completed, description: Native ERC/DRC validation completed. }
+    - { name: pcb.routing.completed, description: Native autorouting completed and a route revision was created. }
+    - { name: pcb.simulation.completed, description: Native electrical simulation completed. }
+    - { name: pcb.firmware.completed, description: Arduino-compatible virtual firmware execution completed. }
     - { name: pcb.artifact.created, description: "A preview, BOM, or package was persisted." }
     - { name: pcb.release.created, description: A validated release package was created. }
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: pcb/v0.2.3, entry: mcp/pcb }
+  source: { repo: github.com/apteva/apps, ref: pcb/v0.3.0, entry: mcp/pcb }
   port: 8080
   health_check: /health
   resources: { cpu: 0.1, memory: 128, cpu_limit: 1, memory_limit: 512 }

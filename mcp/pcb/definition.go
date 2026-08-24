@@ -43,6 +43,7 @@ func emptyDefinition(name string) Definition {
 		Zones:             []Zone{},
 		Keepouts:          []Keepout{},
 		DifferentialPairs: []DifferentialPair{},
+		NetClasses:        []NetClass{},
 	}
 }
 
@@ -111,6 +112,9 @@ func normalizeDefinition(raw []byte, fallbackName string) ([]byte, *Definition, 
 	if def.DifferentialPairs == nil {
 		def.DifferentialPairs = []DifferentialPair{}
 	}
+	if def.NetClasses == nil {
+		def.NetClasses = []NetClass{}
+	}
 	if err := structuralLimits(&def); err != nil {
 		return nil, nil, "", err
 	}
@@ -141,7 +145,7 @@ func structuralLimits(def *Definition) error {
 	}
 	// Native v1's clearance checker is deliberately simple and deterministic.
 	// Keep its accepted graph bounded until the spatial-indexed validator lands.
-	if len(def.Board.Layers) > 64 || len(def.Components) > 10_000 || len(def.Nets) > 20_000 || len(def.Traces) > 2_000 || len(def.Vias) > 10_000 || len(def.Zones) > 2_000 || len(def.Keepouts) > 2_000 || len(def.DifferentialPairs) > 1_000 {
+	if len(def.Board.Layers) > 64 || len(def.Components) > 10_000 || len(def.Nets) > 20_000 || len(def.Traces) > 2_000 || len(def.Vias) > 10_000 || len(def.Zones) > 2_000 || len(def.Keepouts) > 2_000 || len(def.DifferentialPairs) > 1_000 || len(def.NetClasses) > 1_000 {
 		return errors.New("definition exceeds native v1 object limits")
 	}
 	for _, t := range def.Traces {
@@ -183,6 +187,8 @@ func semanticDiff(fromID, toID int64, a, b *Definition, fromHash, toHash string)
 		Zones:             diffByID(a.Zones, b.Zones, func(v Zone) string { return v.ID }),
 		Keepouts:          diffByID(a.Keepouts, b.Keepouts, func(v Keepout) string { return v.ID }),
 		DifferentialPairs: diffByID(a.DifferentialPairs, b.DifferentialPairs, func(v DifferentialPair) string { return v.ID }),
+		NetClasses:        diffByID(a.NetClasses, b.NetClasses, func(v NetClass) string { return v.ID }),
+		SimulationChanged: !equalJSON(a.Simulation, b.Simulation),
 	}
 }
 

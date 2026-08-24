@@ -155,6 +155,104 @@ func (a *App) handleDesign(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 201, result)
+	case "route-suggest":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var body struct {
+			RevisionID int64        `json:"revision_id"`
+			Options    RouteOptions `json:"options"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		plan, err := s.RouteSuggest(id, body.RevisionID, body.Options)
+		if err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"plan": plan})
+	case "route-apply":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var body struct {
+			RevisionID   int64        `json:"revision_id"`
+			Options      RouteOptions `json:"options"`
+			AllowPartial bool         `json:"allow_partial"`
+			Note         string       `json:"note"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		revision, plan, err := s.RouteApply(id, body.RevisionID, body.Options, body.Note, callerName(r.Context()), body.AllowPartial)
+		if err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		writeJSON(w, 201, map[string]any{"revision": revision, "plan": plan})
+	case "route-remove":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var body struct {
+			RevisionID int64    `json:"revision_id"`
+			NetIDs     []string `json:"net_ids"`
+			Note       string   `json:"note"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		revision, err := s.RouteRemove(id, body.RevisionID, body.NetIDs, body.Note, callerName(r.Context()))
+		if err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		writeJSON(w, 201, map[string]any{"revision": revision})
+	case "simulate":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var body struct {
+			RevisionID int64             `json:"revision_id"`
+			Options    SimulationOptions `json:"options"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		run, err := s.Simulate(id, body.RevisionID, body.Options)
+		if err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		writeJSON(w, 201, run)
+	case "firmware":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var body struct {
+			RevisionID int64           `json:"revision_id"`
+			Options    FirmwareOptions `json:"options"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		run, err := s.Firmware(id, body.RevisionID, body.Options)
+		if err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		writeJSON(w, 201, run)
 	case "validate":
 		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.Validate(id, bodyRevisionID(r)) })
 	case "render":

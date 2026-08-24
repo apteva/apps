@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"sort"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -14,6 +16,8 @@ func (a *App) MCPTools() []sdk.Tool {
 	id := map[string]any{"type": "integer", "minimum": 1}
 	definition := map[string]any{"type": "object", "description": "Canonical apteva-pcb/v1 definition."}
 	operation := map[string]any{"type": "object", "properties": map[string]any{"type": map[string]any{"type": "string"}}, "required": []string{"type"}}
+	routeOptions := map[string]any{"type": "object", "description": "Native deterministic routing options including net_ids, layers, grid_nm, clearance_nm, widths, via geometry, and replace_existing."}
+	simulationOptions := map[string]any{"type": "object", "description": "Simulation duration, step, sources, probes, and fault injection."}
 	return []sdk.Tool{
 		{Name: "pcb_examples", Description: "Return the native PCB schema example, units, operations, and compatibility boundary.", InputSchema: schemaObject(nil, nil), HandlerCtx: a.toolExamples},
 		{Name: "pcb_designs_create", Description: "Create a project PCB design and immutable first revision.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "definition": definition, "note": map[string]any{"type": "string"}}, []string{"name"}), HandlerCtx: a.toolDesignCreate},
@@ -24,6 +28,20 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "pcb_revisions_get", Description: "Fetch one immutable PCB revision.", InputSchema: schemaObject(map[string]any{"id": id}, []string{"id"}), HandlerCtx: a.toolRevisionGet},
 		{Name: "pcb_revisions_diff", Description: "Return a semantic native-object diff between revisions.", InputSchema: schemaObject(map[string]any{"from_revision_id": id, "to_revision_id": id}, []string{"from_revision_id", "to_revision_id"}), HandlerCtx: a.toolRevisionDiff},
 		{Name: "pcb_operations_apply", Description: "Atomically apply typed native operations and create an immutable revision.", InputSchema: schemaObject(map[string]any{"design_id": id, "expected_parent_id": id, "operations": map[string]any{"type": "array", "minItems": 1, "maxItems": 256, "items": operation}, "note": map[string]any{"type": "string"}}, []string{"design_id", "expected_parent_id", "operations"}), HandlerCtx: a.toolOperationsApply},
+		{Name: "pcb_route_analyze", Description: "Analyze routability and return a deterministic reviewable route plan without changing the design.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "options": routeOptions}, []string{"design_id"}), HandlerCtx: a.toolRouteSuggest},
+		{Name: "pcb_route_suggest", Description: "Suggest clearance-safe traces and vias as typed operations without changing the design.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "options": routeOptions}, []string{"design_id"}), HandlerCtx: a.toolRouteSuggest},
+		{Name: "pcb_route_apply", Description: "Route selected or unrouted nets and create an immutable revision after review.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "options": routeOptions, "allow_partial": map[string]any{"type": "boolean"}, "note": map[string]any{"type": "string"}}, []string{"design_id"}), HandlerCtx: a.toolRouteApply},
+		{Name: "pcb_route_selected", Description: "Route the net_ids in options and create an immutable revision.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "options": routeOptions, "allow_partial": map[string]any{"type": "boolean"}, "note": map[string]any{"type": "string"}}, []string{"design_id", "options"}), HandlerCtx: a.toolRouteApply},
+		{Name: "pcb_route_all", Description: "Route every incomplete net and create an immutable revision.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "options": routeOptions, "allow_partial": map[string]any{"type": "boolean"}, "note": map[string]any{"type": "string"}}, []string{"design_id"}), HandlerCtx: a.toolRouteApply},
+		{Name: "pcb_route_optimize", Description: "Replace existing routing for selected nets with a deterministic optimized route revision.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "options": routeOptions, "allow_partial": map[string]any{"type": "boolean"}, "note": map[string]any{"type": "string"}}, []string{"design_id"}), HandlerCtx: a.toolRouteOptimize},
+		{Name: "pcb_route_remove", Description: "Remove PCB Studio-generated autoroutes for selected nets and create a revision.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "net_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "note": map[string]any{"type": "string"}}, []string{"design_id"}), HandlerCtx: a.toolRouteRemove},
+		{Name: "pcb_simulation_create", Description: "Save revisioned native simulation sources, probes, and virtual-device configuration.", InputSchema: schemaObject(map[string]any{"design_id": id, "expected_parent_id": id, "simulation": map[string]any{"type": "object"}, "note": map[string]any{"type": "string"}}, []string{"design_id", "expected_parent_id", "simulation"}), HandlerCtx: a.toolSimulationCreate},
+		{Name: "pcb_simulation_run", Description: "Run deterministic native DC, transient RC, and event-driven digital simulation and persist the result.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "options": simulationOptions}, []string{"design_id"}), HandlerCtx: a.toolSimulationRun},
+		{Name: "pcb_simulation_probe", Description: "Run the electrical model with temporary probes and persist waveforms.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "options": simulationOptions}, []string{"design_id"}), HandlerCtx: a.toolSimulationRun},
+		{Name: "pcb_simulation_fault_set", Description: "Run simulation with explicit open-component or short-net faults.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "options": simulationOptions}, []string{"design_id", "options"}), HandlerCtx: a.toolSimulationRun},
+		{Name: "pcb_simulation_results_get", Description: "Load a persisted native simulation result artifact.", InputSchema: schemaObject(map[string]any{"artifact_id": id}, []string{"artifact_id"}), HandlerCtx: a.toolSimulationResultGet},
+		{Name: "pcb_simulation_compare", Description: "Compare final voltages and digital states from two simulation artifacts.", InputSchema: schemaObject(map[string]any{"from_artifact_id": id, "to_artifact_id": id}, []string{"from_artifact_id", "to_artifact_id"}), HandlerCtx: a.toolSimulationCompare},
+		{Name: "pcb_firmware_run", Description: "Run an Arduino-compatible sketch against PCB Studio virtual GPIO, serial, I2C, and sensor models; optionally invoke a bound Functions compiler sandbox.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "source": map[string]any{"type": "string"}, "language": map[string]any{"type": "string"}, "board": map[string]any{"type": "string"}, "iterations": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}, "executor_function": map[string]any{"type": "string"}, "sensor_values": map[string]any{"type": "object"}}, []string{"design_id", "source"}), HandlerCtx: a.toolFirmwareRun},
 		{Name: "pcb_validate", Description: "Run the native electrical-rule and design-rule validator.", InputSchema: designActionSchema(id), HandlerCtx: a.toolValidate},
 		{Name: "pcb_render", Description: "Persist a deterministic SVG board preview.", InputSchema: designActionSchema(id), HandlerCtx: a.toolRender},
 		{Name: "pcb_bom_generate", Description: "Persist a deterministic grouped BOM CSV.", InputSchema: designActionSchema(id), HandlerCtx: a.toolBOM},
@@ -200,6 +218,194 @@ func (a *App) toolOperationsApply(ctx context.Context, app *sdk.AppCtx, args map
 	}
 	return map[string]any{"revision": revision}, err
 }
+
+func (a *App) toolRouteSuggest(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	options, err := routeOptionsArg(args)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := s.RouteSuggest(int64Arg(args, "design_id"), int64Arg(args, "revision_id"), options)
+	return map[string]any{"plan": plan}, err
+}
+
+func (a *App) toolRouteApply(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	options, err := routeOptionsArg(args)
+	if err != nil {
+		return nil, err
+	}
+	revision, plan, err := s.RouteApply(int64Arg(args, "design_id"), int64Arg(args, "revision_id"), options, stringArg(args, "note"), callerName(ctx), boolArg(args, "allow_partial"))
+	return map[string]any{"revision": revision, "plan": plan}, err
+}
+
+func (a *App) toolRouteOptimize(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	options, err := routeOptionsArg(args)
+	if err != nil {
+		return nil, err
+	}
+	options.ReplaceExisting = true
+	copy := cloneArgs(args)
+	body, _ := json.Marshal(options)
+	var generic map[string]any
+	_ = json.Unmarshal(body, &generic)
+	copy["options"] = generic
+	return a.toolRouteApply(ctx, app, copy)
+}
+
+func (a *App) toolRouteRemove(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	var netIDs []string
+	if err := decodeOptionalArg(args, "net_ids", &netIDs); err != nil {
+		return nil, err
+	}
+	revision, err := s.RouteRemove(int64Arg(args, "design_id"), int64Arg(args, "revision_id"), netIDs, stringArg(args, "note"), callerName(ctx))
+	return map[string]any{"revision": revision}, err
+}
+
+func (a *App) toolSimulationCreate(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	var simulation SimulationSpec
+	if err := decodeOptionalArg(args, "simulation", &simulation); err != nil {
+		return nil, err
+	}
+	copy := cloneArgs(args)
+	copy["operations"] = []any{map[string]any{"type": "simulation.set", "simulation": simulation}}
+	return a.toolOperationsApply(ctx, app, copy)
+}
+
+func (a *App) toolSimulationRun(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	var options SimulationOptions
+	if err := decodeOptionalArg(args, "options", &options); err != nil {
+		return nil, err
+	}
+	return s.Simulate(int64Arg(args, "design_id"), int64Arg(args, "revision_id"), options)
+}
+
+func (a *App) toolSimulationResultGet(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	result, artifact, err := loadSimulationArtifact(s, int64Arg(args, "artifact_id"))
+	return map[string]any{"result": result, "artifact": artifact}, err
+}
+
+func (a *App) toolSimulationCompare(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	from, fromArtifact, err := loadSimulationArtifact(s, int64Arg(args, "from_artifact_id"))
+	if err != nil {
+		return nil, err
+	}
+	to, toArtifact, err := loadSimulationArtifact(s, int64Arg(args, "to_artifact_id"))
+	if err != nil {
+		return nil, err
+	}
+	nets := map[string]bool{}
+	for id := range from.FinalVoltage {
+		nets[id] = true
+	}
+	for id := range to.FinalVoltage {
+		nets[id] = true
+	}
+	ids := make([]string, 0, len(nets))
+	for id := range nets {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	differences := []map[string]any{}
+	for _, id := range ids {
+		delta := to.FinalVoltage[id] - from.FinalVoltage[id]
+		if absFloat(delta) > 1e-9 || from.FinalDigital[id] != to.FinalDigital[id] {
+			differences = append(differences, map[string]any{"net_id": id, "from_voltage_v": from.FinalVoltage[id], "to_voltage_v": to.FinalVoltage[id], "delta_v": roundFloat(delta, 9), "from_digital": from.FinalDigital[id], "to_digital": to.FinalDigital[id]})
+		}
+	}
+	return map[string]any{"from_artifact_id": fromArtifact.ID, "to_artifact_id": toArtifact.ID, "differences": differences}, nil
+}
+
+func (a *App) toolFirmwareRun(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	options := FirmwareOptions{Source: stringArg(args, "source"), Language: stringArg(args, "language"), Board: stringArg(args, "board"), Iterations: intArg(args, "iterations"), ExecutorFunction: stringArg(args, "executor_function")}
+	if err := decodeOptionalArg(args, "sensor_values", &options.SensorValues); err != nil {
+		return nil, err
+	}
+	return s.Firmware(int64Arg(args, "design_id"), int64Arg(args, "revision_id"), options)
+}
+
+func routeOptionsArg(args map[string]any) (RouteOptions, error) {
+	var options RouteOptions
+	if err := decodeOptionalArg(args, "options", &options); err != nil {
+		return options, err
+	}
+	return options, nil
+}
+
+func decodeOptionalArg(args map[string]any, key string, out any) error {
+	value, ok := args[key]
+	if !ok || value == nil {
+		return nil
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("invalid %s: %w", key, err)
+	}
+	if err = json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("invalid %s: %w", key, err)
+	}
+	return nil
+}
+
+func cloneArgs(args map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range args {
+		out[key] = value
+	}
+	return out
+}
+func boolArg(args map[string]any, key string) bool { value, _ := args[key].(bool); return value }
+func absFloat(value float64) float64 {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+func loadSimulationArtifact(s *Service, artifactID int64) (*SimulationResult, *Artifact, error) {
+	artifact, err := s.store.GetArtifact(s.project, artifactID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if artifact.Kind != "simulation" || artifact.Format != "json" {
+		return nil, artifact, fmt.Errorf("artifact %d is not a simulation result", artifactID)
+	}
+	body, err := os.ReadFile(artifact.LocalPath)
+	if err != nil {
+		return nil, artifact, err
+	}
+	var result SimulationResult
+	if err = json.Unmarshal(body, &result); err != nil {
+		return nil, artifact, err
+	}
+	return &result, artifact, nil
+}
 func (a *App) toolValidate(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	s, err := a.service(app)
 	if err != nil {
@@ -294,11 +500,13 @@ func (a *App) toolBOMSource(_ context.Context, app *sdk.AppCtx, args map[string]
 func (a *App) toolProvidersStatus(_ context.Context, app *sdk.AppCtx, _ map[string]any) (any, error) {
 	storage := app.IntegrationFor("storage")
 	component, fab := app.IntegrationFor("component_data"), app.IntegrationFor("pcb_fabricator")
+	executor := app.IntegrationFor("firmware_executor")
 	return map[string]any{
-		"native_engine":  map[string]any{"schema": pcbSchema, "engine": engineVersion, "external_engine_dependency": false},
-		"storage":        bindingStatus(storage, true, "native PCB artifacts are persisted through the selected Storage app binding"),
-		"component_data": bindingStatus(component, true, "available through the selected component-data connection"),
-		"pcb_fabricator": bindingStatus(fab, false, "discovery only in v0.2; quote/order disabled"),
+		"native_engine":     map[string]any{"schema": pcbSchema, "engine": engineVersion, "routing": routingSchema, "simulation": simulationSchema, "firmware_runtime": "apteva-arduino-behavioral/0.3", "external_engine_dependency": false},
+		"storage":           bindingStatus(storage, true, "native PCB artifacts are persisted through the selected Storage app binding"),
+		"component_data":    bindingStatus(component, true, "available through the selected component-data connection"),
+		"pcb_fabricator":    bindingStatus(fab, false, "provider discovery is available; quote/order remains approval-gated"),
+		"firmware_executor": bindingStatus(executor, true, "optional Functions sandbox for full Arduino compiler/runtime adapters; native behavioral execution works without it"),
 	}, nil
 }
 

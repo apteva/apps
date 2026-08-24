@@ -163,6 +163,71 @@ func validateDefinition(def *Definition) ValidationReport {
 		}
 	}
 
+	netClassIDs, classifiedNets := map[string]bool{}, map[string]string{}
+	for _, class := range def.NetClasses {
+		if !idValid(class.ID) {
+			add("NET_CLASS_ID_INVALID", "error", "Net class has an invalid stable ID", class.ID)
+		}
+		if netClassIDs[class.ID] {
+			add("NET_CLASS_ID_DUPLICATE", "error", "Net class ID is duplicated", class.ID)
+		}
+		netClassIDs[class.ID] = true
+		if class.TraceWidthNM > 0 && class.TraceWidthNM < def.Rules.MinTraceWidthNM {
+			add("NET_CLASS_TRACE_WIDTH", "error", "Net class trace width is below the board minimum", class.ID)
+		}
+		if class.ClearanceNM > 0 && class.ClearanceNM < def.Rules.MinClearanceNM {
+			add("NET_CLASS_CLEARANCE", "error", "Net class clearance is below the board minimum", class.ID)
+		}
+		if class.ViaDrillNM > 0 && class.ViaDrillNM < def.Rules.MinDrillNM {
+			add("NET_CLASS_VIA_DRILL", "error", "Net class via drill is below the board minimum", class.ID)
+		}
+		if class.ViaDiameterNM > 0 && class.ViaDrillNM > 0 && (class.ViaDiameterNM-class.ViaDrillNM)/2 < def.Rules.MinAnnularRingNM {
+			add("NET_CLASS_ANNULAR_RING", "error", "Net class via annular ring is below the board minimum", class.ID)
+		}
+		for _, netID := range class.NetIDs {
+			if _, ok := nets[netID]; !ok {
+				add("NET_CLASS_NET_MISSING", "error", "Net class references a missing net", class.ID, netID)
+				continue
+			}
+			if other, ok := classifiedNets[netID]; ok {
+				add("NET_MULTIPLE_CLASSES", "error", "Net belongs to multiple net classes", netID, other, class.ID)
+			} else {
+				classifiedNets[netID] = class.ID
+			}
+		}
+	}
+	if def.Simulation != nil {
+		if def.Simulation.DurationUS < 0 || def.Simulation.StepUS < 0 {
+			add("SIMULATION_TIME_INVALID", "error", "Simulation duration and step cannot be negative")
+		}
+		if def.Simulation.DurationUS > 0 && def.Simulation.StepUS > 0 && def.Simulation.DurationUS/def.Simulation.StepUS > 2_000 {
+			add("SIMULATION_SAMPLE_LIMIT", "error", "Simulation configuration exceeds 2000 samples")
+		}
+		sourceIDs := map[string]bool{}
+		for _, source := range def.Simulation.Sources {
+			if !idValid(source.ID) || sourceIDs[source.ID] {
+				add("SIMULATION_SOURCE_ID", "error", "Simulation source needs a unique stable ID", source.ID)
+			}
+			sourceIDs[source.ID] = true
+			if _, ok := nets[source.NetID]; !ok {
+				add("SIMULATION_SOURCE_NET", "error", "Simulation source references a missing net", source.ID, source.NetID)
+			}
+			if source.Kind != "dc" && source.Kind != "digital" && source.Kind != "clock" {
+				add("SIMULATION_SOURCE_KIND", "error", "Simulation source kind must be dc, digital, or clock", source.ID)
+			}
+		}
+		probeIDs := map[string]bool{}
+		for _, probe := range def.Simulation.Probes {
+			if !idValid(probe.ID) || probeIDs[probe.ID] {
+				add("SIMULATION_PROBE_ID", "error", "Simulation probe needs a unique stable ID", probe.ID)
+			}
+			probeIDs[probe.ID] = true
+			if _, ok := nets[probe.NetID]; !ok {
+				add("SIMULATION_PROBE_NET", "error", "Simulation probe references a missing net", probe.ID, probe.NetID)
+			}
+		}
+	}
+
 	traceIDs := map[string]bool{}
 	for _, trace := range def.Traces {
 		if !idValid(trace.ID) {
