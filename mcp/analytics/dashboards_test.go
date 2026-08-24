@@ -286,6 +286,40 @@ func TestStatWidgetGenericAggregations(t *testing.T) {
 	}
 }
 
+func TestStatWidgetPreviousPeriodComparison(t *testing.T) {
+	db := testDashboardDB(t)
+	now := time.Now().UTC()
+	for _, observation := range []struct {
+		age   time.Duration
+		value string
+	}{
+		{10 * 24 * time.Hour, "100"},
+		{24 * time.Hour, "120"},
+	} {
+		if _, err := insertEvent(db, EventInsert{
+			TS: now.Add(-observation.age).UnixMilli(), App: "subscriptions", Topic: "mrr.snapshot",
+			ProjectID: "p1", Source: "track", Props: `{"mrr":` + observation.value + `}`,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := evaluateWidget(db, "p1", DashboardWidget{Type: "stat", Config: map[string]any{
+		"app": "subscriptions", "topic": "mrr.snapshot", "window": "7d",
+		"value": "props.mrr", "aggregation": "latest", "comparison": "previous_period",
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comparison, ok := got["comparison"].(map[string]any)
+	if !ok {
+		t.Fatalf("comparison=%#v", got["comparison"])
+	}
+	if comparison["previous_value"] != 100.0 || comparison["change"] != 20.0 || comparison["change_percent"] != 20.0 || comparison["window"] != "7d" {
+		t.Fatalf("comparison=%#v", comparison)
+	}
+}
+
 func TestCountDistinctAndLegacyAggregationDefaults(t *testing.T) {
 	db := testDashboardDB(t)
 	for i, account := range []string{"a", "b", "a"} {

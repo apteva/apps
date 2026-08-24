@@ -103,6 +103,36 @@ export function formatMetric(value: number, config: Record<string, unknown>): st
 	return typeof config.unit === "string" && config.unit ? `${formatted} ${config.unit}` : formatted;
 }
 
+export interface AreaChartPoint {
+	x: number;
+	y: number;
+}
+
+export function areaChartGeometry(values: number[], width = 300, height = 72): {
+	points: AreaChartPoint[];
+	linePath: string;
+	areaPath: string;
+	baseline: number;
+} {
+	const horizontalPadding = 8;
+	const top = 8;
+	const baseline = height - 6;
+	const min = Math.min(...values);
+	const max = Math.max(...values);
+	const hasVariation = max > min;
+	const points = values.map((value, index) => ({
+		x: horizontalPadding + (index / Math.max(1, values.length - 1)) * (width - horizontalPadding * 2),
+		y: hasVariation
+			? baseline - ((value - min) / (max - min)) * (baseline - top)
+			: top + (baseline - top) / 2,
+	}));
+	const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+	const areaPath = points.length
+		? `${linePath} L ${points.at(-1)?.x} ${baseline} L ${points[0]?.x} ${baseline} Z`
+		: "";
+	return { points, linePath, areaPath, baseline };
+}
+
 export function resolveMetricConfig(config: Record<string, unknown>, filters: Record<string, string>): Record<string, unknown> {
 	const out = { ...config };
 	for (const [key, value] of Object.entries(out)) {

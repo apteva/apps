@@ -607,7 +607,14 @@ func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget, selectedFil
 		if err != nil {
 			return nil, err
 		}
-		return evaluateStatWidget(db, f, w.Type, cfg, aggregation)
+		result, err := evaluateStatWidget(db, f, w.Type, cfg, aggregation)
+		if err != nil {
+			return nil, err
+		}
+		if err := addPreviousPeriodComparison(db, result, f, cfg, aggregation); err != nil {
+			return nil, err
+		}
+		return result, nil
 	case "timeseries":
 		aggregation, err := widgetAggregation(cfg)
 		if err != nil {
@@ -645,6 +652,72 @@ func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget, selectedFil
 		return map[string]any{"type": w.Type, "events": rows}, nil
 	default:
 		return nil, fmt.Errorf("unsupported widget type %q", w.Type)
+	}
+}
+
+// addPreviousPeriodComparison enriches a stat without changing its primary
+// aggregation. It is intentionally opt-in because counts, sums, snapshots, and
+// distinct values can all use the same comparison, while dashboards that do
+// not want it keep their existing payload unchanged.
+func addPreviousPeriodComparison(db *sql.DB, result map[string]any, current Filter, cfg map[string]any, aggregation string) error {
+	if stringConfig(cfg, "comparison", "") != "previous_period" {
+		return nil
+	}
+	windowName := stringConfig(cfg, "window", "")
+	period := windowMillis(windowName)
+	if period <= 0 || current.Since <= 0 {
+		return nil
+	}
+	previous := current
+	previous.Until = current.Since
+	previous.Since = current.Since - period
+	previousResult, err := evaluateStatWidget(db, previous, "stat", cfg, aggregation)
+	if err != nil {
+		return err
+	}
+	currentCount, currentCountOK := numericMapValue(result["count"])
+	previousCount, previousCountOK := numericMapValue(previousResult["count"])
+	if !currentCountOK {
+		currentCount, _ = numericMapValue(result["value"])
+	}
+	if !previousCountOK {
+		previousCount, _ = numericMapValue(previousResult["value"])
+	}
+	if currentCount <= 0 || previousCount <= 0 {
+		return nil
+	}
+	currentValue, currentOK := numericMapValue(result["value"])
+	previousValue, previousOK := numericMapValue(previousResult["value"])
+	if !currentOK || !previousOK {
+		return nil
+	}
+	change := currentValue - previousValue
+	comparison := map[string]any{
+		"kind":           "previous_period",
+		"window":         windowName,
+		"previous_value": previousValue,
+		"change":         change,
+	}
+	if previousValue != 0 {
+		comparison["change_percent"] = change / previousValue * 100
+	}
+	result["comparison"] = comparison
+	return nil
+}
+
+func numericMapValue(value any) (float64, bool) {
+	switch number := value.(type) {
+	case int:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	case float64:
+		return number, true
+	case json.Number:
+		parsed, err := number.Float64()
+		return parsed, err == nil
+	default:
+		return 0, false
 	}
 }
 

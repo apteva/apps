@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { dedupeWidgetGoals, defaultDashboardFilters, selectDashboardID } from "./dashboard-ui";
+import { areaChartGeometry, dedupeWidgetGoals, defaultDashboardFilters, selectDashboardID } from "./dashboard-ui";
 
 describe("Analytics dashboard home widget", () => {
   test("prefers configured dashboard, then stored dashboard, then newest", () => {
@@ -31,5 +31,12 @@ describe("Analytics dashboard home widget", () => {
       11: { series: [], goals: [{ target_id: 174, name: "Members target" }] },
     });
     expect(data[11].goals).toHaveLength(2);
+  });
+
+  test("keeps area-chart endpoints inside the viewbox", () => {
+    const geometry = areaChartGeometry([10, 14, 12, 18]);
+    expect(geometry.points[0].x).toBe(8);
+    expect(geometry.points.at(-1)?.x).toBe(292);
+    expect(geometry.areaPath).toEndWith(`L 8 ${geometry.baseline} Z`);
   });
 });

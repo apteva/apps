@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { batchResultsByID, dedupeWidgetGoals, defaultDashboardFilters, formatMetric, formatObjectiveValue, objectiveProgressWidth, resolveMetricConfig, scopedAppURL, selectDashboardID } from "./dashboard-ui";
+import { areaChartGeometry, batchResultsByID, dedupeWidgetGoals, defaultDashboardFilters, formatMetric, formatObjectiveValue, objectiveProgressWidth, resolveMetricConfig, scopedAppURL, selectDashboardID } from "./dashboard-ui";
 
 interface HostProps {
   appName?: string;
@@ -91,16 +91,7 @@ function Empty({ children }: { children: string }) {
 function AreaChart({ rows, config, gradientId, tone }: { rows: Array<Record<string, unknown>>; config: Record<string, unknown>; gradientId: string; tone: "accent" | "success" }) {
   if (!rows.length) return <Empty>No values in this window.</Empty>;
   const values = rows.map((row) => Number(row.value ?? row.count ?? 0));
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  const baseline = 68;
-  const points = values.map((value, index) => ({
-    x: (index / Math.max(1, values.length - 1)) * 300,
-    y: baseline - ((value - min) / range) * 58,
-  }));
-  const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
-  const areaPath = `${linePath} L ${points.at(-1)?.x ?? 300} ${baseline} L ${points[0]?.x ?? 0} ${baseline} Z`;
+  const { points, linePath, areaPath, baseline } = areaChartGeometry(values);
   const colorClass = tone === "success" ? "text-success" : "text-accent";
   return (
     <div className="mt-2">
@@ -151,6 +142,10 @@ function GoalProgressRows({ goals, error, limit }: { goals?: Array<Record<string
 function MetricCard({ widget, data, filters, goalLimit }: { widget: DashboardWidget; data?: Record<string, any>; filters: Record<string, string>; goalLimit: number }) {
   const config = resolveMetricConfig(widget.config, filters);
   const aggregation = String(data?.aggregation ?? widget.config.aggregation ?? "");
+  const comparison = data?.comparison && typeof data.comparison === "object" ? data.comparison : null;
+  const comparisonPercent = comparison && typeof comparison.change_percent === "number" ? comparison.change_percent : null;
+  const comparisonChange = comparison && typeof comparison.change === "number" ? comparison.change : null;
+  const comparisonPositive = (comparisonPercent ?? comparisonChange ?? 0) >= 0;
   return (
     <article className="min-w-0 rounded border border-border bg-bg-subtle/30 px-3 py-3">
       <div className="truncate text-[10px] font-bold uppercase tracking-wide text-text-dim" title={widget.title}>{widget.title}</div>
@@ -163,7 +158,13 @@ function MetricCard({ widget, data, filters, goalLimit }: { widget: DashboardWid
           </div>
           <div className="mt-1 flex items-center gap-2 text-[10px] text-text-dim">
             {aggregation && <span className="capitalize">{aggregation}</span>}
-            {typeof data?.change_percent === "number" && (
+            {comparison && (comparisonPercent != null || comparisonChange != null) ? (
+              <span className={comparisonPositive ? "text-success" : "text-error"} title={`Previous value: ${formatMetric(Number(comparison.previous_value ?? 0), config)}`}>
+                {comparisonPositive ? "↑" : "↓"} {comparisonPercent != null
+                  ? `${Math.abs(comparisonPercent).toFixed(1)}%`
+                  : formatMetric(Math.abs(comparisonChange ?? 0), config)} vs previous {String(comparison.window || "period")}
+              </span>
+            ) : typeof data?.change_percent === "number" && (
               <span className={data.change_percent >= 0 ? "text-success" : "text-error"}>
                 {data.change_percent >= 0 ? "+" : ""}{data.change_percent.toFixed(1)}%
               </span>
