@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.9.0
+version: 0.9.1
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -21,6 +21,9 @@ description: |
   payment-link delivery, payment receipts, failed-payment notices, and a
   trial-ending reminder sweep. All sends are best-effort — installs
   without messaging keep collecting payments unchanged.
+  v0.9.1 adds optional CRM customer synchronization. SaaS customers are
+  upserted by email as CRM contacts, the contact link is stored durably,
+  and failed or unavailable CRM calls retry without blocking checkout.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
@@ -70,6 +73,9 @@ requires:
       optional: false
     - name: auth
       optional: false
+    - name: crm
+      reason: Optionally sync SaaS customers as duplicate-safe CRM contacts without coupling Auth identities to CRM.
+      optional: true
     - name: messaging
       reason: transactional email — payment links, receipts, failed-payment notices, and trial-ending reminders; sends are best-effort and never block collection
       optional: true

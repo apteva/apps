@@ -31,6 +31,13 @@ usage gauges.
 - SaaS owns plan composition, account state, and live usage gauges.
 - Target apps own their own domain data and expose ordinary tools.
 
+CRM is an optional companion. When installed, SaaS upserts each customer by
+email through `contacts_upsert_by_channel`, stores the resulting contact ID,
+and retries failed synchronization without blocking customer creation or
+checkout. This sync follows the SaaS customer boundary: Auth identities such
+as invited members, administrators, and service accounts are not implicitly
+treated as CRM contacts.
+
 SaaS does not install apps, run containers, or expose domains. Hosting can
 become a target later through its existing tools, but SaaS does not modify
 or depend on Hosting.

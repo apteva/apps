@@ -115,6 +115,8 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		body = map[string]any{"organization": map[string]any{"id": 101, "slug": input["slug"], "name": input["name"]}}
 	case "auth_users_create":
 		body = map[string]any{"user": map[string]any{"id": 202, "email": input["email"], "organization_id": input["organization_id"]}}
+	case "contacts_upsert_by_channel":
+		body = map[string]any{"contact": map[string]any{"id": 303, "display_name": input["defaults"].(map[string]any)["display_name"]}, "was_created": true}
 	case "entitlement_grants_upsert":
 		if p.failGrantOnce && strFromAny(input["feature_key"]) == p.failGrantFeature {
 			p.failGrantOnce = false
@@ -292,8 +294,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.9.0" {
-		t.Errorf("manifest.Version=%q, want 0.9.0", m.Version)
+	if m.Version != "0.9.1" {
+		t.Errorf("manifest.Version=%q, want 0.9.1", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -302,8 +304,10 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 		t.Fatalf("manifest DB not declared correctly: %+v", m.DB)
 	}
 	required := map[string]bool{}
+	present := map[string]bool{}
 	versions := map[string]string{}
 	for _, dep := range m.Requires.Apps {
+		present[dep.Name] = true
 		required[dep.Name] = !dep.Optional
 		versions[dep.Name] = dep.Version
 	}
@@ -351,8 +355,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if len(m.Provides.UIPanels) != 1 || m.Provides.UIPanels[0].Entry != "/ui/SaaSPanel.mjs" {
 		t.Fatalf("manifest should expose SaaS UI panel, got %+v", m.Provides.UIPanels)
 	}
-	if required["messaging"] || required["analytics"] {
-		t.Error("messaging and analytics should be optional")
+	if !present["crm"] || required["crm"] || required["messaging"] || required["analytics"] {
+		t.Error("crm, messaging, and analytics should be optional")
 	}
 	publishes := map[string]bool{}
 	for _, event := range m.Provides.Publishes {
@@ -992,6 +996,7 @@ func TestAccountCreate_AppliesAuthAndEntitlements(t *testing.T) {
 		got[call.App+":"+call.Tool] = true
 	}
 	for _, key := range []string{
+		"crm:contacts_upsert_by_channel",
 		"auth:auth_orgs_create",
 		"auth:auth_users_create",
 		"entitlements:entitlement_grants_upsert",
@@ -1000,6 +1005,48 @@ func TestAccountCreate_AppliesAuthAndEntitlements(t *testing.T) {
 		if !got[key] {
 			t.Errorf("missing call %s; calls=%+v", key, pf.calls)
 		}
+	}
+	customer, err := dbCustomerGet(db, "proj-test", acct.CustomerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customer.CRMContactID == nil || *customer.CRMContactID != 303 || customer.CRMSyncStatus != "synced" {
+		t.Fatalf("customer CRM link was not persisted: %+v", customer)
+	}
+}
+
+func TestCustomerCreate_CRMSyncFailureIsNonBlockingAndRetryable(t *testing.T) {
+	pf := &platformStub{failures: map[string]int{"crm:contacts_upsert_by_channel": 1}}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+
+	out, err := app.toolCustomerCreate(ctx, map[string]any{
+		"email": "buyer@example.com",
+		"name":  "Buyer Example",
+	})
+	if err != nil {
+		t.Fatalf("optional CRM failure blocked customer creation: %v", err)
+	}
+	customer := out.(map[string]any)["customer"].(*Customer)
+	if customer.CRMContactID != nil || customer.CRMSyncStatus != "failed" || customer.CRMSyncError == "" {
+		t.Fatalf("CRM failure state was not persisted: %+v", customer)
+	}
+	if _, err := db.Exec(`UPDATE saas_customers SET crm_sync_attempted_at=datetime('now','-7 hours') WHERE id=?`, customer.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.retryPendingCRMCustomers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	customer, err = dbCustomerGet(db, "proj-test", customer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customer.CRMContactID == nil || *customer.CRMContactID != 303 || customer.CRMSyncStatus != "synced" || customer.CRMSyncError != "" {
+		t.Fatalf("CRM retry did not persist the contact link: %+v", customer)
+	}
+	if got := countCalls(pf.calls, "crm", "contacts_upsert_by_channel"); got != 2 {
+		t.Fatalf("CRM upsert calls=%d, want 2", got)
 	}
 }
 
