@@ -2763,6 +2763,76 @@ func TestPublishYouTube_InitCallShape(t *testing.T) {
 	}
 }
 
+func TestImportYouTubePreservesDescriptionAndTitle(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_my_channel"] = &sdk.ExecuteResult{
+		Success: true,
+		Data: json.RawMessage(`{
+			"items":[{"contentDetails":{"relatedPlaylists":{"uploads":"uploads-1"}}}]
+		}`),
+	}
+	pf.executeResponses["list_playlist_items"] = &sdk.ExecuteResult{
+		Success: true,
+		Data: json.RawMessage(`{
+			"items":[{
+				"snippet":{
+					"title":"A distinct YouTube title",
+					"description":"The full YouTube description.\n\nWith a second paragraph.",
+					"publishedAt":"2026-08-23T12:00:00Z",
+					"resourceId":{"videoId":"video-1"}
+				},
+				"contentDetails":{"videoId":"video-1","videoPublishedAt":"2026-08-23T12:00:00Z"}
+			}]
+		}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	accountRes, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'youtube', 42, 'YouTube Channel', 'active')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := accountRes.LastInsertId()
+
+	result := (&App{}).importYoutubePosts(
+		ctx,
+		"test-proj",
+		importResult{AccountID: accountID, Platform: "youtube"},
+		accountID,
+		42,
+		0,
+		25,
+	)
+	if result.Status != "ok" || result.Imported != 1 {
+		t.Fatalf("import result = %+v, want one imported post", result)
+	}
+
+	var body, optionsRaw string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT p.body, COALESCE(t.options, '')
+		   FROM posts p
+		   JOIN post_targets t ON t.post_id=p.id
+		  WHERE t.social_account_id=? AND t.platform_post_id='video-1'`,
+		accountID,
+	).Scan(&body, &optionsRaw); err != nil {
+		t.Fatal(err)
+	}
+	if body != "The full YouTube description.\n\nWith a second paragraph." {
+		t.Fatalf("post body = %q, want full YouTube description", body)
+	}
+	var options map[string]any
+	if err := json.Unmarshal([]byte(optionsRaw), &options); err != nil {
+		t.Fatalf("decode target options %q: %v", optionsRaw, err)
+	}
+	if options["title"] != "A distinct YouTube title" {
+		t.Fatalf("target title = %v, want YouTube title", options["title"])
+	}
+	if _, duplicated := options["body"]; duplicated {
+		t.Fatalf("target options unexpectedly duplicate post body: %s", optionsRaw)
+	}
+}
+
 func TestPrepareYouTubeThumbnail_PreservesSmallImage(t *testing.T) {
 	var source bytes.Buffer
 	if err := png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 16, 9))); err != nil {

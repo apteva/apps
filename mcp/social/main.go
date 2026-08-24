@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.85
+version: 0.14.86
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -7818,7 +7818,18 @@ func (a *App) importYoutubePosts(
 				publishedAt = item.Snippet.PublishedAt
 			}
 			thumb := bestYoutubeThumb(item.Snippet.Thumbnails)
-			imported, err := a.insertImportedPost(ctx, pid, accountID, profileID, item.Snippet.Title, videoID, "https://www.youtube.com/watch?v="+videoID, publishedAt, []string{thumb})
+			imported, err := a.insertImportedPostWithOptions(
+				ctx,
+				pid,
+				accountID,
+				profileID,
+				item.Snippet.Description,
+				videoID,
+				"https://www.youtube.com/watch?v="+videoID,
+				publishedAt,
+				[]string{thumb},
+				map[string]any{"title": item.Snippet.Title},
+			)
 			if err != nil {
 				ctx.Logger().Warn("import: insert youtube post failed", "video_id", videoID, "err", err)
 				continue
@@ -7844,6 +7855,21 @@ func (a *App) insertImportedPost(
 	accountID, profileID int64,
 	body, platformPostID, platformURL, publishedAt string,
 	mediaURLs []string,
+) (bool, error) {
+	return a.insertImportedPostWithOptions(
+		ctx, pid, accountID, profileID,
+		body, platformPostID, platformURL, publishedAt,
+		mediaURLs, nil,
+	)
+}
+
+func (a *App) insertImportedPostWithOptions(
+	ctx *sdk.AppCtx,
+	pid string,
+	accountID, profileID int64,
+	body, platformPostID, platformURL, publishedAt string,
+	mediaURLs []string,
+	targetOptions map[string]any,
 ) (bool, error) {
 	var existing int64
 	_ = ctx.AppDB().QueryRow(
@@ -7874,11 +7900,20 @@ func (a *App) insertImportedPost(
 		return false, err
 	}
 	postID, _ := postRes.LastInsertId()
+	var optionsJSON sql.NullString
+	if len(targetOptions) > 0 {
+		encoded, err := json.Marshal(targetOptions)
+		if err != nil {
+			_, _ = ctx.AppDB().Exec(`DELETE FROM posts WHERE id=?`, postID)
+			return false, fmt.Errorf("encode imported post target options: %w", err)
+		}
+		optionsJSON = sql.NullString{String: string(encoded), Valid: true}
+	}
 	_, err = ctx.AppDB().Exec(
 		`INSERT INTO post_targets (post_id, social_account_id, status,
-		                           platform_post_id, platform_url, published_at)
-		 VALUES (?, ?, 'published', ?, ?, ?)`,
-		postID, accountID, platformPostID, nullable(platformURL), nullable(publishedAt),
+		                           platform_post_id, platform_url, published_at, options)
+		 VALUES (?, ?, 'published', ?, ?, ?, ?)`,
+		postID, accountID, platformPostID, nullable(platformURL), nullable(publishedAt), optionsJSON,
 	)
 	if err != nil {
 		_, _ = ctx.AppDB().Exec(`DELETE FROM posts WHERE id=?`, postID)
