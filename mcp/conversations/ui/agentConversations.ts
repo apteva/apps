@@ -21,3 +21,12 @@ export function fixedAgentConversationInput(instanceId: number, projectId: strin
     project_id: projectId,
   };
 }
+
+export function agentConversationWidgetLayout(wide: boolean) {
+  return {
+    gridTemplateColumns: wide ? "250px minmax(0,1fr)" : "minmax(0,1fr)",
+    gridTemplateRows: wide
+      ? "minmax(0,1fr)"
+      : "minmax(150px,34%) minmax(0,1fr)",
+  };
+}

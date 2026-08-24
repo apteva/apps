@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
+  agentConversationWidgetLayout,
   fixedAgentConversationInput,
   scopedConversationListPath,
 } from "./agentConversations";
@@ -20,6 +21,20 @@ describe("AgentConversationsWidget scope", () => {
       audience: "operator",
       project_id: "project-a",
     });
+  });
+
+  test("owns its responsive geometry instead of depending on host Tailwind output", () => {
+    expect(agentConversationWidgetLayout(true)).toEqual({
+      gridTemplateColumns: "250px minmax(0,1fr)",
+      gridTemplateRows: "minmax(0,1fr)",
+    });
+    expect(agentConversationWidgetLayout(false)).toEqual({
+      gridTemplateColumns: "minmax(0,1fr)",
+      gridTemplateRows: "minmax(150px,34%) minmax(0,1fr)",
+    });
+    const widget = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
+    expect(widget).not.toContain("md:grid-cols-[");
+    expect(widget).toContain("window.matchMedia");
   });
 
   test("both surfaces use the same transport/controller and shared chat view", () => {

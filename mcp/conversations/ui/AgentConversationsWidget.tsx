@@ -6,6 +6,7 @@ import {
   type Conversation,
 } from "./ConversationsPanel";
 import {
+  agentConversationWidgetLayout,
   appendAgentScope,
   fixedAgentConversationInput,
   scopedConversationListPath,
@@ -34,6 +35,21 @@ function relativeTime(iso: string): string {
   return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
 }
 
+function useWideWidgetLayout(): boolean {
+  const query = "(min-width: 768px)";
+  const [wide, setWide] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia(query).matches,
+  );
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    const update = () => setWide(media.matches);
+    media.addEventListener("change", update);
+    update();
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return wide;
+}
+
 export default function AgentConversationsWidget({
   projectId,
   instanceId,
@@ -48,6 +64,8 @@ export default function AgentConversationsWidget({
   const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const wideLayout = useWideWidgetLayout();
+  const layout = agentConversationWidgetLayout(wideLayout);
 
   const load = useCallback(async () => {
     if (!validAgent || !projectId) return;
@@ -125,8 +143,16 @@ export default function AgentConversationsWidget({
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[minmax(150px,34%)_minmax(0,1fr)] overflow-hidden bg-bg text-text md:grid-cols-[250px_minmax(0,1fr)] md:grid-rows-1 md:divide-x md:divide-border">
-      <aside className="flex min-h-0 flex-col border-b border-border md:border-b-0">
+    <div
+      className="grid h-full min-h-0 overflow-hidden bg-bg text-text"
+      style={layout}
+    >
+      <aside
+        className="flex min-h-0 flex-col"
+        style={wideLayout
+          ? { borderRight: "1px solid var(--color-border)" }
+          : { borderBottom: "1px solid var(--color-border)" }}
+      >
         <div className="flex shrink-0 items-center gap-2 border-b border-border p-3">
           <button
             type="button"
