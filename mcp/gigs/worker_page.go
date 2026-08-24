@@ -112,7 +112,10 @@ func workerPageHTML(token string) string {
   h1 { font-size: clamp(28px, 5vw, 44px); margin: 0 0 12px; line-height: 1.05; letter-spacing: 0; }
   .meta-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .pill { display: inline-flex; align-items: center; min-height: 28px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 13px; background: var(--surface-2); }
-  .summary { margin-top: 16px; color: var(--muted); font-size: 14px; }
+	  .summary { margin-top: 16px; color: var(--muted); font-size: 14px; }
+	  .access-ended { max-width: 620px; margin: 12vh auto 0; padding: 28px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow); }
+	  .access-ended h1 { font-size: 30px; }
+	  .access-ended p { color: var(--muted); font-size: 16px; }
   .offer { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: grid; gap: 14px; }
   .offer h2 { margin: 0; font-size: 20px; }
   .offer-actions { display: flex; flex-wrap: wrap; gap: 10px; }
@@ -240,10 +243,14 @@ func workerPageHTML(token string) string {
 
     fetch(API + "/api/gig")
       .then(r => r.json())
-      .then(data => {
-        if (data.error) {
-          document.getElementById("app").innerHTML = "<div class='done error'>" + escapeHTML(data.error) + "</div>";
-          return;
+	      .then(data => {
+	        if (data.error) {
+	          if (data.error === "access_ended") {
+	            document.getElementById("app").innerHTML = "<section class='access-ended'><h1>This link has ended</h1><p>" + escapeHTML(data.message || "Contact the manager who sent you this link if you still need to submit work.") + "</p></section>";
+	          } else {
+	            document.getElementById("app").innerHTML = "<div class='done error'>" + escapeHTML(data.error) + "</div>";
+	          }
+	          return;
         }
 	        gig = data.gig;
 	        hydrateExistingSubmission(gig.draft || gig.submission);
@@ -261,9 +268,12 @@ func workerPageHTML(token string) string {
       const hero = document.createElement("section");
       hero.className = "hero";
       hero.innerHTML =
-        "<h1>" + escapeHTML(gig.title) + "</h1>" +
-        "<div class='meta-row'>" +
-          "<span class='pill'>Deadline: " + escapeHTML(formatDeadline(gig.deadline_at)) + "</span>" +
+	        "<h1>" + escapeHTML(gig.title) + "</h1>" +
+	        "<div class='meta-row'>" +
+	          (gig.scheduled_for ? "<span class='pill'>Scheduled: " + escapeHTML(formatDeadline(gig.scheduled_for)) + "</span>" : "") +
+	          (gig.due_at ? "<span class='pill'>Due: " + escapeHTML(formatDeadline(gig.due_at)) + "</span>" : "") +
+	          (gig.overdue ? "<span class='pill'>Overdue — submissions remain open</span>" : "") +
+	          (gig.access_expires_at ? "<span class='pill'>Access until: " + escapeHTML(formatDeadline(gig.access_expires_at)) + "</span>" : "") +
           (gig.compensation ? "<span class='pill'>Agreed pay: " + escapeHTML(formatMoney(gig.compensation.worker_amount_minor, gig.compensation.currency)) + "</span>" : "") +
           (gig.assignment_status === "offered"
             ? "<span class='pill'>Full brief after acceptance</span>"
@@ -1309,7 +1319,11 @@ func jsString(s string) string {
 type workerGigPayload struct {
 	GigID              int64            `json:"gig_id"`
 	Title              string           `json:"title"`
+	ScheduledFor       string           `json:"scheduled_for,omitempty"`
+	DueAt              string           `json:"due_at,omitempty"`
 	DeadlineAt         string           `json:"deadline_at,omitempty"`
+	Overdue            bool             `json:"overdue"`
+	AccessExpiresAt    string           `json:"access_expires_at,omitempty"`
 	GigStatus          string           `json:"gig_status"`
 	AssignmentStatus   string           `json:"assignment_status"`
 	AssignmentMode     string           `json:"assignment_mode"`
@@ -1328,13 +1342,18 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token 
 		return
 	}
 	ctx := globalCtx
-	assignID, gigID, pid, status, gigStatus, mode, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	assignID, gigID, pid, status, gigStatus, mode, revoked, accessExpired, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "invalid token")
 		return
 	}
-	if revoked {
-		httpErr(w, http.StatusNotFound, "invalid token")
+	if revoked || accessExpired {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusGone)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":   "access_ended",
+			"message": "Access to this gig has ended. Contact the manager who sent you this link if you still need to submit work.",
+		})
 		return
 	}
 
@@ -1394,7 +1413,11 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token 
 		"gig": workerGigPayload{
 			GigID:            g.ID,
 			Title:            g.Title,
+			ScheduledFor:     g.ScheduledFor,
+			DueAt:            g.DueAt,
 			DeadlineAt:       g.DeadlineAt,
+			Overdue:          g.Overdue,
+			AccessExpiresAt:  g.assignmentAccessExpiry(assignID),
 			GigStatus:        gigStatus,
 			AssignmentStatus: status,
 			AssignmentMode:   mode,
@@ -1465,12 +1488,16 @@ func (a *App) handleWorkerAccept(w http.ResponseWriter, r *http.Request, token s
 		return
 	}
 	ctx := globalCtx
-	assignmentID, gigID, pid, assignmentStatus, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	assignmentID, gigID, pid, assignmentStatus, gigStatus, _, revoked, accessExpired, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "invalid or expired link")
 		return
 	}
-	if revoked || assignmentStatus != "offered" || (gigStatus != "offered" && gigStatus != "accepted") {
+	if revoked || accessExpired {
+		httpErr(w, http.StatusGone, "access to this gig has ended; contact the manager who sent the link")
+		return
+	}
+	if assignmentStatus != "offered" || (gigStatus != "offered" && gigStatus != "accepted") {
 		httpErr(w, http.StatusConflict, "this offer can no longer be accepted")
 		return
 	}
@@ -1516,12 +1543,16 @@ func (a *App) handleWorkerDecline(w http.ResponseWriter, r *http.Request, token 
 		return
 	}
 	ctx := globalCtx
-	assignmentID, gigID, pid, assignmentStatus, _, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	assignmentID, gigID, pid, assignmentStatus, _, _, revoked, accessExpired, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "invalid or expired link")
 		return
 	}
-	if revoked || (assignmentStatus != "offered" && assignmentStatus != "accepted") {
+	if revoked || accessExpired {
+		httpErr(w, http.StatusGone, "access to this gig has ended; contact the manager who sent the link")
+		return
+	}
+	if assignmentStatus != "offered" && assignmentStatus != "accepted" {
 		httpErr(w, http.StatusConflict, "this offer can no longer be declined")
 		return
 	}
@@ -1576,12 +1607,12 @@ func (a *App) handleWorkerDraft(w http.ResponseWriter, r *http.Request, token st
 		return
 	}
 	ctx := globalCtx
-	assignID, gigID, _, status, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	assignID, gigID, _, status, gigStatus, _, revoked, accessExpired, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "invalid or expired link")
 		return
 	}
-	if !assignmentAcceptsWork(status, gigStatus, revoked) {
+	if !assignmentAcceptsWork(status, gigStatus, revoked, accessExpired) {
 		httpErr(w, http.StatusGone, "this assignment is closed")
 		return
 	}
@@ -1615,12 +1646,12 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 		return
 	}
 	ctx := globalCtx
-	assignID, gigID, pid, status, gigStatus, mode, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	assignID, gigID, pid, status, gigStatus, mode, revoked, accessExpired, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "invalid or expired link")
 		return
 	}
-	if !assignmentAcceptsWork(status, gigStatus, revoked) {
+	if !assignmentAcceptsWork(status, gigStatus, revoked, accessExpired) {
 		httpErr(w, http.StatusGone, "this assignment is closed")
 		return
 	}
@@ -1646,6 +1677,11 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 		return
 	}
 	defer tx.Rollback()
+	markedOverdue, err := markLateSubmissionOverdueTx(tx, pid, gigID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if mode == "first-come" {
 		var other int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM gig_submissions s
@@ -1683,7 +1719,9 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 		return
 	}
 	if _, err := tx.Exec(
-		`UPDATE gigs SET status='submitted', updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		`UPDATE gigs SET status='submitted',
+		 overdue_at=CASE WHEN due_at IS NOT NULL AND datetime(due_at)<datetime('now') THEN COALESCE(overdue_at,CURRENT_TIMESTAMP) ELSE overdue_at END,
+		 updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		gigID,
 	); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -1716,7 +1754,29 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 		"assignment_id": assignID,
 		"channel":       "web",
 	})
+	if markedOverdue {
+		ctx.EmitWithProject("gig.overdue", pid, map[string]any{"gig_id": gigID, "reason": "late_submission"})
+	}
 	httpJSON(w, map[string]any{"ok": true})
+}
+
+func markLateSubmissionOverdueTx(tx *sql.Tx, pid string, gigID int64) (bool, error) {
+	var shouldMark int
+	if err := tx.QueryRow(`SELECT CASE WHEN due_at IS NOT NULL AND overdue_at IS NULL
+		AND datetime(due_at)<datetime('now') THEN 1 ELSE 0 END FROM gigs WHERE id=?`, gigID).Scan(&shouldMark); err != nil {
+		return false, err
+	}
+	if shouldMark == 0 {
+		return false, nil
+	}
+	if _, err := tx.Exec(`UPDATE gigs SET overdue_at=CURRENT_TIMESTAMP WHERE id=? AND overdue_at IS NULL`, gigID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`INSERT INTO gig_events(project_id,gig_id,kind,actor,body)
+		VALUES (?,?,'overdue','system','submitted after soft due date')`, pid, gigID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (a *App) handleWorkerUploadInit(w http.ResponseWriter, r *http.Request, token string) {
@@ -1726,12 +1786,12 @@ func (a *App) handleWorkerUploadInit(w http.ResponseWriter, r *http.Request, tok
 		return
 	}
 	ctx := globalCtx
-	assignmentID, gigID, pid, assignmentStatus, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	assignmentID, gigID, pid, assignmentStatus, gigStatus, _, revoked, accessExpired, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "invalid or expired link")
 		return
 	}
-	if !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked) {
+	if !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked, accessExpired) {
 		httpErr(w, http.StatusGone, "this assignment is closed")
 		return
 	}
@@ -1825,8 +1885,8 @@ func (a *App) handleWorkerUploadPart(w http.ResponseWriter, r *http.Request, tok
 		return
 	}
 	ctx := globalCtx
-	assignmentID, _, pid, assignmentStatus, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
-	if err != nil || !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked) {
+	assignmentID, _, pid, assignmentStatus, gigStatus, _, revoked, accessExpired, err := loadAssignmentState(ctx.AppDB(), token)
+	if err != nil || !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked, accessExpired) {
 		httpErr(w, http.StatusGone, "this assignment is closed")
 		return
 	}
@@ -1862,8 +1922,8 @@ func (a *App) handleWorkerUploadComplete(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	ctx := globalCtx
-	assignmentID, gigID, pid, assignmentStatus, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
-	if err != nil || !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked) {
+	assignmentID, gigID, pid, assignmentStatus, gigStatus, _, revoked, accessExpired, err := loadAssignmentState(ctx.AppDB(), token)
+	if err != nil || !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked, accessExpired) {
 		httpErr(w, http.StatusGone, "this assignment is closed")
 		return
 	}
@@ -1932,9 +1992,13 @@ func (a *App) handleWorkerUploadAbort(w http.ResponseWriter, r *http.Request, to
 		return
 	}
 	ctx := globalCtx
-	assignmentID, _, pid, _, _, _, _, err := loadAssignmentState(ctx.AppDB(), token)
+	assignmentID, _, pid, _, _, _, revoked, accessExpired, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "invalid or expired link")
+		return
+	}
+	if revoked || accessExpired {
+		httpErr(w, http.StatusGone, "this assignment is closed")
 		return
 	}
 	var body struct {
@@ -1963,12 +2027,12 @@ func (a *App) handleWorkerUploadRemove(w http.ResponseWriter, r *http.Request, t
 		return
 	}
 	ctx := globalCtx
-	assignmentID, _, pid, assignmentStatus, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	assignmentID, _, pid, assignmentStatus, gigStatus, _, revoked, accessExpired, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "invalid or expired link")
 		return
 	}
-	if !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked) {
+	if !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked, accessExpired) {
 		httpErr(w, http.StatusGone, "this assignment is closed")
 		return
 	}
@@ -2171,6 +2235,10 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 		return err
 	}
 	defer tx.Rollback()
+	markedOverdue, err := markLateSubmissionOverdueTx(tx, pid, gigID)
+	if err != nil {
+		return err
+	}
 	if mode == "first-come" {
 		var other int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM gig_submissions s
@@ -2200,7 +2268,9 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 		return errors.New("assignment changed during submission")
 	}
 	if _, err := tx.Exec(
-		`UPDATE gigs SET status='submitted', updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		`UPDATE gigs SET status='submitted',
+		 overdue_at=CASE WHEN due_at IS NOT NULL AND datetime(due_at)<datetime('now') THEN COALESCE(overdue_at,CURRENT_TIMESTAMP) ELSE overdue_at END,
+		 updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		gigID,
 	); err != nil {
 		return err
@@ -2228,6 +2298,9 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 		"assignment_id": assignID,
 		"channel":       "channel_reply",
 	})
+	if markedOverdue {
+		ctx.EmitWithProject("gig.overdue", pid, map[string]any{"gig_id": gigID, "reason": "late_submission"})
+	}
 	return nil
 }
 

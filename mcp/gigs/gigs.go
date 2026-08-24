@@ -29,7 +29,13 @@ type gig struct {
 	DerivedChecklist     []map[string]any    `json:"derived_checklist,omitempty"`
 	DerivedVariables     []map[string]any    `json:"derived_variables,omitempty"`
 	BudgetCents          int64               `json:"budget_cents,omitempty"`
-	DeadlineAt           string              `json:"deadline_at,omitempty"`
+	ScheduledFor         string              `json:"scheduled_for,omitempty"`
+	DueAt                string              `json:"due_at,omitempty"`
+	DeadlineAt           string              `json:"deadline_at,omitempty"` // deprecated alias for due_at
+	OverdueAt            string              `json:"overdue_at,omitempty"`
+	Overdue              bool                `json:"overdue"`
+	AccessExpiresAt      string              `json:"access_expires_at,omitempty"`
+	AccessExpirySource   string              `json:"access_expiry_source,omitempty"`
 	Priority             string              `json:"priority,omitempty"`
 	Status               string              `json:"status"`
 	Result               map[string]any      `json:"result,omitempty"`
@@ -56,21 +62,23 @@ type gigInstructionRow struct {
 }
 
 type gigAssignmentView struct {
-	ID                int64       `json:"id"`
-	GigID             int64       `json:"gig_id"`
-	WorkerID          int64       `json:"worker_id"`
-	Status            string      `json:"status"`
-	OfferedAt         string      `json:"offered_at"`
-	RespondedAt       string      `json:"responded_at,omitempty"`
-	SubmittedAt       string      `json:"submitted_at,omitempty"`
-	CRMConversationID int64       `json:"crm_conversation_id,omitempty"`
-	WorkerURL         string      `json:"worker_url,omitempty"`
-	PublicBaseURL     string      `json:"public_base_url,omitempty"`
-	Worker            *worker     `json:"worker,omitempty"`
-	Submission        *submission `json:"submission,omitempty"`
-	Mode              string      `json:"mode,omitempty"`
-	NotifyWorker      bool        `json:"notify_worker,omitempty"`
-	TokenExpiresAt    string      `json:"token_expires_at,omitempty"`
+	ID                 int64       `json:"id"`
+	GigID              int64       `json:"gig_id"`
+	WorkerID           int64       `json:"worker_id"`
+	Status             string      `json:"status"`
+	OfferedAt          string      `json:"offered_at"`
+	RespondedAt        string      `json:"responded_at,omitempty"`
+	SubmittedAt        string      `json:"submitted_at,omitempty"`
+	CRMConversationID  int64       `json:"crm_conversation_id,omitempty"`
+	WorkerURL          string      `json:"worker_url,omitempty"`
+	PublicBaseURL      string      `json:"public_base_url,omitempty"`
+	Worker             *worker     `json:"worker,omitempty"`
+	Submission         *submission `json:"submission,omitempty"`
+	Mode               string      `json:"mode,omitempty"`
+	NotifyWorker       bool        `json:"notify_worker,omitempty"`
+	AccessExpiresAt    string      `json:"access_expires_at,omitempty"`
+	TokenExpiresAt     string      `json:"token_expires_at,omitempty"` // deprecated alias
+	AccessExpirySource string      `json:"access_expiry_source,omitempty"`
 }
 
 type submission struct {
@@ -82,53 +90,74 @@ type submission struct {
 	SubmittedAt       string         `json:"submitted_at"`
 }
 
+func (g *gig) assignmentAccessExpiry(assignmentID int64) string {
+	for _, assignment := range g.Assignments {
+		if assignment.ID == assignmentID {
+			return assignment.AccessExpiresAt
+		}
+	}
+	return g.AccessExpiresAt
+}
+
 // ─── Tool registry ──────────────────────────────────────────────────
 
 func (a *App) gigTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "gigs_create_from_template",
-			Description: "Primary dispatch path. Resolves the template's current active version, validates vars, renders the composition, snapshots it onto the gig, and optionally assigns to a worker. Args: template_id OR template_slug, vars (object), worker_id?, notify_worker? (default false), public_domain_id?, deadline_at? (RFC3339), priority?, budget_cents?. Returns {gig, assignment?}.",
+			Description: "Primary dispatch path. Resolves the template's current active version, validates vars, renders the composition, snapshots it onto the gig, and optionally assigns to a worker. Scheduling: scheduled_for? is the intended work date, due_at? is a soft submission date, access_expires_at? is an optional hard worker-link expiry, and access_grace_days? derives hard expiry from due_at. deadline_at remains a deprecated alias for due_at. Returns {gig, assignment?}.",
 			InputSchema: schemaObject(map[string]any{
-				"template_id":      map[string]any{"type": "integer"},
-				"template_slug":    map[string]any{"type": "string"},
-				"vars":             map[string]any{"type": "object"},
-				"worker_id":        map[string]any{"type": "integer"},
-				"notify_worker":    map[string]any{"type": "boolean"},
-				"public_domain_id": map[string]any{"type": "integer"},
-				"deadline_at":      map[string]any{"type": "string"},
-				"priority":         map[string]any{"type": "string"},
-				"budget_cents":     map[string]any{"type": "integer"},
+				"template_id":       map[string]any{"type": "integer"},
+				"template_slug":     map[string]any{"type": "string"},
+				"vars":              map[string]any{"type": "object"},
+				"worker_id":         map[string]any{"type": "integer"},
+				"notify_worker":     map[string]any{"type": "boolean"},
+				"public_domain_id":  map[string]any{"type": "integer"},
+				"scheduled_for":     map[string]any{"type": "string", "format": "date-time"},
+				"due_at":            map[string]any{"type": "string", "format": "date-time"},
+				"deadline_at":       map[string]any{"type": "string"},
+				"access_expires_at": map[string]any{"type": "string", "format": "date-time"},
+				"access_grace_days": map[string]any{"type": "integer", "minimum": 1},
+				"priority":          map[string]any{"type": "string"},
+				"budget_cents":      map[string]any{"type": "integer"},
 			}, []string{}),
 			Handler: a.toolGigsCreateFromTemplate,
 		},
 		{
 			Name:        "gigs_create_from_instructions",
-			Description: "Ad-hoc dispatch — pass instruction refs directly (no template). Args: title, instructions ([{instruction_id, instruction_version_id?, result_key?, overrides?}]), vars?, worker_id?, notify_worker? (default false), public_domain_id?, deadline_at?, priority?. Returns {gig, assignment?}.",
+			Description: "Ad-hoc dispatch from instruction refs. Scheduling supports scheduled_for?, soft due_at?, optional hard access_expires_at? or access_grace_days?, and deprecated deadline_at as a due_at alias. Returns {gig, assignment?}.",
 			InputSchema: schemaObject(map[string]any{
-				"title":            map[string]any{"type": "string"},
-				"instructions":     map[string]any{"type": "array"},
-				"vars":             map[string]any{"type": "object"},
-				"worker_id":        map[string]any{"type": "integer"},
-				"notify_worker":    map[string]any{"type": "boolean"},
-				"public_domain_id": map[string]any{"type": "integer"},
-				"deadline_at":      map[string]any{"type": "string"},
-				"priority":         map[string]any{"type": "string"},
+				"title":             map[string]any{"type": "string"},
+				"instructions":      map[string]any{"type": "array"},
+				"vars":              map[string]any{"type": "object"},
+				"worker_id":         map[string]any{"type": "integer"},
+				"notify_worker":     map[string]any{"type": "boolean"},
+				"public_domain_id":  map[string]any{"type": "integer"},
+				"scheduled_for":     map[string]any{"type": "string", "format": "date-time"},
+				"due_at":            map[string]any{"type": "string", "format": "date-time"},
+				"deadline_at":       map[string]any{"type": "string"},
+				"access_expires_at": map[string]any{"type": "string", "format": "date-time"},
+				"access_grace_days": map[string]any{"type": "integer", "minimum": 1},
+				"priority":          map[string]any{"type": "string"},
 			}, []string{"title", "instructions"}),
 			Handler: a.toolGigsCreateFromInstructions,
 		},
 		{
 			Name:        "gigs_create",
-			Description: "Fully inline gig (raw instruction bodies, no library references). Escape hatch for agent-generated one-offs. Args: title, instructions ([{kind, body, result_key?}]), vars?, worker_id?, notify_worker? (default false), public_domain_id?, deadline_at?, priority?. Returns {gig, assignment?}.",
+			Description: "Fully inline gig (raw instruction bodies, no library references). Scheduling supports scheduled_for?, soft due_at?, optional hard access_expires_at? or access_grace_days?, and deprecated deadline_at as a due_at alias. Returns {gig, assignment?}.",
 			InputSchema: schemaObject(map[string]any{
-				"title":            map[string]any{"type": "string"},
-				"instructions":     map[string]any{"type": "array"},
-				"vars":             map[string]any{"type": "object"},
-				"worker_id":        map[string]any{"type": "integer"},
-				"notify_worker":    map[string]any{"type": "boolean"},
-				"public_domain_id": map[string]any{"type": "integer"},
-				"deadline_at":      map[string]any{"type": "string"},
-				"priority":         map[string]any{"type": "string"},
+				"title":             map[string]any{"type": "string"},
+				"instructions":      map[string]any{"type": "array"},
+				"vars":              map[string]any{"type": "object"},
+				"worker_id":         map[string]any{"type": "integer"},
+				"notify_worker":     map[string]any{"type": "boolean"},
+				"public_domain_id":  map[string]any{"type": "integer"},
+				"scheduled_for":     map[string]any{"type": "string", "format": "date-time"},
+				"due_at":            map[string]any{"type": "string", "format": "date-time"},
+				"deadline_at":       map[string]any{"type": "string"},
+				"access_expires_at": map[string]any{"type": "string", "format": "date-time"},
+				"access_grace_days": map[string]any{"type": "integer", "minimum": 1},
+				"priority":          map[string]any{"type": "string"},
 			}, []string{"title", "instructions"}),
 			Handler: a.toolGigsCreateInline,
 		},
@@ -180,12 +209,24 @@ func (a *App) gigTools() []sdk.Tool {
 		},
 		{
 			Name:        "gigs_extend_deadline",
-			Description: "Push the deadline. Args: id, deadline_at (RFC3339). Returns {gig}.",
+			Description: "Backward-compatible soft due-date update. Args: id, deadline_at (RFC3339). Relative-to-due worker access moves by the same interval; custom access expiry is preserved. Returns {gig}.",
 			InputSchema: schemaObject(map[string]any{
 				"id":          map[string]any{"type": "integer"},
 				"deadline_at": map[string]any{"type": "string"},
 			}, []string{"id", "deadline_at"}),
 			Handler: a.toolGigsExtendDeadline,
+		},
+		{
+			Name:        "gigs_update_schedule",
+			Description: "Update a live gig's intended work date, soft due date, and optional hard worker-link expiry. Supplied fields are patched; access_expires_at:null removes automatic expiry. access_grace_days derives access expiry from the resulting due date. Args: id, scheduled_for?, due_at?, access_expires_at?, access_grace_days?. Returns {gig}.",
+			InputSchema: schemaObject(map[string]any{
+				"id":                map[string]any{"type": "integer"},
+				"scheduled_for":     map[string]any{"type": []string{"string", "null"}, "format": "date-time"},
+				"due_at":            map[string]any{"type": []string{"string", "null"}, "format": "date-time"},
+				"access_expires_at": map[string]any{"type": []string{"string", "null"}, "format": "date-time"},
+				"access_grace_days": map[string]any{"type": "integer", "minimum": 1},
+			}, []string{"id"}),
+			Handler: a.toolGigsUpdateSchedule,
 		},
 		{
 			Name:        "gigs_update",
@@ -311,6 +352,12 @@ func (a *App) toolGigsCreateFromTemplate(ctx *sdk.AppCtx, args map[string]any) (
 	if err != nil {
 		return nil, err
 	}
+	accessGraceDays := intArg(args, "access_grace_days", 0)
+	if _, graceSupplied := args["access_grace_days"]; !graceSupplied {
+		if _, expirySupplied := args["access_expires_at"]; !expirySupplied {
+			accessGraceDays = tplv.DefaultAccessGraceDays
+		}
+	}
 
 	g, ass, err := createGig(ctx, pid, createOpts{
 		TemplateVersionID:  activeVID,
@@ -318,13 +365,17 @@ func (a *App) toolGigsCreateFromTemplate(ctx *sdk.AppCtx, args map[string]any) (
 		Vars:               vars,
 		Rendered:           rendered,
 		Derived:            derived,
+		ScheduledFor:       strArg(args, "scheduled_for"),
+		DueAt:              strArg(args, "due_at"),
 		DeadlineAt:         strArg(args, "deadline_at"),
+		AccessExpiresAt:    strArg(args, "access_expires_at"),
+		AccessGraceDays:    accessGraceDays,
 		Priority:           strArg(args, "priority"),
 		BudgetCents:        int64Arg(args, "budget_cents"),
 		WorkerID:           int64Arg(args, "worker_id"),
 		NotifyWorker:       boolArg(args, "notify_worker", false),
 		PublicDomainID:     int64Arg(args, "public_domain_id"),
-		DefaultDeadlineHrs: tplv.DefaultDeadlineHours,
+		DefaultDeadlineHrs: tplv.DefaultDueHours,
 		Compensation:       compensation,
 		ContractID:         int64Arg(args, "_contract_id"),
 		MilestoneID:        int64Arg(args, "_milestone_id"),
@@ -420,20 +471,24 @@ func (a *App) toolGigsCreateFromInstructions(ctx *sdk.AppCtx, args map[string]an
 		return nil, err
 	}
 	g, ass, err := createGig(ctx, pid, createOpts{
-		Title:          title,
-		Vars:           vars,
-		Rendered:       rendered,
-		Derived:        derived,
-		DeadlineAt:     strArg(args, "deadline_at"),
-		Priority:       strArg(args, "priority"),
-		BudgetCents:    int64Arg(args, "budget_cents"),
-		WorkerID:       int64Arg(args, "worker_id"),
-		NotifyWorker:   boolArg(args, "notify_worker", false),
-		PublicDomainID: int64Arg(args, "public_domain_id"),
-		Compensation:   compensation,
-		ContractID:     int64Arg(args, "_contract_id"),
-		MilestoneID:    int64Arg(args, "_milestone_id"),
-		OverrideReason: strArg(args, "compensation_override_reason"),
+		Title:           title,
+		Vars:            vars,
+		Rendered:        rendered,
+		Derived:         derived,
+		ScheduledFor:    strArg(args, "scheduled_for"),
+		DueAt:           strArg(args, "due_at"),
+		DeadlineAt:      strArg(args, "deadline_at"),
+		AccessExpiresAt: strArg(args, "access_expires_at"),
+		AccessGraceDays: intArg(args, "access_grace_days", 0),
+		Priority:        strArg(args, "priority"),
+		BudgetCents:     int64Arg(args, "budget_cents"),
+		WorkerID:        int64Arg(args, "worker_id"),
+		NotifyWorker:    boolArg(args, "notify_worker", false),
+		PublicDomainID:  int64Arg(args, "public_domain_id"),
+		Compensation:    compensation,
+		ContractID:      int64Arg(args, "_contract_id"),
+		MilestoneID:     int64Arg(args, "_milestone_id"),
+		OverrideReason:  strArg(args, "compensation_override_reason"),
 	})
 	if err != nil {
 		return nil, err
@@ -489,20 +544,24 @@ func (a *App) toolGigsCreateInline(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, err
 	}
 	g, ass, err := createGig(ctx, pid, createOpts{
-		Title:          title,
-		Vars:           vars,
-		Rendered:       rendered,
-		Derived:        derived,
-		DeadlineAt:     strArg(args, "deadline_at"),
-		Priority:       strArg(args, "priority"),
-		BudgetCents:    int64Arg(args, "budget_cents"),
-		WorkerID:       int64Arg(args, "worker_id"),
-		NotifyWorker:   boolArg(args, "notify_worker", false),
-		PublicDomainID: int64Arg(args, "public_domain_id"),
-		Compensation:   compensation,
-		ContractID:     int64Arg(args, "_contract_id"),
-		MilestoneID:    int64Arg(args, "_milestone_id"),
-		OverrideReason: strArg(args, "compensation_override_reason"),
+		Title:           title,
+		Vars:            vars,
+		Rendered:        rendered,
+		Derived:         derived,
+		ScheduledFor:    strArg(args, "scheduled_for"),
+		DueAt:           strArg(args, "due_at"),
+		DeadlineAt:      strArg(args, "deadline_at"),
+		AccessExpiresAt: strArg(args, "access_expires_at"),
+		AccessGraceDays: intArg(args, "access_grace_days", 0),
+		Priority:        strArg(args, "priority"),
+		BudgetCents:     int64Arg(args, "budget_cents"),
+		WorkerID:        int64Arg(args, "worker_id"),
+		NotifyWorker:    boolArg(args, "notify_worker", false),
+		PublicDomainID:  int64Arg(args, "public_domain_id"),
+		Compensation:    compensation,
+		ContractID:      int64Arg(args, "_contract_id"),
+		MilestoneID:     int64Arg(args, "_milestone_id"),
+		OverrideReason:  strArg(args, "compensation_override_reason"),
 	})
 	if err != nil {
 		return nil, err
@@ -522,7 +581,11 @@ type createOpts struct {
 	Vars               map[string]any
 	Rendered           []compositionItem
 	Derived            derivedComposition
+	ScheduledFor       string
+	DueAt              string
 	DeadlineAt         string
+	AccessExpiresAt    string
+	AccessGraceDays    int
 	Priority           string
 	BudgetCents        int64
 	WorkerID           int64
@@ -553,17 +616,93 @@ func compensationQuoteForCreate(ctx *sdk.AppCtx, pid string, templateID, workerI
 	return quote, nil
 }
 
+func normalizeRFC3339(name, value string) (string, time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("%s must be RFC3339", name)
+	}
+	return parsed.UTC().Format(time.RFC3339), parsed.UTC(), nil
+}
+
+func parseStoredTime(value string) (time.Time, error) {
+	var lastErr error
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05-07:00", "2006-01-02 15:04:05 -0700 MST", "2006-01-02 15:04:05"} {
+		parsed, err := time.Parse(layout, value)
+		if err == nil {
+			return parsed.UTC(), nil
+		}
+		lastErr = err
+	}
+	return time.Time{}, lastErr
+}
+
+func resolveCreateSchedule(scheduledFor, dueAt, accessExpiresAt string, accessGraceDays int) (string, string, string, string, error) {
+	scheduledFor, scheduledTime, err := normalizeRFC3339("scheduled_for", scheduledFor)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	dueAt, dueTime, err := normalizeRFC3339("due_at", dueAt)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	if !scheduledTime.IsZero() && !dueTime.IsZero() && dueTime.Before(scheduledTime) {
+		return "", "", "", "", errors.New("due_at cannot be before scheduled_for")
+	}
+	if accessGraceDays > 0 && strings.TrimSpace(accessExpiresAt) != "" {
+		return "", "", "", "", errors.New("use either access_expires_at or access_grace_days, not both")
+	}
+	accessSource := "none"
+	var accessTime time.Time
+	if accessGraceDays > 0 {
+		if dueTime.IsZero() {
+			return "", "", "", "", errors.New("access_grace_days requires due_at")
+		}
+		accessTime = dueTime.Add(time.Duration(accessGraceDays) * 24 * time.Hour)
+		accessExpiresAt = accessTime.Format(time.RFC3339)
+		accessSource = "due"
+	} else if strings.TrimSpace(accessExpiresAt) != "" {
+		accessExpiresAt, accessTime, err = normalizeRFC3339("access_expires_at", accessExpiresAt)
+		if err != nil {
+			return "", "", "", "", err
+		}
+		accessSource = "custom"
+	}
+	if !accessTime.IsZero() && !dueTime.IsZero() && accessTime.Before(dueTime) {
+		return "", "", "", "", errors.New("access_expires_at cannot be before due_at")
+	}
+	if !accessTime.IsZero() && dueTime.IsZero() && !scheduledTime.IsZero() && accessTime.Before(scheduledTime) {
+		return "", "", "", "", errors.New("access_expires_at cannot be before scheduled_for")
+	}
+	return scheduledFor, dueAt, accessExpiresAt, accessSource, nil
+}
+
 func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentView, error) {
-	deadlineAt := o.DeadlineAt
-	if deadlineAt == "" {
+	dueAt := o.DueAt
+	if o.DeadlineAt != "" {
+		if dueAt != "" && dueAt != o.DeadlineAt {
+			return nil, nil, errors.New("due_at and deprecated deadline_at must match when both are supplied")
+		}
+		dueAt = o.DeadlineAt
+	}
+	if dueAt == "" {
 		hrs := o.DefaultDeadlineHrs
+		if hrs <= 0 {
+			hrs = atoi(ctx.Config().Get("default_due_hours"))
+		}
 		if hrs <= 0 {
 			hrs = atoi(ctx.Config().Get("default_deadline_hours"))
 		}
-		if hrs <= 0 {
-			hrs = 24
+		if hrs > 0 {
+			dueAt = time.Now().UTC().Add(time.Duration(hrs) * time.Hour).Format(time.RFC3339)
 		}
-		deadlineAt = time.Now().UTC().Add(time.Duration(hrs) * time.Hour).Format(time.RFC3339)
+	}
+	scheduledFor, dueAt, accessExpiresAt, accessSource, err := resolveCreateSchedule(o.ScheduledFor, dueAt, o.AccessExpiresAt, o.AccessGraceDays)
+	if err != nil {
+		return nil, nil, err
 	}
 	var wk *worker
 	var token string
@@ -598,8 +737,9 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 		    project_id, template_version_id, created_by, title, vars_json,
 		    derived_result_schema_json, derived_media_manifest_json,
 		    derived_checklist_json, derived_variables_json,
-		    budget_cents, deadline_at, priority, status
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    budget_cents, scheduled_for, due_at, deadline_at,
+		    access_expires_at, access_expiry_source, priority, status
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pid,
 		nullInt64(o.TemplateVersionID),
 		"agent", // TODO: pull caller id from ctx when available
@@ -610,7 +750,11 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 		mustJSON(o.Derived.Checklist),
 		mustJSON(o.Derived.Variables),
 		nullInt64(o.BudgetCents),
-		nullStr(deadlineAt),
+		nullStr(scheduledFor),
+		nullStr(dueAt),
+		nullStr(dueAt),
+		nullStr(accessExpiresAt),
+		accessSource,
 		nullStr(o.Priority),
 		"open",
 	)
@@ -642,8 +786,8 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 	var assignID int64
 	if o.WorkerID > 0 {
 		res, err := tx.Exec(`INSERT INTO gig_assignments
-			(gig_id,worker_id,status,magic_token,mode,notify_worker,token_expires_at,public_base_url)
-			VALUES (?,?,'offered',?,'direct',?,?,?)`, gigID, o.WorkerID, token, o.NotifyWorker, nullStr(deadlineAt), nullStr(publicBaseURL))
+			(gig_id,worker_id,status,magic_token,mode,notify_worker,token_expires_at,public_base_url,access_expiry_source)
+			VALUES (?,?,'offered',?,'direct',?,?,?,?)`, gigID, o.WorkerID, token, o.NotifyWorker, nullStr(accessExpiresAt), nullStr(publicBaseURL), accessSource)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -737,9 +881,10 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, 
 	if err != nil {
 		return nil, err
 	}
-	expiresAt := g.DeadlineAt
-	if expiresAt == "" {
-		expiresAt = time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339)
+	expiresAt := g.AccessExpiresAt
+	accessSource := g.AccessExpirySource
+	if accessSource == "" {
+		accessSource = "none"
 	}
 	var assignmentQuote *rateQuote
 	if g.Compensation == nil {
@@ -777,9 +922,9 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, 
 	}
 	res, err := tx.Exec(
 		`INSERT INTO gig_assignments
-		   (gig_id, worker_id, status, magic_token, mode, notify_worker, token_expires_at, public_base_url)
-		 VALUES (?, ?, 'offered', ?, ?, ?, ?, ?)`,
-		gigID, workerID, token, mode, notifyWorker, nullStr(expiresAt), nullStr(publicBaseURL),
+		   (gig_id, worker_id, status, magic_token, mode, notify_worker, token_expires_at, public_base_url, access_expiry_source)
+		 VALUES (?, ?, 'offered', ?, ?, ?, ?, ?, ?)`,
+		gigID, workerID, token, mode, notifyWorker, nullStr(expiresAt), nullStr(publicBaseURL), accessSource,
 	)
 	if err != nil {
 		return nil, err
@@ -935,7 +1080,7 @@ func (a *App) toolGigsListOpen(ctx *sdk.AppCtx, args map[string]any) (any, error
 		qArgs = append(qArgs, tid)
 	}
 	limit := intArg(args, "limit", 50)
-	q += ` ORDER BY deadline_at ASC LIMIT ?`
+	q += ` ORDER BY CASE WHEN due_at IS NULL THEN 1 ELSE 0 END, due_at ASC LIMIT ?`
 	qArgs = append(qArgs, limit)
 
 	rows, err := ctx.AppDB().Query(q, qArgs...)
@@ -974,8 +1119,9 @@ func (a *App) toolGigsListOpen(ctx *sdk.AppCtx, args map[string]any) (any, error
 // gigStatuses is the complete set of values this app ever writes to gigs.status.
 // Assignment rows and gig_events carry their own, wider vocabularies — see
 // migrations/001_init.sql. Notably there is no "completed": the terminal
-// accepted state is "reviewed" (gigs_accept_result), and "expired" is terminal
-// too (the deadline sweeper in lifecycle.go).
+// accepted state is "reviewed" (gigs_accept_result). "expired" remains for
+// backward compatibility and explicit terminal records; soft due dates now use
+// overdue_at without changing workflow status.
 var gigStatuses = []string{"open", "offered", "accepted", "submitted", "reviewed", "cancelled", "expired"}
 
 // defaultGigStatuses is the live-queue view callers get when they pass no filter.
@@ -1038,7 +1184,9 @@ func listGigSummaries(db *sql.DB, pid, statusFilter string, workerID, templateID
 		args = append(args, status)
 	}
 	q := `SELECT g.id,g.project_id,COALESCE(g.template_version_id,0),g.created_by,g.title,
-		COALESCE(g.deadline_at,''),COALESCE(g.priority,''),g.status,g.created_at,g.updated_at,
+		COALESCE(g.scheduled_for,''),COALESCE(g.due_at,g.deadline_at,''),COALESCE(g.overdue_at,''),
+		COALESCE(g.access_expires_at,''),COALESCE(g.access_expiry_source,'none'),
+		COALESCE(g.priority,''),g.status,g.created_at,g.updated_at,
 		COALESCE(g.completed_at,'') FROM gigs g WHERE g.project_id=? AND g.status IN (` + strings.Join(marks, ",") + `)`
 	if workerID > 0 {
 		q += ` AND EXISTS (SELECT 1 FROM gig_assignments a WHERE a.gig_id=g.id AND a.worker_id=?)`
@@ -1051,7 +1199,7 @@ func listGigSummaries(db *sql.DB, pid, statusFilter string, workerID, templateID
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	q += ` ORDER BY CASE WHEN g.deadline_at IS NULL THEN 1 ELSE 0 END,g.deadline_at,g.created_at DESC LIMIT ?`
+	q += ` ORDER BY CASE WHEN g.due_at IS NULL THEN 1 ELSE 0 END,g.due_at,g.created_at DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := db.Query(q, args...)
 	if err != nil {
@@ -1062,9 +1210,12 @@ func listGigSummaries(db *sql.DB, pid, statusFilter string, workerID, templateID
 	for rows.Next() {
 		item := &gig{}
 		if err := rows.Scan(&item.ID, &item.ProjectID, &item.TemplateVersionID, &item.CreatedBy, &item.Title,
-			&item.DeadlineAt, &item.Priority, &item.Status, &item.CreatedAt, &item.UpdatedAt, &item.CompletedAt); err != nil {
+			&item.ScheduledFor, &item.DueAt, &item.OverdueAt, &item.AccessExpiresAt, &item.AccessExpirySource,
+			&item.Priority, &item.Status, &item.CreatedAt, &item.UpdatedAt, &item.CompletedAt); err != nil {
 			return nil, err
 		}
+		item.DeadlineAt = item.DueAt
+		item.Overdue = item.OverdueAt != ""
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -1142,22 +1293,133 @@ func (a *App) toolGigsCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolGigsExtendDeadline(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
 	id := int64Arg(args, "id")
 	deadline := strArg(args, "deadline_at")
 	if id == 0 || deadline == "" {
 		return nil, errors.New("id and deadline_at required")
 	}
-	if _, err := ctx.AppDB().Exec(
-		`UPDATE gigs SET deadline_at=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`,
-		deadline, pid, id,
-	); err != nil {
+	args["due_at"] = deadline
+	return a.toolGigsUpdateSchedule(ctx, args)
+}
+
+func (a *App) toolGigsUpdateSchedule(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
 		return nil, err
 	}
-	g, _ := loadGig(ctx, pid, id)
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	g, err := loadGig(ctx, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if g == nil {
+		return nil, errors.New("gig not found")
+	}
+	if slices.Contains(gigTerminalStatuses, g.Status) {
+		return nil, fmt.Errorf("cannot update schedule for gig in status %s", g.Status)
+	}
+
+	scheduledFor := g.ScheduledFor
+	dueAt := g.DueAt
+	accessExpiresAt := g.AccessExpiresAt
+	accessSource := g.AccessExpirySource
+	if accessSource == "" {
+		accessSource = "none"
+	}
+	_, scheduledSupplied := args["scheduled_for"]
+	_, dueSupplied := args["due_at"]
+	_, accessSupplied := args["access_expires_at"]
+	_, graceSupplied := args["access_grace_days"]
+	if scheduledSupplied {
+		scheduledFor = strArg(args, "scheduled_for")
+	}
+	if dueSupplied {
+		dueAt = strArg(args, "due_at")
+	}
+	if accessSupplied && graceSupplied {
+		return nil, errors.New("use either access_expires_at or access_grace_days, not both")
+	}
+
+	accessChanged := accessSupplied || graceSupplied
+	accessGraceDays := 0
+	if graceSupplied {
+		accessGraceDays = intArg(args, "access_grace_days", 0)
+		if accessGraceDays <= 0 {
+			return nil, errors.New("access_grace_days must be positive")
+		}
+		accessExpiresAt = ""
+	} else if accessSupplied {
+		accessExpiresAt = strArg(args, "access_expires_at")
+	}
+
+	if !accessChanged && dueSupplied && accessSource == "due" && g.DueAt != "" && g.AccessExpiresAt != "" {
+		oldDue, oldDueErr := parseStoredTime(g.DueAt)
+		oldAccess, oldAccessErr := parseStoredTime(g.AccessExpiresAt)
+		newDue, newDueErr := parseStoredTime(dueAt)
+		if oldDueErr == nil && oldAccessErr == nil && newDueErr == nil {
+			accessExpiresAt = newDue.Add(oldAccess.Sub(oldDue)).UTC().Format(time.RFC3339)
+		}
+	}
+	if !accessChanged && dueSupplied && strings.TrimSpace(dueAt) == "" && accessSource == "due" {
+		accessExpiresAt = ""
+		accessSource = "none"
+	}
+
+	normalizedScheduled, normalizedDue, normalizedAccess, normalizedSource, err := resolveCreateSchedule(scheduledFor, dueAt, accessExpiresAt, accessGraceDays)
+	if err != nil {
+		return nil, err
+	}
+	if !accessChanged && accessSource == "due" {
+		normalizedSource = "due"
+	} else if !accessChanged && accessSource == "custom" {
+		normalizedSource = "custom"
+	}
+
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE gigs
+		SET scheduled_for=?,due_at=?,deadline_at=?,access_expires_at=?,access_expiry_source=?,
+		    overdue_at=CASE WHEN ? IS NULL OR datetime(?)>datetime('now') THEN NULL ELSE overdue_at END,
+		    updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`,
+		nullStr(normalizedScheduled), nullStr(normalizedDue), nullStr(normalizedDue), nullStr(normalizedAccess), normalizedSource,
+		nullStr(normalizedDue), nullStr(normalizedDue), pid, id); err != nil {
+		return nil, err
+	}
+	if accessChanged {
+		if _, err := tx.Exec(`UPDATE gig_assignments
+			SET token_expires_at=?, access_expiry_source=?
+			WHERE gig_id=? AND token_revoked_at IS NULL`, nullStr(normalizedAccess), normalizedSource, id); err != nil {
+			return nil, err
+		}
+	} else if dueSupplied && normalizedSource == "due" {
+		if _, err := tx.Exec(`UPDATE gig_assignments
+			SET token_expires_at=?
+			WHERE gig_id=? AND access_expiry_source='due' AND token_revoked_at IS NULL`, nullStr(normalizedAccess), id); err != nil {
+			return nil, err
+		}
+	}
+	body := mustJSON(map[string]any{
+		"scheduled_for":        normalizedScheduled,
+		"due_at":               normalizedDue,
+		"access_expires_at":    normalizedAccess,
+		"access_expiry_source": normalizedSource,
+	})
+	if _, err := tx.Exec(`INSERT INTO gig_events(project_id,gig_id,kind,actor,body)
+		VALUES (?,?,'schedule_updated','agent',?)`, pid, id, body); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	ctx.EmitWithProject("gig.schedule_updated", pid, map[string]any{"gig_id": id})
+	g, _ = loadGig(ctx, pid, id)
 	return map[string]any{"gig": g}, nil
 }
 
@@ -1544,20 +1806,21 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 	db := ctx.AppDB()
 	g := &gig{ProjectID: pid}
 	var tplVID sql.NullInt64
-	var vars, schema, media, checklist, vars2, result, priority, deadlineAt, completedAt, rejection sql.NullString
+	var vars, schema, media, checklist, vars2, result, priority, scheduledFor, dueAt, overdueAt, accessExpiresAt, accessSource, completedAt, rejection sql.NullString
 	var budget sql.NullInt64
 	err := db.QueryRow(
 		`SELECT id, template_version_id, created_by, title, vars_json,
 		        derived_result_schema_json, derived_media_manifest_json,
 		        derived_checklist_json, derived_variables_json,
-		        budget_cents, deadline_at, priority, status, result_json,
+		        budget_cents, scheduled_for, COALESCE(due_at,deadline_at), overdue_at,
+		        access_expires_at, access_expiry_source, priority, status, result_json,
 		        rejection_reason, created_at, updated_at, completed_at
 		 FROM gigs WHERE project_id=? AND id=?`,
 		pid, id,
 	).Scan(
 		&g.ID, &tplVID, &g.CreatedBy, &g.Title, &vars,
 		&schema, &media, &checklist, &vars2,
-		&budget, &deadlineAt, &priority, &g.Status, &result,
+		&budget, &scheduledFor, &dueAt, &overdueAt, &accessExpiresAt, &accessSource, &priority, &g.Status, &result,
 		&rejection, &g.CreatedAt, &g.UpdatedAt, &completedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1568,7 +1831,13 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 	}
 	g.TemplateVersionID = tplVID.Int64
 	g.BudgetCents = budget.Int64
-	g.DeadlineAt = deadlineAt.String
+	g.ScheduledFor = scheduledFor.String
+	g.DueAt = dueAt.String
+	g.DeadlineAt = dueAt.String
+	g.OverdueAt = overdueAt.String
+	g.Overdue = overdueAt.Valid
+	g.AccessExpiresAt = accessExpiresAt.String
+	g.AccessExpirySource = accessSource.String
 	g.Priority = priority.String
 	g.RejectionReason = rejection.String
 	g.CompletedAt = completedAt.String
@@ -1616,7 +1885,8 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 	aRows, err := db.Query(
 		`SELECT id, worker_id, status, offered_at, responded_at, submitted_at,
 		        crm_conversation_id, magic_token, COALESCE(mode,'direct'),
-		        COALESCE(notify_worker,0), COALESCE(token_expires_at,''), COALESCE(public_base_url,'')
+		        COALESCE(notify_worker,0), COALESCE(token_expires_at,''), COALESCE(public_base_url,''),
+		        COALESCE(access_expiry_source,'none')
 		 FROM gig_assignments WHERE gig_id=? ORDER BY offered_at`,
 		id,
 	)
@@ -1626,9 +1896,10 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 			var responded, submitted sql.NullString
 			var convID sql.NullInt64
 			var token string
-			if err := aRows.Scan(&v.ID, &v.WorkerID, &v.Status, &v.OfferedAt, &responded, &submitted, &convID, &token, &v.Mode, &v.NotifyWorker, &v.TokenExpiresAt, &v.PublicBaseURL); err != nil {
+			if err := aRows.Scan(&v.ID, &v.WorkerID, &v.Status, &v.OfferedAt, &responded, &submitted, &convID, &token, &v.Mode, &v.NotifyWorker, &v.AccessExpiresAt, &v.PublicBaseURL, &v.AccessExpirySource); err != nil {
 				return nil, err
 			}
+			v.TokenExpiresAt = v.AccessExpiresAt
 			v.RespondedAt = responded.String
 			v.SubmittedAt = submitted.String
 			v.CRMConversationID = convID.Int64
@@ -1720,12 +1991,14 @@ func loadAssignmentView(ctx *sdk.AppCtx, pid string, assignID int64) (*gigAssign
 	if err := ctx.AppDB().QueryRow(
 		`SELECT id, gig_id, worker_id, status, offered_at, responded_at, submitted_at,
 		        crm_conversation_id, magic_token, COALESCE(mode,'direct'),
-		        COALESCE(notify_worker,0), COALESCE(token_expires_at,''), COALESCE(public_base_url,'')
+		        COALESCE(notify_worker,0), COALESCE(token_expires_at,''), COALESCE(public_base_url,''),
+		        COALESCE(access_expiry_source,'none')
 		 FROM gig_assignments WHERE id=?`,
 		assignID,
-	).Scan(&v.ID, &v.GigID, &v.WorkerID, &v.Status, &v.OfferedAt, &responded, &submitted, &convID, &token, &v.Mode, &v.NotifyWorker, &v.TokenExpiresAt, &v.PublicBaseURL); err != nil {
+	).Scan(&v.ID, &v.GigID, &v.WorkerID, &v.Status, &v.OfferedAt, &responded, &submitted, &convID, &token, &v.Mode, &v.NotifyWorker, &v.AccessExpiresAt, &v.PublicBaseURL, &v.AccessExpirySource); err != nil {
 		return nil, err
 	}
+	v.TokenExpiresAt = v.AccessExpiresAt
 	v.RespondedAt = responded.String
 	v.SubmittedAt = submitted.String
 	v.CRMConversationID = convID.Int64
@@ -1841,6 +2114,24 @@ func (a *App) handleHTTPGigItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch parts[1] {
+		case "schedule":
+			var body map[string]any
+			if err := httpDecode(r, &body); err != nil {
+				httpErr(w, http.StatusBadRequest, "invalid json")
+				return
+			}
+			if body == nil {
+				body = map[string]any{}
+			}
+			body["_project_id"] = pid
+			body["id"] = id
+			out, err := a.toolGigsUpdateSchedule(ctx, body)
+			if err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			httpJSON(w, out)
+			return
 		case "cancel":
 			var body map[string]any
 			if err := httpDecode(r, &body); err != nil {

@@ -27,19 +27,21 @@ type template struct {
 }
 
 type templateVersion struct {
-	ID                   int64               `json:"id"`
-	TemplateID           int64               `json:"template_id"`
-	Version              int                 `json:"version"`
-	Status               string              `json:"status"`
-	TitleTemplate        string              `json:"title_template"`
-	DefaultDeadlineHours int                 `json:"default_deadline_hours,omitempty"`
-	DefaultSkillIDs      []int64             `json:"default_skill_ids,omitempty"`
-	DefaultPriority      string              `json:"default_priority,omitempty"`
-	VariableOverrides    map[string]any      `json:"variable_overrides,omitempty"`
-	CreatedBy            string              `json:"created_by,omitempty"`
-	CreatedAt            string              `json:"created_at"`
-	Composition          []compositionItem   `json:"composition,omitempty"`
-	Derived              *derivedComposition `json:"derived,omitempty"`
+	ID                     int64               `json:"id"`
+	TemplateID             int64               `json:"template_id"`
+	Version                int                 `json:"version"`
+	Status                 string              `json:"status"`
+	TitleTemplate          string              `json:"title_template"`
+	DefaultDueHours        int                 `json:"default_due_hours,omitempty"`
+	DefaultDeadlineHours   int                 `json:"default_deadline_hours,omitempty"` // deprecated alias
+	DefaultAccessGraceDays int                 `json:"default_access_grace_days,omitempty"`
+	DefaultSkillIDs        []int64             `json:"default_skill_ids,omitempty"`
+	DefaultPriority        string              `json:"default_priority,omitempty"`
+	VariableOverrides      map[string]any      `json:"variable_overrides,omitempty"`
+	CreatedBy              string              `json:"created_by,omitempty"`
+	CreatedAt              string              `json:"created_at"`
+	Composition            []compositionItem   `json:"composition,omitempty"`
+	Derived                *derivedComposition `json:"derived,omitempty"`
 }
 
 // ─── Tool registry ──────────────────────────────────────────────────
@@ -48,14 +50,16 @@ func (a *App) templateTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "templates_create",
-			Description: "Create a new template (empty composition, draft). Args: name, kind? (decision|action|creative|expert|micro|physical; default action), slug? (auto-derived), title_template (with {{var}} interpolation), default_deadline_hours?, default_priority?. Returns {template}.",
+			Description: "Create a new template (empty composition, draft). default_due_hours is an optional soft due offset; default_access_grace_days optionally ends worker access that many days later. default_deadline_hours remains a deprecated due alias. Returns {template}.",
 			InputSchema: schemaObject(map[string]any{
-				"name":                   map[string]any{"type": "string"},
-				"kind":                   map[string]any{"type": "string"},
-				"slug":                   map[string]any{"type": "string"},
-				"title_template":         map[string]any{"type": "string"},
-				"default_deadline_hours": map[string]any{"type": "integer"},
-				"default_priority":       map[string]any{"type": "string"},
+				"name":                      map[string]any{"type": "string"},
+				"kind":                      map[string]any{"type": "string"},
+				"slug":                      map[string]any{"type": "string"},
+				"title_template":            map[string]any{"type": "string"},
+				"default_due_hours":         map[string]any{"type": "integer", "minimum": 1},
+				"default_deadline_hours":    map[string]any{"type": "integer"},
+				"default_access_grace_days": map[string]any{"type": "integer", "minimum": 1},
+				"default_priority":          map[string]any{"type": "string"},
 			}, []string{"name", "title_template"}),
 			Handler: a.toolTemplatesCreate,
 		},
@@ -166,6 +170,14 @@ func (a *App) toolTemplatesCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if name == "" || title == "" {
 		return nil, errors.New("name and title_template required")
 	}
+	defaultDueHours := intArg(args, "default_due_hours", 0)
+	legacyDeadlineHours := intArg(args, "default_deadline_hours", 0)
+	if defaultDueHours > 0 && legacyDeadlineHours > 0 && defaultDueHours != legacyDeadlineHours {
+		return nil, errors.New("default_due_hours and deprecated default_deadline_hours must match when both are supplied")
+	}
+	if defaultDueHours == 0 {
+		defaultDueHours = legacyDeadlineHours
+	}
 	kind := strArg(args, "kind")
 	if kind == "" {
 		kind = "action"
@@ -192,10 +204,11 @@ func (a *App) toolTemplatesCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	vRes, err := tx.Exec(
 		`INSERT INTO template_versions
 		   (template_id, version, status, title_template,
-		    default_deadline_hours, default_priority)
-		 VALUES (?, 1, 'draft', ?, ?, ?)`,
+		    default_deadline_hours, default_access_grace_days, default_priority)
+		 VALUES (?, 1, 'draft', ?, ?, ?, ?)`,
 		id, title,
-		nullInt64(int64(intArg(args, "default_deadline_hours", 0))),
+		nullInt64(int64(defaultDueHours)),
+		nullInt64(int64(intArg(args, "default_access_grace_days", 0))),
 		nullStr(strArg(args, "default_priority")),
 	)
 	if err != nil {
@@ -663,22 +676,22 @@ func ensureDraft(db *sql.DB, pid string, templateID int64) (int64, error) {
 		return 0, err
 	}
 	var titleTpl, defPriority sql.NullString
-	var defDeadlineHours sql.NullInt64
+	var defDeadlineHours, defAccessGraceDays sql.NullInt64
 	var skillsJSON, overridesJSON sql.NullString
 	_ = tx.QueryRow(
-		`SELECT title_template, default_deadline_hours, default_skill_ids_json,
+		`SELECT title_template, default_deadline_hours, default_access_grace_days, default_skill_ids_json,
 		        default_priority, variable_overrides_json
 		 FROM template_versions WHERE id=?`,
 		currentVID.Int64,
-	).Scan(&titleTpl, &defDeadlineHours, &skillsJSON, &defPriority, &overridesJSON)
+	).Scan(&titleTpl, &defDeadlineHours, &defAccessGraceDays, &skillsJSON, &defPriority, &overridesJSON)
 	res, err := tx.Exec(
 		`INSERT INTO template_versions
 		   (template_id, version, status, title_template,
-		    default_deadline_hours, default_skill_ids_json,
+		    default_deadline_hours, default_access_grace_days, default_skill_ids_json,
 		    default_priority, variable_overrides_json)
-		 VALUES (?, ?, 'draft', ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?)`,
 		templateID, maxVersion+1, titleTpl, defDeadlineHours,
-		skillsJSON, defPriority, overridesJSON,
+		defAccessGraceDays, skillsJSON, defPriority, overridesJSON,
 	)
 	if err != nil {
 		return 0, err
@@ -746,16 +759,16 @@ func getTemplate(db *sql.DB, pid string, id int64) (*template, error) {
 
 func getTemplateVersion(db *sql.DB, id int64) (*templateVersion, error) {
 	v := &templateVersion{}
-	var defDeadline sql.NullInt64
+	var defDeadline, defAccessGrace sql.NullInt64
 	var skillsJSON, overridesJSON, defPriority, createdBy sql.NullString
 	err := db.QueryRow(
 		`SELECT id, template_id, version, status, title_template,
-		        default_deadline_hours, default_skill_ids_json,
+		        default_deadline_hours, default_access_grace_days, default_skill_ids_json,
 		        default_priority, variable_overrides_json, created_by, created_at
 		 FROM template_versions WHERE id=?`,
 		id,
 	).Scan(&v.ID, &v.TemplateID, &v.Version, &v.Status, &v.TitleTemplate,
-		&defDeadline, &skillsJSON, &defPriority, &overridesJSON, &createdBy, &v.CreatedAt)
+		&defDeadline, &defAccessGrace, &skillsJSON, &defPriority, &overridesJSON, &createdBy, &v.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -764,6 +777,10 @@ func getTemplateVersion(db *sql.DB, id int64) (*templateVersion, error) {
 	}
 	if defDeadline.Valid {
 		v.DefaultDeadlineHours = int(defDeadline.Int64)
+		v.DefaultDueHours = int(defDeadline.Int64)
+	}
+	if defAccessGrace.Valid {
+		v.DefaultAccessGraceDays = int(defAccessGrace.Int64)
 	}
 	_ = parseJSON(skillsJSON.String, &v.DefaultSkillIDs)
 	_ = parseJSON(overridesJSON.String, &v.VariableOverrides)

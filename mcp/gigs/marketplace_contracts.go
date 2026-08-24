@@ -582,15 +582,19 @@ func (a *App) toolContractsDispatchMilestone(ctx *sdk.AppCtx, args map[string]an
 		"vars":                mapArg(args, "vars"),
 		"notify_worker":       boolArg(args, "notify_worker", false),
 		"public_domain_id":    int64Arg(args, "public_domain_id"),
+		"scheduled_for":       strArg(args, "scheduled_for"),
+		"due_at":              strArg(args, "due_at"),
 		"deadline_at":         strArg(args, "deadline_at"),
+		"access_expires_at":   strArg(args, "access_expires_at"),
+		"access_grace_days":   intArg(args, "access_grace_days", 0),
 		"priority":            strArg(args, "priority"),
 		"_contract_id":        cid,
 		"_milestone_id":       mid,
 		"_offer_package_id":   c.OfferPackageID,
 		"_compensation_quote": quote,
 	}
-	if createArgs["deadline_at"] == "" {
-		createArgs["deadline_at"] = m.DueAt
+	if createArgs["due_at"] == "" && createArgs["deadline_at"] == "" {
+		createArgs["due_at"] = m.DueAt
 	}
 	created, err := a.toolGigsCreateFromTemplate(ctx, createArgs)
 	if err != nil {

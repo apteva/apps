@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.3.2
+version: 0.3.3
 description: |
   Generic work marketplace and execution engine. Define standard offers,
   service packages, worker pay grades and effective rate cards; negotiate
@@ -102,7 +102,7 @@ provides:
       description: Templates referencing this instruction — impact view before an edit.
     # ─── Templates (compositions) ────────────────────────────────────
     - name: templates_create
-      description: New template, empty composition (draft).
+      description: New draft template with optional soft due offset and worker-access grace defaults.
     - name: templates_list
       description: Active templates in the project.
     - name: templates_get
@@ -136,14 +136,16 @@ provides:
       description: Pre-flight read — gig + composition + assignments + submission.
     - name: gigs_list_open
       description: >-
-        Filtered lightweight queue read (status, worker, template, deadline); use gigs_status for full details.
+        Filtered lightweight queue read (status, worker, template, schedule and due date); use gigs_status for full details.
         status takes a comma-separated subset of open, offered, accepted, submitted, reviewed, cancelled, expired
         (default 'open,offered,accepted'). There is no 'completed' status — accepted work is 'reviewed', and
         'completed' is accepted as an alias. Unknown values return an error rather than an empty list.
     - name: gigs_cancel
       description: Cancel an open, offered, or accepted gig; only workers originally notified are messaged.
     - name: gigs_extend_deadline
-      description: Push the deadline.
+      description: Backward-compatible soft due-date update; never closes worker access.
+    - name: gigs_update_schedule
+      description: Update scheduled_for, soft due_at, and optional hard worker access expiry independently.
     - name: gigs_delete
       description: >-
         Permanently delete a gig and its assignments, submissions, events and upload sessions. Irreversible —
@@ -229,10 +231,17 @@ provides:
       visibility: project
       supported_sizes: [half, full]
       default_size: half
-      refresh_topics: [gig.created, gig.offered, gig.accepted, gig.declined, gig.submitted, gig.reviewed, gig.rejected, gig.cancelled, gig.expired]
+      refresh_topics: [gig.created, gig.offered, gig.accepted, gig.declined, gig.submitted, gig.reviewed, gig.rejected, gig.cancelled, gig.expired, gig.overdue, gig.access_expired, gig.schedule_updated]
       settings_schema:
         type: object
         properties:
+          primary_date:
+            type: string
+            title: Primary date
+            description: Choose which date leads each gig row. Due-date urgency remains visible either way.
+            enum: [scheduled_for, due_at, both]
+            enum_names: [Scheduled for, Due by, Both]
+            default: scheduled_for
           show_review:
             type: boolean
             title: Needs review
@@ -271,11 +280,16 @@ db:
   migrations: migrations/
 
 config_schema:
+  - name: default_due_hours
+    type: number
+    default: 0
+    label: Default due target (hours)
+    description: Optional soft due-date offset for gigs created without due_at. 0 leaves the due date unset.
   - name: default_deadline_hours
     type: number
-    default: 24
-    label: Default deadline (hours)
-    description: When a gig is created without an explicit deadline, this is the offset from now.
+    default: 0
+    label: Legacy default deadline (hours)
+    description: Deprecated compatibility setting. Treated as a soft due-date offset and never as worker-link expiry.
   - name: auto_remind_after_hours
     type: number
     default: 4

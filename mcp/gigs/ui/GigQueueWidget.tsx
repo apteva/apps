@@ -23,7 +23,10 @@ interface GigRow {
   id: number;
   title: string;
   status: string;
+  scheduled_for?: string;
+  due_at?: string;
   deadline_at?: string;
+  overdue?: boolean;
   completed_at?: string;
   created_at?: string;
 }
@@ -48,11 +51,11 @@ const STATUS_TONE: Record<string, string> = {
 
 const PREVIEW_ROWS: Record<string, GigRow[]> = {
   submitted: [
-    { id: 1, title: "Aug 20 recording — batch A", status: "submitted", deadline_at: sampleDeadline(6) },
+    { id: 1, title: "Aug 20 recording — batch A", status: "submitted", scheduled_for: sampleDeadline(-6), due_at: sampleDeadline(6) },
   ],
   inflight: [
-    { id: 2, title: "Sep 2 recording", status: "offered", deadline_at: sampleDeadline(20) },
-    { id: 3, title: "Interview follow-up", status: "accepted", deadline_at: sampleDeadline(-3) },
+    { id: 2, title: "Sep 2 recording", status: "offered", scheduled_for: sampleDeadline(12), due_at: sampleDeadline(20) },
+    { id: 3, title: "Interview follow-up", status: "accepted", scheduled_for: sampleDeadline(-8), due_at: sampleDeadline(-3), overdue: true },
   ],
   recent: [
     { id: 4, title: "Aug 12 recording", status: "reviewed", completed_at: sampleDeadline(-48) },
@@ -82,14 +85,22 @@ async function fetchGigs(props: HostProps, statuses: string): Promise<GigRow[]> 
 }
 
 function deadlineState(row: GigRow): { label: string; tone: string } | null {
-  if (!row.deadline_at) return null;
-  const due = Date.parse(row.deadline_at);
+	const dueValue = row.due_at || row.deadline_at;
+	if (!dueValue) return null;
+	const due = Date.parse(dueValue);
   if (Number.isNaN(due)) return null;
   const hours = (due - Date.now()) / 3600_000;
   if (hours < 0) return { label: "overdue", tone: "danger" };
   if (hours < 24) return { label: `due in ${Math.max(1, Math.round(hours))}h`, tone: "warn" };
   const days = Math.round(hours / 24);
   return { label: `due in ${days}d`, tone: "default" };
+}
+
+function scheduledState(row: GigRow): string | null {
+  if (!row.scheduled_for) return null;
+  const scheduled = new Date(row.scheduled_for);
+  if (Number.isNaN(scheduled.getTime())) return null;
+  return `scheduled ${scheduled.toLocaleDateString([], { month: "short", day: "numeric" })}`;
 }
 
 function settingsBool(settings: Record<string, unknown> | undefined, key: string, fallback: boolean): boolean {
@@ -100,6 +111,11 @@ function settingsBool(settings: Record<string, unknown> | undefined, key: string
 function settingsInt(settings: Record<string, unknown> | undefined, key: string, fallback: number): number {
   const value = Number(settings?.[key]);
   return Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+}
+
+function settingsString(settings: Record<string, unknown> | undefined, key: string, fallback: string): string {
+  const value = settings?.[key];
+  return typeof value === "string" && value ? value : fallback;
 }
 
 function IconClipboard() {
@@ -118,6 +134,7 @@ export default function GigQueueWidget(props: HostProps) {
   const showInflight = settingsBool(settings, "show_inflight", true);
   const showRecent = settingsBool(settings, "show_recent", false);
   const recentLimit = settingsInt(settings, "recent_limit", 4);
+  const primaryDate = settingsString(settings, "primary_date", "scheduled_for");
   const compact = props.widgetSize !== "full";
 
   const [review, setReview] = useState<GigRow[]>([]);
@@ -166,7 +183,7 @@ export default function GigQueueWidget(props: HostProps) {
 
   const urgent = useMemo(() => {
     const byUrgency = (a: GigRow, b: GigRow) =>
-      (a.deadline_at || "9999").localeCompare(b.deadline_at || "9999");
+		(a.due_at || a.deadline_at || "9999").localeCompare(b.due_at || b.deadline_at || "9999");
     return [...review].concat([...inflight].sort(byUrgency)).slice(0, 3);
   }, [review, inflight]);
 
@@ -189,15 +206,15 @@ export default function GigQueueWidget(props: HostProps) {
         {error && <div className="my-2 rounded border border-red/30 bg-red/10 px-3 py-2 text-xs text-red">{error}</div>}
         {!loaded && !error && <div className="py-4 text-xs text-text-dim">Loading…</div>}
         {empty && <div className="py-4 text-xs text-text-dim">No gigs need attention.</div>}
-        {loaded && !error && compact && !empty && <RowList rows={urgent} />}
+		{loaded && !error && compact && !empty && <RowList rows={urgent} primaryDate={primaryDate} />}
         {loaded && !error && !compact && !empty && (
           <>
             {showReview && review.length > 0 && <SectionHead label="Needs review" />}
-            {showReview && <RowList rows={review} />}
+			{showReview && <RowList rows={review} primaryDate={primaryDate} />}
             {showInflight && inflight.length > 0 && <SectionHead label="In flight" />}
-            {showInflight && <RowList rows={inflight} />}
+			{showInflight && <RowList rows={inflight} primaryDate={primaryDate} />}
             {showRecent && recent.length > 0 && <SectionHead label="Recent outcomes" />}
-            {showRecent && <RowList rows={recent} />}
+			{showRecent && <RowList rows={recent} primaryDate={primaryDate} />}
           </>
         )}
       </div>
@@ -217,19 +234,21 @@ function SectionHead({ label }: { label: string }) {
   return <div className="mt-2 mb-1 text-[10px] font-bold uppercase tracking-wide text-text-dim">{label}</div>;
 }
 
-function RowList({ rows }: { rows: GigRow[] }) {
+function RowList({ rows, primaryDate }: { rows: GigRow[]; primaryDate: string }) {
   return (
     <ul className="flex flex-col">
       {rows.map((row) => {
-        const due = row.status === "submitted" || row.status === "offered" || row.status === "accepted"
-          ? deadlineState(row)
-          : null;
+		const due = row.status === "submitted" || row.status === "offered" || row.status === "accepted"
+		  ? deadlineState(row)
+		  : null;
+		const scheduled = primaryDate !== "due_at" ? scheduledState(row) : null;
         return (
           <li key={row.id} className="flex items-center gap-2 border-b border-border/50 py-1.5 last:border-b-0">
             <span className={`inline-flex shrink-0 items-center rounded border px-1.5 py-0.5 text-[10px] ${PILL[STATUS_TONE[row.status] || "default"]}`}>
               {row.status}
             </span>
-            <span className="min-w-0 flex-1 truncate text-xs text-text" title={row.title}>{row.title}</span>
+			<span className="min-w-0 flex-1 truncate text-xs text-text" title={row.title}>{row.title}</span>
+			{scheduled && <span className="hidden shrink-0 text-[10px] text-text-dim sm:inline">{scheduled}</span>}
             {due && (
               <span className={`inline-flex shrink-0 items-center rounded border px-1.5 py-0.5 text-[10px] ${PILL[due.tone]}`}>
                 {due.label}

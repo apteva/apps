@@ -3,12 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -89,7 +94,7 @@ func seedAssignment(t *testing.T, ctx *sdk.AppCtx, gigID, workerID int64, status
 
 func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.3.2" {
+	if manifest.Version != "0.3.3" {
 		t.Fatalf("version=%q", manifest.Version)
 	}
 	var public []sdk.RouteSpec
@@ -434,15 +439,73 @@ func TestReviewedSubmissionCannotBeAcceptedOrSubmittedTwice(t *testing.T) {
 	}
 }
 
-func TestLifecycleExpiresGigAndRevokesAssignments(t *testing.T) {
+func TestLifecycleMarksGigOverdueWithoutRevokingAssignment(t *testing.T) {
 	ctx := testCtx(t)
 	workerID := seedWorker(t, ctx, "project-a", 14)
 	gigID := seedGig(t, ctx, "project-a", "offered", `{"type":"object","properties":{}}`)
 	assignmentID := seedAssignment(t, ctx, gigID, workerID, "offered", "direct", "expiry-token")
-	if _, err := ctx.AppDB().Exec(`UPDATE gigs SET deadline_at=datetime('now','-1 minute') WHERE id=?`, gigID); err != nil {
+	if _, err := ctx.AppDB().Exec(`UPDATE gigs SET due_at=datetime('now','-1 minute'),deadline_at=datetime('now','-1 minute') WHERE id=?`, gigID); err != nil {
 		t.Fatal(err)
 	}
-	if err := expireDueGigs(context.Background(), ctx); err != nil {
+	if err := markOverdueGigs(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	var gigStatus, assignmentStatus string
+	var revoked, overdue bool
+	if err := ctx.AppDB().QueryRow(`SELECT g.status,a.status,a.token_revoked_at IS NOT NULL,g.overdue_at IS NOT NULL
+		FROM gigs g JOIN gig_assignments a ON a.gig_id=g.id WHERE g.id=? AND a.id=?`, gigID, assignmentID).
+		Scan(&gigStatus, &assignmentStatus, &revoked, &overdue); err != nil {
+		t.Fatal(err)
+	}
+	if gigStatus != "offered" || assignmentStatus != "offered" || revoked || !overdue {
+		t.Fatalf("gig=%s assignment=%s revoked=%v overdue=%v", gigStatus, assignmentStatus, revoked, overdue)
+	}
+}
+
+func TestWorkerCanReadAndUploadAfterSoftDueDate(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(storagePlatformStub{}))
+	old := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = old })
+	workerID := seedWorker(t, ctx, "project-a", 140)
+	gigID := seedGig(t, ctx, "project-a", "accepted", `{"type":"object","properties":{}}`)
+	seedAssignment(t, ctx, gigID, workerID, "accepted", "direct", "late-worker-token")
+	if _, err := ctx.AppDB().Exec(`UPDATE gigs SET due_at=datetime('now','-2 days'),deadline_at=datetime('now','-2 days') WHERE id=?`, gigID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO gig_instructions
+		(gig_id,sort_order,instruction_kind,rendered_body_json,result_key)
+		VALUES (?,0,'text',?,'recording')`, gigID,
+		`{"markdown":"Upload the recording","response":{"files":{"enabled":true,"required":true,"accept":["video/*"]}}}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := markOverdueGigs(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	read := httptest.NewRecorder()
+	app.handleWorkerGigJSON(read, httptest.NewRequest(http.MethodGet, "/worker/late-worker-token/api/gig", nil), "late-worker-token")
+	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), "Upload the recording") {
+		t.Fatalf("read status=%d body=%s", read.Code, read.Body.String())
+	}
+	upload := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/worker/late-worker-token/upload/init", bytes.NewBufferString(`{"instruction_key":"recording","name":"late.mp4","content_type":"video/mp4","size_bytes":5}`))
+	req.Header.Set("Content-Type", "application/json")
+	app.handleWorkerUploadInit(upload, req, "late-worker-token")
+	if upload.Code != http.StatusOK {
+		t.Fatalf("upload status=%d body=%s", upload.Code, upload.Body.String())
+	}
+}
+
+func TestLifecycleHardAccessExpiryRevokesWorkerLink(t *testing.T) {
+	ctx := testCtx(t)
+	workerID := seedWorker(t, ctx, "project-a", 141)
+	gigID := seedGig(t, ctx, "project-a", "accepted", `{"type":"object","properties":{}}`)
+	assignmentID := seedAssignment(t, ctx, gigID, workerID, "accepted", "direct", "hard-expiry-token")
+	if _, err := ctx.AppDB().Exec(`UPDATE gig_assignments SET token_expires_at=datetime('now','-1 minute'),access_expiry_source='custom' WHERE id=?`, assignmentID); err != nil {
+		t.Fatal(err)
+	}
+	if err := expireAssignmentAccess(context.Background(), ctx); err != nil {
 		t.Fatal(err)
 	}
 	var gigStatus, assignmentStatus string
@@ -452,8 +515,147 @@ func TestLifecycleExpiresGigAndRevokesAssignments(t *testing.T) {
 		Scan(&gigStatus, &assignmentStatus, &revoked); err != nil {
 		t.Fatal(err)
 	}
-	if gigStatus != "expired" || assignmentStatus != "withdrawn" || !revoked {
+	if gigStatus != "open" || assignmentStatus != "withdrawn" || !revoked {
 		t.Fatalf("gig=%s assignment=%s revoked=%v", gigStatus, assignmentStatus, revoked)
+	}
+}
+
+func TestExtendDeadlineMovesInheritedAccessButPreservesCustomAccess(t *testing.T) {
+	ctx := testCtx(t)
+	app := &App{}
+	workerID := seedWorker(t, ctx, "project-a", 142)
+	oldDue := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+	newDue := oldDue.Add(48 * time.Hour)
+
+	inheritedGig := seedGig(t, ctx, "project-a", "accepted", `{}`)
+	inheritedAssignment := seedAssignment(t, ctx, inheritedGig, workerID, "accepted", "direct", "inherited-access")
+	if _, err := ctx.AppDB().Exec(`UPDATE gigs SET due_at=?,deadline_at=?,access_expires_at=?,access_expiry_source='due' WHERE id=?`, oldDue, oldDue, oldDue.Add(14*24*time.Hour), inheritedGig); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE gig_assignments SET token_expires_at=?,access_expiry_source='due' WHERE id=?`, oldDue.Add(14*24*time.Hour), inheritedAssignment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolGigsExtendDeadline(ctx, map[string]any{"_project_id": "project-a", "id": inheritedGig, "deadline_at": newDue.Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	var inheritedExpiry string
+	if err := ctx.AppDB().QueryRow(`SELECT token_expires_at FROM gig_assignments WHERE id=?`, inheritedAssignment).Scan(&inheritedExpiry); err != nil {
+		t.Fatal(err)
+	}
+	parsedInherited, err := time.Parse("2006-01-02 15:04:05-07:00", inheritedExpiry)
+	if err != nil {
+		parsedInherited, err = time.Parse(time.RFC3339, inheritedExpiry)
+	}
+	if err != nil || !parsedInherited.Equal(newDue.Add(14*24*time.Hour)) {
+		t.Fatalf("inherited expiry=%q parsed=%v err=%v", inheritedExpiry, parsedInherited, err)
+	}
+
+	customGig := seedGig(t, ctx, "project-a", "accepted", `{}`)
+	customAssignment := seedAssignment(t, ctx, customGig, workerID, "accepted", "direct", "custom-access")
+	customExpiry := oldDue.Add(30 * 24 * time.Hour)
+	if _, err := ctx.AppDB().Exec(`UPDATE gigs SET due_at=?,deadline_at=?,access_expires_at=?,access_expiry_source='custom' WHERE id=?`, oldDue, oldDue, customExpiry, customGig); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE gig_assignments SET token_expires_at=?,access_expiry_source='custom' WHERE id=?`, customExpiry, customAssignment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolGigsExtendDeadline(ctx, map[string]any{"_project_id": "project-a", "id": customGig, "deadline_at": newDue.Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	var gotCustom string
+	if err := ctx.AppDB().QueryRow(`SELECT token_expires_at FROM gig_assignments WHERE id=?`, customAssignment).Scan(&gotCustom); err != nil {
+		t.Fatal(err)
+	}
+	parsedCustom, err := time.Parse("2006-01-02 15:04:05-07:00", gotCustom)
+	if err != nil {
+		parsedCustom, err = time.Parse(time.RFC3339, gotCustom)
+	}
+	if err != nil || !parsedCustom.Equal(customExpiry) {
+		t.Fatalf("custom expiry changed: %q parsed=%v err=%v", gotCustom, parsedCustom, err)
+	}
+}
+
+func TestScheduleMigrationRestoresLegacyDeadlineRevokedLink(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	for i := 1; i <= 5; i++ {
+		path := filepath.Join("migrations", fmt.Sprintf("%03d", i)+map[int]string{1: "_init.sql", 2: "_hardening.sql", 3: "_public_domains.sql", 4: "_marketplace.sql", 5: "_worker_responses.sql"}[i])
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if _, execErr := db.Exec(string(raw)); execErr != nil {
+			t.Fatalf("apply %s: %v", path, execErr)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO workers(id,project_id,contact_id,status) VALUES (1,'project-a',1,'active');
+		INSERT INTO gigs(id,project_id,created_by,title,derived_result_schema_json,status,deadline_at,completed_at)
+		VALUES (10,'project-a','test','Legacy gig','{}','expired','2026-08-20T10:00:00Z','2026-08-20T10:00:00Z');
+		INSERT INTO gig_assignments(id,gig_id,worker_id,status,magic_token,mode,token_expires_at,token_revoked_at,responded_at)
+		VALUES (20,10,1,'withdrawn','legacy-token','direct','2026-08-20T10:00:00Z','2026-08-20T10:00:00Z','2026-08-19T10:00:00Z');
+		INSERT INTO gig_events(project_id,gig_id,kind,actor,body) VALUES ('project-a',10,'expired','system','deadline elapsed');`); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join("migrations", "006_schedule_access.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	var gigStatus, assignmentStatus, dueAt string
+	var revoked, expires bool
+	if err := db.QueryRow(`SELECT g.status,a.status,COALESCE(g.due_at,''),a.token_revoked_at IS NOT NULL,a.token_expires_at IS NOT NULL
+		FROM gigs g JOIN gig_assignments a ON a.gig_id=g.id WHERE g.id=10`).Scan(&gigStatus, &assignmentStatus, &dueAt, &revoked, &expires); err != nil {
+		t.Fatal(err)
+	}
+	if gigStatus != "accepted" || assignmentStatus != "accepted" || dueAt == "" || revoked || expires {
+		t.Fatalf("gig=%s assignment=%s due=%q revoked=%v expires=%v", gigStatus, assignmentStatus, dueAt, revoked, expires)
+	}
+}
+
+func TestTemplateCanDefaultSoftDueAndAccessGrace(t *testing.T) {
+	ctx := testCtx(t)
+	app := &App{}
+	created, err := app.toolTemplatesCreate(ctx, map[string]any{
+		"_project_id":               "project-a",
+		"name":                      "Scheduled recording",
+		"title_template":            "Recording for {{model}}",
+		"default_due_hours":         48,
+		"default_access_grace_days": 14,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl := created.(map[string]any)["template"].(*template)
+	if tpl.CurrentVersion == nil || tpl.CurrentVersion.DefaultDueHours != 48 || tpl.CurrentVersion.DefaultAccessGraceDays != 14 {
+		t.Fatalf("template defaults=%+v", tpl.CurrentVersion)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE template_versions SET status='active' WHERE id=?`, tpl.CurrentVersion.ID); err != nil {
+		t.Fatal(err)
+	}
+	workerID := seedWorker(t, ctx, "project-a", 143)
+	due := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
+	out, err := app.toolGigsCreateFromTemplate(ctx, map[string]any{
+		"_project_id": "project-a",
+		"template_id": tpl.ID,
+		"vars":        map[string]any{"model": "Ana"},
+		"worker_id":   workerID,
+		"due_at":      due.Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := out.(map[string]any)["assignment"].(*gigAssignmentView)
+	if assignment.AccessExpirySource != "due" {
+		t.Fatalf("access source=%q", assignment.AccessExpirySource)
+	}
+	gotExpiry, err := parseStoredTime(assignment.AccessExpiresAt)
+	if err != nil || !gotExpiry.Equal(due.Add(14*24*time.Hour)) {
+		t.Fatalf("access expiry=%q parsed=%v err=%v", assignment.AccessExpiresAt, gotExpiry, err)
 	}
 }
 
@@ -479,14 +681,14 @@ func TestWorkerEndpointsRejectExpiredAndRevokedTokens(t *testing.T) {
 		token       string
 		writeStatus int
 	}{
-		{token: "expired-token", writeStatus: http.StatusNotFound},
+		{token: "expired-token", writeStatus: http.StatusGone},
 		{token: "revoked-token", writeStatus: http.StatusGone},
 	} {
 		token := tc.token
 		t.Run(token+"/read", func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			app.handleWorkerGigJSON(rec, httptest.NewRequest(http.MethodGet, "/worker/"+token+"/api/gig", nil), token)
-			if rec.Code != http.StatusNotFound {
+			if rec.Code != http.StatusGone || !strings.Contains(rec.Body.String(), "access_ended") {
 				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 			}
 		})

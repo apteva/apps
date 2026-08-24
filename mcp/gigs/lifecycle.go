@@ -11,30 +11,34 @@ import (
 )
 
 func runLifecycleSweep(ctx context.Context, app *sdk.AppCtx) error {
-	if err := expireDueGigs(ctx, app); err != nil {
+	if err := markOverdueGigs(ctx, app); err != nil {
+		return err
+	}
+	if err := expireAssignmentAccess(ctx, app); err != nil {
 		return err
 	}
 	return remindOfferedWorkers(ctx, app)
 }
 
-func expireDueGigs(ctx context.Context, app *sdk.AppCtx) error {
+func markOverdueGigs(ctx context.Context, app *sdk.AppCtx) error {
 	rows, err := app.AppDB().QueryContext(ctx, `
 		SELECT id, project_id
 		  FROM gigs
 		 WHERE status IN ('open','offered','accepted')
-		   AND deadline_at IS NOT NULL
-		   AND datetime(deadline_at) <= datetime('now')`)
+		   AND due_at IS NOT NULL
+		   AND overdue_at IS NULL
+		   AND datetime(due_at) <= datetime('now')`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	type dueGig struct {
+	type overdueGig struct {
 		id  int64
 		pid string
 	}
-	var due []dueGig
+	var due []overdueGig
 	for rows.Next() {
-		var g dueGig
+		var g overdueGig
 		if err := rows.Scan(&g.id, &g.pid); err != nil {
 			return err
 		}
@@ -51,19 +55,17 @@ func expireDueGigs(ctx context.Context, app *sdk.AppCtx) error {
 		if err != nil {
 			return err
 		}
-		if _, err = tx.ExecContext(ctx, `
-			UPDATE gigs
-			   SET status='expired', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
-			 WHERE id=? AND project_id=? AND status IN ('open','offered','accepted')`, g.id, g.pid); err == nil {
-			_, err = tx.ExecContext(ctx, `
-				UPDATE gig_assignments
-				   SET status='withdrawn', token_revoked_at=CURRENT_TIMESTAMP
-				 WHERE gig_id=? AND status IN ('offered','accepted')`, g.id)
+		if _, err = tx.ExecContext(ctx, `UPDATE gigs
+			SET overdue_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+			WHERE id=? AND project_id=? AND overdue_at IS NULL
+			  AND status IN ('open','offered','accepted')`, g.id, g.pid); err != nil {
+			_ = tx.Rollback()
+			return err
 		}
 		if err == nil {
 			_, err = tx.ExecContext(ctx, `
 				INSERT INTO gig_events (project_id, gig_id, kind, actor, body)
-				VALUES (?, ?, 'expired', 'system', 'deadline elapsed')`, g.pid, g.id)
+				VALUES (?, ?, 'overdue', 'system', 'soft due date elapsed')`, g.pid, g.id)
 		}
 		if err != nil {
 			_ = tx.Rollback()
@@ -72,10 +74,72 @@ func expireDueGigs(ctx context.Context, app *sdk.AppCtx) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		if err := syncContractFromGig(app.AppDB(), g.pid, g.id, "expired"); err != nil {
-			app.Logger().Warn("sync contract milestone after gig expiry failed", "gig_id", g.id, "err", err.Error())
+		app.EmitWithProject("gig.overdue", g.pid, map[string]any{"gig_id": g.id})
+	}
+	return nil
+}
+
+func expireAssignmentAccess(ctx context.Context, app *sdk.AppCtx) error {
+	rows, err := app.AppDB().QueryContext(ctx, `SELECT a.id,a.gig_id,g.project_id
+		FROM gig_assignments a JOIN gigs g ON g.id=a.gig_id
+		WHERE a.token_revoked_at IS NULL AND a.token_expires_at IS NOT NULL
+		  AND a.status IN ('offered','accepted','submitted')
+		  AND datetime(a.token_expires_at)<=datetime('now')`)
+	if err != nil {
+		return err
+	}
+	type expiredAccess struct {
+		assignmentID, gigID int64
+		pid                 string
+	}
+	var items []expiredAccess
+	for rows.Next() {
+		var item expiredAccess
+		if err := rows.Scan(&item.assignmentID, &item.gigID, &item.pid); err != nil {
+			_ = rows.Close()
+			return err
 		}
-		app.EmitWithProject("gig.expired", g.pid, map[string]any{"gig_id": g.id})
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range items {
+		tx, err := app.AppDB().BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE gig_assignments
+			SET status=CASE WHEN status IN ('offered','accepted') THEN 'withdrawn' ELSE status END,
+			    token_revoked_at=CURRENT_TIMESTAMP
+			WHERE id=? AND token_revoked_at IS NULL`, item.assignmentID)
+		if err == nil {
+			if changed, _ := res.RowsAffected(); changed == 0 {
+				_ = tx.Rollback()
+				continue
+			}
+			_, err = tx.ExecContext(ctx, `UPDATE gigs SET status=CASE
+				WHEN status IN ('submitted','reviewed','cancelled','expired') THEN status
+				WHEN EXISTS (SELECT 1 FROM gig_assignments WHERE gig_id=? AND status='accepted' AND token_revoked_at IS NULL) THEN 'accepted'
+				WHEN EXISTS (SELECT 1 FROM gig_assignments WHERE gig_id=? AND status='offered' AND token_revoked_at IS NULL) THEN 'offered'
+				ELSE 'open' END,updated_at=CURRENT_TIMESTAMP WHERE id=?`, item.gigID, item.gigID, item.gigID)
+		}
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `INSERT INTO gig_events(project_id,gig_id,kind,actor,body)
+				VALUES (?,?,'access_expired','system',?)`, item.pid, item.gigID, fmt.Sprintf("assignment:%d", item.assignmentID))
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		app.EmitWithProject("gig.access_expired", item.pid, map[string]any{"gig_id": item.gigID, "assignment_id": item.assignmentID})
 	}
 	return nil
 }
@@ -150,22 +214,24 @@ func remindOfferedWorkers(ctx context.Context, app *sdk.AppCtx) error {
 	return nil
 }
 
-func loadAssignmentState(db *sql.DB, token string) (assignmentID, gigID int64, projectID, assignmentStatus, gigStatus, mode string, revoked bool, err error) {
+func loadAssignmentState(db *sql.DB, token string) (assignmentID, gigID int64, projectID, assignmentStatus, gigStatus, mode string, revoked, accessExpired bool, err error) {
 	var revokedAt sql.NullString
+	var expired int
 	err = db.QueryRow(`
 		SELECT a.id, a.gig_id, g.project_id, a.status, g.status,
-		       COALESCE(a.mode, 'direct'), a.token_revoked_at
+		       COALESCE(a.mode, 'direct'), a.token_revoked_at,
+		       CASE WHEN a.token_expires_at IS NOT NULL AND datetime(a.token_expires_at)<=datetime('now') THEN 1 ELSE 0 END
 		  FROM gig_assignments a
 		  JOIN gigs g ON g.id=a.gig_id
-		 WHERE a.magic_token=?
-		   AND (a.token_expires_at IS NULL OR datetime(a.token_expires_at) > datetime('now'))`, token,
-	).Scan(&assignmentID, &gigID, &projectID, &assignmentStatus, &gigStatus, &mode, &revokedAt)
+		 WHERE a.magic_token=?`, token,
+	).Scan(&assignmentID, &gigID, &projectID, &assignmentStatus, &gigStatus, &mode, &revokedAt, &expired)
 	revoked = revokedAt.Valid
+	accessExpired = expired != 0
 	return
 }
 
-func assignmentAcceptsWork(assignmentStatus, gigStatus string, revoked bool) bool {
-	if revoked {
+func assignmentAcceptsWork(assignmentStatus, gigStatus string, revoked, accessExpired bool) bool {
+	if revoked || accessExpired {
 		return false
 	}
 	if assignmentStatus != "accepted" && assignmentStatus != "submitted" {

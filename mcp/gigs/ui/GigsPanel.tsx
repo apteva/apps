@@ -92,6 +92,8 @@ interface TemplateVersion {
   version: number;
   status: "draft" | "active" | "archived";
   title_template: string;
+  default_due_hours?: number;
+  default_access_grace_days?: number;
   composition?: CompositionItem[];
   derived?: {
     result_schema: Record<string, unknown>;
@@ -133,7 +135,13 @@ interface Gig {
   id: number;
   title: string;
   status: GigStatus;
+  scheduled_for?: string;
+  due_at?: string;
   deadline_at?: string;
+  overdue_at?: string;
+  overdue?: boolean;
+  access_expires_at?: string;
+  access_expiry_source?: "none" | "due" | "custom";
   template_version_id?: number;
   composition?: Array<{
     sort_order: number;
@@ -150,6 +158,8 @@ interface Gig {
     notify_worker?: boolean;
     submitted_at?: string;
     worker_url?: string;
+    access_expires_at?: string;
+    access_expiry_source?: "none" | "due" | "custom";
     submission?: Submission;
   }>;
   result?: Record<string, unknown>;
@@ -552,9 +562,8 @@ function QueueTab({ projectId }: { projectId: string }) {
             <div className="text-sm truncate">{g.title}</div>
             <div className="flex items-center gap-2 mt-1">
               <Pill tone={gigPillTone(g.status)}>{g.status}</Pill>
-              {g.deadline_at && (
-                <span className="text-xs text-text-muted">due {formatDate(g.deadline_at)}</span>
-              )}
+              {g.scheduled_for && <span className="text-xs text-text-muted">scheduled {formatDate(g.scheduled_for)}</span>}
+              {g.overdue ? <Pill tone="danger">overdue</Pill> : g.due_at && <span className="text-xs text-text-muted">due {formatDate(g.due_at)}</span>}
             </div>
           </button>
         ))}
@@ -587,6 +596,7 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
   const [full, setFull] = useState<Gig | null>(null);
   const [busy, setBusy] = useState(false);
   const [assigning, setAssigning] = useState(false);
+  const [editingSchedule, setEditingSchedule] = useState(false);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
@@ -607,7 +617,8 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
       onChange();
       const d = await api<{ gig: Gig }>(`/gigs/${gig.id}`, projectId);
       setFull(d.gig);
-    } catch (e) { setActionErr((e as Error).message); } finally { setBusy(false); }
+      return true;
+    } catch (e) { setActionErr((e as Error).message); return false; } finally { setBusy(false); }
   };
 
   return (
@@ -619,11 +630,38 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
             <h2 className="text-xl font-semibold text-text">{g.title}</h2>
             <div className="flex items-center gap-2 mt-2 text-sm text-text-muted">
               <Pill tone={gigPillTone(g.status)}>{g.status}</Pill>
-              {g.deadline_at && <span>due {formatDate(g.deadline_at)}</span>}
+              {g.scheduled_for && <span>scheduled {formatDate(g.scheduled_for)}</span>}
+              {g.overdue ? <Pill tone="danger">overdue</Pill> : g.due_at && <span>due {formatDate(g.due_at)}</span>}
             </div>
           </div>
+          {!(["reviewed", "cancelled", "expired"] as string[]).includes(g.status) && (
+            <Button tone="ghost" onClick={() => setEditingSchedule((value) => !value)}>
+              {editingSchedule ? "Close timing" : "Edit timing"}
+            </Button>
+          )}
         </div>
       </Panel>
+
+      {editingSchedule ? (
+        <ScheduleEditor
+          gig={g}
+          busy={busy}
+          onCancel={() => setEditingSchedule(false)}
+          onSave={async (body) => {
+            const saved = await doAction("schedule", body);
+            if (saved) setEditingSchedule(false);
+            return saved;
+          }}
+        />
+      ) : (
+        <Panel className="p-4">
+          <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
+            <TimingValue label="Scheduled for" value={g.scheduled_for} empty="Not scheduled" />
+            <TimingValue label="Due by" value={g.due_at} empty="No due date" tone={g.overdue ? "danger" : undefined} />
+            <TimingValue label="Worker access" value={g.access_expires_at} empty="No automatic expiry" />
+          </div>
+        </Panel>
+      )}
 
       {g.compensation && (
         <Panel className="p-4">
@@ -965,6 +1003,63 @@ function SubmissionFileLink({
   );
 }
 
+function TimingValue({ label, value, empty, tone }: { label: string; value?: string; empty: string; tone?: "danger" }) {
+  return (
+    <div>
+      <div className="text-xs font-medium text-text-muted">{label}</div>
+      <div className={"mt-1 " + (tone === "danger" ? "text-red" : "text-text")}>{value ? formatDate(value) : empty}</div>
+    </div>
+  );
+}
+
+function inferredAccessMode(gig: Gig): "none" | "7" | "14" | "custom" {
+  if (!gig.access_expires_at) return "none";
+  if (gig.access_expiry_source === "due" && gig.due_at) {
+    const days = Math.round((Date.parse(gig.access_expires_at) - Date.parse(gig.due_at)) / 86_400_000);
+    if (days === 7 || days === 14) return String(days) as "7" | "14";
+  }
+  return "custom";
+}
+
+function ScheduleEditor({ gig, busy, onSave, onCancel }: {
+  gig: Gig;
+  busy: boolean;
+  onSave: (body: Record<string, unknown>) => Promise<boolean>;
+  onCancel: () => void;
+}) {
+  const [scheduledLocal, setScheduledLocal] = useState(toDateTimeLocal(gig.scheduled_for));
+  const [dueLocal, setDueLocal] = useState(toDateTimeLocal(gig.due_at));
+  const [accessMode, setAccessMode] = useState<"none" | "7" | "14" | "custom">(inferredAccessMode(gig));
+  const [accessLocal, setAccessLocal] = useState(toDateTimeLocal(gig.access_expires_at));
+  return (
+    <Panel className="p-4">
+      <form className="space-y-4" onSubmit={async (event) => {
+        event.preventDefault();
+        const body: Record<string, unknown> = {
+          scheduled_for: scheduledLocal ? new Date(scheduledLocal).toISOString() : null,
+          due_at: dueLocal ? new Date(dueLocal).toISOString() : null,
+        };
+        if (accessMode === "none") body.access_expires_at = null;
+        if (accessMode === "7" || accessMode === "14") body.access_grace_days = Number(accessMode);
+        if (accessMode === "custom") body.access_expires_at = accessLocal ? new Date(accessLocal).toISOString() : null;
+        await onSave(body);
+      }}>
+        <div>
+          <div className="text-sm font-semibold">Timing and access</div>
+          <div className="mt-0.5 text-xs text-text-muted">Changing the due date never closes the worker page.</div>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <label><span className="mb-1 block text-xs text-text-muted">Scheduled for</span><Field type="datetime-local" value={scheduledLocal} onChange={(e) => setScheduledLocal(e.target.value)} /></label>
+          <label><span className="mb-1 block text-xs text-text-muted">Due by</span><Field type="datetime-local" value={dueLocal} onChange={(e) => setDueLocal(e.target.value)} /></label>
+          <label><span className="mb-1 block text-xs text-text-muted">Worker access ends</span><Field as="select" value={accessMode} onChange={(e) => setAccessMode(e.target.value as typeof accessMode)}><option value="none">No automatic expiry</option><option value="7">7 days after due</option><option value="14">14 days after due</option><option value="custom">Custom date</option></Field></label>
+          {accessMode === "custom" && <label><span className="mb-1 block text-xs text-text-muted">Access expires at</span><Field type="datetime-local" value={accessLocal} onChange={(e) => setAccessLocal(e.target.value)} required /></label>}
+        </div>
+        <div className="flex gap-2"><Button tone="primary" disabled={busy}>Save timing</Button><Button type="button" tone="ghost" onClick={onCancel} disabled={busy}>Cancel</Button></div>
+      </form>
+    </Panel>
+  );
+}
+
 function NewGigForm({
   projectId, onDone, onCancel,
 }: { projectId: string; onDone: (gig: Gig) => void; onCancel: () => void }) {
@@ -981,7 +1076,10 @@ function NewGigForm({
   const [workerId, setWorkerId] = useState("");
   const [notifyWorker, setNotifyWorker] = useState(false);
   const [publicDomainId, setPublicDomainId] = useState("");
-  const [deadlineLocal, setDeadlineLocal] = useState("");
+  const [scheduledLocal, setScheduledLocal] = useState("");
+  const [dueLocal, setDueLocal] = useState("");
+  const [accessMode, setAccessMode] = useState<"none" | "7" | "14" | "custom">("none");
+  const [accessLocal, setAccessLocal] = useState("");
   const [priority, setPriority] = useState("");
   const [selectedInstructionIds, setSelectedInstructionIds] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1023,7 +1121,10 @@ function NewGigForm({
       const vars = parseJSONMap(varsText, "Vars JSON");
       const body: Record<string, unknown> = {
         vars,
-        deadline_at: deadlineLocal ? new Date(deadlineLocal).toISOString() : undefined,
+        scheduled_for: scheduledLocal ? new Date(scheduledLocal).toISOString() : undefined,
+        due_at: dueLocal ? new Date(dueLocal).toISOString() : undefined,
+        access_grace_days: accessMode === "7" || accessMode === "14" ? Number(accessMode) : undefined,
+        access_expires_at: accessMode === "custom" && accessLocal ? new Date(accessLocal).toISOString() : undefined,
         priority: priority || undefined,
         worker_id: workerId ? Number(workerId) : undefined,
         notify_worker: workerId ? notifyWorker : undefined,
@@ -1110,9 +1211,8 @@ function NewGigForm({
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <WorkerSelect projectId={projectId} value={workerId} onChange={setWorkerId} allowEmpty />
-        <Field type="datetime-local" value={deadlineLocal} onChange={(e) => setDeadlineLocal(e.target.value)} />
         <Field as="select" value={priority} onChange={(e) => setPriority(e.target.value)}>
           <option value="">Priority</option>
           <option value="low">Low</option>
@@ -1121,6 +1221,45 @@ function NewGigForm({
           <option value="urgent">Urgent</option>
         </Field>
       </div>
+
+      <Panel className="p-4 space-y-3 bg-bg-subtle">
+        <div>
+          <div className="text-sm font-semibold text-text">Timing</div>
+          <div className="mt-0.5 text-xs text-text-muted">The work date, submission target, and worker-link expiry are independent.</div>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-text-muted">Scheduled for</span>
+            <Field type="datetime-local" value={scheduledLocal} onChange={(e) => setScheduledLocal(e.target.value)} />
+            <span className="mt-1 block text-[11px] text-text-dim">Intended recording or work date.</span>
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium text-text-muted">Due by</span>
+            <Field type="datetime-local" value={dueLocal} onChange={(e) => setDueLocal(e.target.value)} />
+            <span className="mt-1 block text-[11px] text-text-dim">Soft target. Late submissions remain open.</span>
+          </label>
+        </div>
+        <details>
+          <summary className="cursor-pointer text-xs font-medium text-text-muted">Advanced worker access</summary>
+          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-text-muted">Worker access ends</span>
+              <Field as="select" value={accessMode} onChange={(e) => setAccessMode(e.target.value as typeof accessMode)}>
+                <option value="none">No automatic expiry</option>
+                <option value="7">7 days after due</option>
+                <option value="14">14 days after due</option>
+                <option value="custom">Custom date</option>
+              </Field>
+            </label>
+            {accessMode === "custom" && (
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-text-muted">Access expires at</span>
+                <Field type="datetime-local" value={accessLocal} onChange={(e) => setAccessLocal(e.target.value)} required />
+              </label>
+            )}
+          </div>
+        </details>
+      </Panel>
       {workerId && (
         <div className="grid gap-3 md:grid-cols-2">
           <PublicDomainSelect projectId={projectId} value={publicDomainId} onChange={setPublicDomainId} />
@@ -1583,6 +1722,12 @@ function TemplatesTab({ projectId }: { projectId: string }) {
               )}
             </div>
             <div className="mt-1 text-xs text-text-muted">/{t.slug} · {t.kind}</div>
+            {(t.current_version?.default_due_hours || t.current_version?.default_access_grace_days) && (
+              <div className="mt-1 text-xs text-text-muted">
+                {t.current_version.default_due_hours ? `due +${t.current_version.default_due_hours}h` : "no default due"}
+                {t.current_version.default_access_grace_days ? ` · access +${t.current_version.default_access_grace_days}d` : " · no access expiry"}
+              </div>
+            )}
             {t.current_version?.derived && (
               <div className="mt-2 text-xs text-text-muted">
                 {t.current_version.composition?.length || 0} instructions ·{" "}
@@ -1685,6 +1830,8 @@ function TemplateComposer({
 function NewTemplateForm({ projectId, onDone }: { projectId: string; onDone: () => void }) {
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
+  const [dueHours, setDueHours] = useState("");
+  const [accessGraceDays, setAccessGraceDays] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   return (
@@ -1694,7 +1841,12 @@ function NewTemplateForm({ projectId, onDone }: { projectId: string; onDone: () 
         setBusy(true);
         setErr(null);
         try {
-          await api(`/templates`, projectId, { method: "POST", body: JSON.stringify({ name, title_template: title }) });
+          await api(`/templates`, projectId, { method: "POST", body: JSON.stringify({
+            name,
+            title_template: title,
+            default_due_hours: dueHours ? Number(dueHours) : undefined,
+            default_access_grace_days: accessGraceDays ? Number(accessGraceDays) : undefined,
+          }) });
           onDone();
         } catch (error) { setErr((error as Error).message); } finally { setBusy(false); }
       }}
@@ -1702,6 +1854,14 @@ function NewTemplateForm({ projectId, onDone }: { projectId: string; onDone: () 
     >
       <Field value={name} onChange={(e) => setName(e.target.value)} placeholder="Template name" required />
       <Field value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title with {{vars}}" required />
+      <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+        <Field type="number" min="1" value={dueHours} onChange={(e) => setDueHours(e.target.value)} placeholder="Default soft due (hours)" />
+        <Field as="select" value={accessGraceDays} onChange={(e) => setAccessGraceDays(e.target.value)}>
+          <option value="">No automatic access expiry</option>
+          <option value="7">Access ends 7 days after due</option>
+          <option value="14">Access ends 14 days after due</option>
+        </Field>
+      </div>
       {err && <div role="alert" className="text-xs text-red">{err}</div>}
       <Button disabled={busy} tone="primary">Create draft</Button>
     </form>
@@ -2673,6 +2833,14 @@ function formatDate(iso: string): string {
     const d = new Date(iso);
     return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   } catch { return iso; }
+}
+
+function toDateTimeLocal(iso?: string): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
 }
 
 function formatMoneyMinor(amountMinor: number, currency: string): string {

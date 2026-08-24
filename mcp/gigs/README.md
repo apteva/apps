@@ -1,4 +1,4 @@
-# Gigs (v0.3.2)
+# Gigs (v0.3.3)
 
 Gigs is a generic work marketplace and execution engine. Agents can define
 standard services and packages, know the usual customer offer and worker pay,
@@ -83,14 +83,22 @@ until manager review; previous submitted revisions stay available for audit.
 `result_schema`, `media_manifest`, `checklist`, and `variables` are
 **derived** from the composition — never hand-authored.
 
-## Rescheduling a gig
+## Scheduling, due dates, and access
 
-`gigs_extend_deadline` moves `deadline_at` and nothing else. If the title or
-`vars` mention the original date, follow it with `gigs_update` so the record
-does not contradict itself:
+Gigs keeps three independent times: `scheduled_for` is the intended recording
+or work date, `due_at` is a soft submission target, and `access_expires_at` is
+an optional hard worker-link expiry. Passing `due_at` marks the gig overdue and
+emits `gig.overdue`, but workers can still read instructions, stream media,
+upload, replace files, and submit.
+
+Use `gigs_update_schedule` to edit all three controls. `gigs_extend_deadline`
+remains as a compatibility alias for changing the soft due date. Access set as
+7 or 14 days after due moves with it; a custom access date is preserved. If the
+title or `vars` mention the original date, follow the schedule update with
+`gigs_update` so the worker-facing record does not contradict itself:
 
 ```
-gigs_extend_deadline  id=11  deadline_at=2026-08-20T22:00:00+03:00
+gigs_update_schedule  id=11  scheduled_for=2026-08-20T18:00:00+03:00  due_at=2026-08-20T22:00:00+03:00  access_grace_days=14
 gigs_update           id=11  title="Veronika — Aug 20 recording"  vars={"recording_date":"2026-08-20"}
 ```
 
@@ -106,11 +114,13 @@ composition — that snapshot is frozen at dispatch by design.
 ## Home widget
 
 `gig-queue` (`ui/GigQueueWidget.tsx`) is a `dashboard.home` widget: submissions
-awaiting review, work in flight with deadline urgency pills, and optionally
+awaiting review, work in flight with due-date urgency pills, and optionally
 recent outcomes. Half size shows counts plus the three most urgent rows; full
 size shows each enabled section. It refreshes live on the app's `gig.*` events
 and reads the same `/gigs` summaries the panel uses — no widget-specific
-backend. Sections and the recent-outcome limit are per-instance settings.
+backend. Operators can choose Scheduled for, Due by, or Both as the primary
+date; Scheduled for is the default. Sections and the recent-outcome limit are
+per-instance settings.
 
 ## Deleting a gig
 
@@ -144,15 +154,16 @@ A gig's `status` is exactly one of:
 | `submitted` | Worker submitted; awaiting agent review |
 | `reviewed` | **Terminal.** Submission accepted via `gigs_accept_result` |
 | `cancelled` | **Terminal.** Cancelled via `gigs_cancel` |
-| `expired` | **Terminal.** Deadline elapsed without an accepted submission |
+| `expired` | **Terminal.** Legacy or explicitly expired record; soft due dates no longer write this status |
 
 **There is no `completed` status.** Work that was accepted is `reviewed`.
 `gigs_list_open` accepts `completed`, `complete`, and `done` as aliases for
 `reviewed` so the natural phrasing works, and rejects any other unknown value
 with an error rather than returning an empty list.
 
-`completed_at` is stamped on `reviewed` **and** `expired`, so it marks "reached
-a terminal state", not "succeeded" — filter on `status` when you mean success.
+`completed_at` marks a terminal transition such as `reviewed`, `cancelled`, or
+a legacy `expired` record. Overdue gigs remain in their normal workflow status
+and expose `overdue=true` plus `overdue_at`.
 
 `rejected` is not a gig status: rejecting a submission records it on the
 assignment and as a `gig_event`, and returns the gig to an earlier status
