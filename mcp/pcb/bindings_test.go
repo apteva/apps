@@ -112,3 +112,43 @@ func TestSimulationAndFirmwareArtifactsPersistThroughStorageBinding(t *testing.T
 		t.Fatalf("artifact persistence bypassed canonical Storage binding: %s/%s", platform.app, platform.tool)
 	}
 }
+
+func TestRepeatedSimulationRunsAreContentAddressed(t *testing.T) {
+	platform := &pcbBindingPlatform{bindings: map[string]any{"storage": float64(41)}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	store := testStore(t)
+	definition, _ := json.Marshal(sensorNodeExample())
+	canonical, _, hash, err := normalizeDefinition(definition, "Sensor node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	design, err := store.CreateDesign("project-a", "Sensor node", canonical, nil, hash, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{store: store, ctx: ctx, project: "project-a", artifactRoot: t.TempDir()}
+	options := SimulationOptions{DurationUS: 200, StepUS: 100, Sources: []SimulationSource{{ID: "usb", NetID: "usb5v", Kind: "dc", Value: 5}}, Probes: []SimulationProbe{{ID: "rail", NetID: "v3v3", Kind: "voltage"}}}
+	nominal, err := service.Simulate(design.ID, 0, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.Faults = []SimulationFault{{Kind: "open_component", ComponentID: "u3"}}
+	fault, err := service.Simulate(design.ID, 0, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nominal.Artifact.Name == fault.Artifact.Name || nominal.Artifact.LocalPath == fault.Artifact.LocalPath {
+		t.Fatalf("distinct simulation runs collided: %q and %q", nominal.Artifact.Name, fault.Artifact.Name)
+	}
+	nominalResult, _, err := loadSimulationArtifact(service, nominal.Artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	faultResult, _, err := loadSimulationArtifact(service, fault.Artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nominalResult.FinalVoltage["v3v3"] != 3.3 || faultResult.FinalVoltage["v3v3"] != 0 {
+		t.Fatalf("persisted runs lost their distinct results: nominal=%v fault=%v", nominalResult.FinalVoltage["v3v3"], faultResult.FinalVoltage["v3v3"])
+	}
+}

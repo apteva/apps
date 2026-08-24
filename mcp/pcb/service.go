@@ -290,6 +290,18 @@ func (s *Service) persistArtifact(design *Design, revision *Revision, kind, form
 	if kind != "preview" && kind != "bom" {
 		suffix = "-" + safeFilename(kind)
 	}
+	// Simulations and firmware runs are repeatable experiments on the same
+	// immutable revision. Content-address their names so a fault run, changed
+	// probe set, or different sketch can never overwrite an earlier local
+	// result. Manufacturing and release names remain stable for downstream
+	// handoff conventions.
+	if kind == "simulation" || kind == "firmware" {
+		digest := hash
+		if len(digest) > 12 {
+			digest = digest[:12]
+		}
+		suffix += "-" + digest
+	}
 	name := fmt.Sprintf("%s-r%d%s.%s", safeFilename(design.Name), revision.Number, suffix, ext)
 	dir := filepath.Join(s.artifactRoot, fmt.Sprintf("design-%d", design.ID), fmt.Sprintf("revision-%d", revision.ID))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
