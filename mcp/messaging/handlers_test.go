@@ -29,23 +29,24 @@ import (
 // tests are non-nil; everything else panics so failures are loud.
 type stubPlatform struct {
 	tk.BasePlatformClient
-	mu               sync.Mutex
-	executeCalls     []executeCall
-	callAppCalls     []callAppCall
-	executeReply     *sdk.ExecuteResult
-	replyByTool      map[string]*sdk.ExecuteResult
-	executeErr       error
-	callAppReply     json.RawMessage
-	callAppErr       error
-	callAppResultErr error
-	connectionCreds  map[int64]map[string]string
-	domainGrants     []sdk.DomainGrant
-	domainGrantsErr  error
-	dnsRequests      []sdk.DNSRecordRequest
-	dnsResult        *sdk.DNSRecordResult
-	dnsErr           error
-	bindingsOverride map[string]any       // when non-nil, replaces the default email_provider binding
-	whoAmIOverride   *sdk.InstallIdentity // when non-nil, replaces the default identity
+	mu                 sync.Mutex
+	executeCalls       []executeCall
+	callAppCalls       []callAppCall
+	executeReply       *sdk.ExecuteResult
+	replyByTool        map[string]*sdk.ExecuteResult
+	executeErr         error
+	callAppReply       json.RawMessage
+	callAppReplyByTool map[string]json.RawMessage
+	callAppErr         error
+	callAppResultErr   error
+	connectionCreds    map[int64]map[string]string
+	domainGrants       []sdk.DomainGrant
+	domainGrantsErr    error
+	dnsRequests        []sdk.DNSRecordRequest
+	dnsResult          *sdk.DNSRecordResult
+	dnsErr             error
+	bindingsOverride   map[string]any       // when non-nil, replaces the default email_provider binding
+	whoAmIOverride     *sdk.InstallIdentity // when non-nil, replaces the default identity
 	// executeOverride: when non-nil, called per ExecuteIntegrationTool
 	// invocation BEFORE replyByTool / defaults. The int is the
 	// 0-indexed count of prior calls for that tool — lets a test
@@ -117,6 +118,9 @@ func (s *stubPlatform) CallApp(app, tool string, input map[string]any) (json.Raw
 	s.mu.Unlock()
 	if s.callAppErr != nil {
 		return nil, s.callAppErr
+	}
+	if raw, ok := s.callAppReplyByTool[tool]; ok {
+		return raw, nil
 	}
 	return s.callAppReply, nil
 }
@@ -1073,6 +1077,39 @@ func TestSendMessage_SMSURLAttachmentMapsToTwilioMediaURL(t *testing.T) {
 	}
 	if len(msg.Attachments) != 1 || msg.Attachments[0].URL != "https://files.example.test/photo.jpg" {
 		t.Fatalf("attachments=%+v", msg.Attachments)
+	}
+}
+
+func TestSendMessage_SMSMultipleAttachmentsMapToRepeatedTwilioMediaURLs(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	if _, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "sms",
+		"from":    "+15551112222",
+		"to":      "+15553334444",
+		"body":    "two files",
+		"attachments": []any{
+			map[string]any{"url": "https://files.example.test/one.jpg", "content_type": "image/jpeg"},
+			map[string]any{"url": "https://files.example.test/two.pdf", "content_type": "application/pdf"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var sendCall *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "send_sms" {
+			sendCall = &plat.executeCalls[i]
+			break
+		}
+	}
+	if sendCall == nil {
+		t.Fatal("send_sms was not called")
+	}
+	urls, ok := sendCall.Input["MediaUrl"].([]string)
+	if !ok || len(urls) != 2 || urls[0] != "https://files.example.test/one.jpg" || urls[1] != "https://files.example.test/two.pdf" {
+		t.Fatalf("MediaUrl=%T %+v", sendCall.Input["MediaUrl"], sendCall.Input["MediaUrl"])
 	}
 }
 
@@ -3256,6 +3293,19 @@ func newPhoneStub(reply *sdk.ExecuteResult) *stubPlatform {
 	return p
 }
 
+func seedWhatsAppSession(t *testing.T, ctx *sdk.AppCtx) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO messages
+			(project_id, channel, direction, from_addr, to_addrs, status, body_text, received_at, created_at)
+		 VALUES ('test-proj', 'whatsapp', 'in', '+15553334444', '["+15551112222"]', 'received', 'hi', ?, ?)`,
+		now, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSendMessageWhatsAppFreeformRequiresRecentInbound(t *testing.T) {
 	plat := newPhoneStub(nil)
 	ctx := newTestCtx(t, plat)
@@ -3311,6 +3361,249 @@ func TestSendMessageWhatsAppFreeformAllowedAfterInbound(t *testing.T) {
 	}
 	if sendCall.Input["Body"] != "hello" {
 		t.Errorf("Body=%v", sendCall.Input["Body"])
+	}
+}
+
+func TestSendMessageWhatsAppAllowsMediaOnlyAndNormalisesLegacyMediaURL(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	seedWhatsAppSession(t, ctx)
+	app := &App{}
+
+	out, err := app.toolSendMessage(ctx, map[string]any{
+		"channel":   "whatsapp",
+		"from":      "+15551112222",
+		"to":        "+15553334444",
+		"media_url": "https://files.example.test/voice.ogg",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sendCall *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "send_whatsapp" {
+			sendCall = &plat.executeCalls[i]
+			break
+		}
+	}
+	if sendCall == nil {
+		t.Fatal("send_whatsapp was not called")
+	}
+	if sendCall.Input["MediaUrl"] != "https://files.example.test/voice.ogg" {
+		t.Fatalf("MediaUrl=%v", sendCall.Input["MediaUrl"])
+	}
+	if _, present := sendCall.Input["Body"]; present {
+		t.Fatalf("media-only send included Body: %+v", sendCall.Input)
+	}
+	attachments := out.(map[string]any)["attachments"].([]MessageAttachment)
+	if len(attachments) != 1 || attachments[0].URL != "https://files.example.test/voice.ogg" {
+		t.Fatalf("attachments=%+v", attachments)
+	}
+}
+
+func TestSendMessageWhatsAppImageAllowsCaption(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	seedWhatsAppSession(t, ctx)
+	app := &App{}
+
+	if _, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "whatsapp",
+		"from":    "+15551112222",
+		"to":      "+15553334444",
+		"body":    "caption",
+		"attachments": []any{map[string]any{
+			"url": "https://files.example.test/photo.jpg", "content_type": "image/jpeg", "size_bytes": float64(1024),
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := plat.executeCalls[len(plat.executeCalls)-1]
+	if call.Tool != "send_whatsapp" || call.Input["Body"] != "caption" || call.Input["MediaUrl"] != "https://files.example.test/photo.jpg" {
+		t.Fatalf("send call=%+v", call)
+	}
+}
+
+func TestSendMessageWhatsAppSupportsDocumentAudioAndVideoMediaOnly(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		url         string
+	}{
+		{name: "document", contentType: "application/pdf", url: "https://files.example.test/document.pdf"},
+		{name: "voice note", contentType: "audio/ogg; codecs=opus", url: "https://files.example.test/voice.ogg"},
+		{name: "video", contentType: "video/mp4", url: "https://files.example.test/video.mp4"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			plat := newPhoneStub(nil)
+			ctx := newTestCtx(t, plat)
+			seedWhatsAppSession(t, ctx)
+			if _, err := (&App{}).toolSendMessage(ctx, map[string]any{
+				"channel": "whatsapp",
+				"from":    "+15551112222",
+				"to":      "+15553334444",
+				"attachments": []any{map[string]any{
+					"url": tc.url, "content_type": tc.contentType, "size_bytes": float64(2048),
+				}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			call := plat.executeCalls[len(plat.executeCalls)-1]
+			if call.Input["MediaUrl"] != tc.url {
+				t.Fatalf("send call=%+v", call)
+			}
+			if _, present := call.Input["Body"]; present {
+				t.Fatalf("media-only send included Body: %+v", call.Input)
+			}
+		})
+	}
+}
+
+func TestSendMessageWhatsAppAudioRejectsBodyBeforePersist(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	seedWhatsAppSession(t, ctx)
+	app := &App{}
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "whatsapp",
+		"from":    "+15551112222",
+		"to":      "+15553334444",
+		"body":    "listen",
+		"attachments": []any{map[string]any{
+			"url": "https://files.example.test/voice.ogg", "content_type": "audio/ogg", "size_bytes": float64(1024),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "send the text as a separate message") {
+		t.Fatalf("expected audio/body error, got %v", err)
+	}
+	if len(plat.executeCalls) != 0 {
+		t.Fatalf("provider called for invalid request: %+v", plat.executeCalls)
+	}
+	var count int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM messages WHERE direction='out'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("invalid request persisted count=%d err=%v", count, err)
+	}
+}
+
+func TestSendMessageWhatsAppRejectsMultipleMediaBeforeResolution(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "whatsapp",
+		"from":    "+15551112222",
+		"to":      "+15553334444",
+		"attachments": []any{
+			map[string]any{"url": "https://files.example.test/one.jpg", "content_type": "image/jpeg"},
+			map[string]any{"url": "https://files.example.test/two.jpg", "content_type": "image/jpeg"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exactly one media attachment") {
+		t.Fatalf("expected one-media error, got %v", err)
+	}
+	if len(plat.executeCalls) != 0 || len(plat.callAppCalls) != 0 {
+		t.Fatalf("invalid request reached a provider: integration=%+v apps=%+v", plat.executeCalls, plat.callAppCalls)
+	}
+}
+
+func TestSendMessageWhatsAppRejectsContentSidWithMedia(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel":     "whatsapp",
+		"from":        "+15551112222",
+		"to":          "+15553334444",
+		"content_sid": "HXapproved",
+		"media_url":   "https://files.example.test/photo.jpg",
+	})
+	if err == nil || !strings.Contains(err.Error(), "content_sid cannot be combined") {
+		t.Fatalf("expected template/media error, got %v", err)
+	}
+	if len(plat.executeCalls) != 0 {
+		t.Fatalf("provider called for invalid request: %+v", plat.executeCalls)
+	}
+}
+
+func TestSendMessageWhatsAppRejectsContentSidWithBody(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+
+	_, err := (&App{}).toolSendMessage(ctx, map[string]any{
+		"channel":     "whatsapp",
+		"from":        "+15551112222",
+		"to":          "+15553334444",
+		"content_sid": "HXapproved",
+		"body":        "must not be sent",
+	})
+	if err == nil || !strings.Contains(err.Error(), "content_sid cannot be combined") {
+		t.Fatalf("expected template/body error, got %v", err)
+	}
+	if len(plat.executeCalls) != 0 {
+		t.Fatalf("provider called for invalid request: %+v", plat.executeCalls)
+	}
+}
+
+func TestSendMessageWhatsAppValidatesKnownTypeAndSize(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		size        int64
+		want        string
+	}{
+		{name: "unsupported", contentType: "text/plain", size: 10, want: "does not support"},
+		{name: "oversized image", contentType: "image/png", size: whatsAppImageMaxBytes + 1, want: "exceeds"},
+		{name: "oversized audio", contentType: "audio/ogg", size: whatsAppMediaMaxBytes + 1, want: "exceeds"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			plat := newPhoneStub(nil)
+			ctx := newTestCtx(t, plat)
+			seedWhatsAppSession(t, ctx)
+			_, err := (&App{}).toolSendMessage(ctx, map[string]any{
+				"channel": "whatsapp",
+				"from":    "+15551112222",
+				"to":      "+15553334444",
+				"attachments": []any{map[string]any{
+					"url": "https://files.example.test/file", "content_type": tc.contentType, "size_bytes": float64(tc.size),
+				}},
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestSendMessageWhatsAppStorageAttachmentUsesStoredMetadata(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.bindingsOverride["storage"] = float64(3)
+	plat.callAppReplyByTool = map[string]json.RawMessage{
+		"files_get":     json.RawMessage(`{"found":true,"file":{"name":"voice.ogg","content_type":"audio/ogg","size_bytes":2048}}`),
+		"files_get_url": json.RawMessage(`{"url":"https://files.example.test/voice.ogg"}`),
+	}
+	ctx := newTestCtx(t, plat)
+	seedWhatsAppSession(t, ctx)
+
+	out, err := (&App{}).toolSendMessage(ctx, map[string]any{
+		"channel":                "whatsapp",
+		"from":                   "+15551112222",
+		"to":                     "+15553334444",
+		"attachment_storage_ids": []any{float64(77)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := out.(map[string]any)["attachments"].([]MessageAttachment)
+	if len(attachments) != 1 || attachments[0].Filename != "voice.ogg" || attachments[0].ContentType != "audio/ogg" || attachments[0].SizeBytes != 2048 {
+		t.Fatalf("attachments=%+v", attachments)
+	}
+	if call := plat.executeCalls[len(plat.executeCalls)-1]; call.Input["MediaUrl"] != "https://files.example.test/voice.ogg" {
+		t.Fatalf("send call=%+v", call)
 	}
 }
 

@@ -65,7 +65,7 @@ const (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.43
+version: 0.13.44
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through Twilio.
 author: Apteva
@@ -336,9 +336,9 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "send_message",
-			Description: "Send a message. Args: channel (email|sms|whatsapp), from, to (string|string[]), body. " +
+			Description: "Send a message. Args: channel (email|sms|whatsapp), from, to (string|string[]), body?. Attachment-only messages are supported. " +
 				"Email-only fields: subject, body_html, cc, bcc, reply_to, in_reply_to, references, headers. " +
-				"Cross-channel attachment fields: attachments, attachment_storage_ids. SMS/WhatsApp-only fields: media_url, content_sid, content_variables. " +
+				"Cross-channel attachment fields: attachments, attachment_storage_ids. SMS/WhatsApp-only fields: media_url, content_sid, content_variables. WhatsApp accepts one media attachment; ContentSid cannot be combined with Body or media. " +
 				"Common: template_id, vars, idempotency_key. " +
 				"Addresses are plain — emails (alice@x.com) and E.164 phone numbers (+15551234567), no scheme prefix. " +
 				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?, attachments:[normalized metadata]}. " +
@@ -1006,7 +1006,6 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	body := strArg(args, "body")
 	subject := strArg(args, "subject")
 	bodyHTML := strArg(args, "body_html")
-	mediaURL := strArg(args, "media_url")
 	contentSid := strArg(args, "content_sid")
 	contentVars := strArg(args, "content_variables")
 	templateID := int64Arg(args, "template_id")
@@ -1043,9 +1042,8 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 					contentVars = string(cv)
 				}
 			}
-			// Provider templates render server-side; the local body
-			// stays empty so we don't fail the body-required check.
-			body = "(provider template " + tpl.ProviderTemplateID + ")"
+			// Provider templates render server-side. Keep the local body
+			// empty: Twilio requires ContentSid sends to omit Body.
 		} else {
 			// Local template — {{var}} substitution as before.
 			vars := mapArg(args, "vars")
@@ -1065,7 +1063,11 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if attachmentInputErr != nil {
 		return nil, fmt.Errorf("attachments: %w", attachmentInputErr)
 	}
-	if body == "" && bodyHTML == "" && contentSid == "" && mediaURL == "" && len(attachmentInputs) == 0 {
+	if channel == channelSMS || channel == channelWhatsApp {
+		if err := validatePhoneMessageMode(channel, body, contentSid, contentVars, attachmentInputs); err != nil {
+			return nil, err
+		}
+	} else if body == "" && bodyHTML == "" && contentSid == "" && len(attachmentInputs) == 0 {
 		return nil, errors.New("body, body_html, content_sid, media_url, or at least one attachment required (directly or via template)")
 	}
 
@@ -1122,6 +1124,11 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	attachments, attachIDs, err := prepareMessageAttachments(ctx, pid, channel, args)
 	if err != nil {
 		return nil, fmt.Errorf("attachments: %w", err)
+	}
+	if channel == channelWhatsApp {
+		if err := validateWhatsAppAttachments(body, attachments); err != nil {
+			return nil, err
+		}
 	}
 	attachJSON, _ := json.Marshal(attachIDs)
 
@@ -1183,7 +1190,6 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Subject: subject, BodyText: body, BodyHTML: bodyHTML,
 		ReplyTo: replyTo, InReplyTo: inReplyTo, References: references, Headers: headers,
 		Attachments:      attachments,
-		MediaURL:         mediaURL,
 		ContentSid:       contentSid,
 		ContentVariables: contentVars,
 		MessageID:        id,
@@ -1286,7 +1292,6 @@ type providerSendInput struct {
 	MessageID     int64
 	ProjectID     string
 	// SMS / WhatsApp only:
-	MediaURL         string
 	ContentSid       string
 	ContentVariables string
 }
@@ -1672,22 +1677,22 @@ func sendViaTwilio(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 	if in.Channel == channelWhatsApp {
 		prefix = "whatsapp:"
 	}
-	// Twilio accepts EITHER a free-form Body OR a ContentSid (Meta-
-	// approved template). At least one must be present.
-	if in.BodyText == "" && in.ContentSid == "" {
-		return "", errors.New("body or content_sid required for sms/whatsapp")
-	}
-
 	var firstSID string
 	var firstErr error
 	mediaURLs := []string{}
-	if in.MediaURL != "" {
-		mediaURLs = append(mediaURLs, in.MediaURL)
-	}
 	for _, att := range in.Attachments {
 		if att.MediaURL != "" {
 			mediaURLs = append(mediaURLs, att.MediaURL)
 		}
+	}
+	if in.ContentSid != "" && (in.BodyText != "" || len(mediaURLs) > 0) {
+		return "", errors.New("content_sid cannot be combined with body or MediaUrl")
+	}
+	if in.BodyText == "" && in.ContentSid == "" && len(mediaURLs) == 0 {
+		return "", errors.New("body, content_sid, or media attachment required for sms/whatsapp")
+	}
+	if in.Channel == channelWhatsApp && len(mediaURLs) > 1 {
+		return "", errors.New("whatsapp supports exactly one media attachment per message")
 	}
 	for _, to := range in.To {
 		payload := map[string]any{
@@ -1705,7 +1710,7 @@ func sendViaTwilio(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 			if in.ContentVariables != "" {
 				payload["ContentVariables"] = in.ContentVariables
 			}
-		} else {
+		} else if in.BodyText != "" {
 			payload["Body"] = in.BodyText
 		}
 		if len(mediaURLs) == 1 {
