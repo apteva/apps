@@ -46,6 +46,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "pcb_render", Description: "Persist a deterministic SVG board preview.", InputSchema: designActionSchema(id), HandlerCtx: a.toolRender},
 		{Name: "pcb_bom_generate", Description: "Persist a deterministic grouped BOM CSV.", InputSchema: designActionSchema(id), HandlerCtx: a.toolBOM},
 		{Name: "pcb_manufacturing_generate", Description: "Validate and persist a deterministic Gerber X2 plus Excellon manufacturing ZIP.", InputSchema: designActionSchema(id), HandlerCtx: a.toolManufacturing},
+		{Name: "pcb_manufacturing_verify", Description: "Independently parse and reconcile generated Gerber, Excellon, and Gerber-job outputs before fabrication.", InputSchema: designActionSchema(id), HandlerCtx: a.toolManufacturingVerify},
 		{Name: "pcb_artifacts_list", Description: "List generated PCB artifacts.", InputSchema: designActionSchema(id), HandlerCtx: a.toolArtifacts},
 		{Name: "pcb_release_create", Description: "Validate and create a traceable native release ZIP; errors block release.", InputSchema: schemaObject(map[string]any{"design_id": id, "revision_id": id, "note": map[string]any{"type": "string"}}, []string{"design_id"}), HandlerCtx: a.toolRelease},
 		{Name: "pcb_components_search", Description: "Search the optional component-data integration without coupling the PCB model to it.", InputSchema: schemaObject(map[string]any{"query": map[string]any{"type": "string"}, "country": map[string]any{"type": "string"}, "currency": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, []string{"query"}), HandlerCtx: a.toolComponentsSearch},
@@ -434,6 +435,14 @@ func (a *App) toolManufacturing(_ context.Context, app *sdk.AppCtx, args map[str
 	}
 	return s.Manufacturing(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
 }
+
+func (a *App) toolManufacturingVerify(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	s, err := a.service(app)
+	if err != nil {
+		return nil, err
+	}
+	return s.VerifyManufacturing(int64Arg(args, "design_id"), int64Arg(args, "revision_id"))
+}
 func (a *App) toolArtifacts(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	s, err := a.service(app)
 	if err != nil {
@@ -502,7 +511,7 @@ func (a *App) toolProvidersStatus(_ context.Context, app *sdk.AppCtx, _ map[stri
 	component, fab := app.IntegrationFor("component_data"), app.IntegrationFor("pcb_fabricator")
 	executor := app.IntegrationFor("firmware_executor")
 	return map[string]any{
-		"native_engine":     map[string]any{"schema": pcbSchema, "engine": engineVersion, "routing": routingSchema, "simulation": simulationSchema, "firmware_runtime": "apteva-arduino-behavioral/0.3", "external_engine_dependency": false},
+		"native_engine":     map[string]any{"schema": pcbSchema, "engine": engineVersion, "routing": routingSchema, "simulation": simulationSchema, "firmware_runtime": "apteva-arduino-behavioral/0.4", "fabrication_verification": fabricationVerificationSchema, "external_engine_dependency": false},
 		"storage":           bindingStatus(storage, true, "native PCB artifacts are persisted through the selected Storage app binding"),
 		"component_data":    bindingStatus(component, true, "available through the selected component-data connection"),
 		"pcb_fabricator":    bindingStatus(fab, false, "provider discovery is available; quote/order remains approval-gated"),

@@ -152,3 +152,35 @@ func TestRepeatedSimulationRunsAreContentAddressed(t *testing.T) {
 		t.Fatalf("persisted runs lost their distinct results: nominal=%v fault=%v", nominalResult.FinalVoltage["v3v3"], faultResult.FinalVoltage["v3v3"])
 	}
 }
+
+func TestFabricationVerificationPersistsThroughStorageBinding(t *testing.T) {
+	platform := &pcbBindingPlatform{bindings: map[string]any{"storage": float64(41)}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	store := testStore(t)
+	definition, _ := json.Marshal(sensorNodeExample())
+	canonical, _, hash, err := normalizeDefinition(definition, "Sensor node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	design, err := store.CreateDesign("project-a", "Sensor node", canonical, nil, hash, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{store: store, ctx: ctx, project: "project-a", artifactRoot: t.TempDir()}
+	run, err := service.VerifyManufacturing(design.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Result.Status != "passed" || run.Result.Errors != 0 {
+		t.Fatalf("fabrication verification failed: %#v", run.Result)
+	}
+	if run.Artifact == nil || run.Artifact.StorageFileID != "91" || run.Artifact.Kind != "verification" {
+		t.Fatalf("verification artifact did not use Storage: %#v", run.Artifact)
+	}
+	if info, statErr := os.Stat(run.Artifact.LocalPath); statErr != nil || info.Size() == 0 {
+		t.Fatalf("verification artifact was not retained locally: %v", statErr)
+	}
+	if platform.app != "storage" || platform.tool != "files_upload" {
+		t.Fatalf("verification persistence bypassed Storage binding: %s/%s", platform.app, platform.tool)
+	}
+}

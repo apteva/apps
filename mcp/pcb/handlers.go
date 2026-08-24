@@ -261,6 +261,8 @@ func (a *App) handleDesign(w http.ResponseWriter, r *http.Request) {
 		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.BOM(id, bodyRevisionID(r)) })
 	case "manufacturing":
 		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.Manufacturing(id, bodyRevisionID(r)) })
+	case "manufacturing-verify":
+		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.VerifyManufacturing(id, bodyRevisionID(r)) })
 	case "release":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)

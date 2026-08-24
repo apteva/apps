@@ -2,11 +2,12 @@ schema: apteva-app/v1
 
 name: pcb
 display_name: PCB Studio
-version: 0.3.1
+version: 0.4.0
 description: |
   Native, agent-first electronics design for Apteva. PCB Studio owns its
-  canonical circuit and board model, revision engine, validation, rendering,
-  pad/footprint geometry, manufacturing validation, Gerber/Excellon writers,
+  canonical circuit and board model, revision engine, interactive layout editor,
+  validation, rendering, pad/footprint geometry, manufacturing validation,
+  independent Gerber/Excellon verification, Gerber/Excellon writers,
   deterministic autorouting, electrical simulation, Arduino-compatible virtual
   hardware, and release packaging. External services are optional data,
   sourcing, manufacturing, and isolated compilation providers—not geometry,
@@ -65,7 +66,7 @@ requires:
         pcb.provider_discovery: get_api_platform_overview
       required: false
       label: "PCB fabrication provider"
-      hint: Optional provider binding. v0.3 exposes provider readiness only; quote/order calls stay disabled until documented partner endpoints are available.
+      hint: Optional provider binding. v0.4 exposes provider readiness only; quote/order calls stay disabled until documented partner endpoints are available.
 
 provides:
   http_routes:
@@ -112,6 +113,7 @@ provides:
     - { name: pcb_render, description: "Create a deterministic SVG board preview. Args: design_id, revision_id?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_bom_generate, description: "Create a deterministic BOM CSV. Args: design_id, revision_id?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_manufacturing_generate, description: "Validate and create deterministic Gerber X2 plus Excellon manufacturing files. Args: design_id, revision_id?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_manufacturing_verify, description: "Independently parse and reconcile generated Gerber, Excellon, and Gerber-job files. Args: design_id, revision_id?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_artifacts_list, description: "List artifacts for a design or revision. Args: design_id, revision_id?.", requires: pcb.read, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_release_create, description: "Validate and create a traceable native release ZIP. Failed validation blocks release. Args: design_id, revision_id?, note?.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_components_search, description: "Search the optional component-data provider. Args: query, country?, currency?, limit?.", requires: pcb.read }
@@ -134,7 +136,7 @@ provides:
     - name: how-to-use-pcb
       command: /pcb
       body_file: skills/how-to-use-pcb.md
-      description: Design, route, simulate, validate, and fabricate native Apteva circuit boards, including virtual firmware experiments.
+      description: Design, edit, route, simulate, verify, and fabricate native Apteva circuit boards, including virtual firmware experiments.
       metadata: { category: design, icon: "⚡" }
   publishes:
     - { name: pcb.design.created, description: A PCB design and its first immutable revision were created. }
@@ -143,12 +145,13 @@ provides:
     - { name: pcb.routing.completed, description: Native autorouting completed and a route revision was created. }
     - { name: pcb.simulation.completed, description: Native electrical simulation completed. }
     - { name: pcb.firmware.completed, description: Arduino-compatible virtual firmware execution completed. }
+    - { name: pcb.fabrication.verified, description: Independent Gerber and Excellon parser verification completed. }
     - { name: pcb.artifact.created, description: "A preview, BOM, or package was persisted." }
     - { name: pcb.release.created, description: A validated release package was created. }
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: pcb/v0.3.1, entry: mcp/pcb }
+  source: { repo: github.com/apteva/apps, ref: pcb/v0.4.0, entry: mcp/pcb }
   port: 8080
   health_check: /health
   resources: { cpu: 0.1, memory: 128, cpu_limit: 1, memory_limit: 512 }

@@ -38,6 +38,11 @@ type FirmwareRun struct {
 	Artifact *Artifact          `json:"artifact"`
 }
 
+type FabricationVerificationRun struct {
+	Result   *FabricationVerification `json:"result"`
+	Artifact *Artifact                `json:"artifact"`
+}
+
 func (s *Service) revision(designID, revisionID int64) (*Design, *Revision, *Definition, error) {
 	design, err := s.store.GetDesign(s.project, designID)
 	if err != nil {
@@ -222,11 +227,34 @@ func (s *Service) Manufacturing(designID, revisionID int64) (*Artifact, error) {
 	if report.Status == "failed" {
 		return nil, fmt.Errorf("revision failed validation with %d errors; manufacturing output refused", report.Errors)
 	}
-	body, err := zipManufacturingSet(def)
+	files := manufacturingFiles(def)
+	verification := verifyManufacturingFiles(def, files)
+	if verification.Status == "failed" {
+		return nil, fmt.Errorf("independent fabrication verification failed with %d errors; manufacturing output refused", verification.Errors)
+	}
+	body, err := deterministicZip(files)
 	if err != nil {
 		return nil, err
 	}
-	return s.persistArtifact(design, revision, "manufacturing", "zip", "application/zip", body, map[string]any{"engine": engineVersion, "format": "Gerber X2 + Excellon", "files": manufacturingFileSummary(def), "validation_status": report.Status})
+	return s.persistArtifact(design, revision, "manufacturing", "zip", "application/zip", body, map[string]any{"engine": engineVersion, "format": "Gerber X2 + Excellon", "files": manufacturingFileSummary(def), "validation_status": report.Status, "fabrication_verification_status": verification.Status, "parsed_draws": verification.Summary["draws"], "parsed_holes": verification.Summary["holes"]})
+}
+
+func (s *Service) VerifyManufacturing(designID, revisionID int64) (*FabricationVerificationRun, error) {
+	design, revision, def, err := s.revision(designID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	result := verifyManufacturingFiles(def, manufacturingFiles(def))
+	body, _ := json.MarshalIndent(result, "", "  ")
+	body = append(body, '\n')
+	artifact, err := s.persistArtifact(design, revision, "verification", "json", "application/json", body, map[string]any{"engine": engineVersion, "schema": fabricationVerificationSchema, "status": result.Status, "errors": result.Errors})
+	if err != nil {
+		return &FabricationVerificationRun{Result: result, Artifact: artifact}, err
+	}
+	if s.ctx != nil {
+		s.ctx.Emit("pcb.fabrication.verified", map[string]any{"design_id": design.ID, "revision_id": revision.ID, "artifact_id": artifact.ID, "status": result.Status, "errors": result.Errors})
+	}
+	return &FabricationVerificationRun{Result: result, Artifact: artifact}, nil
 }
 
 func (s *Service) Release(_ context.Context, designID, revisionID int64, note string) (*Artifact, error) {
@@ -248,6 +276,11 @@ func (s *Service) Release(_ context.Context, designID, revisionID int64, note st
 	if report.Status == "failed" {
 		return nil, fmt.Errorf("revision failed validation with %d errors; release refused", report.Errors)
 	}
+	manufacturing := manufacturingFiles(def)
+	verification := verifyManufacturingFiles(def, manufacturing)
+	if verification.Status == "failed" {
+		return nil, fmt.Errorf("independent fabrication verification failed with %d errors; release refused", verification.Errors)
+	}
 	files := map[string][]byte{}
 	source, _ := json.MarshalIndent(def, "", "  ")
 	files["source/pcb.json"] = append(source, '\n')
@@ -255,9 +288,11 @@ func (s *Service) Release(_ context.Context, designID, revisionID int64, note st
 		"design_id": design.ID, "revision_id": revision.ID, "report": report,
 	}, "", "  ")
 	files["validation/report.json"] = append(validation, '\n')
+	verificationBody, _ := json.MarshalIndent(verification, "", "  ")
+	files["verification/fabrication.json"] = append(verificationBody, '\n')
 	files["outputs/board.svg"] = renderSVG(def)
 	files["outputs/bom.csv"] = renderBOM(def)
-	for name, body := range manufacturingFiles(def) {
+	for name, body := range manufacturing {
 		files["manufacturing/"+name] = body
 	}
 	hashes := map[string]string{}
@@ -265,7 +300,7 @@ func (s *Service) Release(_ context.Context, designID, revisionID int64, note st
 		sum := sha256.Sum256(body)
 		hashes[name] = hex.EncodeToString(sum[:])
 	}
-	manifest := map[string]any{"schema": releaseSchema, "engine": engineVersion, "design_id": design.ID, "design_name": design.Name, "revision_id": revision.ID, "revision_number": revision.Number, "source_sha256": revision.SourceSHA256, "validation_status": report.Status, "note": strings.TrimSpace(note), "created_at": revision.CreatedAt, "files": hashes, "compatibility": map[string]any{"native_format": pcbSchema, "original_sources_preserved": true}}
+	manifest := map[string]any{"schema": releaseSchema, "engine": engineVersion, "design_id": design.ID, "design_name": design.Name, "revision_id": revision.ID, "revision_number": revision.Number, "source_sha256": revision.SourceSHA256, "validation_status": report.Status, "fabrication_verification_status": verification.Status, "note": strings.TrimSpace(note), "created_at": revision.CreatedAt, "files": hashes, "compatibility": map[string]any{"native_format": pcbSchema, "original_sources_preserved": true}}
 	manifestBody, _ := json.MarshalIndent(manifest, "", "  ")
 	files["manifest.json"] = append(manifestBody, '\n')
 	body, err := deterministicZip(files)

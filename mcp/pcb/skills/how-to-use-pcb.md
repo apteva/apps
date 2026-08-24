@@ -15,8 +15,9 @@ Every edit creates an immutable revision. Start with `pcb_examples`, then:
 5. Run `pcb_validate` and resolve every error. Pad-aware validation checks pin-to-pad mapping, pad routing, drill and annular-ring rules, copper clearance, keepout incursions, and differential-pair gap/skew. Older geometry-free designs receive explicit warnings.
 6. Save a `simulation` block with `simulation.set`, or pass an override to `pcb_simulation_run`. Use `pcb_simulation_probe`, `pcb_simulation_fault_set`, and `pcb_simulation_compare` for rail, transient, digital, and fault experiments. Results and waveforms are persisted through Storage.
 7. Use `pcb_firmware_run` for Arduino-compatible behavioral execution against virtual board hardware. Serial, GPIO, I2C, timing, and modeled sensors work natively. Set `executor_function` only when a bound first-party Functions toolchain should compile or execute the sketch.
-8. Use `pcb_render` for the footprint-aware SVG, `pcb_bom_generate` for the grouped BOM, and `pcb_manufacturing_generate` for the Gerber X2/Excellon manufacturing ZIP.
-9. Use `pcb_release_create` to make a traceable ZIP with native source, validation, hashes, SVG, BOM, Gerbers, drill data, and Gerber job manifest. Failed ERC/DRC blocks manufacturing and release creation.
+8. Use the Layout workspace for snapped component placement, 90-degree rotation, nudging, manual trace/via authoring, selection/deletion, and undo/redo. Save the staged board as a new immutable revision before running server actions.
+9. Use `pcb_render` for the footprint-aware SVG and `pcb_bom_generate` for the grouped BOM. Run `pcb_manufacturing_verify` to independently parse and reconcile the generated Gerber X2, Excellon, and Gerber-job data; `pcb_manufacturing_generate` creates the gated manufacturing ZIP.
+10. Use `pcb_release_create` to make a traceable ZIP with native source, validation, independent fabrication verification, hashes, SVG, BOM, Gerbers, drill data, and Gerber job manifest. Failed ERC/DRC or parser verification blocks manufacturing and release creation.
 
 ## Component data and sourcing
 
@@ -26,6 +27,6 @@ All dependencies are native install bindings. The required `storage` role select
 
 ## Compatibility
 
-The native source remains the editable truth. Import/export compatibility is implemented as deterministic Apteva-owned adapters around that model. Adapters preserve the original source in Storage, emit a conversion report, and declare whether a format is detected, viewed, imported, edited, exported, or semantically round-tripped. V0.3 writes SVG, BOM CSV, Gerber copper/silkscreen/outline files, Excellon drills, a Gerber job manifest, simulation and firmware-run JSON, and the native release ZIP without an external engine. Third-party project adapters remain a separate compatibility layer.
+The native source remains the editable truth. Import/export compatibility is implemented as deterministic Apteva-owned adapters around that model. Adapters preserve the original source in Storage, emit a conversion report, and declare whether a format is detected, viewed, imported, edited, exported, or semantically round-tripped. V0.4 writes SVG, BOM CSV, Gerber copper/silkscreen/outline files, Excellon drills, a Gerber job manifest, fabrication-verification JSON, simulation and firmware-run JSON, and the native release ZIP without an external engine. Third-party project adapters remain a separate compatibility layer.
 
 Fabrication and assembly providers consume a validated release and return quotes. A paid order must always be a separate, explicitly confirmed operation.
