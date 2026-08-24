@@ -22,9 +22,7 @@ import { join } from "path";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const DASHBOARD_VENDOR = join(
-  ROOT,
-  "..",
-  "dashboard",
+  process.env.APTEVA_DASHBOARD_DIR || join(ROOT, "..", "dashboard"),
   "vendor",
   "react.entry.ts",
 );

@@ -891,6 +891,23 @@ func (a *App) publishZernio(ctx *sdk.AppCtx, j publishJob) (string, string, erro
 	if j.providerAccountID == "" {
 		return "", "", errors.New("zernio-backed account missing provider_account_id")
 	}
+	if j.providerPostID != "" {
+		result, err := (zernioLifecycleAdapter{app: a}).UpsertWorkflowPost(ctx, providerWorkflowRequest{
+			Intent: postModePublish, ProviderID: j.providerPostID, PublishJob: j,
+		})
+		if err != nil {
+			return "", "", err
+		}
+		_, platformID, platformURL := extractZernioPostIdentity(result.Raw)
+		_, _ = ctx.AppDB().Exec(
+			`UPDATE post_targets SET provider_post_id=?, provider_data=?, provider_sync_status='published', provider_updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			result.ProviderPostID, string(result.Raw), j.targetID,
+		)
+		if platformID == "" {
+			platformID = result.ProviderPostID
+		}
+		return platformID, platformURL, nil
+	}
 	input := map[string]any{
 		"content":    j.body,
 		"publishNow": true,
@@ -991,16 +1008,24 @@ func (a *App) importZernioPosts(ctx *sdk.AppCtx, pid string, out importResult, a
 		return out
 	}
 	for _, item := range jsonItems(list.Data, "posts", "data", "items", "results") {
-		platformPostID := firstString(item, "platformPostId", "platform_post_id", "externalId", "external_id", "postId", "id", "_id")
-		if platformPostID == "" {
+		providerPostID := firstString(item, "id", "_id", "postId")
+		platformPostID := firstString(item, "platformPostId", "platform_post_id", "externalId", "external_id")
+		if providerPostID == "" {
+			providerPostID = platformPostID
+		}
+		if providerPostID == "" {
 			continue
 		}
 		body := firstString(item, "content", "text", "caption", "description", "title", "body")
 		url := firstString(item, "platformUrl", "platform_url", "permalink", "permalinkUrl", "url", "shareUrl")
-		publishedAt := firstString(item, "publishedAt", "published_at", "createdAt", "created_at", "scheduledFor")
-		imported, err := a.insertImportedPost(ctx, pid, accountID, profileID, body, platformPostID, url, publishedAt, zernioMediaURLs(item))
+		occurredAt := firstString(item, "publishedAt", "published_at", "updatedAt", "updated_at", "createdAt", "created_at")
+		status, requestedMode, scheduleAt := zernioWorkflowStatus(item)
+		imported, err := a.reconcileImportedProviderPost(
+			ctx, pid, accountID, profileID, body, providerPostID, platformPostID, url,
+			status, requestedMode, scheduleAt, occurredAt, zernioMediaURLs(item), item,
+		)
 		if err != nil {
-			ctx.Logger().Warn("import: insert zernio post failed", "provider_post_id", platformPostID, "err", err)
+			ctx.Logger().Warn("import: reconcile zernio post failed", "provider_post_id", providerPostID, "err", err)
 			continue
 		}
 		if imported {
