@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.11.0
+version: 0.11.1
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -59,6 +59,8 @@ description: |
   renders live goal progress in both the Analytics panel and home widget.
   Objective targets now support every generic numeric aggregation from v0.10;
   dashboard reads evaluate linked progress without writing progress history.
+  v0.11.1 renders each linked goal once in the home widget and upgrades metric
+  trends to themed filled area charts.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]

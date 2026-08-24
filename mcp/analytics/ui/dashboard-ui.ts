@@ -137,6 +137,29 @@ export function batchResultsByID(results: DashboardWidgetResult[]): Record<numbe
   );
 }
 
+export function dedupeWidgetGoals(
+  widgetIDs: number[],
+  dataByWidget: Record<number, Record<string, any>>,
+): Record<number, Record<string, any>> {
+  const seen = new Set<number>();
+  const out = { ...dataByWidget };
+  for (const widgetID of widgetIDs) {
+    const data = dataByWidget[widgetID];
+    if (!data || !Array.isArray(data.goals)) continue;
+    out[widgetID] = {
+      ...data,
+      goals: data.goals.filter((goal: Record<string, unknown>) => {
+        const targetID = Number(goal.target_id);
+        if (!Number.isSafeInteger(targetID) || targetID <= 0) return true;
+        if (seen.has(targetID)) return false;
+        seen.add(targetID);
+        return true;
+      }),
+    };
+  }
+  return out;
+}
+
 export function partitionDashboardWidgets<T extends { type: string }>(widgets: T[]): { stats: T[]; charts: T[] } {
   return {
     stats: widgets.filter((widget) => widget.type === "stat"),

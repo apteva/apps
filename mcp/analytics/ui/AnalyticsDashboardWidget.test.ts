@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { defaultDashboardFilters, selectDashboardID } from "./dashboard-ui";
+import { dedupeWidgetGoals, defaultDashboardFilters, selectDashboardID } from "./dashboard-ui";
 
 describe("Analytics dashboard home widget", () => {
   test("prefers configured dashboard, then stored dashboard, then newest", () => {
@@ -19,5 +19,17 @@ describe("Analytics dashboard home widget", () => {
       { key: "window", type: "date_window" },
       { key: "plan", type: "select" },
     ])).toEqual({ page_id: "page-1", window: "30d", plan: "all" });
+  });
+
+  test("renders each linked goal once, preferring the first visible metric", () => {
+    const data = {
+      10: { value: 18240, goals: [{ target_id: 173, name: "MRR target" }] },
+      11: { series: [], goals: [{ target_id: 173, name: "MRR target" }, { target_id: 174, name: "Members target" }] },
+    };
+    expect(dedupeWidgetGoals([10, 11], data)).toEqual({
+      10: { value: 18240, goals: [{ target_id: 173, name: "MRR target" }] },
+      11: { series: [], goals: [{ target_id: 174, name: "Members target" }] },
+    });
+    expect(data[11].goals).toHaveLength(2);
   });
 });

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { batchResultsByID, defaultDashboardFilters, formatMetric, formatObjectiveValue, objectiveProgressWidth, resolveMetricConfig, scopedAppURL, selectDashboardID } from "./dashboard-ui";
+import { batchResultsByID, dedupeWidgetGoals, defaultDashboardFilters, formatMetric, formatObjectiveValue, objectiveProgressWidth, resolveMetricConfig, scopedAppURL, selectDashboardID } from "./dashboard-ui";
 
 interface HostProps {
   appName?: string;
@@ -88,19 +88,36 @@ function Empty({ children }: { children: string }) {
   return <div className="flex min-h-16 items-center text-xs text-text-dim">{children}</div>;
 }
 
-function Sparkline({ rows, config }: { rows: Array<Record<string, unknown>>; config: Record<string, unknown> }) {
+function AreaChart({ rows, config, gradientId, tone }: { rows: Array<Record<string, unknown>>; config: Record<string, unknown>; gradientId: string; tone: "accent" | "success" }) {
   if (!rows.length) return <Empty>No values in this window.</Empty>;
   const values = rows.map((row) => Number(row.value ?? row.count ?? 0));
   const min = Math.min(...values);
   const max = Math.max(...values);
   const range = max - min || 1;
-  const points = values.map((value, index) =>
-    `${(index / Math.max(1, values.length - 1)) * 300},${64 - ((value - min) / range) * 56}`,
-  ).join(" ");
+  const baseline = 68;
+  const points = values.map((value, index) => ({
+    x: (index / Math.max(1, values.length - 1)) * 300,
+    y: baseline - ((value - min) / range) * 58,
+  }));
+  const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+  const areaPath = `${linePath} L ${points.at(-1)?.x ?? 300} ${baseline} L ${points[0]?.x ?? 0} ${baseline} Z`;
+  const colorClass = tone === "success" ? "text-success" : "text-accent";
   return (
-    <div>
-      <svg viewBox="0 0 300 68" className="h-20 w-full text-accent" preserveAspectRatio="none" aria-label="Metric trend">
-        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2.5" vectorEffect="non-scaling-stroke" />
+    <div className="mt-2">
+      <svg viewBox="0 0 300 72" className={`h-24 w-full ${colorClass}`} preserveAspectRatio="none" role="img" aria-label="Metric trend area chart">
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="currentColor" stopOpacity="0.38" />
+            <stop offset="72%" stopColor="currentColor" stopOpacity="0.1" />
+            <stop offset="100%" stopColor="currentColor" stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
+        <g className="text-border" opacity="0.65">
+          {[10, 29, 48, 67].map((y) => <line key={y} x1="0" x2="300" y1={y} y2={y} stroke="currentColor" strokeWidth="0.7" vectorEffect="non-scaling-stroke" />)}
+        </g>
+        <path d={areaPath} fill={`url(#${gradientId})`} />
+        <path d={linePath} fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+        <circle cx={points.at(-1)?.x ?? 300} cy={points.at(-1)?.y ?? baseline} r="2.75" fill="currentColor" stroke="var(--color-bg-card, transparent)" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
       </svg>
       <div className="flex justify-between text-[10px] text-text-dim">
         <span>{String(rows[0]?.bucket ?? "")}</span>
@@ -159,7 +176,7 @@ function MetricCard({ widget, data, filters, goalLimit }: { widget: DashboardWid
   );
 }
 
-function DetailCard({ widget, data, filters, goalLimit }: { widget: DashboardWidget; data?: Record<string, any>; filters: Record<string, string>; goalLimit: number }) {
+function DetailCard({ widget, data, filters, goalLimit, tone }: { widget: DashboardWidget; data?: Record<string, any>; filters: Record<string, string>; goalLimit: number; tone: "accent" | "success" }) {
   const config = resolveMetricConfig(widget.config, filters);
   return (
     <article className="min-w-0 rounded border border-border px-3 py-3">
@@ -170,7 +187,7 @@ function DetailCard({ widget, data, filters, goalLimit }: { widget: DashboardWid
       {data?.error ? (
         <div className="mt-3 truncate text-xs text-error">{String(data.error)}</div>
       ) : widget.type === "timeseries" ? (
-        <Sparkline rows={data?.series ?? []} config={config} />
+        <AreaChart rows={data?.series ?? []} config={config} gradientId={`analytics-area-${widget.id}`} tone={tone} />
       ) : widget.type === "feed" ? (
         <div className="mt-2 space-y-1.5">
           {(data?.events ?? []).slice(0, 5).map((event: any) => (
@@ -318,6 +335,11 @@ export default function AnalyticsDashboardWidget(props: HostProps) {
     return [...stats, ...details];
   }, [dashboard, full, maxMetrics, showTrends]);
 
+  const displayData = useMemo(
+    () => dedupeWidgetGoals(visibleWidgets.map((widget) => widget.id), widgetData),
+    [visibleWidgets, widgetData],
+  );
+
   const refresh = useCallback(async () => {
     if (!dashboard || !projectID || props.preview) return;
     const sequence = ++querySequence.current;
@@ -390,11 +412,11 @@ export default function AnalyticsDashboardWidget(props: HostProps) {
       ) : (
         <div className="min-h-0 flex-1 overflow-auto p-3">
           <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.max(1, Math.min(3, visibleWidgets.filter((widget) => widget.type === "stat").length))}, minmax(0, 1fr))` }}>
-            {visibleWidgets.filter((widget) => widget.type === "stat").map((widget) => <MetricCard key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} goalLimit={full ? 10 : 1} />)}
+            {visibleWidgets.filter((widget) => widget.type === "stat").map((widget) => <MetricCard key={widget.id} widget={widget} data={displayData[widget.id]} filters={filterValues} goalLimit={full ? 10 : 1} />)}
           </div>
           {showTrends && (
             <div className={`mt-2 grid gap-2 ${full ? "grid-cols-2" : "grid-cols-1"}`}>
-              {visibleWidgets.filter((widget) => widget.type !== "stat").map((widget) => <DetailCard key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} goalLimit={full ? 10 : 1} />)}
+              {visibleWidgets.filter((widget) => widget.type !== "stat").map((widget, index) => <DetailCard key={widget.id} widget={widget} data={displayData[widget.id]} filters={filterValues} goalLimit={full ? 10 : 1} tone={index % 2 === 0 ? "accent" : "success"} />)}
             </div>
           )}
         </div>
