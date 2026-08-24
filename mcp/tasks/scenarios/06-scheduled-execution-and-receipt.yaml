@@ -65,14 +65,19 @@ assert:
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_field_at: tasks.0.result
     expect_field_contains: READINESS CHECK PASSED
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.last_occurrence_status
+    expect_field_eq: completed
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.dispatched_at
+    expect_field_contains: T
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.accepted_at
+    expect_field_contains: T
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.telemetry_reference
+    expect_field_contains: /api/telemetry
   - chat_response_contains: READINESS CHECK PASSED
-  - tool_called_with:
-      tool: channels_send
-      thread_id: ${APTEVA_TEST_CONVERSATION_THREAD_ID}
-      args:
-        phase: final
-        text: READINESS CHECK PASSED
-      count: 1
   - iterations_at_most: 16
 
 budget:

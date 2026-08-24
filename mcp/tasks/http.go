@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -51,6 +52,21 @@ func writeTaskError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	}
 	http.Error(w, err.Error(), status)
+}
+
+func decodeStrictJSON(w http.ResponseWriter, r *http.Request, value any) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values are not allowed")
+		}
+		return err
+	}
+	return nil
 }
 
 func splitStates(value string) []string {
@@ -332,17 +348,19 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"task": task, "events": events})
 	case http.MethodPatch, http.MethodPut:
 		var body struct {
+			Description      *string        `json:"description"`
 			State            *string        `json:"state"`
 			Progress         *int           `json:"progress"`
 			ClearProgress    bool           `json:"clear_progress"`
 			CurrentStep      *string        `json:"current_step"`
 			AssignedThreadID *string        `json:"assigned_thread_id"`
 			Result           *string        `json:"result"`
+			ResultReference  *string        `json:"result_reference"`
 			Error            *string        `json:"error"`
 			Schedule         *ScheduleInput `json:"schedule"`
 		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
+		if err := decodeStrictJSON(w, r, &body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		if body.Schedule != nil {
@@ -354,7 +372,7 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"task": updated})
 			return
 		}
-		updated, _, err := a.store.Update(task.ID, "api", UpdateTaskInput{State: body.State, Progress: body.Progress, ClearProgress: body.ClearProgress, CurrentStep: body.CurrentStep, AssignedThreadID: body.AssignedThreadID, Result: body.Result, Error: body.Error})
+		updated, changed, err := a.store.Update(task.ID, "api", UpdateTaskInput{Description: body.Description, State: body.State, Progress: body.Progress, ClearProgress: body.ClearProgress, CurrentStep: body.CurrentStep, AssignedThreadID: body.AssignedThreadID, Result: body.Result, ResultReference: body.ResultReference, Error: body.Error})
 		if err != nil {
 			writeTaskError(w, err)
 			return
@@ -362,7 +380,7 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 		if terminalState(updated.State) {
 			_ = a.notifyCreator(updated)
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"task": updated})
+		writeJSON(w, http.StatusOK, map[string]any{"task": updated, "changed": changed})
 	case http.MethodDelete:
 		state, reason := stateCancelled, "Cancelled by operator"
 		updated, _, err := a.store.Update(task.ID, "api", UpdateTaskInput{State: &state, Error: &reason})

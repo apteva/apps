@@ -80,6 +80,10 @@
             {"id": "schedule_expression", "label": "Schedule expression", "value": "$item.schedule_expression"},
             {"id": "schedule_timezone", "label": "Schedule timezone", "value": "$item.schedule_timezone"},
             {"id": "next_run", "label": "Next run", "value": "$item.next_run_at", "format": "date_time"},
+            {"id": "last_workflow", "label": "Latest workflow", "value": "$item.last_occurrence_status"},
+            {"id": "last_dispatched", "label": "Last dispatched", "value": "$item.last_dispatched_at", "format": "date_time"},
+            {"id": "last_accepted", "label": "Last accepted", "value": "$item.last_run_at", "format": "date_time"},
+            {"id": "last_error", "label": "Latest workflow error", "value": "$item.last_error"},
             {"id": "result", "label": "Result", "value": "$item.result"},
             {"id": "error", "label": "Error", "value": "$item.error"},
             {"id": "created", "label": "Created", "value": "$item.created_at", "format": "date_time"},
@@ -113,12 +117,14 @@
         "path": "/tasks/{item.id}",
         "encoding": "json",
         "body": {
+          "description": "$input.description",
           "state": "$input.state",
           "progress": "$input.progress",
           "current_step": "$input.current_step"
         }
       },
       "fields": [
+        {"name": "description", "type": "multiline", "label": "Description", "default": "$item.description"},
         {
           "name": "state",
           "type": "choice",

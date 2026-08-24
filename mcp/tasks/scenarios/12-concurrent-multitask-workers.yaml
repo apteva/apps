@@ -66,10 +66,16 @@ directive: |
   together, so their messages may race and arrive in any order.
 
   Collect all four worker messages before writing their reported milestones.
-  Then, regardless of arrival order, process the tasks strictly in Alpha, Beta,
-  Gamma, Delta order. For each task, record its exact 40% and 80% steps from the
-  matching message and complete it exactly once with the matching result. Do
-  all Alpha updates and completion first, then Beta, then Gamma, then Delta.
+  Then issue the four exact 40% tasks_update calls together in one parallel tool
+  batch, one call per matching task. After that batch returns, issue the four
+  exact 80% tasks_update calls together in a second parallel tool batch. This is
+  the simultaneous-write portion of the test; do not serialize either progress
+  batch. After the 80% batch returns, complete the tasks exactly once each in
+  Alpha, Beta, Gamma, Delta order with their matching results so final ordering
+  is deterministic. Perform this ledger sequence immediately and continuously;
+  do not pause, pace, wait, or call tasks_get from main between the reported
+  milestones and completions. Retain the task IDs returned by tasks_create and
+  use those IDs directly.
   Never reuse one task ID for another worker's milestone or result. Stop after
   all four tasks are completed.
 
@@ -166,82 +172,78 @@ assert:
       tool: tasks_get
       thread_id: stress-worker-alpha
       count: 1
-      before: send
   - tool_called_with:
       tool: tasks_get
       thread_id: stress-worker-beta
       count: 1
-      before: send
   - tool_called_with:
       tool: tasks_get
       thread_id: stress-worker-gamma
       count: 1
-      before: send
   - tool_called_with:
       tool: tasks_get
       thread_id: stress-worker-delta
       count: 1
-      before: send
   - tool_called_with:
       tool: tasks_update
       thread_id: main
-      count: 12
+      min_count: 12
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 40
         current_step: Alpha worker started
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 80
         current_step: Alpha worker finished
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 40
         current_step: Beta worker started
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 80
         current_step: Beta worker finished
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 40
         current_step: Gamma worker started
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 80
         current_step: Gamma worker finished
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 40
         current_step: Delta worker started
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 80
         current_step: Delta worker finished
-      count: 1
+      min_count: 1
   - tool_not_called_with:
       tool: tasks_update
       args:

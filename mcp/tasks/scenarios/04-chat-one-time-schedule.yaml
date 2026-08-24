@@ -19,8 +19,9 @@ directive: |
   You help the operator manage follow-ups. Do not initiate a follow-up from
   main without an incoming user request. The conversation thread that receives
   the request owns schedule creation and is the only thread that may create its
-  task. Future work must be represented by one durable scheduled task. Never
-  perform future work before it is due.
+  task. It must call tasks_create directly in that conversation; never send,
+  delegate, forward, or ask main to create it. Future work must be represented
+  by one durable scheduled task. Never perform future work before it is due.
 
 prompt: |
   In 10 minutes, remind me to follow up with the launch team. Name it "Launch team follow-up".

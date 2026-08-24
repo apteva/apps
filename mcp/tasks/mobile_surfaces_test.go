@@ -189,6 +189,8 @@ func TestTaskMutationsEmitDeclaredRefreshTopics(t *testing.T) {
 		"task.schedule_paused",
 		"task.schedule_resumed",
 		"task.schedule_run_requested",
+		"task.occurrence_dispatched",
+		"task.occurrence_accepted",
 		"task.occurrence_skipped_overlap",
 	}
 	for _, componentIndex := range []int{0, 1} {
@@ -250,11 +252,22 @@ func TestTaskMutationsEmitDeclaredRefreshTopics(t *testing.T) {
 		return err
 	})
 
-	if _, _, err := app.store.Create(CreateTaskInput{
+	var occurrence *Task
+	if created, _, err := app.store.Create(CreateTaskInput{
 		AgentID: 7, ProjectID: "project-a", Title: "active occurrence", AssignedThreadID: "thread-a", ParentTaskID: task.ID,
 	}); err != nil {
 		t.Fatal(err)
+	} else {
+		occurrence = created
 	}
+	assertOne(t, "occurrence_dispatched", func() error {
+		_, _, err := app.store.MarkDispatched(occurrence.ID, "tasks:scheduler", time.Now().UTC())
+		return err
+	})
+	assertOne(t, "occurrence_accepted", func() error {
+		_, _, err := app.store.Accept(occurrence.ID, "thread-a", time.Now().UTC())
+		return err
+	})
 	task, _ = app.store.Get(task.ID)
 	assertOne(t, "occurrence_skipped_overlap", func() error {
 		return app.scheduler.Tick(task.NextRunAt.Add(time.Second), "project-a")

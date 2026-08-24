@@ -23,16 +23,17 @@ type threadEventCall struct {
 
 type recordingPlatform struct {
 	tk.BasePlatformClient
-	mu     sync.Mutex
-	events []threadEventCall
-	agents map[int64]*sdk.PlatformInstance
+	mu      sync.Mutex
+	events  []threadEventCall
+	agents  map[int64]*sdk.PlatformInstance
+	sendErr error
 }
 
 func (p *recordingPlatform) SendThreadEvent(target sdk.ThreadRef, message any) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.events = append(p.events, threadEventCall{Target: target, Message: message})
-	return nil
+	return p.sendErr
 }
 
 func (p *recordingPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error) {
@@ -201,6 +202,46 @@ func TestAssignmentAndExecutorLifecycle(t *testing.T) {
 	}
 }
 
+func TestStructuredProgressUpdatePreservesAuthoritativeDescriptionForWorker(t *testing.T) {
+	app, appCtx, _ := newTestApp(t)
+	creator := callerContext(7, "thread-origin", "project-a")
+	const description = "TITLE|BODY|MEDIA|AUDIENCE|DATE|TIMEZONE|STOP CONDITIONS"
+	raw, err := app.toolCreate(creator, appCtx, map[string]any{
+		"title": "Authoritative worker handoff", "description": description,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := raw.(map[string]any)["task"].(*Task)
+
+	// Reproduce a Codex structured call: optional strings and schedule fields are
+	// present as empty placeholders even though this is only a progress update.
+	if _, err := app.toolUpdate(creator, appCtx, map[string]any{
+		"task_id": task.ID, "state": stateRunning, "progress": 10,
+		"current_step": "Preparing worker", "description": "", "error": "",
+		"result_reference": "", "schedule": map[string]any{
+			"kind": "once", "at": "", "after": "", "every": "", "cron": "", "timezone": "",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolAssign(creator, appCtx, map[string]any{
+		"task_id": task.ID, "thread_id": "thread-worker",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	worker := callerContext(7, "thread-worker", "project-a")
+	gotRaw, err := app.toolGet(worker, appCtx, map[string]any{"task_id": task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := gotRaw.(map[string]any)["task"].(*Task)
+	if got.Description != description {
+		t.Fatalf("progress update erased authoritative worker description: got %q, want %q", got.Description, description)
+	}
+}
+
 func TestToolsRejectMissingOrCrossProjectCaller(t *testing.T) {
 	app, appCtx, _ := newTestApp(t)
 	if _, err := app.toolCreate(context.Background(), appCtx, map[string]any{"title": "x"}); err == nil {
@@ -313,7 +354,7 @@ func TestSchedulesMaterializeOnceAndRecurringWithoutSetupDuplicates(t *testing.T
 	if once.State != stateQueued || once.ScheduleEnabled || once.NextRunAt != nil || once.ScheduledFor == nil {
 		t.Fatalf("one-time task should become the runnable task itself: %+v", once)
 	}
-	if len(live) != 1 || live[0].event.ToState != stateQueued || live[0].task.State != stateQueued || live[0].task.ScheduleEnabled || live[0].task.NextRunAt != nil {
+	if len(live) != 2 || live[0].event.ToState != stateQueued || live[0].task.State != stateQueued || live[0].task.ScheduleEnabled || live[0].task.NextRunAt != nil || live[1].event.EventType != "occurrence_dispatched" || live[1].task.DispatchedAt == nil {
 		t.Fatalf("queued live event exposed a partial schedule transition: %+v", live)
 	}
 	if enabled, ok := live[0].event.Data["schedule_enabled"].(bool); !ok || enabled {
@@ -335,7 +376,7 @@ func TestSchedulesMaterializeOnceAndRecurringWithoutSetupDuplicates(t *testing.T
 	if _, _, err := app.store.Update(once.ID, "opaque-default", UpdateTaskInput{State: &done, Result: &result}); err != nil {
 		t.Fatal(err)
 	}
-	if len(live) != 3 || live[1].task.State != stateRunning || live[1].task.ScheduleEnabled || live[2].task.State != stateCompleted || live[2].task.ScheduleEnabled {
+	if len(live) != 4 || live[2].task.State != stateRunning || live[2].task.ScheduleEnabled || live[3].task.State != stateCompleted || live[3].task.ScheduleEnabled {
 		t.Fatalf("live lifecycle snapshots=%+v", live)
 	}
 	roots, _ := app.store.List(TaskFilter{ProjectID: "project-a", AgentID: 7, Limit: 50})
@@ -453,10 +494,145 @@ func TestHTTPProjectIsolationAndOperatorLifecycle(t *testing.T) {
 	}
 }
 
+func TestHTTPDescriptionUpdatesAreAppliedStrictAndNoOpSafe(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	task, _, err := app.store.Create(CreateTaskInput{AgentID: 7, ProjectID: "project-a", Title: "Editable", Description: "Old description", AssignedThreadID: "opaque-default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tasks/", app.handleTask)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	update := func(method, body string) (*http.Response, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest(method, server.URL+"/tasks/"+task.ID, bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Apteva-Project-ID", "project-a")
+		resp, requestErr := http.DefaultClient.Do(req)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		var payload map[string]any
+		if strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
+			if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+		}
+		resp.Body.Close()
+		return resp, payload
+	}
+
+	resp, payload := update(http.MethodPatch, `{"description":"New exact description"}`)
+	if resp.StatusCode != http.StatusOK || payload["changed"] != true {
+		t.Fatalf("PATCH response status=%d payload=%+v", resp.StatusCode, payload)
+	}
+	updated, _ := app.store.Get(task.ID)
+	if updated.Description != "New exact description" {
+		t.Fatalf("PATCH silently ignored description: %+v", updated)
+	}
+	stamp := updated.UpdatedAt
+
+	resp, payload = update(http.MethodPut, `{"description":"New exact description"}`)
+	if resp.StatusCode != http.StatusOK || payload["changed"] != false {
+		t.Fatalf("no-op PUT response status=%d payload=%+v", resp.StatusCode, payload)
+	}
+	unchanged, _ := app.store.Get(task.ID)
+	if !unchanged.UpdatedAt.Equal(stamp) {
+		t.Fatalf("no-op PUT changed updated_at from %s to %s", stamp, unchanged.UpdatedAt)
+	}
+
+	resp, _ = update(http.MethodPatch, `{"description":"ignored","unsupported_field":true}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown update field status=%d, want 400", resp.StatusCode)
+	}
+	unchanged, _ = app.store.Get(task.ID)
+	if unchanged.Description != "New exact description" || !unchanged.UpdatedAt.Equal(stamp) {
+		t.Fatalf("rejected request mutated task: %+v", unchanged)
+	}
+}
+
+func TestRecurringOccurrenceLifecycleRollsUpDownstreamOutcome(t *testing.T) {
+	app, appCtx, _ := newTestApp(t)
+	creator := callerContext(7, "schedule-owner", "project-a")
+	raw, err := app.toolCreate(creator, appCtx, map[string]any{
+		"title": "Prepare X post", "schedule": map[string]any{"kind": "interval", "every": "10m"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := raw.(map[string]any)["task"].(*Task)
+	due := parent.NextRunAt.Add(time.Second)
+	if err := app.scheduler.Tick(due, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	parent, _ = app.store.Get(parent.ID)
+	if parent.LastRunAt != nil || parent.LastDispatchedAt == nil || parent.LastOccurrenceStatus != "dispatched" || parent.LastError != "" {
+		t.Fatalf("scheduler dispatch masqueraded as workflow execution: %+v", parent)
+	}
+	parentID := parent.ID
+	runs, err := app.store.List(TaskFilter{ProjectID: "project-a", ParentTaskID: &parentID, Limit: 10})
+	if err != nil || len(runs) != 1 || runs[0].DispatchedAt == nil || runs[0].AcceptedAt != nil || runs[0].TelemetryReference == "" {
+		t.Fatalf("dispatched occurrence incomplete: runs=%+v err=%v", runs, err)
+	}
+
+	executor := callerContext(7, "opaque-default", "project-a")
+	got, err := app.toolGet(executor, appCtx, map[string]any{"task_id": runs[0].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := got.(map[string]any)["task"].(*Task)
+	if accepted.AcceptedAt == nil || accepted.ExecutionThreadID != "opaque-default" {
+		t.Fatalf("authoritative read did not accept occurrence: %+v", accepted)
+	}
+	parent, _ = app.store.Get(parent.ID)
+	if parent.LastRunAt == nil || parent.LastOccurrenceStatus != "accepted" {
+		t.Fatalf("accepted occurrence did not update parent health: %+v", parent)
+	}
+	if _, err := app.toolUpdate(executor, appCtx, map[string]any{"task_id": accepted.ID, "state": stateRunning, "progress": 60, "current_step": "Drafting"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolComplete(executor, appCtx, map[string]any{"task_id": accepted.ID, "result": "Draft ready", "result_reference": "social:draft-42"}); err != nil {
+		t.Fatal(err)
+	}
+	parent, _ = app.store.Get(parent.ID)
+	if parent.State != stateWaiting || parent.LastOccurrenceStatus != stateCompleted || parent.LastError != "" || parent.LastResultReference != "social:draft-42" {
+		t.Fatalf("terminal occurrence did not roll up separately from scheduler state: %+v", parent)
+	}
+}
+
+func TestUnacceptedDispatchFailsAndMarksParentUnhealthy(t *testing.T) {
+	app, appCtx, _ := newTestApp(t)
+	raw, err := app.toolCreate(callerContext(7, "schedule-owner", "project-a"), appCtx, map[string]any{
+		"title": "Prepare X post", "schedule": map[string]any{"kind": "interval", "every": "10m"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := raw.(map[string]any)["task"].(*Task)
+	dispatchedAt := parent.NextRunAt.Add(time.Second)
+	if err := app.scheduler.Tick(dispatchedAt, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.scheduler.reconcileUnaccepted(dispatchedAt.Add(dispatchAcceptanceTimeout+time.Second), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	parent, _ = app.store.Get(parent.ID)
+	if parent.LastRunAt != nil || parent.LastOccurrenceStatus != stateFailed || !strings.Contains(parent.LastError, "not accepted") {
+		t.Fatalf("unaccepted dispatch remained false-green: %+v", parent)
+	}
+	parentID := parent.ID
+	runs, _ := app.store.List(TaskFilter{ProjectID: "project-a", ParentTaskID: &parentID, Limit: 10})
+	if len(runs) != 1 || runs[0].State != stateFailed || runs[0].AcceptedAt != nil || !strings.Contains(runs[0].Error, "not accepted") {
+		t.Fatalf("unaccepted occurrence not failed with reason: %+v", runs)
+	}
+}
+
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.2.9" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.3.0" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]
@@ -628,8 +804,20 @@ func TestOverlapSkipKeepsLastRunAtAndAdvancesNextRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	parent, _ = app.store.Get(parent.ID)
-	if parent.LastRunAt == nil || parent.NextRunAt == nil {
-		t.Fatalf("materialization did not stamp run bookkeeping: %+v", parent)
+	if parent.LastRunAt != nil || parent.LastDispatchedAt == nil || parent.NextRunAt == nil || parent.LastOccurrenceStatus != "dispatched" {
+		t.Fatalf("dispatch was incorrectly recorded as an accepted run: %+v", parent)
+	}
+	parentID := parent.ID
+	runs, err := app.store.List(TaskFilter{ProjectID: "project-a", ParentTaskID: &parentID, Limit: 10})
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs=%+v err=%v", runs, err)
+	}
+	if _, changed, err := app.store.Accept(runs[0].ID, runs[0].AssignedThreadID, firstDue.Add(time.Second)); err != nil || !changed {
+		t.Fatalf("accept occurrence changed=%v err=%v", changed, err)
+	}
+	parent, _ = app.store.Get(parent.ID)
+	if parent.LastRunAt == nil || parent.LastOccurrenceStatus != "accepted" {
+		t.Fatalf("accepted occurrence did not roll up: %+v", parent)
 	}
 	materializedLastRun := *parent.LastRunAt
 

@@ -69,8 +69,17 @@ export interface Task {
   schedule_enabled?: boolean;
   next_run_at?: string;
   last_run_at?: string;
+  last_dispatched_at?: string;
+  last_occurrence_id?: string;
+  last_occurrence_status?: string;
+  last_error?: string;
+  last_result_reference?: string;
   scheduled_for?: string;
+  dispatched_at?: string;
+  accepted_at?: string;
+  telemetry_reference?: string;
   result?: string;
+  result_reference?: string;
   error?: string;
   created_at: string;
   updated_at: string;
@@ -284,6 +293,10 @@ const stateTone: Record<Task["state"], string> = {
 };
 
 export function taskStateLabel(task: Task) {
+  if (task.parent_task_id && task.state === "queued" && task.accepted_at)
+    return "accepted";
+  if (task.parent_task_id && task.state === "queued" && task.dispatched_at)
+    return "dispatched";
   if (isTerminal(task) || ["queued", "running", "blocked"].includes(task.state))
     return task.state;
   if (isPendingSchedule(task))
@@ -299,8 +312,12 @@ export function StatePill({ task }: { task: Task }) {
       ? "border-purple-400/35 bg-purple-400/10 text-purple-300"
       : label === "scheduled"
         ? "border-blue/35 bg-blue/10 text-blue"
-        : label === "paused"
+      : label === "paused"
           ? "border-border bg-bg-hover text-text-dim"
+        : label === "accepted"
+          ? "border-accent/35 bg-accent/10 text-accent"
+        : label === "dispatched"
+          ? "border-blue/35 bg-blue/10 text-blue"
         : stateTone[task.state];
   return (
     <span
@@ -390,6 +407,9 @@ export function TaskRow({
 }
 
 export function taskRowSummary(task: Task) {
+  if (isSchedule(task) && task.last_error) return `Latest workflow failed: ${task.last_error}`;
+  if (isSchedule(task) && task.last_occurrence_status)
+    return `Latest workflow: ${task.last_occurrence_status}`;
   if (task.error) return task.error;
   if (isTerminal(task) && task.result) return task.result;
   return task.current_step || task.description || "";
@@ -486,6 +506,13 @@ export function TaskDetails({
                   Next: {formatWhen(current.next_run_at)}
                 </p>
               )}
+              <div className="mt-3 border-t border-purple-400/15 pt-2 text-[10px] text-text-muted">
+                <p>Scheduler: {current.schedule_enabled === false ? "paused" : "active"}</p>
+                <p>Latest workflow: {current.last_occurrence_status || "not dispatched yet"}</p>
+                {current.last_dispatched_at && <p>Last dispatched: {formatWhen(current.last_dispatched_at)}</p>}
+                {current.last_run_at && <p>Last accepted: {formatWhen(current.last_run_at)}</p>}
+                {current.last_error && <p className="mt-1 text-red">{current.last_error}</p>}
+              </div>
             </section>
           )}
           {(current.result || current.error) && (
@@ -532,7 +559,24 @@ export function TaskDetails({
               </h3>
               <div className="mt-2 overflow-hidden rounded border border-border">
                 {runs.map((run) => (
-                  <TaskRow key={run.id} task={run} />
+                  <div key={run.id} className="border-b border-border p-3 last:border-b-0">
+                    <div className="flex items-center gap-2">
+                      <StatePill task={run} />
+                      <span className="ml-auto text-[9px] text-text-dim">{formatWhen(run.scheduled_for || run.created_at)}</span>
+                    </div>
+                    <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[9px] text-text-muted">
+                      <span>Dispatched</span><span>{formatWhen(run.dispatched_at) || "No"}</span>
+                      <span>Accepted</span><span>{formatWhen(run.accepted_at) || "No"}</span>
+                      <span>Started</span><span>{formatWhen(run.started_at) || "No"}</span>
+                      <span>Completed</span><span>{formatWhen(run.completed_at) || "No"}</span>
+                    </div>
+                    {run.error && <p className="mt-2 text-[10px] text-red">{run.error}</p>}
+                    {run.result && <p className="mt-2 text-[10px] text-text">{run.result}</p>}
+                    <div className="mt-2 flex gap-3 text-[9px] text-accent">
+                      {run.telemetry_reference && <a href={run.telemetry_reference} target="_blank" rel="noreferrer">Agent telemetry</a>}
+                      {run.result_reference && <span>Result: {run.result_reference}</span>}
+                    </div>
+                  </div>
                 ))}
               </div>
             </section>
@@ -589,6 +633,10 @@ export function taskEventLabel(event: TaskEvent) {
   else if (event.event_type === "schedule_run_requested") label = "Run requested";
   else if (event.event_type === "occurrence_skipped_overlap")
     label = "Occurrence skipped to avoid overlap";
+  else if (event.event_type === "occurrence_dispatched")
+    label = "Occurrence dispatched";
+  else if (event.event_type === "occurrence_accepted")
+    label = "Occurrence accepted";
   else label = event.event_type.replaceAll("_", " ");
 
   const progress = event.data?.progress;

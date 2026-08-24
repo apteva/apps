@@ -250,6 +250,43 @@ describe("Tasks app UI model", () => {
     ).toBe("Completed · 100%");
   });
 
+  test("separates scheduler status from latest occurrence health", () => {
+    expect(
+      taskRowSummary(
+        task({
+          state: "waiting",
+          schedule_kind: "cron",
+          schedule_expression: "30 9 * * 1,3,5",
+          schedule_enabled: true,
+          last_occurrence_status: "failed",
+          last_error: "dispatched but not accepted",
+        }),
+      ),
+    ).toBe("Latest workflow failed: dispatched but not accepted");
+    expect(
+      taskStateLabel(
+        task({ parent_task_id: "schedule-1", dispatched_at: "2026-08-08T10:00:01Z" }),
+      ),
+    ).toBe("dispatched");
+    expect(
+      taskStateLabel(
+        task({
+          parent_task_id: "schedule-1",
+          dispatched_at: "2026-08-08T10:00:01Z",
+          accepted_at: "2026-08-08T10:00:02Z",
+        }),
+      ),
+    ).toBe("accepted");
+    expect(
+      taskEventLabel({
+        id: "event-accepted",
+        task_id: "task-1",
+        event_type: "occurrence_accepted",
+        created_at: "2026-08-08T10:00:02Z",
+      }),
+    ).toBe("Occurrence accepted");
+  });
+
   test("normalizes per-instance task overview settings", () => {
     expect(taskOverviewPreferences()).toEqual({
       showActive: true,

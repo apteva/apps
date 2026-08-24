@@ -17,7 +17,7 @@ var taskSkillBody string
 const manifestYAML = `schema: apteva-app/v1
 name: tasks
 display_name: Tasks
-version: 3.2.9
+version: 3.3.0
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -68,7 +68,7 @@ provides:
       supported_sizes: [half, full]
       default_size: half
       visibility: project
-      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_skipped_overlap]
+      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_accepted, task.occurrence_skipped_overlap]
       native:
         schema: apteva-native-surface/v1
         entry: /ui/surfaces/task-overview.json
@@ -101,7 +101,7 @@ provides:
       slots: [dashboard.agent_card, dashboard.agent_detail, dashboard.thread_sidebar]
       suggested: true
       visibility: attached
-      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_skipped_overlap]
+      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_accepted, task.occurrence_skipped_overlap]
       default_width: 1
     - name: task-card
       entry: /ui/TaskCard.mjs
@@ -155,7 +155,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.EmitWithProject("task."+event.EventType, eventProjectID(a.store, event.TaskID), event)
 	})
 	a.scheduler = &scheduler{store: a.store, app: a}
-	ctx.Logger().Info("tasks app mounted", "version", "3.2.9")
+	ctx.Logger().Info("tasks app mounted", "version", "3.3.0")
 	return nil
 }
 

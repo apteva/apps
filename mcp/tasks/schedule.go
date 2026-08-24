@@ -259,8 +259,8 @@ func (s *taskStore) activateOneTime(id, actor string, scheduledFor, now time.Tim
 	step := "Scheduled work is ready"
 	_, err = tx.Exec(`UPDATE tasks SET
 		state=?, progress=NULL, current_step=?, schedule_enabled=0,
-		last_run_at=?, scheduled_for=?, next_run_at=NULL, updated_at=?
-		WHERE id=?`, stateQueued, step, now.Format(time.RFC3339Nano),
+		scheduled_for=?, next_run_at=NULL, updated_at=?
+		WHERE id=?`, stateQueued, step,
 		scheduledFor.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id)
 	if err != nil {
 		return nil, false, err
@@ -298,6 +298,9 @@ type scheduler struct {
 func (s *scheduler) Tick(now time.Time, projectID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reconcileUnaccepted(now.UTC(), projectID); err != nil {
+		return err
+	}
 	query := `SELECT ` + taskColumns + ` FROM tasks WHERE schedule_enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=?`
 	args := []any{now.UTC().Format(time.RFC3339Nano)}
 	if projectID != "" {
@@ -323,6 +326,47 @@ func (s *scheduler) Tick(now time.Time, projectID string) error {
 		if err := s.materialize(task, now.UTC()); err != nil {
 			s.app.logger().Warn("tasks scheduler", "task_id", task.ID, "err", err.Error())
 		}
+	}
+	return nil
+}
+
+const dispatchAcceptanceTimeout = 10 * time.Minute
+
+// reconcileUnaccepted closes the false-green gap where the scheduler wake was
+// sent but no assigned thread ever loaded the authoritative occurrence. It is
+// intentionally independent of the recurrence cadence and runs every tick.
+func (s *scheduler) reconcileUnaccepted(now time.Time, projectID string) error {
+	query := `SELECT ` + taskColumns + ` FROM tasks WHERE state='queued' AND scheduled_for IS NOT NULL
+		AND dispatched_at IS NOT NULL AND accepted_at IS NULL AND dispatched_at<=?`
+	args := []any{now.Add(-dispatchAcceptanceTimeout).Format(time.RFC3339Nano)}
+	if projectID != "" {
+		query += ` AND project_id=?`
+		args = append(args, projectID)
+	}
+	rows, err := s.store.db.Query(query, args...)
+	if err != nil {
+		return err
+	}
+	var overdue []*Task
+	for rows.Next() {
+		run, scanErr := scanTask(rows)
+		if scanErr != nil {
+			rows.Close()
+			return scanErr
+		}
+		overdue = append(overdue, run)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, run := range overdue {
+		failed := stateFailed
+		msg := fmt.Sprintf("dispatched but not accepted by assigned thread within %s", dispatchAcceptanceTimeout)
+		updated, _, updateErr := s.store.Update(run.ID, "tasks:scheduler", UpdateTaskInput{State: &failed, Error: &msg})
+		if updateErr != nil {
+			return updateErr
+		}
+		_ = s.app.notifyCreator(updated)
 	}
 	return nil
 }
@@ -397,7 +441,7 @@ func (s *scheduler) materialize(parent *Task, now time.Time) error {
 		if !activated {
 			return nil
 		}
-		return s.app.notifyAssigned(run, run.AssignedThreadID, "task.ready")
+		return s.dispatch(run, now, "task.ready")
 	}
 	next, err := nextOccurrence(parent, scheduledFor, now)
 	if err != nil {
@@ -439,9 +483,29 @@ func (s *scheduler) materialize(parent *Task, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.store.db.Exec(`UPDATE tasks SET next_run_at=?, last_run_at=?, updated_at=? WHERE id=?`, next.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), parent.ID)
+	_, err = s.store.db.Exec(`UPDATE tasks SET next_run_at=?, updated_at=? WHERE id=?`, next.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), parent.ID)
 	if err != nil {
 		return err
 	}
-	return s.app.notifyAssigned(run, run.AssignedThreadID, "task.ready")
+	return s.dispatch(run, now, "task.ready")
+}
+
+func (s *scheduler) dispatch(run *Task, now time.Time, eventType string) error {
+	dispatched, _, err := s.store.MarkDispatched(run.ID, "tasks:scheduler", now)
+	if err != nil {
+		return err
+	}
+	if err := s.app.notifyAssigned(dispatched, dispatched.AssignedThreadID, eventType); err != nil {
+		failed := stateFailed
+		message := "scheduler dispatch failed: " + err.Error()
+		updated, _, updateErr := s.store.Update(dispatched.ID, "tasks:scheduler", UpdateTaskInput{State: &failed, Error: &message})
+		if updateErr == nil {
+			_ = s.app.notifyCreator(updated)
+		}
+		if updateErr != nil {
+			return fmt.Errorf("%s; recording failure: %w", message, updateErr)
+		}
+		return err
+	}
+	return nil
 }

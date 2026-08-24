@@ -49,9 +49,18 @@ type Task struct {
 	ScheduleCatchupPolicy string     `json:"schedule_catchup_policy,omitempty"`
 	NextRunAt             *time.Time `json:"next_run_at,omitempty"`
 	LastRunAt             *time.Time `json:"last_run_at,omitempty"`
+	LastDispatchedAt      *time.Time `json:"last_dispatched_at,omitempty"`
+	LastOccurrenceID      string     `json:"last_occurrence_id,omitempty"`
+	LastOccurrenceStatus  string     `json:"last_occurrence_status,omitempty"`
+	LastError             string     `json:"last_error,omitempty"`
+	LastResultReference   string     `json:"last_result_reference,omitempty"`
 	ScheduledFor          *time.Time `json:"scheduled_for,omitempty"`
 	ScheduleOccurrenceKey string     `json:"schedule_occurrence_key,omitempty"`
+	DispatchedAt          *time.Time `json:"dispatched_at,omitempty"`
+	AcceptedAt            *time.Time `json:"accepted_at,omitempty"`
+	TelemetryReference    string     `json:"telemetry_reference,omitempty"`
 	Result                string     `json:"result,omitempty"`
+	ResultReference       string     `json:"result_reference,omitempty"`
 	Error                 string     `json:"error,omitempty"`
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
@@ -89,6 +98,7 @@ type CreateTaskInput struct {
 }
 
 type UpdateTaskInput struct {
+	Description       *string
 	State             *string
 	Progress          *int
 	ClearProgress     bool
@@ -96,6 +106,7 @@ type UpdateTaskInput struct {
 	AssignedThreadID  *string
 	ExecutionThreadID *string
 	Result            *string
+	ResultReference   *string
 	Error             *string
 }
 

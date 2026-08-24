@@ -103,3 +103,12 @@ Use `once` with an RFC3339 `at` timestamp or a relative `after` duration. Use
 `interval` or five-field `cron` for recurrence. Server time is authoritative.
 List, pause, resume, cancel, and run schedules through Tasks directly; do not
 ask another thread merely to inspect the schedule inventory.
+
+Every due schedule has an occurrence lifecycle. Scheduler dispatch is not
+workflow success: the assigned thread accepts an occurrence when it reads the
+authoritative record with `tasks_get`, then records running milestones and a
+terminal outcome. Always include a durable `result_reference` when the work
+creates an output ID or URL. A dispatched occurrence that is never accepted is
+failed automatically; do not recreate it merely because the parent schedule is
+still active. The recurring parent reports scheduler state separately from its
+latest occurrence status and error.

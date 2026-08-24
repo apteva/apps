@@ -36,10 +36,10 @@ func (a *App) tools() []sdk.Tool {
 		}), HandlerCtx: a.toolList},
 		{Name: "get", Description: "Read the authoritative task and its chronological event history. Every thread receiving a task event, including a delegated worker, must call this before any domain action. Main may grant this read-only tool to a worker without granting Tasks mutation tools.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}}), HandlerCtx: a.toolGet},
 		{Name: "update", Description: "Record task-level state and progress at meaningful phase boundaries. Keep the task running while any executor is actively working, including a delegated worker. Use waiting only when no executor can progress until an external event; when work resumes, return to running with a concrete current_step. Multi-stage or delegated work should usually have at least two or three intermediate milestones, while short work may move directly from its first update to completion. Do not update after every tool call or mirror task progress into global status.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{
-			"task_id": map[string]any{"type": "string"}, "state": map[string]any{"type": "string", "enum": []string{"queued", "running", "waiting", "blocked", "failed"}}, "progress": map[string]any{"type": "integer", "minimum": 0, "maximum": 100}, "current_step": map[string]any{"type": "string"}, "error": map[string]any{"type": "string"}, "schedule": scheduleSchema(),
+			"task_id": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "state": map[string]any{"type": "string", "enum": []string{"queued", "running", "waiting", "blocked", "failed"}}, "progress": map[string]any{"type": "integer", "minimum": 0, "maximum": 100}, "current_step": map[string]any{"type": "string"}, "error": map[string]any{"type": "string"}, "result_reference": map[string]any{"type": "string"}, "schedule": scheduleSchema(),
 		}), Meta: wakeAlways, HandlerCtx: a.toolUpdate},
 		{Name: "assign", Description: "Assign a task to an existing opaque thread id belonging to the same agent. This records ownership and sends an event containing the authoritative task ID, which wakes a paused worker; it never creates a thread. Main must use the platform spawn tool first, grant the worker tasks_get plus only required domain tools, and retain all Tasks mutation tools. The worker must call tasks_get before any domain action.", InputSchema: objectSchema([]string{"task_id", "thread_id"}, map[string]any{"task_id": map[string]any{"type": "string"}, "thread_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolAssign},
-		{Name: "complete", Description: "Complete an assigned task once with its concrete result. Completion sets progress to 100 and current_step to Completed. Tasks sends a structured terminal receipt to its creator thread when different; do not duplicate that delivery.", InputSchema: objectSchema([]string{"task_id", "result"}, map[string]any{"task_id": map[string]any{"type": "string"}, "result": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolComplete},
+		{Name: "complete", Description: "Complete an assigned task once with its concrete result. Completion sets progress to 100 and current_step to Completed. Include result_reference when a durable output ID or URL exists. Tasks sends a structured terminal receipt to its creator thread when different; do not duplicate that delivery.", InputSchema: objectSchema([]string{"task_id", "result"}, map[string]any{"task_id": map[string]any{"type": "string"}, "result": map[string]any{"type": "string"}, "result_reference": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolComplete},
 		{Name: "cancel", Description: "Cancel an active task or scheduled series.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}, "reason": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolCancel},
 		{Name: "pause", Description: "Pause a scheduled task without deleting it.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolPause},
 		{Name: "resume", Description: "Resume a paused scheduled task and calculate its next occurrence from server time.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolResume},
@@ -155,9 +155,14 @@ func (a *App) toolList(ctx context.Context, app *sdk.AppCtx, args map[string]any
 }
 
 func (a *App) toolGet(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	_, task, err := a.taskForCaller(ctx, app, args)
+	caller, task, err := a.taskForCaller(ctx, app, args)
 	if err != nil {
 		return nil, err
+	}
+	if accepted, changed, acceptErr := a.store.Accept(task.ID, caller.ThreadID, nowUTC()); acceptErr != nil {
+		return nil, acceptErr
+	} else if changed {
+		task = accepted
 	}
 	events, err := a.store.Events(task.ID)
 	if err != nil {
@@ -177,17 +182,27 @@ func (a *App) toolUpdate(ctx context.Context, app *sdk.AppCtx, args map[string]a
 		return a.store.SetSchedule(task.ID, caller.ThreadID, *schedule)
 	}
 	input := UpdateTaskInput{}
+	// Structured-output providers may materialize every optional string as "".
+	// Treat those placeholders as omitted so a progress-only update cannot erase
+	// the authoritative task body or other durable metadata. HTTP PATCH/PUT still
+	// supports explicit empty-string updates because it bypasses this MCP adapter.
+	if v, ok := args["description"].(string); ok && v != "" {
+		input.Description = &v
+	}
 	if v, ok := args["state"].(string); ok && v != "" {
 		input.State = &v
 	}
 	if v, ok := optionalIntArg(args, "progress"); ok {
 		input.Progress = &v
 	}
-	if v, ok := args["current_step"].(string); ok {
+	if v, ok := args["current_step"].(string); ok && v != "" {
 		input.CurrentStep = &v
 	}
-	if v, ok := args["error"].(string); ok {
+	if v, ok := args["error"].(string); ok && v != "" {
 		input.Error = &v
+	}
+	if v, ok := args["result_reference"].(string); ok && v != "" {
+		input.ResultReference = &v
 	}
 	if input.State != nil && strings.EqualFold(strings.TrimSpace(*input.State), stateRunning) && strings.TrimSpace(task.ExecutionThreadID) == "" {
 		executionThreadID := strings.TrimSpace(task.AssignedThreadID)
@@ -240,6 +255,9 @@ func (a *App) toolComplete(ctx context.Context, app *sdk.AppCtx, args map[string
 		return nil, errors.New("result required")
 	}
 	input := UpdateTaskInput{State: &state, Result: &result}
+	if reference := strings.TrimSpace(stringArg(args, "result_reference")); reference != "" {
+		input.ResultReference = &reference
+	}
 	if strings.TrimSpace(task.ExecutionThreadID) == "" {
 		executionThreadID := strings.TrimSpace(task.AssignedThreadID)
 		if executionThreadID == "" {
