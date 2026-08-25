@@ -100,6 +100,75 @@ func normalizeSchedule(input ScheduleInput, now time.Time) (normalizedSchedule, 
 	return n, nil
 }
 
+// mergeSchedulePatch expands a partial definition edit against the persisted
+// schedule. Empty fields preserve their current values. The scheduler's next
+// timestamp only moves when cadence semantics change; metadata-only edits keep
+// the existing timestamp.
+func mergeSchedulePatch(task *Task, patch ScheduleInput, now time.Time) (normalizedSchedule, bool, error) {
+	kind := strings.ToLower(strings.TrimSpace(patch.Kind))
+	if kind == "" {
+		kind = task.ScheduleKind
+	}
+	if kind == "" {
+		return normalizedSchedule{}, false, errors.New("schedule kind is required when adding a schedule")
+	}
+	timezone := strings.TrimSpace(patch.Timezone)
+	if timezone == "" {
+		timezone = task.ScheduleTimezone
+	}
+	overlap := strings.ToLower(strings.TrimSpace(patch.OverlapPolicy))
+	if overlap == "" {
+		overlap = task.ScheduleOverlapPolicy
+	}
+	catchup := strings.ToLower(strings.TrimSpace(patch.CatchupPolicy))
+	if catchup == "" {
+		catchup = task.ScheduleCatchupPolicy
+	}
+
+	full := ScheduleInput{Kind: kind, Timezone: timezone, OverlapPolicy: overlap, CatchupPolicy: catchup}
+	sameKind := kind == task.ScheduleKind
+	switch kind {
+	case scheduleOnce:
+		full.At, full.After = strings.TrimSpace(patch.At), strings.TrimSpace(patch.After)
+		if full.At == "" && full.After == "" && sameKind {
+			full.At = task.ScheduleExpression
+		}
+	case scheduleInterval:
+		full.Every = strings.TrimSpace(patch.Every)
+		if full.Every == "" && sameKind {
+			full.Every = task.ScheduleExpression
+		}
+	case scheduleCron:
+		full.Cron = strings.TrimSpace(patch.Cron)
+		if full.Cron == "" && sameKind {
+			full.Cron = task.ScheduleExpression
+		}
+	}
+
+	n, err := normalizeSchedule(full, now)
+	if err != nil {
+		return n, false, err
+	}
+	changed := n.Kind != task.ScheduleKind || n.Expression != task.ScheduleExpression ||
+		n.Timezone != task.ScheduleTimezone || n.OverlapPolicy != task.ScheduleOverlapPolicy ||
+		n.CatchupPolicy != task.ScheduleCatchupPolicy
+	if !changed {
+		if task.NextRunAt != nil {
+			n.NextRunAt = *task.NextRunAt
+		}
+		return n, false, nil
+	}
+
+	// Timezone and policy metadata do not shift interval or absolute one-time
+	// cadence. Cron timezone changes do because they alter the next wall-clock run.
+	cadenceChanged := n.Kind != task.ScheduleKind || n.Expression != task.ScheduleExpression ||
+		(n.Kind == scheduleCron && n.Timezone != task.ScheduleTimezone)
+	if !cadenceChanged && task.NextRunAt != nil {
+		n.NextRunAt = *task.NextRunAt
+	}
+	return n, true, nil
+}
+
 func nextOccurrence(task *Task, scheduledFor, now time.Time) (*time.Time, error) {
 	switch task.ScheduleKind {
 	case scheduleOnce:
@@ -131,23 +200,8 @@ func nextOccurrence(task *Task, scheduledFor, now time.Time) (*time.Time, error)
 }
 
 func (s *taskStore) SetSchedule(id, actor string, input ScheduleInput) (*Task, error) {
-	n, err := normalizeSchedule(input, time.Now().UTC())
-	if err != nil {
-		return nil, err
-	}
-	task, err := s.Get(id)
-	if err != nil {
-		return nil, err
-	}
-	if terminalState(task.State) {
-		return nil, errTerminalTask
-	}
-	now := time.Now().UTC()
-	_, err = s.db.Exec(`UPDATE tasks SET state='waiting', progress=NULL, current_step='', schedule_kind=?, schedule_expression=?, schedule_timezone=?, schedule_enabled=1, schedule_overlap_policy=?, schedule_catchup_policy=?, next_run_at=?, updated_at=? WHERE id=?`, n.Kind, n.Expression, n.Timezone, n.OverlapPolicy, n.CatchupPolicy, n.NextRunAt.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id)
-	if err != nil {
-		return nil, err
-	}
-	return s.recordSimpleEvent(id, actor, "schedule_updated", task.State, stateWaiting, map[string]any{"schedule_kind": n.Kind, "next_run_at": n.NextRunAt})
+	task, _, err := s.Update(id, actor, UpdateTaskInput{Schedule: &input})
+	return task, err
 }
 
 func (s *taskStore) Pause(id, actor string) (*Task, error) {
@@ -259,8 +313,8 @@ func (s *taskStore) activateOneTime(id, actor string, scheduledFor, now time.Tim
 	step := "Scheduled work is ready"
 	_, err = tx.Exec(`UPDATE tasks SET
 		state=?, progress=NULL, current_step=?, schedule_enabled=0,
-		last_run_at=?, scheduled_for=?, next_run_at=NULL, updated_at=?
-		WHERE id=?`, stateQueued, step, now.Format(time.RFC3339Nano),
+		scheduled_for=?, next_run_at=NULL, updated_at=?
+		WHERE id=?`, stateQueued, step,
 		scheduledFor.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id)
 	if err != nil {
 		return nil, false, err
@@ -298,6 +352,9 @@ type scheduler struct {
 func (s *scheduler) Tick(now time.Time, projectID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reconcileUnaccepted(now.UTC(), projectID); err != nil {
+		return err
+	}
 	query := `SELECT ` + taskColumns + ` FROM tasks WHERE schedule_enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=?`
 	args := []any{now.UTC().Format(time.RFC3339Nano)}
 	if projectID != "" {
@@ -322,6 +379,62 @@ func (s *scheduler) Tick(now time.Time, projectID string) error {
 	for _, task := range due {
 		if err := s.materialize(task, now.UTC()); err != nil {
 			s.app.logger().Warn("tasks scheduler", "task_id", task.ID, "err", err.Error())
+		}
+	}
+	return nil
+}
+
+const (
+	dispatchRetryInterval = 10 * time.Minute
+	dispatchMaxAttempts   = 3 // Initial task.ready plus two durable retries.
+)
+
+// reconcileUnaccepted closes the false-green gap where the scheduler wake was
+// sent but no assigned thread ever loaded the authoritative occurrence. It
+// retries the same durable task.ready event twice before failing the occurrence.
+// The policy is independent of recurrence cadence and runs every tick.
+func (s *scheduler) reconcileUnaccepted(now time.Time, projectID string) error {
+	query := `SELECT ` + taskColumns + ` FROM tasks WHERE state='queued' AND scheduled_for IS NOT NULL
+		AND dispatched_at IS NOT NULL AND accepted_at IS NULL
+		AND COALESCE(last_dispatch_attempt_at, dispatched_at)<=?`
+	eligibleBefore := now.Add(-dispatchRetryInterval)
+	args := []any{eligibleBefore.Format(time.RFC3339Nano)}
+	if projectID != "" {
+		query += ` AND project_id=?`
+		args = append(args, projectID)
+	}
+	rows, err := s.store.db.Query(query, args...)
+	if err != nil {
+		return err
+	}
+	var overdue []*Task
+	for rows.Next() {
+		run, scanErr := scanTask(rows)
+		if scanErr != nil {
+			rows.Close()
+			return scanErr
+		}
+		overdue = append(overdue, run)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, run := range overdue {
+		updated, action, reconcileErr := s.store.ReconcileUnacceptedDispatch(run.ID, "tasks:scheduler", now,
+			eligibleBefore, dispatchMaxAttempts)
+		if reconcileErr != nil {
+			return reconcileErr
+		}
+		switch action {
+		case dispatchReconcileRetry:
+			if notifyErr := s.app.notifyAssigned(updated, updated.AssignedThreadID, "task.ready"); notifyErr != nil {
+				s.app.logger().Warn("tasks scheduler redispatch", "task_id", updated.ID,
+					"attempt", updated.DispatchAttempts, "err", notifyErr.Error())
+			}
+		case dispatchReconcileFail:
+			s.app.logger().Warn("tasks scheduler unaccepted dispatch exhausted", "task_id", updated.ID,
+				"attempts", updated.DispatchAttempts)
+			_ = s.app.notifyDispatchFailure(updated)
 		}
 	}
 	return nil
@@ -397,7 +510,7 @@ func (s *scheduler) materialize(parent *Task, now time.Time) error {
 		if !activated {
 			return nil
 		}
-		return s.app.notifyAssigned(run, run.AssignedThreadID, "task.ready")
+		return s.dispatch(run, now, "task.ready")
 	}
 	next, err := nextOccurrence(parent, scheduledFor, now)
 	if err != nil {
@@ -439,9 +552,22 @@ func (s *scheduler) materialize(parent *Task, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.store.db.Exec(`UPDATE tasks SET next_run_at=?, last_run_at=?, updated_at=? WHERE id=?`, next.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), parent.ID)
+	_, err = s.store.db.Exec(`UPDATE tasks SET next_run_at=?, updated_at=? WHERE id=?`, next.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), parent.ID)
 	if err != nil {
 		return err
 	}
-	return s.app.notifyAssigned(run, run.AssignedThreadID, "task.ready")
+	return s.dispatch(run, now, "task.ready")
+}
+
+func (s *scheduler) dispatch(run *Task, now time.Time, eventType string) error {
+	dispatched, _, err := s.store.MarkDispatched(run.ID, "tasks:scheduler", now)
+	if err != nil {
+		return err
+	}
+	if err := s.app.notifyAssigned(dispatched, dispatched.AssignedThreadID, eventType); err != nil {
+		// The durable occurrence remains queued. Reconciliation will retry this
+		// same task ID instead of turning a transient delivery error into failure.
+		return fmt.Errorf("scheduler dispatch attempt 1 failed; queued for retry: %w", err)
+	}
+	return nil
 }

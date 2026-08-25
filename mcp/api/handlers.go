@@ -102,12 +102,12 @@ func (a *App) handleAPIItem(w http.ResponseWriter, r *http.Request) {
 		}
 		httpJSON(w, res)
 	case http.MethodDelete:
-		ok, err := dbDeleteAPI(globalCtx.AppDB(), api.ProjectID, api.ID)
+		res, err := a.toolAPIDelete(globalCtx, map[string]any{"project_id": api.ProjectID, "id": api.ID})
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		httpJSON(w, map[string]any{"deleted": ok})
+		httpJSON(w, res)
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "GET, PATCH, PUT, or DELETE")
 	}
@@ -238,7 +238,13 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusServiceUnavailable, "api disabled")
 		return
 	}
-	route, params, err := dbMatchRoute(globalCtx.AppDB(), pid, api.ID, r.Method, publicPath)
+	requestMethod := r.Method
+	preflight := r.Method == http.MethodOptions && strings.TrimSpace(r.Header.Get("Origin")) != "" &&
+		strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")) != ""
+	if preflight {
+		requestMethod = strings.ToUpper(strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")))
+	}
+	route, params, err := dbMatchRoute(globalCtx.AppDB(), pid, api.ID, requestMethod, publicPath)
 	if err != nil {
 		logRow.Error = err.Error()
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -252,6 +258,18 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	logRow.RouteID = route.ID
 	logRow.TargetKind = route.TargetKind
 	logRow.TargetRef = route.TargetRef
+	corsWriter, handled, err := prepareGatewayCORS(w, r, api, route, requestMethod, preflight)
+	if err != nil {
+		logRow.StatusCode = http.StatusForbidden
+		logRow.Error = err.Error()
+		httpErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if handled {
+		logRow.StatusCode = http.StatusNoContent
+		return
+	}
+	w = corsWriter
 	authCtx, err := a.authorizeRequest(r, api, route)
 	logRow.AuthKind = authCtx.Kind
 	logRow.Subject = authCtx.Subject
@@ -259,10 +277,6 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		logRow.StatusCode = http.StatusUnauthorized
 		logRow.Error = err.Error()
 		httpErr(w, http.StatusUnauthorized, err.Error())
-		return
-	}
-	if applyCORS(w, r, api, route) {
-		logRow.StatusCode = http.StatusNoContent
 		return
 	}
 	status, err := a.dispatchRoute(w, r, api, route, publicPath, params, authCtx)
@@ -686,26 +700,6 @@ func stringFromMap(m map[string]any, key, def string) string {
 		return s
 	}
 	return def
-}
-
-func applyCORS(w http.ResponseWriter, r *http.Request, api *API, route *APIRoute) bool {
-	policy := effectiveJSON(api.CORSJSON, route.CORSJSON)
-	if len(policy) == 0 || stringFromMap(policy, "enabled", "") == "false" {
-		return false
-	}
-	origin := r.Header.Get("Origin")
-	allow := stringFromMap(policy, "allow_origin", "*")
-	if origin != "" {
-		w.Header().Set("Access-Control-Allow-Origin", allow)
-	}
-	w.Header().Set("Vary", "Origin")
-	w.Header().Set("Access-Control-Allow-Headers", stringFromMap(policy, "allow_headers", "authorization, content-type, x-api-key"))
-	w.Header().Set("Access-Control-Allow-Methods", stringFromMap(policy, "allow_methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"))
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return true
-	}
-	return false
 }
 
 func writeStructuredResponse(w http.ResponseWriter, raw json.RawMessage) bool {

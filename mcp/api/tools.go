@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"net"
 	"net/url"
@@ -22,7 +23,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"hostname":    map[string]any{"type": "string"},
 				"dns_mode":    map[string]any{"type": "string"},
 				"allow_http":  map[string]any{"type": "boolean"},
-				"cors":        map[string]any{"type": "object"},
+				"cors":        corsPolicySchema(),
 				"auth":        map[string]any{"type": "object"},
 			}, []string{"slug"}),
 			Handler: a.toolAPICreate,
@@ -45,7 +46,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"hostname":    map[string]any{"type": "string"},
 			"dns_mode":    map[string]any{"type": "string"},
 			"allow_http":  map[string]any{"type": "boolean"},
-			"cors":        map[string]any{"type": "object"},
+			"cors":        corsPolicySchema(),
 			"auth":        map[string]any{"type": "object"},
 		}, nil), Handler: a.toolAPIUpdate},
 		{Name: "api_delete", Description: "Delete an API.", InputSchema: schemaObject(map[string]any{
@@ -67,7 +68,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"target_path":  map[string]any{"type": "string"},
 				"events":       map[string]any{"type": "object"},
 				"auth":         map[string]any{"type": "object"},
-				"cors":         map[string]any{"type": "object"},
+				"cors":         corsPolicySchema(),
 				"timeout_ms":   map[string]any{"type": "integer"},
 				"priority":     map[string]any{"type": "integer"},
 				"enabled":      map[string]any{"type": "boolean"},
@@ -116,6 +117,9 @@ func (a *App) toolAPICreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if _, err := parseEffectiveCORSPolicy(corsJSON, "{}"); err != nil {
+		return nil, err
+	}
 	authJSON, err := jsonTextArg(args, "auth", "{}")
 	if err != nil {
 		return nil, err
@@ -136,7 +140,10 @@ func (a *App) toolAPICreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	a.configureExposure(ctx, api)
 	api, _ = dbGetAPIByID(ctx.AppDB(), pid, api.ID)
-	return map[string]any{"api": api}, nil
+	out := map[string]any{"api": api}
+	attempted, syncErr := syncAPIBrowserOriginPolicy(ctx, api)
+	recordBrowserOriginSync(out, attempted, syncErr)
+	return out, nil
 }
 
 func (a *App) toolAPIGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -161,13 +168,28 @@ func (a *App) toolAPIUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil || api == nil {
 		return nil, err
 	}
+	if _, ok := args["cors"]; ok {
+		corsJSON, err := jsonTextArg(args, "cors", api.CORSJSON)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := parseEffectiveCORSPolicy(corsJSON, "{}"); err != nil {
+			return nil, err
+		}
+		// dbUpdateAPI accepts structured values. Preserve a caller-supplied JSON
+		// string as an object rather than storing it as a quoted JSON string.
+		args["cors"] = json.RawMessage(corsJSON)
+	}
 	updated, err := dbUpdateAPI(ctx.AppDB(), api.ProjectID, api.ID, args)
 	if err != nil {
 		return nil, err
 	}
 	a.configureExposure(ctx, updated)
 	updated, _ = dbGetAPIByID(ctx.AppDB(), api.ProjectID, api.ID)
-	return map[string]any{"api": updated}, nil
+	out := map[string]any{"api": updated}
+	attempted, syncErr := syncAPIBrowserOriginPolicy(ctx, updated)
+	recordBrowserOriginSync(out, attempted, syncErr)
+	return out, nil
 }
 
 func (a *App) toolAPIDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -178,8 +200,16 @@ func (a *App) toolAPIDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if api.Hostname != "" {
 		_ = ctx.PlatformAPI().UnexposeIngress(api.Hostname)
 	}
+	attempted := false
+	var syncErr error
+	if ctx.BrowserOriginsAPI() != nil {
+		attempted = true
+		syncErr = ctx.DeleteBrowserOrigins(browserOriginRegistrationKey(api.ID))
+	}
 	ok, err := dbDeleteAPI(ctx.AppDB(), api.ProjectID, api.ID)
-	return map[string]any{"deleted": ok}, err
+	out := map[string]any{"deleted": ok}
+	recordBrowserOriginSync(out, attempted, syncErr)
+	return out, err
 }
 
 func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -197,6 +227,9 @@ func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	eventsJSON, err := jsonTextArg(args, "events", "{}")
 	if err != nil {
+		return nil, err
+	}
+	if _, err := parseEffectiveCORSPolicy(api.CORSJSON, corsJSON); err != nil {
 		return nil, err
 	}
 	enabled := true
@@ -221,7 +254,10 @@ func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"route": route, "action": action}, nil
+	out := map[string]any{"route": route, "action": action}
+	attempted, syncErr := syncAPIBrowserOriginPolicy(ctx, api)
+	recordBrowserOriginSync(out, attempted, syncErr)
+	return out, nil
 }
 
 func (a *App) toolRouteList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -241,8 +277,24 @@ func (a *App) toolRouteDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	ok, err := dbDeleteRoute(ctx.AppDB(), pid, int64(intArg(args, "id", 0)))
-	return map[string]any{"deleted": ok}, err
+	route, err := dbGetRouteByID(ctx.AppDB(), pid, int64(intArg(args, "id", 0)))
+	if err != nil {
+		return nil, err
+	}
+	if route == nil {
+		return map[string]any{"deleted": false}, nil
+	}
+	api, err := dbGetAPIByID(ctx.AppDB(), pid, route.APIID)
+	if err != nil {
+		return nil, err
+	}
+	ok, err := dbDeleteRoute(ctx.AppDB(), pid, route.ID)
+	out := map[string]any{"deleted": ok}
+	if err == nil && api != nil {
+		attempted, syncErr := syncAPIBrowserOriginPolicy(ctx, api)
+		recordBrowserOriginSync(out, attempted, syncErr)
+	}
+	return out, err
 }
 
 func (a *App) toolKeyCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {

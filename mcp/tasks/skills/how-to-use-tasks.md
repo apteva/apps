@@ -1,7 +1,7 @@
 # Using Tasks
 
 Tasks are durable work records. Threads are opaque identifiers: never infer a
-role such as “main”, “conversation”, or “worker” from a thread ID.
+platform role from a thread ID.
 
 Task inventory is agent-wide within the current project. A task created,
 assigned, or executed by any thread of the agent remains visible from every
@@ -33,7 +33,7 @@ requests.
 
 The calling thread is always the creator. Immediate work defaults to that
 creator. Scheduled work defaults to the agent's configured default thread so a
-schedule does not depend on a UI conversation staying active. Assign an
+schedule does not depend on the requesting thread staying active. Assign an
 explicit opaque thread only when another existing thread should own the work.
 Tasks records work but does not create threads. When separate context,
 ownership, or parallel execution is useful, main creates the worker with the
@@ -84,6 +84,15 @@ milestones so the task does not sit at its initial percentage throughout the
 work. Percentages represent completed work and remain monotonic; changing
 threads or entering `waiting` does not by itself increase progress.
 
+`tasks_update` also edits an existing task definition. Call `tasks_get` first,
+then send the changed `title`, `description`, and/or partial `schedule` together
+in one update; omitted fields are preserved atomically. For a recurring task,
+update the recurring parent ID rather than an occurrence ID. Editing its
+schedule preserves whether it is paused, and future occurrences inherit the
+new title and description. Occurrences already materialized remain immutable
+snapshots. Never create a placeholder task to rename or reschedule an existing
+one.
+
 For example, a four-message delegated inbox review could record:
 
 - `running` · 10% · `Listing unread Gmail messages`
@@ -103,3 +112,12 @@ Use `once` with an RFC3339 `at` timestamp or a relative `after` duration. Use
 `interval` or five-field `cron` for recurrence. Server time is authoritative.
 List, pause, resume, cancel, and run schedules through Tasks directly; do not
 ask another thread merely to inspect the schedule inventory.
+
+Every due schedule has an occurrence lifecycle. Scheduler dispatch is not
+workflow success: the assigned thread accepts an occurrence when it reads the
+authoritative record with `tasks_get`, then records running milestones and a
+terminal outcome. Always include a durable `result_reference` when the work
+creates an output ID or URL. A dispatched occurrence that is never accepted is
+failed automatically; do not recreate it merely because the parent schedule is
+still active. The recurring parent reports scheduler state separately from its
+latest occurrence status and error.

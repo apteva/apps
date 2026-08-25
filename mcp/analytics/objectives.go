@@ -13,13 +13,17 @@ import (
 )
 
 type ObjectiveMetricQuery struct {
-	Aggregation string         `json:"aggregation"`
-	App         string         `json:"app,omitempty"`
-	Topic       string         `json:"topic,omitempty"`
-	Source      string         `json:"source,omitempty"`
-	Value       string         `json:"value,omitempty"`
-	By          string         `json:"by,omitempty"`
-	Where       map[string]any `json:"where,omitempty"`
+	Aggregation       string         `json:"aggregation"`
+	App               string         `json:"app,omitempty"`
+	Topic             string         `json:"topic,omitempty"`
+	Source            string         `json:"source,omitempty"`
+	Value             string         `json:"value,omitempty"`
+	By                string         `json:"by,omitempty"`
+	Where             map[string]any `json:"where,omitempty"`
+	CurrencyField     string         `json:"currency_field,omitempty"`
+	ReportingCurrency string         `json:"reporting_currency,omitempty"`
+	AmountUnit        string         `json:"amount_unit,omitempty"`
+	RateDateField     string         `json:"rate_date_field,omitempty"`
 
 	// These selectors are owned by the target and platform context. Keeping
 	// them in the decoder lets us reject attempts to smuggle scope into a query.
@@ -109,6 +113,12 @@ func objectiveMetricDefinitions() []ObjectiveMetricDefinition {
 		{Key: "page_views", Name: "Page views", Description: "Count page_view events.", DefaultUnit: "count", Query: ObjectiveMetricQuery{Aggregation: "count", Topic: "page_view"}},
 		{Key: "unique_sessions", Name: "Unique sessions", Description: "Count distinct sessions for matching events.", DefaultUnit: "count", Query: ObjectiveMetricQuery{Aggregation: "distinct", By: "session_id"}},
 		{Key: "custom_sum", Name: "Sum a property", Description: "Sum a numeric event property such as props.amount_usd.", DefaultUnit: "number", Query: ObjectiveMetricQuery{Aggregation: "sum", Value: "props.value"}},
+		{Key: "money_sum", Name: "Money total", Description: "Convert mixed-currency event amounts into one reporting currency and sum them without changing source events.", DefaultUnit: "money", Query: ObjectiveMetricQuery{Aggregation: "sum_money", Value: "props.amount_cents", CurrencyField: "props.currency", ReportingCurrency: "EUR", AmountUnit: "minor"}},
+		{Key: "custom_average", Name: "Average a property", Description: "Average a numeric event property.", DefaultUnit: "number", Query: ObjectiveMetricQuery{Aggregation: "average", Value: "props.value"}},
+		{Key: "custom_min", Name: "Minimum property value", Description: "Measure the minimum numeric value in the target period.", DefaultUnit: "number", Query: ObjectiveMetricQuery{Aggregation: "min", Value: "props.value"}},
+		{Key: "custom_max", Name: "Maximum property value", Description: "Measure the maximum numeric value in the target period.", DefaultUnit: "number", Query: ObjectiveMetricQuery{Aggregation: "max", Value: "props.value"}},
+		{Key: "custom_latest", Name: "Latest property value", Description: "Measure the latest numeric observation in the target period.", DefaultUnit: "number", Query: ObjectiveMetricQuery{Aggregation: "latest", Value: "props.value"}},
+		{Key: "custom_change", Name: "Property change", Description: "Measure latest minus first numeric observation in the target period.", DefaultUnit: "number", Query: ObjectiveMetricQuery{Aggregation: "change", Value: "props.value"}},
 	}
 }
 
@@ -197,21 +207,39 @@ func validateObjectiveTarget(t *ObjectiveTarget) error {
 	if _, err := time.LoadLocation(t.Timezone); err != nil {
 		return fmt.Errorf("invalid timezone %q", t.Timezone)
 	}
-	return validateObjectiveMetricQuery(&t.Query)
+	if err := validateObjectiveMetricQuery(&t.Query); err != nil {
+		return err
+	}
+	if t.Query.Aggregation == "sum_money" {
+		if t.Unit != "money" {
+			return errors.New("sum_money targets must use the money unit")
+		}
+		if t.Currency != t.Query.ReportingCurrency {
+			return errors.New("money target currency must match query reporting_currency")
+		}
+	}
+	return nil
 }
 
 func validateObjectiveMetricQuery(q *ObjectiveMetricQuery) error {
 	q.Aggregation = strings.ToLower(strings.TrimSpace(q.Aggregation))
+	if q.Aggregation == "avg" {
+		q.Aggregation = "average"
+	}
 	q.App = strings.TrimSpace(q.App)
 	q.Topic = strings.TrimSpace(q.Topic)
 	q.Source = strings.TrimSpace(q.Source)
 	q.Value = strings.TrimSpace(q.Value)
 	q.By = strings.TrimSpace(q.By)
+	q.CurrencyField = strings.TrimSpace(q.CurrencyField)
+	q.ReportingCurrency = strings.ToUpper(strings.TrimSpace(q.ReportingCurrency))
+	q.AmountUnit = strings.ToLower(strings.TrimSpace(q.AmountUnit))
+	q.RateDateField = strings.TrimSpace(q.RateDateField)
 	if q.ProjectID != "" || q.Since != 0 || q.Until != 0 || q.Window != "" {
 		return errors.New("project_id and time range are assigned by the objective target")
 	}
-	if !oneOf(q.Aggregation, "count", "sum", "distinct") {
-		return errors.New("query aggregation must be count, sum or distinct")
+	if !oneOf(q.Aggregation, "count", "distinct", "sum", "sum_money", "average", "min", "max", "latest", "change") {
+		return errors.New("query aggregation must be count, distinct, sum_money, sum, average, min, max, latest or change")
 	}
 	if q.Source != "" && !oneOf(q.Source, "track", "auto") {
 		return errors.New("query source must be track or auto")
@@ -219,9 +247,20 @@ func validateObjectiveMetricQuery(q *ObjectiveMetricQuery) error {
 	switch q.Aggregation {
 	case "count":
 		q.Value, q.By = "", ""
-	case "sum":
+		q.CurrencyField, q.ReportingCurrency, q.AmountUnit, q.RateDateField = "", "", "", ""
+	case "sum", "average", "min", "max", "latest", "change":
 		if _, _, ok := numericValueExtract(q.Value); !ok {
-			return errors.New("sum query value must be a numeric event field or props.X")
+			return fmt.Errorf("%s query value must be a numeric event field or props.X", q.Aggregation)
+		}
+		q.By = ""
+		q.CurrencyField, q.ReportingCurrency, q.AmountUnit, q.RateDateField = "", "", "", ""
+	case "sum_money":
+		if _, err := moneyQueryFromConfig(map[string]any{
+			"value": q.Value, "currency_field": q.CurrencyField,
+			"reporting_currency": q.ReportingCurrency, "amount_unit": q.AmountUnit,
+			"rate_date_field": q.RateDateField,
+		}); err != nil {
+			return err
 		}
 		q.By = ""
 	case "distinct":
@@ -229,6 +268,7 @@ func validateObjectiveMetricQuery(q *ObjectiveMetricQuery) error {
 			return errors.New("distinct query by must be session_id, user_id, app, topic, source or props.X")
 		}
 		q.Value = ""
+		q.CurrencyField, q.ReportingCurrency, q.AmountUnit, q.RateDateField = "", "", "", ""
 	}
 	for key := range q.Where {
 		if _, ok := propsExtract(key); !ok {
@@ -462,6 +502,12 @@ func evaluateObjective(db *sql.DB, projectID string, objectiveID int64) ([]Targe
 }
 
 func evaluateObjectiveTarget(db *sql.DB, projectID string, target ObjectiveTarget) TargetProgress {
+	return measureObjectiveTarget(db, projectID, target, true)
+}
+
+// measureObjectiveTarget powers live dashboard goal badges without turning a
+// read-only dashboard refresh into objective-progress history writes.
+func measureObjectiveTarget(db *sql.DB, projectID string, target ObjectiveTarget, persist bool) TargetProgress {
 	now := time.Now().UnixMilli()
 	progress := progressBase(target, now)
 	f := Filter{ProjectID: projectID, App: target.Query.App, Topic: target.Query.Topic, Source: target.Query.Source,
@@ -475,11 +521,36 @@ func evaluateObjectiveTarget(db *sql.DB, projectID string, target ObjectiveTarge
 		count, err = countEvents(db, f)
 		actual = float64(count)
 		details["matched_events"] = count
-	case "sum":
-		var count int64
-		actual, count, err = sumScalarForWidget(db, f, target.Query.Value)
-		details["matched_values"] = count
+	case "sum", "average", "min", "max", "latest", "change":
+		var result map[string]any
+		result, err = numericScalarForWidget(db, f, target.Query.Value, target.Query.Aggregation)
+		if result != nil {
+			actual, _ = result["value"].(float64)
+			details["matched_values"] = result["count"]
+			for _, key := range []string{"previous", "current", "change", "change_percent"} {
+				if value, ok := result[key]; ok {
+					details[key] = value
+				}
+			}
+		}
 		details["value"] = target.Query.Value
+	case "sum_money":
+		var result map[string]any
+		result, err = moneyScalarForWidget(db, f, map[string]any{
+			"value":              target.Query.Value,
+			"currency_field":     target.Query.CurrencyField,
+			"reporting_currency": target.Query.ReportingCurrency,
+			"amount_unit":        target.Query.AmountUnit,
+			"rate_date_field":    target.Query.RateDateField,
+		})
+		if result != nil {
+			actual, _ = result["value"].(float64)
+			details["matched_values"] = result["count"]
+			details["value"] = target.Query.Value
+			details["currency"] = result["currency"]
+			details["breakdown"] = result["breakdown"]
+			details["fx"] = result["fx"]
+		}
 	case "distinct":
 		var count int64
 		count, err = distinctCount(db, f, target.Query.By)
@@ -489,7 +560,9 @@ func evaluateObjectiveTarget(db *sql.DB, projectID string, target ObjectiveTarge
 	if err != nil {
 		progress.Status = "error"
 		progress.Error = err.Error()
-		cacheObjectiveProgressError(db, target.ID, progress.Error, now)
+		if persist {
+			cacheObjectiveProgressError(db, target.ID, progress.Error, now)
+		}
 		if cached, cacheErr := cachedTargetProgress(db, target); cacheErr == nil && cached != nil {
 			cached.Status = "error"
 			cached.Error = progress.Error
@@ -503,8 +576,188 @@ func evaluateObjectiveTarget(db *sql.DB, projectID string, target ObjectiveTarge
 	progress.Details = details
 	progress.MeasuredAt = &now
 	progress.ProgressPct, progress.Achieved = objectiveCompletion(actual, target.TargetValue, target.Direction)
-	cacheObjectiveProgressOK(db, target.ID, actual, details, now)
+	if persist {
+		cacheObjectiveProgressOK(db, target.ID, actual, details, now)
+	}
 	return progress
+}
+
+type DashboardGoalProgress struct {
+	ObjectiveName   string `json:"objective_name"`
+	ObjectiveStatus string `json:"objective_status"`
+	TargetProgress
+}
+
+type dashboardGoalTarget struct {
+	ObjectiveName   string
+	ObjectiveStatus string
+	Target          ObjectiveTarget
+}
+
+func dashboardGoalTargetIDs(config map[string]any) ([]int64, error) {
+	raw, found := config["objective_target_ids"]
+	if !found || raw == nil {
+		return nil, nil
+	}
+	values, ok := raw.([]any)
+	if !ok {
+		switch typed := raw.(type) {
+		case []int64:
+			values = make([]any, len(typed))
+			for i, value := range typed {
+				values[i] = value
+			}
+		case []int:
+			values = make([]any, len(typed))
+			for i, value := range typed {
+				values[i] = value
+			}
+		default:
+			return nil, errors.New("objective_target_ids must be an array of positive integers")
+		}
+	}
+	if len(values) > 10 {
+		return nil, errors.New("a dashboard metric may link at most 10 objective targets")
+	}
+	seen := map[int64]bool{}
+	out := make([]int64, 0, len(values))
+	for _, rawValue := range values {
+		var id int64
+		switch value := rawValue.(type) {
+		case int:
+			id = int64(value)
+		case int64:
+			id = value
+		case float64:
+			if math.Trunc(value) != value || value > math.MaxInt64 {
+				return nil, errors.New("objective_target_ids must contain positive integers")
+			}
+			id = int64(value)
+		case json.Number:
+			parsed, err := value.Int64()
+			if err != nil {
+				return nil, errors.New("objective_target_ids must contain positive integers")
+			}
+			id = parsed
+		default:
+			return nil, errors.New("objective_target_ids must contain positive integers")
+		}
+		if id <= 0 {
+			return nil, errors.New("objective_target_ids must contain positive integers")
+		}
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+func validateDashboardGoalLinks(db *sql.DB, projectID string, config map[string]any) error {
+	ids, err := dashboardGoalTargetIDs(config)
+	if err != nil || len(ids) == 0 {
+		return err
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, projectID)
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM objective_targets t JOIN objectives o ON o.id=t.objective_id
+		WHERE o.project_id=? AND o.status!='archived' AND t.id IN (`+strings.Join(placeholders, ",")+`)`, args...).Scan(&count); err != nil {
+		return err
+	}
+	if count != len(ids) {
+		return errors.New("every objective_target_id must reference a non-archived target in this project")
+	}
+	return nil
+}
+
+// dashboardGoalsForWidgets resolves all linked targets in one project-scoped
+// query, evaluates each unique target once, and never updates progress cache.
+func dashboardGoalsForWidgets(db *sql.DB, projectID string, widgets []DashboardWidget) (map[int64][]DashboardGoalProgress, map[int64]string, error) {
+	widgetTargets := map[int64][]int64{}
+	errorsByWidget := map[int64]string{}
+	unique := map[int64]bool{}
+	var targetIDs []int64
+	for _, widget := range widgets {
+		ids, err := dashboardGoalTargetIDs(widget.Config)
+		if err != nil {
+			errorsByWidget[widget.ID] = err.Error()
+			continue
+		}
+		widgetTargets[widget.ID] = ids
+		for _, id := range ids {
+			if !unique[id] {
+				unique[id] = true
+				targetIDs = append(targetIDs, id)
+			}
+		}
+	}
+	if len(targetIDs) == 0 {
+		return map[int64][]DashboardGoalProgress{}, errorsByWidget, nil
+	}
+	placeholders := make([]string, len(targetIDs))
+	args := make([]any, 0, len(targetIDs)+1)
+	args = append(args, projectID)
+	for i, id := range targetIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	rows, err := db.Query(`SELECT t.id, t.objective_id, t.name, t.metric_key, t.target_value, t.unit, t.currency,
+		t.direction, t.period_start, t.period_end, t.timezone, t.query_json, t.created_at, t.updated_at,
+		o.name, o.status
+		FROM objective_targets t JOIN objectives o ON o.id=t.objective_id
+		WHERE o.project_id=? AND o.status!='archived' AND t.id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	loaded := map[int64]dashboardGoalTarget{}
+	for rows.Next() {
+		var item dashboardGoalTarget
+		var rawQuery string
+		target := &item.Target
+		if err := rows.Scan(&target.ID, &target.ObjectiveID, &target.Name, &target.MetricKey, &target.TargetValue,
+			&target.Unit, &target.Currency, &target.Direction, &target.PeriodStart, &target.PeriodEnd, &target.Timezone,
+			&rawQuery, &target.CreatedAt, &target.UpdatedAt, &item.ObjectiveName, &item.ObjectiveStatus); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		if err := json.Unmarshal([]byte(rawQuery), &target.Query); err != nil {
+			rows.Close()
+			return nil, nil, fmt.Errorf("decode objective target %d query: %w", target.ID, err)
+		}
+		loaded[target.ID] = item
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, err
+	}
+	measured := map[int64]DashboardGoalProgress{}
+	for id, item := range loaded {
+		measured[id] = DashboardGoalProgress{
+			ObjectiveName: item.ObjectiveName, ObjectiveStatus: item.ObjectiveStatus,
+			TargetProgress: measureObjectiveTarget(db, projectID, item.Target, false),
+		}
+	}
+	out := map[int64][]DashboardGoalProgress{}
+	for widgetID, ids := range widgetTargets {
+		for _, id := range ids {
+			goal, found := measured[id]
+			if !found {
+				errorsByWidget[widgetID] = fmt.Sprintf("linked objective target %d is unavailable in this project", id)
+				continue
+			}
+			out[widgetID] = append(out[widgetID], goal)
+		}
+	}
+	return out, errorsByWidget, nil
 }
 
 func progressBase(target ObjectiveTarget, now int64) TargetProgress {

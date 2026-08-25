@@ -133,6 +133,12 @@ func (a *App) Workers() []sdk.Worker {
 		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
 			return a.runTrialReminders(ctx)
 		},
+	}, {
+		Name:     "crm-customer-sync",
+		Schedule: "@every 10m",
+		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+			return a.retryPendingCRMCustomers(ctx)
+		},
 	}}
 }
 
@@ -214,15 +220,20 @@ func (a *App) MCPTools() []sdk.Tool {
 func main() { sdk.Run(&App{}) }
 
 type Customer struct {
-	ID                int64           `json:"id"`
-	ProjectID         string          `json:"project_id"`
-	Email             string          `json:"email"`
-	Name              string          `json:"name"`
-	BillingCustomerID *int64          `json:"billing_customer_id,omitempty"`
-	AuthUserID        *int64          `json:"auth_user_id,omitempty"`
-	Metadata          json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt         string          `json:"created_at"`
-	UpdatedAt         string          `json:"updated_at"`
+	ID                 int64           `json:"id"`
+	ProjectID          string          `json:"project_id"`
+	Email              string          `json:"email"`
+	Name               string          `json:"name"`
+	BillingCustomerID  *int64          `json:"billing_customer_id,omitempty"`
+	AuthUserID         *int64          `json:"auth_user_id,omitempty"`
+	CRMContactID       *int64          `json:"crm_contact_id,omitempty"`
+	CRMSyncStatus      string          `json:"crm_sync_status"`
+	CRMSyncError       string          `json:"crm_sync_error,omitempty"`
+	CRMSyncAttemptedAt string          `json:"crm_sync_attempted_at,omitempty"`
+	CRMSyncedAt        string          `json:"crm_synced_at,omitempty"`
+	Metadata           json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt          string          `json:"created_at"`
+	UpdatedAt          string          `json:"updated_at"`
 }
 
 type Plan struct {
@@ -825,6 +836,11 @@ func (a *App) toolCustomerCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	c, err := dbCustomerUpsert(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	a.syncCustomerCRM(ctx, pid, c)
+	c, err = dbCustomerGet(ctx.AppDB(), pid, c.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -1440,7 +1456,7 @@ func (a *App) createAccount(ctx *sdk.AppCtx, args map[string]any) (*Account, boo
 	if owner == "" {
 		return nil, false, errors.New("owner_email required")
 	}
-	customer, err := resolveCustomer(ctx.AppDB(), pid, args)
+	customer, err := a.resolveCustomer(ctx, pid, args)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1660,7 +1676,7 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	if (discountID != 0 || discountCode != "") && !requiresCommerce {
 		return nil, errors.New("discounts require a Catalog-backed subscription plan")
 	}
-	customer, err := resolveCustomer(ctx.AppDB(), pid, args)
+	customer, err := a.resolveCustomer(ctx, pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -4107,25 +4123,38 @@ func dbCustomerUpsert(db *sql.DB, pid string, args map[string]any) (*Customer, e
 	return dbCustomerGet(db, pid, id)
 }
 
-func resolveCustomer(db *sql.DB, pid string, args map[string]any) (*Customer, error) {
+func (a *App) resolveCustomer(ctx *sdk.AppCtx, pid string, args map[string]any) (*Customer, error) {
+	db := ctx.AppDB()
+	var customer *Customer
+	var err error
 	if id := int64Arg(args, "customer_id"); id > 0 {
-		c, err := dbCustomerGet(db, pid, id)
-		if err != nil || c == nil {
-			return c, firstErr(err, errors.New("customer not found"))
+		customer, err = dbCustomerGet(db, pid, id)
+		if err != nil || customer == nil {
+			return customer, firstErr(err, errors.New("customer not found"))
 		}
-		return c, nil
+	} else {
+		email := firstNonEmpty(strArg(args, "customer_email"), strArg(args, "owner_email"))
+		body := map[string]any{"email": email, "name": strArg(args, "customer_name"), "billing_customer_id": int64Arg(args, "billing_customer_id"), "auth_user_id": int64Arg(args, "auth_user_id")}
+		customer, err = dbCustomerUpsert(db, pid, body)
+		if err != nil {
+			return nil, err
+		}
 	}
-	email := firstNonEmpty(strArg(args, "customer_email"), strArg(args, "owner_email"))
-	body := map[string]any{"email": email, "name": strArg(args, "customer_name"), "billing_customer_id": int64Arg(args, "billing_customer_id"), "auth_user_id": int64Arg(args, "auth_user_id")}
-	return dbCustomerUpsert(db, pid, body)
+	a.syncCustomerCRM(ctx, pid, customer)
+	return dbCustomerGet(db, pid, customer.ID)
 }
 
 func dbCustomerGet(db *sql.DB, pid string, id int64) (*Customer, error) {
 	var c Customer
-	var billing, authUser sql.NullInt64
+	var billing, authUser, crmContact sql.NullInt64
+	var crmAttempted, crmSynced sql.NullString
 	var meta string
-	err := db.QueryRow(`SELECT id, project_id, email, name, billing_customer_id, auth_user_id, metadata_json, created_at, updated_at FROM saas_customers WHERE project_id=? AND id=?`, pid, id).
-		Scan(&c.ID, &c.ProjectID, &c.Email, &c.Name, &billing, &authUser, &meta, &c.CreatedAt, &c.UpdatedAt)
+	err := db.QueryRow(`SELECT id, project_id, email, name, billing_customer_id, auth_user_id,
+		crm_contact_id, crm_sync_status, crm_sync_error, crm_sync_attempted_at, crm_synced_at,
+		metadata_json, created_at, updated_at FROM saas_customers WHERE project_id=? AND id=?`, pid, id).
+		Scan(&c.ID, &c.ProjectID, &c.Email, &c.Name, &billing, &authUser,
+			&crmContact, &c.CRMSyncStatus, &c.CRMSyncError, &crmAttempted, &crmSynced,
+			&meta, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -4137,6 +4166,15 @@ func dbCustomerGet(db *sql.DB, pid string, id int64) (*Customer, error) {
 	}
 	if authUser.Valid {
 		c.AuthUserID = &authUser.Int64
+	}
+	if crmContact.Valid {
+		c.CRMContactID = &crmContact.Int64
+	}
+	if crmAttempted.Valid {
+		c.CRMSyncAttemptedAt = crmAttempted.String
+	}
+	if crmSynced.Valid {
+		c.CRMSyncedAt = crmSynced.String
 	}
 	c.Metadata = json.RawMessage(meta)
 	return &c, nil
@@ -4468,7 +4506,9 @@ func dbHydrateAccounts(db *sql.DB, pid string, accounts []*Account) error {
 		customerMarks = append(customerMarks, "?")
 		customerVals = append(customerVals, id)
 	}
-	rows, err := db.Query(`SELECT id, project_id, email, name, billing_customer_id, auth_user_id, metadata_json, created_at, updated_at
+	rows, err := db.Query(`SELECT id, project_id, email, name, billing_customer_id, auth_user_id,
+		crm_contact_id, crm_sync_status, crm_sync_error, crm_sync_attempted_at, crm_synced_at,
+		metadata_json, created_at, updated_at
 		FROM saas_customers WHERE project_id=? AND id IN (`+strings.Join(customerMarks, ",")+`)`, customerVals...)
 	if err != nil {
 		return err
@@ -4476,14 +4516,24 @@ func dbHydrateAccounts(db *sql.DB, pid string, accounts []*Account) error {
 	customers := map[int64]*Customer{}
 	for rows.Next() {
 		var customer Customer
-		var billingID, authUserID sql.NullInt64
+		var billingID, authUserID, crmContactID sql.NullInt64
+		var crmAttemptedAt, crmSyncedAt sql.NullString
 		var metadata string
-		if err := rows.Scan(&customer.ID, &customer.ProjectID, &customer.Email, &customer.Name, &billingID, &authUserID, &metadata, &customer.CreatedAt, &customer.UpdatedAt); err != nil {
+		if err := rows.Scan(&customer.ID, &customer.ProjectID, &customer.Email, &customer.Name,
+			&billingID, &authUserID, &crmContactID, &customer.CRMSyncStatus, &customer.CRMSyncError,
+			&crmAttemptedAt, &crmSyncedAt, &metadata, &customer.CreatedAt, &customer.UpdatedAt); err != nil {
 			rows.Close()
 			return err
 		}
 		customer.BillingCustomerID = ptrIfValid(billingID)
 		customer.AuthUserID = ptrIfValid(authUserID)
+		customer.CRMContactID = ptrIfValid(crmContactID)
+		if crmAttemptedAt.Valid {
+			customer.CRMSyncAttemptedAt = crmAttemptedAt.String
+		}
+		if crmSyncedAt.Valid {
+			customer.CRMSyncedAt = crmSyncedAt.String
+		}
 		customer.Metadata = json.RawMessage(metadata)
 		customers[customer.ID] = &customer
 	}

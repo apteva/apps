@@ -193,12 +193,29 @@ func pickExt(outputFormat string) string {
 	return "png"
 }
 
-// storageContentURL returns the relative URL the dashboard / MCP host
-// can fetch to stream the saved bytes back. Routed through the platform
-// proxy at /api/apps/storage/* (auth via the host's session); media-studio
-// itself never needs to mint a signed URL for this path.
-func storageContentURL(id int64, projectID string) string {
-	return fmt.Sprintf("/api/apps/storage/files/%d/content?project_id=%s", id, url.QueryEscape(projectID))
+// storageHTTPSURLs asks the bound Storage install to mint model-fetchable,
+// time-limited URLs. Storage owns the signing details and routes the request to
+// the exact install that received the upload; Media Studio only accepts fully
+// qualified HTTPS URLs so callers never mistake an authenticated dashboard
+// route for an externally fetchable asset.
+func storageHTTPSURLs(ctx *sdk.AppCtx, ids []int64) ([]string, error) {
+	urls := make([]string, 0, len(ids))
+	for _, id := range ids {
+		var got struct {
+			URL string `json:"url"`
+		}
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", storageArgs(ctx, map[string]any{
+			"id": id,
+		}), &got); err != nil {
+			return nil, fmt.Errorf("storage file %d: mint HTTPS URL: %w", id, err)
+		}
+		parsed, err := url.Parse(strings.TrimSpace(got.URL))
+		if err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" {
+			return nil, fmt.Errorf("storage file %d returned a non-HTTPS URL", id)
+		}
+		urls = append(urls, parsed.String())
+	}
+	return urls, nil
 }
 
 func storageArgs(ctx *sdk.AppCtx, args map[string]any) map[string]any {

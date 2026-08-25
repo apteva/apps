@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.85
+version: 0.15.1
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -95,6 +95,7 @@ provides:
     - { name: scheduled_publisher, schedule: "@every 1m" }
     - { name: inbox_collector, schedule: "@every 5m" }
     - { name: analytics_collector, schedule: "@every 1h" }
+    - { name: provider_reconciler, schedule: "@every 15m" }
   mcp_tools:
     - { name: account_add,                description: "Begin OAuth for a platform." }
     - { name: account_list_pending_pages, description: "List selectable pages/channels for a pending account." }
@@ -103,9 +104,15 @@ provides:
     - { name: account_list,               description: "List connected social accounts." }
     - { name: account_check,              description: "Check that connected social accounts still work." }
     - { name: account_disconnect,         description: "Revoke a social account." }
-    - { name: post_create,                description: "Create + publish (or schedule) a post across accounts. Scheduled creates are idempotent; retry failed scheduling via post_retry. Pass top-level body or per-target body values." }
+    - { name: post_create,                description: "Create with required explicit mode=draft|schedule|publish. Drafts are optional; direct scheduling and publishing remain first-class. Missing mode never publishes." }
+    - { name: post_draft_create,          description: "Create a media-capable draft without publishing." }
+    - { name: post_draft_update,          description: "Update a draft using expected_revision; edits invalidate approval." }
+    - { name: post_draft_submit,          description: "Submit an exact draft revision for optional review." }
+    - { name: post_draft_approve,         description: "Approve the exact revision in review." }
+    - { name: post_draft_reject,          description: "Reject the exact revision in review with a reason." }
+    - { name: post_draft_publish,         description: "Publish or schedule a stored draft with explicit mode and expected_revision." }
     - { name: post_list,                  description: "List recent posts." }
-    - { name: post_retry,                 description: "Re-attempt a failed post. Failed scheduled posts retry job creation on the same post." }
+    - { name: post_retry,                 description: "Retry transient failures only; deterministic duplicates fail once and return the existing post id." }
     - { name: post_publish_scheduled,     description: "Internal Jobs callback that publishes one scheduled post and reports the final downstream result." }
     - { name: inbox_list,                 description: "List inbox items (comments, DMs, mentions, reviews) from connected accounts." }
     - { name: inbox_get,                  description: "Fetch one inbox item, optionally with the surrounding thread." }
@@ -134,7 +141,7 @@ provides:
           profile_id: { type: integer }
           social_account_id: { type: integer }
           view: { type: string, enum: [week, month] }
-          status: { type: string, enum: [all, scheduled, published, failed, partial, draft] }
+          status: { type: string, enum: [all, scheduled, published, failed, partial, draft, in_review, approved, rejected] }
           anchor_date: { type: string }
       preview_props:
         preview: true
@@ -644,6 +651,11 @@ func (a *App) Workers() []sdk.Worker {
 			Schedule: "@every 1h",
 			Run:      a.runAnalyticsCollector,
 		},
+		{
+			Name:     "provider_reconciler",
+			Schedule: "@every 15m",
+			Run:      a.runProviderReconciler,
+		},
 	}
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
@@ -778,7 +790,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "post_create",
-			Description: "Create a post and publish (or schedule) it to N social accounts. " +
+			Description: "Create a post with an explicit, required intent: mode=draft stores it without publishing, mode=schedule requires schedule_at, and mode=publish publishes now. Omitting mode is always rejected and has no side effects. Drafts may omit targets; scheduling and publishing require at least one. " +
 				"Pass EITHER social_account_ids[] (simple multicast — every target uses the post body) " +
 				"OR targets[] (when you want per-target overrides). The two are mutually exclusive. " +
 				"Each target object: {social_account_id (required), body? (required when top-level body is omitted; otherwise override text for this target), " +
@@ -791,8 +803,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Immediate publishes return targets[] with per-platform status, platform_post_id, and platform_url when available. Scheduled publishes return a local scheduled post; call post_list after it runs to get platform_url. " +
 				"Scheduled creates are idempotent: if the same profile/account/media/body/options/time already exists, the existing post is returned or its failed scheduling is retried instead of creating a duplicate. " +
 				"If scheduling fails, retry that existing post with post_retry; do not create a second post with the same args. " +
-				"Args: body? or targets[].body, schedule_at? (RFC3339; omit = post now), media_storage_ids? (file ids), media_project_id? (Storage project scope for those ids).",
+				"Args: mode (draft|schedule|publish), body? or targets[].body, schedule_at? (RFC3339; required only for schedule), media_storage_ids? (file ids), media_project_id? (Storage project scope for those ids), approval_required?, provider_sync_mode? (local|mirror).",
 			InputSchema: schemaObject(map[string]any{
+				"mode":               map[string]any{"type": "string", "enum": []string{"draft", "schedule", "publish"}, "description": "Required publishing intent. There is no implicit publish default."},
 				"body":               map[string]any{"type": "string", "description": "Post-level default text. Required when using social_account_ids; optional with targets[] if every target has a non-empty body."},
 				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 				"targets": map[string]any{
@@ -800,11 +813,70 @@ func (a *App) MCPTools() []sdk.Tool {
 					"description": "Per-target overrides. Each entry: {social_account_id (required), body? required when top-level body is omitted, plus platform-specific keys such as allow_longform for X or title/visibility/thumbnail_storage_id for YouTube}. Mutually exclusive with social_account_ids.",
 					"items":       map[string]any{"type": "object"},
 				},
-				"schedule_at":       map[string]any{"type": "string"},
-				"media_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
-				"media_project_id":  map[string]any{"type": "string"},
-			}, nil),
+				"schedule_at":        map[string]any{"type": "string"},
+				"media_storage_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+				"media_project_id":   map[string]any{"type": "string"},
+				"approval_required":  map[string]any{"type": "boolean", "description": "If true, the draft's current revision must be approved before it can be scheduled or published."},
+				"provider_sync_mode": map[string]any{"type": "string", "enum": []string{"local", "mirror"}, "description": "Draft/provider synchronization policy. Defaults to local."},
+			}, []string{"mode"}),
 			Handler: a.toolPostCreate,
+		},
+		{
+			Name:        "post_draft_create",
+			Description: "Create a local draft without publishing. Convenience alias for post_create mode=draft. Targets and media are optional and may be added later. Args: body?, social_account_ids? or targets?, media_storage_ids?, media_project_id?, approval_required?, provider_sync_mode?.",
+			InputSchema: schemaObject(map[string]any{
+				"body":               map[string]any{"type": "string"},
+				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+				"targets":            map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"media_storage_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+				"media_project_id":   map[string]any{"type": "string"},
+				"approval_required":  map[string]any{"type": "boolean"},
+				"provider_sync_mode": map[string]any{"type": "string", "enum": []string{"local", "mirror"}},
+			}, nil),
+			Handler: a.toolPostDraftCreate,
+		},
+		{
+			Name:        "post_draft_update",
+			Description: "Update a draft using optimistic revision locking. Body, targets and media attachments can be replaced. Any approved revision returns to draft and requires fresh approval. Args: post_id, expected_revision, body?, social_account_ids? or targets?, media_storage_ids?, media_project_id?.",
+			InputSchema: schemaObject(map[string]any{
+				"post_id":            map[string]any{"type": "integer"},
+				"expected_revision":  map[string]any{"type": "integer"},
+				"body":               map[string]any{"type": "string"},
+				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+				"targets":            map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"media_storage_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+				"media_project_id":   map[string]any{"type": "string"},
+			}, []string{"post_id", "expected_revision"}),
+			Handler: a.toolPostDraftUpdate,
+		},
+		{
+			Name:        "post_draft_submit",
+			Description: "Submit a draft revision for review. This opts the post into approval; direct scheduling/publishing remains available for drafts that do not require approval. Args: post_id, expected_revision.",
+			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "expected_revision": map[string]any{"type": "integer"}}, []string{"post_id", "expected_revision"}),
+			Handler:     a.toolPostDraftSubmit,
+		},
+		{
+			Name:        "post_draft_approve",
+			Description: "Approve the exact revision currently in review. Later edits invalidate this approval. Args: post_id, expected_revision.",
+			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "expected_revision": map[string]any{"type": "integer"}}, []string{"post_id", "expected_revision"}),
+			Handler:     a.toolPostDraftApprove,
+		},
+		{
+			Name:        "post_draft_reject",
+			Description: "Reject the exact revision currently in review with a required reason. Args: post_id, expected_revision, reason.",
+			InputSchema: schemaObject(map[string]any{"post_id": map[string]any{"type": "integer"}, "expected_revision": map[string]any{"type": "integer"}, "reason": map[string]any{"type": "string"}}, []string{"post_id", "expected_revision", "reason"}),
+			Handler:     a.toolPostDraftReject,
+		},
+		{
+			Name:        "post_draft_publish",
+			Description: "Publish or schedule a stored draft revision. mode=publish publishes now; mode=schedule requires schedule_at. Approval is enforced only when the post opted into it. Args: post_id, expected_revision, mode, schedule_at?.",
+			InputSchema: schemaObject(map[string]any{
+				"post_id":           map[string]any{"type": "integer"},
+				"expected_revision": map[string]any{"type": "integer"},
+				"mode":              map[string]any{"type": "string", "enum": []string{"publish", "schedule"}},
+				"schedule_at":       map[string]any{"type": "string"},
+			}, []string{"post_id", "expected_revision", "mode"}),
+			Handler: a.toolPostDraftPublish,
 		},
 		{
 			Name:        "post_list",
@@ -2043,63 +2115,21 @@ func validatePostTargets(ctx *sdk.AppCtx, pid string, targets []targetSpec) (map
 }
 
 func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	mode, err := explicitPostMode(args)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
 	body, _ := args["body"].(string)
-
-	// Accept either form: social_account_ids[] (simple multicast) or
-	// targets[] (per-target overrides). Mutually exclusive — passing
-	// both is ambiguous and we refuse rather than guess which to use.
-	rawAccts, hasAccts := args["social_account_ids"].([]any)
-	rawTargets, hasTargets := args["targets"].([]any)
-	if hasAccts && hasTargets && len(rawAccts) > 0 && len(rawTargets) > 0 {
-		return mcpError("pass either social_account_ids[] OR targets[], not both"), nil
+	targets, _, err := parsePostTargets(args, mode == postModeDraft)
+	if err != nil {
+		return mcpError(err.Error()), nil
 	}
-	var targets []targetSpec
-	switch {
-	case len(rawTargets) > 0:
-		for i, t := range rawTargets {
-			m, ok := t.(map[string]any)
-			if !ok {
-				return mcpError(fmt.Sprintf("targets[%d] must be an object {social_account_id, …}", i)), nil
-			}
-			id := toInt64Loose(m["social_account_id"])
-			if id <= 0 {
-				return mcpError(fmt.Sprintf("targets[%d].social_account_id required", i)), nil
-			}
-			// Strip the id from the options map so it doesn't get
-			// re-serialised inside the per-target options blob.
-			opts := make(map[string]any, len(m))
-			for k, v := range m {
-				if k == "social_account_id" {
-					continue
-				}
-				opts[k] = v
-			}
-			targets = append(targets, targetSpec{SocialAccountID: id, Options: opts})
+	if mode != postModeDraft {
+		if err := validatePostBodyForDelivery(body, targets); err != nil {
+			return nil, err
 		}
-	case len(rawAccts) > 0:
-		for _, v := range rawAccts {
-			if id := toInt64Loose(v); id > 0 {
-				targets = append(targets, targetSpec{SocialAccountID: id})
-			}
-		}
-	default:
-		return nil, errors.New("social_account_ids or targets required (at least one)")
-	}
-	if len(targets) == 0 {
-		return nil, errors.New("social_account_ids or targets required (at least one)")
-	}
-	if strings.TrimSpace(body) == "" {
-		if len(rawTargets) == 0 {
-			return nil, errors.New("body required")
-		}
-		for i, target := range targets {
-			targetBody, _ := target.Options["body"].(string)
-			if strings.TrimSpace(targetBody) == "" {
-				return nil, fmt.Errorf("body required: pass top-level body or targets[%d].body", i)
-			}
-			if body == "" {
-				body = targetBody
-			}
+		if strings.TrimSpace(body) == "" && len(targets) > 0 {
+			body, _ = targets[0].Options["body"].(string)
 		}
 	}
 	// Validate per-target options against each target's platform's
@@ -2107,24 +2137,32 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// the call (forward-compat: an agent passing a field that lands
 	// in a future version still works).
 	pid := projectScope(ctx, args)
-	targetProfiles, err := validatePostTargets(ctx, pid, targets)
-	if err != nil {
-		return mcpError(err.Error()), nil
+	targetProfiles := map[int64]int64{}
+	if len(targets) > 0 {
+		targetProfiles, err = validatePostTargets(ctx, pid, targets)
+		if err != nil {
+			return mcpError(err.Error()), nil
+		}
+		a.validateTargetOptions(ctx, pid, targets)
 	}
-	a.validateTargetOptions(ctx, pid, targets)
 	// Flat list of just the account ids — used by profile-spanning
 	// resolution below, same shape the prior code path relied on.
 	acctIDs := make([]int64, len(targets))
 	for i, t := range targets {
 		acctIDs[i] = t.SocialAccountID
 	}
-	scheduleAt, _ := args["schedule_at"].(string)
-	if strings.TrimSpace(scheduleAt) != "" {
+	scheduleAt := strings.TrimSpace(toString(args["schedule_at"]))
+	if mode == postModeSchedule {
+		if scheduleAt == "" {
+			return mcpError("schedule_at required when mode=schedule"), nil
+		}
 		rfc, err := normaliseScheduleAt(scheduleAt)
 		if err != nil {
 			return mcpError(fmt.Sprintf("invalid schedule_at %q: %v", scheduleAt, err)), nil
 		}
 		scheduleAt = rfc
+	} else if scheduleAt != "" {
+		return mcpError("schedule_at is only valid when mode=schedule"), nil
 	}
 	mediaIDsRaw, _ := args["media_storage_ids"].([]any)
 	mediaIDs := []int64{}
@@ -2137,9 +2175,20 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	mediaProjectID := strings.TrimSpace(stringArgAny(args, "media_project_id", "storage_project_id", "_project_id", "project_id"))
 
 	status := "publishing"
-	if scheduleAt != "" {
+	switch mode {
+	case postModeDraft:
+		status = "draft"
+	case postModeSchedule:
 		status = "scheduled"
 	}
+	providerSyncMode := strings.ToLower(strings.TrimSpace(toString(args["provider_sync_mode"])))
+	if providerSyncMode == "" {
+		providerSyncMode = "local"
+	}
+	if providerSyncMode != "local" && providerSyncMode != "mirror" {
+		return mcpError("provider_sync_mode must be local or mirror"), nil
+	}
+	approvalRequired := boolArg(args, "approval_required", false)
 	// Resolve the post's profile_id. Order:
 	//   1. explicit `profile` / `profile_id` arg
 	//   2. unique profile_id shared by all selected accounts
@@ -2171,7 +2220,7 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 	}
 
-	if scheduleAt != "" {
+	if mode == postModeSchedule {
 		if existing, err := a.findDuplicateScheduledPost(ctx, pid, profileID, body, string(mediaJSON), mediaProjectID, scheduleAt, targets); err != nil {
 			return nil, err
 		} else if existing != nil {
@@ -2194,9 +2243,12 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	defer tx.Rollback()
 	res, err := tx.Exec(
-		`INSERT INTO posts (project_id, body, media_storage_ids, media_project_id, schedule_at, status, profile_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO posts
+		 (project_id, body, media_storage_ids, media_project_id, schedule_at, status, profile_id,
+		  revision, approval_status, approval_required, requested_mode, provider_sync_mode, source, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'not_requested', ?, ?, ?, 'local', CURRENT_TIMESTAMP)`,
 		pid, body, string(mediaJSON), mediaProjectID, nullable(scheduleAt), status, profileID,
+		approvalRequired, mode, providerSyncMode,
 	)
 	if err != nil {
 		return nil, err
@@ -2205,6 +2257,10 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 	// Fan out: one target row per requested social account, carrying
 	// any per-target overrides as a JSON blob in post_targets.options.
+	targetStatus := "pending"
+	if mode == postModeDraft {
+		targetStatus = "draft"
+	}
 	for _, t := range targets {
 		var optsJSON sql.NullString
 		if len(t.Options) > 0 {
@@ -2212,15 +2268,27 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			optsJSON = sql.NullString{String: string(b), Valid: true}
 		}
 		_, err := tx.Exec(
-			`INSERT INTO post_targets (post_id, social_account_id, options) VALUES (?, ?, ?)`,
-			postID, t.SocialAccountID, optsJSON,
+			`INSERT INTO post_targets (post_id, social_account_id, status, options) VALUES (?, ?, ?, ?)`,
+			postID, t.SocialAccountID, targetStatus, optsJSON,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("create post target for account %d: %w", t.SocialAccountID, err)
 		}
 	}
+	if err := recordPostRevisionTx(tx, postID, 1, workflowActor(args)); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
+	}
+	if mode == postModeDraft {
+		ctx.Emit("post.draft_created", map[string]any{"post_id": postID, "revision": 1, "accounts": acctIDs})
+		providerSync := a.syncProviderWorkflow(ctx, postID, postModeDraft, "")
+		post, err := a.loadPostByID(ctx, pid, postID)
+		if post != nil && len(providerSync) > 0 {
+			post["provider_sync"] = providerSync
+		}
+		return post, err
 	}
 
 	// Two execution paths:
@@ -2228,7 +2296,7 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	//   - schedule_at set → schedule a job via the jobs app (when bound)
 	//     so the publish is durable. If jobs isn't bound, fall back to
 	//     the app's minute worker publishes it at the requested time.
-	if scheduleAt == "" {
+	if mode == postModePublish {
 		a.publishPostTargets(ctx, postID)
 	} else if ctx.IntegrationFor("jobs") == nil {
 		ctx.Logger().Info("post scheduled for worker fallback", "post", postID, "run_at", scheduleAt)
@@ -2258,9 +2326,11 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	out := map[string]any{
 		"post_id":      postID,
 		"status":       status,
+		"mode":         mode,
+		"revision":     1,
 		"target_count": len(acctIDs),
 	}
-	if scheduleAt == "" {
+	if mode == postModePublish {
 		if finalStatus := a.postStatus(ctx, postID); finalStatus != "" {
 			out["status"] = finalStatus
 		}
@@ -2474,6 +2544,7 @@ type publishJob struct {
 	platform, extID   string
 	providerSlug      string
 	providerAccountID string
+	providerPostID    string
 	body              string      // already resolved: target.options["body"] || post.body
 	media             []mediaItem // resolved (URL + MIME) so strategies can branch image/video
 	mediaProjectID    string      // Storage project scope for attached media + thumbnail defaults
@@ -2499,7 +2570,8 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 	// publish jobs so Jobs can finish cleanly instead of retrying forever.
 	_, _ = ctx.AppDB().Exec(
 		`UPDATE post_targets
-		    SET status='failed', last_error='social account is not active'
+		    SET status='failed', last_error='social account is not active',
+		        failure_code='account_inactive', retryable=0
 		  WHERE post_id=? AND status='pending'
 		    AND EXISTS (
 		      SELECT 1 FROM social_accounts a
@@ -2521,7 +2593,8 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		        COALESCE(a.external_account_id,''), p.body,
 		        COALESCE(a.page_credentials,''),
 		        COALESCE(t.options,''),
-		        COALESCE(a.provider_slug,'native'), COALESCE(a.provider_account_id,'')
+		        COALESCE(a.provider_slug,'native'), COALESCE(a.provider_account_id,''),
+		        COALESCE(t.provider_post_id,'')
 		 FROM post_targets t
 		 JOIN social_accounts a ON a.id=t.social_account_id
 		 JOIN posts p ON p.id=t.post_id
@@ -2537,7 +2610,7 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		var j publishJob
 		var acctID int64
 		var optsRaw, postBody string
-		if err := rows.Scan(&j.targetID, &acctID, &j.platform, &j.connID, &j.extID, &postBody, &j.pageCreds, &optsRaw, &j.providerSlug, &j.providerAccountID); err != nil {
+		if err := rows.Scan(&j.targetID, &acctID, &j.platform, &j.connID, &j.extID, &postBody, &j.pageCreds, &optsRaw, &j.providerSlug, &j.providerAccountID, &j.providerPostID); err != nil {
 			continue
 		}
 		// Decode per-target options (may be empty/null).
@@ -2586,7 +2659,7 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 			}
 			platformPostID, platformURL, err := a.publishZernio(ctx, j)
 			if err != nil {
-				a.markTargetFailed(ctx, j.targetID, err.Error())
+				a.markTargetError(ctx, j.targetID, err)
 				failures++
 				continue
 			}
@@ -2647,7 +2720,7 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 				successes++
 				continue
 			}
-			a.markTargetFailed(ctx, j.targetID, err.Error())
+			a.markTargetError(ctx, j.targetID, err)
 			failures++
 			continue
 		}
@@ -4066,6 +4139,7 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		urlArgs := map[string]any{
 			"id":          id,
 			"ttl_seconds": 3600,
+			"delivery":    "apteva",
 		}
 		if projectID != "" {
 			urlArgs["_project_id"] = projectID
@@ -4285,11 +4359,11 @@ func upstreamError(out *sdk.ExecuteResult) error {
 	if out == nil {
 		return errors.New("upstream call returned nil")
 	}
-	body := string(out.Data)
-	if len(body) > 500 {
-		body = body[:500] + "…"
+	return &upstreamCallError{
+		Status:         out.Status,
+		Body:           string(out.Data),
+		ExistingPostID: extractExistingPostID(out.Data),
 	}
-	return fmt.Errorf("upstream %d: %s", out.Status, body)
 }
 
 // scheduleJob hands off to the jobs app through its brokered app_tool
@@ -4382,13 +4456,27 @@ func normaliseScheduleAt(s string) (string, error) {
 }
 
 func (a *App) markTargetFailed(ctx *sdk.AppCtx, targetID int64, msg string) {
+	a.markTargetFailure(ctx, targetID, msg, publishFailure{Code: "validation_error", Retryable: false})
+}
+
+func (a *App) markTargetError(ctx *sdk.AppCtx, targetID int64, err error) {
+	a.markTargetFailure(ctx, targetID, err.Error(), classifyPublishFailure(err))
+}
+
+func (a *App) markTargetFailure(ctx *sdk.AppCtx, targetID int64, msg string, failure publishFailure) {
 	_, _ = ctx.AppDB().Exec(
-		`UPDATE post_targets SET status='failed', last_error=? WHERE id=?`,
-		msg, targetID,
+		`UPDATE post_targets
+		    SET status='failed', last_error=?, failure_code=?, retryable=?,
+		        upstream_status=?, existing_post_id=?
+		  WHERE id=?`,
+		msg, failure.Code, failure.Retryable, failure.UpstreamStatus, failure.ExistingPostID, targetID,
 	)
 	ctx.Emit("target.failed", map[string]any{
-		"target_id": targetID,
-		"error":     msg,
+		"target_id":        targetID,
+		"error":            msg,
+		"failure_code":     failure.Code,
+		"retryable":        failure.Retryable,
+		"existing_post_id": failure.ExistingPostID,
 	})
 }
 
@@ -4427,7 +4515,9 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		return mcpError(fmt.Sprintf("profile %q not found in this project", args["profile"])), nil
 	}
 	q := `SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(external_media_urls,'[]'), COALESCE(schedule_at,''),
-	             status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0)
+	             status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0),
+	             revision, approval_status, approved_revision, approval_required,
+	             COALESCE(rejection_reason,''), requested_mode, provider_sync_mode, source, COALESCE(updated_at,created_at)
 	      FROM posts WHERE project_id=?`
 	qArgs := []any{pid}
 	effectiveTime := `CASE
@@ -4458,23 +4548,29 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		return nil, err
 	}
 	type postRow struct {
-		id       int64
-		profID   int64
-		body     string
-		mediaIDs []int64
-		extMedia []string
-		schedAt  string
-		status   string
-		created  string
-		pubAt    string
+		id                                                                                  int64
+		profID                                                                              int64
+		body                                                                                string
+		mediaIDs                                                                            []int64
+		extMedia                                                                            []string
+		schedAt                                                                             string
+		status                                                                              string
+		created                                                                             string
+		pubAt                                                                               string
+		revision, approvedRevision                                                          int64
+		approvalRequired                                                                    bool
+		approvalStatus, rejectionReason, requestedMode, providerSyncMode, source, updatedAt string
 	}
 	postRows := []postRow{}
 	for rows.Next() {
 		var (
-			id, profID                                                       int64
-			body, mediaJSON, extMediaJSON, schedAt, status, createdAt, pubAt string
+			id, profID, revision, approvedRevision, approvalRequired                            int64
+			body, mediaJSON, extMediaJSON, schedAt, status, createdAt, pubAt                    string
+			approvalStatus, rejectionReason, requestedMode, providerSyncMode, source, updatedAt string
 		)
-		if err := rows.Scan(&id, &body, &mediaJSON, &extMediaJSON, &schedAt, &status, &createdAt, &pubAt, &profID); err != nil {
+		if err := rows.Scan(&id, &body, &mediaJSON, &extMediaJSON, &schedAt, &status, &createdAt, &pubAt, &profID,
+			&revision, &approvalStatus, &approvedRevision, &approvalRequired, &rejectionReason,
+			&requestedMode, &providerSyncMode, &source, &updatedAt); err != nil {
 			continue
 		}
 		var mediaIDs []int64
@@ -4491,6 +4587,9 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 			status:   status,
 			created:  createdAt,
 			pubAt:    pubAt,
+			revision: revision, approvedRevision: approvedRevision, approvalRequired: approvalRequired != 0,
+			approvalStatus: approvalStatus, rejectionReason: rejectionReason, requestedMode: requestedMode,
+			providerSyncMode: providerSyncMode, source: source, updatedAt: updatedAt,
 		})
 	}
 	rows.Close()
@@ -4507,6 +4606,15 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 			"status":              p.status,
 			"created_at":          p.created,
 			"published_at":        p.pubAt,
+			"updated_at":          p.updatedAt,
+			"revision":            p.revision,
+			"approval_status":     p.approvalStatus,
+			"approved_revision":   p.approvedRevision,
+			"approval_required":   p.approvalRequired,
+			"rejection_reason":    p.rejectionReason,
+			"requested_mode":      p.requestedMode,
+			"provider_sync_mode":  p.providerSyncMode,
+			"source":              p.source,
 			"targets":             targets,
 		})
 	}
@@ -4515,15 +4623,20 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 
 func (a *App) loadPostByID(ctx *sdk.AppCtx, projectID string, postID int64) (map[string]any, error) {
 	var (
-		id, profileID                                                             int64
-		body, mediaJSON, externalJSON, scheduleAt, status, createdAt, publishedAt string
+		id, profileID, revision, approvedRevision, approvalRequired                         int64
+		body, mediaJSON, externalJSON, scheduleAt, status, createdAt, publishedAt           string
+		approvalStatus, rejectionReason, requestedMode, providerSyncMode, source, updatedAt string
 	)
 	err := ctx.AppDB().QueryRow(
 		`SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(external_media_urls,'[]'), COALESCE(schedule_at,''),
-		        status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0)
+		        status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0),
+		        revision, approval_status, approved_revision, approval_required,
+		        COALESCE(rejection_reason,''), requested_mode, provider_sync_mode, source, COALESCE(updated_at,created_at)
 		   FROM posts WHERE id=? AND project_id=?`,
 		postID, projectID,
-	).Scan(&id, &body, &mediaJSON, &externalJSON, &scheduleAt, &status, &createdAt, &publishedAt, &profileID)
+	).Scan(&id, &body, &mediaJSON, &externalJSON, &scheduleAt, &status, &createdAt, &publishedAt, &profileID,
+		&revision, &approvalStatus, &approvedRevision, &approvalRequired, &rejectionReason,
+		&requestedMode, &providerSyncMode, &source, &updatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -4541,8 +4654,64 @@ func (a *App) loadPostByID(ctx *sdk.AppCtx, projectID string, postID int64) (map
 		"status":              status,
 		"created_at":          createdAt,
 		"published_at":        publishedAt,
+		"updated_at":          updatedAt,
+		"revision":            revision,
+		"approval_status":     approvalStatus,
+		"approved_revision":   approvedRevision,
+		"approval_required":   approvalRequired != 0,
+		"rejection_reason":    rejectionReason,
+		"requested_mode":      requestedMode,
+		"provider_sync_mode":  providerSyncMode,
+		"source":              source,
 		"targets":             a.loadTargets(ctx, id),
+		"reviews":             a.loadPostReviews(ctx, id),
+		"revisions":           a.loadPostRevisions(ctx, id),
 	}, nil
+}
+
+func (a *App) loadPostRevisions(ctx *sdk.AppCtx, postID int64) []map[string]any {
+	rows, err := ctx.AppDB().Query(
+		`SELECT revision, actor, snapshot, created_at
+		   FROM post_revisions WHERE post_id=? ORDER BY revision DESC`, postID,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var revision int64
+		var actor, snapshotRaw, createdAt string
+		if rows.Scan(&revision, &actor, &snapshotRaw, &createdAt) != nil {
+			continue
+		}
+		var snapshot map[string]any
+		_ = json.Unmarshal([]byte(snapshotRaw), &snapshot)
+		out = append(out, map[string]any{
+			"revision": revision, "actor": actor, "snapshot": snapshot, "created_at": createdAt,
+		})
+	}
+	return out
+}
+
+func (a *App) loadPostReviews(ctx *sdk.AppCtx, postID int64) []map[string]any {
+	rows, err := ctx.AppDB().Query(
+		`SELECT revision, action, actor, COALESCE(reason,''), created_at
+		   FROM post_reviews WHERE post_id=? ORDER BY id`, postID,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var revision int64
+		var action, actor, reason, createdAt string
+		if rows.Scan(&revision, &action, &actor, &reason, &createdAt) == nil {
+			out = append(out, map[string]any{"revision": revision, "action": action, "actor": actor, "reason": reason, "created_at": createdAt})
+		}
+	}
+	return out
 }
 
 func postListTimeBound(args map[string]any, name string) (*time.Time, error) {
@@ -4562,7 +4731,9 @@ func (a *App) loadTargets(ctx *sdk.AppCtx, postID int64) []map[string]any {
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.social_account_id, a.platform, a.display_name, COALESCE(a.avatar_url,''),
 		        t.status, COALESCE(t.platform_post_id,''), COALESCE(t.platform_url,''),
-		        t.attempts, COALESCE(t.last_error,''), COALESCE(t.published_at,'')
+		        t.attempts, COALESCE(t.last_error,''), COALESCE(t.published_at,''), COALESCE(t.options,''),
+		        COALESCE(t.failure_code,''), t.retryable, t.upstream_status, COALESCE(t.existing_post_id,''),
+		        COALESCE(t.provider_sync_status,''), COALESCE(t.provider_updated_at,'')
 		 FROM post_targets t JOIN social_accounts a ON a.id=t.social_account_id
 		 WHERE t.post_id=? ORDER BY t.id`,
 		postID,
@@ -4574,25 +4745,40 @@ func (a *App) loadTargets(ctx *sdk.AppCtx, postID int64) []map[string]any {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			tid, acctID                                                int64
-			platform, name, avatar, status, ppid, purl, lastErr, pubAt string
-			attempts                                                   int
+			tid, acctID                                                            int64
+			platform, name, avatar, status, ppid, purl, lastErr, pubAt, optionsRaw string
+			failureCode, existingPostID, providerSyncStatus, providerUpdatedAt     string
+			attempts                                                               int
+			retryable                                                              int64
+			upstreamStatus                                                         int64
 		)
-		if err := rows.Scan(&tid, &acctID, &platform, &name, &avatar, &status, &ppid, &purl, &attempts, &lastErr, &pubAt); err != nil {
+		if err := rows.Scan(&tid, &acctID, &platform, &name, &avatar, &status, &ppid, &purl, &attempts, &lastErr, &pubAt,
+			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt); err != nil {
 			continue
 		}
+		options := map[string]any{}
+		if optionsRaw != "" {
+			_ = json.Unmarshal([]byte(optionsRaw), &options)
+		}
 		out = append(out, map[string]any{
-			"id":                tid,
-			"social_account_id": acctID,
-			"platform":          platform,
-			"display_name":      name,
-			"avatar_url":        avatar,
-			"status":            status,
-			"platform_post_id":  ppid,
-			"platform_url":      purl,
-			"attempts":          attempts,
-			"last_error":        lastErr,
-			"published_at":      pubAt,
+			"id":                   tid,
+			"social_account_id":    acctID,
+			"platform":             platform,
+			"display_name":         name,
+			"avatar_url":           avatar,
+			"status":               status,
+			"platform_post_id":     ppid,
+			"platform_url":         purl,
+			"attempts":             attempts,
+			"last_error":           lastErr,
+			"published_at":         pubAt,
+			"options":              options,
+			"failure_code":         failureCode,
+			"retryable":            retryable != 0,
+			"upstream_status":      upstreamStatus,
+			"existing_post_id":     existingPostID,
+			"provider_sync_status": providerSyncStatus,
+			"provider_updated_at":  providerUpdatedAt,
 		})
 	}
 	return out
@@ -4625,9 +4811,10 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	res, err := ctx.AppDB().Exec(
 		`UPDATE post_targets
-		    SET status='pending', last_error=NULL
+		    SET status='pending', last_error=NULL, failure_code='',
+		        upstream_status=0, existing_post_id=''
 		  WHERE post_id=? AND (
-		        status='failed' OR
+		        (status='failed' AND retryable=1) OR
 		        (status='publishing' AND last_attempt_at < datetime('now','-1 hour'))
 		      )
 		    AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`,
@@ -4638,6 +4825,22 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
+		var code, existingID, lastError string
+		var terminal int
+		_ = ctx.AppDB().QueryRow(
+			`SELECT COUNT(*), COALESCE(MAX(failure_code),''), COALESCE(MAX(existing_post_id),''), COALESCE(MAX(last_error),'')
+			   FROM post_targets WHERE post_id=? AND status='failed' AND retryable=0`, postID,
+		).Scan(&terminal, &code, &existingID, &lastError)
+		if terminal > 0 {
+			return map[string]any{
+				"status":           "failed",
+				"retryable":        false,
+				"failure_code":     code,
+				"existing_post_id": existingID,
+				"error":            lastError,
+				"message":          "content or configuration must change before retrying",
+			}, nil
+		}
 		return mcpError("no failed targets to retry on this post"), nil
 	}
 	a.publishPostTargets(ctx, postID)
@@ -7818,7 +8021,18 @@ func (a *App) importYoutubePosts(
 				publishedAt = item.Snippet.PublishedAt
 			}
 			thumb := bestYoutubeThumb(item.Snippet.Thumbnails)
-			imported, err := a.insertImportedPost(ctx, pid, accountID, profileID, item.Snippet.Title, videoID, "https://www.youtube.com/watch?v="+videoID, publishedAt, []string{thumb})
+			imported, err := a.insertImportedPostWithOptions(
+				ctx,
+				pid,
+				accountID,
+				profileID,
+				item.Snippet.Description,
+				videoID,
+				"https://www.youtube.com/watch?v="+videoID,
+				publishedAt,
+				[]string{thumb},
+				map[string]any{"title": item.Snippet.Title},
+			)
 			if err != nil {
 				ctx.Logger().Warn("import: insert youtube post failed", "video_id", videoID, "err", err)
 				continue
@@ -7844,6 +8058,21 @@ func (a *App) insertImportedPost(
 	accountID, profileID int64,
 	body, platformPostID, platformURL, publishedAt string,
 	mediaURLs []string,
+) (bool, error) {
+	return a.insertImportedPostWithOptions(
+		ctx, pid, accountID, profileID,
+		body, platformPostID, platformURL, publishedAt,
+		mediaURLs, nil,
+	)
+}
+
+func (a *App) insertImportedPostWithOptions(
+	ctx *sdk.AppCtx,
+	pid string,
+	accountID, profileID int64,
+	body, platformPostID, platformURL, publishedAt string,
+	mediaURLs []string,
+	targetOptions map[string]any,
 ) (bool, error) {
 	var existing int64
 	_ = ctx.AppDB().QueryRow(
@@ -7874,11 +8103,20 @@ func (a *App) insertImportedPost(
 		return false, err
 	}
 	postID, _ := postRes.LastInsertId()
+	var optionsJSON sql.NullString
+	if len(targetOptions) > 0 {
+		encoded, err := json.Marshal(targetOptions)
+		if err != nil {
+			_, _ = ctx.AppDB().Exec(`DELETE FROM posts WHERE id=?`, postID)
+			return false, fmt.Errorf("encode imported post target options: %w", err)
+		}
+		optionsJSON = sql.NullString{String: string(encoded), Valid: true}
+	}
 	_, err = ctx.AppDB().Exec(
 		`INSERT INTO post_targets (post_id, social_account_id, status,
-		                           platform_post_id, platform_url, published_at)
-		 VALUES (?, ?, 'published', ?, ?, ?)`,
-		postID, accountID, platformPostID, nullable(platformURL), nullable(publishedAt),
+		                           platform_post_id, platform_url, published_at, options)
+		 VALUES (?, ?, 'published', ?, ?, ?, ?)`,
+		postID, accountID, platformPostID, nullable(platformURL), nullable(publishedAt), optionsJSON,
 	)
 	if err != nil {
 		_, _ = ctx.AppDB().Exec(`DELETE FROM posts WHERE id=?`, postID)
@@ -9050,6 +9288,45 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, out)
 		return
 	}
+	if len(parts) == 2 && r.Method == http.MethodPost {
+		action := parts[1]
+		var handler func(*sdk.AppCtx, map[string]any) (any, error)
+		switch action {
+		case "draft":
+			handler = a.toolPostDraftUpdate
+		case "submit":
+			handler = a.toolPostDraftSubmit
+		case "approve":
+			handler = a.toolPostDraftApprove
+		case "reject":
+			handler = a.toolPostDraftReject
+		case "publish":
+			handler = a.toolPostDraftPublish
+		}
+		if handler != nil {
+			raw := map[string]any{}
+			if r.Body != nil {
+				if err := json.NewDecoder(r.Body).Decode(&raw); err != nil && !errors.Is(err, io.EOF) {
+					http.Error(w, "invalid json", http.StatusBadRequest)
+					return
+				}
+			}
+			raw["post_id"] = id
+			actor := strings.TrimSpace(r.Header.Get("X-Apteva-Actor"))
+			if actor == "" {
+				actor = "panel"
+			}
+			raw["_caller"] = actor
+			copyProjectArgs(raw, projectArgsFromRequest(r))
+			out, err := handler(globalCtx, raw)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, out)
+			return
+		}
+	}
 	if len(parts) == 2 && parts[1] == "reschedule" && r.Method == http.MethodPost {
 		var body struct {
 			ScheduleAt string `json:"schedule_at"`
@@ -9144,7 +9421,7 @@ func (a *App) publishScheduledPost(ctx *sdk.AppCtx, pid string, postID int64) ma
 	res, err := ctx.AppDB().Exec(
 		`UPDATE post_targets
 		    SET status='pending'
-		  WHERE post_id=? AND status='failed' AND attempts < 4
+		  WHERE post_id=? AND status='failed' AND retryable=1 AND attempts < 4
 		    AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`,
 		postID, pid,
 	)
@@ -9156,17 +9433,20 @@ func (a *App) publishScheduledPost(ctx *sdk.AppCtx, pid string, postID int64) ma
 		return map[string]any{"status": "error", "error": "publish failed; retry queued", "post_id": postID}
 	}
 
-	var active, failed, published int
-	var lastError string
+	var active, failed, published, terminal int
+	var lastError, failureCode, existingPostID string
 	if err := ctx.AppDB().QueryRow(
 		`SELECT
 		    COALESCE(SUM(CASE WHEN status IN ('pending','publishing') THEN 1 ELSE 0 END),0),
 		    COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0),
 		    COALESCE(SUM(CASE WHEN status='published' THEN 1 ELSE 0 END),0),
-		    COALESCE(MAX(CASE WHEN status='failed' THEN last_error END),'')
+		    COALESCE(SUM(CASE WHEN status='failed' AND retryable=0 THEN 1 ELSE 0 END),0),
+		    COALESCE(MAX(CASE WHEN status='failed' THEN last_error END),''),
+		    COALESCE(MAX(CASE WHEN status='failed' THEN failure_code END),''),
+		    COALESCE(MAX(CASE WHEN status='failed' THEN existing_post_id END),'')
 		 FROM post_targets WHERE post_id=?`,
 		postID,
-	).Scan(&active, &failed, &published, &lastError); err != nil {
+	).Scan(&active, &failed, &published, &terminal, &lastError, &failureCode, &existingPostID); err != nil {
 		return map[string]any{"status": "error", "error": "check publish state: " + err.Error()}
 	}
 	if active > 0 {
@@ -9176,7 +9456,16 @@ func (a *App) publishScheduledPost(ctx *sdk.AppCtx, pid string, postID int64) ma
 		if lastError == "" {
 			lastError = "one or more social targets failed"
 		}
-		return map[string]any{"status": "failed", "error": lastError, "post_id": postID, "failed_targets": failed}
+		if terminal > 0 {
+			// Jobs treats failed/error as retryable. terminal acknowledges the
+			// callback while preserving the failed Social post for correction.
+			return map[string]any{
+				"status": "terminal", "outcome": "failed", "retryable": false,
+				"error": lastError, "post_id": postID, "failed_targets": failed,
+				"failure_code": failureCode, "existing_post_id": existingPostID,
+			}
+		}
+		return map[string]any{"status": "failed", "error": lastError, "post_id": postID, "failed_targets": failed, "retryable": true}
 	}
 	if published == 0 {
 		return map[string]any{"status": "failed", "error": "post has no published targets", "post_id": postID}

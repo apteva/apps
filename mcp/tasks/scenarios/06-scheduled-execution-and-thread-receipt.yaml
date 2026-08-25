@@ -1,0 +1,98 @@
+name: scheduled-default-execution-returns-to-creator-thread
+description: |
+  A named Core request thread schedules work one minute ahead. When due, main
+  accepts and completes the occurrence. Tasks then wakes the opaque creator
+  thread with its structured terminal receipt, without any channel dependency.
+
+timeout: 4m
+settle_for: 10s
+max_iterations: 18
+
+setup:
+  mode: autonomous
+  interaction: thread
+  thread:
+    id: request-scheduled
+    mcp: [tasks]
+    directive: |
+      On the initial request, create exactly one one-time task named
+      "Scheduled readiness check" and let Tasks assign scheduled execution to
+      the default durable thread. Do not update or complete it here. After
+      creation, wait. When a task.terminal event later arrives, call tasks_get
+      once with that event's task ID, verify the authoritative result, and
+      respond with "TERMINAL RECEIPT OBSERVED: " followed by that result. Do
+      not poll, delegate, or use another thread as an intermediary.
+  app:
+    path: ./
+
+directive: |
+  You execute due Tasks work assigned to main. Ignore setup requests owned by
+  other threads. When task.ready arrives, call tasks_get, record one running
+  milestone with current_step "Readiness check started", and complete that
+  task exactly once with the result "READINESS CHECK PASSED". Then wait.
+
+prompt: |
+  In one minute, run a readiness check. Track it as one task named "Scheduled readiness check" and report its terminal result back to this requesting thread.
+
+assert:
+  - tool_called_with:
+      tool: tasks_create
+      thread_id: request-scheduled
+      count: 1
+  - tool_called_with:
+      tool: tasks_get
+      thread_id: main
+      min_count: 1
+  - tool_called_with:
+      tool: tasks_update
+      thread_id: main
+      args:
+        state: running
+        current_step: Readiness check started
+      count: 1
+  - tool_called_with:
+      tool: tasks_complete
+      thread_id: main
+      args:
+        result: READINESS CHECK PASSED
+      count: 1
+  - tool_called_with:
+      tool: tasks_get
+      thread_id: request-scheduled
+      count: 1
+  - tool_not_called_with:
+      tool: tasks_update | tasks_complete
+      thread_id: request-scheduled
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_status: 200
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.created_by_thread_id
+    expect_field_eq: request-scheduled
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.assigned_thread_id
+    expect_field_eq: main
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.state
+    expect_field_eq: completed
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.result
+    expect_field_eq: READINESS CHECK PASSED
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.last_occurrence_status
+    expect_field_eq: completed
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.dispatched_at
+    expect_field_contains: T
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.accepted_at
+    expect_field_contains: T
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.telemetry_reference
+    expect_field_contains: /api/telemetry
+  - iterations_at_most: 18
+
+budget:
+  total_tokens: 350000
+  cost_usd: 2.50

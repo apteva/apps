@@ -17,7 +17,7 @@ var taskSkillBody string
 const manifestYAML = `schema: apteva-app/v1
 name: tasks
 display_name: Tasks
-version: 3.2.9
+version: 3.3.2
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -38,7 +38,7 @@ provides:
     - { name: create, description: "Create one durable task for multi-step, multi-source, delegated, scheduled, or resumable work." }
     - { name: list, description: List durable tasks visible to the calling agent. }
     - { name: get, description: Get one task and its event history. }
-    - { name: update, description: Record meaningful task-level progress and state. }
+    - { name: update, description: Atomically edit task definitions and record meaningful progress or state. }
     - { name: assign, description: Assign a task to an existing opaque agent thread. }
     - { name: complete, description: Complete a task with a concrete result. }
     - { name: cancel, description: Cancel a task or schedule. }
@@ -68,7 +68,7 @@ provides:
       supported_sizes: [half, full]
       default_size: half
       visibility: project
-      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_skipped_overlap]
+      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap]
       native:
         schema: apteva-native-surface/v1
         entry: /ui/surfaces/task-overview.json
@@ -101,7 +101,7 @@ provides:
       slots: [dashboard.agent_card, dashboard.agent_detail, dashboard.thread_sidebar]
       suggested: true
       visibility: attached
-      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_skipped_overlap]
+      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap]
       default_width: 1
     - name: task-card
       entry: /ui/TaskCard.mjs
@@ -155,7 +155,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.EmitWithProject("task."+event.EventType, eventProjectID(a.store, event.TaskID), event)
 	})
 	a.scheduler = &scheduler{store: a.store, app: a}
-	ctx.Logger().Info("tasks app mounted", "version", "3.2.9")
+	ctx.Logger().Info("tasks app mounted", "version", "3.3.2")
 	return nil
 }
 
@@ -213,7 +213,7 @@ func (a *App) notifyAssigned(task *Task, threadID, eventType string) error {
 	if a.ctx == nil || a.ctx.ThreadAPI() == nil {
 		return errors.New("platform thread API unavailable")
 	}
-	payload := map[string]any{"type": eventType, "task_id": task.ID, "title": task.Title, "description": task.Description, "state": task.State, "scheduled_for": task.ScheduledFor, "parent_task_id": task.ParentTaskID}
+	payload := map[string]any{"type": eventType, "task_id": task.ID, "title": task.Title, "description": task.Description, "state": task.State, "scheduled_for": task.ScheduledFor, "parent_task_id": task.ParentTaskID, "dispatch_attempt": task.DispatchAttempts}
 	return a.ctx.ThreadAPI().SendThreadEvent(sdk.ThreadRef{AgentID: task.AgentID, ThreadID: threadID}, payload)
 }
 
@@ -226,6 +226,30 @@ func (a *App) notifyCreator(task *Task) error {
 	}
 	payload := map[string]any{"type": "task.terminal", "task_id": task.ID, "title": task.Title, "state": task.State, "result": task.Result, "error": task.Error, "parent_task_id": task.ParentTaskID}
 	return a.ctx.ThreadAPI().SendThreadEvent(sdk.ThreadRef{AgentID: task.AgentID, ThreadID: task.CreatedByThreadID}, payload)
+}
+
+// notifyDispatchFailure always wakes the task owner after delivery retries are
+// exhausted. Unlike an ordinary terminal receipt, this must also fire when the
+// creator and assignee are the same thread: no executor ever accepted the work,
+// so there is no successful thread already aware of the terminal outcome.
+func (a *App) notifyDispatchFailure(task *Task) error {
+	if task == nil {
+		return nil
+	}
+	target := strings.TrimSpace(task.CreatedByThreadID)
+	if target == "" {
+		target = strings.TrimSpace(task.AssignedThreadID)
+	}
+	if target == "" {
+		return nil
+	}
+	if a.ctx == nil || a.ctx.ThreadAPI() == nil {
+		return errors.New("platform thread API unavailable")
+	}
+	payload := map[string]any{"type": "task.terminal", "task_id": task.ID, "title": task.Title,
+		"state": task.State, "error": task.Error, "parent_task_id": task.ParentTaskID,
+		"reason": "dispatch_unaccepted", "attention_required": true}
+	return a.ctx.ThreadAPI().SendThreadEvent(sdk.ThreadRef{AgentID: task.AgentID, ThreadID: target}, payload)
 }
 
 func nowUTC() time.Time { return time.Now().UTC() }

@@ -253,6 +253,47 @@ func (a *App) handleDesign(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 201, run)
+	case "wiring-validate":
+		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.WiringValidate(id, bodyRevisionID(r)) })
+	case "wiring-export":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var body struct {
+			RevisionID int64  `json:"revision_id"`
+			Format     string `json:"format"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		artifact, err := s.WiringExport(id, body.RevisionID, body.Format)
+		if err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		writeJSON(w, 201, map[string]any{"artifact": artifact})
+	case "wiring-simulate":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var body struct {
+			RevisionID int64  `json:"revision_id"`
+			Source     string `json:"source"`
+			Iterations int    `json:"iterations"`
+		}
+		if err := decodeBody(r, &body); err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		run, err := s.WiringSimulate(id, body.RevisionID, body.Source, body.Iterations)
+		if err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		writeJSON(w, 201, run)
 	case "validate":
 		handleServiceArtifact(w, r, http.MethodPost, func() (any, error) { return s.Validate(id, bodyRevisionID(r)) })
 	case "render":
@@ -391,6 +432,34 @@ func (a *App) handleExamples(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, pcbExamples())
+}
+func (a *App) handleWiringLibrary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	writeJSON(w, 200, wiringLibraryResponse())
+}
+func (a *App) handleWiringExample(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, 200, map[string]any{"template": "arduino-led-breadboard", "definition": arduinoLEDExample()})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		return
+	}
+	var args map[string]any
+	if err := decodeBody(r, &args); err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	result, err := a.toolWiringExampleCreate(r.Context(), a.requestCtx(r), args)
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	writeJSON(w, 201, result)
 }
 func (a *App) handleProviders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

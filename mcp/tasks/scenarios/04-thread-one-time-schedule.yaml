@@ -1,8 +1,8 @@
-name: conversation-creates-one-time-schedule
+name: request-thread-creates-one-time-schedule
 description: |
-  A natural future request from a saved conversation creates one logical
-  scheduled task owned by the durable default thread. The conversation records
-  the request but does not execute or complete the future work early.
+  A named Core request thread creates one future task. Tasks records that
+  opaque creator while assigning scheduled execution to the durable default
+  thread, and no execution occurs before the schedule is due.
 
 timeout: 2m
 settle_for: 8s
@@ -10,17 +10,21 @@ max_iterations: 10
 
 setup:
   mode: autonomous
-  interaction: conversation
+  interaction: thread
+  thread:
+    id: request-once
+    mcp: [tasks]
+    directive: |
+      Convert the request into exactly one durable one-time task. Call
+      tasks_create directly from this thread. Do not delegate creation and do
+      not update or complete future work before it is due. After creation,
+      confirm the saved title in your response and stop.
   app:
     path: ./
-    spawnable: true
 
 directive: |
-  You help the operator manage follow-ups. Do not initiate a follow-up from
-  main without an incoming user request. The conversation thread that receives
-  the request owns schedule creation and is the only thread that may create its
-  task. Future work must be represented by one durable scheduled task. Never
-  perform future work before it is due.
+  You are the durable default executor for scheduled Tasks events. Do not
+  create follow-up work without a task.ready event addressed to main.
 
 prompt: |
   In 10 minutes, remind me to follow up with the launch team. Name it "Launch team follow-up".
@@ -28,16 +32,9 @@ prompt: |
 assert:
   - tool_called_with:
       tool: tasks_create
-      thread_id: ${APTEVA_TEST_CONVERSATION_THREAD_ID}
+      thread_id: request-once
       count: 1
   - tool_not_called: tasks_update | tasks_complete
-  - tool_not_called_with:
-      tool: send
-      exact: true
-      thread_id: ${APTEVA_TEST_CONVERSATION_THREAD_ID}
-  - tool_not_called_with:
-      tool: evolve
-      thread_id: ${APTEVA_TEST_CONVERSATION_THREAD_ID}
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_status: 200
     expect_count_at: tasks
@@ -47,18 +44,16 @@ assert:
     expect_field_contains: Launch team follow-up
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_field_at: tasks.0.created_by_thread_id
-    expect_field_eq: ${APTEVA_TEST_CONVERSATION_THREAD_ID}
+    expect_field_eq: request-once
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_field_at: tasks.0.assigned_thread_id
-    expect_field_eq: ${APTEVA_TEST_DEFAULT_THREAD_ID}
+    expect_field_eq: main
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_field_at: tasks.0.schedule_kind
     expect_field_eq: once
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_field_at: tasks.0.state
     expect_field_eq: waiting
-  - chat_response_contains: Launch team follow-up
-  - chat_final_messages: 1
   - iterations_at_most: 10
 
 budget:

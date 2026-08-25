@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.4.0
+version: 0.5.0
 description: |
   Lightweight API gateway for Apteva SaaS projects. Owns public API
   hostnames, method/path routes, simple API keys, CORS policy, request
@@ -22,6 +22,9 @@ description: |
   v0.4.0 adds bounded in-list event matching, projections of explicitly
   constrained data fields, and per-projection coalescing so one stream can
   safely invalidate several precise resources without losing concurrent changes.
+
+  v0.5.0 adds platform-managed browser-origin registration with delegated,
+  route-aware preflight and exact origin enforcement for actual requests.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/api
@@ -56,7 +59,7 @@ provides:
       no_auth: true
   mcp_tools:
     - name: api_create
-      description: "Create an API and optionally expose a hostname. Args: slug, name?, description?, hostname?, dns_mode? (manual|domains|skipped), allow_http?, cors?, auth?."
+      description: "Create an API and optionally expose a hostname. CORS requires explicit HTTP(S) origins and is registered with Apteva using delegated app preflight. Args: slug, name?, description?, hostname?, dns_mode? (manual|domains|skipped), allow_http?, cors?, auth?."
     - name: api_get
       description: "Fetch one API by id or slug."
     - name: api_list

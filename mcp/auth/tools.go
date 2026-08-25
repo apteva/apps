@@ -443,12 +443,16 @@ func (a *App) toolClientsCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	default:
 		return nil, fmt.Errorf("unknown type %q (spa | web | native | m2m)", typ)
 	}
+	origins, err := normalizeClientOrigins(stringArrArg(args, "allowed_origins"))
+	if err != nil {
+		return nil, err
+	}
 	c := Client{
 		ClientID:                "akc_" + mustSlug(16),
 		Name:                    name,
 		Type:                    typ,
 		RedirectURIs:            stringArrArg(args, "redirect_uris"),
-		AllowedOrigins:          stringArrArg(args, "allowed_origins"),
+		AllowedOrigins:          origins,
 		AllowedGrantTypes:       defaultedGrants(typ, stringArrArg(args, "allowed_grant_types")),
 		TokenEndpointAuthMethod: defaultAuthMethod(typ),
 		RequirePKCE:             typ == "spa" || typ == "native",
@@ -483,6 +487,11 @@ func (a *App) toolClientsCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if secret != "" {
 		out["client_secret"] = secret
 		out["note"] = "store this secret — it will not be shown again"
+	}
+	attempted, syncErr := replaceClientBrowserOrigins(ctx, c)
+	recordBrowserOriginSync(out, attempted, syncErr)
+	if syncErr != nil {
+		ctx.Logger().Warn("OAuth client browser-origin registration failed", "client_id", c.ClientID, "error", syncErr)
 	}
 	return out, nil
 }
@@ -538,7 +547,13 @@ func (a *App) toolClientsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	dbAudit(ctx.AppDB(), pid, updated.OrganizationID, nil, clientID, "client_updated", "", "agent", map[string]any{
 		"allowed_origins": origins,
 	})
-	return map[string]any{"client": updated}, nil
+	out := map[string]any{"client": updated}
+	attempted, syncErr := replaceClientBrowserOrigins(ctx, *updated)
+	recordBrowserOriginSync(out, attempted, syncErr)
+	if syncErr != nil {
+		ctx.Logger().Warn("OAuth client browser-origin registration failed", "client_id", clientID, "error", syncErr)
+	}
+	return out, nil
 }
 
 func normalizeClientOrigins(values []string) ([]string, error) {
@@ -559,9 +574,6 @@ func normalizeClientOrigins(values []string) ([]string, error) {
 
 func normalizeClientOrigin(value string) (string, error) {
 	value = strings.TrimRight(strings.TrimSpace(value), "/")
-	if value == "*" {
-		return value, nil
-	}
 	parsed, err := url.Parse(value)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
 		return "", fmt.Errorf("allowed origin %q must be an absolute http(s) origin without a path", value)
@@ -613,7 +625,13 @@ func (a *App) toolClientsDisable(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	dbAudit(ctx.AppDB(), pid, c.OrganizationID, nil, clientID, "client_disabled", "", "agent", nil)
-	return map[string]any{"ok": true}, nil
+	out := map[string]any{"ok": true}
+	attempted, syncErr := deleteClientBrowserOrigins(ctx, clientID)
+	recordBrowserOriginSync(out, attempted, syncErr)
+	if syncErr != nil {
+		ctx.Logger().Warn("OAuth client browser-origin deletion failed", "client_id", clientID, "error", syncErr)
+	}
+	return out, nil
 }
 
 // ─── auth_public_signup ──────────────────────────────────────────────

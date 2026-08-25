@@ -44,14 +44,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.9.3
+version: 0.9.4
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
   owns N orgs; each org has its own users, clients, signing keys, JWKS,
   and audit log. EdDSA JWTs, refresh-token rotation, email verification,
   password reset, magic links, TOTP MFA. Optional delegated authorization
-  is resolved independently by the Apteva server per OAuth client.
+  is resolved independently by the Apteva server per OAuth client. OAuth
+  client origins are reconciled with platform-managed CORS.
 author: Apteva
 scopes: [project]
 min_apteva_version: "0.14.1"
@@ -273,6 +274,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 		if err := ensureSigningKey(ctx.AppDB(), pid, orgID); err != nil {
 			return fmt.Errorf("seed signing key: %w", err)
+		}
+		if err := reconcileBrowserOrigins(ctx, pid); err != nil {
+			// Auth's database remains authoritative and the same stable keys are
+			// retried on the next mount. A CORS control-plane outage must not make
+			// the identity service unavailable.
+			ctx.Logger().Warn("browser-origin reconciliation incomplete", "error", err)
 		}
 	}
 	ctx.Logger().Info("auth mounted",

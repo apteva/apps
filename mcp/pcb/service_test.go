@@ -96,3 +96,54 @@ func TestReleaseIsStableAndContainsTraceability(t *testing.T) {
 		}
 	}
 }
+
+func TestWiringServiceExportsAndRelease(t *testing.T) {
+	store := testStore(t)
+	def := arduinoLEDExample()
+	canonical, _, hash, err := normalizeDefinition(mustJSON(def), def.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	design, err := store.CreateDesign("project-a", def.Name, canonical, nil, hash, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{store: store, project: "project-a", artifactRoot: t.TempDir()}
+	for _, format := range []string{"svg", "png", "tutorial-json", "tutorial-zip"} {
+		artifact, err := service.WiringExport(design.ID, 0, format)
+		if err != nil {
+			t.Fatalf("%s: %v", format, err)
+		}
+		if artifact.SizeBytes == 0 {
+			t.Fatalf("%s empty", format)
+		}
+	}
+	run, err := service.WiringSimulate(design.ID, 0, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active, _ := run.Result.PartStates["led1"]["active"].(bool); !active {
+		t.Fatal("wired LED inactive")
+	}
+	release, err := service.Release(context.Background(), design.ID, 0, "wiring tutorial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(release.LocalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, f := range zr.File {
+		names[f.Name] = true
+	}
+	for _, name := range []string{"wiring/illustration.svg", "wiring/illustration.png", "wiring/tutorial.json"} {
+		if !names[name] {
+			t.Errorf("release missing %s", name)
+		}
+	}
+}

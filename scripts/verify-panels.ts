@@ -22,9 +22,7 @@ import { join } from "path";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const DASHBOARD_VENDOR = join(
-  ROOT,
-  "..",
-  "dashboard",
+  process.env.APTEVA_DASHBOARD_DIR || join(ROOT, "..", "dashboard"),
   "vendor",
   "react.entry.ts",
 );
@@ -67,7 +65,7 @@ function parseImportNames(spec: string): string[] {
   return out;
 }
 
-async function checkPanel(file: string, vendor: Set<string>): Promise<string[]> {
+async function checkPanel(file: string, vendor: Set<string>, requireDefault: boolean): Promise<string[]> {
   const src = await readFile(file, "utf8");
   const errors: string[] = [];
   // Every panel must have a default export — that's what the
@@ -77,7 +75,7 @@ async function checkPanel(file: string, vendor: Set<string>): Promise<string[]> 
   const hasDefault =
     /export\s*\{[^}]*\bas\s+default\b[^}]*\}/.test(src) ||
     /export\s+default\b/.test(src);
-  if (!hasDefault) {
+  if (requireDefault && !hasDefault) {
     errors.push(
       `${file}: no default export. Convert "export function FooPanel(...)" to "export default function FooPanel(...)" — the dashboard's panel loader imports the default.`,
     );
@@ -136,7 +134,8 @@ async function main() {
     const entries = await readdir(uiDir);
     for (const f of entries) {
       if (!f.endsWith(".mjs") || f.endsWith(".mjs.map")) continue;
-      const errs = await checkPanel(join(uiDir, f), vendor);
+      const sourceName = f.replace(/\.mjs$/, ".tsx");
+      const errs = await checkPanel(join(uiDir, f), vendor, existsSync(join(uiDir, sourceName)));
       if (errs.length > 0) {
         failures.push(...errs);
       } else {

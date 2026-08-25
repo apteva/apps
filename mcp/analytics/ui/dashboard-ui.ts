@@ -28,6 +28,60 @@ export function selectDashboardID(rows: DashboardChoice[], preferredID: number, 
 		|| 0;
 }
 
+export interface ObjectiveQueryLike {
+	aggregation?: string;
+	app?: string;
+	topic?: string;
+	source?: string;
+	value?: string;
+	by?: string;
+	where?: Record<string, unknown>;
+	currency_field?: string;
+	reporting_currency?: string;
+	amount_unit?: string;
+	rate_date_field?: string;
+}
+
+export function metricAggregation(config: Record<string, unknown>): string {
+	const explicit = typeof config.aggregation === "string" ? config.aggregation.toLowerCase().trim() : "";
+	if (explicit === "avg") return "average";
+	if (explicit) return explicit;
+	if (typeof config.by === "string" && config.by && !(typeof config.value === "string" && config.value)) return "distinct";
+	if (typeof config.value === "string" && config.value) return "sum";
+	return "count";
+}
+
+export function objectiveTargetIDs(config: Record<string, unknown>): number[] {
+	if (!Array.isArray(config.objective_target_ids)) return [];
+	return [...new Set(config.objective_target_ids.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
+}
+
+function stableRecord(value: unknown): string {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return "{}";
+	return JSON.stringify(Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))));
+}
+
+export function objectiveMatchesMetric(config: Record<string, unknown>, query: ObjectiveQueryLike): boolean {
+	const aggregation = metricAggregation(config);
+	const targetAggregation = query.aggregation === "avg" ? "average" : (query.aggregation || "count");
+	if (aggregation !== targetAggregation) return false;
+	for (const key of ["app", "topic", "source"] as const) {
+		if (String(config[key] ?? "") !== String(query[key] ?? "")) return false;
+	}
+	if (["sum", "sum_money", "average", "min", "max", "latest", "change"].includes(aggregation)) {
+		if (String(config.value ?? "") !== String(query.value ?? "")) return false;
+	}
+	if (aggregation === "sum_money") {
+		for (const key of ["currency_field", "reporting_currency", "amount_unit", "rate_date_field"] as const) {
+			if (String(config[key] ?? "") !== String(query[key] ?? "")) return false;
+		}
+	}
+	if (aggregation === "distinct") {
+		if (String(config.by ?? config.value ?? "") !== String(query.by ?? "")) return false;
+	}
+	return stableRecord(config.where) === stableRecord(query.where);
+}
+
 export function formatMetric(value: number, config: Record<string, unknown>): string {
 	const raw = Number.isFinite(value) ? value : 0;
 	const configuredScale = Number(config.scale ?? 1);
@@ -35,8 +89,13 @@ export function formatMetric(value: number, config: Record<string, unknown>): st
 	const configuredDecimals = Number(config.decimals);
 	const hasConfiguredDecimals = Number.isFinite(configuredDecimals);
 	const decimals = Math.max(0, Math.min(6, hasConfiguredDecimals ? Math.floor(configuredDecimals) : 2));
-	if (config.format === "currency") {
-		const currency = typeof config.currency === "string" && config.currency ? config.currency : "USD";
+	const moneyAggregation = metricAggregation(config) === "sum_money";
+	if (config.format === "currency" || moneyAggregation) {
+		const currency = typeof config.currency === "string" && config.currency
+			? config.currency
+			: typeof config.reporting_currency === "string" && config.reporting_currency
+				? config.reporting_currency
+				: "USD";
 		return new Intl.NumberFormat("en-US", {
 			style: "currency",
 			currency,
@@ -56,6 +115,44 @@ export function formatMetric(value: number, config: Record<string, unknown>): st
 		...(hasConfiguredDecimals ? { minimumFractionDigits: decimals, maximumFractionDigits: decimals } : {}),
 	}).format(numeric);
 	return typeof config.unit === "string" && config.unit ? `${formatted} ${config.unit}` : formatted;
+}
+
+export interface AreaChartPoint {
+	x: number;
+	y: number;
+}
+
+export function areaChartGeometry(values: number[], width = 300, height = 72): {
+	points: AreaChartPoint[];
+	linePath: string;
+	areaPath: string;
+	baseline: number;
+} {
+	const horizontalPadding = 8;
+	const top = 8;
+	const baseline = height - 6;
+	const min = Math.min(...values);
+	const max = Math.max(...values);
+	const hasVariation = max > min;
+	const points = values.map((value, index) => ({
+		x: horizontalPadding + (index / Math.max(1, values.length - 1)) * (width - horizontalPadding * 2),
+		y: hasVariation
+			? baseline - ((value - min) / (max - min)) * (baseline - top)
+			: top + (baseline - top) / 2,
+	}));
+	const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+	const areaPath = points.length
+		? `${linePath} L ${points.at(-1)?.x} ${baseline} L ${points[0]?.x} ${baseline} Z`
+		: "";
+	return { points, linePath, areaPath, baseline };
+}
+
+export function areaChartEndMarkerPath(points: AreaChartPoint[], baseline: number): string {
+	const point = points.at(-1) ?? { x: 292, y: baseline };
+	// A nearly zero-length path with a round, non-scaling stroke renders as a
+	// true screen-space dot. An SVG circle is distorted when the chart uses
+	// preserveAspectRatio="none" to fill a wide dashboard card.
+	return `M ${point.x} ${point.y} h 0.001`;
 }
 
 export function resolveMetricConfig(config: Record<string, unknown>, filters: Record<string, string>): Record<string, unknown> {
@@ -90,6 +187,29 @@ export function batchResultsByID(results: DashboardWidgetResult[]): Record<numbe
       result.error ? { error: result.error } : (result.data ?? {}),
     ]),
   );
+}
+
+export function dedupeWidgetGoals(
+  widgetIDs: number[],
+  dataByWidget: Record<number, Record<string, any>>,
+): Record<number, Record<string, any>> {
+  const seen = new Set<number>();
+  const out = { ...dataByWidget };
+  for (const widgetID of widgetIDs) {
+    const data = dataByWidget[widgetID];
+    if (!data || !Array.isArray(data.goals)) continue;
+    out[widgetID] = {
+      ...data,
+      goals: data.goals.filter((goal: Record<string, unknown>) => {
+        const targetID = Number(goal.target_id);
+        if (!Number.isSafeInteger(targetID) || targetID <= 0) return true;
+        if (seen.has(targetID)) return false;
+        seen.add(targetID);
+        return true;
+      }),
+    };
+  }
+  return out;
 }
 
 export function partitionDashboardWidgets<T extends { type: string }>(widgets: T[]): { stats: T[]; charts: T[] } {

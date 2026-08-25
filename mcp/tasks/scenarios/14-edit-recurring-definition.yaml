@@ -1,0 +1,95 @@
+name: edit-recurring-task-definition
+description: |
+  An existing recurring task is paused, then renamed, re-described, and
+  rescheduled atomically through tasks_update. The edit preserves the paused
+  state and does not create a placeholder or replacement task.
+
+timeout: 2m
+settle_for: 5s
+max_iterations: 12
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  seed_mcp_calls:
+    - app: tasks
+      tool: create
+      thread_id: operator-intake
+      args:
+        title: Old recurring lead review
+        description: Review newly active leads using the old definition.
+        assigned_thread_id: main
+        idempotency_key: recurring-definition-edit-${APTEVA_TEST_AGENT_ID}
+        schedule:
+          kind: interval
+          every: 15m
+          timezone: UTC
+
+directive: |
+  Edit the existing recurring lead-review task; never create a replacement or
+  placeholder task. First call tasks_list and identify the exact task named
+  "Old recurring lead review". Pause that schedule. Then call tasks_update
+  exactly once for the same task ID and atomically make these definition edits:
+
+  - title: "Madrid recurring lead review"
+  - description: "Review newly active Madrid leads using the authoritative revised definition."
+  - interval: every 30 minutes
+  - timezone: Europe/Madrid
+
+  Do not send execution state, progress, current_step, or any unchanged task
+  field in the update. Afterward call tasks_get once to verify the authoritative
+  record. The schedule must remain paused. Do not resume, run, complete, cancel,
+  or create any task. Stop after verification.
+
+assert:
+  - tool_called_with:
+      tool: tasks_list
+      thread_id: main
+      count: 1
+  - tool_called_with:
+      tool: tasks_pause
+      thread_id: main
+      count: 1
+  - tool_called_with:
+      tool: tasks_update
+      thread_id: main
+      args:
+        title: Madrid recurring lead review
+        description: Review newly active Madrid leads using the authoritative revised definition.
+      count: 1
+  - tool_called_with:
+      tool: tasks_get
+      thread_id: main
+      count: 1
+  - tool_not_called: tasks_create | tasks_resume | tasks_run_now | tasks_complete | tasks_cancel
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_status: 200
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.title
+    expect_field_eq: Madrid recurring lead review
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.description
+    expect_field_eq: Review newly active Madrid leads using the authoritative revised definition.
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.schedule_kind
+    expect_field_eq: interval
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.schedule_expression
+    expect_field_eq: 30m0s
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.schedule_timezone
+    expect_field_eq: Europe/Madrid
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.schedule_enabled
+    expect_field_eq: false
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.state
+    expect_field_eq: waiting
+  - iterations_at_most: 12
+
+budget:
+  total_tokens: 200000
+  cost_usd: 1.50

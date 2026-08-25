@@ -190,6 +190,44 @@ func (a *App) toolSum(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"buckets": rows, "value": value}, nil
 }
 
+func (a *App) toolSumMoney(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	f, err := scopedFilter(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return moneyScalarForWidget(ctx.AppDB(), f, args)
+}
+
+func (a *App) toolFXRateUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	rate, err := upsertFXRate(ctx.AppDB(), projectID, FXRate{
+		BaseCurrency:  stringArg(args, "base_currency"),
+		QuoteCurrency: stringArg(args, "quote_currency"),
+		AsOf:          int64Arg(args, "as_of"),
+		Rate:          floatArg(args, "rate"),
+		Source:        stringArg(args, "source"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"rate": rate}, nil
+}
+
+func (a *App) toolFXRatesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	rates, err := listFXRates(ctx.AppDB(), projectID, stringArg(args, "base_currency"), stringArg(args, "quote_currency"), int64Arg(args, "since"), int64Arg(args, "until"), intArg(args, "limit"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"rates": rates}, nil
+}
+
 func (a *App) toolEventSpecsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	projectID, err := scopedProject(ctx, args)
 	if err != nil {
@@ -263,11 +301,95 @@ func (a *App) toolEventSpecUpsert(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	spec.ProjectID = projectID
-	saved, err := upsertEventSpec(ctx.AppDB(), spec, true)
+	replaceProperties := true
+	var existing *EventSpec
+	var existingErr error
+	if id := int64Arg(args, "id"); id > 0 {
+		existing, existingErr = getEventSpecByID(ctx.AppDB(), id)
+		if existingErr == nil {
+			if err := ensureSpecInCurrentProject(ctx, args, existing.ProjectID); err != nil {
+				return nil, err
+			}
+			if spec.App != existing.App || spec.Topic != existing.Topic {
+				return nil, errors.New("app and topic cannot be changed; create a new spec")
+			}
+		}
+	} else {
+		existing, existingErr = getEventSpec(ctx.AppDB(), projectID, spec.App, spec.Topic)
+	}
+	if existingErr == nil {
+		spec, replaceProperties, err = mergeEventSpecPatch(existing, spec, args)
+		if err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(existingErr, sql.ErrNoRows) {
+		return nil, existingErr
+	}
+	if existingErr != nil {
+		spec.ID = 0
+	}
+	saved, err := upsertEventSpec(ctx.AppDB(), spec, replaceProperties)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"spec": saved}, nil
+}
+
+func mergeEventSpecPatch(existing *EventSpec, patch EventSpec, args map[string]any) (EventSpec, bool, error) {
+	merged := *existing
+	merged.Properties = existing.Properties
+	if id := int64Arg(args, "id"); id > 0 && id != existing.ID {
+		return EventSpec{}, false, fmt.Errorf("id %d does not match existing spec %d", id, existing.ID)
+	}
+	if _, ok := args["kind"]; ok {
+		merged.Kind = patch.Kind
+	}
+	if _, ok := args["display_name"]; ok {
+		merged.DisplayName = patch.DisplayName
+	}
+	if _, ok := args["description"]; ok {
+		merged.Description = patch.Description
+	}
+	if _, ok := args["category"]; ok {
+		merged.Category = patch.Category
+	}
+	if _, ok := args["status"]; ok {
+		merged.Status = patch.Status
+	}
+	if _, ok := args["validation_mode"]; ok {
+		merged.ValidationMode = patch.ValidationMode
+	}
+	if _, ok := args["ingest_mode"]; ok {
+		merged.IngestMode = patch.IngestMode
+	}
+	if _, ok := args["created_by"]; ok {
+		merged.CreatedBy = patch.CreatedBy
+	}
+	if _, ok := args["upsert_policy"]; ok {
+		merged.UpsertPolicy = patch.UpsertPolicy
+	}
+	if _, ok := args["rollup_policy"]; ok {
+		merged.RollupPolicy = patch.RollupPolicy
+	}
+	if boolArg(args, "clear_upsert_policy") {
+		merged.UpsertPolicy = nil
+	}
+	if boolArg(args, "clear_rollup_policy") {
+		merged.RollupPolicy = nil
+	}
+	replaceProperties := false
+	if _, ok := args["properties"]; ok {
+		if len(patch.Properties) == 0 && len(existing.Properties) > 0 && !boolArg(args, "clear_properties") {
+			return EventSpec{}, false, errors.New("refusing to remove existing properties without clear_properties=true")
+		}
+		merged.Properties = patch.Properties
+		replaceProperties = true
+	}
+	if boolArg(args, "clear_properties") {
+		merged.Properties = nil
+		replaceProperties = true
+	}
+	return merged, replaceProperties, nil
 }
 
 func (a *App) toolEventSpecDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -482,6 +604,9 @@ func exampleValue(prop EventPropertySpec) any {
 	if prop.ExampleValue != "" {
 		return prop.ExampleValue
 	}
+	if len(prop.AllowedValues) > 0 {
+		return prop.AllowedValues[0].Value
+	}
 	if len(prop.EnumValues) > 0 {
 		return prop.EnumValues[0]
 	}
@@ -548,6 +673,27 @@ func int64Arg(args map[string]any, name string) int64 {
 		return x
 	case json.Number:
 		n, _ := x.Int64()
+		return n
+	}
+	return 0
+}
+
+func floatArg(args map[string]any, name string) float64 {
+	v, ok := args[name]
+	if !ok || v == nil {
+		return 0
+	}
+	switch x := v.(type) {
+	case float64:
+		return x
+	case float32:
+		return float64(x)
+	case int:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case json.Number:
+		n, _ := x.Float64()
 		return n
 	}
 	return 0
@@ -652,6 +798,7 @@ func propertyFromArgs(args map[string]any) (EventPropertySpec, error) {
 		Type:              stringArg(args, "type"),
 		Required:          boolArg(args, "required"),
 		Description:       stringArg(args, "description"),
+		ReferenceSet:      stringArg(args, "reference_set"),
 		PIIClassification: stringArg(args, "pii_classification"),
 		ExampleValue:      stringArg(args, "example_value"),
 	}

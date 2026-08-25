@@ -103,6 +103,28 @@ func TestManifestUsesServerNativeIngress(t *testing.T) {
 	}
 }
 
+func TestManifestDeclaresTemplateReadPermission(t *testing.T) {
+	manifests := map[string]sdk.Manifest{"embedded": (&App{}).Manifest()}
+	b, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, err := sdk.ParseManifest(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifests["disk"] = *disk
+	for label, manifest := range manifests {
+		found := false
+		for _, permission := range manifest.Requires.Permissions {
+			found = found || permission == sdk.PermTemplatesRead
+		}
+		if !found {
+			t.Errorf("%s manifest missing platform.templates.read", label)
+		}
+	}
+}
+
 func TestManifestDeclaresOptionalA2A(t *testing.T) {
 	manifests := map[string]sdk.Manifest{"embedded": (&App{}).Manifest()}
 	b, err := os.ReadFile("apteva.yaml")

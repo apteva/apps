@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: api
 display_name: API Gateway
-version: 0.4.0
-description: Lightweight API gateway for Apteva SaaS projects with streaming Function targets and safe authenticated AppBus invalidation feeds with allowlisted projections.
+version: 0.5.0
+description: Lightweight API gateway with streaming Function targets, safe authenticated AppBus invalidation feeds, and platform-managed browser-origin policies.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -88,6 +88,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		a.httpClient = http.DefaultClient
 	}
 	a.eventHubs = newAppEventHubManager(os.Getenv("APTEVA_GATEWAY_URL"), outboundAppToken(), a.httpClient)
+	if err := reconcileBrowserOriginPolicies(ctx); err != nil {
+		// API data remains authoritative and stable registration keys are
+		// retried on the next mount. Do not make the Gateway unavailable when
+		// the platform policy endpoint is temporarily unavailable.
+		ctx.Logger().Warn("browser-origin reconciliation incomplete", "error", err)
+	}
 	ctx.Logger().Info("api mounted", "project_id", ctx.CurrentProject())
 	return nil
 }
@@ -158,6 +164,22 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 		out["required"] = required
 	}
 	return out
+}
+
+func corsPolicySchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "Explicit browser CORS policy. Wildcard origins are rejected. Route policies override API defaults.",
+		"properties": map[string]any{
+			"enabled":        map[string]any{"type": "boolean"},
+			"origins":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"allow_methods":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"allow_headers":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"expose_headers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"credentials":    map[string]any{"type": "boolean"},
+			"max_age":        map[string]any{"type": "integer", "minimum": 0, "maximum": 86400},
+		},
+	}
 }
 
 func stringArg(args map[string]any, key, def string) string {

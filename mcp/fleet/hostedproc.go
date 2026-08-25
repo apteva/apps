@@ -541,7 +541,7 @@ func sh(s string) string {
 // auto-setup-or-setup_pending response is the same; only spawn,
 // stop, and the base_url differ.
 
-func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner string, instanceID int64) (any, error) {
+func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner string, instanceID int64, pendingTemplate *pendingTenantTemplate) (any, error) {
 	if _, err := validatedTenantSlug(slug); err != nil {
 		return nil, err
 	}
@@ -603,6 +603,13 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 	if err := a.store.insert(t, apiKeyStub, nil); err != nil {
 		return nil, err
 	}
+	if pendingTemplate != nil {
+		pendingTemplate.TenantID = t.ID
+		if err := a.store.savePendingTemplate(*pendingTemplate); err != nil {
+			_ = a.store.hardDelete(t.ID)
+			return nil, fmt.Errorf("save requested template: %w", err)
+		}
+	}
 	_ = a.store.recordEvent(t.ID, "spawn_start", "user",
 		map[string]any{"instance_id": instanceID, "instance_ip": info.PublicIPv4, "port": port})
 
@@ -648,7 +655,7 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 		}
 		_ = a.store.recordEvent(t.ID, "auto_setup_failed", "user",
 			map[string]any{"error": err.Error()})
-		return map[string]any{
+		out := map[string]any{
 			"tenant_id":        t.ID,
 			"slug":             slug,
 			"base_url":         baseURL,
@@ -657,7 +664,11 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 			"setup_token":      setupToken,
 			"instance_id":      instanceID,
 			"auto_setup_error": err.Error(),
-		}, nil
+		}
+		if pendingTemplate != nil {
+			out["template"] = pendingTemplateStatus(*pendingTemplate)
+		}
+		return out, nil
 	}
 
 	// Auto-setup happy path — seal the api_key, flip to active.
@@ -680,6 +691,9 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 		"api_key":        autoSetup.APIKey,
 		"instance_id":    instanceID,
 		"target_version": version,
+	}
+	if pendingTemplate != nil {
+		out["template"] = a.applyPendingTemplateBestEffort(ctx, t, autoSetup.APIKey)
 	}
 	out["a2a"] = a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_create")
 	return out, nil

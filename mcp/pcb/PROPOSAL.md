@@ -1,5 +1,9 @@
 # PCB Studio App Proposal
 
+## Version 0.5 implementation status
+
+PCB Studio now includes a native physical Wiring workspace for Arduino and breadboard tutorials. Its semantic model stores reference parts, stable named pins, jumper endpoints, tutorial steps, and firmware pin mappings in the immutable PCB revision. PCB Studio renders that model itself as detailed SVG and PNG, packages tutorial JSON/ZIP, validates endpoint and LED/resistor compatibility, and maps Arduino GPIO execution back onto visible parts. The first reference design is an Arduino Uno R3 connected to a half breadboard, 220 Ω resistor, and red LED on pin 9. No Fritzing or external illustration engine is required.
+
 ## Version 0.4 implementation status
 
 The first native routing and simulation milestone is implemented. PCB Studio now owns deterministic grid/A* autorouting with net-class rules and reviewable typed operations; failed or constraint-invalid route proposals are blocked by default. It also owns a deterministic DC, RC-transient, and digital-event simulator with sources, probes, fault injection, waveform artifacts, and behavioral regulator, passive, LED, and sensor models.

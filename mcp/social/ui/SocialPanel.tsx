@@ -4,7 +4,7 @@
 //   - Tab "Accounts": connected social accounts grid + Add Account flow
 //     (OAuth in popup → page picker if needed → finalize).
 //   - Tab "Compose": prompt body + multi-select accounts + media picker
-//     (storage app, when bound) + Schedule/Now → post_create.
+//     (storage app, when bound) + explicit Draft/Schedule/Publish → post_create.
 //   - Tab "Posts": compact list or bounded month/week calendar with
 //     shared filters, post details, and lifecycle actions.
 //
@@ -124,6 +124,20 @@ interface PostTarget {
   attempts: number;
   last_error: string;
   published_at: string;
+  options?: Record<string, any>;
+  failure_code?: string;
+  retryable?: boolean;
+  upstream_status?: number;
+  existing_post_id?: string;
+  provider_sync_status?: string;
+}
+
+interface PostReview {
+  revision: number;
+  action: "submit" | "approve" | "reject";
+  actor: string;
+  reason?: string;
+  created_at: string;
 }
 
 interface Post {
@@ -137,6 +151,16 @@ interface Post {
   published_at: string;
   targets: PostTarget[];
   profile_id?: number;
+  revision: number;
+  approval_status: "not_requested" | "pending" | "approved" | "rejected";
+  approved_revision: number;
+  approval_required: boolean;
+  rejection_reason?: string;
+  requested_mode: "draft" | "schedule" | "publish" | "";
+  provider_sync_mode: "local" | "mirror";
+  source: "local" | "provider";
+  updated_at?: string;
+  reviews?: PostReview[];
 }
 
 interface InboxItem {
@@ -529,9 +553,8 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         <Tab label="Metrics" value="metrics" current={tab} onClick={setTab} />
         <button
           onClick={() => setComposeOpen(true)}
-          disabled={accounts.length === 0}
-          className="ml-auto px-3 py-1 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
-          title={accounts.length === 0 ? "Connect at least one social account first" : "New post"}
+          className="ml-auto px-3 py-1 text-sm bg-accent text-bg rounded font-bold"
+          title="Create a draft, schedule, or publish"
         >
           + New post
         </button>
@@ -3153,10 +3176,13 @@ function ComposeDialog({
     setStatus(`Added ${picked.length} file${picked.length !== 1 ? "s" : ""} from storage.`);
   };
 
-  const submit = async () => {
-    if (!body.trim() || selected.size === 0) return;
+  const submit = async (mode: "draft" | "schedule" | "publish") => {
+    const hasContent = !!body.trim() || media.length > 0;
+    if (!hasContent) return;
+    if (mode !== "draft" && selected.size === 0) return;
+    if (mode === "schedule" && !scheduleAt) return;
     setBusy(true);
-    setStatus("Posting…");
+    setStatus(mode === "draft" ? "Saving draft…" : mode === "schedule" ? "Scheduling…" : "Publishing…");
     try {
       // Choose between the simple multicast shape (social_account_ids[])
       // and the per-target shape (targets[]). Use targets[] only when
@@ -3165,8 +3191,9 @@ function ComposeDialog({
       const selectedIds = Array.from(selected);
       const anyCustomized = selectedIds.some((id) => isCustomized(id));
       const payload: Record<string, any> = {
+        mode,
         body,
-        schedule_at: scheduleAt || undefined,
+        schedule_at: mode === "schedule" ? scheduleAt : undefined,
         media_storage_ids: media.length > 0 ? media.map((m) => m.id) : undefined,
         media_project_id: media.length > 0 ? projectId : undefined,
         // When the panel is scoped to one profile, tag the post
@@ -3200,7 +3227,7 @@ function ComposeDialog({
       // Don't revoke the object URLs here — the cleanup effect handles
       // them on unmount. Just clear the list visually.
       setMedia([]);
-      setStatus("Done.");
+      setStatus(mode === "draft" ? "Draft saved." : mode === "schedule" ? "Post scheduled." : "Post published.");
       onCreated();
     } catch (e) {
       setStatus("Post failed: " + (e as Error).message);
@@ -3376,14 +3403,28 @@ function ComposeDialog({
               className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
             />
           </div>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             <button onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
             <button
-              onClick={submit}
-              disabled={!body.trim() || selected.size === 0 || busy}
+              onClick={() => submit("draft")}
+              disabled={(!body.trim() && media.length === 0) || busy}
+              className="px-3 py-2 text-sm border border-accent text-accent rounded font-medium disabled:opacity-50"
+            >
+              {busy ? "…" : "Save draft"}
+            </button>
+            <button
+              onClick={() => submit("schedule")}
+              disabled={(!body.trim() && media.length === 0) || selected.size === 0 || !scheduleAt || busy}
+              className="px-3 py-2 text-sm border border-border text-text rounded font-medium disabled:opacity-50"
+            >
+              Schedule
+            </button>
+            <button
+              onClick={() => submit("publish")}
+              disabled={(!body.trim() && media.length === 0) || selected.size === 0 || busy}
               className="px-4 py-2 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
             >
-              {busy ? "…" : scheduleAt ? "Schedule" : "Post now"}
+              Publish now
             </button>
           </div>
         </div>
@@ -4115,6 +4156,19 @@ function PostsView({
     if (current) setSelectedPost(current);
   }, [sourcePosts, selectedPost?.id]);
 
+  useEffect(() => {
+    if (!selectedPost?.id) return;
+    let alive = true;
+    fetch(appURL(`/posts/${selectedPost.id}`, projectId), { credentials: "same-origin" })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await res.text());
+        return res.json();
+      })
+      .then((data) => { if (alive && data.post) setSelectedPost(data.post); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [projectId, selectedPost?.id, postsRevision]);
+
   const retry = async (postId: number) => {
     try {
       const res = await fetch(appURL(`/posts/${postId}/retry`, projectId), { method: "POST", credentials: "same-origin" });
@@ -4123,6 +4177,31 @@ function PostsView({
       await refreshAll();
     } catch (e) {
       setStatus("Retry failed: " + (e as Error).message);
+    }
+  };
+
+  const workflow = async (post: Post, action: "submit" | "approve" | "reject" | "publish", extra: Record<string, any> = {}) => {
+    try {
+      const res = await fetch(appURL(`/posts/${post.id}/${action}`, projectId), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_revision: post.revision, ...extra }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      const envelopeError = mcpEnvelopeError(data);
+      if (envelopeError) throw new Error(envelopeError);
+      setStatus(
+        action === "submit" ? "Draft submitted for review." :
+        action === "approve" ? "Draft approved." :
+        action === "reject" ? "Draft rejected." :
+        extra.mode === "schedule" ? "Draft scheduled." : "Draft published."
+      );
+      setSelectedPost(data as Post);
+      await refreshAll();
+    } catch (e) {
+      setStatus(`Draft ${action} failed: ${(e as Error).message}`);
     }
   };
 
@@ -4183,6 +4262,9 @@ function PostsView({
           <option value="failed">Failed</option>
           <option value="partial">Partial</option>
           <option value="draft">Draft</option>
+          <option value="in_review">In review</option>
+          <option value="approved">Approved</option>
+          <option value="rejected">Rejected</option>
         </select>
         <select
           value={accountFilter}
@@ -4245,6 +4327,14 @@ function PostsView({
           onReschedule={() => setRescheduleFor(selectedPost)}
           onEdit={() => setEditFor(selectedPost)}
           onDelete={() => setDeleteFor(selectedPost)}
+          onSubmit={() => workflow(selectedPost, "submit")}
+          onApprove={() => workflow(selectedPost, "approve")}
+          onReject={() => {
+            const reason = window.prompt("Why is this draft being rejected?")?.trim();
+            if (reason) workflow(selectedPost, "reject", { reason });
+          }}
+          onPublish={() => workflow(selectedPost, "publish", { mode: "publish" })}
+          onSchedule={() => setRescheduleFor(selectedPost)}
         />
       )}
       {dayDialog && (
@@ -4708,7 +4798,10 @@ function PostLeadMedia({ post, projectId, variant }: {
   );
 }
 
-function PostDetailPanel({ post, projectId, onClose, onRetry, onReschedule, onEdit, onDelete }: {
+function PostDetailPanel({
+  post, projectId, onClose, onRetry, onReschedule, onEdit, onDelete,
+  onSubmit, onApprove, onReject, onPublish, onSchedule,
+}: {
   post: Post;
   projectId?: string | null;
   onClose: () => void;
@@ -4716,6 +4809,11 @@ function PostDetailPanel({ post, projectId, onClose, onRetry, onReschedule, onEd
   onReschedule: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  onSubmit: () => void;
+  onApprove: () => void;
+  onReject: () => void;
+  onPublish: () => void;
+  onSchedule: () => void;
 }) {
   const editable = (post.status === "published" || post.status === "partial") &&
     post.targets.some((target) => isEditablePlatform(target.platform));
@@ -4753,7 +4851,29 @@ function PostDetailPanel({ post, projectId, onClose, onRetry, onReschedule, onEd
             <div><div className="text-text-dim uppercase">Scheduled</div><div className="text-text mt-1">{post.schedule_at ? new Date(post.schedule_at).toLocaleString() : "—"}</div></div>
             <div><div className="text-text-dim uppercase">Published</div><div className="text-text mt-1">{post.published_at ? new Date(post.published_at).toLocaleString() : "—"}</div></div>
             <div><div className="text-text-dim uppercase">Targets</div><div className="text-text mt-1">{post.targets.length}</div></div>
+            <div><div className="text-text-dim uppercase">Revision</div><div className="text-text mt-1">{post.revision || 1}</div></div>
+            <div><div className="text-text-dim uppercase">Approval</div><div className="text-text mt-1">{post.approval_status || "not requested"}</div></div>
           </section>
+          {post.rejection_reason && (
+            <section className="p-4 border-b border-border">
+              <div className="text-xs uppercase text-text-dim mb-1">Rejection reason</div>
+              <div className="text-error text-sm whitespace-pre-wrap">{post.rejection_reason}</div>
+            </section>
+          )}
+          {(post.reviews?.length || 0) > 0 && (
+            <section className="p-4 border-b border-border">
+              <div className="text-xs uppercase text-text-dim mb-2">Review history</div>
+              <div className="flex flex-col gap-2">
+                {post.reviews!.map((review, index) => (
+                  <div key={`${review.action}-${review.revision}-${index}`} className="text-xs text-text">
+                    <span className="font-medium capitalize">{review.action}</span> revision {review.revision}
+                    <span className="text-text-dim"> · {review.actor} · {new Date(review.created_at).toLocaleString()}</span>
+                    {review.reason && <div className="text-text-muted mt-0.5">{review.reason}</div>}
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
           <section className="p-4">
             <div className="text-xs uppercase text-text-dim mb-2">Destinations</div>
             <div className="flex flex-col gap-2">
@@ -4774,6 +4894,12 @@ function PostDetailPanel({ post, projectId, onClose, onRetry, onReschedule, onEd
         <div className="flex flex-wrap justify-end gap-2 px-4 py-3 border-t border-border bg-bg-card/30">
           {(post.status === "failed" || post.status === "partial") && <button type="button" onClick={onRetry} className="px-3 py-1.5 text-sm border border-accent text-accent rounded">Retry</button>}
           {post.status === "scheduled" && <button type="button" onClick={onReschedule} className="px-3 py-1.5 text-sm border border-border text-text rounded">Reschedule</button>}
+          {(post.status === "draft" || post.status === "rejected" || post.status === "approved") && <button type="button" onClick={onEdit} className="px-3 py-1.5 text-sm border border-border text-text rounded">Edit draft</button>}
+          {(post.status === "draft" || post.status === "rejected") && <button type="button" onClick={onSubmit} className="px-3 py-1.5 text-sm border border-border text-text rounded">Submit for review</button>}
+          {post.status === "in_review" && <button type="button" onClick={onReject} className="px-3 py-1.5 text-sm border border-error text-error rounded">Reject</button>}
+          {post.status === "in_review" && <button type="button" onClick={onApprove} className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold">Approve</button>}
+          {(post.status === "draft" || post.status === "approved") && <button type="button" onClick={onSchedule} className="px-3 py-1.5 text-sm border border-border text-text rounded">Schedule</button>}
+          {(post.status === "draft" || post.status === "approved") && <button type="button" onClick={onPublish} className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold">Publish now</button>}
           {editable && <button type="button" onClick={onEdit} className="px-3 py-1.5 text-sm border border-border text-text rounded">Edit</button>}
           <button type="button" onClick={onDelete} className="px-3 py-1.5 text-sm border border-error text-error rounded">{post.status === "scheduled" ? "Cancel post" : "Delete"}</button>
         </div>
@@ -5011,6 +5137,7 @@ function EditPostDialog({
   // want to change.
   const [targetOptions, setTargetOptions] = useState<Record<number, Record<string, any>>>({});
   const [busy, setBusy] = useState(false);
+  const draftLike = post.status === "draft" || post.status === "rejected" || post.status === "approved";
 
   const setOpt = (acctId: number, key: string, value: any) => {
     setTargetOptions((prev) => {
@@ -5036,20 +5163,36 @@ function EditPostDialog({
       const targets = Object.entries(targetOptions).map(([id, opts]) => ({
         social_account_id: Number(id), ...opts,
       }));
-      if (targets.length > 0) payload.targets = targets;
+      if (targets.length > 0) {
+        payload.targets = draftLike
+          ? post.targets.map((target) => ({
+              social_account_id: target.social_account_id,
+              ...(target.options || {}),
+              ...(targetOptions[target.social_account_id] || {}),
+            }))
+          : targets;
+      }
+      if (draftLike) payload.expected_revision = post.revision;
       if (Object.keys(payload).length === 0) {
         setStatus("Nothing to save — body and targets unchanged.");
         setBusy(false);
         return;
       }
-      const res = await fetch(appURL(`/posts/${post.id}/edit`, projectId), {
+      const res = await fetch(appURL(`/posts/${post.id}/${draftLike ? "draft" : "edit"}`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error(await res.text());
-      const data = await res.json() as { targets?: TargetEditOutcome[] };
+      const data = await res.json() as { targets?: TargetEditOutcome[]; isError?: boolean };
+      const envelopeError = mcpEnvelopeError(data);
+      if (envelopeError) throw new Error(envelopeError);
+      if (draftLike) {
+        setStatus("Draft updated. Any prior approval was invalidated.");
+        onSaved();
+        return;
+      }
       const outcomes = data.targets || [];
       const failed = outcomes.filter((t) => t.status === "failed");
       const unsupported = outcomes.filter((t) => t.status === "unsupported");
@@ -5077,7 +5220,7 @@ function EditPostDialog({
       >
         <div className="bg-bg-card border border-border rounded-lg shadow-lg w-[min(640px,92vw)] max-h-[85vh] flex flex-col">
           <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-            <div className="text-text font-bold">Edit post</div>
+            <div className="text-text font-bold">{draftLike ? "Edit draft" : "Edit post"}</div>
             <button onClick={onClose} disabled={busy} className="text-text-muted hover:text-text text-lg leading-none disabled:opacity-50">×</button>
           </div>
           <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
@@ -5237,19 +5380,25 @@ function RescheduleDialog({
   const seed = (post.schedule_at || "").slice(0, 16);
   const [when, setWhen] = useState(seed);
   const [busy, setBusy] = useState(false);
+  const schedulingDraft = post.status === "draft" || post.status === "approved";
 
   const submit = async () => {
     if (!when) return;
     setBusy(true);
     try {
-      const res = await fetch(appURL(`/posts/${post.id}/reschedule`, projectId), {
+      const res = await fetch(appURL(`/posts/${post.id}/${schedulingDraft ? "publish" : "reschedule"}`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schedule_at: when }),
+        body: JSON.stringify(schedulingDraft
+          ? { expected_revision: post.revision, mode: "schedule", schedule_at: when }
+          : { schedule_at: when }),
       });
       if (!res.ok) throw new Error(await res.text());
-      setStatus("Rescheduled.");
+      const data = await res.json();
+      const envelopeError = mcpEnvelopeError(data);
+      if (envelopeError) throw new Error(envelopeError);
+      setStatus(schedulingDraft ? "Draft scheduled." : "Rescheduled.");
       onChanged();
     } catch (e) {
       setStatus("Reschedule failed: " + (e as Error).message);
@@ -5265,7 +5414,7 @@ function RescheduleDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <div className="text-text font-medium">Reschedule post #{post.id}</div>
+          <div className="text-text font-medium">{schedulingDraft ? "Schedule draft" : "Reschedule post"} #{post.id}</div>
           <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
         </div>
         <div className="text-text-dim text-xs whitespace-pre-wrap">{post.body}</div>
@@ -5281,10 +5430,10 @@ function RescheduleDialog({
           <button onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
           <button
             onClick={submit}
-            disabled={!when || busy || when === seed}
+            disabled={!when || busy || (!schedulingDraft && when === seed)}
             className="px-4 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
           >
-            {busy ? "…" : "Reschedule"}
+            {busy ? "…" : schedulingDraft ? "Schedule" : "Reschedule"}
           </button>
         </div>
       </div>
@@ -6252,6 +6401,9 @@ function StatusPill({ status }: { status: string }) {
     status === "failed" ? "text-error" :
     status === "partial" ? "text-warn" :
     status === "scheduled" ? "text-info" :
+    status === "approved" ? "text-success" :
+    status === "in_review" ? "text-info" :
+    status === "rejected" ? "text-error" :
     "text-text-dim";
   return <span className={"text-xs uppercase " + tone}>{status}</span>;
 }

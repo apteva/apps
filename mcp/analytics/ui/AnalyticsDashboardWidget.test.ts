@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { defaultDashboardFilters, selectDashboardID } from "./dashboard-ui";
+import { areaChartEndMarkerPath, areaChartGeometry, dedupeWidgetGoals, defaultDashboardFilters, formatMetric, objectiveMatchesMetric, selectDashboardID } from "./dashboard-ui";
 
 describe("Analytics dashboard home widget", () => {
   test("prefers configured dashboard, then stored dashboard, then newest", () => {
@@ -19,5 +19,41 @@ describe("Analytics dashboard home widget", () => {
       { key: "window", type: "date_window" },
       { key: "plan", type: "select" },
     ])).toEqual({ page_id: "page-1", window: "30d", plan: "all" });
+  });
+
+  test("renders each linked goal once, preferring the first visible metric", () => {
+    const data = {
+      10: { value: 18240, goals: [{ target_id: 173, name: "MRR target" }] },
+      11: { series: [], goals: [{ target_id: 173, name: "MRR target" }, { target_id: 174, name: "Members target" }] },
+    };
+    expect(dedupeWidgetGoals([10, 11], data)).toEqual({
+      10: { value: 18240, goals: [{ target_id: 173, name: "MRR target" }] },
+      11: { series: [], goals: [{ target_id: 174, name: "Members target" }] },
+    });
+    expect(data[11].goals).toHaveLength(2);
+  });
+
+  test("keeps area-chart endpoints inside the viewbox", () => {
+    const geometry = areaChartGeometry([10, 14, 12, 18]);
+    expect(geometry.points[0].x).toBe(8);
+    expect(geometry.points.at(-1)?.x).toBe(292);
+    expect(geometry.areaPath).toEndWith(`L 8 ${geometry.baseline} Z`);
+    expect(areaChartEndMarkerPath(geometry.points, geometry.baseline)).toBe("M 292 8 h 0.001");
+  });
+
+  test("formats and matches generic money aggregates without widget-specific code", () => {
+    const config = {
+      aggregation: "sum_money",
+      app: "billing",
+      topic: "invoice.paid",
+      value: "props.total_cents",
+      currency_field: "props.currency",
+      reporting_currency: "EUR",
+      amount_unit: "minor",
+      rate_date_field: "props.accounting_date",
+    };
+    expect(formatMetric(9234.56, config)).toBe("€9,234.56");
+    expect(objectiveMatchesMetric(config, config)).toBe(true);
+    expect(objectiveMatchesMetric(config, { ...config, reporting_currency: "USD" })).toBe(false);
   });
 });

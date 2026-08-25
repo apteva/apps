@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.10.0
+version: 0.13.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -55,6 +55,21 @@ description: |
   plus reusable count, distinct, sum, average, min, max, latest, and change
   aggregations for dashboard stats and timeseries. Existing value/by widgets
   retain their v0.9 sum/distinct behavior without migration.
+  v0.11 links objective targets explicitly to saved dashboard metrics and
+  renders live goal progress in both the Analytics panel and home widget.
+  Objective targets now support every generic numeric aggregation from v0.10;
+  dashboard reads evaluate linked progress without writing progress history.
+  v0.11.1 renders each linked goal once in the home widget and upgrades metric
+  trends to themed filled area charts.
+  v0.11.2 keeps area-chart endpoints inside the plot and adds optional generic
+  previous-period comparisons for dashboard metrics.
+  v0.11.3 keeps trend endpoint markers circular in stretched dashboard cards.
+  v0.12 adds read-only mixed-currency aggregation for stats, trends,
+  comparisons, and objectives using project-scoped auditable FX rates. Source
+  events remain unchanged.
+  v0.13 adds generic project-scoped reference sets for governed dimensions,
+  active-value validation and discovery, and safe patch semantics for event
+  specifications.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -76,6 +91,8 @@ provides:
       description: Record events via analytics_track.
     - name: events.read
       description: Query events.
+    - name: references.manage
+      description: Manage canonical Analytics reference sets and values.
   mcp_tools:
     - name: analytics_track
       description: Record one event in the current project. Project is assigned automatically from the calling agent; do not pass project_id.
@@ -95,6 +112,24 @@ provides:
     - name: analytics_sum
       description: Sum a numeric property over events, optionally grouped.
       requires: events.read
+    - name: analytics_sum_money
+      description: Convert and sum mixed-currency event amounts without changing source events.
+      requires: events.read
+    - name: analytics_fx_rate_upsert
+      description: Create or update a project-scoped FX reference rate.
+      requires: events.write
+    - name: analytics_fx_rates_list
+      description: List project-scoped FX reference rates.
+      requires: events.read
+    - name: analytics_reference_set_upsert
+      description: Create or update one project-scoped canonical reference set.
+      requires: references.manage
+    - name: analytics_reference_value_upsert
+      description: Create, update, activate, or deactivate a canonical reference value.
+      requires: references.manage
+    - name: analytics_reference_values_list
+      description: List canonical values in one current-project reference set.
+      requires: events.read
     - name: analytics_event_specs_list
       description: List current-project event specs.
       requires: events.read
@@ -105,13 +140,13 @@ provides:
       description: Get one event spec with properties.
       requires: events.read
     - name: analytics_event_spec_upsert
-      description: Create or update an event spec and its properties.
+      description: Create or safely patch an event spec; omitted properties and policies are preserved.
       requires: events.write
     - name: analytics_event_spec_delete
       description: Delete an event spec.
       requires: events.write
     - name: analytics_event_property_upsert
-      description: Create or update one event property spec.
+      description: Create or update one property spec, optionally referencing a canonical reference set.
       requires: events.write
     - name: analytics_event_property_delete
       description: Delete one event property spec.
@@ -173,6 +208,10 @@ provides:
           show_trends:
             type: boolean
             title: Show trends and details
+            default: true
+          show_goals:
+            type: boolean
+            title: Show linked goals
             default: true
           max_metrics:
             type: integer
@@ -355,6 +394,79 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolSum,
 		},
 		{
+			Name:        "analytics_sum_money",
+			Description: "Read-only mixed-currency sum over current-project events. Converts each amount with the latest project FX rate at or before its event/accounting date and never changes source events.",
+			InputSchema: schemaObject(map[string]any{
+				"value":              map[string]any{"type": "string", "description": "Numeric amount field, for example props.total_cents."},
+				"currency_field":     map[string]any{"type": "string", "description": "Currency field, for example props.currency."},
+				"reporting_currency": map[string]any{"type": "string", "description": "Three-letter target currency, for example EUR."},
+				"amount_unit":        map[string]any{"type": "string", "enum": []string{"minor", "major"}},
+				"rate_date_field":    map[string]any{"type": "string", "description": "Optional props.X date; event timestamp is used when omitted."},
+				"app":                map[string]any{"type": "string"},
+				"topic":              map[string]any{"type": "string"},
+				"since":              map[string]any{"type": "integer"},
+				"until":              map[string]any{"type": "integer"},
+				"where":              map[string]any{"type": "object"},
+			}, []string{"value", "currency_field", "reporting_currency", "amount_unit"}),
+			Handler: a.toolSumMoney,
+		},
+		{
+			Name:        "analytics_fx_rate_upsert",
+			Description: "Create or update one project-scoped FX reference rate. This changes only the rate cache, never Analytics events. One base unit equals rate quote units.",
+			InputSchema: schemaObject(map[string]any{
+				"base_currency":  map[string]any{"type": "string"},
+				"quote_currency": map[string]any{"type": "string"},
+				"as_of":          map[string]any{"type": "integer", "description": "Unix milliseconds."},
+				"rate":           map[string]any{"type": "number"},
+				"source":         map[string]any{"type": "string"},
+			}, []string{"base_currency", "quote_currency", "as_of", "rate"}),
+			Handler: a.toolFXRateUpsert,
+		},
+		{
+			Name:        "analytics_fx_rates_list",
+			Description: "List project-scoped FX reference rates for auditing money aggregates.",
+			InputSchema: schemaObject(map[string]any{
+				"base_currency":  map[string]any{"type": "string"},
+				"quote_currency": map[string]any{"type": "string"},
+				"since":          map[string]any{"type": "integer"},
+				"until":          map[string]any{"type": "integer"},
+				"limit":          map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolFXRatesList,
+		},
+		{
+			Name:        "analytics_reference_set_upsert",
+			Description: "Create or update one project-scoped reference set. Reference management is separate from event ingestion.",
+			InputSchema: schemaObject(map[string]any{
+				"key":         map[string]any{"type": "string"},
+				"label":       map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+			}, []string{"key", "label"}),
+			Handler: a.toolReferenceSetUpsert,
+		},
+		{
+			Name:        "analytics_reference_value_upsert",
+			Description: "Create, update, activate, or deactivate one value in a project-scoped reference set.",
+			InputSchema: schemaObject(map[string]any{
+				"reference_set": map[string]any{"type": "string"},
+				"value":         map[string]any{"type": "string"},
+				"label":         map[string]any{"type": "string"},
+				"status":        map[string]any{"type": "string", "enum": []string{"active", "inactive"}},
+				"metadata":      map[string]any{"type": "object"},
+			}, []string{"reference_set", "value", "label", "status"}),
+			Handler: a.toolReferenceValueUpsert,
+		},
+		{
+			Name:        "analytics_reference_values_list",
+			Description: "List canonical values in one current-project reference set. Defaults to active values for agent discovery.",
+			InputSchema: schemaObject(map[string]any{
+				"reference_set": map[string]any{"type": "string"},
+				"status":        map[string]any{"type": "string", "enum": []string{"active", "inactive"}},
+				"limit":         map[string]any{"type": "integer"},
+			}, []string{"reference_set"}),
+			Handler: a.toolReferenceValuesList,
+		},
+		{
 			Name:        "analytics_event_specs_list",
 			Description: "List current-project event specs. Args app?, status?. Returns specs with properties.",
 			InputSchema: schemaObject(map[string]any{
@@ -383,21 +495,24 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "analytics_event_spec_upsert",
-			Description: "Create or update an event spec in the current project. Args app, topic, kind?, display_name?, description?, category?, status?, validation_mode?, ingest_mode?, upsert_policy?, rollup_policy?, properties?.",
+			Description: "Create or safely patch an event spec in the current project. Omitted properties and policies are preserved; clearing requires an explicit clear_* flag.",
 			InputSchema: schemaObject(map[string]any{
-				"id":              map[string]any{"type": "integer"},
-				"app":             map[string]any{"type": "string"},
-				"topic":           map[string]any{"type": "string"},
-				"kind":            map[string]any{"type": "string"},
-				"display_name":    map[string]any{"type": "string"},
-				"description":     map[string]any{"type": "string"},
-				"category":        map[string]any{"type": "string"},
-				"status":          map[string]any{"type": "string"},
-				"validation_mode": map[string]any{"type": "string"},
-				"ingest_mode":     map[string]any{"type": "string"},
-				"upsert_policy":   map[string]any{"type": "object"},
-				"rollup_policy":   map[string]any{"type": "object"},
-				"properties":      map[string]any{"type": "array"},
+				"id":                  map[string]any{"type": "integer"},
+				"app":                 map[string]any{"type": "string"},
+				"topic":               map[string]any{"type": "string"},
+				"kind":                map[string]any{"type": "string"},
+				"display_name":        map[string]any{"type": "string"},
+				"description":         map[string]any{"type": "string"},
+				"category":            map[string]any{"type": "string"},
+				"status":              map[string]any{"type": "string"},
+				"validation_mode":     map[string]any{"type": "string"},
+				"ingest_mode":         map[string]any{"type": "string"},
+				"upsert_policy":       map[string]any{"type": "object"},
+				"rollup_policy":       map[string]any{"type": "object"},
+				"properties":          map[string]any{"type": "array"},
+				"clear_properties":    map[string]any{"type": "boolean"},
+				"clear_upsert_policy": map[string]any{"type": "boolean"},
+				"clear_rollup_policy": map[string]any{"type": "boolean"},
 			}, []string{"app", "topic"}),
 			Handler: a.toolEventSpecUpsert,
 		},
@@ -411,7 +526,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "analytics_event_property_upsert",
-			Description: "Create or update one property spec. Args event_spec_id, key, type?, required?, description?, enum_values?, pii_classification?, example_value?.",
+			Description: "Create or update one property spec. reference_set optionally enforces an active canonical dimension value.",
 			InputSchema: schemaObject(map[string]any{
 				"event_spec_id":      map[string]any{"type": "integer"},
 				"key":                map[string]any{"type": "string"},
@@ -419,6 +534,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"required":           map[string]any{"type": "boolean"},
 				"description":        map[string]any{"type": "string"},
 				"enum_values":        map[string]any{"type": "array"},
+				"reference_set":      map[string]any{"type": "string"},
 				"pii_classification": map[string]any{"type": "string"},
 				"example_value":      map[string]any{"type": "string"},
 			}, []string{"event_spec_id", "key"}),

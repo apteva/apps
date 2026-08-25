@@ -752,6 +752,7 @@ func TestPostCreate_FansOutAndPublishes(t *testing.T) {
 
 	app := &App{}
 	out, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "hello world",
 		"social_account_ids": []any{acctID},
 	})
@@ -809,6 +810,122 @@ func TestPostCreate_FansOutAndPublishes(t *testing.T) {
 	ctx.AppDB().QueryRow(`SELECT status FROM posts WHERE id=?`, postID).Scan(&postStatus)
 	if postStatus != "published" {
 		t.Errorf("post status = %q", postStatus)
+	}
+}
+
+func TestPostCreateRequiresExplicitModeWithoutSideEffects(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newSocialCtx(t, pf)
+	out, err := (&App{}).toolPostCreate(ctx, map[string]any{"body": "do not publish"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["isError"] != true || !strings.Contains(fmt.Sprint(result), "mode required") {
+		t.Fatalf("missing mode result = %+v", result)
+	}
+	var posts int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts`).Scan(&posts)
+	if posts != 0 || len(pf.executeCalls) != 0 {
+		t.Fatalf("missing mode had side effects: posts=%d calls=%+v", posts, pf.executeCalls)
+	}
+}
+
+func TestDraftLifecycleSupportsMediaAndOptionalApproval(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["post_tweet"] = &sdk.ExecuteResult{Success: true, Data: json.RawMessage(`{"data":{"id":"draft-published"}}`)}
+	ctx := newSocialCtx(t, pf)
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	accountID, _ := account.LastInsertId()
+	app := &App{}
+	created, err := app.toolPostDraftCreate(ctx, map[string]any{
+		"body":               "review me",
+		"social_account_ids": []any{accountID},
+		"media_storage_ids":  []any{int64(71)},
+		"media_project_id":   "media-project",
+		"approval_required":  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := created.(map[string]any)
+	postID := draft["id"].(int64)
+	if draft["status"] != "draft" || draft["revision"] != int64(1) || len(pf.executeCalls) != 0 {
+		t.Fatalf("draft create = %+v; calls=%+v", draft, pf.executeCalls)
+	}
+	media := draft["media_storage_ids"].([]int64)
+	if len(media) != 1 || media[0] != 71 {
+		t.Fatalf("draft media = %+v", media)
+	}
+	if _, err := app.toolPostDraftSubmit(ctx, map[string]any{"post_id": postID, "expected_revision": 1, "_caller": "agent:writer"}); err != nil {
+		t.Fatal(err)
+	}
+	approved, err := app.toolPostDraftApprove(ctx, map[string]any{"post_id": postID, "expected_revision": 1, "_caller": "human:reviewer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.(map[string]any)["status"] != "approved" {
+		t.Fatalf("approved = %+v", approved)
+	}
+	// Remove the media before delivery so this unit test does not need a Storage binding.
+	updated, err := app.toolPostDraftUpdate(ctx, map[string]any{
+		"post_id": postID, "expected_revision": 1, "media_storage_ids": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.(map[string]any)["status"] != "draft" || updated.(map[string]any)["revision"] != int64(2) {
+		t.Fatalf("updated draft = %+v", updated)
+	}
+	blocked, err := app.toolPostDraftPublish(ctx, map[string]any{"post_id": postID, "expected_revision": 2, "mode": "publish"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked.(map[string]any)["isError"] != true {
+		t.Fatalf("edited approved draft should require reapproval: %+v", blocked)
+	}
+	if _, err := app.toolPostDraftSubmit(ctx, map[string]any{"post_id": postID, "expected_revision": 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPostDraftApprove(ctx, map[string]any{"post_id": postID, "expected_revision": 2}); err != nil {
+		t.Fatal(err)
+	}
+	published, err := app.toolPostDraftPublish(ctx, map[string]any{"post_id": postID, "expected_revision": 2, "mode": "publish"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published.(map[string]any)["status"] != "published" || len(pf.executeCalls) != 1 {
+		t.Fatalf("published draft = %+v; calls=%+v", published, pf.executeCalls)
+	}
+	if reviews := published.(map[string]any)["reviews"].([]map[string]any); len(reviews) != 4 {
+		t.Fatalf("reviews = %+v", reviews)
+	}
+}
+
+func TestDraftCanScheduleDirectlyWithoutApproval(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	accountID, _ := account.LastInsertId()
+	app := &App{}
+	created, err := app.toolPostDraftCreate(ctx, map[string]any{"body": "later", "social_account_ids": []any{accountID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID := created.(map[string]any)["id"].(int64)
+	out, err := app.toolPostDraftPublish(ctx, map[string]any{
+		"post_id": postID, "expected_revision": 1, "mode": "schedule", "schedule_at": "2026-09-01T10:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["status"] != "scheduled" {
+		t.Fatalf("direct draft schedule = %+v", out)
 	}
 }
 
@@ -1615,6 +1732,7 @@ func TestPostCreate_ZernioProviderPublishesNonNativePlatform(t *testing.T) {
 
 	app := &App{}
 	out, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "plain social copy",
 		"social_account_ids": []any{acctID},
 	})
@@ -1645,6 +1763,141 @@ func TestPostCreate_ZernioProviderPublishesNonNativePlatform(t *testing.T) {
 	).Scan(&status, &platformPostID, &providerPostID)
 	if status != "published" || platformPostID != "li_456" || providerPostID != "zp_123" {
 		t.Fatalf("target = status %q platform %q provider %q", status, platformPostID, providerPostID)
+	}
+}
+
+func TestZernioDuplicateContentIsTerminalAndReturnsExistingPostID(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["create_post"] = &sdk.ExecuteResult{
+		Success: false,
+		Status:  409,
+		Data:    json.RawMessage(`{"error":"duplicate content","details":{"existingPostId":"zp_existing_42"}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, external_account_id, display_name, status,
+		    provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'za_1', 'Company Page', 'active', 'zernio', 'za_1')`,
+	)
+	accountID, _ := account.LastInsertId()
+	app := &App{}
+	created, err := app.toolPostCreate(ctx, map[string]any{
+		"mode": "publish", "body": "same content", "social_account_ids": []any{accountID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID := created.(map[string]any)["post_id"].(int64)
+	var attempts, retryable, upstreamStatus int
+	var code, existingID string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT attempts, retryable, upstream_status, failure_code, existing_post_id
+		   FROM post_targets WHERE post_id=?`, postID,
+	).Scan(&attempts, &retryable, &upstreamStatus, &code, &existingID); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 || retryable != 0 || upstreamStatus != 409 || code != "duplicate_content" || existingID != "zp_existing_42" {
+		t.Fatalf("duplicate classification attempts=%d retryable=%d status=%d code=%q existing=%q", attempts, retryable, upstreamStatus, code, existingID)
+	}
+	retry, err := app.toolPostRetry(ctx, map[string]any{"post_id": postID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := retry.(map[string]any)
+	if result["retryable"] != false || result["existing_post_id"] != "zp_existing_42" {
+		t.Fatalf("retry result = %+v", result)
+	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("deterministic duplicate was retried: %+v", pf.executeCalls)
+	}
+	callback := app.publishScheduledPost(ctx, "test-proj", postID)
+	if callback["status"] != "terminal" || callback["retryable"] != false || callback["existing_post_id"] != "zp_existing_42" {
+		t.Fatalf("jobs callback should acknowledge terminal duplicate: %+v", callback)
+	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("jobs callback repeated deterministic provider call: %+v", pf.executeCalls)
+	}
+}
+
+func TestZernioDraftMirrorUsesNativeDraftAndUpdateCapabilities(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["create_post"] = &sdk.ExecuteResult{Success: true, Status: 201, Data: json.RawMessage(`{"id":"zd_1","status":"draft"}`)}
+	pf.executeResponses["update_post"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"id":"zd_1","status":"draft"}`)}
+	ctx := newSocialCtx(t, pf)
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'Company', 'active', 'zernio', 'za_1')`,
+	)
+	accountID, _ := account.LastInsertId()
+	app := &App{}
+	created, err := app.toolPostDraftCreate(ctx, map[string]any{
+		"body": "mirrored", "social_account_ids": []any{accountID}, "provider_sync_mode": "mirror",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := created.(map[string]any)
+	postID := post["id"].(int64)
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "create_post" || pf.executeCalls[0].Input["isDraft"] != true || pf.executeCalls[0].Input["publishNow"] != false {
+		t.Fatalf("draft mirror call = %+v", pf.executeCalls)
+	}
+	var providerID, syncStatus string
+	_ = ctx.AppDB().QueryRow(`SELECT provider_post_id, provider_sync_status FROM post_targets WHERE post_id=?`, postID).Scan(&providerID, &syncStatus)
+	if providerID != "zd_1" || syncStatus != "draft" {
+		t.Fatalf("provider mirror id=%q status=%q", providerID, syncStatus)
+	}
+	if _, err := app.toolPostDraftUpdate(ctx, map[string]any{"post_id": postID, "expected_revision": 1, "body": "mirrored v2"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 2 || pf.executeCalls[1].Tool != "update_post" || pf.executeCalls[1].Input["postId"] != "zd_1" || pf.executeCalls[1].Input["content"] != "mirrored v2" {
+		t.Fatalf("draft mirror update = %+v", pf.executeCalls)
+	}
+}
+
+func TestZernioImportReconcilesDraftAndScheduledLifecycle(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["sync_external_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}
+	pf.executeResponses["list_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"posts":[
+			{"id":"zd_import","status":"draft","isDraft":true,"content":"provider draft"},
+			{"id":"zs_import","status":"scheduled","content":"provider scheduled","scheduledFor":"2026-09-02T12:00:00Z"}
+		]
+	}`)}
+	ctx := newSocialCtx(t, pf)
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'Company', 'active', 'zernio', 'za_1')`,
+	)
+	accountID, _ := account.LastInsertId()
+	result := (&App{}).importZernioPosts(ctx, "test-proj", importResult{}, accountID, 99, "za_1", 0, 50)
+	if result.Status != "ok" || result.Imported != 2 {
+		t.Fatalf("import result = %+v", result)
+	}
+	rows, err := ctx.AppDB().Query(`SELECT status, requested_mode, COALESCE(schedule_at,''), source FROM posts ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := [][4]string{}
+	for rows.Next() {
+		var row [4]string
+		_ = rows.Scan(&row[0], &row[1], &row[2], &row[3])
+		got = append(got, row)
+	}
+	rows.Close()
+	if len(got) != 2 || got[0][0] != "draft" || got[0][1] != "draft" || got[1][0] != "scheduled" || got[1][1] != "schedule" || got[1][2] != "2026-09-02T12:00:00Z" || got[1][3] != "provider" {
+		t.Fatalf("imported workflow rows = %+v", got)
+	}
+	if err := (&App{}).runProviderReconciler(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	var postCount int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts`).Scan(&postCount)
+	if postCount != 2 {
+		t.Fatalf("automatic reconciliation duplicated provider posts: count=%d", postCount)
 	}
 }
 
@@ -1928,6 +2181,7 @@ func TestPostCreate_FacebookUsesMessageAndPageId(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "hello fb",
 		"social_account_ids": []any{acctID},
 	}); err != nil {
@@ -1966,6 +2220,7 @@ func TestPostCreate_TargetBodyCanSupplyPostBody(t *testing.T) {
 
 	app := &App{}
 	out, err := app.toolPostCreate(ctx, map[string]any{
+		"mode": "publish",
 		"targets": []any{
 			map[string]any{
 				"social_account_id": acctID,
@@ -2003,12 +2258,52 @@ func TestPostCreate_TargetsStillRequireResolvedBody(t *testing.T) {
 
 	app := &App{}
 	_, err := app.toolPostCreate(ctx, map[string]any{
+		"mode": "publish",
 		"targets": []any{
 			map[string]any{"social_account_id": acctID},
 		},
 	})
 	if err == nil || !strings.Contains(err.Error(), "targets[0].body") {
 		t.Fatalf("err = %v, want missing target body error", err)
+	}
+}
+
+func TestResolveMediaRequestsAptevaDelivery(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":296,\"content_type\":\"video/mp4\",\"size_bytes\":1024}"}]}}`,
+	)
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://agents.example.com/api/apps/storage/files/296/content/video.mp4?sig=abc\"}"}]}}`,
+	)
+	ctx := newSocialCtx(t, pf)
+
+	media, err := (&App{}).resolveMedia(ctx, []int64{296}, "media-proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(media) != 1 {
+		t.Fatalf("resolved media count = %d, want 1", len(media))
+	}
+
+	var getURLCall *callAppCall
+	for i := range pf.callAppCalls {
+		if pf.callAppCalls[i].AppName == "storage" && pf.callAppCalls[i].Tool == "files_get_url" {
+			getURLCall = &pf.callAppCalls[i]
+			break
+		}
+	}
+	if getURLCall == nil {
+		t.Fatal("storage files_get_url was not called")
+	}
+	if got := getURLCall.Input["delivery"]; got != "apteva" {
+		t.Fatalf("files_get_url delivery = %v, want apteva; input=%+v", got, getURLCall.Input)
+	}
+	if got := getURLCall.Input["ttl_seconds"]; got != 3600 {
+		t.Fatalf("files_get_url ttl_seconds = %v, want 3600", got)
+	}
+	if got := getURLCall.Input["_project_id"]; got != "media-proj" {
+		t.Fatalf("files_get_url _project_id = %v, want media-proj", got)
 	}
 }
 
@@ -2033,6 +2328,7 @@ func TestPostCreate_FacebookImageUsesPhotoToolAndStorageProject(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "hello photo",
 		"social_account_ids": []any{acctID},
 		"media_storage_ids":  []any{int64(296)},
@@ -2094,6 +2390,7 @@ func TestPostCreate_TwitterImageUploadsMediaID(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "hello image",
 		"social_account_ids": []any{acctID},
 		"media_storage_ids":  []any{int64(296)},
@@ -2166,6 +2463,7 @@ func TestPostCreate_TwitterVideoUsesChunkedUpload(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "hello video",
 		"social_account_ids": []any{acctID},
 		"media_storage_ids":  []any{int64(298)},
@@ -2219,6 +2517,7 @@ func TestPostCreate_AttachedMediaResolutionFailureDoesNotPublishTextOnly(t *test
 
 	app := &App{}
 	out, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "hello missing photo",
 		"social_account_ids": []any{acctID},
 		"media_storage_ids":  []any{int64(296)},
@@ -2268,6 +2567,7 @@ func TestPostCreate_FailedTargetMarksPartial(t *testing.T) {
 
 	app := &App{}
 	out, _ := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "hello",
 		"social_account_ids": []any{tid, fid},
 	})
@@ -2345,6 +2645,7 @@ func TestPublishInstagram_TwoStepWithStorageMedia(t *testing.T) {
 
 	app := &App{}
 	out, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "hello insta",
 		"social_account_ids": []any{acctID},
 		"media_storage_ids":  []any{int64(77)},
@@ -2400,6 +2701,7 @@ func TestPublishInstagram_NoMediaFails(t *testing.T) {
 	acctID, _ := r.LastInsertId()
 	app := &App{}
 	out, _ := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "no media",
 		"social_account_ids": []any{acctID},
 	})
@@ -2450,6 +2752,7 @@ func TestPublishTikTok_BuildsFileUploadInitInput_SingleChunk(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "ride the wave #fyp",
 		"social_account_ids": []any{acctID},
 		"media_storage_ids":  []any{int64(7)},
@@ -2516,7 +2819,7 @@ func TestPublishTikTok_UsesPullFromURLWhenDeliveryReady(t *testing.T) {
 	acctID, _ := r.LastInsertId()
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
-		"body": "verified pull", "social_account_ids": []any{acctID}, "media_storage_ids": []any{int64(17)},
+		"mode": "publish", "body": "verified pull", "social_account_ids": []any{acctID}, "media_storage_ids": []any{int64(17)},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -2557,6 +2860,7 @@ func TestPublishTikTok_FileUploadInit_MultiChunkMath(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "long video",
 		"social_account_ids": []any{acctID},
 		"media_storage_ids":  []any{int64(8)},
@@ -2604,6 +2908,7 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":              "publish",
 		"body":              "photo description #fyp",
 		"media_storage_ids": []any{int64(9)},
 		"targets": []any{
@@ -2677,6 +2982,7 @@ func TestPublishTikTok_PhotoPostRejectsMixedMedia(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "mixed media",
 		"social_account_ids": []any{acctID},
 		"media_storage_ids":  []any{int64(9), int64(10)},
@@ -2725,6 +3031,7 @@ func TestPublishYouTube_InitCallShape(t *testing.T) {
 	acctID, _ := r.LastInsertId()
 	app := &App{}
 	out, _ := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "My video title",
 		"social_account_ids": []any{acctID},
 		"media_storage_ids":  []any{int64(1)},
@@ -2760,6 +3067,76 @@ func TestPublishYouTube_InitCallShape(t *testing.T) {
 	).Scan(&lastErr)
 	if !strings.Contains(lastErr, "no Location header") {
 		t.Errorf("expected 'no Location header' error; got %q", lastErr)
+	}
+}
+
+func TestImportYouTubePreservesDescriptionAndTitle(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_my_channel"] = &sdk.ExecuteResult{
+		Success: true,
+		Data: json.RawMessage(`{
+			"items":[{"contentDetails":{"relatedPlaylists":{"uploads":"uploads-1"}}}]
+		}`),
+	}
+	pf.executeResponses["list_playlist_items"] = &sdk.ExecuteResult{
+		Success: true,
+		Data: json.RawMessage(`{
+			"items":[{
+				"snippet":{
+					"title":"A distinct YouTube title",
+					"description":"The full YouTube description.\n\nWith a second paragraph.",
+					"publishedAt":"2026-08-23T12:00:00Z",
+					"resourceId":{"videoId":"video-1"}
+				},
+				"contentDetails":{"videoId":"video-1","videoPublishedAt":"2026-08-23T12:00:00Z"}
+			}]
+		}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	accountRes, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'youtube', 42, 'YouTube Channel', 'active')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := accountRes.LastInsertId()
+
+	result := (&App{}).importYoutubePosts(
+		ctx,
+		"test-proj",
+		importResult{AccountID: accountID, Platform: "youtube"},
+		accountID,
+		42,
+		0,
+		25,
+	)
+	if result.Status != "ok" || result.Imported != 1 {
+		t.Fatalf("import result = %+v, want one imported post", result)
+	}
+
+	var body, optionsRaw string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT p.body, COALESCE(t.options, '')
+		   FROM posts p
+		   JOIN post_targets t ON t.post_id=p.id
+		  WHERE t.social_account_id=? AND t.platform_post_id='video-1'`,
+		accountID,
+	).Scan(&body, &optionsRaw); err != nil {
+		t.Fatal(err)
+	}
+	if body != "The full YouTube description.\n\nWith a second paragraph." {
+		t.Fatalf("post body = %q, want full YouTube description", body)
+	}
+	var options map[string]any
+	if err := json.Unmarshal([]byte(optionsRaw), &options); err != nil {
+		t.Fatalf("decode target options %q: %v", optionsRaw, err)
+	}
+	if options["title"] != "A distinct YouTube title" {
+		t.Fatalf("target title = %v, want YouTube title", options["title"])
+	}
+	if _, duplicated := options["body"]; duplicated {
+		t.Fatalf("target options unexpectedly duplicate post body: %s", optionsRaw)
 	}
 }
 
@@ -2882,6 +3259,7 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 
 	app := &App{}
 	out, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "schedule",
 		"body":               "later",
 		"social_account_ids": []any{acctID},
 		"schedule_at":        "2026-05-01T10:00:00Z",
@@ -2953,6 +3331,7 @@ func TestSchedule_DedupesIdenticalScheduledPost(t *testing.T) {
 
 	app := &App{}
 	args := map[string]any{
+		"mode":               "schedule",
 		"body":               "later",
 		"social_account_ids": []any{acctID},
 		"media_storage_ids":  []any{float64(11)},
@@ -3005,6 +3384,7 @@ func TestSchedule_JobsFailureFallsBackWithoutDuplicatingPost(t *testing.T) {
 
 	app := &App{}
 	args := map[string]any{
+		"mode":               "schedule",
 		"body":               "later",
 		"social_account_ids": []any{acctID},
 		"schedule_at":        "2026-05-01T10:00:00Z",
@@ -3070,6 +3450,7 @@ func TestSchedule_UsesWorkerFallbackWhenJobsUnbound(t *testing.T) {
 
 	app := &App{}
 	out, _ := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "schedule",
 		"body":               "later",
 		"social_account_ids": []any{acctID},
 		"schedule_at":        "2026-05-01T10:00:00Z",
@@ -3098,6 +3479,7 @@ func TestPostCreateRejectsCrossProjectAndDuplicateTargets(t *testing.T) {
 	)
 	foreignID, _ := res.LastInsertId()
 	out, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"_project_id":        "victim-project",
 		"body":               "must not publish",
 		"social_account_ids": []any{foreignID},
@@ -3120,6 +3502,7 @@ func TestPostCreateRejectsCrossProjectAndDuplicateTargets(t *testing.T) {
 	)
 	localID, _ := res.LastInsertId()
 	out, err = app.toolPostCreate(ctx, map[string]any{
+		"mode":               "publish",
 		"body":               "duplicate",
 		"social_account_ids": []any{localID, localID},
 	})
@@ -3192,6 +3575,7 @@ func TestScheduledWorkerFallbackPublishesDuePost(t *testing.T) {
 	acctID, _ := acct.LastInsertId()
 	app := &App{}
 	out, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "schedule",
 		"body":               "worker post",
 		"social_account_ids": []any{acctID},
 		"schedule_at":        time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
@@ -3475,7 +3859,7 @@ func TestScheduledPublishToolReturnsPublishedOnlyAfterDownstreamSuccess(t *testi
 	}
 }
 
-func TestScheduledPublishToolReturnsFailedAfterTargetRetriesExhausted(t *testing.T) {
+func TestScheduledPublishToolAcknowledgesDeterministicFailureWithoutRetry(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.executeResponses["post_tweet"] = &sdk.ExecuteResult{Success: false, Status: 400, Data: json.RawMessage(`{"error":"permanent"}`)}
 	ctx := newSocialCtx(t, pf)
@@ -3487,7 +3871,7 @@ func TestScheduledPublishToolReturnsFailedAfterTargetRetriesExhausted(t *testing
 	post, _ := ctx.AppDB().Exec(`INSERT INTO posts (project_id, body, status, job_id) VALUES ('test-proj', 'x', 'publishing', 88)`)
 	postID, _ := post.LastInsertId()
 	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO post_targets (post_id, social_account_id, status, attempts) VALUES (?, ?, 'pending', 3)`,
+		`INSERT INTO post_targets (post_id, social_account_id, status, attempts) VALUES (?, ?, 'pending', 0)`,
 		postID, acctID,
 	)
 
@@ -3496,8 +3880,8 @@ func TestScheduledPublishToolReturnsFailedAfterTargetRetriesExhausted(t *testing
 		t.Fatal(err)
 	}
 	result := out.(map[string]any)
-	if result["status"] != "failed" {
-		t.Fatalf("result=%+v, want failed", result)
+	if result["status"] != "terminal" || result["retryable"] != false {
+		t.Fatalf("result=%+v, want terminal non-retryable", result)
 	}
 	if !strings.Contains(toString(result["error"]), "upstream 400") {
 		t.Fatalf("result error=%q, want downstream error", result["error"])
@@ -3506,8 +3890,12 @@ func TestScheduledPublishToolReturnsFailedAfterTargetRetriesExhausted(t *testing
 	var attempts int
 	_ = ctx.AppDB().QueryRow(`SELECT status, attempts FROM post_targets WHERE post_id=?`, postID).Scan(&targetStatus, &attempts)
 	_ = ctx.AppDB().QueryRow(`SELECT status FROM posts WHERE id=?`, postID).Scan(&postStatus)
-	if targetStatus != "failed" || postStatus != "failed" || attempts != 4 {
+	if targetStatus != "failed" || postStatus != "failed" || attempts != 1 {
 		t.Fatalf("target=%q post=%q attempts=%d", targetStatus, postStatus, attempts)
+	}
+	out, err = (&App{}).toolPostPublishScheduled(ctx, map[string]any{"post_id": postID})
+	if err != nil || out.(map[string]any)["status"] != "terminal" || len(pf.executeCalls) != 1 {
+		t.Fatalf("terminal callback retried provider: out=%+v err=%v calls=%d", out, err, len(pf.executeCalls))
 	}
 }
 
@@ -3923,6 +4311,7 @@ func TestPostCreate_PersistsJobID(t *testing.T) {
 	acctID, _ := r.LastInsertId()
 	app := &App{}
 	out, err := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "schedule",
 		"body":               "later",
 		"social_account_ids": []any{acctID},
 		"schedule_at":        "2026-05-10T10:00:00Z",
@@ -3951,6 +4340,7 @@ func TestPostReschedule_CancelsOldAndCreatesNew(t *testing.T) {
 	acctID, _ := r.LastInsertId()
 	app := &App{}
 	created, _ := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "schedule",
 		"body":               "later",
 		"social_account_ids": []any{acctID},
 		"schedule_at":        "2026-05-10T10:00:00Z",
@@ -4041,6 +4431,7 @@ func TestPostDelete_CancelsJobAndRemovesRows(t *testing.T) {
 	acctID, _ := r.LastInsertId()
 	app := &App{}
 	created, _ := app.toolPostCreate(ctx, map[string]any{
+		"mode":               "schedule",
 		"body":               "later",
 		"social_account_ids": []any{acctID},
 		"schedule_at":        "2026-05-10T10:00:00Z",

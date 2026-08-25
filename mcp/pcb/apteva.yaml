@@ -2,14 +2,15 @@ schema: apteva-app/v1
 
 name: pcb
 display_name: PCB Studio
-version: 0.4.0
+version: 0.5.0
 description: |
   Native, agent-first electronics design for Apteva. PCB Studio owns its
   canonical circuit and board model, revision engine, interactive layout editor,
   validation, rendering, pad/footprint geometry, manufacturing validation,
   independent Gerber/Excellon verification, Gerber/Excellon writers,
   deterministic autorouting, electrical simulation, Arduino-compatible virtual
-  hardware, and release packaging. External services are optional data,
+  hardware, native breadboard/wiring illustrations, named-pin compatibility
+  validation, tutorial exports, and release packaging. External services are optional data,
   sourcing, manufacturing, and isolated compilation providers—not geometry,
   routing, simulation, or ECAD engines.
 
@@ -17,7 +18,7 @@ author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/pcb
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [pcb, electronics, ecad, hardware, manufacturing]
+tags: [pcb, electronics, ecad, hardware, manufacturing, arduino, breadboard, tutorials]
 
 scopes: [project]
 min_apteva_version: "0.11.0"
@@ -66,7 +67,7 @@ requires:
         pcb.provider_discovery: get_api_platform_overview
       required: false
       label: "PCB fabrication provider"
-      hint: Optional provider binding. v0.4 exposes provider readiness only; quote/order calls stay disabled until documented partner endpoints are available.
+      hint: Optional provider binding. v0.5 exposes provider readiness only; quote/order calls stay disabled until documented partner endpoints are available.
 
 provides:
   http_routes:
@@ -87,6 +88,11 @@ provides:
     - { name: pcb.firmware, resource: pcb_design, description: "Execute Arduino-compatible firmware against virtual PCB hardware." }
   mcp_tools:
     - { name: pcb_examples, description: Return canonical apteva-pcb/v1 examples and supported typed operations., requires: pcb.read }
+    - { name: pcb_wiring_library, description: "List native wiring reference parts and named electrical pins.", requires: pcb.read }
+    - { name: pcb_wiring_example_create, description: "Create an editable Arduino Uno, breadboard, resistor, and LED tutorial.", requires: pcb.write }
+    - { name: pcb_wiring_validate, description: "Validate physical wiring endpoints, electrical compatibility, and tutorial references.", requires: pcb.validate, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_wiring_export, description: "Create SVG, PNG, tutorial JSON, or tutorial ZIP wiring artifacts.", requires: pcb.export, resource_from: "pcb_design/{arg.design_id}" }
+    - { name: pcb_wiring_simulate, description: "Run Arduino firmware and map GPIO state onto the physical wiring illustration.", requires: pcb.firmware, resource_from: "pcb_design/{arg.design_id}" }
     - { name: pcb_designs_create, description: "Create a PCB design and immutable first revision. Args: name, definition?, note?.", requires: pcb.write }
     - { name: pcb_designs_list, description: "List project PCB designs. Args: q?, status?, limit?.", requires: pcb.read }
     - { name: pcb_designs_get, description: "Fetch a design with current revision, validation, and artifacts. Args: id.", requires: pcb.read, resource_from: "pcb_design/{arg.id}" }
@@ -136,7 +142,7 @@ provides:
     - name: how-to-use-pcb
       command: /pcb
       body_file: skills/how-to-use-pcb.md
-      description: Design, edit, route, simulate, verify, and fabricate native Apteva circuit boards, including virtual firmware experiments.
+      description: Design, wire, illustrate, edit, route, simulate, verify, and fabricate native Apteva electronics, including Arduino and breadboard tutorials.
       metadata: { category: design, icon: "⚡" }
   publishes:
     - { name: pcb.design.created, description: A PCB design and its first immutable revision were created. }
@@ -145,13 +151,14 @@ provides:
     - { name: pcb.routing.completed, description: Native autorouting completed and a route revision was created. }
     - { name: pcb.simulation.completed, description: Native electrical simulation completed. }
     - { name: pcb.firmware.completed, description: Arduino-compatible virtual firmware execution completed. }
+    - { name: pcb.wiring.simulation.completed, description: Arduino firmware state was mapped onto a physical wiring tutorial. }
     - { name: pcb.fabrication.verified, description: Independent Gerber and Excellon parser verification completed. }
     - { name: pcb.artifact.created, description: "A preview, BOM, or package was persisted." }
     - { name: pcb.release.created, description: A validated release package was created. }
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: pcb/v0.4.0, entry: mcp/pcb }
+  source: { repo: github.com/apteva/apps, ref: pcb/v0.5.0, entry: mcp/pcb }
   port: 8080
   health_check: /health
   resources: { cpu: 0.1, memory: 128, cpu_limit: 1, memory_limit: 512 }

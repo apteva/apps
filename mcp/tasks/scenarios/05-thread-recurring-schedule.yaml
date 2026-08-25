@@ -1,8 +1,8 @@
-name: conversation-creates-recurring-schedule
+name: request-thread-creates-recurring-schedule
 description: |
-  A recurring request from chat creates one authoritative recurring task. It is
-  assigned away from the disposable conversation and remains waiting for its
-  first occurrence instead of being run during setup.
+  A named Core request thread creates one authoritative recurring task. Tasks
+  assigns it to the durable default thread and leaves it waiting for its first
+  occurrence instead of executing setup work.
 
 timeout: 2m
 settle_for: 8s
@@ -10,17 +10,23 @@ max_iterations: 10
 
 setup:
   mode: autonomous
-  interaction: conversation
+  interaction: thread
+  thread:
+    id: request-recurring
+    mcp: [tasks]
+    directive: |
+      Convert the request into exactly one recurring task by calling
+      tasks_create directly. Represent one recurring outcome as one logical
+      task. Use the interval schedule form specifically: kind="interval" and
+      every="15m"; do not translate the interval into cron. Do not spawn a
+      worker and do not execute a future occurrence during schedule creation.
+      Confirm the saved title in your response and stop.
   app:
     path: ./
-    spawnable: true
 
 directive: |
-  You help the operator schedule operational reviews. Do not initiate a review
-  from main without an incoming user request. The conversation thread that
-  receives the request owns schedule creation and is the only thread that may
-  create its task. Represent one recurring outcome as one recurring task and do
-  not execute a future occurrence during schedule creation.
+  You are the durable default executor for scheduled Tasks events. Do not
+  create recurring work without a task.ready event addressed to main.
 
 prompt: |
   Every 15 minutes, review newly active leads. Name the recurring work "New lead review".
@@ -28,13 +34,9 @@ prompt: |
 assert:
   - tool_called_with:
       tool: tasks_create
-      thread_id: ${APTEVA_TEST_CONVERSATION_THREAD_ID}
+      thread_id: request-recurring
       count: 1
   - tool_not_called: tasks_update | tasks_complete | spawn
-  - tool_not_called_with:
-      tool: send
-      exact: true
-      thread_id: ${APTEVA_TEST_CONVERSATION_THREAD_ID}
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_status: 200
     expect_count_at: tasks
@@ -44,10 +46,10 @@ assert:
     expect_field_contains: New lead review
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_field_at: tasks.0.created_by_thread_id
-    expect_field_eq: ${APTEVA_TEST_CONVERSATION_THREAD_ID}
+    expect_field_eq: request-recurring
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_field_at: tasks.0.assigned_thread_id
-    expect_field_eq: ${APTEVA_TEST_DEFAULT_THREAD_ID}
+    expect_field_eq: main
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_field_at: tasks.0.schedule_kind
     expect_field_eq: interval
@@ -57,8 +59,6 @@ assert:
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_field_at: tasks.0.state
     expect_field_eq: waiting
-  - chat_response_contains: New lead review
-  - chat_final_messages: 1
   - iterations_at_most: 10
 
 budget:

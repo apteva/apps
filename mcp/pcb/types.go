@@ -5,7 +5,7 @@ import "encoding/json"
 const (
 	pcbSchema            = "apteva-pcb/v1"
 	releaseSchema        = "apteva-pcb-release/v1"
-	engineVersion        = "pcb-native/0.4.0"
+	engineVersion        = "pcb-native/0.5.0"
 	defaultClearance     = int64(200_000)
 	defaultTraceWidth    = int64(200_000)
 	defaultEdgeClearance = int64(250_000)
@@ -216,6 +216,75 @@ type SimulationDevice struct {
 	Values      map[string]float64 `json:"values,omitempty"`
 }
 
+// WiringSpec is PCB Studio's engine-independent physical prototyping model.
+// It records real part/pin connectivity and tutorial intent; the SVG/PNG
+// illustration is a deterministic view of this data rather than the source.
+type WiringSpec struct {
+	Schema      string             `json:"schema,omitempty"`
+	Canvas      WiringCanvas       `json:"canvas"`
+	Parts       []WiringPart       `json:"parts"`
+	Wires       []WiringWire       `json:"wires"`
+	Annotations []WiringAnnotation `json:"annotations,omitempty"`
+	Steps       []WiringStep       `json:"steps,omitempty"`
+	Firmware    *WiringFirmware    `json:"firmware,omitempty"`
+}
+
+type WiringCanvas struct {
+	Width  int `json:"width"`
+	Height int `json:"height"`
+	Grid   int `json:"grid,omitempty"`
+}
+
+type WiringPart struct {
+	ID         string         `json:"id"`
+	LibraryID  string         `json:"library_id"`
+	Label      string         `json:"label,omitempty"`
+	X          float64        `json:"x"`
+	Y          float64        `json:"y"`
+	Rotation   float64        `json:"rotation_deg,omitempty"`
+	Properties map[string]any `json:"properties,omitempty"`
+}
+
+type WiringEndpoint struct {
+	PartID string `json:"part_id"`
+	PinID  string `json:"pin_id"`
+}
+
+type WiringPoint struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+type WiringWire struct {
+	ID     string         `json:"id"`
+	NetID  string         `json:"net_id"`
+	Color  string         `json:"color,omitempty"`
+	From   WiringEndpoint `json:"from"`
+	To     WiringEndpoint `json:"to"`
+	Points []WiringPoint  `json:"points,omitempty"`
+}
+
+type WiringAnnotation struct {
+	ID   string  `json:"id"`
+	Text string  `json:"text"`
+	X    float64 `json:"x"`
+	Y    float64 `json:"y"`
+}
+
+type WiringStep struct {
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Instruction string   `json:"instruction"`
+	PartIDs     []string `json:"part_ids,omitempty"`
+	WireIDs     []string `json:"wire_ids,omitempty"`
+}
+
+type WiringFirmware struct {
+	Board  string            `json:"board"`
+	Source string            `json:"source"`
+	PinMap map[string]string `json:"pin_map,omitempty"`
+}
+
 type Definition struct {
 	Schema            string             `json:"schema"`
 	Name              string             `json:"name,omitempty"`
@@ -230,6 +299,7 @@ type Definition struct {
 	DifferentialPairs []DifferentialPair `json:"differential_pairs,omitempty"`
 	NetClasses        []NetClass         `json:"net_classes,omitempty"`
 	Simulation        *SimulationSpec    `json:"simulation,omitempty"`
+	Wiring            *WiringSpec        `json:"wiring,omitempty"`
 }
 
 type Operation struct {
@@ -255,6 +325,11 @@ type Operation struct {
 	NetClass           *NetClass         `json:"net_class,omitempty"`
 	NetClassID         string            `json:"net_class_id,omitempty"`
 	Simulation         *SimulationSpec   `json:"simulation,omitempty"`
+	Wiring             *WiringSpec       `json:"wiring,omitempty"`
+	WiringPart         *WiringPart       `json:"wiring_part,omitempty"`
+	WiringPartID       string            `json:"wiring_part_id,omitempty"`
+	WiringWire         *WiringWire       `json:"wiring_wire,omitempty"`
+	WiringWireID       string            `json:"wiring_wire_id,omitempty"`
 }
 
 type Check struct {
@@ -275,6 +350,8 @@ type Metrics struct {
 	Keepouts          int   `json:"keepouts"`
 	DifferentialPairs int   `json:"differential_pairs"`
 	BoardAreaNM2      int64 `json:"board_area_nm2"`
+	WiringParts       int   `json:"wiring_parts,omitempty"`
+	WiringWires       int   `json:"wiring_wires,omitempty"`
 }
 
 type ValidationReport struct {
@@ -358,4 +435,5 @@ type RevisionDiff struct {
 	DifferentialPairs map[string][]string `json:"differential_pairs"`
 	NetClasses        map[string][]string `json:"net_classes"`
 	SimulationChanged bool                `json:"simulation_changed"`
+	WiringChanged     bool                `json:"wiring_changed"`
 }

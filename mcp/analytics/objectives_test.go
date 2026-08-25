@@ -12,7 +12,7 @@ func objectiveFixture(name, aggregation string) ObjectiveWrite {
 	query := ObjectiveMetricQuery{Aggregation: aggregation, App: "billing", Topic: "payment_received"}
 	unit := "count"
 	currency := ""
-	if aggregation == "sum" {
+	if oneOf(aggregation, "sum", "average", "min", "max", "latest", "change", "avg") {
 		query.Value = "props.amount_usd"
 		unit, currency = "money", "USD"
 	}
@@ -51,6 +51,12 @@ func TestObjectiveProgressUsesStoredProjectScopedAnalyticsData(t *testing.T) {
 		{aggregation: "count", want: 3},
 		{aggregation: "sum", want: 25},
 		{aggregation: "distinct", want: 2},
+		{aggregation: "average", want: 25.0 / 3.0},
+		{aggregation: "avg", want: 25.0 / 3.0},
+		{aggregation: "min", want: 5},
+		{aggregation: "max", want: 12.5},
+		{aggregation: "latest", want: 5},
+		{aggregation: "change", want: -7.5},
 	} {
 		o, err := createObjective(db, "h-sites", objectiveFixture(tc.aggregation, tc.aggregation))
 		if err != nil {
@@ -63,6 +69,81 @@ func TestObjectiveProgressUsesStoredProjectScopedAnalyticsData(t *testing.T) {
 		if len(progress) != 1 || progress[0].ActualValue == nil || *progress[0].ActualValue != tc.want || progress[0].Status != "ok" {
 			t.Fatalf("%s progress = %#v, want actual %v and ok", tc.aggregation, progress, tc.want)
 		}
+	}
+}
+
+func TestMoneyObjectiveUsesSameReadOnlyAggregateAsDashboard(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("h-sites"))
+	db := ctx.AppDB()
+	if _, err := upsertFXRate(db, "h-sites", FXRate{BaseCurrency: "USD", QuoteCurrency: "EUR", AsOf: 1_000, Rate: 0.5, Source: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	insertObjectiveEvent(t, db, "h-sites", 2_000, `{"amount_cents":10000,"currency":"USD"}`)
+	insertObjectiveEvent(t, db, "h-sites", 3_000, `{"amount_cents":2500,"currency":"EUR"}`)
+	in := ObjectiveWrite{Name: "EUR revenue", Status: "active", Targets: []ObjectiveTarget{{
+		Name: "Revenue target", MetricKey: "money_sum", TargetValue: 70, Unit: "money", Currency: "EUR",
+		Direction: "at_least", PeriodStart: 1_000, PeriodEnd: 5_000, Timezone: "UTC",
+		Query: ObjectiveMetricQuery{Aggregation: "sum_money", App: "billing", Topic: "payment_received", Value: "props.amount_cents", CurrencyField: "props.currency", ReportingCurrency: "EUR", AmountUnit: "minor"},
+	}}}
+	objective, err := createObjective(db, "h-sites", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, err := evaluateObjective(db, "h-sites", objective.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progress) != 1 || progress[0].ActualValue == nil || *progress[0].ActualValue != 75 || !progress[0].Achieved {
+		t.Fatalf("progress=%#v want 75 EUR achieved", progress)
+	}
+	var rows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE project_id='h-sites'`).Scan(&rows); err != nil || rows != 2 {
+		t.Fatalf("source event count=%d err=%v", rows, err)
+	}
+}
+
+func TestDashboardGoalLinksAreProjectScopedAndReadOnly(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("h-sites"))
+	db := ctx.AppDB()
+	insertObjectiveEvent(t, db, "h-sites", 2_000, `{"amount_usd":10}`)
+	insertObjectiveEvent(t, db, "h-sites", 3_000, `{"amount_usd":14}`)
+	objective, err := createObjective(db, "h-sites", objectiveFixture("MRR goal", "latest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID := objective.Targets[0].ID
+	dashboard, err := createDashboard(db, "h-sites", "Finance", "", nil, []DashboardWidget{{
+		Type: "stat", Title: "MRR", Config: map[string]any{
+			"app": "billing", "topic": "payment_received", "aggregation": "latest", "value": "props.amount_usd",
+			"objective_target_ids": []int64{targetID},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDashboardGoalLinks(db, "h-sites", dashboard.Widgets[0].Config); err != nil {
+		t.Fatalf("valid goal link: %v", err)
+	}
+	if err := validateDashboardGoalLinks(db, "other-project", dashboard.Widgets[0].Config); err == nil {
+		t.Fatal("cross-project goal link should fail")
+	}
+	goals, goalErrors, err := dashboardGoalsForWidgets(db, "h-sites", dashboard.Widgets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if goalErrors[dashboard.Widgets[0].ID] != "" || len(goals[dashboard.Widgets[0].ID]) != 1 {
+		t.Fatalf("goals=%#v errors=%#v", goals, goalErrors)
+	}
+	progress := goals[dashboard.Widgets[0].ID][0]
+	if progress.ActualValue == nil || *progress.ActualValue != 14 || progress.ObjectiveName != "MRR goal" || progress.Status != "ok" {
+		t.Fatalf("goal progress=%#v", progress)
+	}
+	var cached int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM objective_progress WHERE target_id=?`, targetID).Scan(&cached); err != nil {
+		t.Fatal(err)
+	}
+	if cached != 0 {
+		t.Fatalf("dashboard read wrote %d objective progress row(s)", cached)
 	}
 }
 

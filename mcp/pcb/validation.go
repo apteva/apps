@@ -19,6 +19,10 @@ func validateDefinition(def *Definition) ValidationReport {
 			BoardAreaNM2: saturatingArea(def.Board.WidthNM, def.Board.HeightNM),
 		},
 	}
+	if def.Wiring != nil {
+		report.Metrics.WiringParts = len(def.Wiring.Parts)
+		report.Metrics.WiringWires = len(def.Wiring.Wires)
+	}
 	add := func(code, severity, message string, ids ...string) {
 		report.Checks = append(report.Checks, Check{Code: code, Severity: severity, Message: message, ObjectIDs: ids})
 		if severity == "error" {
@@ -303,6 +307,9 @@ func validateDefinition(def *Definition) ValidationReport {
 	}
 
 	for _, check := range validateManufacturing(def) {
+		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
+	}
+	for _, check := range wiringChecks(def.Wiring) {
 		add(check.Code, check.Severity, check.Message, check.ObjectIDs...)
 	}
 

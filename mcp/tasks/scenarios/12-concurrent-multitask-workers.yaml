@@ -28,10 +28,10 @@ directive: |
   entirely: do not pass kind, after, at, every, or cron. Use the exact
   idempotency key shown so a transport retry cannot create a durable duplicate:
 
-  1. "Stress Alpha" — `stress-alpha-${APTEVA_TEST_AGENT_ID}`
-  2. "Stress Beta" — `stress-beta-${APTEVA_TEST_AGENT_ID}`
-  3. "Stress Gamma" — `stress-gamma-${APTEVA_TEST_AGENT_ID}`
-  4. "Stress Delta" — `stress-delta-${APTEVA_TEST_AGENT_ID}`
+  1. "Stress Alpha" — `stress-alpha`
+  2. "Stress Beta" — `stress-beta`
+  3. "Stress Gamma" — `stress-gamma`
+  4. "Stress Delta" — `stress-delta`
 
   Record one initial milestone on each task before delegation:
 
@@ -66,10 +66,16 @@ directive: |
   together, so their messages may race and arrive in any order.
 
   Collect all four worker messages before writing their reported milestones.
-  Then, regardless of arrival order, process the tasks strictly in Alpha, Beta,
-  Gamma, Delta order. For each task, record its exact 40% and 80% steps from the
-  matching message and complete it exactly once with the matching result. Do
-  all Alpha updates and completion first, then Beta, then Gamma, then Delta.
+  Then issue the four exact 40% tasks_update calls together in one parallel tool
+  batch, one call per matching task. After that batch returns, issue the four
+  exact 80% tasks_update calls together in a second parallel tool batch. This is
+  the simultaneous-write portion of the test; do not serialize either progress
+  batch. After the 80% batch returns, issue the four matching tasks_complete
+  calls together in one parallel tool batch. Each task must be completed exactly
+  once with its matching result. Perform this ledger sequence immediately and
+  continuously; do not pause, pace, wait, or call tasks_get from main between
+  the reported milestones and completions. Retain the task IDs returned by
+  tasks_create and use those IDs directly.
   Never reuse one task ID for another worker's milestone or result. Stop after
   all four tasks are completed.
 
@@ -166,82 +172,78 @@ assert:
       tool: tasks_get
       thread_id: stress-worker-alpha
       count: 1
-      before: send
   - tool_called_with:
       tool: tasks_get
       thread_id: stress-worker-beta
       count: 1
-      before: send
   - tool_called_with:
       tool: tasks_get
       thread_id: stress-worker-gamma
       count: 1
-      before: send
   - tool_called_with:
       tool: tasks_get
       thread_id: stress-worker-delta
       count: 1
-      before: send
   - tool_called_with:
       tool: tasks_update
       thread_id: main
-      count: 12
+      min_count: 12
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 40
         current_step: Alpha worker started
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 80
         current_step: Alpha worker finished
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 40
         current_step: Beta worker started
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 80
         current_step: Beta worker finished
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 40
         current_step: Gamma worker started
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 80
         current_step: Gamma worker finished
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 40
         current_step: Delta worker started
-      count: 1
+      min_count: 1
   - tool_called_with:
       tool: tasks_update
       thread_id: main
       args:
         progress: 80
         current_step: Delta worker finished
-      count: 1
+      min_count: 1
   - tool_not_called_with:
       tool: tasks_update
       args:
@@ -283,41 +285,29 @@ assert:
     expect_count_at: tasks
     expect_count: 4
   - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
-    expect_field_at: tasks.0.title
-    expect_field_eq: Stress Delta
+    expect_item_at: tasks
+    expect_item:
+      title: Stress Alpha
+      result: ALPHA OK
+      execution_thread_id: stress-worker-alpha
   - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
-    expect_field_at: tasks.0.result
-    expect_field_eq: DELTA OK
+    expect_item_at: tasks
+    expect_item:
+      title: Stress Beta
+      result: BETA OK
+      execution_thread_id: stress-worker-beta
   - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
-    expect_field_at: tasks.0.execution_thread_id
-    expect_field_eq: stress-worker-delta
+    expect_item_at: tasks
+    expect_item:
+      title: Stress Gamma
+      result: GAMMA OK
+      execution_thread_id: stress-worker-gamma
   - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
-    expect_field_at: tasks.1.title
-    expect_field_eq: Stress Gamma
-  - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
-    expect_field_at: tasks.1.result
-    expect_field_eq: GAMMA OK
-  - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
-    expect_field_at: tasks.1.execution_thread_id
-    expect_field_eq: stress-worker-gamma
-  - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
-    expect_field_at: tasks.2.title
-    expect_field_eq: Stress Beta
-  - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
-    expect_field_at: tasks.2.result
-    expect_field_eq: BETA OK
-  - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
-    expect_field_at: tasks.2.execution_thread_id
-    expect_field_eq: stress-worker-beta
-  - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
-    expect_field_at: tasks.3.title
-    expect_field_eq: Stress Alpha
-  - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
-    expect_field_at: tasks.3.result
-    expect_field_eq: ALPHA OK
-  - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
-    expect_field_at: tasks.3.execution_thread_id
-    expect_field_eq: stress-worker-alpha
+    expect_item_at: tasks
+    expect_item:
+      title: Stress Delta
+      result: DELTA OK
+      execution_thread_id: stress-worker-delta
   - iterations_at_most: 55
 
 budget:

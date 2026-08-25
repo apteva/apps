@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { batchResultsByID, defaultDashboardFilters, formatMetric, resolveMetricConfig, scopedAppURL, selectDashboardID } from "./dashboard-ui";
+import { areaChartEndMarkerPath, areaChartGeometry, batchResultsByID, dedupeWidgetGoals, defaultDashboardFilters, formatMetric, formatObjectiveValue, objectiveProgressWidth, resolveMetricConfig, scopedAppURL, selectDashboardID } from "./dashboard-ui";
 
 interface HostProps {
   appName?: string;
@@ -88,19 +88,28 @@ function Empty({ children }: { children: string }) {
   return <div className="flex min-h-16 items-center text-xs text-text-dim">{children}</div>;
 }
 
-function Sparkline({ rows, config }: { rows: Array<Record<string, unknown>>; config: Record<string, unknown> }) {
+function AreaChart({ rows, config, gradientId, tone }: { rows: Array<Record<string, unknown>>; config: Record<string, unknown>; gradientId: string; tone: "accent" | "success" }) {
   if (!rows.length) return <Empty>No values in this window.</Empty>;
   const values = rows.map((row) => Number(row.value ?? row.count ?? 0));
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  const points = values.map((value, index) =>
-    `${(index / Math.max(1, values.length - 1)) * 300},${64 - ((value - min) / range) * 56}`,
-  ).join(" ");
+  const { points, linePath, areaPath, baseline } = areaChartGeometry(values);
+  const endMarkerPath = areaChartEndMarkerPath(points, baseline);
+  const colorClass = tone === "success" ? "text-success" : "text-accent";
   return (
-    <div>
-      <svg viewBox="0 0 300 68" className="h-20 w-full text-accent" preserveAspectRatio="none" aria-label="Metric trend">
-        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2.5" vectorEffect="non-scaling-stroke" />
+    <div className="mt-2">
+      <svg viewBox="0 0 300 72" className={`h-24 w-full ${colorClass}`} preserveAspectRatio="none" role="img" aria-label="Metric trend area chart">
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="currentColor" stopOpacity="0.38" />
+            <stop offset="72%" stopColor="currentColor" stopOpacity="0.1" />
+            <stop offset="100%" stopColor="currentColor" stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
+        <g className="text-border" opacity="0.65">
+          {[10, 29, 48, 67].map((y) => <line key={y} x1="0" x2="300" y1={y} y2={y} stroke="currentColor" strokeWidth="0.7" vectorEffect="non-scaling-stroke" />)}
+        </g>
+        <path d={areaPath} fill={`url(#${gradientId})`} />
+        <path d={linePath} fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+        <path d={endMarkerPath} fill="none" stroke="currentColor" strokeWidth="5.5" strokeLinecap="round" vectorEffect="non-scaling-stroke" aria-hidden="true" />
       </svg>
       <div className="flex justify-between text-[10px] text-text-dim">
         <span>{String(rows[0]?.bucket ?? "")}</span>
@@ -110,9 +119,34 @@ function Sparkline({ rows, config }: { rows: Array<Record<string, unknown>>; con
   );
 }
 
-function MetricCard({ widget, data, filters }: { widget: DashboardWidget; data?: Record<string, any>; filters: Record<string, string> }) {
+function GoalProgressRows({ goals, error, limit }: { goals?: Array<Record<string, any>>; error?: string; limit: number }) {
+  if (error) return <div className="mt-2 truncate text-[10px] text-error" title={error}>{error}</div>;
+  if (!goals?.length) return null;
+  return <div className="mt-2 space-y-2 border-t border-border pt-2">
+    {goals.slice(0, limit).map((goal) => {
+      const progress = objectiveProgressWidth(goal.progress_percent);
+      const actual = goal.actual_value == null ? "—" : formatObjectiveValue(goal.actual_value, goal.unit, goal.currency);
+      const target = formatObjectiveValue(goal.target_value, goal.unit, goal.currency);
+      return <div key={goal.target_id} className="min-w-0">
+        <div className="flex items-center gap-2 text-[10px]">
+          <span className="min-w-0 flex-1 truncate text-text-muted" title={`${goal.objective_name}: ${goal.name}`}>{goal.objective_name}: {goal.name}</span>
+          <span className="shrink-0 tabular-nums text-text">{actual} / {target}</span>
+        </div>
+        <div className="mt-1 h-1 overflow-hidden rounded bg-bg-input" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
+          <div className={`h-full ${goal.status === "error" ? "bg-error" : goal.achieved ? "bg-success" : "bg-accent"}`} style={{ width: `${progress}%` }} />
+        </div>
+      </div>;
+    })}
+  </div>;
+}
+
+function MetricCard({ widget, data, filters, goalLimit }: { widget: DashboardWidget; data?: Record<string, any>; filters: Record<string, string>; goalLimit: number }) {
   const config = resolveMetricConfig(widget.config, filters);
   const aggregation = String(data?.aggregation ?? widget.config.aggregation ?? "");
+  const comparison = data?.comparison && typeof data.comparison === "object" ? data.comparison : null;
+  const comparisonPercent = comparison && typeof comparison.change_percent === "number" ? comparison.change_percent : null;
+  const comparisonChange = comparison && typeof comparison.change === "number" ? comparison.change : null;
+  const comparisonPositive = (comparisonPercent ?? comparisonChange ?? 0) >= 0;
   return (
     <article className="min-w-0 rounded border border-border bg-bg-subtle/30 px-3 py-3">
       <div className="truncate text-[10px] font-bold uppercase tracking-wide text-text-dim" title={widget.title}>{widget.title}</div>
@@ -125,19 +159,26 @@ function MetricCard({ widget, data, filters }: { widget: DashboardWidget; data?:
           </div>
           <div className="mt-1 flex items-center gap-2 text-[10px] text-text-dim">
             {aggregation && <span className="capitalize">{aggregation}</span>}
-            {typeof data?.change_percent === "number" && (
+            {comparison && (comparisonPercent != null || comparisonChange != null) ? (
+              <span className={comparisonPositive ? "text-success" : "text-error"} title={`Previous value: ${formatMetric(Number(comparison.previous_value ?? 0), config)}`}>
+                {comparisonPositive ? "↑" : "↓"} {comparisonPercent != null
+                  ? `${Math.abs(comparisonPercent).toFixed(1)}%`
+                  : formatMetric(Math.abs(comparisonChange ?? 0), config)} vs previous {String(comparison.window || "period")}
+              </span>
+            ) : typeof data?.change_percent === "number" && (
               <span className={data.change_percent >= 0 ? "text-success" : "text-error"}>
                 {data.change_percent >= 0 ? "+" : ""}{data.change_percent.toFixed(1)}%
               </span>
             )}
           </div>
+          <GoalProgressRows goals={data?.goals} error={data?.goal_error} limit={goalLimit} />
         </>
       )}
     </article>
   );
 }
 
-function DetailCard({ widget, data, filters }: { widget: DashboardWidget; data?: Record<string, any>; filters: Record<string, string> }) {
+function DetailCard({ widget, data, filters, goalLimit, tone }: { widget: DashboardWidget; data?: Record<string, any>; filters: Record<string, string>; goalLimit: number; tone: "accent" | "success" }) {
   const config = resolveMetricConfig(widget.config, filters);
   return (
     <article className="min-w-0 rounded border border-border px-3 py-3">
@@ -148,7 +189,7 @@ function DetailCard({ widget, data, filters }: { widget: DashboardWidget; data?:
       {data?.error ? (
         <div className="mt-3 truncate text-xs text-error">{String(data.error)}</div>
       ) : widget.type === "timeseries" ? (
-        <Sparkline rows={data?.series ?? []} config={config} />
+        <AreaChart rows={data?.series ?? []} config={config} gradientId={`analytics-area-${widget.id}`} tone={tone} />
       ) : widget.type === "feed" ? (
         <div className="mt-2 space-y-1.5">
           {(data?.events ?? []).slice(0, 5).map((event: any) => (
@@ -170,6 +211,7 @@ function DetailCard({ widget, data, filters }: { widget: DashboardWidget; data?:
           {data && !(data.top ?? []).length && <Empty>No values in this window.</Empty>}
         </div>
       )}
+      <GoalProgressRows goals={data?.goals} error={data?.goal_error} limit={goalLimit} />
     </article>
   );
 }
@@ -204,6 +246,7 @@ export default function AnalyticsDashboardWidget(props: HostProps) {
   const projectID = props.projectId || "";
   const full = props.widgetSize === "full";
   const showTrends = settingBoolean(props.widgetSettings, "show_trends", true);
+  const showGoals = settingBoolean(props.widgetSettings, "show_goals", true);
   const maxMetrics = Math.floor(Math.max(1, Math.min(6, settingNumber(props.widgetSettings, "max_metrics", 3))));
   const preferredDashboardID = Math.floor(settingNumber(props.widgetSettings, "dashboard_id", 0));
   const storageKey = `apteva:analytics:dashboard-widget:${props.widgetId || projectID || "global"}`;
@@ -294,12 +337,17 @@ export default function AnalyticsDashboardWidget(props: HostProps) {
     return [...stats, ...details];
   }, [dashboard, full, maxMetrics, showTrends]);
 
+  const displayData = useMemo(
+    () => dedupeWidgetGoals(visibleWidgets.map((widget) => widget.id), widgetData),
+    [visibleWidgets, widgetData],
+  );
+
   const refresh = useCallback(async () => {
     if (!dashboard || !projectID || props.preview) return;
     const sequence = ++querySequence.current;
     try {
       const payload = await getJSON<{ widgets?: Array<{ widget_id: number; data?: Record<string, unknown>; error?: string }> }>(
-        `/query-dashboard?dashboard_id=${dashboard.id}&filters=${encodeURIComponent(JSON.stringify(filterValues))}`,
+        `/query-dashboard?dashboard_id=${dashboard.id}&include_goals=${showGoals}&filters=${encodeURIComponent(JSON.stringify(filterValues))}`,
       );
       if (sequence !== querySequence.current) return;
       setWidgetData(batchResultsByID(payload.widgets ?? []));
@@ -307,7 +355,7 @@ export default function AnalyticsDashboardWidget(props: HostProps) {
     } catch (reason) {
       if (sequence === querySequence.current) setError(reason instanceof Error ? reason.message : String(reason));
     }
-  }, [dashboard, filterValues, getJSON, projectID, props.preview]);
+  }, [dashboard, filterValues, getJSON, projectID, props.preview, showGoals]);
 
   useEffect(() => { void refresh(); }, [refresh, props.eventRevision]);
   useEffect(() => {
@@ -366,11 +414,11 @@ export default function AnalyticsDashboardWidget(props: HostProps) {
       ) : (
         <div className="min-h-0 flex-1 overflow-auto p-3">
           <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.max(1, Math.min(3, visibleWidgets.filter((widget) => widget.type === "stat").length))}, minmax(0, 1fr))` }}>
-            {visibleWidgets.filter((widget) => widget.type === "stat").map((widget) => <MetricCard key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} />)}
+            {visibleWidgets.filter((widget) => widget.type === "stat").map((widget) => <MetricCard key={widget.id} widget={widget} data={displayData[widget.id]} filters={filterValues} goalLimit={full ? 10 : 1} />)}
           </div>
           {showTrends && (
             <div className={`mt-2 grid gap-2 ${full ? "grid-cols-2" : "grid-cols-1"}`}>
-              {visibleWidgets.filter((widget) => widget.type !== "stat").map((widget) => <DetailCard key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} />)}
+              {visibleWidgets.filter((widget) => widget.type !== "stat").map((widget, index) => <DetailCard key={widget.id} widget={widget} data={displayData[widget.id]} filters={filterValues} goalLimit={full ? 10 : 1} tone={index % 2 === 0 ? "accent" : "success"} />)}
             </div>
           )}
         </div>

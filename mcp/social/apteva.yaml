@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.14.85
+version: 0.15.1
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -70,6 +70,8 @@ provides:
       schedule: "@every 5m"
     - name: analytics_collector
       schedule: "@every 1h"
+    - name: provider_reconciler
+      schedule: "@every 15m"
   mcp_tools:
     - { name: account_add,                 description: "Begin OAuth for a platform. Returns authorize_url + pending_account_id." }
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable pages/channels (FB pages, IG business accounts, YouTube channels)." }
@@ -78,9 +80,15 @@ provides:
     - { name: account_list,                description: "List connected social accounts in this project." }
     - { name: account_check,               description: "Check that one or more connected social accounts still work; refreshes Meta page credentials when possible." }
     - { name: account_disconnect,          description: "Disconnect an account while preserving history; explicit confirmed hard delete can remove local history." }
-    - { name: post_create,                 description: "Create + publish (or schedule) a post across N social accounts. Scheduled creates are idempotent; retry failed scheduling via post_retry, do not create a duplicate. Args: body or targets[].body, social_account_ids[] or targets[], schedule_at?, media_storage_ids?." }
+    - { name: post_create,                 description: "Create a post with required explicit mode=draft|schedule|publish. Draft is optional and may omit targets; schedule remains a direct path and requires schedule_at; publish is immediate. Omitting mode never publishes. Args: mode, body or targets[].body, social_account_ids[] or targets[], schedule_at?, media_storage_ids?." }
+    - { name: post_draft_create,           description: "Create a local, media-capable draft without publishing; optional approval/provider mirroring can be enabled per draft." }
+    - { name: post_draft_update,           description: "Update a draft's body, targets, and media with expected_revision locking; edits invalidate prior approval." }
+    - { name: post_draft_submit,           description: "Submit an exact draft revision for review. Approval is opt-in, not required for ordinary direct scheduling." }
+    - { name: post_draft_approve,          description: "Approve the exact revision currently in review." }
+    - { name: post_draft_reject,           description: "Reject the exact revision currently in review with a reason." }
+    - { name: post_draft_publish,          description: "Publish now or schedule a stored draft using explicit mode=publish|schedule and expected_revision." }
     - { name: post_list,                   description: "List recent posts with per-target status. Args: limit?, status?." }
-    - { name: post_retry,                  description: "Re-attempt a failed post. Failed scheduled posts retry job creation on the same post; failed publish targets are re-published. Args: post_id." }
+    - { name: post_retry,                  description: "Re-attempt retryable failures only. Deterministic duplicate/content errors fail once and return failure_code plus existing_post_id instead of being retried." }
     - { name: post_publish_scheduled,      description: "Internal Jobs callback that publishes one scheduled post and reports the final downstream result. Args: post_id." }
     - { name: inbox_list,                  description: "List inbox items (comments, DMs, mentions, reviews) across connected social accounts. Filters: kinds, status, social_account_ids, since, limit." }
     - { name: inbox_get,                   description: "Fetch one inbox item by id; with_thread=true returns the surrounding conversation." }
@@ -109,7 +117,7 @@ provides:
           profile_id: { type: integer }
           social_account_id: { type: integer }
           view: { type: string, enum: [week, month] }
-          status: { type: string, enum: [all, scheduled, published, failed, partial, draft] }
+          status: { type: string, enum: [all, scheduled, published, failed, partial, draft, in_review, approved, rejected] }
           anchor_date: { type: string }
       preview_props:
         preview: true

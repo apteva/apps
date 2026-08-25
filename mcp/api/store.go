@@ -366,6 +366,23 @@ func dbListAPIs(db *sql.DB, pid string) ([]*API, error) {
 	return out, rows.Err()
 }
 
+func dbListAllAPIs(db *sql.DB) ([]*API, error) {
+	rows, err := db.Query(`SELECT ` + apiCols + ` FROM apis ORDER BY project_id, slug`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*API
+	for rows.Next() {
+		a, err := scanAPI(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func dbDeleteAPI(db *sql.DB, pid string, id int64) (bool, error) {
 	res, err := db.Exec(`DELETE FROM apis WHERE project_id=? AND id=?`, pid, id)
 	if err != nil {

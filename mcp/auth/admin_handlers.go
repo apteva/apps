@@ -670,6 +670,11 @@ func (a *App) handleAdminClientsCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "unknown type (spa | web | native | m2m)")
 		return
 	}
+	origins, err := normalizeClientOrigins(body.AllowedOrigins)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	grants := body.AllowedGrantTypes
 	if len(grants) == 0 {
 		grants = defaultedGrants(body.Type, nil)
@@ -679,7 +684,7 @@ func (a *App) handleAdminClientsCreate(w http.ResponseWriter, r *http.Request) {
 		Name:                    body.Name,
 		Type:                    body.Type,
 		RedirectURIs:            body.RedirectURIs,
-		AllowedOrigins:          body.AllowedOrigins,
+		AllowedOrigins:          origins,
 		AllowedGrantTypes:       grants,
 		TokenEndpointAuthMethod: defaultAuthMethod(body.Type),
 		RequirePKCE:             body.Type == "spa" || body.Type == "native",
@@ -706,6 +711,11 @@ func (a *App) handleAdminClientsCreate(w http.ResponseWriter, r *http.Request) {
 	if secret != "" {
 		out["client_secret"] = secret
 		out["note"] = "store this secret — it will not be shown again"
+	}
+	attempted, syncErr := replaceClientBrowserOrigins(ctx, c)
+	recordBrowserOriginSync(out, attempted, syncErr)
+	if syncErr != nil {
+		ctx.Logger().Warn("OAuth client browser-origin registration failed", "client_id", c.ClientID, "error", syncErr)
 	}
 	httpStatus(w, http.StatusCreated, out)
 }
@@ -763,7 +773,13 @@ func (a *App) handleAdminClientsDisable(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	dbAudit(ctx.AppDB(), pid, c.OrganizationID, nil, clientID, "client_disabled", r.RemoteAddr, r.UserAgent(), nil)
-	httpJSON(w, map[string]any{"ok": true})
+	out := map[string]any{"ok": true}
+	attempted, syncErr := deleteClientBrowserOrigins(ctx, clientID)
+	recordBrowserOriginSync(out, attempted, syncErr)
+	if syncErr != nil {
+		ctx.Logger().Warn("OAuth client browser-origin deletion failed", "client_id", clientID, "error", syncErr)
+	}
+	httpJSON(w, out)
 }
 
 // ─── /admin/audit ────────────────────────────────────────────────────

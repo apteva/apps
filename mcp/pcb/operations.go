@@ -235,10 +235,100 @@ func applyOperation(def *Definition, op Operation) error {
 		def.NetClasses = append(def.NetClasses[:idx], def.NetClasses[idx+1:]...)
 	case "simulation.set":
 		def.Simulation = op.Simulation
+	case "wiring.set":
+		def.Wiring = op.Wiring
+	case "wiring.part.add":
+		if op.WiringPart == nil {
+			return errors.New("wiring_part is required")
+		}
+		if def.Wiring == nil {
+			return errors.New("wiring workspace is not initialized")
+		}
+		if findWiringPart(def.Wiring.Parts, op.WiringPart.ID) >= 0 {
+			return fmt.Errorf("wiring part %q already exists", op.WiringPart.ID)
+		}
+		def.Wiring.Parts = append(def.Wiring.Parts, *op.WiringPart)
+	case "wiring.part.replace":
+		if op.WiringPart == nil {
+			return errors.New("wiring_part is required")
+		}
+		if def.Wiring == nil {
+			return errors.New("wiring workspace is not initialized")
+		}
+		idx := findWiringPart(def.Wiring.Parts, op.WiringPart.ID)
+		if idx < 0 {
+			return fmt.Errorf("wiring part %q not found", op.WiringPart.ID)
+		}
+		def.Wiring.Parts[idx] = *op.WiringPart
+	case "wiring.part.remove":
+		if def.Wiring == nil {
+			return errors.New("wiring workspace is not initialized")
+		}
+		idx := findWiringPart(def.Wiring.Parts, op.WiringPartID)
+		if idx < 0 {
+			return fmt.Errorf("wiring part %q not found", op.WiringPartID)
+		}
+		def.Wiring.Parts = append(def.Wiring.Parts[:idx], def.Wiring.Parts[idx+1:]...)
+		wires := def.Wiring.Wires[:0]
+		for _, w := range def.Wiring.Wires {
+			if w.From.PartID != op.WiringPartID && w.To.PartID != op.WiringPartID {
+				wires = append(wires, w)
+			}
+		}
+		def.Wiring.Wires = wires
+	case "wiring.wire.add":
+		if op.WiringWire == nil {
+			return errors.New("wiring_wire is required")
+		}
+		if def.Wiring == nil {
+			return errors.New("wiring workspace is not initialized")
+		}
+		if findWiringWire(def.Wiring.Wires, op.WiringWire.ID) >= 0 {
+			return fmt.Errorf("wiring wire %q already exists", op.WiringWire.ID)
+		}
+		def.Wiring.Wires = append(def.Wiring.Wires, *op.WiringWire)
+	case "wiring.wire.replace":
+		if op.WiringWire == nil {
+			return errors.New("wiring_wire is required")
+		}
+		if def.Wiring == nil {
+			return errors.New("wiring workspace is not initialized")
+		}
+		idx := findWiringWire(def.Wiring.Wires, op.WiringWire.ID)
+		if idx < 0 {
+			return fmt.Errorf("wiring wire %q not found", op.WiringWire.ID)
+		}
+		def.Wiring.Wires[idx] = *op.WiringWire
+	case "wiring.wire.remove":
+		if def.Wiring == nil {
+			return errors.New("wiring workspace is not initialized")
+		}
+		idx := findWiringWire(def.Wiring.Wires, op.WiringWireID)
+		if idx < 0 {
+			return fmt.Errorf("wiring wire %q not found", op.WiringWireID)
+		}
+		def.Wiring.Wires = append(def.Wiring.Wires[:idx], def.Wiring.Wires[idx+1:]...)
 	default:
 		return fmt.Errorf("unsupported operation type %q", op.Type)
 	}
 	return nil
+}
+
+func findWiringPart(v []WiringPart, id string) int {
+	for i := range v {
+		if v[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+func findWiringWire(v []WiringWire, id string) int {
+	for i := range v {
+		if v[i].ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 func findNetClass(v []NetClass, id string) int {

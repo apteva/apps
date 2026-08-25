@@ -16,7 +16,7 @@ func testDashboardDB(t *testing.T) *sql.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, name := range []string{"001_init.sql", "004_dashboards.sql", "005_event_specs.sql", "006_dashboard_config.sql", "007_integrity_performance.sql"} {
+	for _, name := range []string{"001_init.sql", "004_dashboards.sql", "005_event_specs.sql", "006_dashboard_config.sql", "007_integrity_performance.sql", "009_fx_rates.sql", "010_reference_sets.sql"} {
 		b, err := os.ReadFile(filepath.Join("migrations", name))
 		if err != nil {
 			t.Fatalf("read migration %s: %v", name, err)
@@ -283,6 +283,40 @@ func TestStatWidgetGenericAggregations(t *testing.T) {
 	}
 	if change["previous"] != 10.0 || change["current"] != 5.0 || change["change"] != -5.0 || change["change_percent"] != -50.0 {
 		t.Fatalf("change metadata=%#v", change)
+	}
+}
+
+func TestStatWidgetPreviousPeriodComparison(t *testing.T) {
+	db := testDashboardDB(t)
+	now := time.Now().UTC()
+	for _, observation := range []struct {
+		age   time.Duration
+		value string
+	}{
+		{10 * 24 * time.Hour, "100"},
+		{24 * time.Hour, "120"},
+	} {
+		if _, err := insertEvent(db, EventInsert{
+			TS: now.Add(-observation.age).UnixMilli(), App: "subscriptions", Topic: "mrr.snapshot",
+			ProjectID: "p1", Source: "track", Props: `{"mrr":` + observation.value + `}`,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := evaluateWidget(db, "p1", DashboardWidget{Type: "stat", Config: map[string]any{
+		"app": "subscriptions", "topic": "mrr.snapshot", "window": "7d",
+		"value": "props.mrr", "aggregation": "latest", "comparison": "previous_period",
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comparison, ok := got["comparison"].(map[string]any)
+	if !ok {
+		t.Fatalf("comparison=%#v", got["comparison"])
+	}
+	if comparison["previous_value"] != 100.0 || comparison["change"] != 20.0 || comparison["change_percent"] != 20.0 || comparison["window"] != "7d" {
+		t.Fatalf("comparison=%#v", comparison)
 	}
 }
 
