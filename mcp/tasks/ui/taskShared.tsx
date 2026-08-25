@@ -76,6 +76,8 @@ export interface Task {
   last_result_reference?: string;
   scheduled_for?: string;
   dispatched_at?: string;
+  dispatch_attempts?: number;
+  last_dispatch_attempt_at?: string;
   accepted_at?: string;
   telemetry_reference?: string;
   result?: string;
@@ -566,6 +568,8 @@ export function TaskDetails({
                     </div>
                     <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[9px] text-text-muted">
                       <span>Dispatched</span><span>{formatWhen(run.dispatched_at) || "No"}</span>
+                      <span>Delivery attempts</span><span>{run.dispatch_attempts || 0}</span>
+                      <span>Last attempt</span><span>{formatWhen(run.last_dispatch_attempt_at) || "No"}</span>
                       <span>Accepted</span><span>{formatWhen(run.accepted_at) || "No"}</span>
                       <span>Started</span><span>{formatWhen(run.started_at) || "No"}</span>
                       <span>Completed</span><span>{formatWhen(run.completed_at) || "No"}</span>
@@ -635,7 +639,13 @@ export function taskEventLabel(event: TaskEvent) {
     label = "Occurrence skipped to avoid overlap";
   else if (event.event_type === "occurrence_dispatched")
     label = "Occurrence dispatched";
-  else if (event.event_type === "occurrence_accepted")
+  else if (event.event_type === "occurrence_redispatched") {
+    const attempt = event.data?.dispatch_attempt;
+    label =
+      typeof attempt === "number"
+        ? `Occurrence redispatched · attempt ${attempt}`
+        : "Occurrence redispatched";
+  } else if (event.event_type === "occurrence_accepted")
     label = "Occurrence accepted";
   else label = event.event_type.replaceAll("_", " ");
 

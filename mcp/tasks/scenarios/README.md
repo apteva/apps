@@ -27,13 +27,12 @@ apteva test ./scenarios/ --max-budget-usd 0.50
 |---|---|
 | `01-create-and-complete.yaml` | One opaque-thread-owned task moves through create → progress → complete without duplication. |
 | `02-list-and-update.yaml` | One recurring task is created, listed directly from Tasks, and paused without a setup-task duplicate. |
-| `03-brief-chat-no-task.yaml` | A simple saved-conversation reply stays task-free and is delivered exactly once. |
-| `04-chat-one-time-schedule.yaml` | Chat creates one future task owned by the default durable thread and does not execute it early. |
-| `05-chat-recurring-schedule.yaml` | Chat creates one recurring schedule without setup work, worker delegation, or early execution; Core may report the durable schedule to main. |
-| `06-scheduled-execution-and-receipt.yaml` | Due work executes on the default thread and its terminal receipt returns one requested result to the creator conversation. |
-| `07-chat-lists-agent-inventory.yaml` | Chat lists the agent-wide Tasks inventory directly without a thread-to-thread status query. |
-| `08-chat-natural-multisource-task.yaml` | A natural multi-area review creates and completes one conversation-owned task without task-oriented wording. |
-| `09-chat-bounded-lookup-no-task.yaml` | A single bounded lookup remains task-free, preserving the other side of the classification boundary. |
+| `03-bounded-lookup-no-task.yaml` | A named request thread answers one bounded fact without manufacturing a task. |
+| `04-thread-one-time-schedule.yaml` | A named request thread creates one future task owned by the default durable thread and does not execute it early. |
+| `05-thread-recurring-schedule.yaml` | A named request thread creates one recurring schedule without setup work, delegation, or early execution. |
+| `06-scheduled-execution-and-thread-receipt.yaml` | Due work executes on the default thread and Tasks returns its structured terminal receipt to the opaque creator thread. |
+| `07-cross-thread-inventory.yaml` | A named thread lists the agent-wide Tasks inventory directly across creator-thread boundaries. |
+| `08-thread-multisource-task.yaml` | A named request thread uses three fake domain reads and creates and completes one task without task-oriented wording. |
 | `10-simultaneous-directive-wake-and-task.yaml` | A directive-owned timer and a due Tasks event race on main; both outcomes must complete exactly once. |
 | `11-delegated-multistage-progress.yaml` | A four-message delegated occurrence stays running while its Core-spawned worker records meaningful progress milestones. |
 | `12-concurrent-multitask-workers.yaml` | Four tasks and four Core workers race assignments and reports without crossing progress, executors, or results. |
@@ -46,12 +45,13 @@ worker to populate every argument from `tasks_get` before invoking it. This
 keeps the handoff test representative of a real Tasks + domain-tool worker
 without depending on Patreon, Computer, or network access.
 
-Conversation scenarios use `setup.interaction: conversation`: `directive` is
-the agent's durable role and `prompt` is sent as a real dashboard-channel user
-message after the agent starts. Runtime placeholders expose the opaque IDs:
+Request scenarios use `setup.interaction: thread`. The runner creates the named
+Core thread with its explicit MCP profile and queues `prompt` atomically as its
+first event. They do not mount Channels or call a user-facing messaging API.
+`directive` remains the durable main-thread role; `setup.thread.directive`
+defines the request thread. Runtime placeholders expose the opaque IDs:
 
-- `${APTEVA_TEST_CONVERSATION_ID}`
-- `${APTEVA_TEST_CONVERSATION_THREAD_ID}`
+- `${APTEVA_TEST_THREAD_ID}`
 - `${APTEVA_TEST_DEFAULT_THREAD_ID}`
 - `${APTEVA_TEST_AGENT_ID}`
 - `${APTEVA_TEST_WAKE_AT}` when `setup.initial_wake` is configured

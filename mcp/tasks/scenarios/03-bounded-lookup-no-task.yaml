@@ -1,0 +1,39 @@
+name: bounded-lookup-does-not-create-task
+description: |
+  A named Core request thread answers one bounded fact without manufacturing
+  durable work. This preserves the negative side of the Tasks classification
+  boundary without involving any user-facing channel implementation.
+
+timeout: 90s
+settle_for: 6s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  interaction: thread
+  thread:
+    id: request-lookup
+    mcp: [tasks]
+    directive: |
+      The authoritative snapshot says there are nineteen active contacts.
+      Answer the request directly. A single bounded lookup is not durable work,
+      so do not create, update, or complete a task.
+  app:
+    path: ./
+
+directive: |
+  Wait for durable task events. Do not manufacture work from another thread's
+  request and do not create a task unless an event addressed to main requires it.
+
+prompt: |
+  How many active contacts are currently in the snapshot? Reply with just the number.
+
+assert:
+  - agent_response_contains: '19'
+    thread_id: request-lookup
+  - tool_not_called: tasks_create | tasks_update | tasks_complete
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 100000
+  cost_usd: 1.00

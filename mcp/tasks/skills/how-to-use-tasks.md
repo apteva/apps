@@ -1,7 +1,7 @@
 # Using Tasks
 
 Tasks are durable work records. Threads are opaque identifiers: never infer a
-role such as “main”, “conversation”, or “worker” from a thread ID.
+platform role from a thread ID.
 
 Task inventory is agent-wide within the current project. A task created,
 assigned, or executed by any thread of the agent remains visible from every
@@ -33,7 +33,7 @@ requests.
 
 The calling thread is always the creator. Immediate work defaults to that
 creator. Scheduled work defaults to the agent's configured default thread so a
-schedule does not depend on a UI conversation staying active. Assign an
+schedule does not depend on the requesting thread staying active. Assign an
 explicit opaque thread only when another existing thread should own the work.
 Tasks records work but does not create threads. When separate context,
 ownership, or parallel execution is useful, main creates the worker with the

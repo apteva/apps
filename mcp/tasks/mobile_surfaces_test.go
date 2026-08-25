@@ -190,6 +190,7 @@ func TestTaskMutationsEmitDeclaredRefreshTopics(t *testing.T) {
 		"task.schedule_resumed",
 		"task.schedule_run_requested",
 		"task.occurrence_dispatched",
+		"task.occurrence_redispatched",
 		"task.occurrence_accepted",
 		"task.occurrence_skipped_overlap",
 	}

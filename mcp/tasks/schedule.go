@@ -384,15 +384,21 @@ func (s *scheduler) Tick(now time.Time, projectID string) error {
 	return nil
 }
 
-const dispatchAcceptanceTimeout = 10 * time.Minute
+const (
+	dispatchRetryInterval = 10 * time.Minute
+	dispatchMaxAttempts   = 3 // Initial task.ready plus two durable retries.
+)
 
 // reconcileUnaccepted closes the false-green gap where the scheduler wake was
-// sent but no assigned thread ever loaded the authoritative occurrence. It is
-// intentionally independent of the recurrence cadence and runs every tick.
+// sent but no assigned thread ever loaded the authoritative occurrence. It
+// retries the same durable task.ready event twice before failing the occurrence.
+// The policy is independent of recurrence cadence and runs every tick.
 func (s *scheduler) reconcileUnaccepted(now time.Time, projectID string) error {
 	query := `SELECT ` + taskColumns + ` FROM tasks WHERE state='queued' AND scheduled_for IS NOT NULL
-		AND dispatched_at IS NOT NULL AND accepted_at IS NULL AND dispatched_at<=?`
-	args := []any{now.Add(-dispatchAcceptanceTimeout).Format(time.RFC3339Nano)}
+		AND dispatched_at IS NOT NULL AND accepted_at IS NULL
+		AND COALESCE(last_dispatch_attempt_at, dispatched_at)<=?`
+	eligibleBefore := now.Add(-dispatchRetryInterval)
+	args := []any{eligibleBefore.Format(time.RFC3339Nano)}
 	if projectID != "" {
 		query += ` AND project_id=?`
 		args = append(args, projectID)
@@ -414,13 +420,22 @@ func (s *scheduler) reconcileUnaccepted(now time.Time, projectID string) error {
 		return err
 	}
 	for _, run := range overdue {
-		failed := stateFailed
-		msg := fmt.Sprintf("dispatched but not accepted by assigned thread within %s", dispatchAcceptanceTimeout)
-		updated, _, updateErr := s.store.Update(run.ID, "tasks:scheduler", UpdateTaskInput{State: &failed, Error: &msg})
-		if updateErr != nil {
-			return updateErr
+		updated, action, reconcileErr := s.store.ReconcileUnacceptedDispatch(run.ID, "tasks:scheduler", now,
+			eligibleBefore, dispatchMaxAttempts)
+		if reconcileErr != nil {
+			return reconcileErr
 		}
-		_ = s.app.notifyCreator(updated)
+		switch action {
+		case dispatchReconcileRetry:
+			if notifyErr := s.app.notifyAssigned(updated, updated.AssignedThreadID, "task.ready"); notifyErr != nil {
+				s.app.logger().Warn("tasks scheduler redispatch", "task_id", updated.ID,
+					"attempt", updated.DispatchAttempts, "err", notifyErr.Error())
+			}
+		case dispatchReconcileFail:
+			s.app.logger().Warn("tasks scheduler unaccepted dispatch exhausted", "task_id", updated.ID,
+				"attempts", updated.DispatchAttempts)
+			_ = s.app.notifyDispatchFailure(updated)
+		}
 	}
 	return nil
 }
@@ -550,16 +565,9 @@ func (s *scheduler) dispatch(run *Task, now time.Time, eventType string) error {
 		return err
 	}
 	if err := s.app.notifyAssigned(dispatched, dispatched.AssignedThreadID, eventType); err != nil {
-		failed := stateFailed
-		message := "scheduler dispatch failed: " + err.Error()
-		updated, _, updateErr := s.store.Update(dispatched.ID, "tasks:scheduler", UpdateTaskInput{State: &failed, Error: &message})
-		if updateErr == nil {
-			_ = s.app.notifyCreator(updated)
-		}
-		if updateErr != nil {
-			return fmt.Errorf("%s; recording failure: %w", message, updateErr)
-		}
-		return err
+		// The durable occurrence remains queued. Reconciliation will retry this
+		// same task ID instead of turning a transient delivery error into failure.
+		return fmt.Errorf("scheduler dispatch attempt 1 failed; queued for retry: %w", err)
 	}
 	return nil
 }

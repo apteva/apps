@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -79,7 +80,7 @@ func TestTaskLifecycleUsesOpaqueThreadOwnership(t *testing.T) {
 		t.Fatalf("task app classified an opaque thread: %q", created.AssignedThreadID)
 	}
 
-	running, progress, step := stateRunning, 25, "Reviewing conversations"
+	running, progress, step := stateRunning, 25, "Reviewing records"
 	updatedRaw, err := app.toolUpdate(creator, appCtx, map[string]any{
 		"task_id": created.ID, "state": running, "progress": progress, "current_step": step,
 	})
@@ -344,7 +345,7 @@ func TestListIsAgentWideAcrossOpaqueThreads(t *testing.T) {
 		title  string
 	}{
 		{thread: "opaque-default", title: "Created by default thread"},
-		{thread: "conversation-a", title: "Created by conversation"},
+		{thread: "requester-a", title: "Created by requester"},
 		{thread: "execution-b", title: "Created by another thread"},
 	} {
 		if _, err := app.toolCreate(callerContext(7, item.thread, "project-a"), appCtx, map[string]any{"title": item.title}); err != nil {
@@ -366,8 +367,8 @@ func TestListIsAgentWideAcrossOpaqueThreads(t *testing.T) {
 	// Legacy thread filters are intentionally ignored by the handler. They are
 	// also absent from the public schema, so no caller can turn provenance into
 	// a visibility boundary.
-	raw, err := app.toolList(callerContext(7, "conversation-reader", "project-a"), appCtx, map[string]any{
-		"created_by_me": true, "assigned_thread_id": "conversation-reader",
+	raw, err := app.toolList(callerContext(7, "inventory-reader", "project-a"), appCtx, map[string]any{
+		"created_by_me": true, "assigned_thread_id": "inventory-reader",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -526,7 +527,7 @@ func TestHTTPProjectIsolationAndOperatorLifecycle(t *testing.T) {
 	if created.Task.AssignedThreadID != "opaque-default" {
 		t.Fatalf("UI task not assigned to agent default thread: %+v", created.Task)
 	}
-	if _, _, err := app.store.Create(CreateTaskInput{AgentID: 7, ProjectID: "project-a", Title: "Conversation-created", CreatedByThreadID: "conversation-a", AssignedThreadID: "conversation-a"}); err != nil {
+	if _, _, err := app.store.Create(CreateTaskInput{AgentID: 7, ProjectID: "project-a", Title: "Requester-created", CreatedByThreadID: "requester-a", AssignedThreadID: "requester-a"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := app.store.Create(CreateTaskInput{AgentID: 8, ProjectID: "project-a", Title: "Other agent", AssignedThreadID: "other-default"}); err != nil {
@@ -723,9 +724,9 @@ func TestRecurringOccurrenceLifecycleRollsUpDownstreamOutcome(t *testing.T) {
 	}
 }
 
-func TestUnacceptedDispatchFailsAndMarksParentUnhealthy(t *testing.T) {
-	app, appCtx, _ := newTestApp(t)
-	raw, err := app.toolCreate(callerContext(7, "schedule-owner", "project-a"), appCtx, map[string]any{
+func TestUnacceptedDispatchRetriesBeforeFailure(t *testing.T) {
+	app, appCtx, platform := newTestApp(t)
+	raw, err := app.toolCreate(callerContext(7, "opaque-default", "project-a"), appCtx, map[string]any{
 		"title": "Prepare X post", "schedule": map[string]any{"kind": "interval", "every": "10m"},
 	})
 	if err != nil {
@@ -736,24 +737,224 @@ func TestUnacceptedDispatchFailsAndMarksParentUnhealthy(t *testing.T) {
 	if err := app.scheduler.Tick(dispatchedAt, "project-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.scheduler.reconcileUnaccepted(dispatchedAt.Add(dispatchAcceptanceTimeout+time.Second), "project-a"); err != nil {
+	parentID := parent.ID
+	runs, _ := app.store.List(TaskFilter{ProjectID: "project-a", ParentTaskID: &parentID, Limit: 10})
+	if len(runs) != 1 || runs[0].DispatchAttempts != 1 || runs[0].LastDispatchAttemptAt == nil {
+		t.Fatalf("initial dispatch metadata incomplete: %+v", runs)
+	}
+
+	for retry := 1; retry < dispatchMaxAttempts; retry++ {
+		tick := dispatchedAt.Add(time.Duration(retry)*dispatchRetryInterval + time.Second)
+		if err := app.scheduler.reconcileUnaccepted(tick, "project-a"); err != nil {
+			t.Fatal(err)
+		}
+		run, _ := app.store.Get(runs[0].ID)
+		wantAttempts := retry + 1
+		if run.State != stateQueued || run.AcceptedAt != nil || run.DispatchAttempts != wantAttempts {
+			t.Fatalf("retry %d prematurely failed or lost attempt metadata: %+v", retry, run)
+		}
+		parent, _ = app.store.Get(parent.ID)
+		if parent.LastOccurrenceStatus != "dispatched" || parent.LastError != "" {
+			t.Fatalf("retry %d made parent falsely unhealthy: %+v", retry, parent)
+		}
+		for _, call := range platform.events {
+			payload, _ := call.Message.(map[string]any)
+			if payload["type"] == "task.terminal" {
+				t.Fatalf("retry %d alerted before attempts were exhausted: %+v", retry, platform.events)
+			}
+		}
+		// A repeated tick inside the same retry window must not emit again.
+		if err := app.scheduler.reconcileUnaccepted(tick, "project-a"); err != nil {
+			t.Fatal(err)
+		}
+		afterDuplicate, _ := app.store.Get(run.ID)
+		if afterDuplicate.DispatchAttempts != wantAttempts {
+			t.Fatalf("retry %d duplicated in the same window: %+v", retry, afterDuplicate)
+		}
+	}
+
+	exhaustedAt := dispatchedAt.Add(time.Duration(dispatchMaxAttempts)*dispatchRetryInterval + time.Second)
+	if err := app.scheduler.reconcileUnaccepted(exhaustedAt, "project-a"); err != nil {
 		t.Fatal(err)
 	}
 	parent, _ = app.store.Get(parent.ID)
-	if parent.LastRunAt != nil || parent.LastOccurrenceStatus != stateFailed || !strings.Contains(parent.LastError, "not accepted") {
-		t.Fatalf("unaccepted dispatch remained false-green: %+v", parent)
+	if parent.LastRunAt != nil || parent.LastOccurrenceStatus != stateFailed || !strings.Contains(parent.LastError, "3 delivery attempts") {
+		t.Fatalf("exhausted dispatch did not mark parent unhealthy: %+v", parent)
+	}
+	run, _ := app.store.Get(runs[0].ID)
+	if run.State != stateFailed || run.AcceptedAt != nil || run.DispatchAttempts != dispatchMaxAttempts || !strings.Contains(run.Error, "3 delivery attempts") {
+		t.Fatalf("exhausted occurrence not failed with reason: %+v", run)
+	}
+	ready, terminal := 0, 0
+	for _, call := range platform.events {
+		payload, _ := call.Message.(map[string]any)
+		switch payload["type"] {
+		case "task.ready":
+			ready++
+			if payload["task_id"] != run.ID {
+				t.Fatalf("retry changed authoritative occurrence: %+v", payload)
+			}
+		case "task.terminal":
+			terminal++
+			if payload["attention_required"] != true || payload["reason"] != "dispatch_unaccepted" || call.Target.ThreadID != "opaque-default" {
+				t.Fatalf("final dispatch alert incomplete: target=%+v payload=%+v", call.Target, payload)
+			}
+		}
+	}
+	if ready != dispatchMaxAttempts || terminal != 1 {
+		t.Fatalf("want %d task.ready attempts and one final alert, got ready=%d terminal=%d events=%+v", dispatchMaxAttempts, ready, terminal, platform.events)
+	}
+	events, err := app.store.Events(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redispatched := 0
+	for _, event := range events {
+		if event.EventType == "occurrence_redispatched" {
+			redispatched++
+		}
+	}
+	if redispatched != dispatchMaxAttempts-1 {
+		t.Fatalf("want %d durable redispatch events, got %+v", dispatchMaxAttempts-1, events)
+	}
+}
+
+func TestAcceptedRedispatchStopsRetriesAndFailure(t *testing.T) {
+	app, appCtx, platform := newTestApp(t)
+	raw, err := app.toolCreate(callerContext(7, "schedule-owner", "project-a"), appCtx, map[string]any{
+		"title": "Prepare accepted X post", "schedule": map[string]any{"kind": "interval", "every": "30m"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := raw.(map[string]any)["task"].(*Task)
+	dispatchedAt := parent.NextRunAt.Add(time.Second)
+	if err := app.scheduler.Tick(dispatchedAt, "project-a"); err != nil {
+		t.Fatal(err)
 	}
 	parentID := parent.ID
 	runs, _ := app.store.List(TaskFilter{ProjectID: "project-a", ParentTaskID: &parentID, Limit: 10})
-	if len(runs) != 1 || runs[0].State != stateFailed || runs[0].AcceptedAt != nil || !strings.Contains(runs[0].Error, "not accepted") {
-		t.Fatalf("unaccepted occurrence not failed with reason: %+v", runs)
+	if len(runs) != 1 {
+		t.Fatalf("want one occurrence, got %+v", runs)
+	}
+	retryAt := dispatchedAt.Add(dispatchRetryInterval + time.Second)
+	if err := app.scheduler.reconcileUnaccepted(retryAt, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.store.Accept(runs[0].ID, "opaque-default", retryAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.scheduler.reconcileUnaccepted(retryAt.Add(24*time.Hour), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	accepted, _ := app.store.Get(runs[0].ID)
+	if accepted.State != stateQueued || accepted.AcceptedAt == nil || accepted.DispatchAttempts != 2 || accepted.Error != "" {
+		t.Fatalf("accepted occurrence retried or failed: %+v", accepted)
+	}
+	parent, _ = app.store.Get(parent.ID)
+	if parent.LastOccurrenceStatus != "accepted" || parent.LastError != "" {
+		t.Fatalf("accepted retry did not preserve healthy parent status: %+v", parent)
+	}
+	ready, terminal := 0, 0
+	for _, call := range platform.events {
+		payload, _ := call.Message.(map[string]any)
+		if payload["type"] == "task.ready" {
+			ready++
+		}
+		if payload["type"] == "task.terminal" {
+			terminal++
+		}
+	}
+	if ready != 2 || terminal != 0 {
+		t.Fatalf("accepted occurrence should stop after one retry: ready=%d terminal=%d events=%+v", ready, terminal, platform.events)
+	}
+}
+
+func TestInitialDeliveryErrorRemainsQueuedForRetry(t *testing.T) {
+	app, appCtx, platform := newTestApp(t)
+	raw, err := app.toolCreate(callerContext(7, "schedule-owner", "project-a"), appCtx, map[string]any{
+		"title": "Recover transient delivery", "schedule": map[string]any{"kind": "interval", "every": "30m"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := raw.(map[string]any)["task"].(*Task)
+	platform.sendErr = errors.New("temporary thread delivery outage")
+	dispatchedAt := parent.NextRunAt.Add(time.Second)
+	if err := app.scheduler.Tick(dispatchedAt, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	parentID := parent.ID
+	runs, _ := app.store.List(TaskFilter{ProjectID: "project-a", ParentTaskID: &parentID, Limit: 10})
+	if len(runs) != 1 || runs[0].State != stateQueued || runs[0].DispatchAttempts != 1 || runs[0].Error != "" {
+		t.Fatalf("transient initial delivery became a terminal failure: %+v", runs)
+	}
+	parent, _ = app.store.Get(parent.ID)
+	if parent.LastOccurrenceStatus != "dispatched" || parent.LastError != "" {
+		t.Fatalf("transient initial delivery made parent unhealthy: %+v", parent)
+	}
+	platform.sendErr = nil
+	if err := app.scheduler.reconcileUnaccepted(dispatchedAt.Add(dispatchRetryInterval+time.Second), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	retried, _ := app.store.Get(runs[0].ID)
+	if retried.State != stateQueued || retried.DispatchAttempts != 2 || retried.Error != "" {
+		t.Fatalf("transient initial delivery did not enter retry flow: %+v", retried)
+	}
+}
+
+func TestConcurrentSchedulerTicksClaimOneRedispatch(t *testing.T) {
+	app, appCtx, platform := newTestApp(t)
+	raw, err := app.toolCreate(callerContext(7, "schedule-owner", "project-a"), appCtx, map[string]any{
+		"title": "Concurrent retry", "schedule": map[string]any{"kind": "interval", "every": "30m"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := raw.(map[string]any)["task"].(*Task)
+	dispatchedAt := parent.NextRunAt.Add(time.Second)
+	if err := app.scheduler.Tick(dispatchedAt, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	retryAt := dispatchedAt.Add(dispatchRetryInterval + time.Second)
+	const callers = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- app.scheduler.Tick(retryAt, "project-a")
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for tickErr := range errs {
+		if tickErr != nil {
+			t.Fatal(tickErr)
+		}
+	}
+	parentID := parent.ID
+	runs, _ := app.store.List(TaskFilter{ProjectID: "project-a", ParentTaskID: &parentID, Limit: 10})
+	if len(runs) != 1 || runs[0].DispatchAttempts != 2 || runs[0].State != stateQueued {
+		t.Fatalf("concurrent ticks duplicated retry or occurrence: %+v", runs)
+	}
+	ready := 0
+	for _, call := range platform.events {
+		payload, _ := call.Message.(map[string]any)
+		if payload["type"] == "task.ready" {
+			ready++
+		}
+	}
+	if ready != 2 {
+		t.Fatalf("want initial delivery plus one claimed retry, got %d: %+v", ready, platform.events)
 	}
 }
 
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.3.1" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.3.2" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]

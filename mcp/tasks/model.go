@@ -57,6 +57,8 @@ type Task struct {
 	ScheduledFor          *time.Time `json:"scheduled_for,omitempty"`
 	ScheduleOccurrenceKey string     `json:"schedule_occurrence_key,omitempty"`
 	DispatchedAt          *time.Time `json:"dispatched_at,omitempty"`
+	DispatchAttempts      int        `json:"dispatch_attempts,omitempty"`
+	LastDispatchAttemptAt *time.Time `json:"last_dispatch_attempt_at,omitempty"`
 	AcceptedAt            *time.Time `json:"accepted_at,omitempty"`
 	TelemetryReference    string     `json:"telemetry_reference,omitempty"`
 	Result                string     `json:"result,omitempty"`

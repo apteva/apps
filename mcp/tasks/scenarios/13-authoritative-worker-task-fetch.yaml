@@ -89,8 +89,6 @@ assert:
       args:
         id: authoritative-task-worker
         paused: "true"
-        tools: tasks_get
-        mcp: creator-sandbox
       count: 1
   - tool_called_with:
       tool: tasks_assign

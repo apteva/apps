@@ -29,7 +29,7 @@ const taskColumns = `id, agent_id, project_id, title, description, state,
 	schedule_overlap_policy, schedule_catchup_policy, next_run_at, last_run_at,
 	last_dispatched_at, last_occurrence_id, last_occurrence_status, last_error,
 	last_result_reference, scheduled_for, schedule_occurrence_key, dispatched_at,
-	accepted_at, telemetry_reference, result, result_reference, error, created_at,
+	dispatch_attempts, last_dispatch_attempt_at, accepted_at, telemetry_reference, result, result_reference, error, created_at,
 	updated_at, started_at, completed_at`
 
 type rowScanner interface{ Scan(...any) error }
@@ -38,7 +38,7 @@ func scanTask(row rowScanner) (*Task, error) {
 	var t Task
 	var progress sql.NullInt64
 	var scheduleEnabled int
-	var next, last, lastDispatched, scheduled, dispatched, accepted, started, completed sql.NullString
+	var next, last, lastDispatched, scheduled, dispatched, lastDispatchAttempt, accepted, started, completed sql.NullString
 	var created, updated string
 	err := row.Scan(&t.ID, &t.AgentID, &t.ProjectID, &t.Title, &t.Description, &t.State,
 		&progress, &t.CurrentStep, &t.CreatedByThreadID, &t.AssignedThreadID,
@@ -46,7 +46,7 @@ func scanTask(row rowScanner) (*Task, error) {
 		&t.ScheduleExpression, &t.ScheduleTimezone, &scheduleEnabled,
 		&t.ScheduleOverlapPolicy, &t.ScheduleCatchupPolicy, &next, &last, &lastDispatched,
 		&t.LastOccurrenceID, &t.LastOccurrenceStatus, &t.LastError, &t.LastResultReference,
-		&scheduled, &t.ScheduleOccurrenceKey, &dispatched, &accepted, &t.TelemetryReference,
+		&scheduled, &t.ScheduleOccurrenceKey, &dispatched, &t.DispatchAttempts, &lastDispatchAttempt, &accepted, &t.TelemetryReference,
 		&t.Result, &t.ResultReference, &t.Error, &created, &updated, &started, &completed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errTaskNotFound
@@ -64,6 +64,7 @@ func scanTask(row rowScanner) (*Task, error) {
 	t.LastDispatchedAt = parseNullableTime(lastDispatched)
 	t.ScheduledFor = parseNullableTime(scheduled)
 	t.DispatchedAt = parseNullableTime(dispatched)
+	t.LastDispatchAttemptAt = parseNullableTime(lastDispatchAttempt)
 	t.AcceptedAt = parseNullableTime(accepted)
 	t.StartedAt = parseNullableTime(started)
 	t.CompletedAt = parseNullableTime(completed)
@@ -185,12 +186,12 @@ func (s *taskStore) Create(input CreateTaskInput) (*Task, bool, error) {
 	if input.ScheduledFor != nil {
 		scheduledFor = input.ScheduledFor.UTC().Format(time.RFC3339Nano)
 	}
-	_, err = tx.Exec(`INSERT INTO tasks (`+taskColumns+`) VALUES (`+strings.TrimSuffix(strings.Repeat("?,", 38), ",")+`)`,
+	_, err = tx.Exec(`INSERT INTO tasks (`+taskColumns+`) VALUES (`+strings.TrimSuffix(strings.Repeat("?,", 40), ",")+`)`,
 		id, input.AgentID, input.ProjectID, input.Title, strings.TrimSpace(input.Description), input.State,
 		progress, strings.TrimSpace(input.CurrentStep), input.CreatedByThreadID, input.AssignedThreadID,
 		"", strings.TrimSpace(input.ParentTaskID), strings.TrimSpace(input.IdempotencyKey), scheduleKind,
 		expression, timezone, enabled, overlap, catchup, nextRun, nil, nil, "", "", "", "",
-		scheduledFor, strings.TrimSpace(input.OccurrenceKey), nil, nil, "", "", "", "",
+		scheduledFor, strings.TrimSpace(input.OccurrenceKey), nil, 0, nil, nil, "", "", "", "",
 		now.Format(time.RFC3339Nano),
 		now.Format(time.RFC3339Nano), started, completed)
 	if err != nil {
@@ -545,8 +546,10 @@ func (s *taskStore) MarkDispatched(id, actor string, at time.Time) (*Task, bool,
 	}
 	at = at.UTC()
 	telemetryReference := taskTelemetryReference(current.AgentID, current.AssignedThreadID, at)
-	_, err = tx.Exec(`UPDATE tasks SET dispatched_at=?, telemetry_reference=?, updated_at=? WHERE id=?`,
-		at.Format(time.RFC3339Nano), telemetryReference, at.Format(time.RFC3339Nano), id)
+	_, err = tx.Exec(`UPDATE tasks SET dispatched_at=?, dispatch_attempts=1,
+		last_dispatch_attempt_at=?, telemetry_reference=?, updated_at=? WHERE id=?`,
+		at.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), telemetryReference,
+		at.Format(time.RFC3339Nano), id)
 	if err != nil {
 		return nil, false, err
 	}
@@ -564,7 +567,7 @@ func (s *taskStore) MarkDispatched(id, actor string, at time.Time) (*Task, bool,
 	}
 	event, err := insertEvent(tx, TaskEvent{TaskID: id, AgentID: current.AgentID,
 		EventType: "occurrence_dispatched", ThreadID: actor, FromState: current.State,
-		ToState: current.State, Data: map[string]any{"dispatched_at": at, "telemetry_reference": telemetryReference}})
+		ToState: current.State, Data: map[string]any{"dispatched_at": at, "dispatch_attempt": 1, "telemetry_reference": telemetryReference}})
 	if err != nil {
 		return nil, false, err
 	}
@@ -576,6 +579,111 @@ func (s *taskStore) MarkDispatched(id, actor string, at time.Time) (*Task, bool,
 		s.emit(event)
 	}
 	return task, true, err
+}
+
+const (
+	dispatchReconcileNone  = ""
+	dispatchReconcileRetry = "retry"
+	dispatchReconcileFail  = "fail"
+)
+
+// ReconcileUnacceptedDispatch atomically claims the next retry or terminally
+// fails an occurrence whose assigned thread has not accepted it. The atomic
+// claim prevents repeated or concurrent scheduler ticks from emitting the same
+// retry more than once.
+func (s *taskStore) ReconcileUnacceptedDispatch(id, actor string, at, eligibleBefore time.Time, maxAttempts int) (*Task, string, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, dispatchReconcileNone, err
+	}
+	defer tx.Rollback()
+	current, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
+	if err != nil {
+		return nil, dispatchReconcileNone, err
+	}
+	if current.State != stateQueued || current.ScheduledFor == nil || current.DispatchedAt == nil || current.AcceptedAt != nil {
+		return current, dispatchReconcileNone, nil
+	}
+	lastAttempt := current.LastDispatchAttemptAt
+	if lastAttempt == nil {
+		lastAttempt = current.DispatchedAt
+	}
+	if lastAttempt == nil || lastAttempt.After(eligibleBefore) {
+		return current, dispatchReconcileNone, nil
+	}
+	at = at.UTC()
+	attempts := current.DispatchAttempts
+	if attempts < 1 {
+		// Rows dispatched before migration 006 already received one task.ready.
+		attempts = 1
+	}
+
+	var event TaskEvent
+	action := dispatchReconcileRetry
+	if attempts < maxAttempts {
+		attempts++
+		result, updateErr := tx.Exec(`UPDATE tasks SET dispatch_attempts=?, last_dispatch_attempt_at=?, updated_at=?
+			WHERE id=? AND state='queued' AND accepted_at IS NULL
+			AND COALESCE(last_dispatch_attempt_at, dispatched_at)<=?`, attempts,
+			at.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), id, eligibleBefore.UTC().Format(time.RFC3339Nano))
+		if updateErr != nil {
+			return nil, dispatchReconcileNone, updateErr
+		}
+		changed, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return nil, dispatchReconcileNone, rowsErr
+		}
+		if changed == 0 {
+			return current, dispatchReconcileNone, nil
+		}
+		event, err = insertEvent(tx, TaskEvent{TaskID: id, AgentID: current.AgentID,
+			EventType: "occurrence_redispatched", ThreadID: actor, FromState: current.State,
+			ToState: current.State, Data: map[string]any{"dispatch_attempt": attempts, "max_dispatch_attempts": maxAttempts,
+				"first_dispatched_at": current.DispatchedAt, "last_dispatch_attempt_at": at}})
+	} else {
+		action = dispatchReconcileFail
+		message := fmt.Sprintf("dispatched but not accepted after %d delivery attempts", attempts)
+		result, updateErr := tx.Exec(`UPDATE tasks SET state='failed', error=?, updated_at=?, completed_at=?
+			WHERE id=? AND state='queued' AND accepted_at IS NULL
+			AND COALESCE(last_dispatch_attempt_at, dispatched_at)<=?`, message,
+			at.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), id,
+			eligibleBefore.UTC().Format(time.RFC3339Nano))
+		if updateErr != nil {
+			return nil, dispatchReconcileNone, updateErr
+		}
+		changed, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return nil, dispatchReconcileNone, rowsErr
+		}
+		if changed == 0 {
+			return current, dispatchReconcileNone, nil
+		}
+		if current.ParentTaskID != "" {
+			if err := rollupOccurrenceTx(tx, current.ParentTaskID, current.ID, stateFailed, message, current.ResultReference,
+				current.DispatchedAt, current.AcceptedAt, at); err != nil {
+				return nil, dispatchReconcileNone, err
+			}
+		} else {
+			_, err = tx.Exec(`UPDATE tasks SET last_occurrence_status='failed', last_error=? WHERE id=?`, message, current.ID)
+			if err != nil {
+				return nil, dispatchReconcileNone, err
+			}
+		}
+		event, err = insertEvent(tx, TaskEvent{TaskID: id, AgentID: current.AgentID,
+			EventType: "state_changed", ThreadID: actor, FromState: current.State, ToState: stateFailed,
+			Data: map[string]any{"error": message, "dispatch_attempts": attempts, "current_step": current.CurrentStep}})
+	}
+	if err != nil {
+		return nil, dispatchReconcileNone, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, dispatchReconcileNone, err
+	}
+	task, err := s.Get(id)
+	if err == nil {
+		s.emit(event)
+	}
+	return task, action, err
 }
 
 // Accept records the first authoritative read by the assigned execution
