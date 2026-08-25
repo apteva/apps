@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.12.0
+version: 0.13.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -94,6 +94,11 @@ description: |
   convert each observation at its event or accounting date without rewriting
   any source event.
 
+  v0.13 adds generic project-scoped reference sets for governed dimensions.
+  Event properties can require an active canonical value, agents can discover
+  allowed values, and event-spec updates preserve omitted policies and
+  properties unless clearing is explicit.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics
 icon: /ui/icon.svg
@@ -121,6 +126,8 @@ provides:
       description: Record events via analytics_track.
     - name: events.read
       description: Query events.
+    - name: references.manage
+      description: Manage canonical Analytics reference sets and values.
   mcp_tools:
     - name: analytics_track
       description: Record one event in the current project. Args event (required), props?, app?, user_id?, session_id?, ts? (unix ms — defaults to now). Project is assigned automatically from the calling agent; do not pass project_id. Returns the new event id or validation hints.
@@ -149,6 +156,15 @@ provides:
     - name: analytics_fx_rates_list
       description: List project-scoped FX reference rates for auditing money aggregates.
       requires: events.read
+    - name: analytics_reference_set_upsert
+      description: Create or update one project-scoped canonical reference set.
+      requires: references.manage
+    - name: analytics_reference_value_upsert
+      description: Create, update, activate, or deactivate a canonical reference value.
+      requires: references.manage
+    - name: analytics_reference_values_list
+      description: List canonical values in one current-project reference set.
+      requires: events.read
     - name: analytics_event_specs_list
       description: List current-project event specs with their property specs. Args app?, status?.
       requires: events.read
@@ -159,13 +175,13 @@ provides:
       description: Get one current-project event spec by id or by app/topic.
       requires: events.read
     - name: analytics_event_spec_upsert
-      description: Create or update an event spec and optionally replace its properties and ingest policy.
+      description: Create or safely patch an event spec; omitted properties and policies are preserved.
       requires: events.write
     - name: analytics_event_spec_delete
       description: Delete an event spec by id.
       requires: events.write
     - name: analytics_event_property_upsert
-      description: Add or update one property spec for an event spec.
+      description: Add or update one property spec, optionally referencing a canonical reference set.
       requires: events.write
     - name: analytics_event_property_delete
       description: Delete one property spec from an event spec.

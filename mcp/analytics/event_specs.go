@@ -45,17 +45,19 @@ type EventIngestPolicy struct {
 }
 
 type EventPropertySpec struct {
-	ID                int64    `json:"id,omitempty"`
-	EventSpecID       int64    `json:"event_spec_id,omitempty"`
-	Key               string   `json:"key"`
-	Type              string   `json:"type"`
-	Required          bool     `json:"required"`
-	Description       string   `json:"description,omitempty"`
-	EnumValues        []string `json:"enum_values,omitempty"`
-	PIIClassification string   `json:"pii_classification"`
-	ExampleValue      string   `json:"example_value,omitempty"`
-	CreatedAt         int64    `json:"created_at,omitempty"`
-	UpdatedAt         int64    `json:"updated_at,omitempty"`
+	ID                int64             `json:"id,omitempty"`
+	EventSpecID       int64             `json:"event_spec_id,omitempty"`
+	Key               string            `json:"key"`
+	Type              string            `json:"type"`
+	Required          bool              `json:"required"`
+	Description       string            `json:"description,omitempty"`
+	EnumValues        []string          `json:"enum_values,omitempty"`
+	ReferenceSet      string            `json:"reference_set,omitempty"`
+	AllowedValues     []ReferenceOption `json:"allowed_values,omitempty"`
+	PIIClassification string            `json:"pii_classification"`
+	ExampleValue      string            `json:"example_value,omitempty"`
+	CreatedAt         int64             `json:"created_at,omitempty"`
+	UpdatedAt         int64             `json:"updated_at,omitempty"`
 }
 
 type EventSpecViolation struct {
@@ -406,6 +408,9 @@ func listEventSpecs(db *sql.DB, f specFilter) ([]EventSpec, error) {
 			return nil, err
 		}
 		out[i].Properties = props
+		if err := hydrateEventSpecReferences(db, &out[i]); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -421,6 +426,9 @@ func getEventSpecByID(db *sql.DB, id int64) (*EventSpec, error) {
 		return nil, err
 	}
 	spec.Properties = props
+	if err := hydrateEventSpecReferences(db, &spec); err != nil {
+		return nil, err
+	}
 	return &spec, nil
 }
 
@@ -435,6 +443,9 @@ func getEventSpec(db *sql.DB, projectID, app, topic string) (*EventSpec, error) 
 		return nil, err
 	}
 	spec.Properties = props
+	if err := hydrateEventSpecReferences(db, &spec); err != nil {
+		return nil, err
+	}
 	return &spec, nil
 }
 
@@ -474,7 +485,12 @@ func upsertEventSpec(db *sql.DB, spec EventSpec, replaceProperties bool) (*Event
 		return nil, err
 	}
 	now := time.Now().UnixMilli()
-	res, err := db.Exec(
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`INSERT INTO event_specs (project_id, app, topic, kind, display_name, description, category, status, validation_mode, ingest_mode, upsert_policy, rollup_policy, created_by, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(project_id, app, topic) DO UPDATE SET
@@ -495,21 +511,24 @@ func upsertEventSpec(db *sql.DB, spec EventSpec, replaceProperties bool) (*Event
 	}
 	id := spec.ID
 	if id == 0 {
-		_ = db.QueryRow(`SELECT id FROM event_specs WHERE project_id=? AND app=? AND topic=?`, spec.ProjectID, spec.App, spec.Topic).Scan(&id)
+		_ = tx.QueryRow(`SELECT id FROM event_specs WHERE project_id=? AND app=? AND topic=?`, spec.ProjectID, spec.App, spec.Topic).Scan(&id)
 	}
 	if id == 0 {
 		id, _ = res.LastInsertId()
 	}
 	if replaceProperties {
-		if _, err := db.Exec(`DELETE FROM event_property_specs WHERE event_spec_id=?`, id); err != nil {
+		if _, err := tx.Exec(`DELETE FROM event_property_specs WHERE event_spec_id=?`, id); err != nil {
 			return nil, err
 		}
 		for _, prop := range spec.Properties {
 			prop.EventSpecID = id
-			if err := upsertEventPropertySpec(db, prop); err != nil {
+			if err := upsertEventPropertySpec(tx, prop); err != nil {
 				return nil, err
 			}
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return getEventSpecByID(db, id)
 }
@@ -587,7 +606,7 @@ func normalizeIngestPolicy(policy *EventIngestPolicy) {
 
 func listEventPropertySpecs(db *sql.DB, specID int64) ([]EventPropertySpec, error) {
 	rows, err := db.Query(
-		`SELECT id, event_spec_id, key, type, required, description, enum_values, pii_classification, example_value, created_at, updated_at
+		`SELECT id, event_spec_id, key, type, required, description, enum_values, reference_set, pii_classification, example_value, created_at, updated_at
 		 FROM event_property_specs WHERE event_spec_id=? ORDER BY required DESC, key`,
 		specID,
 	)
@@ -599,11 +618,12 @@ func listEventPropertySpecs(db *sql.DB, specID int64) ([]EventPropertySpec, erro
 	for rows.Next() {
 		var prop EventPropertySpec
 		var required int
-		var enumJSON sql.NullString
-		if err := rows.Scan(&prop.ID, &prop.EventSpecID, &prop.Key, &prop.Type, &required, &prop.Description, &enumJSON, &prop.PIIClassification, &prop.ExampleValue, &prop.CreatedAt, &prop.UpdatedAt); err != nil {
+		var enumJSON, referenceSet sql.NullString
+		if err := rows.Scan(&prop.ID, &prop.EventSpecID, &prop.Key, &prop.Type, &required, &prop.Description, &enumJSON, &referenceSet, &prop.PIIClassification, &prop.ExampleValue, &prop.CreatedAt, &prop.UpdatedAt); err != nil {
 			return nil, err
 		}
 		prop.Required = required == 1
+		prop.ReferenceSet = referenceSet.String
 		if enumJSON.Valid && enumJSON.String != "" {
 			_ = json.Unmarshal([]byte(enumJSON.String), &prop.EnumValues)
 		}
@@ -612,7 +632,7 @@ func listEventPropertySpecs(db *sql.DB, specID int64) ([]EventPropertySpec, erro
 	return out, rows.Err()
 }
 
-func upsertEventPropertySpec(db *sql.DB, prop EventPropertySpec) error {
+func upsertEventPropertySpec(db sqlRunner, prop EventPropertySpec) error {
 	prop.Key = strings.TrimSpace(prop.Key)
 	if prop.EventSpecID <= 0 || prop.Key == "" {
 		return errors.New("event_spec_id and key required")
@@ -626,6 +646,25 @@ func upsertEventPropertySpec(db *sql.DB, prop EventPropertySpec) error {
 	prop.PIIClassification = normalizeChoice(prop.PIIClassification, "none", map[string]bool{
 		"none": true, "contact": true, "identifier": true, "sensitive": true, "secret": true,
 	})
+	prop.ReferenceSet = strings.TrimSpace(prop.ReferenceSet)
+	if prop.ReferenceSet != "" && !validReferenceSetKey(prop.ReferenceSet) {
+		return fmt.Errorf("invalid reference_set %q", prop.ReferenceSet)
+	}
+	if prop.ReferenceSet != "" && prop.Type != "string" {
+		return errors.New("reference_set is only supported for string properties")
+	}
+	if prop.ReferenceSet != "" {
+		var found int
+		if err := db.QueryRow(`
+			SELECT 1 FROM reference_sets
+			WHERE project_id=(SELECT project_id FROM event_specs WHERE id=?) AND key=?
+		`, prop.EventSpecID, prop.ReferenceSet).Scan(&found); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("reference set %q not found in the event spec project", prop.ReferenceSet)
+			}
+			return err
+		}
+	}
 	required := 0
 	if prop.Required {
 		required = 1
@@ -637,17 +676,18 @@ func upsertEventPropertySpec(db *sql.DB, prop EventPropertySpec) error {
 	}
 	now := time.Now().UnixMilli()
 	_, err := db.Exec(
-		`INSERT INTO event_property_specs (event_spec_id, key, type, required, description, enum_values, pii_classification, example_value, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO event_property_specs (event_spec_id, key, type, required, description, enum_values, reference_set, pii_classification, example_value, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(event_spec_id, key) DO UPDATE SET
 			type=excluded.type,
 			required=excluded.required,
 			description=excluded.description,
 			enum_values=excluded.enum_values,
+			reference_set=excluded.reference_set,
 			pii_classification=excluded.pii_classification,
 			example_value=excluded.example_value,
 			updated_at=excluded.updated_at`,
-		prop.EventSpecID, prop.Key, prop.Type, required, prop.Description, enumJSON, prop.PIIClassification, prop.ExampleValue, now, now,
+		prop.EventSpecID, prop.Key, prop.Type, required, prop.Description, enumJSON, nullStr(prop.ReferenceSet), prop.PIIClassification, prop.ExampleValue, now, now,
 	)
 	return err
 }
@@ -711,6 +751,15 @@ func validateEventAgainstSpecs(db *sql.DB, ev EventInsert) (validationOutcome, e
 		}
 		if len(prop.EnumValues) > 0 && !stringIn(fmt.Sprint(v), prop.EnumValues) {
 			add("enum_mismatch", prop.Key, "property value is not allowed")
+		}
+		if prop.ReferenceSet != "" {
+			found, err := activeReferenceValueExists(db, ev.ProjectID, prop.ReferenceSet, fmt.Sprint(v))
+			if err != nil {
+				return validationOutcome{}, err
+			}
+			if !found {
+				add("reference_not_found", prop.Key, fmt.Sprintf("value %q is not active in reference set %q", fmt.Sprint(v), prop.ReferenceSet))
+			}
 		}
 	}
 	reject := spec.Status == "blocked" || (spec.ValidationMode == "reject" && len(violations) > 0)
