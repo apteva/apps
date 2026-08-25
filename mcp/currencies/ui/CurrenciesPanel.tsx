@@ -187,9 +187,9 @@ export default function CurrenciesPanel({ projectId }: NativePanelProps) {
   const toDef = currencyByCode.get(quote);
 
   return (
-    <div className="h-full overflow-auto p-5 text-text">
-      <div className="max-w-6xl mx-auto space-y-5">
-        <header className="flex items-start justify-between gap-4">
+    <div className="h-full min-w-0 overflow-auto p-4 md:p-5 text-text">
+      <div className="w-full space-y-5">
+        <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="text-xl font-semibold">Currencies</h1>
             <p className="text-sm text-text-muted mt-1">Current and historical FX with immutable source provenance.</p>
@@ -199,7 +199,7 @@ export default function CurrenciesPanel({ projectId }: NativePanelProps) {
           </span>
         </header>
 
-        <section className="grid grid-cols-3 gap-3">
+        <section className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Stat label="ISO definitions" value={currencies.length || "—"} />
           <Stat label="Tracked pairs" value={sources?.tracked_pairs ?? "—"} />
           <Stat label="Observations" value={sources?.observations ?? "—"} />
@@ -207,18 +207,18 @@ export default function CurrenciesPanel({ projectId }: NativePanelProps) {
 
         {(error || notice) && <div className={`text-sm rounded border px-3 py-2 ${error ? "border-red/40 text-red" : "border-green-500/40 text-green-500"}`}>{error || notice}</div>}
 
-        <div className="grid lg:grid-cols-[1.4fr_1fr] gap-5">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           <section className="border border-border rounded-lg p-4 space-y-4">
             <div>
               <h2 className="font-medium">Rate and conversion</h2>
               <p className="text-xs text-text-muted mt-1">Leave the date empty for the latest eligible observation.</p>
             </div>
-            <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-end">
+            <div className="flex flex-col sm:flex-row sm:items-end gap-2">
               <CurrencySelect label="From" value={base} onChange={setBase} currencies={selectable} />
-              <button type="button" onClick={swap} className="mb-1 px-2 py-1 border border-border rounded hover:bg-bg-input" aria-label="Swap currencies">⇄</button>
+              <button type="button" onClick={swap} className="h-9 w-full sm:w-auto shrink-0 border border-border rounded px-3 hover:bg-bg-input" aria-label="Swap currencies">⇄</button>
               <CurrencySelect label="To" value={quote} onChange={setQuote} currencies={selectable} />
             </div>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <label className="text-xs text-text-muted">Amount
                 <input value={amount} onChange={(e) => setAmount(e.target.value)} className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text" />
               </label>
@@ -245,7 +245,7 @@ export default function CurrenciesPanel({ projectId }: NativePanelProps) {
               <h2 className="font-medium">Manual observation</h2>
               <p className="text-xs text-text-muted mt-1">Append-only fallback for official, contractual, or offline rates.</p>
             </div>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <CurrencySelect label="Base" value={manualBase} onChange={setManualBase} currencies={selectable} />
               <CurrencySelect label="Quote" value={manualQuote} onChange={setManualQuote} currencies={selectable} />
             </div>
@@ -262,7 +262,7 @@ export default function CurrenciesPanel({ projectId }: NativePanelProps) {
           </section>
         </div>
 
-        <section className="border border-border rounded-lg overflow-hidden">
+        <section className="border border-border rounded-lg overflow-x-auto">
           <div className="p-3 border-b border-border"><h2 className="font-medium">FX providers</h2></div>
           {!sources?.providers.length ? <p className="p-4 text-sm text-text-muted">No provider bound. Identity, manual, and cached rates remain available.</p> : (
             <table className="w-full text-sm"><thead className="text-xs text-text-muted"><tr className="border-b border-border"><th className="text-left p-2">Provider</th><th className="text-left p-2">Status</th><th className="text-left p-2">Last success</th><th className="text-left p-2">Health</th></tr></thead>
@@ -276,7 +276,7 @@ export default function CurrenciesPanel({ projectId }: NativePanelProps) {
 }
 
 function CurrencySelect({ label, value, onChange, currencies }: { label: string; value: string; onChange: (v: string) => void; currencies: Currency[] }) {
-  return <label className="text-xs text-text-muted">{label}<select value={value} onChange={(e) => onChange(e.target.value)} className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text">{currencies.map((c) => <option key={c.code} value={c.code}>{c.code} · {c.name}</option>)}</select></label>;
+  return <label className="min-w-0 flex-1 text-xs text-text-muted">{label}<select value={value} onChange={(e) => onChange(e.target.value)} className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text">{currencies.map((c) => <option key={c.code} value={c.code}>{c.code} · {c.name}</option>)}</select></label>;
 }
 
 function Stat({ label, value }: { label: string; value: string | number }) {

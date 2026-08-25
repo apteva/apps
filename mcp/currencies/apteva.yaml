@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: currencies
 display_name: Currencies
-version: 0.1.0
+version: 0.1.1
 description: |
   Provider-neutral ISO currency metadata, current and historical exchange
   rates, and deterministic minor-unit conversion. Rates retain source,

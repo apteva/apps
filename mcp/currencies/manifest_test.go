@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -11,7 +13,7 @@ func TestManifestMatchesRuntimeAndHasNoAppDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse manifest: %v", err)
 	}
-	if m.Name != "currencies" || m.Version != "0.1.0" {
+	if m.Name != "currencies" || m.Version != "0.1.1" {
 		t.Fatalf("unexpected identity %s %s", m.Name, m.Version)
 	}
 	if len(m.Requires.Apps) != 0 {
@@ -38,5 +40,19 @@ func TestManifestMatchesRuntimeAndHasNoAppDependencies(t *testing.T) {
 	}
 	if len((&App{}).Workers()) != 1 || (&App{}).Workers()[0].Schedule != "@every 15m" {
 		t.Fatal("currencies refresh worker is missing or has the wrong schedule")
+	}
+}
+
+func TestProjectPanelUsesFullAvailableWidth(t *testing.T) {
+	source, err := os.ReadFile("ui/CurrenciesPanel.tsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	panel := string(source)
+	if strings.Contains(panel, "max-w-6xl") || strings.Contains(panel, "mx-auto space-y-5") {
+		t.Fatal("project panel must not impose a centered maximum-width container")
+	}
+	if !strings.Contains(panel, `className="w-full space-y-5"`) {
+		t.Fatal("project panel must explicitly consume the app shell's full width")
 	}
 }
