@@ -21,12 +21,15 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Error("db.migrations missing")
 	}
-	// v0.13.50 surface: 6 catalog read + 2 folder ops + move/delete + 9
+	if m.Runtime.Source == nil || m.Runtime.Source.Ref != "media/v"+m.Version {
+		t.Errorf("runtime source must pin its immutable release tag, got %#v", m.Runtime.Source)
+	}
+	// v0.13.91 surface: 6 catalog read + analyze/ask + 2 folder ops + move/delete + 9
 	// render submit + 3 render manage + 1 description setter + 1
 	// audience-rating setter + 1 keyframes getter + 3 transcript
-	// tools + 1 describe = 29.
-	if len(m.Provides.MCPTools) != 29 {
-		t.Errorf("expected 29 MCP tools, got %d", len(m.Provides.MCPTools))
+	// tools + 1 describe = 31.
+	if len(m.Provides.MCPTools) != 31 {
+		t.Errorf("expected 31 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.Workers) != 1 {
 		t.Errorf("expected 1 worker, got %d", len(m.Provides.Workers))

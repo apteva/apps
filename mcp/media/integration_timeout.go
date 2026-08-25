@@ -17,10 +17,18 @@ type integrationCallResult struct {
 var integrationCallsInFlight sync.Map
 
 func executeIntegrationToolWithTimeout(app *sdk.AppCtx, connID int64, tool string, input map[string]any, timeout time.Duration) (*sdk.ExecuteResult, error) {
+	return executeIntegrationToolWithTimeoutKey(app, "default", connID, tool, input, timeout)
+}
+
+// executeIntegrationToolWithTimeoutKey keeps independently useful call
+// classes from blocking each other. Interactive media_ask requests may run
+// alongside the background describer, while repeated asks still serialize
+// behind their own key so a timed-out upstream call cannot fan out forever.
+func executeIntegrationToolWithTimeoutKey(app *sdk.AppCtx, callClass string, connID int64, tool string, input map[string]any, timeout time.Duration) (*sdk.ExecuteResult, error) {
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
 	}
-	key := strconv.FormatInt(connID, 10) + ":" + tool
+	key := callClass + ":" + strconv.FormatInt(connID, 10) + ":" + tool
 	if _, loaded := integrationCallsInFlight.LoadOrStore(key, struct{}{}); loaded {
 		return nil, errors.New("previous integration call is still running")
 	}

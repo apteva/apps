@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.90
+version: 0.13.91
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -73,7 +73,7 @@ requires:
         vision.describe: chat_completion
       required: false
       label: "Auto-description provider"
-      hint: "Connect OpenCode Go, OpenAI API, or OpenAI Codex to auto-generate descriptions from thumbnails + transcripts. Defaults: kimi-k2.6 on OpenCode Go, gpt-4o-mini on OpenAI API, gpt-5.5 on OpenAI Codex. Without it, descriptions stay manual."
+      hint: "Connect OpenCode Go, OpenAI API, or OpenAI Codex to auto-generate descriptions and answer media_ask questions from existing thumbnails, keyframes, and transcripts. Defaults: kimi-k2.6 on OpenCode Go, gpt-4o-mini on OpenAI API, gpt-5.5 on OpenAI Codex."
     - role: render_executor
       kind: integration
       compatible_slugs: [cloudinary]
@@ -106,6 +106,8 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_get,             description: "Fetch one media record by storage file_id. The returned url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads." }
+    - { name: media_analyze,         description: "Read-only technical and quality analysis for an image, video, or audio file. Returns encoding metadata, decode integrity, visual measurements and timeline anomalies, and audio loudness/peak/silence measurements where applicable. Creates no artifacts." }
+    - { name: media_ask,             description: "Ask a grounded question using only existing source images, cached thumbnails/keyframes, and completed transcripts. Never runs ffmpeg, creates derivations, or writes files." }
     - { name: media_search,          description: "Compact catalog discovery with q/filename/title, folder_scope exact|subtree, type, aspect, duration, rating, dimensions, and codec filters. Empty exact searches diagnose matching descendants; call media_get for full details." }
     - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
     - { name: media_create_folder,   description: "Create an empty folder in storage that media files can later land in. Idempotent. Args - path." }
@@ -279,7 +281,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: media/v0.13.91
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -455,6 +457,31 @@ func (a *App) MCPTools() []sdk.Tool {
 				"include_raw_probe": map[string]any{"type": "boolean"},
 			}, []string{"file_id"}),
 			Handler: a.toolGet,
+		},
+		{
+			Name:        "media_analyze",
+			Description: "Analyze an existing image, video, or audio source without modifying it. Returns catalog/stream encoding details, decode integrity, sampled visual measurements, black/frozen video segments, and LUFS/peak/RMS/silence audio measurements where applicable. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. No render, derivation, or Storage object is created.",
+			InputSchema: schemaObject(map[string]any{
+				"file_id":              map[string]any{"type": "string"},
+				"depth":                map[string]any{"type": "string", "enum": []string{"standard", "full"}, "default": "standard"},
+				"start_ms":             map[string]any{"type": "integer", "minimum": 0},
+				"end_ms":               map[string]any{"type": "integer", "minimum": 0},
+				"silence_threshold_db": map[string]any{"type": "number", "default": -50},
+				"silence_min_ms":       map[string]any{"type": "integer", "minimum": 100, "default": 1000},
+			}, []string{"file_id"}),
+			Handler: a.toolAnalyze,
+		},
+		{
+			Name:        "media_ask",
+			Description: "Ask a grounded question about a media file using the configured descriptions vision/chat integration. Images use an existing thumbnail or source object. Videos use the existing canonical thumbnail plus cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports its actual timestamp. Audio uses an existing completed transcript. This tool never runs ffmpeg, generates frames/derivations, or writes files.",
+			InputSchema: schemaObject(map[string]any{
+				"file_id":            map[string]any{"type": "string"},
+				"question":           map[string]any{"type": "string", "maxLength": maxAskQuestionChars},
+				"at_ms":              map[string]any{"type": "integer", "minimum": 0, "description": "Video only. Selects the nearest cached keyframe; does not extract an exact frame."},
+				"frame_count":        map[string]any{"type": "integer", "minimum": 1, "maximum": maxAskFrameCount, "default": defaultAskFrameCount},
+				"include_transcript": map[string]any{"type": "boolean", "default": true},
+			}, []string{"file_id", "question"}),
+			Handler: a.toolAsk,
 		},
 		{
 			Name:        "media_search",
