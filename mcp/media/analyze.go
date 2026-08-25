@@ -132,15 +132,15 @@ func (a *App) toolAnalyze(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	sourceURL, err := signedFetchURLForMedia(ctx, pid, fid, "", "")
-	if err != nil || sourceURL == "" {
+	source, err := signedFetchURLForMedia(ctx, pid, fid)
+	if err != nil || source.URL == "" {
 		if err == nil {
 			err = errors.New("empty signed URL")
 		}
 		return nil, fmt.Errorf("read source for analysis: %w", err)
 	}
 	result := baseAnalysisResult(row, opts)
-	quality, err := mediaAnalysisRunner(ctx, sourceURL, row, opts)
+	quality, err := mediaAnalysisRunner(ctx, source.URL, row, opts)
 	if err != nil {
 		return nil, err
 	}

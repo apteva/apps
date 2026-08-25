@@ -36,6 +36,22 @@ type storageClient struct {
 	httpClient *http.Client
 }
 
+const (
+	storageDeliveryApteva    = "apteva"
+	storageDispositionInline = "inline"
+)
+
+// StorageSignedURL is Storage's confirmed response to files_get_url.
+// Delivery and disposition are copied from Storage's effective result
+// rather than inferred from Media's request.
+type StorageSignedURL struct {
+	URL         string `json:"url"`
+	Delivery    string `json:"delivery,omitempty"`
+	Disposition string `json:"disposition,omitempty"`
+	ExpiresAt   int64  `json:"expires_at,omitempty"`
+	FileID      int64  `json:"file_id,omitempty"`
+}
+
 func newStorageClient() *storageClient {
 	// Outbound token: prefer APTEVA_OUTBOUND_TOKEN (set explicitly
 	// for cross-app HTTP) and fall back to APTEVA_APP_TOKEN. In
@@ -218,21 +234,10 @@ func (c *storageClient) GetFile(ctx context.Context, projectID string, id int64)
 	return &resp.File, nil
 }
 
-// GetSignedURL asks storage to mint a time-limited signed URL for a
-// file. Returned absolute URL is reachable from outside the cluster;
-// callers hand it to third-party services like Deepgram that need to
-// fetch the bytes themselves.
-//
-// Two URL shapes come back from storage's HTTP endpoint:
-//
-//  1. S3-backed storage: a full presigned S3 URL on the bucket's
-//     provider domain (Hetzner Object Storage / R2 / AWS / B2). No
-//     prefix needed.
-//
-//  2. Disk-backed storage: a path-only URL (e.g.
-//     "/files/42/content?sig=...&exp=..."). We prepend the
-//     platform's public host so it's a real https:// URL the remote
-//     side can curl.
+// GetSignedURL asks Storage to mint a time-limited Apteva-proxied URL
+// with inline disposition. It remains a string-only compatibility
+// wrapper for internal callers; media_get uses GetSignedURLInfo to
+// expose Storage's confirmed URL characteristics.
 //
 // Pre-v0.12.6 this read `os.Getenv("APTEVA_PUBLIC_URL")` directly,
 // which captures the tunnel URL at sidecar SPAWN time. When ngrok
@@ -245,43 +250,51 @@ func (c *storageClient) GetFile(ctx context.Context, projectID string, id int64)
 // edits without restart) and falls back to the env for older
 // platforms / unusual setups.
 func (c *storageClient) GetSignedURL(ctx context.Context, projectID string, id int64, ttlSeconds int) (string, error) {
+	info, err := c.GetSignedURLInfo(ctx, projectID, id, ttlSeconds)
+	if err != nil {
+		return "", err
+	}
+	return info.URL, nil
+}
+
+// GetSignedURLInfo is the structured form of GetSignedURL. Both the
+// HTTP path and its MCP fallback request the same explicit delivery
+// contract so S3-backed Storage does not select legacy direct delivery.
+func (c *storageClient) GetSignedURLInfo(ctx context.Context, projectID string, id int64, ttlSeconds int) (StorageSignedURL, error) {
 	publicURL, err := resolvePublicURL(globalCtx)
 	if err != nil {
-		return "", fmt.Errorf("cannot mint a signed URL reachable from outside the cluster: %w", err)
+		return StorageSignedURL{}, fmt.Errorf("cannot mint a signed URL reachable from outside the cluster: %w", err)
 	}
 	q := url.Values{}
 	if projectID != "" {
 		q.Set("project_id", projectID)
 	}
 	body, err := c.do(ctx, http.MethodPost, "/files/"+strconv.FormatInt(id, 10)+"/url?"+q.Encode(),
-		map[string]any{"project_id": projectID, "ttl_seconds": ttlSeconds}, "application/json")
+		map[string]any{
+			"project_id":  projectID,
+			"ttl_seconds": ttlSeconds,
+			"delivery":    storageDeliveryApteva,
+			"disposition": storageDispositionInline,
+		}, "application/json")
 	if err != nil {
-		// Older storage versions might not have the HTTP route; fall
-		// back to the MCP tool via the same gateway.
+		// Fall back to the MCP tool via the same binding-gated gateway.
 		return c.signedURLViaMCP(ctx, projectID, id, ttlSeconds, publicURL)
 	}
-	var resp struct {
-		URL string `json:"url"`
-	}
+	var resp StorageSignedURL
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", fmt.Errorf("parse get_url: %w (body=%s)", err, string(body))
+		return StorageSignedURL{}, fmt.Errorf("parse get_url: %w (body=%s)", err, string(body))
 	}
 	if resp.URL == "" {
-		return "", errors.New("storage returned empty url")
+		return StorageSignedURL{}, errors.New("storage returned empty url")
 	}
-	if strings.HasPrefix(resp.URL, "/") {
-		if strings.HasPrefix(resp.URL, "/api/apps/storage/") {
-			return publicURL + resp.URL, nil
-		}
-		return publicURL + "/api/apps/storage" + resp.URL, nil
-	}
-	return resp.URL, nil
+	resp.URL = absolutizeStorageURL(publicURL, resp.URL)
+	return resp, nil
 }
 
 // signedURLViaMCP is the fallback when storage doesn't expose a
 // dedicated HTTP route for url-minting. Hits files_get_url via the
 // MCP endpoint — same gateway, JSON-RPC envelope.
-func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, id int64, ttlSeconds int, publicURL string) (string, error) {
+func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, id int64, ttlSeconds int, publicURL string) (StorageSignedURL, error) {
 	rpc := map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 		"params": map[string]any{
@@ -290,11 +303,13 @@ func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, i
 				"_project_id": projectID,
 				"id":          id,
 				"ttl_seconds": ttlSeconds,
+				"delivery":    storageDeliveryApteva,
+				"disposition": storageDispositionInline,
 			},
 		},
 	}
 	if c.base == "" {
-		return "", errors.New("APTEVA_GATEWAY_URL not set")
+		return StorageSignedURL{}, errors.New("APTEVA_GATEWAY_URL not set")
 	}
 	raw, _ := json.Marshal(rpc)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
@@ -303,12 +318,12 @@ func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, i
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return StorageSignedURL{}, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("files_get_url: %d: %s", resp.StatusCode, body)
+		return StorageSignedURL{}, fmt.Errorf("files_get_url: %d: %s", resp.StatusCode, body)
 	}
 	var env struct {
 		Result struct {
@@ -318,26 +333,30 @@ func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, i
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {
-		return "", fmt.Errorf("decode mcp envelope: %w", err)
+		return StorageSignedURL{}, fmt.Errorf("decode mcp envelope: %w", err)
 	}
 	if len(env.Result.Content) == 0 {
-		return "", errors.New("files_get_url returned empty result")
+		return StorageSignedURL{}, errors.New("files_get_url returned empty result")
 	}
-	var inner map[string]any
-	if err := json.Unmarshal([]byte(env.Result.Content[0].Text), &inner); err != nil {
-		return "", fmt.Errorf("decode inner: %w", err)
+	var result StorageSignedURL
+	if err := json.Unmarshal([]byte(env.Result.Content[0].Text), &result); err != nil {
+		return StorageSignedURL{}, fmt.Errorf("decode inner: %w", err)
 	}
-	urlStr, _ := inner["url"].(string)
-	if urlStr == "" {
-		return "", errors.New("files_get_url returned no url")
+	if result.URL == "" {
+		return StorageSignedURL{}, errors.New("files_get_url returned no url")
 	}
+	result.URL = absolutizeStorageURL(publicURL, result.URL)
+	return result, nil
+}
+
+func absolutizeStorageURL(publicURL, urlStr string) string {
 	if strings.HasPrefix(urlStr, "/") {
 		if strings.HasPrefix(urlStr, "/api/apps/storage/") {
-			return publicURL + urlStr, nil
+			return publicURL + urlStr
 		}
-		return publicURL + "/api/apps/storage" + urlStr, nil
+		return publicURL + "/api/apps/storage" + urlStr
 	}
-	return urlStr, nil
+	return urlStr
 }
 
 // DeleteFile hard-deletes a storage file by id. Used by the media

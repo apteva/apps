@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.93
+version: 0.13.94
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,9 +31,8 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.13.93 adds arbitrary versioned workflow metadata,
-  atomic conditional merge patches, metadata search filters, and a JSON
-  metadata editor in the Media panel.
+  through storage. v0.13.94 makes media_get return a fresh Apteva-proxied
+  external ingestion URL and Storage-confirmed delivery characteristics.
 author: Apteva
 scopes: [project, global]
 min_apteva_version: "0.25.9"
@@ -45,7 +44,7 @@ requires:
     - platform.apps.call
   apps:
     - name: storage
-      version: ">=0.10.23"
+      version: ">=0.10.25"
       reason: reads source bytes; writes destination-preserving thumbnails, waveforms, and render outputs back to storage
     - name: jobs
       version: ">=0.1.0"
@@ -107,7 +106,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_get,             description: "Fetch one media record by storage file_id, including arbitrary metadata and metadata_version. The returned url is a fresh public/signed fetch URL suitable for third-party ingestion." }
+    - { name: media_get,             description: "Fetch one media record by storage file_id, including arbitrary metadata and metadata_version. The returned url is a fresh Apteva-proxied external ingestion URL; delivery, disposition, and expires_at report Storage's confirmed URL characteristics." }
     - { name: media_analyze,         description: "Read-only technical and quality analysis for an image, video, or audio file. Returns encoding metadata, decode integrity, visual measurements and timeline anomalies, and audio loudness/peak/silence measurements where applicable. Creates no artifacts." }
     - { name: media_ask,             description: "Ask a grounded question using only existing source images, cached thumbnails/keyframes, and completed transcripts. Never runs ffmpeg, creates derivations, or writes files." }
     - { name: media_search,          description: "Compact catalog discovery with q/filename/title, folder_scope exact|subtree, type, aspect, duration, rating, dimensions, codec, and arbitrary metadata equality filters. Empty exact searches diagnose matching descendants; call media_get for full details." }
@@ -284,7 +283,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.13.93
+    ref: media/v0.13.94
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -454,7 +453,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "media_get",
-			Description: "Fetch one media record by storage file_id. Returns arbitrary metadata + metadata_version, display-space width/height/orientation, and derivation pointers. The returned media.url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true.",
+			Description: "Fetch one media record by storage file_id. Returns arbitrary metadata + metadata_version, display-space width/height/orientation, and derivation pointers. The returned media.url is a fresh Apteva-proxied external ingestion URL; delivery, disposition, and expires_at report Storage's confirmed URL characteristics. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":           map[string]any{"type": "string"},
 				"include_raw_probe": map[string]any{"type": "boolean"},
@@ -887,8 +886,11 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return map[string]any{"found": true, "media": &rows[0], "storage_unavailable": true}, nil
 	}
 	row := enriched[0]
-	if signed, err := signedFetchURLForMedia(ctx, pid, fid, row.Visibility, row.URL); err == nil && signed != "" {
-		row.URL = signed
+	if signed, err := signedFetchURLForMedia(ctx, pid, fid); err == nil && signed.URL != "" {
+		row.URL = signed.URL
+		row.Delivery = signed.Delivery
+		row.Disposition = signed.Disposition
+		row.ExpiresAt = signed.ExpiresAt
 	} else if row.Visibility != "public" {
 		// Avoid returning a private canonical URL that looks usable
 		// to third-party services. The rest of the probe metadata is
@@ -901,33 +903,29 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 const mediaGetSignedURLTTLSeconds = 24 * 60 * 60
 
-// signedFetchURLForMedia returns a URL that can be handed to an
-// external fetcher such as Bunny Stream. Public files can use their
-// canonical URL. Private/signed files ask storage to mint a fresh
-// signed/presigned URL via the bound app; tests and older platforms
-// fall back to the HTTP helper.
-func signedFetchURLForMedia(ctx *sdk.AppCtx, projectID, fileID, visibility, canonicalURL string) (string, error) {
-	if visibility == "public" && canonicalURL != "" {
-		return canonicalURL, nil
-	}
+// signedFetchURLForMedia asks the bound Storage app to mint a fresh,
+// Apteva-proxied URL for every visibility. The response characteristics
+// come from Storage's effective result rather than Media's request.
+func signedFetchURLForMedia(ctx *sdk.AppCtx, projectID, fileID string) (StorageSignedURL, error) {
 	id, err := strconv.ParseInt(fileID, 10, 64)
 	if err != nil || id <= 0 {
-		return "", fmt.Errorf("invalid file_id %q", fileID)
+		return StorageSignedURL{}, fmt.Errorf("invalid file_id %q", fileID)
 	}
 	args := map[string]any{
 		"_project_id": projectID,
 		"id":          id,
 		"ttl_seconds": mediaGetSignedURLTTLSeconds,
+		"delivery":    storageDeliveryApteva,
+		"disposition": storageDispositionInline,
 	}
 	if ctx != nil && ctx.PlatformAPI() != nil {
-		var out struct {
-			URL string `json:"url"`
-		}
+		var out StorageSignedURL
 		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", args, &out); err == nil && out.URL != "" {
-			return absolutizeStorageFetchURL(ctx, out.URL), nil
+			out.URL = absolutizeStorageFetchURL(ctx, out.URL)
+			return out, nil
 		}
 	}
-	return newStorageClient().GetSignedURL(context.Background(), projectID, id, mediaGetSignedURLTTLSeconds)
+	return newStorageClient().GetSignedURLInfo(context.Background(), projectID, id, mediaGetSignedURLTTLSeconds)
 }
 
 func absolutizeStorageFetchURL(ctx *sdk.AppCtx, u string) string {

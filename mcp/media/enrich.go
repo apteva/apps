@@ -36,6 +36,9 @@ type MediaResponseRow struct {
 	DisplayOrientation string  `json:"display_orientation,omitempty"`
 	DisplayAspectRatio float64 `json:"display_aspect_ratio,omitempty"`
 	URL                string  `json:"url,omitempty"`
+	Delivery           string  `json:"delivery,omitempty"`
+	Disposition        string  `json:"disposition,omitempty"`
+	ExpiresAt          int64   `json:"expires_at,omitempty"`
 	Name               string  `json:"name,omitempty"`
 	Folder             string  `json:"folder,omitempty"`
 	Visibility         string  `json:"visibility,omitempty"`

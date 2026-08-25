@@ -24,7 +24,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Runtime.Source == nil || m.Runtime.Source.Ref != "media/v"+m.Version {
 		t.Errorf("runtime source must pin its immutable release tag, got %#v", m.Runtime.Source)
 	}
-	// v0.13.93 surface: 6 catalog read + analyze/ask + 2 folder ops + move/delete + 9
+	// v0.13.94 surface: 6 catalog read + analyze/ask + 2 folder ops + move/delete + 9
 	// render submit + 3 render manage + 1 description setter + 1 metadata patcher + 1
 	// audience-rating setter + 1 keyframes getter + 3 transcript
 	// tools + 1 describe = 32.
@@ -42,8 +42,10 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	for _, a := range m.Requires.Apps {
 		gotApps[a.Name] = a
 	}
-	if _, ok := gotApps["storage"]; !ok {
+	if storage, ok := gotApps["storage"]; !ok {
 		t.Errorf("expected requires.apps to include storage, got %#v", m.Requires.Apps)
+	} else if storage.Version != ">=0.10.25" {
+		t.Errorf("storage version=%q, want >=0.10.25", storage.Version)
 	}
 	if jobs, ok := gotApps["jobs"]; !ok || !jobs.Optional {
 		t.Errorf("expected requires.apps to include optional jobs, got %#v", m.Requires.Apps)
