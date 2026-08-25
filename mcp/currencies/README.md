@@ -3,14 +3,24 @@
 Provider-neutral ISO 4217 metadata, current and historical FX observations,
 and deterministic minor-unit conversion for Apteva apps and agents.
 
-Currencies has no app dependencies. It works with manual rates alone and can
-optionally fetch rates through bound Alpaca Market Data, Salt Edge, or Alpha
-Vantage integration connections. Provider credentials never enter this app.
+Currencies has no app dependencies. On first mount it downloads the latest 90
+calendar days of official euro reference rates from the European Central Bank,
+then refreshes that public feed every six hours. It can additionally fetch
+broader or intraday coverage through bound Alpaca Market Data, Salt Edge, or
+Alpha Vantage integration connections. Provider credentials never enter this
+app.
+
+The ECB source is keyless, best-effort, and may be disabled with
+`ecb_bootstrap_enabled`. An ECB outage never blocks installation. ECB rates are
+published for information purposes and are not transaction prices; their
+observations carry `official_reference_rate` and `information_only` flags.
 
 ## Core behavior
 
 - Ships 178 current ISO 4217 definitions from SIX List One, published
   2026-01-01.
+- Bootstraps roughly 90 days of daily ECB observations for about 30 currencies,
+  sufficient for direct EUR rates and EUR-pivoted cross rates.
 - Stores exchange-rate observations append-only.
 - Supports current, historical, inverse, and two-edge triangulated rates.
 - Converts signed integer minor-unit amounts with exact rational arithmetic.

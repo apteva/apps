@@ -337,7 +337,7 @@ func trackedPairs(db *sql.DB, projectID string) ([][2]string, error) {
 }
 
 func providerPriority(ctx *sdk.AppCtx) map[string]int {
-	order := "alpaca-market-data,saltedge,alpha-vantage,manual"
+	order := "alpaca-market-data,saltedge,alpha-vantage,ecb-reference-rates,manual"
 	if ctx != nil && strings.TrimSpace(ctx.Config().Get("provider_priority")) != "" {
 		order = ctx.Config().Get("provider_priority")
 	}

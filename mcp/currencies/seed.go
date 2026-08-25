@@ -8,7 +8,8 @@ import (
 )
 
 // currenciesSeed is generated from SIX ISO 4217 List One, the official
-// maintenance-agency source. Rates are never seeded; only definitions are.
+// maintenance-agency source. Exchange rates are not embedded: a separate,
+// best-effort ECB bootstrap downloads recent public reference observations.
 //
 //go:embed currencies_seed.json
 var currenciesSeed []byte

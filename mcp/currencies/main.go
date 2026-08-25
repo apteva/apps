@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"errors"
 	"net/http"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -35,6 +36,19 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := seedCurrencyDefinitions(ctx.AppDB()); err != nil {
 		return err
 	}
+	if configBool(ctx, "ecb_bootstrap_enabled", true) {
+		bootstrapCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		created, latest, err := a.refreshECBIfDue(bootstrapCtx, ctx, false)
+		cancel()
+		if err != nil {
+			// Public reference data is a convenience bootstrap. The app must
+			// remain installable and usable with manual/cached rates when ECB is
+			// unavailable.
+			ctx.Logger().Warn("ECB reference-rate bootstrap failed", "error", err)
+		} else if latest != "" {
+			ctx.Logger().Info("ECB reference rates ready", "created", created, "latest", latest)
+		}
+	}
 	globalCtx = ctx
 	ctx.Logger().Info("currencies mounted", "project_id", ctx.CurrentProject())
 	return nil
@@ -49,7 +63,14 @@ func (a *App) Workers() []sdk.Worker {
 		Name:     "currencies-refresh",
 		Schedule: "@every 15m",
 		Run: func(ctx context.Context, app *sdk.AppCtx) error {
-			return a.refreshTrackedPairs(ctx, app)
+			var failures []error
+			if _, _, err := a.refreshECBIfDue(ctx, app, false); err != nil {
+				failures = append(failures, err)
+			}
+			if err := a.refreshTrackedPairs(ctx, app); err != nil {
+				failures = append(failures, err)
+			}
+			return errors.Join(failures...)
 		},
 	}}
 }

@@ -14,7 +14,7 @@ import (
 func testCtx(t *testing.T, opts ...testkit.Option) *sdk.AppCtx {
 	t.Helper()
 	all := []testkit.Option{testkit.WithProjectID("project-test"), testkit.WithConfig(map[string]string{
-		"provider_priority": "alpaca-market-data,saltedge,alpha-vantage,manual",
+		"provider_priority": "alpaca-market-data,saltedge,alpha-vantage,ecb-reference-rates,manual",
 		"pivot_currencies":  "EUR,USD", "default_max_age_seconds": "259200",
 	})}
 	all = append(all, opts...)

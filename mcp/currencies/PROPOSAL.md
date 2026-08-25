@@ -13,7 +13,8 @@ currency metadata, exchange-rate observations, deterministic conversions, and
 rate provenance to Finance, Billing, Bills, Taxes, Commerce, Affiliate, Partner
 Program, Ads, and other apps.
 
-Currencies has **no app dependencies**. It works in manual/offline mode using
+Currencies has **no app dependencies**. It boots with keyless public ECB
+reference rates and also works in manual/offline mode using
 its own database and may use optional FX-provider integrations through platform
 connections. It never stores provider credentials and never calls another app.
 

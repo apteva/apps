@@ -13,11 +13,21 @@ func TestManifestMatchesRuntimeAndHasNoAppDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse manifest: %v", err)
 	}
-	if m.Name != "currencies" || m.Version != "0.1.1" {
+	if m.Name != "currencies" || m.Version != "0.2.0" {
 		t.Fatalf("unexpected identity %s %s", m.Name, m.Version)
 	}
 	if len(m.Requires.Apps) != 0 {
 		t.Fatalf("currencies must have no app dependencies: %+v", m.Requires.Apps)
+	}
+	hasEgress := false
+	for _, permission := range m.Requires.Permissions {
+		if permission == "net.egress" {
+			hasEgress = true
+			break
+		}
+	}
+	if !hasEgress {
+		t.Fatal("ECB bootstrap requires the net.egress permission")
 	}
 	if len(m.Requires.Integrations) != 2 {
 		t.Fatalf("expected primary and fallback FX roles, got %d", len(m.Requires.Integrations))

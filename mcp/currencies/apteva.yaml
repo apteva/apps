@@ -2,12 +2,13 @@ schema: apteva-app/v1
 
 name: currencies
 display_name: Currencies
-version: 0.1.1
+version: 0.2.0
 description: |
   Provider-neutral ISO currency metadata, current and historical exchange
   rates, and deterministic minor-unit conversion. Rates retain source,
   effective time, staleness, inversion, and triangulation provenance. Works
-  with manual rates alone; optional provider connections add live/history data.
+  immediately with public ECB reference data; optional provider connections
+  add broader or intraday coverage.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/currencies
@@ -21,6 +22,7 @@ min_apteva_version: "0.11.0"
 requires:
   permissions:
     - db.write.app
+    - net.egress
     - platform.connections.read
     - platform.connections.execute
   integrations:
@@ -59,7 +61,7 @@ provides:
     - name: currencies_sources_status
       description: "List bound FX providers, last sync state, tracked pairs, and newest observations."
     - name: currencies_sync_now
-      description: "Fetch and ingest provider observations for one pair or all tracked pairs. Args: base?, quote?, as_of?, provider?."
+      description: "Fetch and ingest provider observations for one pair or all tracked pairs. Use provider=ecb-reference-rates to refresh the built-in public feed. Args: base?, quote?, as_of?, provider?."
   ui_panels:
     - slot: project.page
       label: Currencies
@@ -102,7 +104,7 @@ db:
 config_schema:
   - name: provider_priority
     type: text
-    default: "alpaca-market-data,saltedge,alpha-vantage,manual"
+    default: "alpaca-market-data,saltedge,alpha-vantage,ecb-reference-rates,manual"
     label: Provider priority
     description: "Comma-separated provider slugs. Manual rates are last unless explicitly moved."
   - name: pivot_currencies
@@ -115,5 +117,10 @@ config_schema:
     default: 259200
     label: Default maximum rate age
     description: "Default freshness window in seconds (3 days accommodates weekends)."
+  - name: ecb_bootstrap_enabled
+    type: boolean
+    default: true
+    label: Bootstrap ECB reference rates
+    description: "Download the latest 90 calendar days of official, information-only ECB euro reference rates on first mount and refresh them periodically."
 
 upgrade_policy: auto-patch

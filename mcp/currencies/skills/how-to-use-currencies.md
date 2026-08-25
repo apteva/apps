@@ -9,6 +9,9 @@ historical conversion, ISO currency metadata, or provider provenance.
 - Use `currencies_convert` to convert an integer minor-unit amount.
 - Use `currencies_rates_history` for a time series or audit trail.
 - Use `currencies_sources_status` when a rate is missing or stale.
+- The built-in `ecb-reference-rates` source requires no connection and seeds
+  the latest 90 calendar days on first mount. Pass
+  `{"provider":"ecb-reference-rates"}` to `currencies_sync_now` to refresh it.
 - Use `currencies_rate_set_manual` only when the user supplies or authorizes a
   contractual, official, or offline rate. Always include a reason.
 
@@ -20,6 +23,7 @@ accepted `rate_kinds` when the distinction matters.
 
 Provider history and granularity differ. A daily close/reference observation
 is labelled as daily; it is not presented as an intraday rate.
+ECB observations are information-only reference rates, not transaction prices.
 
 ## Conversions
 

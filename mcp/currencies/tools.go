@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -212,6 +213,25 @@ func (a *App) toolSourcesStatus(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	connections, connErr := providerConnections(ctx, projectID)
 	priority := providerPriority(ctx)
 	statuses := []ProviderStatus{}
+	ecbObservations := 0
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM rate_observations WHERE project_id=? AND provider_slug=?`,
+		projectID, ecbProviderSlug).Scan(&ecbObservations)
+	if configBool(ctx, "ecb_bootstrap_enabled", true) {
+		ecb := ProviderStatus{
+			ConnectionID: 0, Provider: ecbProviderSlug, Name: ecbProviderName,
+			Status: "public", Priority: priority[ecbProviderSlug], Enabled: true,
+		}
+		var enabled int
+		err := ctx.AppDB().QueryRow(`SELECT priority,enabled,COALESCE(last_attempt_at,''),COALESCE(last_success_at,''),last_error,failure_count
+            FROM provider_health WHERE project_id=? AND connection_id=0 AND provider_slug=?`, projectID, ecbProviderSlug).Scan(
+			&ecb.Priority, &enabled, &ecb.LastAttemptAt, &ecb.LastSuccessAt, &ecb.LastError, &ecb.FailureCount)
+		if err == nil {
+			ecb.Enabled = enabled != 0
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		statuses = append(statuses, ecb)
+	}
 	for _, conn := range connections {
 		s := ProviderStatus{ConnectionID: conn.ID, Provider: conn.AppSlug, Name: conn.Name, Status: conn.Status, Priority: priority[conn.AppSlug], Enabled: true}
 		var enabled int
@@ -230,7 +250,11 @@ func (a *App) toolSourcesStatus(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM rate_observations WHERE project_id=?`, projectID).Scan(&observations)
 	var newest string
 	_ = ctx.AppDB().QueryRow(`SELECT COALESCE(MAX(effective_at),'') FROM rate_observations WHERE project_id=?`, projectID).Scan(&newest)
-	out := map[string]any{"providers": statuses, "tracked_pairs": tracked, "observations": observations, "newest_effective_at": newest, "offline_manual_mode": len(statuses) == 0}
+	out := map[string]any{
+		"providers": statuses, "tracked_pairs": tracked, "observations": observations,
+		"newest_effective_at": newest, "offline_manual_mode": len(connections) == 0 && ecbObservations == 0,
+		"ecb_observations": ecbObservations,
+	}
 	if connErr != nil {
 		out["connection_error"] = connErr.Error()
 	}
@@ -239,6 +263,22 @@ func (a *App) toolSourcesStatus(ctx *sdk.AppCtx, args map[string]any) (any, erro
 
 func (a *App) toolSyncNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	projectID := scopeKey(ctx, args)
+	requestedProvider := strings.ToLower(strings.TrimSpace(stringArg(args, "provider")))
+	if requestedProvider == ecbProviderSlug {
+		syncCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		created, latest, err := a.refreshECBIfDue(syncCtx, ctx, true)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"results": []map[string]any{{
+				"provider": ecbProviderSlug, "base": "EUR", "observations_created": created,
+				"latest_effective_date": latest, "success": true,
+			}},
+			"count": 1,
+		}, nil
+	}
 	asOf := time.Now().UTC()
 	var err error
 	if raw := strings.TrimSpace(stringArg(args, "as_of")); raw != "" {
@@ -277,7 +317,7 @@ func (a *App) toolSyncNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	results := []map[string]any{}
 	for _, pair := range pairs {
-		created, fetchErr := a.fetchPair(ctx, projectID, pair[0], pair[1], asOf, stringArg(args, "provider"))
+		created, fetchErr := a.fetchPair(ctx, projectID, pair[0], pair[1], asOf, requestedProvider)
 		row := map[string]any{"base": pair[0], "quote": pair[1], "observations_created": len(created), "success": fetchErr == nil}
 		if fetchErr != nil {
 			row["error"] = fetchErr.Error()
