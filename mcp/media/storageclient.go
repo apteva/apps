@@ -39,6 +39,7 @@ type storageClient struct {
 const (
 	storageDeliveryApteva    = "apteva"
 	storageDeliveryDirect    = "direct"
+	storageDeliveryProxy     = "proxy"
 	storageDispositionInline = "inline"
 	storageDispositionAttach = "attachment"
 )
@@ -236,7 +237,7 @@ func (c *storageClient) GetFile(ctx context.Context, projectID string, id int64)
 	return &resp.File, nil
 }
 
-// GetSignedURL asks Storage to mint a time-limited Apteva-proxied URL
+// GetSignedURL asks Storage to mint a time-limited proxy-delivered URL
 // with inline disposition. It remains a string-only compatibility
 // wrapper for internal callers; media_get uses GetSignedURLInfo to
 // expose Storage's confirmed URL characteristics.
@@ -260,14 +261,14 @@ func (c *storageClient) GetSignedURL(ctx context.Context, projectID string, id i
 }
 
 // GetSignedURLInfo is the structured form of GetSignedURL. Both the
-// HTTP path and its MCP fallback request the same explicit delivery
-// contract so S3-backed Storage does not select legacy direct delivery.
+// HTTP path and its MCP fallback explicitly request proxy delivery so
+// S3-backed Storage does not select legacy direct delivery.
 func (c *storageClient) GetSignedURLInfo(ctx context.Context, projectID string, id int64, ttlSeconds int) (StorageSignedURL, error) {
-	return c.GetSignedURLInfoWithOptions(ctx, projectID, id, ttlSeconds, storageDeliveryApteva, storageDispositionInline)
+	return c.GetSignedURLInfoWithOptions(ctx, projectID, id, ttlSeconds, storageDeliveryProxy, storageDispositionInline)
 }
 
 // GetSignedURLInfoWithOptions requests the caller-selected delivery and
-// disposition while preserving Apteva/inline as the empty-value defaults.
+// disposition while preserving proxy/inline as the empty-value defaults.
 func (c *storageClient) GetSignedURLInfoWithOptions(ctx context.Context, projectID string, id int64, ttlSeconds int, delivery, disposition string) (StorageSignedURL, error) {
 	delivery, disposition, err := normalizeStorageURLRequest(delivery, disposition)
 	if err != nil {
@@ -364,10 +365,10 @@ func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, i
 func normalizeStorageURLRequest(delivery, disposition string) (string, string, error) {
 	delivery = strings.ToLower(strings.TrimSpace(delivery))
 	if delivery == "" {
-		delivery = storageDeliveryApteva
+		delivery = storageDeliveryProxy
 	}
-	if delivery != storageDeliveryApteva && delivery != storageDeliveryDirect {
-		return "", "", errors.New("delivery must be one of: apteva, direct")
+	if delivery != storageDeliveryApteva && delivery != storageDeliveryDirect && delivery != storageDeliveryProxy {
+		return "", "", errors.New("delivery must be one of: proxy, apteva, direct")
 	}
 	disposition = strings.ToLower(strings.TrimSpace(disposition))
 	if disposition == "" {

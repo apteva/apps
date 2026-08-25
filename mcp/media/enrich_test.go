@@ -46,8 +46,12 @@ func newFakeStorage(t *testing.T, files []StorageFile) (*fakeStorage, func()) {
 			if len(parts) >= 5 {
 				if id, ok := parseInt64Local(parts[len(parts)-2]); ok {
 					if _, exists := fs.files[id]; exists {
+						fetchURL := "https://agents.example.com/api/apps/storage/files/" + parts[len(parts)-2] + "/content?sig=test&exp=9999999999"
+						if request["delivery"] == "proxy" {
+							fetchURL = "https://agents.example.com/api/apps/storage/public/files/" + parts[len(parts)-2] + "/proxy/content/x.mp4?sig=test&exp=9999999999"
+						}
 						_ = json.NewEncoder(w).Encode(map[string]any{
-							"url":         "https://agents.example.com/api/apps/storage/files/" + parts[len(parts)-2] + "/content?sig=test&exp=9999999999",
+							"url":         fetchURL,
 							"delivery":    request["delivery"],
 							"disposition": request["disposition"],
 							"expires_at":  int64(9999999999),
@@ -170,10 +174,13 @@ func TestGet_EnrichesURL(t *testing.T) {
 	if !strings.Contains(row.URL, "sig=test") {
 		t.Fatalf("URL was not upgraded to signed fetch URL: %q", row.URL)
 	}
-	if row.Delivery != "apteva" || row.Disposition != "inline" || row.ExpiresAt != 9999999999 {
+	if row.Delivery != "proxy" || row.Disposition != "inline" || row.ExpiresAt != 9999999999 {
 		t.Fatalf("URL characteristics were not propagated: %+v", row)
 	}
-	if len(fs.urlRequests) != 1 || fs.urlRequests[0]["delivery"] != "apteva" || fs.urlRequests[0]["disposition"] != "inline" {
+	if !strings.Contains(row.URL, "/proxy/") {
+		t.Fatalf("default media_get URL is not proxied: %q", row.URL)
+	}
+	if len(fs.urlRequests) != 1 || fs.urlRequests[0]["delivery"] != "proxy" || fs.urlRequests[0]["disposition"] != "inline" {
 		t.Fatalf("default Storage URL request = %#v", fs.urlRequests)
 	}
 }
@@ -189,12 +196,12 @@ func TestGet_PublicFileStillMintsConfirmedIngestionURL(t *testing.T) {
 	}})
 	defer cleanup()
 
-	out, err := (&App{}).toolGet(ctx, map[string]any{"_project_id": testProj, "file_id": "8"})
+	out, err := (&App{}).toolGet(ctx, map[string]any{"_project_id": testProj, "file_id": "8", "delivery": "proxy"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	row := out.(map[string]any)["media"].(MediaResponseRow)
-	if !strings.Contains(row.URL, "sig=test") || row.Delivery != "apteva" || row.ExpiresAt == 0 {
+	if !strings.Contains(row.URL, "/proxy/") || row.Delivery != "proxy" || row.ExpiresAt == 0 {
 		t.Fatalf("public file did not receive confirmed ingestion URL: %+v", row)
 	}
 }
@@ -253,8 +260,8 @@ func (p *signedURLPlatform) CallAppResult(appName, toolName string, args map[str
 	p.args = args
 	out := output.(*StorageSignedURL)
 	*out = StorageSignedURL{
-		URL:         "/files/9/content?sig=platform&exp=555",
-		Delivery:    "apteva",
+		URL:         "/public/files/9/proxy/content/platform.mp4?sig=platform&exp=555",
+		Delivery:    "proxy",
 		Disposition: "inline",
 		ExpiresAt:   555,
 		FileID:      9,
@@ -265,17 +272,17 @@ func (p *signedURLPlatform) CallAppResult(appName, toolName string, args map[str
 func TestSignedFetchURLForMediaPlatformPathRequestsCallerDelivery(t *testing.T) {
 	p := &signedURLPlatform{stubPlatform: noBindings()}
 	ctx := newTestCtxWithPlatform(t, p)
-	info, err := signedFetchURLForMedia(ctx, testProj, "9", "direct", "attachment")
+	info, err := signedFetchURLForMedia(ctx, testProj, "9", "proxy", "inline")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p.appName != "storage" || p.toolName != "files_get_url" {
 		t.Fatalf("call = %s.%s", p.appName, p.toolName)
 	}
-	if p.args["ttl_seconds"] != mediaGetSignedURLTTLSeconds || p.args["delivery"] != "direct" || p.args["disposition"] != "attachment" {
+	if p.args["ttl_seconds"] != mediaGetSignedURLTTLSeconds || p.args["delivery"] != "proxy" || p.args["disposition"] != "inline" {
 		t.Fatalf("platform arguments = %#v", p.args)
 	}
-	if info.URL == "" || info.Delivery != "apteva" || info.Disposition != "inline" || info.ExpiresAt != 555 {
+	if !strings.Contains(info.URL, "/proxy/") || info.Delivery != "proxy" || info.Disposition != "inline" || info.ExpiresAt != 555 {
 		t.Fatalf("platform result = %+v", info)
 	}
 }

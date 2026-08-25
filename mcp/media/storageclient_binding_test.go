@@ -37,8 +37,8 @@ func TestStorageClientUsesBoundStreamingProxy(t *testing.T) {
 				t.Errorf("decode url request: %v", err)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"url":         "/api/apps/storage/public/files/5300/content/zombie.mp4?sig=test&exp=999",
-				"delivery":    "apteva",
+				"url":         "/api/apps/storage/public/files/5300/proxy/content/zombie.mp4?sig=test&exp=999",
+				"delivery":    "proxy",
 				"disposition": "inline",
 				"expires_at":  int64(999),
 				"file_id":     int64(5300),
@@ -64,15 +64,15 @@ func TestStorageClientUsesBoundStreamingProxy(t *testing.T) {
 		t.Fatalf("content=%q", content.String())
 	}
 	t.Setenv("APTEVA_PUBLIC_URL", srv.URL)
-	signed, err := c.GetSignedURLInfoWithOptions(context.Background(), "prod-project", 5300, 60, "direct", "attachment")
-	wantSigned := srv.URL + "/api/apps/storage/public/files/5300/content/zombie.mp4?sig=test&exp=999"
+	signed, err := c.GetSignedURLInfo(context.Background(), "prod-project", 5300, 60)
+	wantSigned := srv.URL + "/api/apps/storage/public/files/5300/proxy/content/zombie.mp4?sig=test&exp=999"
 	if err != nil || signed.URL != wantSigned {
-		t.Fatalf("GetSignedURLInfoWithOptions = %+v, %v", signed, err)
+		t.Fatalf("GetSignedURLInfo = %+v, %v", signed, err)
 	}
-	if signed.Delivery != "apteva" || signed.Disposition != "inline" || signed.ExpiresAt != 999 || signed.FileID != 5300 {
+	if signed.Delivery != "proxy" || signed.Disposition != "inline" || signed.ExpiresAt != 999 || signed.FileID != 5300 {
 		t.Fatalf("confirmed URL characteristics = %+v", signed)
 	}
-	if urlRequest["delivery"] != "direct" || urlRequest["disposition"] != "attachment" || urlRequest["ttl_seconds"] != float64(60) {
+	if urlRequest["delivery"] != "proxy" || urlRequest["disposition"] != "inline" || urlRequest["ttl_seconds"] != float64(60) {
 		t.Fatalf("url request = %#v", urlRequest)
 	}
 	for _, path := range paths {
@@ -82,7 +82,7 @@ func TestStorageClientUsesBoundStreamingProxy(t *testing.T) {
 	}
 }
 
-func TestStorageClientMCPFallbackPreservesCallerDelivery(t *testing.T) {
+func TestStorageClientMCPFallbackDefaultsToProxy(t *testing.T) {
 	var arguments map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -103,7 +103,7 @@ func TestStorageClientMCPFallbackPreservesCallerDelivery(t *testing.T) {
 				"id":      1,
 				"result": map[string]any{"content": []map[string]any{{
 					"type": "text",
-					"text": `{"url":"/files/42/content?sig=mcp&exp=1234","expires_at":1234,"file_id":42,"delivery":"apteva","disposition":"inline"}`,
+					"text": `{"url":"/public/files/42/proxy/content/demo.mp4?sig=mcp&exp=1234","expires_at":1234,"file_id":42,"delivery":"proxy","disposition":"inline"}`,
 				}}},
 			})
 		default:
@@ -116,14 +116,30 @@ func TestStorageClientMCPFallbackPreservesCallerDelivery(t *testing.T) {
 	t.Setenv("APTEVA_OUTBOUND_TOKEN", "media-token")
 	t.Setenv("APTEVA_PUBLIC_URL", srv.URL)
 	globalCtx = nil
-	info, err := newStorageClient().GetSignedURLInfoWithOptions(context.Background(), "prod-project", 42, 86400, "direct", "attachment")
+	info, err := newStorageClient().GetSignedURLInfo(context.Background(), "prod-project", 42, 86400)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.URL != srv.URL+"/api/apps/storage/files/42/content?sig=mcp&exp=1234" || info.Delivery != "apteva" || info.Disposition != "inline" || info.ExpiresAt != 1234 {
+	if info.URL != srv.URL+"/api/apps/storage/public/files/42/proxy/content/demo.mp4?sig=mcp&exp=1234" || info.Delivery != "proxy" || info.Disposition != "inline" || info.ExpiresAt != 1234 {
 		t.Fatalf("fallback info = %+v", info)
 	}
-	if arguments["delivery"] != "direct" || arguments["disposition"] != "attachment" || arguments["ttl_seconds"] != float64(86400) {
+	if arguments["delivery"] != "proxy" || arguments["disposition"] != "inline" || arguments["ttl_seconds"] != float64(86400) {
 		t.Fatalf("fallback arguments = %#v", arguments)
+	}
+}
+
+func TestNormalizeStorageURLRequestDeliveryChoices(t *testing.T) {
+	for _, delivery := range []string{"proxy", "apteva", "direct"} {
+		gotDelivery, gotDisposition, err := normalizeStorageURLRequest(delivery, "")
+		if err != nil {
+			t.Fatalf("delivery %q: %v", delivery, err)
+		}
+		if gotDelivery != delivery || gotDisposition != "inline" {
+			t.Fatalf("delivery %q normalized to %q/%q", delivery, gotDelivery, gotDisposition)
+		}
+	}
+	gotDelivery, gotDisposition, err := normalizeStorageURLRequest("", "")
+	if err != nil || gotDelivery != "proxy" || gotDisposition != "inline" {
+		t.Fatalf("defaults = %q/%q, %v", gotDelivery, gotDisposition, err)
 	}
 }

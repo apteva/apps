@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.95
+version: 0.13.96
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,8 +31,8 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.13.95 lets media_get callers choose Apteva or direct
-  delivery and inline or attachment disposition, with Apteva/inline defaults.
+  through storage. v0.13.96 defaults external ingestion URLs to Storage proxy
+  delivery while retaining explicit Apteva/direct and disposition choices.
 author: Apteva
 scopes: [project, global]
 min_apteva_version: "0.25.9"
@@ -44,7 +44,7 @@ requires:
     - platform.apps.call
   apps:
     - name: storage
-      version: ">=0.10.25"
+      version: ">=0.10.26"
       reason: reads source bytes; writes destination-preserving thumbnails, waveforms, and render outputs back to storage
     - name: jobs
       version: ">=0.1.0"
@@ -106,7 +106,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_get,             description: "Fetch one media record by storage file_id, including arbitrary metadata and metadata_version. URL delivery defaults to apteva/inline; callers can request direct delivery or attachment disposition. Returned delivery, disposition, and expires_at are Storage-confirmed." }
+    - { name: media_get,             description: "Fetch one media record by storage file_id, including arbitrary metadata and metadata_version. External ingestion URL delivery defaults to proxy/inline; callers can explicitly request apteva, direct, or attachment disposition. Returned delivery, disposition, and expires_at are Storage-confirmed." }
     - { name: media_analyze,         description: "Read-only technical and quality analysis for an image, video, or audio file. Returns encoding metadata, decode integrity, visual measurements and timeline anomalies, and audio loudness/peak/silence measurements where applicable. Creates no artifacts." }
     - { name: media_ask,             description: "Ask a grounded question using only existing source images, cached thumbnails/keyframes, and completed transcripts. Never runs ffmpeg, creates derivations, or writes files." }
     - { name: media_search,          description: "Compact catalog discovery with q/filename/title, folder_scope exact|subtree, type, aspect, duration, rating, dimensions, codec, and arbitrary metadata equality filters. Empty exact searches diagnose matching descendants; call media_get for full details." }
@@ -283,7 +283,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.13.95
+    ref: media/v0.13.96
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -453,11 +453,11 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "media_get",
-			Description: "Fetch one media record by storage file_id. Returns arbitrary metadata + metadata_version, display-space width/height/orientation, and derivation pointers. URL delivery defaults to apteva with inline disposition; pass delivery=direct or disposition=attachment when needed. Returned delivery, disposition, and expires_at are Storage-confirmed effective values. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true.",
+			Description: "Fetch one media record by storage file_id. Returns arbitrary metadata + metadata_version, display-space width/height/orientation, and derivation pointers. External ingestion URL delivery defaults to proxy with inline disposition; pass delivery=apteva, delivery=direct, or disposition=attachment when needed. Returned delivery, disposition, and expires_at are Storage-confirmed effective values. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":           map[string]any{"type": "string"},
 				"include_raw_probe": map[string]any{"type": "boolean"},
-				"delivery":          map[string]any{"type": "string", "enum": []string{"apteva", "direct"}, "default": "apteva", "description": "URL delivery mode. direct is effective only when Storage's backend supports it; inspect returned delivery."},
+				"delivery":          map[string]any{"type": "string", "enum": []string{"proxy", "apteva", "direct"}, "default": "proxy", "description": "External URL delivery mode. proxy streams through Storage without exposing or redirecting to its backend; direct is effective only when supported. Inspect returned delivery."},
 				"disposition":       map[string]any{"type": "string", "enum": []string{"inline", "attachment"}, "default": "inline", "description": "Requested Content-Disposition. Storage reports the effective value."},
 			}, []string{"file_id"}),
 			Handler: a.toolGet,
