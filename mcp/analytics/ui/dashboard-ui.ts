@@ -36,6 +36,10 @@ export interface ObjectiveQueryLike {
 	value?: string;
 	by?: string;
 	where?: Record<string, unknown>;
+	currency_field?: string;
+	reporting_currency?: string;
+	amount_unit?: string;
+	rate_date_field?: string;
 }
 
 export function metricAggregation(config: Record<string, unknown>): string {
@@ -64,8 +68,13 @@ export function objectiveMatchesMetric(config: Record<string, unknown>, query: O
 	for (const key of ["app", "topic", "source"] as const) {
 		if (String(config[key] ?? "") !== String(query[key] ?? "")) return false;
 	}
-	if (["sum", "average", "min", "max", "latest", "change"].includes(aggregation)) {
+	if (["sum", "sum_money", "average", "min", "max", "latest", "change"].includes(aggregation)) {
 		if (String(config.value ?? "") !== String(query.value ?? "")) return false;
+	}
+	if (aggregation === "sum_money") {
+		for (const key of ["currency_field", "reporting_currency", "amount_unit", "rate_date_field"] as const) {
+			if (String(config[key] ?? "") !== String(query[key] ?? "")) return false;
+		}
 	}
 	if (aggregation === "distinct") {
 		if (String(config.by ?? config.value ?? "") !== String(query.by ?? "")) return false;
@@ -80,8 +89,13 @@ export function formatMetric(value: number, config: Record<string, unknown>): st
 	const configuredDecimals = Number(config.decimals);
 	const hasConfiguredDecimals = Number.isFinite(configuredDecimals);
 	const decimals = Math.max(0, Math.min(6, hasConfiguredDecimals ? Math.floor(configuredDecimals) : 2));
-	if (config.format === "currency") {
-		const currency = typeof config.currency === "string" && config.currency ? config.currency : "USD";
+	const moneyAggregation = metricAggregation(config) === "sum_money";
+	if (config.format === "currency" || moneyAggregation) {
+		const currency = typeof config.currency === "string" && config.currency
+			? config.currency
+			: typeof config.reporting_currency === "string" && config.reporting_currency
+				? config.reporting_currency
+				: "USD";
 		return new Intl.NumberFormat("en-US", {
 			style: "currency",
 			currency,

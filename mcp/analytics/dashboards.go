@@ -620,6 +620,15 @@ func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget, selectedFil
 		if err != nil {
 			return nil, err
 		}
+		if aggregation == "sum_money" {
+			rows, metadata, err := moneySeriesForWidget(db, f, stringConfig(cfg, "interval", "minute"), cfg)
+			if err != nil {
+				return nil, err
+			}
+			metadata["type"] = w.Type
+			metadata["series"] = rows
+			return metadata, nil
+		}
 		rows, err := seriesForWidget(
 			db,
 			f,
@@ -744,6 +753,14 @@ func evaluateStatWidget(db *sql.DB, f Filter, widgetType string, cfg map[string]
 		}
 		return map[string]any{"type": widgetType, "value": n, "aggregation": aggregation, "field": by}, nil
 	}
+	if aggregation == "sum_money" {
+		result, err := moneyScalarForWidget(db, f, cfg)
+		if err != nil {
+			return nil, err
+		}
+		result["type"] = widgetType
+		return result, nil
+	}
 	if valueKey == "" {
 		return nil, fmt.Errorf("%s aggregation requires value", aggregation)
 	}
@@ -773,7 +790,7 @@ func widgetAggregation(cfg map[string]any) (string, error) {
 		return "count", nil
 	}
 	switch aggregation {
-	case "count", "distinct", "sum", "average", "min", "max", "latest", "change":
+	case "count", "distinct", "sum", "sum_money", "average", "min", "max", "latest", "change":
 		return aggregation, nil
 	default:
 		return "", fmt.Errorf("unsupported aggregation %q", aggregation)

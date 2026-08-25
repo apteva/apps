@@ -224,13 +224,17 @@ interface EventViolation {
 }
 
 interface ObjectiveMetricQuery {
-  aggregation: "count" | "distinct" | "sum" | "average" | "min" | "max" | "latest" | "change";
+  aggregation: "count" | "distinct" | "sum" | "sum_money" | "average" | "min" | "max" | "latest" | "change";
   app?: string;
   topic?: string;
   source?: "track" | "auto";
   value?: string;
   by?: string;
   where?: Record<string, unknown>;
+  currency_field?: string;
+  reporting_currency?: string;
+  amount_unit?: "minor" | "major";
+  rate_date_field?: string;
 }
 
 interface TargetProgress {
@@ -522,7 +526,7 @@ function currentMonth(): string {
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-const NUMERIC_OBJECTIVE_AGGREGATIONS: ObjectiveMetricQuery["aggregation"][] = ["sum", "average", "min", "max", "latest", "change"];
+const NUMERIC_OBJECTIVE_AGGREGATIONS: ObjectiveMetricQuery["aggregation"][] = ["sum", "sum_money", "average", "min", "max", "latest", "change"];
 
 function ObjectivesTab({ projectId }: { projectId: string }) {
   const [objectives, setObjectives] = useState<Objective[]>([]);
@@ -544,6 +548,9 @@ function ObjectivesTab({ projectId }: { projectId: string }) {
   const [topic, setTopic] = useState("");
   const [value, setValue] = useState("props.amount_usd");
   const [by, setBy] = useState("session_id");
+  const [currencyField, setCurrencyField] = useState("props.currency");
+  const [amountUnit, setAmountUnit] = useState<"minor" | "major">("minor");
+  const [rateDateField, setRateDateField] = useState("props.accounting_date");
   const [whereKey, setWhereKey] = useState("");
   const [whereValue, setWhereValue] = useState("");
 
@@ -582,6 +589,9 @@ function ObjectivesTab({ projectId }: { projectId: string }) {
     setTopic("");
     setValue("props.amount_usd");
     setBy("session_id");
+    setCurrencyField("props.currency");
+    setAmountUnit("minor");
+    setRateDateField("props.accounting_date");
     setWhereKey("");
     setWhereValue("");
   };
@@ -604,6 +614,12 @@ function ObjectivesTab({ projectId }: { projectId: string }) {
     if (app.trim()) query.app = app.trim();
     if (topic.trim()) query.topic = topic.trim();
     if (NUMERIC_OBJECTIVE_AGGREGATIONS.includes(aggregation)) query.value = value.trim();
+    if (aggregation === "sum_money") {
+      query.currency_field = currencyField.trim();
+      query.reporting_currency = currency.trim().toUpperCase();
+      query.amount_unit = amountUnit;
+      if (rateDateField.trim()) query.rate_date_field = rateDateField.trim();
+    }
     if (aggregation === "distinct") query.by = by.trim();
     if (whereKey.trim() && whereValue.trim()) query.where = { [whereKey.trim()]: whereValue.trim() };
     setBusy(true);
@@ -618,7 +634,7 @@ function ObjectivesTab({ projectId }: { projectId: string }) {
           status: "active",
           targets: [{
             name: targetName.trim(),
-            metric_key: aggregation === "distinct" ? "custom_distinct" : aggregation === "count" ? "custom_count" : `custom_${aggregation}`,
+            metric_key: aggregation === "sum_money" ? "money_sum" : aggregation === "distinct" ? "custom_distinct" : aggregation === "count" ? "custom_count" : `custom_${aggregation}`,
             target_value: numericTarget,
             unit,
             currency: unit === "money" ? currency.trim().toUpperCase() : "",
@@ -696,11 +712,16 @@ function ObjectivesTab({ projectId }: { projectId: string }) {
             <label className={labelCls}>Objective name<input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></label>
             <label className={labelCls}>Target name<input className={inputCls} value={targetName} onChange={(e) => setTargetName(e.target.value)} /></label>
             <label className={labelCls}>Month<input type="month" className={inputCls} value={month} onChange={(e) => setMonth(e.target.value)} /></label>
-            <label className={labelCls}>Aggregation<select className={inputCls} value={aggregation} onChange={(e) => setAggregation(e.target.value as ObjectiveMetricQuery["aggregation"])}><option value="count">Count</option><option value="distinct">Distinct</option><option value="sum">Sum</option><option value="average">Average</option><option value="min">Minimum</option><option value="max">Maximum</option><option value="latest">Latest</option><option value="change">Change</option></select></label>
+            <label className={labelCls}>Aggregation<select className={inputCls} value={aggregation} onChange={(e) => { const next = e.target.value as ObjectiveMetricQuery["aggregation"]; setAggregation(next); if (next === "sum_money") setUnit("money"); }}><option value="count">Count</option><option value="distinct">Distinct</option><option value="sum">Sum</option><option value="sum_money">Money total</option><option value="average">Average</option><option value="min">Minimum</option><option value="max">Maximum</option><option value="latest">Latest</option><option value="change">Change</option></select></label>
             <label className={labelCls}>App<input list="objective-apps" className={inputCls} value={app} onChange={(e) => setApp(e.target.value)} /><datalist id="objective-apps">{dims.apps.map((v) => <option key={v} value={v} />)}</datalist></label>
             <label className={labelCls}>Event topic<input list="objective-topics" className={inputCls} value={topic} onChange={(e) => setTopic(e.target.value)} /><datalist id="objective-topics">{dims.topics.map((v) => <option key={v} value={v} />)}</datalist></label>
             {NUMERIC_OBJECTIVE_AGGREGATIONS.includes(aggregation) && <label className={labelCls}>Value field<input className={inputCls} value={value} onChange={(e) => setValue(e.target.value)} /></label>}
             {aggregation === "distinct" && <label className={labelCls}>Distinct field<input className={inputCls} value={by} onChange={(e) => setBy(e.target.value)} /></label>}
+            {aggregation === "sum_money" && <>
+              <label className={labelCls}>Currency field<input className={inputCls} value={currencyField} onChange={(e) => setCurrencyField(e.target.value)} /></label>
+              <label className={labelCls}>Amount unit<select className={inputCls} value={amountUnit} onChange={(e) => setAmountUnit(e.target.value as "minor" | "major")}><option value="minor">Minor (cents)</option><option value="major">Major</option></select></label>
+              <label className={labelCls}>FX date field<input className={inputCls} placeholder="Uses event time when blank" value={rateDateField} onChange={(e) => setRateDateField(e.target.value)} /></label>
+            </>}
             <label className={labelCls}>Target value<input type="number" step="any" className={inputCls} value={targetValue} onChange={(e) => setTargetValue(e.target.value)} /></label>
             <label className={labelCls}>Direction<select className={inputCls} value={direction} onChange={(e) => setDirection(e.target.value as ObjectiveTarget["direction"])}><option value="at_least">At least</option><option value="at_most">At most</option></select></label>
             <label className={labelCls}>Unit<select className={inputCls} value={unit} onChange={(e) => setUnit(e.target.value as ObjectiveTarget["unit"])}><option value="count">Count</option><option value="money">Money</option><option value="percent">Percent</option><option value="number">Number</option></select></label>

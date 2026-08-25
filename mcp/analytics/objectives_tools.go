@@ -12,13 +12,17 @@ func (a *App) objectiveTools() []sdk.Tool {
 	querySchema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"aggregation": map[string]any{"type": "string", "enum": []string{"count", "distinct", "sum", "average", "min", "max", "latest", "change"}},
-			"app":         map[string]any{"type": "string"},
-			"topic":       map[string]any{"type": "string"},
-			"source":      map[string]any{"type": "string", "enum": []string{"track", "auto"}},
-			"value":       map[string]any{"type": "string", "description": "Numeric field for sum, average, min, max, latest or change; for example props.amount_usd."},
-			"by":          map[string]any{"type": "string", "description": "Field for distinct, for example session_id or props.subscriber_id."},
-			"where":       map[string]any{"type": "object", "description": "Equality filters keyed by props.X."},
+			"aggregation":        map[string]any{"type": "string", "enum": []string{"count", "distinct", "sum", "sum_money", "average", "min", "max", "latest", "change"}},
+			"app":                map[string]any{"type": "string"},
+			"topic":              map[string]any{"type": "string"},
+			"source":             map[string]any{"type": "string", "enum": []string{"track", "auto"}},
+			"value":              map[string]any{"type": "string", "description": "Numeric field for sum, sum_money, average, min, max, latest or change."},
+			"by":                 map[string]any{"type": "string", "description": "Field for distinct, for example session_id or props.subscriber_id."},
+			"where":              map[string]any{"type": "object", "description": "Equality filters keyed by props.X."},
+			"currency_field":     map[string]any{"type": "string", "description": "Currency property for sum_money, for example props.currency."},
+			"reporting_currency": map[string]any{"type": "string", "description": "Target currency for sum_money, for example EUR."},
+			"amount_unit":        map[string]any{"type": "string", "enum": []string{"minor", "major"}, "description": "Unit stored in value for sum_money."},
+			"rate_date_field":    map[string]any{"type": "string", "description": "Optional props.X date used to select the historical FX rate; event time is the default."},
 		},
 		"required": []string{"aggregation"},
 	}
@@ -49,7 +53,7 @@ func (a *App) objectiveTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "analytics_objectives_create",
-			Description: "Create an objective with one or more targets over data already ingested into the current project's Analytics event store. Queries support count, distinct, sum, average, min, max, latest and change; project and period scope come from the platform and target.",
+			Description: "Create an objective with one or more targets over data already ingested into the current project's Analytics event store. Queries support count, distinct, sum, sum_money, average, min, max, latest and change; project and period scope come from the platform and target.",
 			InputSchema: schemaObject(writeProps, []string{"name", "targets"}),
 			Handler:     a.toolObjectiveCreate,
 		},

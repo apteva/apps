@@ -72,6 +72,36 @@ func TestObjectiveProgressUsesStoredProjectScopedAnalyticsData(t *testing.T) {
 	}
 }
 
+func TestMoneyObjectiveUsesSameReadOnlyAggregateAsDashboard(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("h-sites"))
+	db := ctx.AppDB()
+	if _, err := upsertFXRate(db, "h-sites", FXRate{BaseCurrency: "USD", QuoteCurrency: "EUR", AsOf: 1_000, Rate: 0.5, Source: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	insertObjectiveEvent(t, db, "h-sites", 2_000, `{"amount_cents":10000,"currency":"USD"}`)
+	insertObjectiveEvent(t, db, "h-sites", 3_000, `{"amount_cents":2500,"currency":"EUR"}`)
+	in := ObjectiveWrite{Name: "EUR revenue", Status: "active", Targets: []ObjectiveTarget{{
+		Name: "Revenue target", MetricKey: "money_sum", TargetValue: 70, Unit: "money", Currency: "EUR",
+		Direction: "at_least", PeriodStart: 1_000, PeriodEnd: 5_000, Timezone: "UTC",
+		Query: ObjectiveMetricQuery{Aggregation: "sum_money", App: "billing", Topic: "payment_received", Value: "props.amount_cents", CurrencyField: "props.currency", ReportingCurrency: "EUR", AmountUnit: "minor"},
+	}}}
+	objective, err := createObjective(db, "h-sites", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, err := evaluateObjective(db, "h-sites", objective.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progress) != 1 || progress[0].ActualValue == nil || *progress[0].ActualValue != 75 || !progress[0].Achieved {
+		t.Fatalf("progress=%#v want 75 EUR achieved", progress)
+	}
+	var rows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events WHERE project_id='h-sites'`).Scan(&rows); err != nil || rows != 2 {
+		t.Fatalf("source event count=%d err=%v", rows, err)
+	}
+}
+
 func TestDashboardGoalLinksAreProjectScopedAndReadOnly(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("h-sites"))
 	db := ctx.AppDB()

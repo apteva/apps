@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.11.3
+version: 0.12.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -89,6 +89,11 @@ description: |
 
   v0.11.3 keeps trend endpoint markers circular in stretched dashboard cards.
 
+  v0.12 adds read-only mixed-currency aggregation for stats, trends, period
+  comparisons, and objectives. Project-scoped, auditable FX reference rates
+  convert each observation at its event or accounting date without rewriting
+  any source event.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics
 icon: /ui/icon.svg
@@ -134,6 +139,15 @@ provides:
       requires: events.read
     - name: analytics_sum
       description: Sum a numeric current-project event field/path. Args value (required, e.g. props.views), app?, topic?, since?, until?, where?, group_by?, limit?. Returns aggregate buckets with sum/count.
+      requires: events.read
+    - name: analytics_sum_money
+      description: Read-only mixed-currency sum over current-project events using historical project FX rates. Source events are never changed.
+      requires: events.read
+    - name: analytics_fx_rate_upsert
+      description: Create or update one project-scoped FX reference rate without changing Analytics events.
+      requires: events.write
+    - name: analytics_fx_rates_list
+      description: List project-scoped FX reference rates for auditing money aggregates.
       requires: events.read
     - name: analytics_event_specs_list
       description: List current-project event specs with their property specs. Args app?, status?.

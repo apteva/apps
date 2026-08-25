@@ -190,6 +190,44 @@ func (a *App) toolSum(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"buckets": rows, "value": value}, nil
 }
 
+func (a *App) toolSumMoney(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	f, err := scopedFilter(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return moneyScalarForWidget(ctx.AppDB(), f, args)
+}
+
+func (a *App) toolFXRateUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	rate, err := upsertFXRate(ctx.AppDB(), projectID, FXRate{
+		BaseCurrency:  stringArg(args, "base_currency"),
+		QuoteCurrency: stringArg(args, "quote_currency"),
+		AsOf:          int64Arg(args, "as_of"),
+		Rate:          floatArg(args, "rate"),
+		Source:        stringArg(args, "source"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"rate": rate}, nil
+}
+
+func (a *App) toolFXRatesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	rates, err := listFXRates(ctx.AppDB(), projectID, stringArg(args, "base_currency"), stringArg(args, "quote_currency"), int64Arg(args, "since"), int64Arg(args, "until"), intArg(args, "limit"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"rates": rates}, nil
+}
+
 func (a *App) toolEventSpecsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	projectID, err := scopedProject(ctx, args)
 	if err != nil {
@@ -548,6 +586,27 @@ func int64Arg(args map[string]any, name string) int64 {
 		return x
 	case json.Number:
 		n, _ := x.Int64()
+		return n
+	}
+	return 0
+}
+
+func floatArg(args map[string]any, name string) float64 {
+	v, ok := args[name]
+	if !ok || v == nil {
+		return 0
+	}
+	switch x := v.(type) {
+	case float64:
+		return x
+	case float32:
+		return float64(x)
+	case int:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case json.Number:
+		n, _ := x.Float64()
 		return n
 	}
 	return 0
