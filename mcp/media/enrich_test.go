@@ -16,8 +16,9 @@ import (
 // fakeStorage stands in for storage's HTTP API. Holds a fixed map of
 // id → StorageFile so each test seeds expectations clearly.
 type fakeStorage struct {
-	files map[int64]*StorageFile
-	calls int
+	files       map[int64]*StorageFile
+	calls       int
+	urlRequests []map[string]any
 }
 
 func newFakeStorage(t *testing.T, files []StorageFile) (*fakeStorage, func()) {
@@ -40,17 +41,15 @@ func newFakeStorage(t *testing.T, files []StorageFile) (*fakeStorage, func()) {
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Errorf("decode signed URL request: %v", err)
 			}
-			if request["delivery"] != "apteva" || request["disposition"] != "inline" {
-				t.Errorf("signed URL request = %#v", request)
-			}
+			fs.urlRequests = append(fs.urlRequests, request)
 			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 			if len(parts) >= 5 {
 				if id, ok := parseInt64Local(parts[len(parts)-2]); ok {
 					if _, exists := fs.files[id]; exists {
 						_ = json.NewEncoder(w).Encode(map[string]any{
 							"url":         "https://agents.example.com/api/apps/storage/files/" + parts[len(parts)-2] + "/content?sig=test&exp=9999999999",
-							"delivery":    "apteva",
-							"disposition": "inline",
+							"delivery":    request["delivery"],
+							"disposition": request["disposition"],
 							"expires_at":  int64(9999999999),
 							"file_id":     id,
 						})
@@ -152,7 +151,7 @@ func TestGet_EnrichesURL(t *testing.T) {
 	if err := upsertMedia(ctx.AppDB(), testProj, "7", sampleVideoProbe(), "abc", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	_, cleanup := newFakeStorage(t, []StorageFile{
+	fs, cleanup := newFakeStorage(t, []StorageFile{
 		{ID: 7, Name: "x.mp4", Visibility: "private",
 			URL: "https://agents.example.com/api/apps/storage/files/7/content"},
 	})
@@ -174,6 +173,9 @@ func TestGet_EnrichesURL(t *testing.T) {
 	if row.Delivery != "apteva" || row.Disposition != "inline" || row.ExpiresAt != 9999999999 {
 		t.Fatalf("URL characteristics were not propagated: %+v", row)
 	}
+	if len(fs.urlRequests) != 1 || fs.urlRequests[0]["delivery"] != "apteva" || fs.urlRequests[0]["disposition"] != "inline" {
+		t.Fatalf("default Storage URL request = %#v", fs.urlRequests)
+	}
 }
 
 func TestGet_PublicFileStillMintsConfirmedIngestionURL(t *testing.T) {
@@ -194,6 +196,47 @@ func TestGet_PublicFileStillMintsConfirmedIngestionURL(t *testing.T) {
 	row := out.(map[string]any)["media"].(MediaResponseRow)
 	if !strings.Contains(row.URL, "sig=test") || row.Delivery != "apteva" || row.ExpiresAt == 0 {
 		t.Fatalf("public file did not receive confirmed ingestion URL: %+v", row)
+	}
+}
+
+func TestGet_AllowsDirectAttachmentDelivery(t *testing.T) {
+	ctx := newTestCtx(t)
+	if err := upsertMedia(ctx.AppDB(), testProj, "10", sampleVideoProbe(), "abc", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	fs, cleanup := newFakeStorage(t, []StorageFile{{
+		ID: 10, Name: "download.mp4", Visibility: "private",
+		URL: "https://agents.example.com/api/apps/storage/files/10/content",
+	}})
+	defer cleanup()
+
+	out, err := (&App{}).toolGet(ctx, map[string]any{
+		"_project_id": testProj,
+		"file_id":     "10",
+		"delivery":    "direct",
+		"disposition": "attachment",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := out.(map[string]any)["media"].(MediaResponseRow)
+	if row.Delivery != "direct" || row.Disposition != "attachment" {
+		t.Fatalf("selected delivery was not propagated: %+v", row)
+	}
+	if len(fs.urlRequests) != 1 || fs.urlRequests[0]["delivery"] != "direct" || fs.urlRequests[0]["disposition"] != "attachment" {
+		t.Fatalf("Storage URL requests = %#v", fs.urlRequests)
+	}
+}
+
+func TestGet_RejectsInvalidDeliveryOptions(t *testing.T) {
+	ctx := newTestCtx(t)
+	for _, args := range []map[string]any{
+		{"_project_id": testProj, "file_id": "10", "delivery": "legacy"},
+		{"_project_id": testProj, "file_id": "10", "disposition": "open"},
+	} {
+		if _, err := (&App{}).toolGet(ctx, args); err == nil {
+			t.Fatalf("expected validation error for %#v", args)
+		}
 	}
 }
 
@@ -219,17 +262,17 @@ func (p *signedURLPlatform) CallAppResult(appName, toolName string, args map[str
 	return nil
 }
 
-func TestSignedFetchURLForMediaPlatformPathRequestsExplicitDelivery(t *testing.T) {
+func TestSignedFetchURLForMediaPlatformPathRequestsCallerDelivery(t *testing.T) {
 	p := &signedURLPlatform{stubPlatform: noBindings()}
 	ctx := newTestCtxWithPlatform(t, p)
-	info, err := signedFetchURLForMedia(ctx, testProj, "9")
+	info, err := signedFetchURLForMedia(ctx, testProj, "9", "direct", "attachment")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p.appName != "storage" || p.toolName != "files_get_url" {
 		t.Fatalf("call = %s.%s", p.appName, p.toolName)
 	}
-	if p.args["ttl_seconds"] != mediaGetSignedURLTTLSeconds || p.args["delivery"] != "apteva" || p.args["disposition"] != "inline" {
+	if p.args["ttl_seconds"] != mediaGetSignedURLTTLSeconds || p.args["delivery"] != "direct" || p.args["disposition"] != "attachment" {
 		t.Fatalf("platform arguments = %#v", p.args)
 	}
 	if info.URL == "" || info.Delivery != "apteva" || info.Disposition != "inline" || info.ExpiresAt != 555 {

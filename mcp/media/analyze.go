@@ -132,7 +132,7 @@ func (a *App) toolAnalyze(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	source, err := signedFetchURLForMedia(ctx, pid, fid)
+	source, err := signedFetchURLForMedia(ctx, pid, fid, storageDeliveryApteva, storageDispositionInline)
 	if err != nil || source.URL == "" {
 		if err == nil {
 			err = errors.New("empty signed URL")

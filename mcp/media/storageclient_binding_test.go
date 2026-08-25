@@ -64,15 +64,15 @@ func TestStorageClientUsesBoundStreamingProxy(t *testing.T) {
 		t.Fatalf("content=%q", content.String())
 	}
 	t.Setenv("APTEVA_PUBLIC_URL", srv.URL)
-	signed, err := c.GetSignedURLInfo(context.Background(), "prod-project", 5300, 60)
+	signed, err := c.GetSignedURLInfoWithOptions(context.Background(), "prod-project", 5300, 60, "direct", "attachment")
 	wantSigned := srv.URL + "/api/apps/storage/public/files/5300/content/zombie.mp4?sig=test&exp=999"
 	if err != nil || signed.URL != wantSigned {
-		t.Fatalf("GetSignedURLInfo = %+v, %v", signed, err)
+		t.Fatalf("GetSignedURLInfoWithOptions = %+v, %v", signed, err)
 	}
 	if signed.Delivery != "apteva" || signed.Disposition != "inline" || signed.ExpiresAt != 999 || signed.FileID != 5300 {
 		t.Fatalf("confirmed URL characteristics = %+v", signed)
 	}
-	if urlRequest["delivery"] != "apteva" || urlRequest["disposition"] != "inline" || urlRequest["ttl_seconds"] != float64(60) {
+	if urlRequest["delivery"] != "direct" || urlRequest["disposition"] != "attachment" || urlRequest["ttl_seconds"] != float64(60) {
 		t.Fatalf("url request = %#v", urlRequest)
 	}
 	for _, path := range paths {
@@ -82,7 +82,7 @@ func TestStorageClientUsesBoundStreamingProxy(t *testing.T) {
 	}
 }
 
-func TestStorageClientMCPFallbackRequestsAptevaInline(t *testing.T) {
+func TestStorageClientMCPFallbackPreservesCallerDelivery(t *testing.T) {
 	var arguments map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -116,14 +116,14 @@ func TestStorageClientMCPFallbackRequestsAptevaInline(t *testing.T) {
 	t.Setenv("APTEVA_OUTBOUND_TOKEN", "media-token")
 	t.Setenv("APTEVA_PUBLIC_URL", srv.URL)
 	globalCtx = nil
-	info, err := newStorageClient().GetSignedURLInfo(context.Background(), "prod-project", 42, 86400)
+	info, err := newStorageClient().GetSignedURLInfoWithOptions(context.Background(), "prod-project", 42, 86400, "direct", "attachment")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if info.URL != srv.URL+"/api/apps/storage/files/42/content?sig=mcp&exp=1234" || info.Delivery != "apteva" || info.Disposition != "inline" || info.ExpiresAt != 1234 {
 		t.Fatalf("fallback info = %+v", info)
 	}
-	if arguments["delivery"] != "apteva" || arguments["disposition"] != "inline" || arguments["ttl_seconds"] != float64(86400) {
+	if arguments["delivery"] != "direct" || arguments["disposition"] != "attachment" || arguments["ttl_seconds"] != float64(86400) {
 		t.Fatalf("fallback arguments = %#v", arguments)
 	}
 }

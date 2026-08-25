@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.94
+version: 0.13.95
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,8 +31,8 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.13.94 makes media_get return a fresh Apteva-proxied
-  external ingestion URL and Storage-confirmed delivery characteristics.
+  through storage. v0.13.95 lets media_get callers choose Apteva or direct
+  delivery and inline or attachment disposition, with Apteva/inline defaults.
 author: Apteva
 scopes: [project, global]
 min_apteva_version: "0.25.9"
@@ -106,7 +106,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_get,             description: "Fetch one media record by storage file_id, including arbitrary metadata and metadata_version. The returned url is a fresh Apteva-proxied external ingestion URL; delivery, disposition, and expires_at report Storage's confirmed URL characteristics." }
+    - { name: media_get,             description: "Fetch one media record by storage file_id, including arbitrary metadata and metadata_version. URL delivery defaults to apteva/inline; callers can request direct delivery or attachment disposition. Returned delivery, disposition, and expires_at are Storage-confirmed." }
     - { name: media_analyze,         description: "Read-only technical and quality analysis for an image, video, or audio file. Returns encoding metadata, decode integrity, visual measurements and timeline anomalies, and audio loudness/peak/silence measurements where applicable. Creates no artifacts." }
     - { name: media_ask,             description: "Ask a grounded question using only existing source images, cached thumbnails/keyframes, and completed transcripts. Never runs ffmpeg, creates derivations, or writes files." }
     - { name: media_search,          description: "Compact catalog discovery with q/filename/title, folder_scope exact|subtree, type, aspect, duration, rating, dimensions, codec, and arbitrary metadata equality filters. Empty exact searches diagnose matching descendants; call media_get for full details." }
@@ -283,7 +283,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.13.94
+    ref: media/v0.13.95
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -453,10 +453,12 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "media_get",
-			Description: "Fetch one media record by storage file_id. Returns arbitrary metadata + metadata_version, display-space width/height/orientation, and derivation pointers. The returned media.url is a fresh Apteva-proxied external ingestion URL; delivery, disposition, and expires_at report Storage's confirmed URL characteristics. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true.",
+			Description: "Fetch one media record by storage file_id. Returns arbitrary metadata + metadata_version, display-space width/height/orientation, and derivation pointers. URL delivery defaults to apteva with inline disposition; pass delivery=direct or disposition=attachment when needed. Returned delivery, disposition, and expires_at are Storage-confirmed effective values. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":           map[string]any{"type": "string"},
 				"include_raw_probe": map[string]any{"type": "boolean"},
+				"delivery":          map[string]any{"type": "string", "enum": []string{"apteva", "direct"}, "default": "apteva", "description": "URL delivery mode. direct is effective only when Storage's backend supports it; inspect returned delivery."},
+				"disposition":       map[string]any{"type": "string", "enum": []string{"inline", "attachment"}, "default": "inline", "description": "Requested Content-Disposition. Storage reports the effective value."},
 			}, []string{"file_id"}),
 			Handler: a.toolGet,
 		},
@@ -869,6 +871,12 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if fid == "" {
 		return nil, errors.New("file_id required")
 	}
+	requestedDelivery, _ := args["delivery"].(string)
+	requestedDisposition, _ := args["disposition"].(string)
+	delivery, disposition, err := normalizeStorageURLRequest(requestedDelivery, requestedDisposition)
+	if err != nil {
+		return nil, err
+	}
 	m, err := getMedia(ctx.AppDB(), pid, fid)
 	if err != nil {
 		if notFound(err) {
@@ -886,7 +894,7 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return map[string]any{"found": true, "media": &rows[0], "storage_unavailable": true}, nil
 	}
 	row := enriched[0]
-	if signed, err := signedFetchURLForMedia(ctx, pid, fid); err == nil && signed.URL != "" {
+	if signed, err := signedFetchURLForMedia(ctx, pid, fid, delivery, disposition); err == nil && signed.URL != "" {
 		row.URL = signed.URL
 		row.Delivery = signed.Delivery
 		row.Disposition = signed.Disposition
@@ -903,10 +911,14 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 const mediaGetSignedURLTTLSeconds = 24 * 60 * 60
 
-// signedFetchURLForMedia asks the bound Storage app to mint a fresh,
-// Apteva-proxied URL for every visibility. The response characteristics
-// come from Storage's effective result rather than Media's request.
-func signedFetchURLForMedia(ctx *sdk.AppCtx, projectID, fileID string) (StorageSignedURL, error) {
+// signedFetchURLForMedia asks the bound Storage app to mint a fresh URL
+// with the caller-selected delivery and disposition. Response characteristics
+// always come from Storage's effective result rather than Media's request.
+func signedFetchURLForMedia(ctx *sdk.AppCtx, projectID, fileID, delivery, disposition string) (StorageSignedURL, error) {
+	delivery, disposition, err := normalizeStorageURLRequest(delivery, disposition)
+	if err != nil {
+		return StorageSignedURL{}, err
+	}
 	id, err := strconv.ParseInt(fileID, 10, 64)
 	if err != nil || id <= 0 {
 		return StorageSignedURL{}, fmt.Errorf("invalid file_id %q", fileID)
@@ -915,8 +927,8 @@ func signedFetchURLForMedia(ctx *sdk.AppCtx, projectID, fileID string) (StorageS
 		"_project_id": projectID,
 		"id":          id,
 		"ttl_seconds": mediaGetSignedURLTTLSeconds,
-		"delivery":    storageDeliveryApteva,
-		"disposition": storageDispositionInline,
+		"delivery":    delivery,
+		"disposition": disposition,
 	}
 	if ctx != nil && ctx.PlatformAPI() != nil {
 		var out StorageSignedURL
@@ -925,7 +937,7 @@ func signedFetchURLForMedia(ctx *sdk.AppCtx, projectID, fileID string) (StorageS
 			return out, nil
 		}
 	}
-	return newStorageClient().GetSignedURLInfo(context.Background(), projectID, id, mediaGetSignedURLTTLSeconds)
+	return newStorageClient().GetSignedURLInfoWithOptions(context.Background(), projectID, id, mediaGetSignedURLTTLSeconds, delivery, disposition)
 }
 
 func absolutizeStorageFetchURL(ctx *sdk.AppCtx, u string) string {

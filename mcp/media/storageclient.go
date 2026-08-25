@@ -38,7 +38,9 @@ type storageClient struct {
 
 const (
 	storageDeliveryApteva    = "apteva"
+	storageDeliveryDirect    = "direct"
 	storageDispositionInline = "inline"
+	storageDispositionAttach = "attachment"
 )
 
 // StorageSignedURL is Storage's confirmed response to files_get_url.
@@ -261,6 +263,16 @@ func (c *storageClient) GetSignedURL(ctx context.Context, projectID string, id i
 // HTTP path and its MCP fallback request the same explicit delivery
 // contract so S3-backed Storage does not select legacy direct delivery.
 func (c *storageClient) GetSignedURLInfo(ctx context.Context, projectID string, id int64, ttlSeconds int) (StorageSignedURL, error) {
+	return c.GetSignedURLInfoWithOptions(ctx, projectID, id, ttlSeconds, storageDeliveryApteva, storageDispositionInline)
+}
+
+// GetSignedURLInfoWithOptions requests the caller-selected delivery and
+// disposition while preserving Apteva/inline as the empty-value defaults.
+func (c *storageClient) GetSignedURLInfoWithOptions(ctx context.Context, projectID string, id int64, ttlSeconds int, delivery, disposition string) (StorageSignedURL, error) {
+	delivery, disposition, err := normalizeStorageURLRequest(delivery, disposition)
+	if err != nil {
+		return StorageSignedURL{}, err
+	}
 	publicURL, err := resolvePublicURL(globalCtx)
 	if err != nil {
 		return StorageSignedURL{}, fmt.Errorf("cannot mint a signed URL reachable from outside the cluster: %w", err)
@@ -273,12 +285,12 @@ func (c *storageClient) GetSignedURLInfo(ctx context.Context, projectID string, 
 		map[string]any{
 			"project_id":  projectID,
 			"ttl_seconds": ttlSeconds,
-			"delivery":    storageDeliveryApteva,
-			"disposition": storageDispositionInline,
+			"delivery":    delivery,
+			"disposition": disposition,
 		}, "application/json")
 	if err != nil {
 		// Fall back to the MCP tool via the same binding-gated gateway.
-		return c.signedURLViaMCP(ctx, projectID, id, ttlSeconds, publicURL)
+		return c.signedURLViaMCP(ctx, projectID, id, ttlSeconds, delivery, disposition, publicURL)
 	}
 	var resp StorageSignedURL
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -294,7 +306,7 @@ func (c *storageClient) GetSignedURLInfo(ctx context.Context, projectID string, 
 // signedURLViaMCP is the fallback when storage doesn't expose a
 // dedicated HTTP route for url-minting. Hits files_get_url via the
 // MCP endpoint — same gateway, JSON-RPC envelope.
-func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, id int64, ttlSeconds int, publicURL string) (StorageSignedURL, error) {
+func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, id int64, ttlSeconds int, delivery, disposition, publicURL string) (StorageSignedURL, error) {
 	rpc := map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 		"params": map[string]any{
@@ -303,8 +315,8 @@ func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, i
 				"_project_id": projectID,
 				"id":          id,
 				"ttl_seconds": ttlSeconds,
-				"delivery":    storageDeliveryApteva,
-				"disposition": storageDispositionInline,
+				"delivery":    delivery,
+				"disposition": disposition,
 			},
 		},
 	}
@@ -347,6 +359,24 @@ func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, i
 	}
 	result.URL = absolutizeStorageURL(publicURL, result.URL)
 	return result, nil
+}
+
+func normalizeStorageURLRequest(delivery, disposition string) (string, string, error) {
+	delivery = strings.ToLower(strings.TrimSpace(delivery))
+	if delivery == "" {
+		delivery = storageDeliveryApteva
+	}
+	if delivery != storageDeliveryApteva && delivery != storageDeliveryDirect {
+		return "", "", errors.New("delivery must be one of: apteva, direct")
+	}
+	disposition = strings.ToLower(strings.TrimSpace(disposition))
+	if disposition == "" {
+		disposition = storageDispositionInline
+	}
+	if disposition != storageDispositionInline && disposition != storageDispositionAttach {
+		return "", "", errors.New("disposition must be one of: inline, attachment")
+	}
+	return delivery, disposition, nil
 }
 
 func absolutizeStorageURL(publicURL, urlStr string) string {

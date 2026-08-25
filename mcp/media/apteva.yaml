@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.94
+version: 0.13.95
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -19,8 +19,9 @@ description: |
   by default, Cloudinary when bound. A wedged encode releases its
   slot without disturbing the indexer.
 
-  v0.13.94 makes media_get return a fresh Apteva-proxied external
-  ingestion URL and Storage-confirmed delivery characteristics.
+  v0.13.95 lets media_get callers choose Apteva or direct delivery and
+  inline or attachment disposition, with Apteva/inline defaults and
+  Storage-confirmed effective values in the response.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media
@@ -108,7 +109,7 @@ provides:
   mcp_tools:
     # Catalog (existing)
     - name: media_get
-      description: Fetch one media record by storage file_id, including arbitrary metadata + metadata_version, probe fields, and derivation pointers. The returned url is a fresh Apteva-proxied external ingestion URL; delivery, disposition, and expires_at report Storage's confirmed URL characteristics.
+      description: Fetch one media record by storage file_id, including arbitrary metadata + metadata_version, probe fields, and derivation pointers. URL delivery defaults to apteva/inline; callers can request delivery=direct or disposition=attachment. Returned delivery, disposition, and expires_at are Storage-confirmed effective values.
     - name: media_analyze
       description: Analyze an existing image, video, or audio source without modifying it. Returns encoding metadata, decode integrity, visual measurements and black/frozen segments, plus LUFS/peak/RMS/silence audio measurements where applicable. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. Creates no render, derivation, or Storage object. Args — file_id, depth? (standard|full), start_ms?, end_ms?, silence_threshold_db?, silence_min_ms?.
     - name: media_ask
@@ -499,7 +500,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.13.94
+    ref: media/v0.13.95
     entry: mcp/media
   port: 8080
   health_check: /health

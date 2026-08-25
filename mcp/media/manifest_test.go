@@ -24,7 +24,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Runtime.Source == nil || m.Runtime.Source.Ref != "media/v"+m.Version {
 		t.Errorf("runtime source must pin its immutable release tag, got %#v", m.Runtime.Source)
 	}
-	// v0.13.94 surface: 6 catalog read + analyze/ask + 2 folder ops + move/delete + 9
+	// v0.13.95 surface: 6 catalog read + analyze/ask + 2 folder ops + move/delete + 9
 	// render submit + 3 render manage + 1 description setter + 1 metadata patcher + 1
 	// audience-rating setter + 1 keyframes getter + 3 transcript
 	// tools + 1 describe = 32.
@@ -74,5 +74,28 @@ func TestMCPTools_DeclaredMatchHandlers(t *testing.T) {
 		if !declared[name] {
 			t.Errorf("handler implements %q but manifest doesn't declare it", name)
 		}
+	}
+}
+
+func TestMediaGetSchema_ExposesDeliveryChoices(t *testing.T) {
+	var get *sdk.Tool
+	tools := (&App{}).MCPTools()
+	for i := range tools {
+		if tools[i].Name == "media_get" {
+			get = &tools[i]
+			break
+		}
+	}
+	if get == nil {
+		t.Fatal("media_get tool missing")
+	}
+	properties := get.InputSchema["properties"].(map[string]any)
+	delivery := properties["delivery"].(map[string]any)
+	disposition := properties["disposition"].(map[string]any)
+	if delivery["default"] != "apteva" {
+		t.Fatalf("delivery schema = %#v", delivery)
+	}
+	if disposition["default"] != "inline" {
+		t.Fatalf("disposition schema = %#v", disposition)
 	}
 }
