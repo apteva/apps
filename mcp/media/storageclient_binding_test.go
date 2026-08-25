@@ -37,8 +37,8 @@ func TestStorageClientUsesBoundStreamingProxy(t *testing.T) {
 				t.Errorf("decode url request: %v", err)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"url":         "/api/apps/storage/public/files/5300/proxy/content/zombie.mp4?sig=test&exp=999",
-				"delivery":    "proxy",
+				"url":         "/api/apps/storage/public/files/5300/content/zombie.mp4?sig=test&exp=999",
+				"delivery":    "apteva",
 				"disposition": "inline",
 				"expires_at":  int64(999),
 				"file_id":     int64(5300),
@@ -65,14 +65,14 @@ func TestStorageClientUsesBoundStreamingProxy(t *testing.T) {
 	}
 	t.Setenv("APTEVA_PUBLIC_URL", srv.URL)
 	signed, err := c.GetSignedURLInfo(context.Background(), "prod-project", 5300, 60)
-	wantSigned := srv.URL + "/api/apps/storage/public/files/5300/proxy/content/zombie.mp4?sig=test&exp=999"
+	wantSigned := srv.URL + "/api/apps/storage/public/files/5300/content/zombie.mp4?sig=test&exp=999"
 	if err != nil || signed.URL != wantSigned {
 		t.Fatalf("GetSignedURLInfo = %+v, %v", signed, err)
 	}
-	if signed.Delivery != "proxy" || signed.Disposition != "inline" || signed.ExpiresAt != 999 || signed.FileID != 5300 {
+	if signed.Delivery != "apteva" || signed.Disposition != "inline" || signed.ExpiresAt != 999 || signed.FileID != 5300 {
 		t.Fatalf("confirmed URL characteristics = %+v", signed)
 	}
-	if urlRequest["delivery"] != "proxy" || urlRequest["disposition"] != "inline" || urlRequest["ttl_seconds"] != float64(60) {
+	if urlRequest["delivery"] != "apteva" || urlRequest["disposition"] != "inline" || urlRequest["ttl_seconds"] != float64(60) {
 		t.Fatalf("url request = %#v", urlRequest)
 	}
 	for _, path := range paths {
@@ -82,7 +82,7 @@ func TestStorageClientUsesBoundStreamingProxy(t *testing.T) {
 	}
 }
 
-func TestStorageClientMCPFallbackDefaultsToProxy(t *testing.T) {
+func TestStorageClientMCPFallbackPreservesExplicitProxy(t *testing.T) {
 	var arguments map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -116,7 +116,7 @@ func TestStorageClientMCPFallbackDefaultsToProxy(t *testing.T) {
 	t.Setenv("APTEVA_OUTBOUND_TOKEN", "media-token")
 	t.Setenv("APTEVA_PUBLIC_URL", srv.URL)
 	globalCtx = nil
-	info, err := newStorageClient().GetSignedURLInfo(context.Background(), "prod-project", 42, 86400)
+	info, err := newStorageClient().GetSignedURLInfoWithOptions(context.Background(), "prod-project", 42, 86400, "proxy", "inline")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestNormalizeStorageURLRequestDeliveryChoices(t *testing.T) {
 		}
 	}
 	gotDelivery, gotDisposition, err := normalizeStorageURLRequest("", "")
-	if err != nil || gotDelivery != "proxy" || gotDisposition != "inline" {
+	if err != nil || gotDelivery != "apteva" || gotDisposition != "inline" {
 		t.Fatalf("defaults = %q/%q, %v", gotDelivery, gotDisposition, err)
 	}
 }

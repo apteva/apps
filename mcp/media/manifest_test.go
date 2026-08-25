@@ -24,7 +24,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Runtime.Source == nil || m.Runtime.Source.Ref != "media/v"+m.Version {
 		t.Errorf("runtime source must pin its immutable release tag, got %#v", m.Runtime.Source)
 	}
-	// v0.13.96 surface: 6 catalog read + analyze/ask + 2 folder ops + move/delete + 9
+	// v0.13.97 surface: 6 catalog read + analyze/ask + 2 folder ops + move/delete + 9
 	// render submit + 3 render manage + 1 description setter + 1 metadata patcher + 1
 	// audience-rating setter + 1 keyframes getter + 3 transcript
 	// tools + 1 describe = 32.
@@ -92,11 +92,11 @@ func TestMediaGetSchema_ExposesDeliveryChoices(t *testing.T) {
 	properties := get.InputSchema["properties"].(map[string]any)
 	delivery := properties["delivery"].(map[string]any)
 	disposition := properties["disposition"].(map[string]any)
-	if delivery["default"] != "proxy" {
+	if delivery["default"] != "apteva" {
 		t.Fatalf("delivery schema = %#v", delivery)
 	}
 	deliveryEnum, ok := delivery["enum"].([]string)
-	if !ok || len(deliveryEnum) != 3 || deliveryEnum[0] != "proxy" || deliveryEnum[1] != "apteva" || deliveryEnum[2] != "direct" {
+	if !ok || len(deliveryEnum) != 3 || deliveryEnum[0] != "apteva" || deliveryEnum[1] != "proxy" || deliveryEnum[2] != "direct" {
 		t.Fatalf("delivery enum = %#v", delivery["enum"])
 	}
 	if disposition["default"] != "inline" {

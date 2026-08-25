@@ -237,7 +237,7 @@ func (c *storageClient) GetFile(ctx context.Context, projectID string, id int64)
 	return &resp.File, nil
 }
 
-// GetSignedURL asks Storage to mint a time-limited proxy-delivered URL
+// GetSignedURL asks Storage to mint a time-limited Apteva-delivered URL
 // with inline disposition. It remains a string-only compatibility
 // wrapper for internal callers; media_get uses GetSignedURLInfo to
 // expose Storage's confirmed URL characteristics.
@@ -261,14 +261,14 @@ func (c *storageClient) GetSignedURL(ctx context.Context, projectID string, id i
 }
 
 // GetSignedURLInfo is the structured form of GetSignedURL. Both the
-// HTTP path and its MCP fallback explicitly request proxy delivery so
+// HTTP path and its MCP fallback explicitly request Apteva delivery so
 // S3-backed Storage does not select legacy direct delivery.
 func (c *storageClient) GetSignedURLInfo(ctx context.Context, projectID string, id int64, ttlSeconds int) (StorageSignedURL, error) {
-	return c.GetSignedURLInfoWithOptions(ctx, projectID, id, ttlSeconds, storageDeliveryProxy, storageDispositionInline)
+	return c.GetSignedURLInfoWithOptions(ctx, projectID, id, ttlSeconds, storageDeliveryApteva, storageDispositionInline)
 }
 
 // GetSignedURLInfoWithOptions requests the caller-selected delivery and
-// disposition while preserving proxy/inline as the empty-value defaults.
+// disposition while preserving Apteva/inline as the empty-value defaults.
 func (c *storageClient) GetSignedURLInfoWithOptions(ctx context.Context, projectID string, id int64, ttlSeconds int, delivery, disposition string) (StorageSignedURL, error) {
 	delivery, disposition, err := normalizeStorageURLRequest(delivery, disposition)
 	if err != nil {
@@ -365,7 +365,7 @@ func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, i
 func normalizeStorageURLRequest(delivery, disposition string) (string, string, error) {
 	delivery = strings.ToLower(strings.TrimSpace(delivery))
 	if delivery == "" {
-		delivery = storageDeliveryProxy
+		delivery = storageDeliveryApteva
 	}
 	if delivery != storageDeliveryApteva && delivery != storageDeliveryDirect && delivery != storageDeliveryProxy {
 		return "", "", errors.New("delivery must be one of: proxy, apteva, direct")

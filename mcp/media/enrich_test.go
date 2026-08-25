@@ -174,13 +174,13 @@ func TestGet_EnrichesURL(t *testing.T) {
 	if !strings.Contains(row.URL, "sig=test") {
 		t.Fatalf("URL was not upgraded to signed fetch URL: %q", row.URL)
 	}
-	if row.Delivery != "proxy" || row.Disposition != "inline" || row.ExpiresAt != 9999999999 {
+	if row.Delivery != "apteva" || row.Disposition != "inline" || row.ExpiresAt != 9999999999 {
 		t.Fatalf("URL characteristics were not propagated: %+v", row)
 	}
-	if !strings.Contains(row.URL, "/proxy/") {
-		t.Fatalf("default media_get URL is not proxied: %q", row.URL)
+	if strings.Contains(row.URL, "/proxy/") {
+		t.Fatalf("default media_get URL unexpectedly uses proxy delivery: %q", row.URL)
 	}
-	if len(fs.urlRequests) != 1 || fs.urlRequests[0]["delivery"] != "proxy" || fs.urlRequests[0]["disposition"] != "inline" {
+	if len(fs.urlRequests) != 1 || fs.urlRequests[0]["delivery"] != "apteva" || fs.urlRequests[0]["disposition"] != "inline" {
 		t.Fatalf("default Storage URL request = %#v", fs.urlRequests)
 	}
 }
