@@ -182,7 +182,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "files_get_url",
-			Description: "Mint a signed time-limited URL. Args: id, ttl_seconds?, disposition? (inline|attachment), delivery? (apteva|direct). Existing S3 callers that omit delivery retain direct delivery; new callers should choose explicitly.",
+			Description: "Mint a signed time-limited URL. Args: id, ttl_seconds?, disposition? (inline|attachment), delivery? (apteva|direct|proxy). Proxy streams through Storage without exposing or redirecting to the backend. Existing S3 callers that omit delivery retain direct delivery; new callers should choose explicitly.",
 			InputSchema: schemaObject(map[string]any{
 				"id":          map[string]any{"type": "integer"},
 				"ttl_seconds": map[string]any{"type": "integer"},
@@ -685,8 +685,8 @@ func (a *App) toolGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			delivery = "apteva"
 		}
 	}
-	if delivery != "apteva" && delivery != "direct" {
-		return nil, errors.New("delivery must be one of: apteva, direct")
+	if delivery != "apteva" && delivery != "direct" && delivery != "proxy" {
+		return nil, errors.New("delivery must be one of: apteva, direct, proxy")
 	}
 	// Preserve the pre-v0.10.25 behavior for S3 consumers that omit both
 	// fields: they still receive an attachment-oriented direct URL. Explicit
@@ -697,6 +697,15 @@ func (a *App) toolGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	disposition := effectiveContentDisposition(requestedDisposition, f.ContentType)
 	options := GetObjectOptions{
 		Filename: f.Name, ContentType: f.ContentType, Disposition: disposition,
+	}
+	if delivery == "proxy" {
+		sig := signProxyFile(f.ID, f.ProjectID, exp, disposition)
+		url := signedAbsoluteProxyURL(ctx, f, sig, exp, disposition)
+		return map[string]any{
+			"url": url, "expires_at": exp, "file_id": f.ID,
+			"presigned": false, "proxied": true, "delivery": "proxy",
+			"disposition": string(disposition),
+		}, nil
 	}
 
 	if delivery == "direct" && be.Kind() == "s3" {
@@ -710,6 +719,7 @@ func (a *App) toolGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"expires_at":  exp,
 			"file_id":     f.ID,
 			"presigned":   true,
+			"proxied":     false,
 			"delivery":    "direct",
 			"disposition": string(disposition),
 		}, nil
@@ -725,7 +735,7 @@ func (a *App) toolGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	url := signedAbsoluteURLWithDisposition(ctx, f, sig, exp, disposition)
 	return map[string]any{
 		"url": url, "expires_at": exp, "file_id": f.ID,
-		"presigned": false, "delivery": "apteva", "disposition": string(disposition),
+		"presigned": false, "proxied": false, "delivery": "apteva", "disposition": string(disposition),
 	}, nil
 }
 
@@ -1136,16 +1146,30 @@ func (a *App) handlePublicFilesItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "not found")
 		return
 	}
-	tail := parts[1]
-	if i := strings.IndexByte(tail, '/'); i >= 0 {
-		tail = tail[:i]
-	}
+	tailParts := strings.SplitN(parts[1], "/", 3)
+	tail := tailParts[0]
 	var disposition ContentDisposition
 	switch tail {
 	case "content":
 		disposition = DispositionInline
 	case "download":
 		disposition = DispositionAttachment
+	case "proxy":
+		if len(tailParts) < 2 {
+			httpErr(w, http.StatusNotFound, "not found")
+			return
+		}
+		switch tailParts[1] {
+		case "content":
+			disposition = DispositionInline
+		case "download":
+			disposition = DispositionAttachment
+		default:
+			httpErr(w, http.StatusNotFound, "not found")
+			return
+		}
+		a.httpServeProxy(w, r, id, disposition)
+		return
 	default:
 		httpErr(w, http.StatusNotFound, "not found")
 		return
@@ -1739,6 +1763,258 @@ func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64,
 	}
 	w.Header().Set("Location", url)
 	w.WriteHeader(http.StatusFound)
+}
+
+// httpServeProxy is the explicit bandwidth-through-Storage delivery path.
+// Unlike canonical Apteva delivery it never redirects or exposes a backend
+// URL. Authorization is purpose-bound: ordinary signed content URLs cannot be
+// rewritten into proxy URLs because their signatures use a different domain.
+func (a *App) httpServeProxy(w http.ResponseWriter, r *http.Request, id int64, requested ContentDisposition) {
+	started := time.Now()
+	recorder := &proxyResponseRecorder{ResponseWriter: w}
+	completed := false
+	resultLabel := "rejected"
+	defer func() {
+		cancelled := errors.Is(r.Context().Err(), context.Canceled)
+		if globalCtx != nil {
+			globalCtx.Logger().Info("storage proxy delivery",
+				"file_id", id,
+				"status", recorder.Status(),
+				"range", boundedRangeForLog(r.Header.Get("Range")),
+				"bytes", recorder.BytesWritten(),
+				"duration_ms", time.Since(started).Milliseconds(),
+				"completed", completed,
+				"cancelled", cancelled,
+				"result", resultLabel,
+			)
+		}
+	}()
+
+	ctx := globalCtx
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		pid = ""
+	}
+	var f *File
+	if pid != "" {
+		f, err = dbGetByID(ctx.AppDB(), pid, id)
+	} else {
+		f, err = dbGetByIDAnyProject(ctx.AppDB(), id)
+	}
+	if err != nil {
+		resultLabel = "metadata_error"
+		httpErr(recorder, http.StatusInternalServerError, "file metadata unavailable")
+		return
+	}
+	if f == nil {
+		resultLabel = "not_found"
+		httpErr(recorder, http.StatusNotFound, "not found")
+		return
+	}
+
+	exp, _ := strconv.ParseInt(r.URL.Query().Get("exp"), 10, 64)
+	disposition := effectiveContentDisposition(requested, safeResponseContentType(f.ContentType))
+	if !verifyProxySignature(f.ID, f.ProjectID, exp, disposition, r.URL.Query().Get("sig")) {
+		resultLabel = "invalid_signature"
+		httpErr(recorder, http.StatusForbidden, "invalid or expired proxy signature")
+		return
+	}
+
+	rangeHeader := strings.TrimSpace(r.Header.Get("Range"))
+	if _, err := parseSingleByteRange(rangeHeader); err != nil {
+		resultLabel = "invalid_range"
+		writeRangeNotSatisfiable(recorder, f.SizeBytes)
+		return
+	}
+
+	key := objectKey(f.SHA256, f.StorageKey)
+	contentType := safeResponseContentType(f.ContentType)
+	recorder.Header().Set("Cache-Control", "private, no-store")
+	recorder.Header().Set("Pragma", "no-cache")
+	recorder.Header().Set("Accept-Ranges", "bytes")
+	recorder.Header().Set("Content-Type", contentType)
+	recorder.Header().Set("Content-Disposition", contentDispositionHeader(disposition, f.Name))
+	recorder.Header().Set("X-Content-Type-Options", "nosniff")
+	recorder.Header().Del("Location")
+
+	be := backend()
+	if path, ok := be.LocalPath(key); ok {
+		recorder.Header().Set("ETag", quoteETag(f.SHA256))
+		http.ServeFile(recorder, r, path)
+		completed = recorder.WriteError() == nil
+		resultLabel = "disk"
+		return
+	}
+
+	if r.Method == http.MethodHead {
+		metadata, err := be.HeadObject(r.Context(), key)
+		if err != nil {
+			resultLabel = proxyBackendErrorLabel(err)
+			writeProxyBackendError(recorder, err)
+			return
+		}
+		applyProxyMetadataHeaders(recorder.Header(), f, metadata)
+		recorder.Header().Set("Content-Length", strconv.FormatInt(metadata.Size, 10))
+		recorder.WriteHeader(http.StatusOK)
+		completed = true
+		resultLabel = "head"
+		return
+	}
+
+	read, err := be.OpenObject(r.Context(), key, ObjectReadOptions{Range: rangeHeader})
+	if err != nil {
+		if errors.Is(err, ErrRangeNotSatisfiable) {
+			size := f.SizeBytes
+			if metadata, headErr := be.HeadObject(r.Context(), key); headErr == nil {
+				size = metadata.Size
+			}
+			resultLabel = "range_not_satisfiable"
+			writeRangeNotSatisfiable(recorder, size)
+			return
+		}
+		resultLabel = proxyBackendErrorLabel(err)
+		writeProxyBackendError(recorder, err)
+		return
+	}
+	defer read.Body.Close()
+	if rangeHeader != "" && (read.StatusCode != http.StatusPartialContent || read.ContentRange == "") {
+		resultLabel = "invalid_backend_range"
+		httpErr(recorder, http.StatusBadGateway, "backend returned an invalid range response")
+		return
+	}
+	applyProxyReadHeaders(recorder.Header(), f, read)
+	status := read.StatusCode
+	if status != http.StatusPartialContent {
+		status = http.StatusOK
+	}
+	recorder.WriteHeader(status)
+	_, copyErr := io.CopyBuffer(recorder, read.Body, make([]byte, 128*1024))
+	completed = copyErr == nil && recorder.WriteError() == nil
+	if completed {
+		resultLabel = "streamed"
+	} else if errors.Is(r.Context().Err(), context.Canceled) {
+		resultLabel = "cancelled"
+	} else {
+		resultLabel = "stream_error"
+	}
+}
+
+type proxyResponseRecorder struct {
+	http.ResponseWriter
+	status     int
+	bytes      int64
+	writeError error
+}
+
+func (w *proxyResponseRecorder) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *proxyResponseRecorder) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	n, err := w.ResponseWriter.Write(p)
+	w.bytes += int64(n)
+	if err != nil && w.writeError == nil {
+		w.writeError = err
+	}
+	return n, err
+}
+
+// Flush and Unwrap preserve optional ResponseWriter capabilities through the
+// metrics wrapper, allowing streaming servers and ResponseController to flush
+// proxy bytes as they are written.
+func (w *proxyResponseRecorder) Flush() {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *proxyResponseRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *proxyResponseRecorder) Status() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
+}
+
+func (w *proxyResponseRecorder) BytesWritten() int64 { return w.bytes }
+func (w *proxyResponseRecorder) WriteError() error   { return w.writeError }
+
+func applyProxyMetadataHeaders(headers http.Header, f *File, metadata ObjectMetadata) {
+	if metadata.ContentType != "" {
+		headers.Set("Content-Type", safeResponseContentType(metadata.ContentType))
+	}
+	etag := metadata.ETag
+	if etag == "" {
+		etag = f.SHA256
+	}
+	if etag != "" {
+		headers.Set("ETag", quoteETag(etag))
+	}
+	if !metadata.LastModified.IsZero() {
+		headers.Set("Last-Modified", metadata.LastModified.UTC().Format(http.TimeFormat))
+	}
+}
+
+func applyProxyReadHeaders(headers http.Header, f *File, read *ObjectReadResult) {
+	applyProxyMetadataHeaders(headers, f, ObjectMetadata{
+		ContentType: read.ContentType, ETag: read.ETag, LastModified: read.LastModified,
+	})
+	if read.ContentLength >= 0 {
+		headers.Set("Content-Length", strconv.FormatInt(read.ContentLength, 10))
+	}
+	if read.StatusCode == http.StatusPartialContent && read.ContentRange != "" {
+		headers.Set("Content-Range", read.ContentRange)
+	}
+}
+
+func quoteETag(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, `"`) || strings.HasPrefix(raw, "W/\"") {
+		return raw
+	}
+	return `"` + strings.Trim(raw, `"`) + `"`
+}
+
+func writeRangeNotSatisfiable(w http.ResponseWriter, size int64) {
+	w.Header().Set("Accept-Ranges", "bytes")
+	if size >= 0 {
+		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(size, 10))
+	}
+	httpErr(w, http.StatusRequestedRangeNotSatisfiable, "range not satisfiable")
+}
+
+func writeProxyBackendError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrNotFound) {
+		httpErr(w, http.StatusNotFound, "object not found")
+		return
+	}
+	httpErr(w, http.StatusBadGateway, "object backend unavailable")
+}
+
+func proxyBackendErrorLabel(err error) string {
+	if errors.Is(err, ErrNotFound) {
+		return "object_not_found"
+	}
+	return "backend_error"
+}
+
+func boundedRangeForLog(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if len(raw) > 128 {
+		return raw[:128]
+	}
+	return raw
 }
 
 func (a *App) httpPatch(w http.ResponseWriter, r *http.Request, id int64) {
@@ -2422,6 +2698,24 @@ func verifySignature(id int64, expires int64, sig string) bool {
 	return hmac.Equal([]byte(want), []byte(sig))
 }
 
+// signProxyFile domain-separates bandwidth-consuming proxy links from ordinary
+// content signatures and binds the tenant + disposition. A canonical signed
+// URL therefore cannot be rewritten into a proxy URL.
+func signProxyFile(id int64, projectID string, expires int64, disposition ContentDisposition) string {
+	mac := hmac.New(sha256.New, signingKey())
+	fmt.Fprintf(mac, "storage-proxy:v1:%d:%d:%d:%s:%s",
+		id, expires, len(projectID), projectID, disposition)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func verifyProxySignature(id int64, projectID string, expires int64, disposition ContentDisposition, sig string) bool {
+	if sig == "" || expires == 0 || time.Now().Unix() > expires {
+		return false
+	}
+	want := signProxyFile(id, projectID, expires, disposition)
+	return hmac.Equal([]byte(want), []byte(sig))
+}
+
 // signingKey is derived from the platform's APTEVA_APP_TOKEN. Same
 // value across this sidecar's lifetime; rotates when the platform
 // re-spawns. v0.2 may move to a per-install key persisted in app DB.
@@ -2505,6 +2799,21 @@ func buildPublicContentURL(f *File) string {
 
 func buildPublicDownloadURL(f *File) string {
 	return strings.Replace(buildDownloadURL(f), "/files/", "/public/files/", 1)
+}
+
+func buildPublicProxyURL(f *File, disposition ContentDisposition) string {
+	action := "content"
+	if disposition == DispositionAttachment {
+		action = "download"
+	}
+	if f == nil {
+		return "/public/files/0/proxy/" + action
+	}
+	base := fmt.Sprintf("/public/files/%d/proxy/%s", f.ID, action)
+	if f.Name == "" {
+		return base
+	}
+	return base + "/" + url.PathEscape(f.Name)
 }
 
 func extOf(name, contentType string) string {

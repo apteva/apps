@@ -627,6 +627,7 @@ func newRemoteFile(t *testing.T, contentType, visibility string) (*sdk.AppCtx, *
 		t.Fatal(err)
 	}
 	stub := newFakeS3()
+	stub.objects[objectKey(refreshed.SHA256, refreshed.StorageKey)] = []byte("PNG")
 	globalBackend = stub
 	t.Cleanup(func() { globalBackend = nil })
 	return ctx, refreshed, stub

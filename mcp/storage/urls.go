@@ -251,3 +251,19 @@ func signedAbsoluteURLWithDisposition(ctx *sdk.AppCtx, f *File, sig string, exp 
 	}
 	return base + "/api/apps/storage" + rel + q
 }
+
+func signedAbsoluteProxyURL(ctx *sdk.AppCtx, f *File, sig string, exp int64, disposition ContentDisposition) string {
+	rel := buildPublicProxyURL(f, disposition)
+	q := fmt.Sprintf("?sig=%s&exp=%d", url.QueryEscape(sig), exp)
+	if version := contentVersion(f); version != "" {
+		q += "&v=" + url.QueryEscape(version)
+	}
+	if f != nil && f.ProjectID != "" {
+		q += "&project_id=" + url.QueryEscape(f.ProjectID)
+	}
+	base := publicBase(ctx)
+	if base == "" {
+		return "/api/apps/storage" + rel + q
+	}
+	return base + "/api/apps/storage" + rel + q
+}
