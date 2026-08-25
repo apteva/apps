@@ -2906,9 +2906,7 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 	}
 
 	if stubCreated {
-		emitCRMEvent(ctx, pid, "contact.added", map[string]any{
-			"id": contact.ID, "display_name": contact.DisplayName,
-		})
+		emitContact(ctx, pid, "contact.added", contact)
 	}
 	if reopened {
 		emitCRMEvent(ctx, pid, "conversation.status.changed", map[string]any{
