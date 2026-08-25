@@ -133,6 +133,14 @@ export function areaChartGeometry(values: number[], width = 300, height = 72): {
 	return { points, linePath, areaPath, baseline };
 }
 
+export function areaChartEndMarkerPath(points: AreaChartPoint[], baseline: number): string {
+	const point = points.at(-1) ?? { x: 292, y: baseline };
+	// A nearly zero-length path with a round, non-scaling stroke renders as a
+	// true screen-space dot. An SVG circle is distorted when the chart uses
+	// preserveAspectRatio="none" to fill a wide dashboard card.
+	return `M ${point.x} ${point.y} h 0.001`;
+}
+
 export function resolveMetricConfig(config: Record<string, unknown>, filters: Record<string, string>): Record<string, unknown> {
 	const out = { ...config };
 	for (const [key, value] of Object.entries(out)) {

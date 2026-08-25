@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.11.2
+version: 0.11.3
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -63,6 +63,7 @@ description: |
   trends to themed filled area charts.
   v0.11.2 keeps area-chart endpoints inside the plot and adds optional generic
   previous-period comparisons for dashboard metrics.
+  v0.11.3 keeps trend endpoint markers circular in stretched dashboard cards.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]

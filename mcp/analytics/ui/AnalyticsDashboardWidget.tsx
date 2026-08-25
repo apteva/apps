@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { areaChartGeometry, batchResultsByID, dedupeWidgetGoals, defaultDashboardFilters, formatMetric, formatObjectiveValue, objectiveProgressWidth, resolveMetricConfig, scopedAppURL, selectDashboardID } from "./dashboard-ui";
+import { areaChartEndMarkerPath, areaChartGeometry, batchResultsByID, dedupeWidgetGoals, defaultDashboardFilters, formatMetric, formatObjectiveValue, objectiveProgressWidth, resolveMetricConfig, scopedAppURL, selectDashboardID } from "./dashboard-ui";
 
 interface HostProps {
   appName?: string;
@@ -92,6 +92,7 @@ function AreaChart({ rows, config, gradientId, tone }: { rows: Array<Record<stri
   if (!rows.length) return <Empty>No values in this window.</Empty>;
   const values = rows.map((row) => Number(row.value ?? row.count ?? 0));
   const { points, linePath, areaPath, baseline } = areaChartGeometry(values);
+  const endMarkerPath = areaChartEndMarkerPath(points, baseline);
   const colorClass = tone === "success" ? "text-success" : "text-accent";
   return (
     <div className="mt-2">
@@ -108,7 +109,7 @@ function AreaChart({ rows, config, gradientId, tone }: { rows: Array<Record<stri
         </g>
         <path d={areaPath} fill={`url(#${gradientId})`} />
         <path d={linePath} fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-        <circle cx={points.at(-1)?.x ?? 300} cy={points.at(-1)?.y ?? baseline} r="2.75" fill="currentColor" stroke="var(--color-bg-card, transparent)" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+        <path d={endMarkerPath} fill="none" stroke="currentColor" strokeWidth="5.5" strokeLinecap="round" vectorEffect="non-scaling-stroke" aria-hidden="true" />
       </svg>
       <div className="flex justify-between text-[10px] text-text-dim">
         <span>{String(rows[0]?.bucket ?? "")}</span>

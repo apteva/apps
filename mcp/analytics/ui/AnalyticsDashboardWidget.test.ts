@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { areaChartGeometry, dedupeWidgetGoals, defaultDashboardFilters, selectDashboardID } from "./dashboard-ui";
+import { areaChartEndMarkerPath, areaChartGeometry, dedupeWidgetGoals, defaultDashboardFilters, selectDashboardID } from "./dashboard-ui";
 
 describe("Analytics dashboard home widget", () => {
   test("prefers configured dashboard, then stored dashboard, then newest", () => {
@@ -38,5 +38,6 @@ describe("Analytics dashboard home widget", () => {
     expect(geometry.points[0].x).toBe(8);
     expect(geometry.points.at(-1)?.x).toBe(292);
     expect(geometry.areaPath).toEndWith(`L 8 ${geometry.baseline} Z`);
+    expect(areaChartEndMarkerPath(geometry.points, geometry.baseline)).toBe("M 292 8 h 0.001");
   });
 });
