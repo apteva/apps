@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.91
+version: 0.13.92
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -216,7 +216,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_audio_filter
-      description: "Normalize, clean, adjust, or mute audio in an audio/video source. For video outputs, copies video and only re-encodes audio. Returns render_id."
+      description: "Normalize, clean, adjust, or mute audio in an audio/video source. Normalization preserves the indexed source sample rate and applies a lossy-codec-safe peak limiter. For video outputs, copies video and only re-encodes audio. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -281,7 +281,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.13.91
+    ref: media/v0.13.92
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -690,7 +690,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_audio_filter",
-			Description: "Modify audio in an audio or video file. For videos, copies the video stream unchanged and only filters/re-encodes audio. Args: file_id, mode ('normalize' default | 'speech_clean' | 'volume' | 'mute'), target_lufs (optional, default -16 for normalize/speech_clean), gain_db (for volume), output_name?, output_folder?. Audio-only inputs keep their audio container; video inputs keep their video container unless output_name has an audio extension.",
+			Description: "Modify audio in an audio or video file. Normalization preserves the indexed source sample rate and applies a lossy-codec-safe peak limiter. For videos, copies the video stream unchanged and only filters/re-encodes audio. Args: file_id, mode ('normalize' default | 'speech_clean' | 'volume' | 'mute'), target_lufs (optional, default -16 for normalize/speech_clean), gain_db (for volume), output_name?, output_folder?. Audio-only inputs keep their audio container; video inputs keep their video container unless output_name has an audio extension.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string"},
 				"mode":          map[string]any{"type": "string", "description": "'normalize' (default), 'speech_clean', 'volume', or 'mute'."},

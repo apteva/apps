@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.91
+version: 0.13.92
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -229,7 +229,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_audio_filter
-      description: Normalize, speech-clean, adjust volume, or mute audio in an audio/video source. For video outputs, copies video unchanged and only re-encodes audio. Args — file_id, mode? (normalize|speech_clean|volume|mute), target_lufs?, gain_db?, output_name?.
+      description: Normalize, speech-clean, adjust volume, or mute audio in an audio/video source. Normalization preserves the indexed source sample rate and applies a lossy-codec-safe peak limiter. For video outputs, copies video unchanged and only re-encodes audio. Args — file_id, mode? (normalize|speech_clean|volume|mute), target_lufs?, gain_db?, output_name?.
       async_result:
         id_field: render_id
         notify:
@@ -493,7 +493,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.13.91
+    ref: media/v0.13.92
     entry: mcp/media
   port: 8080
   health_check: /health

@@ -235,11 +235,49 @@ func TestPlanAudioFilter_NormalizeVideoCopiesVideo(t *testing.T) {
 	if !argPair(plan.Args, "-c:a", "aac") {
 		t.Errorf("audio_filter video output should encode audio as aac: %v", plan.Args)
 	}
-	if !contains(plan.Args, "loudnorm=I=-16:TP=-1.5:LRA=11") {
-		t.Errorf("missing loudnorm filter: %v", plan.Args)
+	filter := strings.Join(plan.Args, " ")
+	for _, want := range []string{
+		"loudnorm=I=-16:TP=-3.5:LRA=11",
+		"aresample=48000",
+		"alimiter=limit=0.668344",
+	} {
+		if !strings.Contains(filter, want) {
+			t.Errorf("safe normalization filter missing %q: %v", want, plan.Args)
+		}
+	}
+	if !argPair(plan.Args, "-ar", "48000") {
+		t.Errorf("audio_filter should restore the source sample rate: %v", plan.Args)
 	}
 	if plan.ContentType != "video/mp4" {
 		t.Errorf("content type=%q want video/mp4", plan.ContentType)
+	}
+}
+
+func TestPlanAudioFilter_PreservesInjectedSampleRate(t *testing.T) {
+	plan, err := buildPlan("audio_filter", []string{"42"}, raw(t, map[string]any{
+		"mode":                "normalize",
+		"_source_sample_rate": 44100,
+	}), "", ".mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !argPair(plan.Args, "-ar", "44100") || !strings.Contains(strings.Join(plan.Args, " "), "aresample=44100") {
+		t.Fatalf("source sample rate was not preserved: %v", plan.Args)
+	}
+}
+
+func TestPlanAudioFilter_LosslessUsesDeliveryCeiling(t *testing.T) {
+	plan, err := buildPlan("audio_filter", []string{"42"}, raw(t, map[string]any{
+		"mode":                "normalize",
+		"_source_sample_rate": 48000,
+	}), "safe.wav", ".wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	filter := strings.Join(plan.Args, " ")
+	if !strings.Contains(filter, "loudnorm=I=-16:TP=-1.5:LRA=11") ||
+		!strings.Contains(filter, "alimiter=limit=0.841395") {
+		t.Fatalf("lossless output should use the -1.5 dBTP ceiling: %v", plan.Args)
 	}
 }
 

@@ -575,9 +575,10 @@ func planAudioExtract(sources []string, raw json.RawMessage, outputName string) 
 // only the filtered audio stream.
 
 type audioFilterParams struct {
-	Mode       string  `json:"mode"`                  // normalize|speech_clean|volume|mute
-	TargetLUFS float64 `json:"target_lufs,omitempty"` // default -16 for normalize/speech_clean
-	GainDB     float64 `json:"gain_db,omitempty"`     // used by volume mode
+	Mode             string  `json:"mode"`                          // normalize|speech_clean|volume|mute
+	TargetLUFS       float64 `json:"target_lufs,omitempty"`         // default -16 for normalize/speech_clean
+	GainDB           float64 `json:"gain_db,omitempty"`             // used by volume mode
+	SourceSampleRate int     `json:"_source_sample_rate,omitempty"` // executor-injected; never agent-controlled
 }
 
 func planAudioFilter(sources []string, raw json.RawMessage, outputName, sourceExt string) (*opPlan, error) {
@@ -588,15 +589,25 @@ func planAudioFilter(sources []string, raw json.RawMessage, outputName, sourceEx
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("audio_filter params: %w", err)
 	}
-	af, err := audioFilterChain(p)
-	if err != nil {
-		return nil, err
-	}
 	name, ct, audioOnly := audioFilterOutput(outputName, sources[0], sourceExt)
 	codec, err := audioFilterCodecForOutput(path.Ext(name), audioOnly)
 	if err != nil {
 		return nil, err
 	}
+	if p.SourceSampleRate == 0 {
+		// Submit-time validation runs before the executor can consult the
+		// indexed source row. 48 kHz is the safe media default; execution
+		// replaces it with the actual source rate when one is known.
+		p.SourceSampleRate = 48_000
+	}
+	if p.SourceSampleRate < 8_000 || p.SourceSampleRate > 192_000 {
+		return nil, fmt.Errorf("audio_filter: invalid source sample rate %d", p.SourceSampleRate)
+	}
+	af, err := audioFilterChain(p, isLossyAudioCodec(codec))
+	if err != nil {
+		return nil, err
+	}
+	sampleRate := strconv.Itoa(p.SourceSampleRate)
 	if audioOnly {
 		args := []string{
 			"-y",
@@ -607,6 +618,7 @@ func planAudioFilter(sources []string, raw json.RawMessage, outputName, sourceEx
 			"-map", "0:a:0",
 			"-af", af,
 			"-c:a", codec,
+			"-ar", sampleRate,
 		}
 		return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
 	} else {
@@ -620,12 +632,13 @@ func planAudioFilter(sources []string, raw json.RawMessage, outputName, sourceEx
 			"-c:v", "copy",
 			"-af", af,
 			"-c:a", codec,
+			"-ar", sampleRate,
 		}
 		return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
 	}
 }
 
-func audioFilterChain(p audioFilterParams) (string, error) {
+func audioFilterChain(p audioFilterParams, lossyOutput bool) (string, error) {
 	mode := strings.ToLower(strings.TrimSpace(p.Mode))
 	if mode == "" {
 		mode = "normalize"
@@ -634,18 +647,44 @@ func audioFilterChain(p audioFilterParams) (string, error) {
 	if target == 0 {
 		target = -16
 	}
-	loudnorm := fmt.Sprintf("loudnorm=I=%s:TP=-1.5:LRA=11", ffmpegFloat(target))
+	// loudnorm's dynamic mode internally upsamples to 192 kHz. Leaving
+	// that rate at the encoder boundary made AAC/MOV outputs land at
+	// 96 kHz and produced inter-sample overs above 0 dBTP despite TP=-1.5.
+	// Explicitly return to the source rate before encoding. Lossy codecs
+	// get 2 dB of encode headroom and a post-resample limiter (AAC on
+	// real phone recordings produced up to +1.6 dB of post-encode true-
+	// peak overshoot in regression testing);
+	// lossless codecs can use the requested delivery ceiling directly.
+	peakDB := "-1.5"
+	peakLinear := "0.841395" // 10^(-1.5/20)
+	if lossyOutput {
+		peakDB = "-3.5"
+		peakLinear = "0.668344" // 10^(-3.5/20)
+	}
+	rate := strconv.Itoa(p.SourceSampleRate)
+	loudnorm := fmt.Sprintf("loudnorm=I=%s:TP=%s:LRA=11", ffmpegFloat(target), peakDB)
+	safeNormalize := loudnorm + ",aresample=" + rate +
+		",alimiter=limit=" + peakLinear + ":attack=5:release=50:level=false"
 	switch mode {
 	case "normalize":
-		return loudnorm, nil
+		return safeNormalize, nil
 	case "speech_clean":
-		return "highpass=f=80,lowpass=f=8000,acompressor=threshold=-18dB:ratio=3:attack=5:release=100," + loudnorm, nil
+		return "highpass=f=80,lowpass=f=8000,acompressor=threshold=-18dB:ratio=3:attack=5:release=100," + safeNormalize, nil
 	case "volume":
 		return fmt.Sprintf("volume=%sdB", ffmpegFloat(p.GainDB)), nil
 	case "mute":
 		return "volume=0", nil
 	default:
 		return "", fmt.Errorf("audio_filter: unsupported mode %q (normalize|speech_clean|volume|mute)", p.Mode)
+	}
+}
+
+func isLossyAudioCodec(codec string) bool {
+	switch codec {
+	case "aac", "libmp3lame", "libopus":
+		return true
+	default:
+		return false
 	}
 }
 

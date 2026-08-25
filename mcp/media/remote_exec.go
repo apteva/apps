@@ -137,6 +137,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	// dimensions, so it can only run after sc exists. No-op for ops
 	// that don't crop (trim, concat, audio_extract, …).
 	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+	row.Params = prepareAudioFilterParams(app.AppDB(), row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 
 	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName,
 		resolveSourceExt(ctx, sc, app.AppDB(), row.ProjectID, row.SourceFileIDs))

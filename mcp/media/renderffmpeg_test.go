@@ -44,7 +44,7 @@ func generateSampleVideo(t *testing.T, dir string) string {
 	cmd := exec.Command("ffmpeg",
 		"-y", "-loglevel", "error",
 		"-f", "lavfi", "-i", "testsrc=duration=5:size=320x240:rate=30",
-		"-f", "lavfi", "-i", "sine=frequency=1000:duration=5",
+		"-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=5",
 		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
 		// All-intra: every frame is a keyframe. Lets stream-copy trim
 		// land on exact frame boundaries instead of jumping back to
@@ -55,6 +55,29 @@ func generateSampleVideo(t *testing.T, dir string) string {
 	)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("generate sample.mp4: %v: %s", err, b)
+	}
+	return out
+}
+
+// generatePeakySampleVideo makes normalization exercise its limiter rather
+// than only a steady sine. The quiet bed keeps integrated loudness low while
+// short full-scale impulses model the post-normalization peak shape that
+// exposed AAC overshoot on real phone recordings.
+func generatePeakySampleVideo(t *testing.T, dir string) string {
+	t.Helper()
+	out := filepath.Join(dir, "peaky-sample.mp4")
+	audio := `aevalsrc=0.02*sin(2*PI*440*t)+if(lt(mod(t\,0.5)\,0.003)\,0.95\,0):s=48000:d=5`
+	cmd := exec.Command("ffmpeg",
+		"-y", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc=duration=5:size=320x240:rate=30",
+		"-f", "lavfi", "-i", audio,
+		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+		"-g", "1", "-keyint_min", "1",
+		"-c:a", "aac", "-b:a", "128k", "-shortest",
+		out,
+	)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate peaky sample: %v: %s", err, b)
 	}
 	return out
 }
@@ -148,6 +171,41 @@ func probe(t *testing.T, path string) probeResult {
 		t.Fatalf("ffprobe parse: %v: %s", err, out)
 	}
 	return r
+}
+
+func measureLoudness(t *testing.T, path string) (integratedLUFS, truePeakDBTP float64) {
+	t.Helper()
+	cmd := exec.Command("ffmpeg",
+		"-hide_banner", "-nostats", "-i", path,
+		"-vn", "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
+		"-f", "null", "-",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("measure loudness %s: %v: %s", path, err, out)
+	}
+	raw := string(out)
+	start := strings.LastIndex(raw, "{")
+	end := strings.LastIndex(raw, "}")
+	if start < 0 || end <= start {
+		t.Fatalf("loudnorm JSON missing: %s", raw)
+	}
+	var measured struct {
+		Integrated string `json:"input_i"`
+		TruePeak   string `json:"input_tp"`
+	}
+	if err := json.Unmarshal([]byte(raw[start:end+1]), &measured); err != nil {
+		t.Fatalf("parse loudnorm JSON: %v: %s", err, raw[start:end+1])
+	}
+	integratedLUFS, err = strconv.ParseFloat(measured.Integrated, 64)
+	if err != nil {
+		t.Fatalf("parse input_i %q: %v", measured.Integrated, err)
+	}
+	truePeakDBTP, err = strconv.ParseFloat(measured.TruePeak, 64)
+	if err != nil {
+		t.Fatalf("parse input_tp %q: %v", measured.TruePeak, err)
+	}
+	return integratedLUFS, truePeakDBTP
 }
 
 func (r probeResult) videoStream() (probedStream, error) {
@@ -327,6 +385,37 @@ func TestFFmpeg_AudioFilter_NormalizeVideo(t *testing.T) {
 	}
 	if a.CodecName != "aac" {
 		t.Errorf("audio codec=%q want aac", a.CodecName)
+	}
+	if a.SampRate != "48000" {
+		t.Errorf("audio sample rate=%q want source rate 48000", a.SampRate)
+	}
+	integrated, peak := measureLoudness(t, out)
+	if integrated < -17.5 || integrated > -14.5 {
+		t.Errorf("integrated loudness=%.1f LUFS want near -16", integrated)
+	}
+	if peak > -1.5 {
+		t.Errorf("true peak=%.1f dBTP exceeds safe -1.5 dBTP ceiling", peak)
+	}
+}
+
+func TestFFmpeg_AudioFilter_PeakLimiter(t *testing.T) {
+	skipIfNoFFmpeg(t)
+	dir := t.TempDir()
+	src := generatePeakySampleVideo(t, dir)
+	out := runOpAgainstFile(t, "audio_filter", []string{src},
+		map[string]any{"mode": "normalize", "target_lufs": -16},
+		"peaky-normalized.mp4", dir)
+	r := probe(t, out)
+	a, err := r.audioStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.SampRate != "48000" {
+		t.Errorf("audio sample rate=%q want source rate 48000", a.SampRate)
+	}
+	_, peak := measureLoudness(t, out)
+	if peak > -1.5 {
+		t.Errorf("peaky true peak=%.1f dBTP exceeds safe -1.5 dBTP ceiling", peak)
 	}
 }
 

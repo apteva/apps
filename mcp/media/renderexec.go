@@ -124,6 +124,7 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	// operation supports it. Mutates row.Params in place so buildPlan
 	// can see explicit crop_w/h/x/y. No-op for ops that don't crop.
 	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+	row.Params = prepareAudioFilterParams(db, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 
 	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName,
 		resolveSourceExt(ctx, sc, db, row.ProjectID, row.SourceFileIDs))
