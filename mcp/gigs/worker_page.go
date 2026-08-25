@@ -134,6 +134,14 @@ func workerPageHTML(token string) string {
   .media-frame { border: 1px solid var(--line); background: #050505; border-radius: 8px; padding: 10px; }
   audio, video, img { width: 100%; max-width: 100%; border-radius: 6px; display: block; }
   audio { min-height: 44px; }
+  .content-blocks { display: grid; gap: 16px; }
+  .content-image { margin: 0; display: grid; gap: 8px; }
+  .content-image img { background: #050505; border: 1px solid var(--line); max-height: 720px; object-fit: contain; }
+  .content-image figcaption { color: var(--muted); font-size: 13px; line-height: 1.45; }
+  .content-callout { border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); border-radius: 6px; padding: 12px 14px; white-space: pre-wrap; }
+  .content-callout.tip { border-left-color: var(--ok); }
+  .content-callout.warning { border-left-color: var(--warn); }
+  .content-divider { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 2px 0; }
   a.link { color: var(--accent); font-weight: 600; }
   .label { font-size: 12px; color: var(--muted); margin-bottom: 7px; text-transform: uppercase; }
   .text { white-space: pre-wrap; line-height: 1.55; }
@@ -379,6 +387,9 @@ func workerPageHTML(token string) string {
         case "text":
           wrap.appendChild(textBlock(body.markdown || ""));
           break;
+        case "content":
+          wrap.appendChild(renderContentBlocks(body.blocks || []));
+          break;
         case "audio":
           appendInstructionCopy(wrap, body);
           if (it.signed_url) wrap.appendChild(mediaBlock('<audio controls src="' + escapeAttr(it.signed_url) + '"></audio>'));
@@ -448,6 +459,54 @@ func workerPageHTML(token string) string {
     function appendInstructionCopy(wrap, body) {
       const text = body.caption || body.transcript || body.markdown || body.text || "";
       if (text) wrap.appendChild(textBlock(text));
+    }
+
+    function renderContentBlocks(blocks) {
+      const container = document.createElement("div");
+      container.className = "content-blocks";
+      (Array.isArray(blocks) ? blocks : []).forEach(block => {
+        if (!block || typeof block !== "object") return;
+        switch (String(block.type || "")) {
+          case "markdown":
+            container.appendChild(textBlock(block.markdown || ""));
+            break;
+          case "image": {
+            const figure = document.createElement("figure");
+            figure.className = "content-image";
+            if (block.signed_url) {
+              const img = document.createElement("img");
+              img.src = block.signed_url;
+              img.alt = block.alt || block.caption || "Instruction image";
+              img.loading = "lazy";
+              figure.appendChild(img);
+            } else {
+              figure.appendChild(mut("Image unavailable"));
+            }
+            if (block.caption) {
+              const caption = document.createElement("figcaption");
+              caption.textContent = block.caption;
+              figure.appendChild(caption);
+            }
+            container.appendChild(figure);
+            break;
+          }
+          case "callout": {
+            const callout = document.createElement("div");
+            const tone = ["info", "tip", "warning"].includes(block.tone) ? block.tone : "info";
+            callout.className = "content-callout " + tone;
+            callout.textContent = block.text || "";
+            container.appendChild(callout);
+            break;
+          }
+          case "divider": {
+            const divider = document.createElement("hr");
+            divider.className = "content-divider";
+            container.appendChild(divider);
+            break;
+          }
+        }
+      });
+      return container;
     }
 
     function textBlock(text) {
@@ -1376,11 +1435,15 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token 
 		composition = nil
 	}
 	for _, it := range composition {
+		body := it.RenderedBody
+		if it.InstructionKind == kindContent {
+			body = enrichContentBlockURLs(ctx, pid, body, ttl)
+		}
 		m := map[string]any{
 			"sort_order":       it.SortOrder,
 			"instruction_kind": it.InstructionKind,
 			"instruction_name": it.InstructionName,
-			"rendered_body":    it.RenderedBody,
+			"rendered_body":    body,
 			"result_key":       it.ResultKey,
 		}
 		if isMediaKind(it.InstructionKind) {
@@ -1434,6 +1497,39 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token 
 			Compensation: g.Compensation,
 		},
 	})
+}
+
+func enrichContentBlockURLs(ctx *sdk.AppCtx, pid string, body map[string]any, ttl int) map[string]any {
+	out := make(map[string]any, len(body))
+	for key, value := range body {
+		out[key] = value
+	}
+	blocks, ok := body["blocks"].([]any)
+	if !ok {
+		return out
+	}
+	enriched := make([]any, len(blocks))
+	for i, raw := range blocks {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			enriched[i] = raw
+			continue
+		}
+		copy := make(map[string]any, len(block)+1)
+		for key, value := range block {
+			copy[key] = value
+		}
+		if strOf(copy["type"]) == "image" {
+			if fid := int64Cast(copy["storage_file_id"]); fid > 0 {
+				if url, err := storageSignedURL(ctx, pid, fid, ttl); err == nil {
+					copy["signed_url"] = url
+				}
+			}
+		}
+		enriched[i] = copy
+	}
+	out["blocks"] = enriched
+	return out
 }
 
 func loadLatestSubmissionForAssignment(db *sql.DB, assignmentID int64) (*submission, error) {

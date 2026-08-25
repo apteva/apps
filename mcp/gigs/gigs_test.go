@@ -39,6 +39,8 @@ func (storagePlatformStub) CallAppResult(app, tool string, _ map[string]any, out
 		payload = map[string]any{"found": true, "file": map[string]any{"id": 91, "name": "clip.mp4", "content_type": "video/mp4", "size_bytes": 5}}
 	case "storage/files_delete":
 		payload = map[string]any{"ok": true}
+	case "storage/files_get_url":
+		payload = map[string]any{"url": "https://storage.example.test/signed/image"}
 	case "storage/storage_abort_upload":
 		payload = map[string]any{"found": true}
 	default:
@@ -94,7 +96,7 @@ func seedAssignment(t *testing.T, ctx *sdk.AppCtx, gigID, workerID int64, status
 
 func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.3.3" {
+	if manifest.Version != "0.3.4" {
 		t.Fatalf("version=%q", manifest.Version)
 	}
 	var public []sdk.RouteSpec
@@ -130,6 +132,23 @@ func TestWorkerPageUsesCustomUploadDropzoneAndCompactPreview(t *testing.T) {
 	}
 	if strings.Contains(html, `<input data-files type='file'`) {
 		t.Fatal("worker page exposes the browser-native file input instead of the custom dropzone")
+	}
+}
+
+func TestWorkerPageRendersStructuredContentBlocks(t *testing.T) {
+	html := workerPageHTML("worker-token")
+	for _, want := range []string{
+		`case "content":`,
+		`renderContentBlocks(body.blocks || [])`,
+		`case "image":`,
+		`img.loading = "lazy"`,
+		`case "callout":`,
+		`className = "content-callout " + tone`,
+		`case "divider":`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("worker page missing content renderer marker %q", want)
+		}
 	}
 }
 
@@ -311,6 +330,113 @@ func TestExplicitResponseSpecRejectsMalformedRules(t *testing.T) {
 		if err := validateBody(kindText, body); err == nil {
 			t.Fatalf("case %d malformed response accepted: %v", i, body)
 		}
+	}
+}
+
+func TestContentInstructionValidationDerivationAndRendering(t *testing.T) {
+	body := map[string]any{"blocks": []any{
+		map[string]any{"type": "markdown", "markdown": "## Welcome {{model}}"},
+		map[string]any{"type": "image", "storage_file_id": float64(501), "caption": "Correct pose for {{shot}}", "alt": "Reference for {{model}}"},
+		map[string]any{"type": "callout", "tone": "tip", "text": "Keep {{shot}} visible."},
+		map[string]any{"type": "divider"},
+	}}
+	if err := validateBody(kindContent, body); err != nil {
+		t.Fatalf("valid content body rejected: %v", err)
+	}
+	declared := deriveDeclaredVariables(kindContent, body)
+	if !slices.Equal(declared, []string{"model", "shot"}) {
+		t.Fatalf("declared variables = %v", declared)
+	}
+	rendered := renderBody(kindContent, body, map[string]any{"model": "Holly", "shot": "full body"})
+	blocks := rendered["blocks"].([]any)
+	if got := blocks[0].(map[string]any)["markdown"]; got != "## Welcome Holly" {
+		t.Fatalf("rendered markdown = %v", got)
+	}
+	if got := blocks[1].(map[string]any)["caption"]; got != "Correct pose for full body" {
+		t.Fatalf("rendered caption = %v", got)
+	}
+	if original := body["blocks"].([]any)[0].(map[string]any)["markdown"]; original != "## Welcome {{model}}" {
+		t.Fatalf("render mutated source body: %v", original)
+	}
+	derived := deriveFromComposition([]compositionItem{{
+		SortOrder: 2, InstructionID: 7, Kind: kindContent, Body: body, DeclaredVariables: declared,
+	}})
+	if len(derived.MediaManifest) != 1 {
+		t.Fatalf("media manifest = %#v", derived.MediaManifest)
+	}
+	if derived.MediaManifest[0]["storage_file_id"] != float64(501) || derived.MediaManifest[0]["block_index"] != 1 {
+		t.Fatalf("content media entry = %#v", derived.MediaManifest[0])
+	}
+	if len(derived.ResultSchema["properties"].(map[string]any)) != 0 {
+		t.Fatalf("read-only content contributed result schema: %#v", derived.ResultSchema)
+	}
+}
+
+func TestContentInstructionRejectsMalformedBlocks(t *testing.T) {
+	tests := []map[string]any{
+		{},
+		{"blocks": []any{}},
+		{"blocks": []any{map[string]any{"type": "markdown", "markdown": ""}}},
+		{"blocks": []any{map[string]any{"type": "image", "storage_file_id": 0}}},
+		{"blocks": []any{map[string]any{"type": "callout", "text": "Read", "tone": "urgent"}}},
+		{"blocks": []any{map[string]any{"type": "html", "html": "<script>"}}},
+	}
+	for i, body := range tests {
+		if err := validateBody(kindContent, body); err == nil {
+			t.Fatalf("case %d malformed content accepted: %#v", i, body)
+		}
+	}
+}
+
+func TestContentInstructionImageGetsSignedWithoutMutatingStoredBody(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(storagePlatformStub{}))
+	body := map[string]any{"blocks": []any{
+		map[string]any{"type": "markdown", "markdown": "Look here"},
+		map[string]any{"type": "image", "storage_file_id": float64(91), "caption": "Reference"},
+	}}
+	enriched := enrichContentBlockURLs(ctx, "project-a", body, 3600)
+	blocks := enriched["blocks"].([]any)
+	if got := blocks[1].(map[string]any)["signed_url"]; got != "https://storage.example.test/signed/image" {
+		t.Fatalf("signed url = %v", got)
+	}
+	if _, exists := body["blocks"].([]any)[1].(map[string]any)["signed_url"]; exists {
+		t.Fatal("signing mutated stored instruction body")
+	}
+}
+
+func TestWorkerGigJSONSignsImagesInsideContentInstruction(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(storagePlatformStub{}))
+	old := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = old })
+	workerID := seedWorker(t, ctx, "project-a", 103)
+	gigID := seedGig(t, ctx, "project-a", "accepted", `{"type":"object","properties":{}}`)
+	seedAssignment(t, ctx, gigID, workerID, "accepted", "direct", "content-image-token")
+	body := `{"blocks":[{"type":"markdown","markdown":"Starting pose"},{"type":"image","storage_file_id":91,"caption":"Reference"}]}`
+	if _, err := ctx.AppDB().Exec(`INSERT INTO gig_instructions
+		(gig_id,sort_order,instruction_kind,rendered_body_json)
+		VALUES (?,0,'content',?)`, gigID, body); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	(&App{}).handleWorkerGigJSON(rec, httptest.NewRequest(http.MethodGet, "/worker/content-image-token/api/gig", nil), "content-image-token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var envelope struct {
+		Gig struct {
+			Composition []struct {
+				RenderedBody map[string]any `json:"rendered_body"`
+			} `json:"composition"`
+		} `json:"gig"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	blocks := envelope.Gig.Composition[0].RenderedBody["blocks"].([]any)
+	image := blocks[1].(map[string]any)
+	if image["signed_url"] != "https://storage.example.test/signed/image" {
+		t.Fatalf("worker content image = %#v", image)
 	}
 }
 

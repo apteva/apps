@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.3.3
+version: 0.3.4
 description: |
   Generic work marketplace and execution engine. Define standard offers,
   service packages, worker pay grades and effective rate cards; negotiate
@@ -51,7 +51,7 @@ requires:
       capabilities: [files.read, files.write, files.delete]
       required: true
       label: "Storage"
-      hint: "Instruction media (audio/video) and worker submissions are stored here under /.gigs/."
+      hint: "Instruction media (images/audio/video) and worker submissions are stored here under /.gigs/."
     - role: domains
       kind: app
       compatible_app_names: [domains]
@@ -87,7 +87,7 @@ provides:
       description: List all skills in the project.
     # ─── Instruction library ─────────────────────────────────────────
     - name: instructions_create
-      description: Create a versioned instruction. Read-only kinds can define body.response with independent note and files rules; files can restrict accepted types, counts, and size. Omitting response means no worker upload or note. Returns the head row + v1.
+      description: Create a versioned instruction. The content kind stores ordered markdown, image, callout, and divider blocks in one worker card. Read-only kinds can define body.response with independent note and files rules; omitting response means no worker upload or note. Returns the head row + v1.
     - name: instructions_list
       description: Filter the library by kind or search.
     - name: instructions_get

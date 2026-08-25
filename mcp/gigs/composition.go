@@ -17,6 +17,7 @@ import (
 const (
 	// Read.
 	kindText     = "text"
+	kindContent  = "content"
 	kindAudio    = "audio"
 	kindVideo    = "video"
 	kindImage    = "image"
@@ -47,7 +48,7 @@ const (
 )
 
 var knownKinds = map[string]bool{
-	kindText: true, kindAudio: true, kindVideo: true, kindImage: true,
+	kindText: true, kindContent: true, kindAudio: true, kindVideo: true, kindImage: true,
 	kindDocument: true, kindLink: true, kindScript: true, kindWarning: true,
 	kindExample: true, kindChecklistItem: true, kindConfirmation: true,
 	kindTimerHint: true, kindInputShortText: true, kindInputLongText: true,
@@ -92,6 +93,37 @@ func validateBody(kind string, body map[string]any) error {
 	switch kind {
 	case kindText:
 		return req("markdown")
+	case kindContent:
+		blocks, ok := body["blocks"].([]any)
+		if !ok || len(blocks) == 0 {
+			return errors.New("kind \"content\" requires a non-empty body.blocks array")
+		}
+		for i, raw := range blocks {
+			block, ok := raw.(map[string]any)
+			if !ok {
+				return fmt.Errorf("kind \"content\" block %d must be an object", i+1)
+			}
+			switch blockType := strOf(block["type"]); blockType {
+			case "markdown":
+				if strings.TrimSpace(strOf(block["markdown"])) == "" {
+					return fmt.Errorf("kind \"content\" block %d requires markdown", i+1)
+				}
+			case "image":
+				if intFromAny(block["storage_file_id"]) <= 0 {
+					return fmt.Errorf("kind \"content\" block %d requires a positive storage_file_id", i+1)
+				}
+			case "callout":
+				if strings.TrimSpace(strOf(block["text"])) == "" {
+					return fmt.Errorf("kind \"content\" block %d requires text", i+1)
+				}
+				if tone := strOf(block["tone"]); tone != "" && tone != "info" && tone != "tip" && tone != "warning" {
+					return fmt.Errorf("kind \"content\" block %d has invalid tone %q", i+1, tone)
+				}
+			case "divider":
+			default:
+				return fmt.Errorf("kind \"content\" block %d has unknown type %q", i+1, blockType)
+			}
+		}
 	case kindAudio, kindVideo, kindImage, kindDocument:
 		if _, ok := body["storage_file_id"]; !ok {
 			return fmt.Errorf("kind %q requires body.storage_file_id", kind)
@@ -220,6 +252,16 @@ func deriveDeclaredVariables(kind string, body map[string]any) []string {
 	switch kind {
 	case kindText:
 		add(strOf(body["markdown"]))
+	case kindContent:
+		if blocks, ok := body["blocks"].([]any); ok {
+			for _, raw := range blocks {
+				block, _ := raw.(map[string]any)
+				add(strOf(block["markdown"]))
+				add(strOf(block["caption"]))
+				add(strOf(block["alt"]))
+				add(strOf(block["text"]))
+			}
+		}
 	case kindLink:
 		add(strOf(body["label"]))
 		add(strOf(body["url"]))
@@ -323,6 +365,25 @@ func deriveFromComposition(items []compositionItem) derivedComposition {
 				entry["poster_file_id"] = v
 			}
 			media = append(media, entry)
+		} else if it.Kind == kindContent {
+			if blocks, ok := it.Body["blocks"].([]any); ok {
+				for blockIndex, raw := range blocks {
+					block, _ := raw.(map[string]any)
+					if strOf(block["type"]) != "image" {
+						continue
+					}
+					entry := map[string]any{
+						"sort_order":      it.SortOrder,
+						"block_index":     blockIndex,
+						"role":            "image",
+						"storage_file_id": block["storage_file_id"],
+					}
+					if caption := strOf(block["caption"]); caption != "" {
+						entry["label"] = caption
+					}
+					media = append(media, entry)
+				}
+			}
 		}
 		// Variables union.
 		for _, v := range it.DeclaredVariables {
@@ -395,6 +456,28 @@ func renderBody(kind string, body map[string]any, vars map[string]any) map[strin
 	switch kind {
 	case kindText:
 		interp("markdown")
+	case kindContent:
+		if blocks, ok := out["blocks"].([]any); ok {
+			newBlocks := make([]any, len(blocks))
+			for i, raw := range blocks {
+				block, ok := raw.(map[string]any)
+				if !ok {
+					newBlocks[i] = raw
+					continue
+				}
+				copy := make(map[string]any, len(block))
+				for key, value := range block {
+					copy[key] = value
+				}
+				for _, field := range []string{"markdown", "caption", "alt", "text"} {
+					if value, ok := copy[field].(string); ok {
+						copy[field] = interpolate(value, vars)
+					}
+				}
+				newBlocks[i] = copy
+			}
+			out["blocks"] = newBlocks
+		}
 	case kindLink:
 		interp("label")
 		interp("url")

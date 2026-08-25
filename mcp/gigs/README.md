@@ -1,4 +1,4 @@
-# Gigs (v0.3.3)
+# Gigs (v0.3.4)
 
 Gigs is a generic work marketplace and execution engine. Agents can define
 standard services and packages, know the usual customer offer and worker pay,
@@ -38,7 +38,7 @@ milestone, and the contract completes after all milestones are resolved.
 ## Three layers
 
 1. **Instruction library** — atomic, versioned units. The dashboard creation
-   flow currently exposes text, audio, and video instructions.
+   flow exposes text, structured content, image, audio, and video instructions.
 2. **Templates** — ordered compositions of pinned instruction versions
    with title + defaults + per-use overrides.
 3. **Gigs** — immutable snapshots, composed at dispatch from a template +
@@ -73,6 +73,30 @@ recording upload:
 Template composition overrides may replace `body.response` for one template;
 the resolved contract is frozen onto every dispatched gig. Legacy
 `body.response_mode=optional|required` snapshots remain readable.
+
+### Mixed text and images
+
+Use a `content` instruction when one numbered worker card should mix text and
+multiple images. Its body is an ordered block list; supported block types are
+`markdown`, `image`, `callout`, and `divider`:
+
+```json
+{
+  "blocks": [
+    {"type": "markdown", "markdown": "## Starting position\nStand facing the camera."},
+    {"type": "image", "storage_file_id": 123, "caption": "Correct position", "alt": "Full-body reference pose"},
+    {"type": "callout", "tone": "tip", "text": "Keep your full body visible."},
+    {"type": "divider"},
+    {"type": "markdown", "markdown": "Continue with the recording brief."}
+  ]
+}
+```
+
+Images receive signed Storage URLs only when the worker loads the gig. Text,
+captions, alternative text, and callouts support template variables. Omitting
+`body.response` makes the whole content instruction read-only; the worker sees
+no per-step note or upload control. Existing text and standalone media kinds
+remain unchanged.
 
 The worker page saves an assignment draft as notes and completed uploads change.
 Each upload is bound to the instruction key and validated against its file type,
@@ -173,7 +197,7 @@ assignment and as a `gig_event`, and returns the gig to an earlier status
 
 - `crm` (required) — workers are CRM contacts; notifications and timeline
   logging go through `crm.contacts_send_message` / `contacts_log_activity`.
-- `storage` (required) — audio/video instruction media and worker submissions live
+- `storage` (required) — image/audio/video instruction media and worker submissions live
   under `/.gigs/` (configurable).
 - `catalog` (required) — owns customer-facing products and immutable sell-side
   prices. Publishing an offer synchronizes its service product and package
