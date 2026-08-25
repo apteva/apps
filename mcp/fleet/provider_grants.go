@@ -386,6 +386,10 @@ func providerFromCovered(value string, patterns []string) bool {
 }
 
 func tenantJSON(ctx context.Context, baseURL, apiKey, method, path string, body any, out any) error {
+	return tenantJSONWithClient(httpClient, ctx, baseURL, apiKey, method, path, body, out)
+}
+
+func tenantJSONWithClient(client *http.Client, ctx context.Context, baseURL, apiKey, method, path string, body any, out any) error {
 	var rdr io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -399,7 +403,7 @@ func tenantJSON(ctx context.Context, baseURL, apiKey, method, path string, body 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

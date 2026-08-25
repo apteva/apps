@@ -84,13 +84,17 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if owner == "" {
 		return nil, errors.New("owner_email is required")
 	}
+	pendingTemplate, err := a.requestedParentTemplate(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	// Hosted dispatch: when instance_id > 0, fleet drives a remote
 	// VPS (via the Instances integration) instead of spawning a
 	// local process. The hosted path shares nothing with the local
 	// path other than the auto-setup orchestrator — keeping it in
 	// hostedproc.go makes the divergence explicit.
 	if id := int64Arg(args, "instance_id"); id > 0 {
-		return a.toolCreateHosted(ctx, args, slug, owner, id)
+		return a.toolCreateHosted(ctx, args, slug, owner, id, pendingTemplate)
 	}
 	if _, _, err := a.store.getBySlug(slug); err == nil {
 		return nil, fmt.Errorf("slug %q already in use", slug)
@@ -126,6 +130,13 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if err := a.store.insert(t, apiKeyStub, nil); err != nil {
 		return nil, err
+	}
+	if pendingTemplate != nil {
+		pendingTemplate.TenantID = t.ID
+		if err := a.store.savePendingTemplate(*pendingTemplate); err != nil {
+			_ = a.store.hardDelete(t.ID)
+			return nil, fmt.Errorf("save requested template: %w", err)
+		}
 	}
 	_ = a.store.recordEvent(t.ID, "spawn_start", "user", map[string]any{"port": port, "config_dir": configDir})
 
@@ -196,7 +207,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		_ = a.store.recordEvent(t.ID, "auto_setup_failed", "user", map[string]any{"error": err.Error()})
 		publicURL := a.publicBaseURL(t.BaseURL)
-		return map[string]any{
+		out := map[string]any{
 			"tenant_id":        t.ID,
 			"slug":             slug,
 			"base_url":         publicURL,
@@ -205,7 +216,11 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"setup_token":      setupToken,
 			"auto_setup_error": err.Error(),
 			"next_steps":       "Auto-setup failed (see auto_setup_error). Manual recovery: open setup_url, register admin with the setup_token, generate an api_key, call tenant_attach_key.",
-		}, nil
+		}
+		if pendingTemplate != nil {
+			out["template"] = pendingTemplateStatus(*pendingTemplate)
+		}
+		return out, nil
 	}
 
 	// Persist the freshly-minted api_key + flip status to active.
@@ -230,6 +245,9 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"admin_password": autoSetup.Password,
 		"api_key":        autoSetup.APIKey,
 		"next_steps":     "Save admin_password and api_key — they're shown ONCE. The admin_password lets the operator (or the client) log into the tenant dashboard at base_url; api_key is the long-lived bearer fleet uses internally.",
+	}
+	if pendingTemplate != nil {
+		out["template"] = a.applyPendingTemplateBestEffort(ctx, t, autoSetup.APIKey)
 	}
 	out["a2a"] = a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_create")
 	return out, nil
@@ -288,11 +306,15 @@ func (a *App) toolAttachKey(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = a.store.updateHealth(t.ID, true, version, body)
 	}
 
-	return map[string]any{
+	out := map[string]any{
 		"tenant_id": t.ID,
 		"status":    StatusActive,
-		"a2a":       a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_attach_key"),
-	}, nil
+	}
+	if templateResult := a.applyPendingTemplateBestEffort(ctx, t, apiKey); templateResult != nil {
+		out["template"] = templateResult
+	}
+	out["a2a"] = a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_attach_key")
+	return out, nil
 }
 
 // verifyAPIKey GETs /api/auth/status with the supplied bearer and

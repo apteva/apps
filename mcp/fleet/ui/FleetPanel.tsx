@@ -124,6 +124,32 @@ interface NativePanelProps {
   instanceId?: number;
 }
 
+type ToolCaller = <T>(tool: string, args: Record<string, unknown>) => Promise<T>;
+
+interface ProjectTemplateSummary {
+  id: string;
+  kind: string;
+  name: string;
+  description?: string;
+  source: string;
+  revision?: number;
+}
+
+interface ProjectTemplateListResp {
+  project_id: string;
+  templates: ProjectTemplateSummary[];
+}
+
+interface TemplateApplyResult {
+  status: "pending" | "applied" | "failed";
+  source_template_id: string;
+  target_project_id?: string;
+  target_template_id?: string;
+  imported?: boolean;
+  apply_result?: { warnings?: string[] };
+  error?: string;
+}
+
 type TenantStatus =
   | "starting"
   | "setup_pending"
@@ -232,6 +258,7 @@ interface CreateResp {
   setup_url?: string;
   setup_token?: string;
   auto_setup_error?: string;
+  template?: TemplateApplyResult;
 }
 
 interface CredentialsReveal {
@@ -301,6 +328,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   const [showUpdate, setShowUpdate] = useState<Tenant | null>(null);
   const [showMigrate, setShowMigrate] = useState<Tenant | null>(null);
   const [showClone, setShowClone] = useState<Tenant | null>(null);
+  const [showApplyTemplate, setShowApplyTemplate] = useState<Tenant | null>(null);
   // Held in panel state because both fleet endpoints return sensitive
   // material the operator gets to see once and copy — same pattern as
   // the post-create credentialsReveal.
@@ -474,6 +502,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
         onOpenUpdate={(t) => setShowUpdate(t)}
         onOpenMigrate={(t) => setShowMigrate(t)}
         onOpenClone={(t) => setShowClone(t)}
+        onOpenApplyTemplate={(t) => setShowApplyTemplate(t)}
         onRevealAPIKey={setRevealedAPIKey}
         onResetPassword={setResetPassword}
         onAfterAction={async (after) => {
@@ -489,18 +518,28 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
       {showCreate && (
         <CreateTenantDialog
           meta={meta}
+          callTool={callTool}
           onClose={() => setShowCreate(false)}
-          onSubmit={async ({ slug, owner_email, instance_id, port }) => {
+          onSubmit={async ({ slug, owner_email, instance_id, port, template_id, project_description }) => {
             try {
               const r = await callTool<CreateResp>("tenant_create", {
                 slug,
                 owner_email,
                 ...(instance_id ? { instance_id } : {}),
                 ...(port ? { port } : {}),
+                ...(template_id ? { template_id } : {}),
+                ...(project_description ? { project_description } : {}),
               });
               await refreshList({ quiet: true });
               if (r.tenant_id) setSelectedId(r.tenant_id);
               setShowCreate(false);
+              if (r.template?.status === "failed") {
+                setStatus(`Tenant created; template failed: ${r.template.error || "unknown error"}`);
+              } else if (r.template?.status === "pending") {
+                setStatus("Tenant created; template will apply after setup is completed");
+              } else if (r.template?.apply_result?.warnings?.length) {
+                setStatus(`Tenant created with template warnings: ${r.template.apply_result.warnings.join("; ")}`);
+              }
               // Auto-setup happy path returns admin_password + api_key.
               // Surface them in a one-shot modal — fleet stores the
               // api_key sealed and never the plaintext password, so
@@ -646,6 +685,29 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
               await refreshList({ quiet: true });
               if (r.tenant_id) setSelectedId(r.tenant_id);
               setShowClone(null);
+              return { ok: true };
+            } catch (e) {
+              return { ok: false, error: (e as Error).message };
+            }
+          }}
+        />
+      )}
+      {showApplyTemplate && (
+        <ApplyTemplateDialog
+          tenant={showApplyTemplate}
+          callTool={callTool}
+          onClose={() => setShowApplyTemplate(null)}
+          onSubmit={async ({ template_id, project_description }) => {
+            try {
+              const result = await callTool<TemplateApplyResult>("tenant_apply_template", {
+                tenant_id: showApplyTemplate.id,
+                template_id,
+                ...(project_description ? { project_description } : {}),
+              });
+              setShowApplyTemplate(null);
+              await refreshDetail(showApplyTemplate.id);
+              const warnings = result.apply_result?.warnings ?? [];
+              setStatus(warnings.length ? `Template applied with warnings: ${warnings.join("; ")}` : "Template applied");
               return { ok: true };
             } catch (e) {
               return { ok: false, error: (e as Error).message };
@@ -850,6 +912,7 @@ function TenantDetail({
   onOpenUpdate,
   onOpenMigrate,
   onOpenClone,
+  onOpenApplyTemplate,
   onRevealAPIKey,
   onResetPassword,
   onAfterAction,
@@ -867,6 +930,7 @@ function TenantDetail({
   onOpenUpdate: (t: Tenant) => void;
   onOpenMigrate: (t: Tenant) => void;
   onOpenClone: (t: Tenant) => void;
+  onOpenApplyTemplate: (t: Tenant) => void;
   onRevealAPIKey: (r: { slug: string; base_url: string; api_key: string }) => void;
   onResetPassword: (r: { slug: string; base_url: string; admin_email: string; admin_password: string }) => void;
   onAfterAction: (after?: "deselect") => Promise<void>;
@@ -983,6 +1047,12 @@ function TenantDetail({
               }
               setSupportDialog(true);
             }}
+          />
+        )}
+        {!isSetupPending && (
+          <ActionButton
+            label="Apply template…"
+            onClick={() => onOpenApplyTemplate(tenant)}
           />
         )}
         {canMigrate && (
@@ -1639,6 +1709,7 @@ function CreateTenantDialog({
   onClose,
   onSubmit,
   meta,
+  callTool,
 }: {
   onClose: () => void;
   onSubmit: (v: {
@@ -1646,8 +1717,11 @@ function CreateTenantDialog({
     owner_email: string;
     instance_id?: number;
     port?: number;
+    template_id?: string;
+    project_description?: string;
   }) => Promise<{ ok: boolean; error?: string }>;
   meta: MetaResp | null;
+  callTool: ToolCaller;
 }) {
   const [slug, setSlug] = useState("");
   const [email, setEmail] = useState("");
@@ -1656,6 +1730,8 @@ function CreateTenantDialog({
   const [port, setPort] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [templateID, setTemplateID] = useState("");
+  const [projectDescription, setProjectDescription] = useState("");
 
   const instances = meta?.instances ?? [];
   const canHost = !!meta?.host_provider_available && instances.length > 0;
@@ -1690,6 +1766,14 @@ function CreateTenantDialog({
           className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
         />
       </Label>
+      <TemplatePicker
+        callTool={callTool}
+        value={templateID}
+        onChange={setTemplateID}
+        description={projectDescription}
+        onDescriptionChange={setProjectDescription}
+        optional
+      />
       <Label text="Run on">
         <select
           value={runOn}
@@ -1747,9 +1831,150 @@ function CreateTenantDialog({
               owner_email: email,
               ...(hosted ? { instance_id: runOn } : {}),
               ...(hosted && port.trim() ? { port: Number(port) } : {}),
+              ...(templateID ? { template_id: templateID } : {}),
+              ...(templateID && projectDescription.trim()
+                ? { project_description: projectDescription.trim() }
+                : {}),
             });
             setBusy(false);
             if (!r.ok) setErr(r.error || "failed");
+          }}
+        />
+      </DialogActions>
+    </DialogFrame>
+  );
+}
+
+function TemplatePicker({
+  callTool,
+  value,
+  onChange,
+  description,
+  onDescriptionChange,
+  optional = false,
+}: {
+  callTool: ToolCaller;
+  value: string;
+  onChange: (value: string) => void;
+  description: string;
+  onDescriptionChange: (value: string) => void;
+  optional?: boolean;
+}) {
+  const [templates, setTemplates] = useState<ProjectTemplateSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    callTool<ProjectTemplateListResp>("tenant_template_list", { include_system: true })
+      .then((result) => {
+        if (cancelled) return;
+        setTemplates(result.templates ?? []);
+        setError(null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError((e as Error).message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [callTool]);
+
+  return (
+    <>
+      <Label text={optional ? "Project template (optional)" : "Project template"}>
+        <select
+          value={value}
+          disabled={loading || !!error}
+          onChange={(e) => {
+            const next = e.target.value;
+            onChange(next);
+            const selected = templates.find((template) => template.id === next);
+            onDescriptionChange(selected?.description || selected?.name || "");
+          }}
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text disabled:opacity-60"
+        >
+          <option value="">{loading ? "Loading templates…" : optional ? "No template" : "Select a template"}</option>
+          {templates.map((template) => (
+            <option key={template.id} value={template.id}>
+              {template.name} · {template.source}{template.revision ? ` r${template.revision}` : ""}
+            </option>
+          ))}
+        </select>
+      </Label>
+      {error && (
+        <p className="text-xs text-error -mt-1">
+          Template catalog unavailable: {error}. Refresh Fleet's approved permissions after upgrading.
+        </p>
+      )}
+      {value && (
+        <Label text="Project description">
+          <textarea
+            value={description}
+            onChange={(e) => onDescriptionChange(e.target.value)}
+            rows={3}
+            placeholder="Context inserted into the template's agent directives"
+            className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text resize-y"
+          />
+        </Label>
+      )}
+    </>
+  );
+}
+
+function ApplyTemplateDialog({
+  tenant,
+  callTool,
+  onClose,
+  onSubmit,
+}: {
+  tenant: Tenant;
+  callTool: ToolCaller;
+  onClose: () => void;
+  onSubmit: (args: { template_id: string; project_description?: string }) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const [templateID, setTemplateID] = useState("");
+  const [projectDescription, setProjectDescription] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  return (
+    <DialogFrame title={`Apply template to ${tenant.slug}`} onClose={onClose}>
+      <p className="text-xs text-text-dim mb-3">
+        Copies an exact snapshot from this parent project, then lets the tenant install required apps,
+        create missing agents, and merge dashboard widgets. Existing agents with the same names are preserved.
+      </p>
+      <TemplatePicker
+        callTool={callTool}
+        value={templateID}
+        onChange={setTemplateID}
+        description={projectDescription}
+        onDescriptionChange={setProjectDescription}
+      />
+      {err && <p className="text-xs text-error mt-2">{err}</p>}
+      <DialogActions>
+        <ActionButton label="Cancel" onClick={onClose} />
+        <ActionButton
+          label={busy ? "Applying…" : "Apply"}
+          busy={busy}
+          onClick={async () => {
+            if (!templateID) {
+              setErr("Select a project template");
+              return;
+            }
+            setBusy(true);
+            setErr(null);
+            const result = await onSubmit({
+              template_id: templateID,
+              ...(projectDescription.trim() ? { project_description: projectDescription.trim() } : {}),
+            });
+            setBusy(false);
+            if (!result.ok) setErr(result.error || "failed");
           }}
         />
       </DialogActions>

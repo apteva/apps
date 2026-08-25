@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.9.1
+version: 0.10.0
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -27,6 +27,9 @@ description: |
   v0.9.1 isolates tenant process environments from Fleet's parent-app
   credentials so tenant-owned apps always use tenant-minted callback tokens.
 
+  v0.10.0 reads project templates through the platform SDK and can import and
+  apply them to new or existing Fleet-managed tenants.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
 icon: /ui/icon.svg
@@ -43,6 +46,7 @@ requires:
     - platform.apps.call
     - platform.connections.execute
     - platform.ingress.write
+    - platform.templates.read
   apps:
     - name: a2a
       version: ">=0.4.0"
@@ -80,7 +84,11 @@ provides:
     # inside unquoted scalars — every "Args: …" suffix would trip the
     # parser otherwise (see fleet/v0.2.0's install bug).
     - name: tenant_create
-      description: "Spawn a new apteva tenant. Default (instance_id=0): local process on the parent host under ~/.apteva-fleet/<slug>/. Pass instance_id>0 (Instances app row id) to host on a remote VPS instead — fleet drives spawn/stop/install over SSH via the Instances integration. Pinned to npm apteva@latest by default; override with apteva_version. Args: slug, owner_email, instance_id? (default 0), port? (hosted), apteva_version? (default latest), apteva_bin? (local override)."
+      description: "Spawn a new apteva tenant and optionally import/apply a parent project template. Default (instance_id=0): local process on the parent host; pass instance_id>0 for an Instances VPS. Args: slug, owner_email, template_id?, project_description?, source_project_id?, instance_id?, port?, apteva_version?, apteva_bin?."
+    - name: tenant_template_list
+      description: "List parent-project setup templates Fleet may copy into tenants. Built-ins are included by default. Args: source_project_id?, include_system?."
+    - name: tenant_apply_template
+      description: "Read a parent-project template, import an exact snapshot into an active tenant project, and apply its apps, agents, and dashboard. Args: tenant_id, template_id, project_description?, source_project_id?, target_project_id?."
     - name: tenant_clone
       description: "Clone a Fleet-managed tenant without stopping or modifying the source. Copies into an isolated data dir and clears public domain links. With start=true (default), Fleet requires Apteva 0.25.4+, boots the copy in clone quarantine, verifies every source app runtime was rebased or reconstructed at its exact installed version, then stops the validated rehearsal; tenant_start is the explicit activation step. Args: source_tenant_id, slug, owner_email?, instance_id? (default source host; 0 = local parent, >0 = Instances VPS), port?, start?."
     - name: tenant_attach_key
@@ -178,7 +186,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.9.1
+    ref: fleet/v0.10.0
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

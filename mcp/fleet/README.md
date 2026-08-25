@@ -50,6 +50,28 @@ Fleet v0.9.1 also strips the parent Fleet sidecar's app identity variables
 before spawning a tenant. This prevents tenant-owned apps from accidentally
 using the parent's callback credentials.
 
+## Project template provisioning (v0.10.0)
+
+Fleet can read built-in and project-owned setup templates from the parent
+project and apply an exact snapshot to a managed tenant. The Fleet install must
+approve `platform.templates.read`; existing installations need their approved
+permission snapshot refreshed after upgrading.
+
+- `tenant_template_list` lists the templates visible to the current parent
+  project, including built-ins by default.
+- `tenant_create` accepts `template_id` and an optional
+  `project_description`. After tenant auto-setup, Fleet imports the template
+  into the tenant's default project and calls the tenant setup/apply API.
+- `tenant_apply_template` applies a parent template to an existing active
+  tenant. `target_project_id` disambiguates tenants with multiple projects.
+- If auto-setup falls back to `setup_pending`, Fleet stores the requested
+  template snapshot and resumes application after `tenant_attach_key`.
+
+Template application is intentionally non-destructive. The tenant preserves
+existing agents with matching names, merges dashboard widgets, installs
+missing apps when the tenant API key belongs to an admin, and returns any
+partial-application warnings in the tool result and Fleet event timeline.
+
 ## Quick start
 
 ```sh

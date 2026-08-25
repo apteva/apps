@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.9.1
+version: 0.10.0
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 icon: /ui/icon.svg
@@ -32,6 +32,7 @@ requires:
     - platform.apps.call
     - platform.connections.execute
     - platform.ingress.write
+    - platform.templates.read
   apps:
     - name: a2a
       version: ">=0.4.0"
@@ -66,6 +67,10 @@ provides:
   mcp_tools:
     - name: tenant_create
       description: Spawn a new local apteva tenant.
+    - name: tenant_template_list
+      description: List project templates available for tenant provisioning.
+    - name: tenant_apply_template
+      description: Import and apply a project template to a managed tenant.
     - name: tenant_clone
       description: Clone a Fleet tenant to local or an Instances host without stopping or modifying the source.
     - name: tenant_attach_key
@@ -157,7 +162,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.9.1
+    ref: fleet/v0.10.0
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
@@ -332,20 +337,51 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "tenant_create",
-			Description: "Spawn a new apteva tenant. Default behavior (instance_id=0): local process on the parent host under ~/.apteva-fleet/<slug>/, pinned to npm apteva@latest. Pass instance_id>0 (a row id from the Instances app) to host the tenant on a remote VPS instead — fleet uses instance_run_command over SSH for spawn / stop / version-install / health-probe, with data living at /var/lib/apteva-fleet/<slug>/ on the VPS. Auto-setup orchestrator runs against either; on success returns admin_email + admin_password + api_key (one-shot). Args: slug (required), owner_email (required), instance_id? (default 0 = local), port? (hosted only — default 7100 + tenant-count-on-instance), apteva_version? (default \"latest\"), apteva_bin? (local override only).",
+			Description: "Spawn a new apteva tenant and optionally import/apply a parent project template. Default behavior (instance_id=0): local process on the parent host; pass instance_id>0 for an Instances VPS. Auto-setup returns one-shot admin credentials. Args: slug, owner_email, template_id?, project_description?, source_project_id?, instance_id?, port?, apteva_version?, apteva_bin?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"slug":           map[string]any{"type": "string"},
-					"owner_email":    map[string]any{"type": "string"},
-					"instance_id":    map[string]any{"type": "integer"},
-					"port":           map[string]any{"type": "integer"},
-					"apteva_version": map[string]any{"type": "string"},
-					"apteva_bin":     map[string]any{"type": "string"},
+					"slug":                map[string]any{"type": "string"},
+					"owner_email":         map[string]any{"type": "string"},
+					"instance_id":         map[string]any{"type": "integer"},
+					"port":                map[string]any{"type": "integer"},
+					"apteva_version":      map[string]any{"type": "string"},
+					"apteva_bin":          map[string]any{"type": "string"},
+					"template_id":         map[string]any{"type": "string"},
+					"project_description": map[string]any{"type": "string"},
+					"source_project_id":   map[string]any{"type": "string"},
 				},
 				"required": []string{"slug", "owner_email"},
 			},
 			Handler: a.toolCreate,
+		},
+		{
+			Name:        "tenant_template_list",
+			Description: "List parent-project setup templates Fleet may copy into tenants. Built-ins are included by default. Args: source_project_id?, include_system?",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"source_project_id": map[string]any{"type": "string"},
+					"include_system":    map[string]any{"type": "boolean"},
+				},
+			},
+			Handler: a.toolTenantTemplateList,
+		},
+		{
+			Name:        "tenant_apply_template",
+			Description: "Read a parent-project template, import an exact snapshot into an active tenant project, and apply its apps, agents, and dashboard. Args: tenant_id, template_id, project_description?, source_project_id?, target_project_id?",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id":           map[string]any{"type": "string"},
+					"template_id":         map[string]any{"type": "string"},
+					"project_description": map[string]any{"type": "string"},
+					"source_project_id":   map[string]any{"type": "string"},
+					"target_project_id":   map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id", "template_id"},
+			},
+			Handler: a.toolTenantApplyTemplate,
 		},
 		{
 			Name:        "tenant_clone",
