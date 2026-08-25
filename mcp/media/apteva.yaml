@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.92
+version: 0.13.93
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -18,6 +18,10 @@ description: |
   via the optional `render_executor` integration role — local ffmpeg
   by default, Cloudinary when bound. A wedged encode releases its
   slot without disturbing the indexer.
+
+  v0.13.93 adds arbitrary versioned workflow metadata on media rows,
+  atomic conditional JSON merge patches, metadata equality filters in
+  media_search, and a conflict-safe JSON metadata editor in the Media panel.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media
@@ -105,13 +109,13 @@ provides:
   mcp_tools:
     # Catalog (existing)
     - name: media_get
-      description: Fetch one media record by storage file_id (probe + derivation pointers). The returned url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads.
+      description: Fetch one media record by storage file_id, including arbitrary metadata + metadata_version, probe fields, and derivation pointers. The returned url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads.
     - name: media_analyze
       description: Analyze an existing image, video, or audio source without modifying it. Returns encoding metadata, decode integrity, visual measurements and black/frozen segments, plus LUFS/peak/RMS/silence audio measurements where applicable. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. Creates no render, derivation, or Storage object. Args — file_id, depth? (standard|full), start_ms?, end_ms?, silence_threshold_db?, silence_min_ms?.
     - name: media_ask
       description: Ask a grounded question using the configured descriptions vision/chat integration and only artifacts that already exist. Images use an existing thumbnail or source object; videos use the canonical thumbnail and cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports the actual timestamp; audio uses an existing completed transcript. Never runs ffmpeg, generates frames/derivations, or writes files. Args — file_id, question, at_ms?, frame_count? (1-8), include_transcript?.
     - name: media_search
-      description: Search the catalog with q, filename, or title plus folder, folder_scope (exact|subtree), media_type, aspect (portrait|landscape|square|reel|wide), duration, audience rating, dimensions, and codec filters. exact is the default and searches only the supplied folder; subtree includes every descendant. Empty exact searches report matching descendants and an actionable retry rather than silently broadening. Returns compact discovery rows by default; call media_get for complete metadata and source URLs. Default limit 20, maximum 100; use next_cursor when has_more is true. detail and include_raw_probe are opt-in. recursive remains a compatibility alias for folder_scope.
+      description: Search the catalog with q, filename, or title plus folder, folder_scope (exact|subtree), media_type, aspect (portrait|landscape|square|reel|wide), duration, audience rating, dimensions, codec, and arbitrary metadata_filters equality predicates. exact is the default and searches only the supplied folder; subtree includes every descendant. Empty exact searches report matching descendants and an actionable retry rather than silently broadening. Returns compact discovery rows by default; call media_get for complete metadata and source URLs. Default limit 20, maximum 100; use next_cursor when has_more is true. detail and include_raw_probe are opt-in. recursive remains a compatibility alias for folder_scope.
     - name: media_list_folders
       description: List immediate child folders of `parent` that contain media. Args - parent (default "/"). Mirrors storage's files_list_folders semantics; only folders with at least one audio/video/image row appear.
     - name: media_create_folder
@@ -269,6 +273,8 @@ provides:
     # Catalog metadata — agent/user-supplied prose on media rows.
     - name: media_set_description
       description: Set title / description / alt_text on a media row. Partial update (omitted fields preserved). Empty string clears.
+    - name: media_patch_metadata
+      description: Atomically apply an RFC 7396 merge patch to arbitrary workflow metadata. Optional metadata.* path conditions and expected_metadata_version provide compare-and-swap updates; failed conditions never overwrite concurrent state.
 
     # Audience rating + keyframes (v0.13.0+)
     - name: media_set_audience_rating
@@ -396,10 +402,11 @@ provides:
         text_chars: integer
 
     - name: media.updated
-      description: A media row's metadata was updated (move, rename, re-index, manual description edit, etc.).
+      description: A media row was updated (move, rename, re-index, manual description edit, workflow metadata patch, etc.).
       payload:
         file_id: string
-        change: string                  # moved | renamed | reindexed | described | transcript_set
+        change: string                  # moved | renamed | reindexed | described | transcript_set | metadata_patched
+        metadata_version: integer       # present for metadata_patched
 
     - name: media.deleted
       description: A media row was removed because the underlying storage file is gone.
@@ -493,7 +500,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.13.92
+    ref: media/v0.13.93
     entry: mcp/media
   port: 8080
   health_check: /health

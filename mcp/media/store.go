@@ -69,6 +69,13 @@ type MediaRow struct {
 
 	RawProbe json.RawMessage `json:"raw_probe,omitempty"`
 
+	// Consumer-owned workflow metadata. Unlike probe fields, these columns
+	// are never written by upsertMedia, so re-indexing preserves them. Version
+	// is a monotonic compare-and-swap revision incremented by
+	// media_patch_metadata.
+	Metadata        json.RawMessage `json:"metadata"`
+	MetadataVersion int64           `json:"metadata_version"`
+
 	// User/agent-supplied prose. Written via media_set_description;
 	// never touched by upsertMedia (the indexer's probe upsert) so a
 	// reprobe never wipes them.
@@ -697,6 +704,7 @@ func getMedia(db *sql.DB, projectID, fileID string) (*MediaRow, error) {
 			COALESCE(m.description_attempted_at, ''), m.description_error,
 			COALESCE(t.status, ''),
 			m.audience_rating, m.audience_reasoning, COALESCE(m.audience_updated_at, ''),
+			m.metadata, m.metadata_version,
 			m.created_at, m.updated_at
 		FROM media m
 		LEFT JOIN transcripts t
@@ -727,6 +735,7 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		descSource, descUpdatedAt      string
 		descAttemptedAt, descError     string
 		transcriptStatus               string
+		metadata                       string
 	)
 	err := row.Scan(
 		&m.FileID, &m.ProjectID, &m.SourceSHA256, &m.Folder, &m.Name,
@@ -739,6 +748,7 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		&descSource, &descUpdatedAt, &descAttemptedAt, &descError,
 		&transcriptStatus,
 		&m.AudienceRating, &m.AudienceReasoning, &m.AudienceUpdatedAt,
+		&metadata, &m.MetadataVersion,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -772,6 +782,10 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 	if rawProbe != "" {
 		m.RawProbe = json.RawMessage(rawProbe)
 	}
+	if metadata == "" {
+		metadata = "{}"
+	}
+	m.Metadata = json.RawMessage(metadata)
 	return &m, nil
 }
 
@@ -817,6 +831,10 @@ type SearchFilters struct {
 	// status string when callers want "exclude adult" semantics.
 	AudienceRatingIn    []string
 	AudienceRatingNotIn []string
+	// MetadataFilters are type-sensitive scalar equality predicates over
+	// validated dotted paths such as metadata.patreon.status. All predicates
+	// are ANDed with the standard catalog filters.
+	MetadataFilters []MetadataCondition
 }
 
 const (
@@ -963,6 +981,15 @@ func buildMediaSearchWhere(projectID string, f SearchFilters) ([]string, []any) 
 			args = append(args, r)
 		}
 	}
+	for _, filter := range f.MetadataFilters {
+		if filter.Value == nil {
+			clauses = append(clauses, "json_type(m.metadata, ?) = 'null'")
+			args = append(args, filter.JSONPath)
+		} else {
+			clauses = append(clauses, "json_extract(m.metadata, ?) = ?")
+			args = append(args, filter.JSONPath, filter.Value)
+		}
+	}
 	return clauses, args
 }
 
@@ -1001,6 +1028,7 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		COALESCE(m.description_attempted_at, ''), m.description_error,
 		COALESCE(t.status, ''),
 		m.audience_rating, m.audience_reasoning, COALESCE(m.audience_updated_at, ''),
+		m.metadata, m.metadata_version,
 		m.created_at, m.updated_at
 	FROM media m
 	LEFT JOIN transcripts t

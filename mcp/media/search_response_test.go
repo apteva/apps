@@ -223,7 +223,7 @@ func TestMediaSearchToolDescriptionGuidesTwoStepFlow(t *testing.T) {
 			}
 		}
 		properties := tool.InputSchema["properties"].(map[string]any)
-		for _, name := range []string{"q", "filename", "title", "folder_scope", "recursive", "cursor", "detail", "include_raw_probe"} {
+		for _, name := range []string{"q", "filename", "title", "folder_scope", "recursive", "metadata_filters", "cursor", "detail", "include_raw_probe"} {
 			if _, ok := properties[name]; !ok {
 				t.Errorf("media_search schema missing %q", name)
 			}

@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.92
+version: 0.13.93
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,7 +31,9 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage.
+  through storage. v0.13.93 adds arbitrary versioned workflow metadata,
+  atomic conditional merge patches, metadata search filters, and a JSON
+  metadata editor in the Media panel.
 author: Apteva
 scopes: [project, global]
 min_apteva_version: "0.25.9"
@@ -105,10 +107,10 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_get,             description: "Fetch one media record by storage file_id. The returned url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads." }
+    - { name: media_get,             description: "Fetch one media record by storage file_id, including arbitrary metadata and metadata_version. The returned url is a fresh public/signed fetch URL suitable for third-party ingestion." }
     - { name: media_analyze,         description: "Read-only technical and quality analysis for an image, video, or audio file. Returns encoding metadata, decode integrity, visual measurements and timeline anomalies, and audio loudness/peak/silence measurements where applicable. Creates no artifacts." }
     - { name: media_ask,             description: "Ask a grounded question using only existing source images, cached thumbnails/keyframes, and completed transcripts. Never runs ffmpeg, creates derivations, or writes files." }
-    - { name: media_search,          description: "Compact catalog discovery with q/filename/title, folder_scope exact|subtree, type, aspect, duration, rating, dimensions, and codec filters. Empty exact searches diagnose matching descendants; call media_get for full details." }
+    - { name: media_search,          description: "Compact catalog discovery with q/filename/title, folder_scope exact|subtree, type, aspect, duration, rating, dimensions, codec, and arbitrary metadata equality filters. Empty exact searches diagnose matching descendants; call media_get for full details." }
     - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
     - { name: media_create_folder,   description: "Create an empty folder in storage that media files can later land in. Idempotent. Args - path." }
     - { name: media_move,            description: "Move and/or rename a media file in storage. Media's row auto-updates via the file.updated event handler. Args - file_id, folder?, name?." }
@@ -247,6 +249,7 @@ provides:
     - { name: media_list_renders,    description: "List renders filtered by status / operation." }
     - { name: media_cancel_render,   description: "Cancel a pending or running render. Idempotent." }
     - { name: media_set_description, description: "Set title / description / alt_text on a media row. Partial update; omitted fields preserved." }
+    - { name: media_patch_metadata,  description: "Atomically merge-patch arbitrary workflow metadata with optional path conditions and metadata-version compare-and-swap." }
     - { name: media_set_audience_rating, description: "Override audience rating (general | mature | adult | unrated). 'unrated' clears and re-queues for the describer." }
     - { name: media_get_keyframes,   description: "Storyboard frames for a video as [{position_ms, storage_file_id, url}, …]." }
     - { name: media_transcribe,      description: "Queue a transcription for one media file. Returns transcript_id; poll media_get_transcript." }
@@ -281,7 +284,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.13.92
+    ref: media/v0.13.93
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -451,7 +454,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "media_get",
-			Description: "Fetch one media record by storage file_id. Returns display-space width/height/orientation + derivation pointers. The returned media.url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true.",
+			Description: "Fetch one media record by storage file_id. Returns arbitrary metadata + metadata_version, display-space width/height/orientation, and derivation pointers. The returned media.url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":           map[string]any{"type": "string"},
 				"include_raw_probe": map[string]any{"type": "boolean"},
@@ -485,7 +488,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_search",
-			Description: "Search the media catalog before calling media_get. Use q for a case-insensitive match across filename, title, description, and alt text; use filename or title for narrower matching. With folder, folder_scope='exact' (the default) searches only that folder; folder_scope='subtree' searches it and every descendant. Namespace roots such as /hgv, /ashley, /monika, /alexa, and /lily normally require subtree. An empty exact result does not prove its subtree is empty: inspect has_matching_descendants and retry_recommended. Results are compact discovery rows (file_id, filename/title, type, duration, dimensions, folder, thumbnail) by default. Filters include folder, media_type, aspect (portrait|landscape|square|reel|wide), duration, rating, dimensions, and codec. Call media_get with the chosen file_id for complete metadata and source URLs. Default limit is 20, maximum 100. If has_more is true, repeat the same filters with next_cursor. detail and include_raw_probe are exceptional opt-ins.",
+			Description: "Search the media catalog before calling media_get. Use q for a case-insensitive match across filename, title, description, and alt text; use filename or title for narrower matching. With folder, folder_scope='exact' (the default) searches only that folder; folder_scope='subtree' searches it and every descendant. Namespace roots such as /hgv, /ashley, /monika, /alexa, and /lily normally require subtree. An empty exact result does not prove its subtree is empty: inspect has_matching_descendants and retry_recommended. Results are compact discovery rows (file_id, filename/title, type, duration, dimensions, folder, thumbnail) by default. Filters include folder, media_type, aspect (portrait|landscape|square|reel|wide), duration, rating, dimensions, codec, and metadata_filters exact matches such as {'metadata.patreon.status':'ready'}. Call media_get with the chosen file_id for complete metadata and source URLs. Default limit is 20, maximum 100. If has_more is true, repeat the same filters with next_cursor. detail and include_raw_probe are exceptional opt-ins.",
 			InputSchema: schemaObject(map[string]any{
 				"q":               map[string]any{"type": "string", "description": "Case-insensitive contains match across filename, title, description, and alt text."},
 				"filename":        map[string]any{"type": "string", "description": "Case-insensitive contains match on the storage filename only."},
@@ -507,6 +510,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"width_max":   map[string]any{"type": "integer"},
 				"video_codec": map[string]any{"type": "string"},
 				"audio_codec": map[string]any{"type": "string"},
+				"metadata_filters": map[string]any{
+					"type":                 "object",
+					"maxProperties":        maxMediaMetadataConditions,
+					"additionalProperties": map[string]any{"type": []string{"string", "number", "boolean", "null"}},
+					"description":          "Type-sensitive equality filters keyed by validated dotted paths beginning metadata., for example {'metadata.site_id':'monika','metadata.patreon.status':'ready'}. All filters are ANDed.",
+				},
 				"audience_rating": map[string]any{
 					"oneOf": []map[string]any{
 						{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}},
@@ -749,6 +758,25 @@ func (a *App) MCPTools() []sdk.Tool {
 				"alt_text":    map[string]any{"type": "string"},
 			}, []string{"file_id"}),
 			Handler: a.toolSetDescription,
+		},
+		{
+			Name:        "media_patch_metadata",
+			Description: "Atomically apply an RFC 7396 merge patch to a media row's arbitrary workflow metadata. Nested objects merge and null deletes a field. conditions is an optional map of exact scalar predicates keyed by paths such as metadata.patreon.status; the write occurs only when all still match. expected_metadata_version optionally adds optimistic compare-and-swap. Returns updated=false with reason not_found, condition_failed, metadata_version_mismatch, or metadata_too_large instead of overwriting concurrent work.",
+			InputSchema: schemaObject(map[string]any{
+				"file_id": map[string]any{"type": "string"},
+				"patch": map[string]any{
+					"type":        "object",
+					"description": "RFC 7396 JSON Merge Patch. Nested objects merge; null deletes a field.",
+				},
+				"conditions": map[string]any{
+					"type":                 "object",
+					"maxProperties":        maxMediaMetadataConditions,
+					"additionalProperties": map[string]any{"type": []string{"string", "number", "boolean", "null"}},
+					"description":          "Optional exact-match preconditions keyed by metadata.* dotted paths.",
+				},
+				"expected_metadata_version": map[string]any{"type": "integer", "minimum": 0},
+			}, []string{"file_id", "patch"}),
+			Handler: a.toolPatchMetadata,
 		},
 		{
 			Name:        "media_set_audience_rating",
@@ -1329,6 +1357,10 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	f.OrderBy, _ = args["order_by"].(string)
 	f.AudienceRatingIn = ratingFilterArg(args["audience_rating"])
 	f.AudienceRatingNotIn = ratingFilterArg(args["exclude_audience_rating"])
+	f.MetadataFilters, err = parseMetadataConditions(args["metadata_filters"], "metadata_filters")
+	if err != nil {
+		return nil, err
+	}
 	rows, err := searchMedia(ctx.AppDB(), pid, f)
 	if err != nil {
 		return nil, err

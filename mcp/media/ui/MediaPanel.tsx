@@ -136,6 +136,11 @@ interface MediaRow {
   probe_status: "pending" | "ok" | "failed" | "unsupported" | "skipped_size";
   probe_error?: string;
   raw_probe?: unknown;
+  // v0.13.93 — arbitrary consumer-owned workflow state. The revision is
+  // incremented on every successful conditional merge patch and is sent back
+  // by the editor as an optimistic concurrency precondition.
+  metadata?: Record<string, unknown>;
+  metadata_version?: number;
   // v0.3 — user/agent-supplied prose. Survives reprobe.
   title?: string;
   description?: string;
@@ -170,6 +175,15 @@ interface TranscriptSegment {
   end_ms: number;
   text: string;
   speaker?: string;
+}
+
+interface MetadataPatchResponse {
+  found: boolean;
+  updated: boolean;
+  reason?: "not_found" | "condition_failed" | "metadata_version_mismatch" | "metadata_too_large";
+  file_id: string;
+  metadata: Record<string, unknown>;
+  metadata_version: number;
 }
 
 const API = "/api/apps/media";
@@ -452,6 +466,57 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         prev.map((r) => (r.file_id === fileId ? { ...r, ...fields } : r)),
       );
       setSelected((prev) => (prev && prev.file_id === fileId ? { ...prev, ...fields } : prev));
+    },
+    [withMediaParams],
+  );
+
+  // saveMetadata deliberately calls the public MCP tool instead of a private
+  // panel-only endpoint. UI edits therefore exercise the exact same atomic
+  // merge-patch and compare-and-swap path as agents and other apps.
+  const saveMetadata = useCallback(
+    async (fileId: string, patch: Record<string, unknown>, expectedVersion: number) => {
+      const res = await fetch(`${API}/mcp?${withMediaParams()}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "media_patch_metadata",
+            arguments: {
+              file_id: fileId,
+              patch,
+              expected_metadata_version: expectedVersion,
+            },
+          },
+        }),
+      });
+      const payload = await res.json().catch(() => null) as null | {
+        error?: { message?: string };
+        result?: { isError?: boolean; content?: Array<{ text?: string }> };
+      };
+      if (!res.ok || payload?.error) {
+        throw new Error(payload?.error?.message || `HTTP ${res.status}`);
+      }
+      if (payload?.result?.isError) {
+        throw new Error(payload.result.content?.[0]?.text || "media_patch_metadata failed");
+      }
+      const text = payload?.result?.content?.find((item) => item.text)?.text;
+      if (!text) throw new Error("media_patch_metadata returned no result");
+      const result = JSON.parse(text) as MetadataPatchResponse;
+      const fields = {
+        metadata: result.metadata || {},
+        metadata_version: result.metadata_version || 0,
+      };
+      // Even a failed compare-and-swap returns the current server value. Put it
+      // into panel state immediately so the editor can show what won the race.
+      if (result.found) {
+        setRows((prev) => prev.map((r) => (r.file_id === fileId ? { ...r, ...fields } : r)));
+        setSelected((prev) => (prev && prev.file_id === fileId ? { ...prev, ...fields } : prev));
+      }
+      return result;
     },
     [withMediaParams],
   );
@@ -805,6 +870,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           onReindex={() => handleReindex(selected.file_id)}
           onDelete={() => deleteMedia(selected.file_id)}
           onSaveDescription={(fields) => saveDescription(selected.file_id, fields)}
+          onSaveMetadata={(patch, expectedVersion) => saveMetadata(selected.file_id, patch, expectedVersion)}
           onTranscribe={(force) => queueTranscribe(selected.file_id, force)}
           previewBase={`${STORAGE}/files`}
           apiBase={API}
@@ -825,6 +891,7 @@ function DetailDrawer({
   onReindex,
   onDelete,
   onSaveDescription,
+  onSaveMetadata,
   onTranscribe,
   previewBase,
   apiBase,
@@ -839,6 +906,7 @@ function DetailDrawer({
   onReindex: () => void;
   onDelete: () => Promise<void>;
   onSaveDescription: (fields: { title?: string; description?: string; alt_text?: string }) => Promise<void>;
+  onSaveMetadata: (patch: Record<string, unknown>, expectedVersion: number) => Promise<MetadataPatchResponse>;
   onTranscribe: (force: boolean) => Promise<void>;
   previewBase: string;
   apiBase: string;
@@ -952,6 +1020,7 @@ function DetailDrawer({
             Open source file ↗
           </a>
           <DescriptionEditor row={row} onSave={onSaveDescription} />
+          <MetadataEditor row={row} onSave={onSaveMetadata} />
           <AudienceRatingSection row={row} apiBase={apiBase} query={mediaQuery} />
           <KeyframesStrip row={row} previewBase={previewBase} query={storageQuery} />
           <OperationsSection
@@ -2732,6 +2801,190 @@ function DescriptionEditor({
       </div>
     </section>
   );
+}
+
+// MetadataEditor exposes arbitrary workflow state without inventing a fixed
+// form schema. It computes an RFC 7396 merge patch from the edited object, so
+// omitted keys are translated to null deletions, and saves with the revision
+// that was visible when editing began. A concurrent winner is returned by the
+// server and displayed instead of being overwritten.
+function MetadataEditor({
+  row,
+  onSave,
+}: {
+  row: MediaRow;
+  onSave: (patch: Record<string, unknown>, expectedVersion: number) => Promise<MetadataPatchResponse>;
+}) {
+  const current = isJSONObject(row.metadata) ? row.metadata : {};
+  const version = row.metadata_version || 0;
+  const [editing, setEditing] = useState(false);
+  const [jsonText, setJSONText] = useState(() => formatMetadataJSON(current));
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    setJSONText(formatMetadataJSON(isJSONObject(row.metadata) ? row.metadata : {}));
+    setEditing(false);
+    setErr("");
+  }, [row.file_id]);
+
+  const beginEdit = () => {
+    setJSONText(formatMetadataJSON(current));
+    setErr("");
+    setEditing(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setErr("");
+    try {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(jsonText);
+      } catch (e) {
+        throw new Error(`Invalid JSON: ${(e as Error).message}`);
+      }
+      if (!isJSONObject(parsed)) {
+        throw new Error("Metadata must be a JSON object.");
+      }
+      if (new TextEncoder().encode(JSON.stringify(parsed)).length > 16 * 1024) {
+        throw new Error("Metadata must be 16 KB or smaller.");
+      }
+      const patch = buildMetadataMergePatch(current, parsed);
+      if (Object.keys(patch).length === 0) {
+        setEditing(false);
+        return;
+      }
+      const result = await onSave(patch, version);
+      setJSONText(formatMetadataJSON(result.metadata || {}));
+      if (!result.updated) {
+        const messages: Record<string, string> = {
+          metadata_version_mismatch: "Metadata changed elsewhere. The current server value is shown; review it before saving again.",
+          condition_failed: "The update condition no longer matches. The current server value is shown.",
+          metadata_too_large: "The merged metadata would exceed 16 KB.",
+          not_found: "This media record no longer exists.",
+        };
+        setErr(messages[result.reason || ""] || "Metadata was not updated.");
+        return;
+      }
+      setEditing(false);
+    } catch (e) {
+      setErr((e as Error).message || String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!editing) {
+    const empty = Object.keys(current).length === 0;
+    return (
+      <section>
+        <div className="flex items-center justify-between mb-1 gap-2">
+          <div className="flex items-center gap-2">
+            <h3 className="text-xs uppercase tracking-wide text-text-dim">Metadata</h3>
+            <span className="text-[10px] font-mono text-text-dim border border-border rounded px-1">
+              v{version}
+            </span>
+          </div>
+          <button type="button" onClick={beginEdit} className="text-xs text-accent hover:underline">
+            {empty ? "Add metadata" : "Edit JSON"}
+          </button>
+        </div>
+        {empty ? (
+          <div className="text-xs text-text-dim italic">No workflow metadata.</div>
+        ) : (
+          <pre className="bg-bg-input border border-border rounded p-2 overflow-auto max-h-64 text-[11px]">
+            {formatMetadataJSON(current)}
+          </pre>
+        )}
+      </section>
+    );
+  }
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-1 gap-2">
+        <h3 className="text-xs uppercase tracking-wide text-text-dim">Metadata JSON</h3>
+        <span className="text-[10px] font-mono text-text-dim">editing v{version}</span>
+      </div>
+      <textarea
+        value={jsonText}
+        onChange={(e) => setJSONText(e.target.value)}
+        rows={12}
+        spellCheck={false}
+        disabled={saving}
+        className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
+      />
+      <div className="text-[10px] text-text-dim mt-1">
+        Maximum 16 KB. Removing a key deletes it; JSON null also means delete under merge-patch semantics.
+      </div>
+      {err ? <div className="text-red text-xs mt-2">{err}</div> : null}
+      <div className="flex items-center gap-2 mt-2">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={saving}
+          className="px-3 py-1 text-sm bg-accent text-bg rounded hover:opacity-90 disabled:opacity-40"
+        >
+          {saving ? "Saving…" : "Save metadata"}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setJSONText(formatMetadataJSON(current));
+            setEditing(false);
+            setErr("");
+          }}
+          disabled={saving}
+          className="px-3 py-1 text-sm border border-border text-text-muted rounded hover:bg-bg-input disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function isJSONObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function formatMetadataJSON(value: Record<string, unknown>): string {
+  return JSON.stringify(value, null, 2);
+}
+
+function sameJSONValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((value, index) => sameJSONValue(value, b[index]));
+  }
+  if (isJSONObject(a) && isJSONObject(b)) {
+    const aKeys = Object.keys(a).sort();
+    const bKeys = Object.keys(b).sort();
+    return aKeys.length === bKeys.length &&
+      aKeys.every((key, index) => key === bKeys[index] && sameJSONValue(a[key], b[key]));
+  }
+  return false;
+}
+
+function buildMetadataMergePatch(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+  for (const key of Object.keys(before)) {
+    if (!(key in after)) patch[key] = null;
+  }
+  for (const [key, value] of Object.entries(after)) {
+    const previous = before[key];
+    if (isJSONObject(previous) && isJSONObject(value)) {
+      const nested = buildMetadataMergePatch(previous, value);
+      if (Object.keys(nested).length > 0) patch[key] = nested;
+    } else if (!sameJSONValue(previous, value)) {
+      patch[key] = value;
+    }
+  }
+  return patch;
 }
 
 // ─── Transcripts ───────────────────────────────────────────────────

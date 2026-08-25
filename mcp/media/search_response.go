@@ -127,6 +127,9 @@ func mediaSearchQueryEcho(f SearchFilters) map[string]any {
 	if len(f.AudienceRatingNotIn) > 0 {
 		query["exclude_audience_rating"] = append([]string(nil), f.AudienceRatingNotIn...)
 	}
+	if filters := metadataConditionsEcho(f.MetadataFilters); len(filters) > 0 {
+		query["metadata_filters"] = filters
+	}
 	putString("order_by", f.OrderBy)
 	return query
 }
