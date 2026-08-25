@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.15.0
+version: 0.15.1
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -4139,6 +4139,7 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		urlArgs := map[string]any{
 			"id":          id,
 			"ttl_seconds": 3600,
+			"delivery":    "apteva",
 		}
 		if projectID != "" {
 			urlArgs["_project_id"] = projectID

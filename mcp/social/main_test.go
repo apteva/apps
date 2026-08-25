@@ -2268,6 +2268,45 @@ func TestPostCreate_TargetsStillRequireResolvedBody(t *testing.T) {
 	}
 }
 
+func TestResolveMediaRequestsAptevaDelivery(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":296,\"content_type\":\"video/mp4\",\"size_bytes\":1024}"}]}}`,
+	)
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://agents.example.com/api/apps/storage/files/296/content/video.mp4?sig=abc\"}"}]}}`,
+	)
+	ctx := newSocialCtx(t, pf)
+
+	media, err := (&App{}).resolveMedia(ctx, []int64{296}, "media-proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(media) != 1 {
+		t.Fatalf("resolved media count = %d, want 1", len(media))
+	}
+
+	var getURLCall *callAppCall
+	for i := range pf.callAppCalls {
+		if pf.callAppCalls[i].AppName == "storage" && pf.callAppCalls[i].Tool == "files_get_url" {
+			getURLCall = &pf.callAppCalls[i]
+			break
+		}
+	}
+	if getURLCall == nil {
+		t.Fatal("storage files_get_url was not called")
+	}
+	if got := getURLCall.Input["delivery"]; got != "apteva" {
+		t.Fatalf("files_get_url delivery = %v, want apteva; input=%+v", got, getURLCall.Input)
+	}
+	if got := getURLCall.Input["ttl_seconds"]; got != 3600 {
+		t.Fatalf("files_get_url ttl_seconds = %v, want 3600", got)
+	}
+	if got := getURLCall.Input["_project_id"]; got != "media-proj" {
+		t.Fatalf("files_get_url _project_id = %v, want media-proj", got)
+	}
+}
+
 func TestPostCreate_FacebookImageUsesPhotoToolAndStorageProject(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.callAppResponses["storage:files_get"] = json.RawMessage(
