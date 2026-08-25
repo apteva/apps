@@ -13,13 +13,17 @@ import (
 )
 
 type ObjectiveMetricQuery struct {
-	Aggregation string         `json:"aggregation"`
-	App         string         `json:"app,omitempty"`
-	Topic       string         `json:"topic,omitempty"`
-	Source      string         `json:"source,omitempty"`
-	Value       string         `json:"value,omitempty"`
-	By          string         `json:"by,omitempty"`
-	Where       map[string]any `json:"where,omitempty"`
+	Aggregation       string         `json:"aggregation"`
+	App               string         `json:"app,omitempty"`
+	Topic             string         `json:"topic,omitempty"`
+	Source            string         `json:"source,omitempty"`
+	Value             string         `json:"value,omitempty"`
+	By                string         `json:"by,omitempty"`
+	Where             map[string]any `json:"where,omitempty"`
+	CurrencyField     string         `json:"currency_field,omitempty"`
+	ReportingCurrency string         `json:"reporting_currency,omitempty"`
+	AmountUnit        string         `json:"amount_unit,omitempty"`
+	RateDateField     string         `json:"rate_date_field,omitempty"`
 
 	// These selectors are owned by the target and platform context. Keeping
 	// them in the decoder lets us reject attempts to smuggle scope into a query.
@@ -109,6 +113,7 @@ func objectiveMetricDefinitions() []ObjectiveMetricDefinition {
 		{Key: "page_views", Name: "Page views", Description: "Count page_view events.", DefaultUnit: "count", Query: ObjectiveMetricQuery{Aggregation: "count", Topic: "page_view"}},
 		{Key: "unique_sessions", Name: "Unique sessions", Description: "Count distinct sessions for matching events.", DefaultUnit: "count", Query: ObjectiveMetricQuery{Aggregation: "distinct", By: "session_id"}},
 		{Key: "custom_sum", Name: "Sum a property", Description: "Sum a numeric event property such as props.amount_usd.", DefaultUnit: "number", Query: ObjectiveMetricQuery{Aggregation: "sum", Value: "props.value"}},
+		{Key: "money_sum", Name: "Money total", Description: "Convert mixed-currency event amounts into one reporting currency and sum them without changing source events.", DefaultUnit: "money", Query: ObjectiveMetricQuery{Aggregation: "sum_money", Value: "props.amount_cents", CurrencyField: "props.currency", ReportingCurrency: "EUR", AmountUnit: "minor"}},
 		{Key: "custom_average", Name: "Average a property", Description: "Average a numeric event property.", DefaultUnit: "number", Query: ObjectiveMetricQuery{Aggregation: "average", Value: "props.value"}},
 		{Key: "custom_min", Name: "Minimum property value", Description: "Measure the minimum numeric value in the target period.", DefaultUnit: "number", Query: ObjectiveMetricQuery{Aggregation: "min", Value: "props.value"}},
 		{Key: "custom_max", Name: "Maximum property value", Description: "Measure the maximum numeric value in the target period.", DefaultUnit: "number", Query: ObjectiveMetricQuery{Aggregation: "max", Value: "props.value"}},
@@ -202,7 +207,18 @@ func validateObjectiveTarget(t *ObjectiveTarget) error {
 	if _, err := time.LoadLocation(t.Timezone); err != nil {
 		return fmt.Errorf("invalid timezone %q", t.Timezone)
 	}
-	return validateObjectiveMetricQuery(&t.Query)
+	if err := validateObjectiveMetricQuery(&t.Query); err != nil {
+		return err
+	}
+	if t.Query.Aggregation == "sum_money" {
+		if t.Unit != "money" {
+			return errors.New("sum_money targets must use the money unit")
+		}
+		if t.Currency != t.Query.ReportingCurrency {
+			return errors.New("money target currency must match query reporting_currency")
+		}
+	}
+	return nil
 }
 
 func validateObjectiveMetricQuery(q *ObjectiveMetricQuery) error {
@@ -215,11 +231,15 @@ func validateObjectiveMetricQuery(q *ObjectiveMetricQuery) error {
 	q.Source = strings.TrimSpace(q.Source)
 	q.Value = strings.TrimSpace(q.Value)
 	q.By = strings.TrimSpace(q.By)
+	q.CurrencyField = strings.TrimSpace(q.CurrencyField)
+	q.ReportingCurrency = strings.ToUpper(strings.TrimSpace(q.ReportingCurrency))
+	q.AmountUnit = strings.ToLower(strings.TrimSpace(q.AmountUnit))
+	q.RateDateField = strings.TrimSpace(q.RateDateField)
 	if q.ProjectID != "" || q.Since != 0 || q.Until != 0 || q.Window != "" {
 		return errors.New("project_id and time range are assigned by the objective target")
 	}
-	if !oneOf(q.Aggregation, "count", "distinct", "sum", "average", "min", "max", "latest", "change") {
-		return errors.New("query aggregation must be count, distinct, sum, average, min, max, latest or change")
+	if !oneOf(q.Aggregation, "count", "distinct", "sum", "sum_money", "average", "min", "max", "latest", "change") {
+		return errors.New("query aggregation must be count, distinct, sum_money, sum, average, min, max, latest or change")
 	}
 	if q.Source != "" && !oneOf(q.Source, "track", "auto") {
 		return errors.New("query source must be track or auto")
@@ -227,9 +247,20 @@ func validateObjectiveMetricQuery(q *ObjectiveMetricQuery) error {
 	switch q.Aggregation {
 	case "count":
 		q.Value, q.By = "", ""
+		q.CurrencyField, q.ReportingCurrency, q.AmountUnit, q.RateDateField = "", "", "", ""
 	case "sum", "average", "min", "max", "latest", "change":
 		if _, _, ok := numericValueExtract(q.Value); !ok {
 			return fmt.Errorf("%s query value must be a numeric event field or props.X", q.Aggregation)
+		}
+		q.By = ""
+		q.CurrencyField, q.ReportingCurrency, q.AmountUnit, q.RateDateField = "", "", "", ""
+	case "sum_money":
+		if _, err := moneyQueryFromConfig(map[string]any{
+			"value": q.Value, "currency_field": q.CurrencyField,
+			"reporting_currency": q.ReportingCurrency, "amount_unit": q.AmountUnit,
+			"rate_date_field": q.RateDateField,
+		}); err != nil {
+			return err
 		}
 		q.By = ""
 	case "distinct":
@@ -237,6 +268,7 @@ func validateObjectiveMetricQuery(q *ObjectiveMetricQuery) error {
 			return errors.New("distinct query by must be session_id, user_id, app, topic, source or props.X")
 		}
 		q.Value = ""
+		q.CurrencyField, q.ReportingCurrency, q.AmountUnit, q.RateDateField = "", "", "", ""
 	}
 	for key := range q.Where {
 		if _, ok := propsExtract(key); !ok {
@@ -502,6 +534,23 @@ func measureObjectiveTarget(db *sql.DB, projectID string, target ObjectiveTarget
 			}
 		}
 		details["value"] = target.Query.Value
+	case "sum_money":
+		var result map[string]any
+		result, err = moneyScalarForWidget(db, f, map[string]any{
+			"value":              target.Query.Value,
+			"currency_field":     target.Query.CurrencyField,
+			"reporting_currency": target.Query.ReportingCurrency,
+			"amount_unit":        target.Query.AmountUnit,
+			"rate_date_field":    target.Query.RateDateField,
+		})
+		if result != nil {
+			actual, _ = result["value"].(float64)
+			details["matched_values"] = result["count"]
+			details["value"] = target.Query.Value
+			details["currency"] = result["currency"]
+			details["breakdown"] = result["breakdown"]
+			details["fx"] = result["fx"]
+		}
 	case "distinct":
 		var count int64
 		count, err = distinctCount(db, f, target.Query.By)

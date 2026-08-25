@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.11.3
+version: 0.12.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -64,6 +64,9 @@ description: |
   v0.11.2 keeps area-chart endpoints inside the plot and adds optional generic
   previous-period comparisons for dashboard metrics.
   v0.11.3 keeps trend endpoint markers circular in stretched dashboard cards.
+  v0.12 adds read-only mixed-currency aggregation for stats, trends,
+  comparisons, and objectives using project-scoped auditable FX rates. Source
+  events remain unchanged.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -103,6 +106,15 @@ provides:
       requires: events.read
     - name: analytics_sum
       description: Sum a numeric property over events, optionally grouped.
+      requires: events.read
+    - name: analytics_sum_money
+      description: Convert and sum mixed-currency event amounts without changing source events.
+      requires: events.read
+    - name: analytics_fx_rate_upsert
+      description: Create or update a project-scoped FX reference rate.
+      requires: events.write
+    - name: analytics_fx_rates_list
+      description: List project-scoped FX reference rates.
       requires: events.read
     - name: analytics_event_specs_list
       description: List current-project event specs.
@@ -366,6 +378,47 @@ func (a *App) MCPTools() []sdk.Tool {
 				"limit":    map[string]any{"type": "integer"},
 			}, []string{"value"}),
 			Handler: a.toolSum,
+		},
+		{
+			Name:        "analytics_sum_money",
+			Description: "Read-only mixed-currency sum over current-project events. Converts each amount with the latest project FX rate at or before its event/accounting date and never changes source events.",
+			InputSchema: schemaObject(map[string]any{
+				"value":              map[string]any{"type": "string", "description": "Numeric amount field, for example props.total_cents."},
+				"currency_field":     map[string]any{"type": "string", "description": "Currency field, for example props.currency."},
+				"reporting_currency": map[string]any{"type": "string", "description": "Three-letter target currency, for example EUR."},
+				"amount_unit":        map[string]any{"type": "string", "enum": []string{"minor", "major"}},
+				"rate_date_field":    map[string]any{"type": "string", "description": "Optional props.X date; event timestamp is used when omitted."},
+				"app":                map[string]any{"type": "string"},
+				"topic":              map[string]any{"type": "string"},
+				"since":              map[string]any{"type": "integer"},
+				"until":              map[string]any{"type": "integer"},
+				"where":              map[string]any{"type": "object"},
+			}, []string{"value", "currency_field", "reporting_currency", "amount_unit"}),
+			Handler: a.toolSumMoney,
+		},
+		{
+			Name:        "analytics_fx_rate_upsert",
+			Description: "Create or update one project-scoped FX reference rate. This changes only the rate cache, never Analytics events. One base unit equals rate quote units.",
+			InputSchema: schemaObject(map[string]any{
+				"base_currency":  map[string]any{"type": "string"},
+				"quote_currency": map[string]any{"type": "string"},
+				"as_of":          map[string]any{"type": "integer", "description": "Unix milliseconds."},
+				"rate":           map[string]any{"type": "number"},
+				"source":         map[string]any{"type": "string"},
+			}, []string{"base_currency", "quote_currency", "as_of", "rate"}),
+			Handler: a.toolFXRateUpsert,
+		},
+		{
+			Name:        "analytics_fx_rates_list",
+			Description: "List project-scoped FX reference rates for auditing money aggregates.",
+			InputSchema: schemaObject(map[string]any{
+				"base_currency":  map[string]any{"type": "string"},
+				"quote_currency": map[string]any{"type": "string"},
+				"since":          map[string]any{"type": "integer"},
+				"until":          map[string]any{"type": "integer"},
+				"limit":          map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolFXRatesList,
 		},
 		{
 			Name:        "analytics_event_specs_list",

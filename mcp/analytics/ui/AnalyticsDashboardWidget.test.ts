@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { areaChartEndMarkerPath, areaChartGeometry, dedupeWidgetGoals, defaultDashboardFilters, selectDashboardID } from "./dashboard-ui";
+import { areaChartEndMarkerPath, areaChartGeometry, dedupeWidgetGoals, defaultDashboardFilters, formatMetric, objectiveMatchesMetric, selectDashboardID } from "./dashboard-ui";
 
 describe("Analytics dashboard home widget", () => {
   test("prefers configured dashboard, then stored dashboard, then newest", () => {
@@ -39,5 +39,21 @@ describe("Analytics dashboard home widget", () => {
     expect(geometry.points.at(-1)?.x).toBe(292);
     expect(geometry.areaPath).toEndWith(`L 8 ${geometry.baseline} Z`);
     expect(areaChartEndMarkerPath(geometry.points, geometry.baseline)).toBe("M 292 8 h 0.001");
+  });
+
+  test("formats and matches generic money aggregates without widget-specific code", () => {
+    const config = {
+      aggregation: "sum_money",
+      app: "billing",
+      topic: "invoice.paid",
+      value: "props.total_cents",
+      currency_field: "props.currency",
+      reporting_currency: "EUR",
+      amount_unit: "minor",
+      rate_date_field: "props.accounting_date",
+    };
+    expect(formatMetric(9234.56, config)).toBe("€9,234.56");
+    expect(objectiveMatchesMetric(config, config)).toBe(true);
+    expect(objectiveMatchesMetric(config, { ...config, reporting_currency: "USD" })).toBe(false);
   });
 });
