@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"reflect"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -79,6 +80,43 @@ func TestEmbeddedManifest_PublishesCRMEvents(t *testing.T) {
 	} {
 		if !got[want] {
 			t.Errorf("manifest missing published event %q", want)
+		}
+	}
+}
+
+func TestContactAddedManifestDeclaresEmittedPayload(t *testing.T) {
+	want := map[string]string{
+		"id":           "integer",
+		"display_name": "string",
+		"first_name":   "string",
+		"last_name":    "string",
+		"archived":     "boolean",
+		"list_ids":     "array<integer>",
+	}
+	raw, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, err := sdk.ParseManifest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for source, manifest := range map[string]sdk.Manifest{
+		"embedded": (&App{}).Manifest(),
+		"disk":     *disk,
+	} {
+		found := false
+		for _, event := range manifest.Provides.Publishes {
+			if event.Name != "contact.added" {
+				continue
+			}
+			found = true
+			if !reflect.DeepEqual(event.Payload, want) {
+				t.Fatalf("%s contact.added payload=%v, want %v", source, event.Payload, want)
+			}
+		}
+		if !found {
+			t.Fatalf("%s manifest does not declare contact.added", source)
 		}
 	}
 }

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.8.29
+version: 0.8.30
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -169,10 +169,14 @@ provides:
       entry: /ui/CrmPanel.mjs
   publishes:
     - name: contact.added
-      description: A contact was created or first materialised from inbound messaging.
+      description: A contact was created or first materialised from inbound messaging; list_ids contains its active list memberships after creation routing completes.
       payload:
         id: integer
         display_name: string
+        first_name: string
+        last_name: string
+        archived: boolean
+        list_ids: array<integer>
     - name: contact.updated
       description: A contact's core fields, channels, attributes, tags, or list-driven metadata changed.
       payload:
