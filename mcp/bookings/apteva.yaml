@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: bookings
 display_name: Bookings
-version: 0.1.2
+version: 0.2.0
 description: |
-  Calendly-style booking links for human and AI-agent meetings. Booking
-  types define availability, duration, intake fields, routing target,
+  Calendly-style booking links for client meetings. Booking
+  types define availability, duration, conflict and destination calendars,
   and meeting location. Bookings reads free slots from Calendar, creates
   the booked Calendar event, optionally creates a Calls room, and can
   attach invitees and booking activity to CRM.
@@ -14,7 +14,7 @@ author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bookings
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [bookings, scheduling, calendar, meetings, agents]
+tags: [bookings, scheduling, calendar, meetings]
 
 scopes: [project, global]
 min_apteva_version: "0.10.0"
@@ -45,20 +45,6 @@ requires:
       required: false
       label: "CRM"
       hint: "When enabled on a booking type, invitees are upserted as contacts and booking activity is logged."
-    - role: jobs
-      kind: app
-      compatible_app_names: [jobs]
-      capabilities: [jobs.schedule]
-      required: false
-      label: "Jobs"
-      hint: "Reserved for reminders and follow-up automation."
-    - role: messaging
-      kind: app
-      compatible_app_names: [messaging]
-      capabilities: [message.send]
-      required: false
-      label: "Messaging"
-      hint: "Reserved for confirmations, reminders, and follow-ups."
 
 provides:
   http_routes:
@@ -69,7 +55,7 @@ provides:
     - name: booking_types_get
       description: Fetch one booking type by id or slug.
     - name: booking_types_create
-      description: Create a booking type. Defines duration, calendars, target, Calls/CRM behavior, availability rules, and intake schema.
+      description: Create a booking type. Defines duration, timezone, conflict and destination calendars, Calls/CRM behavior, and availability rules.
     - name: booking_types_update
       description: Patch a booking type.
     - name: booking_types_archive
@@ -77,7 +63,7 @@ provides:
     - name: bookings_find_slots
       description: Find slots for a booking type by applying its rules over Calendar availability.
     - name: bookings_create
-      description: Create a booking and mirror it into Calendar; optionally creates Calls room and CRM contact/activity.
+      description: Revalidate an available slot, create a booking, and mirror it into Calendar; optionally creates a Calls room and CRM contact/activity.
     - name: bookings_get
       description: Fetch one booking.
     - name: bookings_list
