@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.29
+version: 0.8.30
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -183,10 +183,14 @@ provides:
       entry: /ui/CrmPanel.mjs
   publishes:
     - name: contact.added
-      description: A contact was created or first materialised from inbound messaging.
+      description: A contact was created or first materialised from inbound messaging; list_ids contains its active list memberships after creation routing completes.
       payload:
         id: integer
         display_name: string
+        first_name: string
+        last_name: string
+        archived: boolean
+        list_ids: array<integer>
     - name: contact.updated
       description: A contact's core fields, channels, attributes, tags, or list-driven metadata changed.
       payload:
@@ -1630,7 +1634,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	emitListMembershipsAdded(ctx, c.ID, listIDs)
-	emitContact(ctx, "contact.added", c)
+	emitContact(ctx, pid, "contact.added", c)
 	out := map[string]any{"contact": c}
 	if len(listIDs) > 0 {
 		out["lists_added"] = listIDs
@@ -1656,7 +1660,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := loadChannels(ctx.AppDB(), c); err != nil {
 		return nil, err
 	}
-	emitContact(ctx, "contact.updated", c)
+	emitContact(ctx, pid, "contact.updated", c)
 	return map[string]any{"contact": c}, nil
 }
 
@@ -1679,14 +1683,14 @@ func (a *App) toolUpsertByChannel(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err := loadChannels(ctx.AppDB(), c); err != nil {
 		return nil, err
 	}
-	if created {
-		emitContact(ctx, "contact.added", c)
-	} else {
-		emitContact(ctx, "contact.updated", c)
-	}
 	// Ensure list membership regardless of created/found — "upsert into
 	// this list" is the natural semantic (idempotent).
 	listsAdded := addContactToLists(ctx, pid, c.ID, args, "contacts_upsert")
+	if created {
+		emitContact(ctx, pid, "contact.added", c)
+	} else {
+		emitContact(ctx, pid, "contact.updated", c)
+	}
 	out := map[string]any{"contact": c, "was_created": created}
 	if len(listsAdded) > 0 {
 		out["lists_added"] = listsAdded
@@ -1719,19 +1723,34 @@ func (a *App) toolMerge(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // emitContact broadcasts a contact mutation. Best-effort: ctx.Emit is
 // fire-and-forget and the DB write has already committed. Subscribers
-// re-fetch the row themselves rather than trusting the payload, but
-// id + display_name are useful for optimistic UI.
-func emitContact(ctx *sdk.AppCtx, topic string, c *Contact) {
+// re-fetch the row themselves rather than trusting the payload. The added
+// event also includes the complete active list membership snapshot.
+func emitContact(ctx *sdk.AppCtx, pid, topic string, c *Contact) {
 	if ctx == nil || c == nil {
 		return
 	}
-	ctx.Emit(topic, map[string]any{
+	payload := map[string]any{
 		"id":           c.ID,
 		"display_name": c.DisplayName,
 		"first_name":   c.FirstName,
 		"last_name":    c.LastName,
 		"archived":     c.Status == "archived",
-	})
+	}
+	if topic == "contact.added" {
+		// Query after all create-time list operations so this is the complete
+		// active membership set, not merely the lists requested by one caller.
+		lists, err := dbListsForContact(ctx.AppDB(), pid, c.ID)
+		listIDs := make([]int64, 0, len(lists))
+		if err != nil {
+			ctx.Logger().Warn("contact event list lookup failed", "contact_id", c.ID, "err", err)
+		} else {
+			for _, list := range lists {
+				listIDs = append(listIDs, list.ID)
+			}
+		}
+		payload["list_ids"] = listIDs
+	}
+	emitCRMEvent(ctx, pid, topic, payload)
 }
 
 // addContactToLists provides the idempotent best-effort membership semantics
@@ -2023,7 +2042,7 @@ func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	emitListMembershipsAdded(ctx, c.ID, listIDs)
-	emitContact(ctx, "contact.added", c)
+	emitContact(ctx, pid, "contact.added", c)
 	out := map[string]any{"contact": c}
 	if len(listIDs) > 0 {
 		out["lists_added"] = listIDs
@@ -2094,7 +2113,7 @@ func (a *App) handleHTTPUpdate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	emitContact(ctx, "contact.updated", c)
+	emitContact(ctx, pid, "contact.updated", c)
 	httpJSON(w, map[string]any{"contact": c})
 }
 

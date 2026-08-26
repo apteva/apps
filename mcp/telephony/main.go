@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.3.6
+version: 0.3.7
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -130,6 +130,7 @@ provides:
     - { name: telephony_recording_get, description: "Get one recording and its private Storage or carrier playback URL." }
     - { name: telephony_recording_retry_import, description: "Retry durable Storage import." }
     - { name: telephony_recording_delete, description: "Delete a recording from Storage and the carrier." }
+    - { name: telephony_numbers_connected, description: "List all numbers owned by the bound carrier with their Telephony routing and outbound status." }
     - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing." }
     - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit confirmation, with address and bundle when required." }
     - { name: telephony_addresses_list, description: "List provider addresses." }
@@ -625,6 +626,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Delete a recording from private Storage and its carrier. Args: recording_id.",
 			InputSchema: schemaObject(map[string]any{"recording_id": map[string]any{"type": "string"}}, []string{"recording_id"}),
 			HandlerCtx:  a.toolRecordingDelete,
+		},
+		{
+			Name: "telephony_numbers_connected",
+			Description: "List every phone number owned by the bound carrier, including purchased numbers that do not have a Telephony route. " +
+				"Returns normalized capabilities, carrier status, inbound route and routing health, outbound readiness, and direct-SIP status. This operation is read-only.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			HandlerCtx:  a.toolNumbersConnected,
 		},
 		{
 			Name: "telephony_numbers_search",

@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -98,6 +99,53 @@ func (d *diskBackend) Stat(_ context.Context, key string) (int64, error) {
 		return 0, err
 	}
 	return st.Size(), nil
+}
+
+func (d *diskBackend) HeadObject(_ context.Context, key string) (ObjectMetadata, error) {
+	st, err := os.Stat(d.absPath(key))
+	if errors.Is(err, os.ErrNotExist) {
+		return ObjectMetadata{}, ErrNotFound
+	}
+	if err != nil {
+		return ObjectMetadata{}, err
+	}
+	return ObjectMetadata{Size: st.Size(), LastModified: st.ModTime()}, nil
+}
+
+func (d *diskBackend) OpenObject(_ context.Context, key string, options ObjectReadOptions) (*ObjectReadResult, error) {
+	f, err := os.Open(d.absPath(key))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	start, end, ranged, err := resolveByteRange(options.Range, st.Size())
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	result := &ObjectReadResult{
+		Body: f, StatusCode: 200, ContentLength: st.Size(), LastModified: st.ModTime(),
+	}
+	if ranged {
+		length := end - start + 1
+		result.Body = &sectionReadCloser{SectionReader: io.NewSectionReader(f, start, length), Closer: f}
+		result.StatusCode = 206
+		result.ContentLength = length
+		result.ContentRange = fmt.Sprintf("bytes %d-%d/%d", start, end, st.Size())
+	}
+	return result, nil
+}
+
+type sectionReadCloser struct {
+	*io.SectionReader
+	io.Closer
 }
 
 func (d *diskBackend) LocalPath(key string) (string, bool) {

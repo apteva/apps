@@ -9,10 +9,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,6 +212,119 @@ func TestS3PresignGet_SignsDispositionTypeAndBoundedCache(t *testing.T) {
 	disposition := query.Get("response-content-disposition")
 	if !strings.HasPrefix(disposition, "inline;") || !strings.Contains(disposition, "filename*=UTF-8''caf%C3%A9.png") {
 		t.Fatalf("response disposition=%q", disposition)
+	}
+}
+
+func TestS3OpenObject_UsesCredentialedSDKRangeGET(t *testing.T) {
+	modified := time.Unix(1_700_000_123, 0).UTC()
+	var sawAuthorization atomic.Bool
+	var sawRange atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bucket/ab/file" {
+			http.NotFound(w, r)
+			return
+		}
+		if strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
+			sawAuthorization.Store(true)
+		}
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("ETag", `"backend-etag"`)
+		w.Header().Set("Last-Modified", modified.Format(http.TimeFormat))
+		switch r.Method {
+		case http.MethodHead:
+			w.Header().Set("Content-Length", "8")
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			if r.Header.Get("Range") == "bytes=2-5" {
+				sawRange.Store(true)
+			}
+			w.Header().Set("Content-Range", "bytes 2-5/8")
+			w.Header().Set("Content-Length", "4")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write([]byte("2345"))
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := minio.New(strings.TrimPrefix(server.URL, "http://"), &minio.Options{
+		Creds: credentials.NewStaticV4("access", "secret", ""), Secure: false,
+		Region: "us-east-1", BucketLookup: minio.BucketLookupPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &s3Backend{client: client, bucket: "bucket", region: "us-east-1"}
+	metadata, err := be.HeadObject(context.Background(), "ab/file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Size != 8 || metadata.ContentType != "video/mp4" || metadata.ETag != "backend-etag" || !metadata.LastModified.Equal(modified) {
+		t.Fatalf("metadata=%+v", metadata)
+	}
+	result, err := be.OpenObject(context.Background(), "ab/file", ObjectReadOptions{Range: "bytes=2-5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Body.Close()
+	body, err := io.ReadAll(result.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "2345" || result.StatusCode != http.StatusPartialContent ||
+		result.ContentLength != 4 || result.ContentRange != "bytes 2-5/8" {
+		t.Fatalf("body=%q result=%+v", body, result)
+	}
+	if !sawAuthorization.Load() || !sawRange.Load() {
+		t.Fatal("MinIO SDK request was not credential-signed")
+	}
+}
+
+func TestS3OpenObject_MapsUnsatisfiableRange(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+		_, _ = io.WriteString(w, `<Error><Code>InvalidRange</Code><Message>range</Message></Error>`)
+	}))
+	t.Cleanup(server.Close)
+	client, err := minio.New(strings.TrimPrefix(server.URL, "http://"), &minio.Options{
+		Creds: credentials.NewStaticV4("access", "secret", ""), Secure: false,
+		Region: "us-east-1", BucketLookup: minio.BucketLookupPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &s3Backend{client: client, bucket: "bucket", region: "us-east-1"}
+	if _, err := be.OpenObject(context.Background(), "ab/file", ObjectReadOptions{Range: "bytes=9-"}); !errors.Is(err, ErrRangeNotSatisfiable) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestResolveByteRange_SingleForms(t *testing.T) {
+	tests := []struct {
+		raw        string
+		size       int64
+		start, end int64
+	}{
+		{"bytes=2-5", 10, 2, 5},
+		{"bytes=7-", 10, 7, 9},
+		{"bytes=-3", 10, 7, 9},
+		{"bytes=0-999", 10, 0, 9},
+	}
+	for _, test := range tests {
+		start, end, ranged, err := resolveByteRange(test.raw, test.size)
+		if err != nil || !ranged || start != test.start || end != test.end {
+			t.Errorf("resolve(%q,%d)=(%d,%d,%v,%v)", test.raw, test.size, start, end, ranged, err)
+		}
+	}
+	for _, raw := range []string{"items=0-1", "bytes=", "bytes=5-2", "bytes=0-1,4-5", "bytes=-0"} {
+		if _, err := parseSingleByteRange(raw); err == nil {
+			t.Errorf("parseSingleByteRange(%q) succeeded", raw)
+		}
+	}
+	if _, _, _, err := resolveByteRange("bytes=10-", 10); !errors.Is(err, ErrRangeNotSatisfiable) {
+		t.Fatalf("unsatisfiable error=%v", err)
 	}
 }
 

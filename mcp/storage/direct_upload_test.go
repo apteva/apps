@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,10 @@ type fakeS3Backend struct {
 	getOptions GetObjectOptions
 	getTTL     time.Duration
 	getURL     string
+	headCalls  int32
+	openCalls  int32
+	openHook   func(context.Context, string, ObjectReadOptions) (*ObjectReadResult, error)
+	metadata   *ObjectMetadata
 }
 
 func newFakeS3() *fakeS3Backend { return &fakeS3Backend{objects: map[string][]byte{}} }
@@ -65,6 +70,55 @@ func (f *fakeS3Backend) Stat(_ context.Context, key string) (int64, error) {
 		return 0, ErrNotFound
 	}
 	return int64(len(b)), nil
+}
+
+func (f *fakeS3Backend) HeadObject(_ context.Context, key string) (ObjectMetadata, error) {
+	atomic.AddInt32(&f.headCalls, 1)
+	if f.metadata != nil {
+		return *f.metadata, nil
+	}
+	b, ok := f.objects[key]
+	if !ok {
+		return ObjectMetadata{}, ErrNotFound
+	}
+	return ObjectMetadata{
+		Size: int64(len(b)), ContentType: "application/octet-stream",
+		ETag: "fake-etag", LastModified: time.Unix(1_700_000_000, 0).UTC(),
+	}, nil
+}
+
+func (f *fakeS3Backend) OpenObject(ctx context.Context, key string, options ObjectReadOptions) (*ObjectReadResult, error) {
+	atomic.AddInt32(&f.openCalls, 1)
+	if f.openHook != nil {
+		return f.openHook(ctx, key, options)
+	}
+	b, ok := f.objects[key]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	start, end, ranged, err := resolveByteRange(options.Range, int64(len(b)))
+	if err != nil {
+		return nil, err
+	}
+	selected := b
+	status := http.StatusOK
+	contentRange := ""
+	if ranged {
+		selected = b[start : end+1]
+		status = http.StatusPartialContent
+		contentRange = fmt.Sprintf("bytes %d-%d/%d", start, end, len(b))
+	}
+	return &ObjectReadResult{
+		Body: io.NopCloser(bytes.NewReader(selected)), StatusCode: status,
+		ContentLength: int64(len(selected)), ContentRange: contentRange,
+		ContentType: func() string {
+			if f.metadata != nil {
+				return f.metadata.ContentType
+			}
+			return "application/octet-stream"
+		}(), ETag: "fake-etag",
+		LastModified: time.Unix(1_700_000_000, 0).UTC(),
+	}, nil
 }
 
 func (f *fakeS3Backend) LocalPath(string) (string, bool) { return "", false }

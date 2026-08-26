@@ -41,6 +41,10 @@ var ErrPresignNotSupported = errors.New("backend does not support presigned URLs
 // it's harmless (Delete is idempotent).
 var ErrNotFound = errors.New("object not found")
 
+// ErrRangeNotSatisfiable is returned when a syntactically valid byte range
+// does not overlap the object. HTTP handlers map it to 416.
+var ErrRangeNotSatisfiable = errors.New("object range not satisfiable")
+
 type ContentDisposition string
 
 const (
@@ -57,8 +61,38 @@ type GetObjectOptions struct {
 	Disposition ContentDisposition
 }
 
+// ObjectMetadata is the backend-authoritative metadata used by proxied HEAD
+// responses. ETag is stored without imposing a quoting convention; the HTTP
+// layer normalizes it before writing the response header.
+type ObjectMetadata struct {
+	Size         int64
+	ContentType  string
+	ETag         string
+	LastModified time.Time
+}
+
+// ObjectReadOptions controls a streaming backend GET. Range is either empty
+// or a validated single RFC byte range such as "bytes=0-1023".
+type ObjectReadOptions struct {
+	Range string
+}
+
+// ObjectReadResult owns Body; callers must close it. ContentLength describes
+// this response body (the selected range for 206), not necessarily the full
+// object size.
+type ObjectReadResult struct {
+	Body          io.ReadCloser
+	StatusCode    int
+	ContentLength int64
+	ContentRange  string
+	ContentType   string
+	ETag          string
+	LastModified  time.Time
+}
+
 // Backend is the abstract blob store. Implementations live in
-// backend_disk.go and backend_s3.go.
+// backend_disk.go and backend_s3.go. HeadObject and OpenObject support the
+// explicit proxy delivery path without creating backend URLs.
 type Backend interface {
 	// Kind identifies the backend in logs + metrics. "disk" | "s3".
 	Kind() string
@@ -75,6 +109,13 @@ type Backend interface {
 	// when absent. Used by the presigned-finalize endpoint to verify
 	// a client-direct upload actually arrived.
 	Stat(ctx context.Context, key string) (int64, error)
+
+	// HeadObject returns authoritative metadata without opening an object body.
+	HeadObject(ctx context.Context, key string) (ObjectMetadata, error)
+
+	// OpenObject starts a credentialed streaming GET against the backend. It
+	// must never mint or follow a client-visible presigned URL.
+	OpenObject(ctx context.Context, key string, options ObjectReadOptions) (*ObjectReadResult, error)
 
 	// LocalPath returns a filesystem path to serve via http.ServeFile
 	// when the backend stores bytes locally. Disk returns (path, true);
@@ -94,6 +135,98 @@ type Backend interface {
 	// upload to without proxying through us. Disk returns
 	// ErrPresignNotSupported.
 	PresignPut(ctx context.Context, key, contentType string, ttl time.Duration) (string, error)
+}
+
+type byteRange struct {
+	start  int64
+	end    int64
+	suffix bool
+	open   bool
+}
+
+// parseSingleByteRange deliberately supports one range only. Multipart byte
+// ranges add substantial response complexity and are unnecessary for media
+// ingestion clients, which issue one probe range at a time.
+func parseSingleByteRange(raw string) (byteRange, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return byteRange{}, nil
+	}
+	if !strings.HasPrefix(strings.ToLower(raw), "bytes=") {
+		return byteRange{}, fmt.Errorf("invalid range unit")
+	}
+	spec := strings.TrimSpace(raw[len("bytes="):])
+	if spec == "" || strings.Contains(spec, ",") {
+		return byteRange{}, fmt.Errorf("exactly one byte range is required")
+	}
+	parts := strings.SplitN(spec, "-", 2)
+	if len(parts) != 2 {
+		return byteRange{}, fmt.Errorf("invalid byte range")
+	}
+	if parts[0] == "" {
+		n, err := parseNonNegativeInt64(parts[1])
+		if err != nil || n <= 0 {
+			return byteRange{}, fmt.Errorf("invalid suffix byte range")
+		}
+		return byteRange{end: n, suffix: true}, nil
+	}
+	start, err := parseNonNegativeInt64(parts[0])
+	if err != nil {
+		return byteRange{}, fmt.Errorf("invalid byte range start")
+	}
+	if parts[1] == "" {
+		return byteRange{start: start, open: true}, nil
+	}
+	end, err := parseNonNegativeInt64(parts[1])
+	if err != nil || end < start {
+		return byteRange{}, fmt.Errorf("invalid byte range end")
+	}
+	return byteRange{start: start, end: end}, nil
+}
+
+func parseNonNegativeInt64(raw string) (int64, error) {
+	if raw == "" {
+		return 0, errors.New("empty integer")
+	}
+	var n int64
+	for _, ch := range raw {
+		if ch < '0' || ch > '9' {
+			return 0, errors.New("non-decimal integer")
+		}
+		if n > (1<<63-1-int64(ch-'0'))/10 {
+			return 0, errors.New("integer overflow")
+		}
+		n = n*10 + int64(ch-'0')
+	}
+	return n, nil
+}
+
+func resolveByteRange(raw string, size int64) (start, end int64, ranged bool, err error) {
+	parsed, err := parseSingleByteRange(raw)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if strings.TrimSpace(raw) == "" {
+		return 0, 0, false, nil
+	}
+	if size <= 0 {
+		return 0, 0, true, ErrRangeNotSatisfiable
+	}
+	if parsed.suffix {
+		length := parsed.end
+		if length > size {
+			length = size
+		}
+		return size - length, size - 1, true, nil
+	}
+	if parsed.start >= size {
+		return 0, 0, true, ErrRangeNotSatisfiable
+	}
+	end = parsed.end
+	if parsed.open || end >= size {
+		end = size - 1
+	}
+	return parsed.start, end, true, nil
 }
 
 func parseContentDisposition(raw string) (ContentDisposition, error) {

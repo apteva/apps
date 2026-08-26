@@ -21,7 +21,6 @@ func newTestApp(t *testing.T) (*App, *sdk.AppCtx, *tk.EmitRecorder) {
 	)
 	app := &App{}
 	globalCtx = ctx
-	globalApp = app
 	return app, ctx, rec
 }
 
@@ -132,7 +131,10 @@ func TestAgentUsesSameJoinAndMessageFlow(t *testing.T) {
 func TestTranscriptUsesUnifiedParticipant(t *testing.T) {
 	app, ctx, rec := newTestApp(t)
 	room := createRoom(t, app, ctx)
-	tokenOut, _ := app.toolCreateJoinToken(ctx, map[string]any{"room_id": room.ID, "participant_kind": "human", "display_name": "Alice"})
+	tokenOut, _ := app.toolCreateJoinToken(ctx, map[string]any{
+		"room_id": room.ID, "participant_kind": "human", "display_name": "Alice",
+		"capabilities": map[string]any{"transcript_write": true},
+	})
 	joinOut, _ := app.toolJoinRoom(ctx, map[string]any{"token": tokenOut.(map[string]any)["token"].(string)})
 	p := joinOut.(map[string]any)["participant"].(*Participant)
 	out, err := app.toolAppendTranscript(ctx, map[string]any{

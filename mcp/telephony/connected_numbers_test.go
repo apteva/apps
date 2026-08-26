@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -413,6 +414,40 @@ func TestConnectedNumbersPanelContract(t *testing.T) {
 	}
 	if !foundPermission {
 		t.Fatal("platform.instances.read is required to display assigned agent names")
+	}
+}
+
+func TestToolNumbersConnectedIncludesOwnedNumberWithoutRoute(t *testing.T) {
+	platform := &answerPlatform{
+		bindings: map[string]any{"carrier": float64(10)},
+		connection: &sdk.PlatformConnection{
+			ID: 10, AppSlug: "twilio", Status: "connected", ProjectID: "project-a",
+		},
+		credentials: &sdk.ConnectionCredentials{
+			ConnectionID: 10, Slug: "twilio", Fields: map[string]string{"auth_token": "test-auth-token"},
+		},
+		integrationResponse: map[string]json.RawMessage{
+			"list_phone_numbers": json.RawMessage(`{"incoming_phone_numbers":[{"sid":"PN-unrouted","phone_number":"+13502231051","capabilities":{"voice":true}}]}`),
+		},
+	}
+	app, ctx := withTelephonyTestContext(t, platform)
+	result, err := app.toolNumbersConnected(context.Background(), ctx, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("result=%#v", result)
+	}
+	if payload["count"] != 1 {
+		t.Fatalf("count=%#v", payload["count"])
+	}
+	numbers, ok := payload["numbers"].([]connectedNumberView)
+	if !ok || len(numbers) != 1 {
+		t.Fatalf("numbers=%#v", payload["numbers"])
+	}
+	if numbers[0].PhoneNumber != "+13502231051" || numbers[0].Route != nil {
+		t.Fatalf("unrouted owned number=%#v", numbers[0])
 	}
 }
 

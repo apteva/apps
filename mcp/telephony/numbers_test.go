@@ -264,7 +264,7 @@ func TestManifestAndRuntimeExposeNumberTools(t *testing.T) {
 		runtimeTools[tool.Name] = true
 	}
 	for _, name := range []string{
-		"telephony_numbers_search", "telephony_numbers_purchase", "telephony_addresses_list",
+		"telephony_numbers_connected", "telephony_numbers_search", "telephony_numbers_purchase", "telephony_addresses_list",
 		"telephony_address_create", "telephony_regulatory_requirements", "telephony_regulatory_bundles_list",
 		"telephony_regulatory_bundle_create", "telephony_regulatory_bundle_get",
 		"telephony_regulatory_bundle_item_create", "telephony_regulatory_bundle_evaluate",
