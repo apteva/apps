@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: calls
 display_name: Calls
-version: 0.2.0
+version: 0.2.1
 description: |
   Secure realtime audio/video rooms using authenticated WebRTC mesh
   signaling, expiring join links, unified human/agent/service
@@ -24,6 +24,14 @@ requires:
 
 provides:
   http_routes:
+    - prefix: /join/
+      no_auth: true
+    - prefix: /room/
+      no_auth: true
+    - prefix: /api/join
+      no_auth: true
+    - prefix: /api/rooms/
+      no_auth: true
     - prefix: /
   mcp_tools:
     - { name: calls_create_room,          description: "Create a call room. Args: title, slug?, metadata?. Returns room, host_join_token, host_join_url." }
