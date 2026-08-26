@@ -37,25 +37,27 @@ type CheckResult struct {
 }
 
 type SMTPProbe struct {
-	Checked     bool          `json:"checked"`
-	Email       string        `json:"email,omitempty"`
-	MX          string        `json:"mx,omitempty"`
-	RcptStatus  string        `json:"rcpt_status,omitempty"` // ok | reject | catch_all | tempfail | timeout | connect_failed | unavailable | unknown
-	Code        int           `json:"code,omitempty"`
-	Response    string        `json:"response,omitempty"`
-	Informative *bool         `json:"informative,omitempty"`
-	CatchAll    *bool         `json:"catch_all,omitempty"`
-	Retryable   bool          `json:"retryable"`
-	Note        string        `json:"note,omitempty"`
-	Attempts    []SMTPAttempt `json:"attempts,omitempty"`
+	Checked      bool          `json:"checked"`
+	Email        string        `json:"email,omitempty"`
+	MX           string        `json:"mx,omitempty"`
+	RcptStatus   string        `json:"rcpt_status,omitempty"` // ok | reject | blocked | catch_all | tempfail | timeout | connect_failed | unavailable | unknown
+	Code         int           `json:"code,omitempty"`
+	EnhancedCode string        `json:"enhanced_code,omitempty"`
+	Response     string        `json:"response,omitempty"`
+	Informative  *bool         `json:"informative,omitempty"`
+	CatchAll     *bool         `json:"catch_all,omitempty"`
+	Retryable    bool          `json:"retryable"`
+	Note         string        `json:"note,omitempty"`
+	Attempts     []SMTPAttempt `json:"attempts,omitempty"`
 }
 
 type SMTPAttempt struct {
-	MX       string `json:"mx"`
-	Kind     string `json:"kind"` // recipient | catch_all
-	Status   string `json:"status"`
-	Code     int    `json:"code,omitempty"`
-	Response string `json:"response,omitempty"`
+	MX           string `json:"mx"`
+	Kind         string `json:"kind"` // recipient | catch_all
+	Status       string `json:"status"`
+	Code         int    `json:"code,omitempty"`
+	EnhancedCode string `json:"enhanced_code,omitempty"`
+	Response     string `json:"response,omitempty"`
 }
 
 type mailResolver interface {
@@ -213,13 +215,14 @@ func (v localVerifier) checkSMTP(parent context.Context, email string, routes []
 	defer cancel()
 
 	rejects := 0
+	blocked := 0
 	retryable := false
 	for _, mxHost := range routes {
 		attempt := v.probeHost(ctx, mxHost, email, timeout)
 		attempt.MX = mxHost
 		attempt.Kind = "recipient"
 		result.Attempts = append(result.Attempts, attempt)
-		result.MX, result.Code, result.Response = mxHost, attempt.Code, attempt.Response
+		result.MX, result.Code, result.EnhancedCode, result.Response = mxHost, attempt.Code, attempt.EnhancedCode, attempt.Response
 
 		switch attempt.Status {
 		case "ok":
@@ -250,6 +253,8 @@ func (v localVerifier) checkSMTP(parent context.Context, email string, routes []
 			return result
 		case "reject":
 			rejects++
+		case "blocked":
+			blocked++
 		case "tempfail", "timeout", "connect_failed":
 			retryable = true
 		}
@@ -265,6 +270,11 @@ func (v localVerifier) checkSMTP(parent context.Context, email string, routes []
 		result.RcptStatus = "reject"
 		result.Informative = boolPtr(true)
 		result.Note = "Every reachable mail exchanger rejected the recipient."
+		return result
+	}
+	if blocked > 0 {
+		result.RcptStatus = "blocked"
+		result.Note = "The mail server blocked the verification probe for policy, reputation, authentication, or anti-abuse reasons. This does not indicate whether the mailbox exists."
 		return result
 	}
 	if retryable {
@@ -328,14 +338,8 @@ func probeSMTPHostWithDial(ctx context.Context, mxHost, email string, timeout ti
 		if code, message := parseSMTPErr(err); code != 0 {
 			result.Code = code
 			result.Response = message
-			switch {
-			case code >= 500 && code < 600:
-				result.Status = "reject"
-			case code >= 400 && code < 500:
-				result.Status = "tempfail"
-			default:
-				result.Status = "unknown"
-			}
+			result.EnhancedCode = parseEnhancedSMTPCode(message)
+			result.Status = classifyRecipientSMTPReply(code, result.EnhancedCode, message)
 		} else if isTimeout(err) {
 			result.Status = "timeout"
 		}
@@ -345,6 +349,82 @@ func probeSMTPHostWithDial(ctx context.Context, mxHost, email string, timeout ti
 	result.Status = "ok"
 	_ = client.Quit()
 	return result
+}
+
+// classifyRecipientSMTPReply deliberately distinguishes a missing mailbox from
+// a server refusing the verifier. A generic 5xx is only a permanent SMTP
+// failure; it is not necessarily evidence that the recipient does not exist.
+func classifyRecipientSMTPReply(code int, enhancedCode, message string) string {
+	if code >= 400 && code < 500 {
+		return "tempfail"
+	}
+	if code < 500 || code >= 600 {
+		return "unknown"
+	}
+
+	normalized := strings.ToLower(message)
+	if containsAny(normalized,
+		"blacklist", "block list", "dnsbl", "spamhaus", "spam source",
+		"policy", "not authorized", "not authorised", "authentication required",
+		"access denied", "relay denied", "relay not permitted", "reputation",
+		"prohibited", "anti-abuse", "security restriction",
+	) || strings.HasPrefix(enhancedCode, "5.7.") {
+		return "blocked"
+	}
+
+	// These enhanced address-status codes describe the destination mailbox,
+	// unlike 5.2.x storage/state failures or 5.7.x policy failures.
+	switch enhancedCode {
+	case "5.1.1", "5.1.3", "5.1.6":
+		return "reject"
+	}
+
+	// Some older MTAs omit enhanced status codes. Only strong, mailbox-specific
+	// wording is safe enough to turn their generic 550 into a definitive reject.
+	if enhancedCode == "" && containsAny(normalized,
+		"user unknown", "unknown user", "no such user", "no such mailbox",
+		"mailbox does not exist", "recipient does not exist", "recipient not found",
+		"address not found", "invalid recipient", "unknown recipient",
+		"unrouteable address", "undeliverable address",
+	) {
+		return "reject"
+	}
+	return "blocked"
+}
+
+func parseEnhancedSMTPCode(message string) string {
+	fields := strings.Fields(message)
+	if len(fields) == 0 {
+		return ""
+	}
+	candidate := strings.Trim(fields[0], "\"'")
+	parts := strings.Split(candidate, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	for _, part := range parts {
+		if part == "" {
+			return ""
+		}
+		for _, char := range part {
+			if char < '0' || char > '9' {
+				return ""
+			}
+		}
+	}
+	if parts[0] != "2" && parts[0] != "4" && parts[0] != "5" {
+		return ""
+	}
+	return candidate
+}
+
+func containsAny(value string, candidates ...string) bool {
+	for _, candidate := range candidates {
+		if strings.Contains(value, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func smtpTransportFailure(result SMTPAttempt, err error) SMTPAttempt {

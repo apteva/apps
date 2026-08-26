@@ -44,6 +44,7 @@ interface SMTPProbe {
   mx?: string;
   rcpt_status?: string;
   code?: number;
+  enhanced_code?: string;
   response?: string;
   informative?: boolean;
   catch_all?: boolean;
@@ -57,6 +58,7 @@ interface SMTPAttempt {
   kind: "recipient" | "catch_all";
   status: string;
   code?: number;
+  enhanced_code?: string;
   response?: string;
 }
 
@@ -179,20 +181,45 @@ function verdictBadgeClass(verdict?: string) {
   }
 }
 
+function reasonBadgeClass(reason: string) {
+  switch (reason) {
+    case "role_account": return "text-info";
+    case "possible_typo":
+    case "dns_temporary_error": return "text-warn";
+    default: return "text-error";
+  }
+}
+
 function titleCase(value: string) {
   return value.replace(/[_-]+/g, " ").replace(/\b\w/g, (x) => x.toUpperCase());
+}
+
+function resultPresentation(r: CheckResult) {
+  const routable = r.syntax_ok && !!(r.mx && r.mx.length);
+  if (r.verdict === "unknown" && routable && !r.smtp.checked) {
+    return { title: "Routable — mailbox not checked", confidence: "Domain checks passed", recommendation: "SMTP optional" };
+  }
+  if (r.verdict === "unknown" && routable && r.smtp.rcpt_status === "blocked") {
+    return { title: "Routable — SMTP probe blocked", confidence: "Mailbox unverified", recommendation: "Review" };
+  }
+  return {
+    title: titleCase(r.verdict),
+    confidence: `${titleCase(r.confidence)} confidence`,
+    recommendation: titleCase(r.recommendation),
+  };
 }
 
 function Result({ r }: { r: CheckResult }) {
   const hasMX = !!(r.mx && r.mx.length);
   const positive = r.verdict === "deliverable";
   const negative = r.verdict === "undeliverable";
+  const presentation = resultPresentation(r);
   return (
     <section className="border border-border rounded overflow-hidden">
       <div className={`flex items-center gap-2 px-4 py-3 ${positive ? "text-success" : negative ? "text-error" : "text-warn"}`}>
         {positive ? <CheckIcon /> : negative ? <XIcon /> : null}
         <span className="font-medium" style={{ fontSize: "16px" }}>
-          {titleCase(r.verdict)}
+          {presentation.title}
         </span>
         <span
           className="text-text-muted text-sm ml-2"
@@ -202,8 +229,8 @@ function Result({ r }: { r: CheckResult }) {
         </span>
         <span className="ml-auto">
           <span className="flex items-center gap-2">
-            <Badge text={`${titleCase(r.confidence)} confidence`} cls={verdictBadgeClass(r.verdict)} />
-            <Badge text={titleCase(r.recommendation)} cls={verdictBadgeClass(r.verdict)} />
+            <Badge text={presentation.confidence} cls={verdictBadgeClass(r.verdict)} />
+            <Badge text={presentation.recommendation} cls={verdictBadgeClass(r.verdict)} />
           </span>
         </span>
       </div>
@@ -211,7 +238,7 @@ function Result({ r }: { r: CheckResult }) {
       {r.reasons.length > 0 && (
         <div className="px-4 pb-3 flex flex-wrap gap-2">
           {r.reasons.map((x) => (
-            <Badge key={x} text={REASON_LABELS[x] ?? x} cls="text-error" />
+            <Badge key={x} text={REASON_LABELS[x] ?? x} cls={reasonBadgeClass(x)} />
           ))}
         </div>
       )}
@@ -286,6 +313,7 @@ function Result({ r }: { r: CheckResult }) {
           />
           {r.smtp.mx && <SignalRow label="MX host" badge={<span />} mono={r.smtp.mx} />}
           {r.smtp.code !== undefined && <SignalRow label="SMTP code" badge={<span />} mono={String(r.smtp.code)} />}
+          {r.smtp.enhanced_code && <SignalRow label="Enhanced status" badge={<span />} mono={r.smtp.enhanced_code} />}
           <SignalRow
             label="Informative"
             badge={r.smtp.informative

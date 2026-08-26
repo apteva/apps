@@ -184,6 +184,40 @@ func TestSMTPRequiresConsistentRejectionAcrossAllMX(t *testing.T) {
 	}
 }
 
+func TestSMTPPolicyBlockIsNeverMailboxRejection(t *testing.T) {
+	resolver := &fakeResolver{mxs: []*net.MX{{Host: "inbound-smtp.eu-west-1.amazonaws.com.", Pref: 10}}}
+	probe := func(_ context.Context, mx, _ string, _ time.Duration) SMTPAttempt {
+		return SMTPAttempt{
+			MX: mx, Status: "blocked", Code: 550, EnhancedCode: "5.7.1",
+			Response: "5.7.1 IP address blacklisted by recipient",
+		}
+	}
+	result := verifierForTest(resolver, probe).check(context.Background(), "contact@marcoschwartz.com", true, time.Second)
+	if result.Verdict != "unknown" || !result.Valid || result.Recommendation != "review" {
+		t.Fatalf("policy block was overclassified: %#v", result)
+	}
+	if result.SMTP.RcptStatus != "blocked" || result.SMTP.Informative == nil || *result.SMTP.Informative {
+		t.Fatalf("policy block should be explicit and non-informative: %#v", result.SMTP)
+	}
+}
+
+func TestMixedMailboxRejectAndPolicyBlockStaysUnknown(t *testing.T) {
+	resolver := &fakeResolver{mxs: []*net.MX{
+		{Host: "primary.example.com.", Pref: 10},
+		{Host: "backup.example.com.", Pref: 20},
+	}}
+	probe := func(_ context.Context, mx, _ string, _ time.Duration) SMTPAttempt {
+		if mx == "primary.example.com" {
+			return SMTPAttempt{Status: "reject", Code: 550, EnhancedCode: "5.1.1"}
+		}
+		return SMTPAttempt{Status: "blocked", Code: 550, EnhancedCode: "5.7.1"}
+	}
+	result := verifierForTest(resolver, probe).check(context.Background(), "person@example.com", true, time.Second)
+	if result.Verdict != "unknown" || result.SMTP.RcptStatus != "blocked" || !result.Valid {
+		t.Fatalf("mixed policy result was overclassified: %#v", result)
+	}
+}
+
 func TestMixedSMTPRejectAndTemporaryFailureStaysUnknown(t *testing.T) {
 	resolver := &fakeResolver{mxs: []*net.MX{
 		{Host: "primary.example.com.", Pref: 10},
@@ -231,6 +265,10 @@ func TestSMTPWireProbeClassifiesRecipientReplies(t *testing.T) {
 	}{
 		{name: "accepted", rcptReply: "250 2.1.5 recipient ok", wantStatus: "ok", wantCode: 250},
 		{name: "rejected", rcptReply: "550 5.1.1 mailbox unavailable", wantStatus: "reject", wantCode: 550},
+		{name: "AWS policy block", rcptReply: "550 5.7.1 IP address blacklisted by recipient", wantStatus: "blocked", wantCode: 550},
+		{name: "generic policy block", rcptReply: "550 rejected due to sender reputation policy", wantStatus: "blocked", wantCode: 550},
+		{name: "legacy missing mailbox", rcptReply: "550 no such user", wantStatus: "reject", wantCode: 550},
+		{name: "ambiguous permanent failure", rcptReply: "550 mailbox unavailable", wantStatus: "blocked", wantCode: 550},
 		{name: "temporary", rcptReply: "451 4.7.1 try again later", wantStatus: "tempfail", wantCode: 451},
 	}
 
@@ -246,6 +284,9 @@ func TestSMTPWireProbeClassifiesRecipientReplies(t *testing.T) {
 			if result.Status != tc.wantStatus || result.Code != tc.wantCode {
 				t.Fatalf("probe=%#v, want status=%s code=%d", result, tc.wantStatus, tc.wantCode)
 			}
+			if tc.name == "AWS policy block" && result.EnhancedCode != "5.7.1" {
+				t.Fatalf("enhanced status was not retained: %#v", result)
+			}
 			select {
 			case err := <-serverDone:
 				if err != nil {
@@ -255,6 +296,20 @@ func TestSMTPWireProbeClassifiesRecipientReplies(t *testing.T) {
 				t.Fatal("test SMTP server did not exit")
 			}
 		})
+	}
+}
+
+func TestParseEnhancedSMTPCode(t *testing.T) {
+	tests := map[string]string{
+		"5.1.1 mailbox unavailable":    "5.1.1",
+		"5.7.1 IP address blacklisted": "5.7.1",
+		"mailbox unavailable":          "",
+		"5.x.1 malformed":              "",
+	}
+	for input, want := range tests {
+		if got := parseEnhancedSMTPCode(input); got != want {
+			t.Errorf("parseEnhancedSMTPCode(%q)=%q, want %q", input, got, want)
+		}
 	}
 }
 

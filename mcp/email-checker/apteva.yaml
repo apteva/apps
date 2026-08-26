@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: email-checker
 display_name: Email Checker
-version: 0.5.0
+version: 0.5.1
 description: |
   Stateless email validation. Run local syntax, RFC-correct MX/A/AAAA routing,
   Null MX, disposable/free/role and typo classification, plus an optional

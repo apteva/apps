@@ -21,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: email-checker
 display_name: Email Checker
-version: 0.5.0
+version: 0.5.1
 description: |
   Standalone email checks with RFC-correct DNS, multi-MX SMTP and catch-all detection, plus optional provider verification.
 author: Apteva

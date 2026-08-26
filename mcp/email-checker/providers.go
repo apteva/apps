@@ -179,6 +179,10 @@ func applyLocalDecision(result *CheckResult) {
 		result.Verdict = "unknown"
 		result.Confidence = "low"
 		result.Recommendation = "retry"
+	case result.SMTP.Checked:
+		result.Verdict = "unknown"
+		result.Confidence = "low"
+		result.Recommendation = "review"
 	default:
 		result.Verdict = "unknown"
 		result.Confidence = "low"
