@@ -722,8 +722,9 @@ func isUniqueViolation(err error) bool {
 // ─── Address resolution ───────────────────────────────────────────
 
 type resolvedAddress struct {
-	Channel string
-	Address string
+	Channel   string
+	Address   string
+	ChannelID int64
 }
 
 // resolveContactAddress picks (channel, address) for a send.
@@ -738,38 +739,35 @@ func resolveContactAddress(db *sql.DB, pid string, c *Contact, preferChannel str
 	if c == nil {
 		return nil, errors.New("contact required")
 	}
-	pickFromChannels := func(channel string) string {
-		switch channel {
-		case channelEmail:
-			if c.PrimaryEmail != "" {
-				return c.PrimaryEmail
-			}
-		case channelSMS, channelWhatsApp:
-			if c.PrimaryPhone != "" {
-				return c.PrimaryPhone
-			}
-		}
+	pickFromChannels := func(channel string) (int64, string) {
 		kind := contactChannelKindFor(channel)
 		if kind == "" {
-			return ""
+			return 0, ""
 		}
+		var id int64
 		var v string
 		row := db.QueryRow(
-			`SELECT value FROM contact_channels
-			 WHERE project_id = ? AND contact_id = ? AND kind = ?
+			`SELECT c.id, c.value FROM contact_channels c
+			 WHERE c.project_id = ? AND c.contact_id = ? AND c.kind = ?
+			   AND NOT EXISTS (
+				 SELECT 1 FROM contact_channel_delivery_state s
+				 WHERE s.project_id = c.project_id AND s.channel_id = c.id AND s.transport = ?
+				   AND (s.suppressed = 1 OR s.quarantined = 1
+					OR s.status IN ('hard_bounced','complained','unsubscribed'))
+			   )
 			 ORDER BY is_primary DESC, id ASC LIMIT 1`,
-			pid, c.ID, kind,
+			pid, c.ID, kind, channel,
 		)
-		_ = row.Scan(&v)
-		return v
+		_ = row.Scan(&id, &v)
+		return id, v
 	}
 
 	if preferChannel != "" {
-		addr := pickFromChannels(preferChannel)
+		id, addr := pickFromChannels(preferChannel)
 		if addr == "" {
-			return nil, fmt.Errorf("contact has no %s address", preferChannel)
+			return nil, fmt.Errorf("contact has no messageable %s address", preferChannel)
 		}
-		return &resolvedAddress{Channel: preferChannel, Address: addr}, nil
+		return &resolvedAddress{Channel: preferChannel, Address: addr, ChannelID: id}, nil
 	}
 
 	row := db.QueryRow(
@@ -794,22 +792,23 @@ func resolveContactAddress(db *sql.DB, pid string, c *Contact, preferChannel str
 		}
 	}
 	if lastChannel != "" {
-		if addr := pickFromChannels(lastChannel); addr != "" {
-			return &resolvedAddress{Channel: lastChannel, Address: addr}, nil
+		if id, addr := pickFromChannels(lastChannel); addr != "" {
+			return &resolvedAddress{Channel: lastChannel, Address: addr, ChannelID: id}, nil
 		}
 	}
 
 	available := []string{}
 	for _, ch := range []string{channelEmail, channelSMS, channelWhatsApp} {
-		if pickFromChannels(ch) != "" {
+		if _, addr := pickFromChannels(ch); addr != "" {
 			available = append(available, ch)
 		}
 	}
 	switch len(available) {
 	case 0:
-		return nil, errors.New("contact has no email or phone address")
+		return nil, errors.New("contact has no messageable email, SMS, or WhatsApp address")
 	case 1:
-		return &resolvedAddress{Channel: available[0], Address: pickFromChannels(available[0])}, nil
+		id, addr := pickFromChannels(available[0])
+		return &resolvedAddress{Channel: available[0], Address: addr, ChannelID: id}, nil
 	default:
 		return nil, fmt.Errorf("channel required: contact has %s — pass channel arg", strings.Join(available, " and "))
 	}
@@ -1479,9 +1478,28 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	}
 
 	if !isTest {
-		if suppressed, reason := suppressionCheck(ctx, addr.Channel, addr.Address); suppressed {
-			return nil, fmt.Errorf("address suppressed (%s): %s", reason, addr.Address)
+		for attempts := 0; attempts < 20; attempts++ {
+			check, checkErr := suppressionCheckDetailed(ctx, pid, addr.Channel, addr.Address)
+			if checkErr != nil {
+				// Messaging remains the final enforcement point. A transient
+				// preflight read failure must not make the optional CRM cache a
+				// second source of truth.
+				break
+			}
+			recordSuppressionPreflight(ctx.AppDB(), pid, addr.ChannelID, addr.Channel, check)
+			if !check.Suppressed {
+				break
+			}
+			blockedAddress := addr.Address
+			next, resolveErr := resolveContactAddress(ctx.AppDB(), pid, c, preferChannel)
+			if resolveErr != nil || next.Address == blockedAddress {
+				return nil, fmt.Errorf("address suppressed (%s): %s", check.Reason, blockedAddress)
+			}
+			addr = next
 		}
+	}
+	if err := validateStandaloneEmailArgs(args, addr.Channel, templateID); err != nil {
+		return nil, err
 	}
 
 	// Sender resolution precedence: explicit `from` arg > list default
@@ -1929,12 +1947,23 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // ─── Tool: contacts_list_messageable ──────────────────────────────
 
+type MessageableContact struct {
+	ID                   int64             `json:"id"`
+	DisplayName          string            `json:"display_name,omitempty"`
+	PrimaryEmail         string            `json:"primary_email,omitempty"`
+	PrimaryPhone         string            `json:"primary_phone,omitempty"`
+	MessageableAddresses map[string]string `json:"messageable_addresses"`
+}
+
 func (a *App) toolListMessageable(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
 	channel := strings.ToLower(strings.TrimSpace(strArg(args, "channel")))
+	if channel != "" && channel != channelEmail && channel != channelSMS && channel != channelWhatsApp {
+		return nil, fmt.Errorf("invalid channel %q (email|sms|whatsapp)", channel)
+	}
 	limit := intArg(args, "limit", 100)
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -1942,13 +1971,27 @@ func (a *App) toolListMessageable(ctx *sdk.AppCtx, args map[string]any) (any, er
 
 	where := []string{"project_id = ?", "deleted_at IS NULL", "(status IS NULL OR status = 'active')"}
 	qargs := []any{pid}
+	messageableExists := func(transport string) string {
+		qargs = append(qargs, transport)
+		return `EXISTS (
+			SELECT 1 FROM contact_channels cc
+			JOIN contact_channel_delivery_state ds
+			  ON ds.project_id = cc.project_id AND ds.channel_id = cc.id
+			WHERE cc.project_id = contacts.project_id AND cc.contact_id = contacts.id
+			  AND ds.transport = ? AND ds.suppressed = 0 AND ds.quarantined = 0
+			  AND ds.status NOT IN ('hard_bounced','complained','unsubscribed')
+		)`
+	}
 	switch channel {
 	case channelEmail:
-		where = append(where, "primary_email IS NOT NULL AND primary_email <> ''")
+		where = append(where, messageableExists(channelEmail))
 	case channelSMS, channelWhatsApp:
-		where = append(where, "primary_phone IS NOT NULL AND primary_phone <> ''")
+		where = append(where, messageableExists(channel))
 	case "":
-		where = append(where, "((primary_email IS NOT NULL AND primary_email <> '') OR (primary_phone IS NOT NULL AND primary_phone <> ''))")
+		emailExists := messageableExists(channelEmail)
+		smsExists := messageableExists(channelSMS)
+		whatsAppExists := messageableExists(channelWhatsApp)
+		where = append(where, "("+emailExists+" OR "+smsExists+" OR "+whatsAppExists+")")
 	}
 	// Exclude automated / no-reply senders from bulk-message audiences by
 	// default — you rarely want to blast noreply@…. Individual sends and
@@ -1961,8 +2004,26 @@ func (a *App) toolListMessageable(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	qargs = append(qargs, limit)
 	rows, err := ctx.AppDB().Query(
-		`SELECT id, COALESCE(display_name,''), COALESCE(primary_email,''),
-				COALESCE(primary_phone,'')
+		`SELECT contacts.id, COALESCE(display_name,''), COALESCE(primary_email,''),
+				COALESCE(primary_phone,''),
+				COALESCE((SELECT cc.value FROM contact_channels cc
+					JOIN contact_channel_delivery_state ds ON ds.project_id = cc.project_id AND ds.channel_id = cc.id
+					WHERE cc.project_id = contacts.project_id AND cc.contact_id = contacts.id
+					  AND ds.transport = 'email' AND ds.suppressed = 0 AND ds.quarantined = 0
+					  AND ds.status NOT IN ('hard_bounced','complained','unsubscribed')
+					ORDER BY cc.is_primary DESC, cc.id ASC LIMIT 1), ''),
+				COALESCE((SELECT cc.value FROM contact_channels cc
+					JOIN contact_channel_delivery_state ds ON ds.project_id = cc.project_id AND ds.channel_id = cc.id
+					WHERE cc.project_id = contacts.project_id AND cc.contact_id = contacts.id
+					  AND ds.transport = 'sms' AND ds.suppressed = 0 AND ds.quarantined = 0
+					  AND ds.status NOT IN ('hard_bounced','complained','unsubscribed')
+					ORDER BY cc.is_primary DESC, cc.id ASC LIMIT 1), ''),
+				COALESCE((SELECT cc.value FROM contact_channels cc
+					JOIN contact_channel_delivery_state ds ON ds.project_id = cc.project_id AND ds.channel_id = cc.id
+					WHERE cc.project_id = contacts.project_id AND cc.contact_id = contacts.id
+					  AND ds.transport = 'whatsapp' AND ds.suppressed = 0 AND ds.quarantined = 0
+					  AND ds.status NOT IN ('hard_bounced','complained','unsubscribed')
+					ORDER BY cc.is_primary DESC, cc.id ASC LIMIT 1), '')
 		 FROM contacts WHERE `+strings.Join(where, " AND ")+`
 		 ORDER BY updated_at DESC LIMIT ?`,
 		qargs...,
@@ -1971,16 +2032,21 @@ func (a *App) toolListMessageable(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	defer rows.Close()
-	type listRow struct {
-		ID           int64  `json:"id"`
-		DisplayName  string `json:"display_name,omitempty"`
-		PrimaryEmail string `json:"primary_email,omitempty"`
-		PrimaryPhone string `json:"primary_phone,omitempty"`
-	}
-	out := []listRow{}
+	out := []MessageableContact{}
 	for rows.Next() {
-		var r listRow
-		if err := rows.Scan(&r.ID, &r.DisplayName, &r.PrimaryEmail, &r.PrimaryPhone); err == nil {
+		var r MessageableContact
+		var email, sms, whatsApp string
+		if err := rows.Scan(&r.ID, &r.DisplayName, &r.PrimaryEmail, &r.PrimaryPhone, &email, &sms, &whatsApp); err == nil {
+			r.MessageableAddresses = map[string]string{}
+			if email != "" {
+				r.MessageableAddresses[channelEmail] = email
+			}
+			if sms != "" {
+				r.MessageableAddresses[channelSMS] = sms
+			}
+			if whatsApp != "" {
+				r.MessageableAddresses[channelWhatsApp] = whatsApp
+			}
 			out = append(out, r)
 		}
 	}
@@ -2766,7 +2832,7 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			"display_name": parseFromName(body.From, body.Headers),
 			"source":       "messaging:inbound",
 		}
-		contact, _, err = dbUpsertByChannel(db, pid, contactChannelKindFor(body.Channel), body.From, defaults, "messaging:inbound")
+		contact, _, _, err = upsertContactWithEmailVerification(ctx, pid, contactChannelKindFor(body.Channel), body.From, defaults, "messaging:inbound", false)
 		if err != nil {
 			return nil, fmt.Errorf("upsert: %w", err)
 		}

@@ -4,7 +4,7 @@ description: Use CRM tools for contacts, customer conversations, lists, segments
 compatibility: Requires the CRM MCP tools supplied by an Apteva app installation.
 metadata:
   author: apteva
-  version: "1.0"
+  version: "1.1"
 ---
 
 # CRM
@@ -69,6 +69,25 @@ customer conversations, lists, segments, opportunities, and pipelines.
   placeholder message merely to test whether a sender is configured.
 - Preserve returned delivery, threading, and deduplication information in the
   user-facing result.
+- Each stored email or phone channel can include per-transport `deliverability`
+  state. Treat `messageable: false` as authoritative for CRM selection; an
+  email, SMS route, or WhatsApp route may be blocked without deactivating the
+  contact or the phone's other transport.
+- `contacts_list_messageable` already excludes suppressed, quarantined, hard
+  bounced, complained, and unsubscribed routes for the requested transport.
+
+## Email verification
+
+- Contact writes may return `email_verifications` for new or changed email
+  channels. Treat these as address-validity annotations, not Messaging delivery
+  state and not proof that the
+  contact owns the address; `verified_at` has separate semantics.
+- Do not repeatedly verify an unchanged address. Use `contacts_verify_email`
+  only when the user asks for a recheck or current delivery evidence matters.
+- The optional SMTP probe contacts recipient mail servers and may be slower or
+  inconclusive. Set `smtp: true` only for an explicitly requested deeper check.
+- Never replace an address with `suggested_value` automatically. Present the
+  suggestion to the user for review.
 
 ## Reporting
 

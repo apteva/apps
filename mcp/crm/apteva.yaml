@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.8.30
+version: 0.9.0
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -26,13 +26,20 @@ requires:
     - platform.apps.call
   apps:
     - name: messaging
-      version: ">=0.13.43"
+      version: ">=0.13.46"
       optional: true
-      reason: "Delivers outbound attachments and supplies normalized attachment metadata for CRM activities."
+      reason: "Delivers messages and attachments, and supplies delivery and suppression events for per-channel messageability."
+      events:
+        - message.event
+        - suppression.changed
     - name: storage
       version: ">=0.10.0"
       optional: true
       reason: "Lets operators choose project files in the CRM composer and open persisted attachment content."
+    - name: email-checker
+      version: ">=0.5.0"
+      optional: true
+      reason: "Adds optional deliverability checks for newly stored email channels and operator-requested SMTP probes."
   integrations:
     - role: messaging
       kind: app
@@ -40,7 +47,16 @@ requires:
       capabilities: [message.send]
       required: false
       label: "Messaging (optional)"
-      hint: "When bound, CRM gains Send/Reply tools with attachments and accepts inbound mail/SMS/WhatsApp media at /inbound, auto-attaching it to contact activity. Messaging v0.13.43 or newer is required for attachment metadata. Without it, CRM is a standalone contact store."
+      hint: "When bound, CRM gains Send/Reply tools with attachments, accepts inbound mail/SMS/WhatsApp media, and tracks per-channel delivery and suppression state. Messaging v0.13.46 or newer is required. Without it, CRM is a standalone contact store."
+    - role: email_verification
+      kind: app
+      compatible_app_names: [email-checker]
+      capabilities: [email.verify]
+      tools:
+        email.verify: email_check
+      required: false
+      label: "Email verification (optional)"
+      hint: "When bound, CRM annotates new email channels with Email Checker deliverability results. CRM remains fully functional when it is absent or temporarily unavailable."
 
 provides:
   # The same canonical Agent Skill is also discovered portably through
@@ -59,7 +75,7 @@ provides:
     - name: contacts_search
       description: Filtered contact search over core fields including created_at/updated_at timestamps, attributes, and list predicates.
     - name: contacts_get
-      description: Authoritative current-state read with core fields, channels, tags, custom attributes, and active list memberships; excludes history and opportunities.
+      description: Authoritative current-state read with core fields, channels, per-transport deliverability/messageability, tags, custom attributes, and active list memberships; excludes history and opportunities.
     - name: contacts_get_context
       description: Authoritative pre-flight read with complete current state plus bounded recent activities, conversations, and opportunities with truncation metadata.
     - name: contacts_create
@@ -68,6 +84,8 @@ provides:
       description: Partial-patch a contact, including channel replacement.
     - name: contacts_upsert_by_channel
       description: Find-or-create by email or phone. Returns was_created.
+    - name: contacts_verify_email
+      description: Re-check one stored email channel, optionally including a direct SMTP probe, and persist its deliverability metadata.
     - name: contacts_merge
       description: Merge one contact into another.
     - name: contacts_log_activity
@@ -92,7 +110,7 @@ provides:
     - name: messaging_inbound_receive
       description: Receive an inbound message and normalized attachment metadata dispatched by Messaging and attach it to CRM contact activity.
     - name: contacts_list_messageable
-      description: List contacts reachable on a given channel.
+      description: List contacts with at least one non-suppressed, non-quarantined route for the requested email, SMS, or WhatsApp transport.
     - name: contacts_list_conversations
       description: List a contact's recent conversations (each with status + priority); optional status filter.
     - name: contacts_get_conversation
@@ -185,6 +203,17 @@ provides:
         first_name: string
         last_name: string
         archived: boolean
+    - name: contact.channel.deliverability.changed
+      description: A contact email, SMS, or WhatsApp route changed delivery, quarantine, suppression, or effective messageability state.
+      payload:
+        contact_id: integer
+        channel_id: integer
+        transport: string
+        status: string
+        suppressed: boolean
+        quarantined: boolean
+        messageable: boolean
+        messageability_reason: string
     - name: contact.deleted
       description: A contact was archived/soft-deleted.
       payload:
@@ -384,6 +413,28 @@ db:
   migrations: migrations/
 
 config_schema:
+  - name: email_verification_mode
+    type: select
+    default: local
+    label: Automatic email verification
+    options: [off, local, smtp]
+    description: Check only new or changed email channels. Local avoids direct SMTP probing; SMTP enables it. Has no effect unless Email Checker is bound.
+  - name: email_verification_policy
+    type: select
+    default: annotate
+    label: Email verification policy
+    options: [annotate, reject_definitive]
+    description: Annotate always saves contacts. Reject definitive blocks only conclusive invalid email signals; verifier errors and uncertain results remain fail-open.
+  - name: email_verification_timeout_seconds
+    type: number
+    default: 5
+    label: Email verification timeout (seconds)
+    description: Per-email timeout for automatic and manual checks, from 1 to 60 seconds.
+  - name: email_verification_block_disposable
+    type: bool
+    default: false
+    label: Reject disposable emails in strict mode
+    description: When enabled with reject_definitive, disposable-provider signals reject the write. Off by default.
   - name: phone_default_country
     type: text
     default: "US"
