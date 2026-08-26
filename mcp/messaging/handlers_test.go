@@ -1511,6 +1511,133 @@ func TestSuppression_AddRemove(t *testing.T) {
 	}
 }
 
+func TestSuppressionChangedEvent_AddAndRemove(t *testing.T) {
+	recorder := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, nil, tk.WithEmitter(recorder))
+	app := &App{}
+
+	if _, err := app.toolSuppressionAdd(ctx, map[string]any{
+		"address": "blocked@example.com",
+		"reason":  "user-requested",
+		"source":  "crm",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolSuppressionRemove(ctx, map[string]any{"address": "blocked@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	// Removing a missing row is an idempotent no-op and must not invent a
+	// third change event.
+	if _, err := app.toolSuppressionRemove(ctx, map[string]any{"address": "blocked@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+
+	events := recorder.EventsByTopic("suppression.changed")
+	if len(events) != 2 {
+		t.Fatalf("suppression.changed events=%d, want 2", len(events))
+	}
+	for i, operation := range []string{"add", "remove"} {
+		event := events[i]
+		payload, ok := event.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("event %d data=%T, want map", i, event.Data)
+		}
+		if event.ProjectID != "test-proj" {
+			t.Fatalf("event %d project=%q", i, event.ProjectID)
+		}
+		if payload["operation"] != operation ||
+			payload["address"] != "blocked@example.com" ||
+			payload["channel"] != channelEmail ||
+			payload["kind"] != "address" ||
+			payload["reason"] != "user-requested" ||
+			payload["source"] != "crm" {
+			t.Fatalf("event %d payload=%#v", i, payload)
+		}
+	}
+	addPayload := events[0].Data.(map[string]any)
+	removePayload := events[1].Data.(map[string]any)
+	if addPayload["suppressed"] != true || removePayload["suppressed"] != false {
+		t.Fatalf("suppressed flags add=%#v remove=%#v", addPayload, removePayload)
+	}
+}
+
+func TestSuppressionListPaginationReturnsFilteredTotal(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	for _, row := range []struct {
+		channel string
+		address string
+	}{
+		{channelEmail, "a@example.com"},
+		{channelEmail, "b@example.com"},
+		{channelEmail, "c@example.com"},
+		{channelSMS, "+12025550101"},
+		{channelWhatsApp, "+12025550102"},
+	} {
+		if err := dbSuppressionUpsert(ctx.AppDB(), "test-proj", row.channel, row.address, "test", "manual"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE suppressions SET last_seen='2026-08-26T10:00:00Z' WHERE project_id='test-proj'`); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := (&App{}).toolSuppressionList(ctx, map[string]any{
+		"channel": channelEmail,
+		"limit":   2,
+		"offset":  1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := out.(map[string]any)
+	if page["count"] != 2 || page["total"] != 3 || page["limit"] != 2 || page["offset"] != 1 || page["has_more"] != false {
+		t.Fatalf("page metadata=%#v", page)
+	}
+	rows := page["suppressions"].([]Suppression)
+	if len(rows) != 2 || rows[0].Address != "b@example.com" || rows[1].Address != "c@example.com" {
+		t.Fatalf("stable page rows=%#v", rows)
+	}
+}
+
+func TestSendMessage_FinalSuppressionCheckStopsConcurrentOptOut(t *testing.T) {
+	platform := &stubPlatform{}
+	ctx := newTestCtx(t, platform)
+	_, err := ctx.AppDB().Exec(`CREATE TRIGGER add_suppression_after_outbound_insert
+		AFTER INSERT ON messages
+		WHEN NEW.direction = 'out'
+		BEGIN
+			INSERT INTO suppressions
+				(project_id, channel, kind, address, reason, source, first_seen, last_seen)
+			VALUES
+				(NEW.project_id, NEW.channel, 'address', 'race@example.com', 'concurrent-opt-out', 'auto', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		END`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = (&App{}).toolSendMessage(ctx, map[string]any{
+		"channel": channelEmail,
+		"from":    fromAcme,
+		"to":      "race@example.com",
+		"subject": "must not send",
+		"body":    "blocked at final check",
+	})
+	var suppressedErr *recipientSuppressedError
+	if !errors.As(err, &suppressedErr) {
+		t.Fatalf("error=%v, want final recipient suppression", err)
+	}
+	if len(platform.executeCalls) != 0 {
+		t.Fatalf("provider calls=%#v, want none", platform.executeCalls)
+	}
+	var status string
+	if err := ctx.AppDB().QueryRow(`SELECT status FROM messages WHERE direction='out' ORDER BY id DESC LIMIT 1`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "suppressed" {
+		t.Fatalf("persisted status=%q, want suppressed", status)
+	}
+}
+
 // ─── senders ──────────────────────────────────────────────────────
 
 // preseedSender writes a row directly via dbUpsertSender so list/refresh
@@ -4733,9 +4860,10 @@ func TestTwilioInboundWebhook_DetectsWhatsAppByPrefix(t *testing.T) {
 
 func TestTwilioInboundWebhook_AutoSuppressesOnSTOP(t *testing.T) {
 	plat := newPhoneStub(nil)
+	recorder := tk.NewEmitRecorder()
 	ctx := newTestCtx(t, plat, tk.WithConfig(map[string]string{
 		"twilio_auth_token": "secret",
-	}))
+	}), tk.WithEmitter(recorder))
 	app := &App{}
 
 	form := url.Values{
@@ -4775,6 +4903,14 @@ func TestTwilioInboundWebhook_AutoSuppressesOnSTOP(t *testing.T) {
 	}
 	if supps[0].Address != "+15551112222" || supps[0].Reason != "stop-keyword" {
 		t.Errorf("suppression: %+v", supps[0])
+	}
+	changes := recorder.EventsByTopic("suppression.changed")
+	if len(changes) != 1 {
+		t.Fatalf("suppression.changed=%#v", changes)
+	}
+	payload := changes[0].Data.(map[string]any)
+	if payload["operation"] != "add" || payload["channel"] != channelSMS || payload["address"] != "+15551112222" {
+		t.Fatalf("suppression.changed payload=%#v", payload)
 	}
 }
 

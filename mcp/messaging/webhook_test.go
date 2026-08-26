@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -126,6 +127,193 @@ func TestBounceWebhook_ComplaintSuppresses(t *testing.T) {
 	}
 }
 
+func TestSESBounceEventPublishesTypedClassificationAndSuppressionChange(t *testing.T) {
+	recorder := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, nil, tk.WithEmitter(recorder))
+	app := &App{}
+	_, err := ctx.AppDB().Exec(
+		`INSERT INTO messages (project_id, channel, direction, from_addr, to_addrs, status, provider_message_id)
+		 VALUES ('test-proj', 'email', 'out', 'noreply@acme.com', '["missing@example.com"]', 'sent', 'ses-typed-bounce-1')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	innerSES := map[string]any{
+		"eventType": "Bounce",
+		"mail": map[string]any{
+			"messageId":   "ses-typed-bounce-1",
+			"timestamp":   "2026-08-26T10:00:00Z",
+			"destination": []string{"missing@example.com"},
+		},
+		"bounce": map[string]any{
+			"timestamp":     "2026-08-26T10:00:01Z",
+			"bounceType":    "Permanent",
+			"bounceSubType": "NoEmail",
+			"bouncedRecipients": []map[string]any{{
+				"emailAddress": "missing@example.com", "diagnosticCode": "smtp; 550 5.1.1 user unknown",
+			}},
+		},
+	}
+	innerJSON, _ := json.Marshal(innerSES)
+	envelope := map[string]any{
+		"Type": "Notification", "MessageId": "sns-typed-bounce", "TopicArn": testSNSTopicARN,
+		"Message": string(innerJSON), "SigningCertURL": "https://sns.us-east-1.amazonaws.com/cert.pem",
+	}
+	body, _ := json.Marshal(envelope)
+	r := httptest.NewRequest(http.MethodPost, "/webhooks/ses-bounces?project_id=test-proj", strings.NewReader(string(body)))
+	signTestSNSRequest(r, body)
+	w := httptest.NewRecorder()
+	app.handleBounceWebhook(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	messageEvents := recorder.EventsByTopic("message.event")
+	if len(messageEvents) != 1 {
+		t.Fatalf("message.event count=%d", len(messageEvents))
+	}
+	payload := messageEvents[0].Data.(map[string]any)
+	if payload["permanent"] != true || payload["bounce_type"] != "Permanent" || payload["bounce_subtype"] != "NoEmail" || payload["reason"] != "smtp; 550 5.1.1 user unknown" {
+		t.Fatalf("typed bounce payload=%#v", payload)
+	}
+	suppressionEvents := recorder.EventsByTopic("suppression.changed")
+	if len(suppressionEvents) != 1 {
+		t.Fatalf("suppression events=%#v", suppressionEvents)
+	}
+	suppressionPayload := suppressionEvents[0].Data.(map[string]any)
+	if suppressionPayload["operation"] != "add" || suppressionPayload["address"] != "missing@example.com" {
+		t.Fatalf("suppression payload=%#v", suppressionPayload)
+	}
+}
+
+func TestSESTransientBounceClassifiesWithoutSuppressing(t *testing.T) {
+	recorder := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, nil, tk.WithEmitter(recorder))
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO messages (project_id, channel, direction, from_addr, to_addrs, status, provider_message_id)
+		 VALUES ('test-proj', 'email', 'out', 'noreply@acme.com', '["full@example.com"]', 'sent', 'ses-transient-1')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, _ := res.LastInsertId()
+	message, _ := dbMessageGet(ctx.AppDB(), "test-proj", messageID)
+	events, err := parseSESProviderEvents(`{
+		"eventType":"Bounce",
+		"mail":{"messageId":"ses-transient-1","destination":["full@example.com"]},
+		"bounce":{"bounceType":"Transient","bounceSubType":"MailboxFull","bouncedRecipients":[{"emailAddress":"full@example.com","diagnosticCode":"mailbox full"}]}
+	}`)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%#v err=%v", events, err)
+	}
+	events[0].ProviderEventID = "sns:transient:0"
+	if persisted, err := persistAndEmitProviderEvent(ctx, message, events[0]); err != nil || !persisted {
+		t.Fatalf("persisted=%v err=%v", persisted, err)
+	}
+	suppressions, _ := dbSuppressionList(ctx.AppDB(), "test-proj", channelEmail, 100)
+	if len(suppressions) != 0 {
+		t.Fatalf("transient bounce suppressions=%#v", suppressions)
+	}
+	payload := recorder.EventsByTopic("message.event")[0].Data.(map[string]any)
+	if payload["permanent"] != false || payload["bounce_type"] != "Transient" || payload["bounce_subtype"] != "MailboxFull" || payload["reason"] != "mailbox full" {
+		t.Fatalf("transient payload=%#v", payload)
+	}
+}
+
+func TestLegacySESNotificationPreservesBounceClassification(t *testing.T) {
+	events, err := parseSESProviderEvents(`{
+		"notificationType":"Bounce",
+		"mail":{"messageId":"legacy-bounce-1"},
+		"bounce":{"bounceType":"Permanent","bounceSubType":"Suppressed","bouncedRecipients":[{"emailAddress":"legacy@example.com","diagnosticCode":"address suppressed"}]}
+	}`)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%#v err=%v", events, err)
+	}
+	event := events[0]
+	if !event.Permanent || event.BounceType != "Permanent" || event.BounceSubType != "Suppressed" || event.Reason != "address suppressed" {
+		t.Fatalf("legacy event=%#v", event)
+	}
+}
+
+func TestSESSubscriptionOnlyGloballySuppressesUnsubscribeAll(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		unsubscribeAll bool
+		wantSuppressed bool
+	}{
+		{name: "unsubscribe all", unsubscribeAll: true, wantSuppressed: true},
+		{name: "topic only", unsubscribeAll: false, wantSuppressed: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := tk.NewEmitRecorder()
+			ctx := newTestCtx(t, nil, tk.WithEmitter(recorder))
+			res, err := ctx.AppDB().Exec(
+				`INSERT INTO messages (project_id, channel, direction, from_addr, to_addrs, status, provider_message_id)
+				 VALUES ('test-proj', 'email', 'out', 'noreply@acme.com', '["subscriber@example.com"]', 'sent', 'ses-subscription-1')`,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			messageID, _ := res.LastInsertId()
+			message, _ := dbMessageGet(ctx.AppDB(), "test-proj", messageID)
+			raw := fmt.Sprintf(`{
+				"eventType":"Subscription",
+				"mail":{"messageId":"ses-subscription-1","destination":["subscriber@example.com"]},
+				"subscription":{"contactList":"customers","newTopicPreferences":{"unsubscribeAll":%t,"topicSubscriptionStatus":{"topicName":"news","subscriptionStatus":"OptOut"}}}
+			}`, tc.unsubscribeAll)
+			events, err := parseSESProviderEvents(raw)
+			if err != nil || len(events) != 1 {
+				t.Fatalf("events=%#v err=%v", events, err)
+			}
+			events[0].ProviderEventID = "sns:subscription:0"
+			if persisted, err := persistAndEmitProviderEvent(ctx, message, events[0]); err != nil || !persisted {
+				t.Fatalf("persisted=%v err=%v", persisted, err)
+			}
+			suppressions, _ := dbSuppressionList(ctx.AppDB(), "test-proj", channelEmail, 100)
+			if got := len(suppressions) == 1; got != tc.wantSuppressed {
+				t.Fatalf("suppressions=%#v wantSuppressed=%v", suppressions, tc.wantSuppressed)
+			}
+			changes := recorder.EventsByTopic("suppression.changed")
+			if got := len(changes) == 1; got != tc.wantSuppressed {
+				t.Fatalf("suppression.changed=%#v want=%v", changes, tc.wantSuppressed)
+			}
+			if tc.wantSuppressed && suppressions[0].Reason != "unsubscribe-all" {
+				t.Fatalf("suppression=%#v", suppressions[0])
+			}
+		})
+	}
+}
+
+func TestProviderEventRollsBackWhenAutomaticSuppressionFails(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO messages (project_id, channel, direction, from_addr, to_addrs, status, provider_message_id)
+		 VALUES ('test-proj', 'email', 'out', 'noreply@acme.com', '["broken@example.com"]', 'sent', 'ses-atomic-1')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, _ := res.LastInsertId()
+	message, _ := dbMessageGet(ctx.AppDB(), "test-proj", messageID)
+	if _, err := ctx.AppDB().Exec(`CREATE TRIGGER reject_suppression BEFORE INSERT ON suppressions BEGIN SELECT RAISE(ABORT, 'suppression unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, err := persistAndEmitProviderEvent(ctx, message, providerEvent{
+		ProviderEventID: "sns:atomic:0", Provider: "aws-ses", ProviderMessageID: "ses-atomic-1",
+		Kind: "bounced", Recipient: "broken@example.com", Reason: "user unknown",
+		Permanent: true, BounceType: "Permanent", BounceSubType: "NoEmail", Raw: json.RawMessage(`{"eventType":"Bounce"}`),
+	})
+	if err == nil || persisted {
+		t.Fatalf("persisted=%v err=%v, want atomic failure", persisted, err)
+	}
+	stored, _ := dbDeliveryEvents(ctx.AppDB(), messageID)
+	if len(stored) != 0 {
+		t.Fatalf("delivery event survived rollback: %#v", stored)
+	}
+}
+
 func TestSESEventPublishing_ClickPersistsAndEmitsSpecificTopic(t *testing.T) {
 	ctx := newTestCtx(t, nil)
 	app := &App{}
@@ -213,13 +401,15 @@ func TestProviderEvent_GlobalInstallEmitsForMessageProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	persistAndEmitProviderEvent(ctx, msg, providerEvent{
+	if _, err := persistAndEmitProviderEvent(ctx, msg, providerEvent{
 		Provider:          "twilio",
 		ProviderMessageID: "SMglobal1",
 		Kind:              "opened",
 		Recipient:         "+15553334444",
 		Raw:               json.RawMessage(`{"MessageStatus":"read"}`),
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, topic := range []string{"message.opened", "message.event"} {
 		events := rec.EventsByTopic(topic)
@@ -255,10 +445,18 @@ func TestProviderEventIsIdempotent(t *testing.T) {
 		ProviderEventID: "sns:event-1:0", Provider: "ses", ProviderMessageID: "ses-1",
 		Kind: "delivered", Recipient: "b@example.com", Raw: json.RawMessage(`{"event":"delivery"}`),
 	}
-	if !persistAndEmitProviderEvent(ctx, message, event) {
+	persisted, err := persistAndEmitProviderEvent(ctx, message, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !persisted {
 		t.Fatal("first event was not persisted")
 	}
-	if persistAndEmitProviderEvent(ctx, message, event) {
+	persisted, err = persistAndEmitProviderEvent(ctx, message, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted {
 		t.Fatal("duplicate event was persisted")
 	}
 	if events, _ := dbDeliveryEvents(ctx.AppDB(), id); len(events) != 1 {

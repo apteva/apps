@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.44
+version: 0.13.45
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through
   Twilio. Tracks
@@ -121,7 +121,7 @@ provides:
     - { name: template_list,          description: "List templates. Args: channel?, limit?." }
     - { name: template_delete,        description: "Remove a template from this project. Args: id, delete_provider? (default false)." }
     # suppression
-    - { name: suppression_list,       description: "List suppressed exact addresses and domains. Args: channel?, limit?." }
+    - { name: suppression_list,       description: "List suppressed exact addresses and domains with stable pagination. Args: channel?, limit?, offset?. Returns count, total, limit, offset, and has_more." }
     - { name: suppression_add,        description: "Suppress an exact address or email domain for outbound sends and inbound dispatch. Args: address, channel?, kind? (address|domain), reason?, source?, force?." }
     - { name: suppression_remove,     description: "Remove an address or domain from suppression. Args: address, channel?, kind?." }
     - { name: suppression_check,      description: "Suppression lookup. Args: address, channel?. Checks exact address plus email domain and returns {suppressed, kind?, reason?, source?, suppressed_at?}." }
