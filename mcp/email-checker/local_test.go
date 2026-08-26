@@ -74,6 +74,9 @@ func TestNoMXUsesRFCImplicitAddressRoute(t *testing.T) {
 	if !reflect.DeepEqual(result.MX, []string{"example.com"}) || !result.Valid {
 		t.Fatalf("implicit route was not retained: %#v", result)
 	}
+	if !result.Routable || result.MailboxStatus != "not_checked" || result.RiskLevel != "none" {
+		t.Fatalf("routable domain was not classified neutrally: %#v", result)
+	}
 }
 
 func TestNullMXIsDefinitivelyUndeliverable(t *testing.T) {
@@ -142,8 +145,22 @@ func TestSMTPAcceptingGeneratedRecipientIsCatchAll(t *testing.T) {
 		return SMTPAttempt{MX: mx, Status: "ok", Code: 250}
 	}
 	result := verifierForTest(resolver, probe).check(context.Background(), "person@example.com", true, time.Second)
-	if result.Verdict != "risky" || result.SMTP.RcptStatus != "catch_all" || result.SMTP.CatchAll == nil || !*result.SMTP.CatchAll {
+	if result.Verdict != "unknown" || result.Recommendation != "allow" || !result.Valid || !result.Routable {
+		t.Fatalf("catch-all should remain allowed: %#v", result)
+	}
+	if result.MailboxStatus != "catch_all" || result.RiskLevel != "unassessed" || result.SMTP.RcptStatus != "catch_all" || result.SMTP.CatchAll == nil || !*result.SMTP.CatchAll {
 		t.Fatalf("catch-all was not detected: %#v", result)
+	}
+}
+
+func TestRoleAccountOnCatchAllDomainIsInformational(t *testing.T) {
+	resolver := &fakeResolver{mxs: []*net.MX{{Host: "mx.example.com.", Pref: 10}}}
+	probe := func(_ context.Context, mx, _ string, _ time.Duration) SMTPAttempt {
+		return SMTPAttempt{MX: mx, Status: "ok", Code: 250}
+	}
+	result := verifierForTest(resolver, probe).check(context.Background(), "contact@example.com", true, time.Second)
+	if !result.Role || result.Verdict == "risky" || result.RiskLevel == "elevated" || result.Recommendation != "allow" {
+		t.Fatalf("role signal changed neutral catch-all decision: %#v", result)
 	}
 }
 
@@ -193,7 +210,7 @@ func TestSMTPPolicyBlockIsNeverMailboxRejection(t *testing.T) {
 		}
 	}
 	result := verifierForTest(resolver, probe).check(context.Background(), "contact@marcoschwartz.com", true, time.Second)
-	if result.Verdict != "unknown" || !result.Valid || result.Recommendation != "review" {
+	if result.Verdict != "unknown" || !result.Valid || result.Recommendation != "allow" || result.MailboxStatus != "probe_blocked" {
 		t.Fatalf("policy block was overclassified: %#v", result)
 	}
 	if result.SMTP.RcptStatus != "blocked" || result.SMTP.Informative == nil || *result.SMTP.Informative {

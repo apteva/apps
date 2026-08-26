@@ -21,9 +21,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: email-checker
 display_name: Email Checker
-version: 0.5.1
+version: 0.5.2
 description: |
-  Standalone email checks with RFC-correct DNS, multi-MX SMTP and catch-all detection, plus optional provider verification.
+  Standalone email checks with RFC-correct DNS, multi-MX SMTP and neutral catch-all detection, plus optional provider verification.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -147,7 +147,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Args: email, smtp? (default false), provider? (local|auto|provider slug; default local), " +
 				"connection_id?, timeout_seconds? (default 5), ip_address? (ZeroBounce only). " +
 				"External provider calls may consume credits and therefore run only when provider is explicit. " +
-				"Returns normalized verdict/recommendation plus local signals and provider details.",
+				"Returns normalized verdict/recommendation, routability, mailbox status, risk level, local signals, and provider details. " +
+				"Catch-all and role addresses are not treated as risky by themselves.",
 			InputSchema: schemaObject(map[string]any{
 				"email": map[string]any{"type": "string"},
 				"smtp":  map[string]any{"type": "boolean"},

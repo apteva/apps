@@ -2,11 +2,13 @@ schema: apteva-app/v1
 
 name: email-checker
 display_name: Email Checker
-version: 0.5.1
+version: 0.5.2
 description: |
   Stateless email validation. Run local syntax, RFC-correct MX/A/AAAA routing,
   Null MX, disposable/free/role and typo classification, plus an optional
   multi-MX SMTP probe with generated-recipient catch-all detection.
+  Catch-all domains remain routable and allowed while their individual mailbox
+  status stays unverified; role accounts are informational rather than risky.
   Optionally route a passing address through a bound verification provider
   such as ZeroBounce, Bouncer, NeverBounce, Kickbox, MillionVerifier, or
   Hunter and return one normalized deliverability verdict. No DB, no state.

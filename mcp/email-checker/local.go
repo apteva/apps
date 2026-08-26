@@ -33,6 +33,9 @@ type CheckResult struct {
 	Verdict        string          `json:"verdict"`
 	Confidence     string          `json:"confidence"`
 	Recommendation string          `json:"recommendation"`
+	MailboxStatus  string          `json:"mailbox_status"`
+	Routable       bool            `json:"routable"`
+	RiskLevel      string          `json:"risk_level"`
 	Provider       *ProviderResult `json:"provider,omitempty"`
 }
 

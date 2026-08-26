@@ -128,6 +128,11 @@ func runCheck(ctx *sdk.AppCtx, input string, opts CheckOptions) (CheckResult, er
 	providerResult := executeVerificationProvider(ctx, bound, result.Email, opts)
 	result.Provider = &providerResult
 	if providerResult.Verdict != "" {
+		// A neutral catch-all provider result must not erase an independent
+		// local risk signal such as a likely domain typo.
+		if providerResult.Recommendation == "allow" && result.RiskLevel == "elevated" {
+			return result, nil
+		}
 		result.Verdict = providerResult.Verdict
 		result.Recommendation = providerResult.Recommendation
 		switch providerResult.Verdict {
@@ -139,14 +144,15 @@ func runCheck(ctx *sdk.AppCtx, input string, opts CheckOptions) (CheckResult, er
 			result.Confidence = "low"
 		}
 		// Preserve the legacy boolean for callers that have not adopted the
-		// richer verdict yet. Once a provider was requested, only its positive
-		// deliverability verdict should leave valid=true.
-		result.Valid = providerResult.Verdict == "deliverable"
+		// richer mailbox status yet. Neutral catch-all results remain allowed.
+		result.Valid = providerResult.Verdict == "deliverable" || providerResult.Recommendation == "allow"
+		applyProviderStatus(&result, providerResult)
 	}
 	return result, nil
 }
 
 func applyLocalDecision(result *CheckResult) {
+	applyLocalStatus(result)
 	switch {
 	case localFailureIsDefinitive(*result):
 		result.Valid = false
@@ -172,9 +178,9 @@ func applyLocalDecision(result *CheckResult) {
 		result.Confidence = "high"
 		result.Recommendation = "send"
 	case result.SMTP.Checked && result.SMTP.RcptStatus == "catch_all":
-		result.Verdict = "risky"
+		result.Verdict = "unknown"
 		result.Confidence = "low"
-		result.Recommendation = "review"
+		result.Recommendation = "allow"
 	case result.SMTP.Checked && result.SMTP.Retryable:
 		result.Verdict = "unknown"
 		result.Confidence = "low"
@@ -182,11 +188,78 @@ func applyLocalDecision(result *CheckResult) {
 	case result.SMTP.Checked:
 		result.Verdict = "unknown"
 		result.Confidence = "low"
-		result.Recommendation = "review"
+		if result.Routable && result.RiskLevel != "elevated" {
+			result.Recommendation = "allow"
+		} else {
+			result.Recommendation = "review"
+		}
 	default:
 		result.Verdict = "unknown"
 		result.Confidence = "low"
 		result.Recommendation = "run_smtp_probe"
+	}
+}
+
+func applyLocalStatus(result *CheckResult) {
+	result.Routable = result.SyntaxOK && len(result.MX) > 0 && result.DomainStatus != "dns_error"
+	result.RiskLevel = "none"
+	if result.Disposable || result.SuggestedEmail != "" {
+		result.RiskLevel = "elevated"
+	}
+
+	switch {
+	case !result.SyntaxOK:
+		result.MailboxStatus = "invalid_syntax"
+		result.RiskLevel = "not_applicable"
+	case result.DomainStatus == "null_mx" || result.DomainStatus == "no_mail_server":
+		result.MailboxStatus = "domain_unroutable"
+		result.RiskLevel = "not_applicable"
+	case result.DomainStatus == "dns_error":
+		result.MailboxStatus = "temporarily_unavailable"
+	case !result.SMTP.Checked:
+		result.MailboxStatus = "not_checked"
+	case result.SMTP.Informative != nil && *result.SMTP.Informative && result.SMTP.RcptStatus == "reject":
+		result.MailboxStatus = "rejected"
+		result.RiskLevel = "not_applicable"
+	case result.SMTP.Informative != nil && *result.SMTP.Informative && result.SMTP.RcptStatus == "ok":
+		result.MailboxStatus = "verified"
+	case result.SMTP.RcptStatus == "catch_all":
+		result.MailboxStatus = "catch_all"
+		if result.RiskLevel == "none" {
+			result.RiskLevel = "unassessed"
+		}
+	case result.SMTP.RcptStatus == "blocked":
+		result.MailboxStatus = "probe_blocked"
+		if result.RiskLevel == "none" {
+			result.RiskLevel = "unassessed"
+		}
+	case result.SMTP.Retryable:
+		result.MailboxStatus = "temporarily_unavailable"
+	default:
+		result.MailboxStatus = "unverified"
+	}
+}
+
+func applyProviderStatus(result *CheckResult, provider ProviderResult) {
+	switch provider.Verdict {
+	case "deliverable":
+		result.MailboxStatus = "verified"
+		result.RiskLevel = "none"
+	case "undeliverable":
+		result.MailboxStatus = "rejected"
+		result.RiskLevel = "not_applicable"
+	case "risky":
+		result.MailboxStatus = "provider_risky"
+		result.RiskLevel = "elevated"
+	default:
+		if provider.Recommendation == "allow" && provider.CatchAll != nil && *provider.CatchAll {
+			result.MailboxStatus = "catch_all"
+			if result.RiskLevel == "none" {
+				result.RiskLevel = "unassessed"
+			}
+		} else {
+			result.MailboxStatus = "provider_unverified"
+		}
 	}
 }
 
@@ -407,7 +480,19 @@ func normalizeProviderResponse(slug string, payload map[string]any, connectionID
 		result.Error = "unsupported provider response"
 		setProviderDecision(&result, "unknown", "review")
 	}
+	if providerCatchAllIsOnlyLimitation(result) {
+		setProviderDecision(&result, "unknown", "allow")
+	}
 	return result
+}
+
+func providerCatchAllIsOnlyLimitation(result ProviderResult) bool {
+	if result.CatchAll == nil || !*result.CatchAll || result.SuggestedEmail != "" || (result.Disposable != nil && *result.Disposable) {
+		return false
+	}
+	status := strings.ReplaceAll(result.Status, "-", "_")
+	return status == "catchall" || status == "catch_all" || status == "accept_all" ||
+		(result.Verdict == "risky" && result.Recommendation == "review")
 }
 
 func setProviderDecision(result *ProviderResult, verdict, recommendation string) {

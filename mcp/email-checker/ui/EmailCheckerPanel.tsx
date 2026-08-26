@@ -34,7 +34,10 @@ interface CheckResult {
   smtp: SMTPProbe;
   verdict: "deliverable" | "undeliverable" | "risky" | "unknown";
   confidence: "high" | "medium" | "low";
-  recommendation: "send" | "do_not_send" | "review" | "retry" | "run_smtp_probe";
+  recommendation: "send" | "allow" | "do_not_send" | "review" | "retry" | "run_smtp_probe";
+  mailbox_status: "verified" | "rejected" | "catch_all" | "not_checked" | "probe_blocked" | "temporarily_unavailable" | "unverified" | string;
+  routable: boolean;
+  risk_level: "none" | "unassessed" | "elevated" | "not_applicable";
   provider?: ProviderResult;
 }
 
@@ -157,7 +160,7 @@ function smtpBadgeClass(status?: string) {
     case "ok":
       return "text-success";
     case "catch_all":
-      return "text-warn";
+      return "text-info";
     case "reject":
     case "bad_syntax":
     case "no_mx":
@@ -195,17 +198,21 @@ function titleCase(value: string) {
 }
 
 function resultPresentation(r: CheckResult) {
-  const routable = r.syntax_ok && !!(r.mx && r.mx.length);
-  if (r.verdict === "unknown" && routable && !r.smtp.checked) {
+  const routable = r.routable ?? (r.syntax_ok && !!(r.mx && r.mx.length));
+  if (r.mailbox_status === "catch_all") {
+    return { title: "Routable — catch-all domain", confidence: "Mailbox not individually verified", recommendation: "Allowed", neutral: true };
+  }
+  if (r.verdict === "unknown" && routable && (r.mailbox_status === "not_checked" || !r.smtp.checked)) {
     return { title: "Routable — mailbox not checked", confidence: "Domain checks passed", recommendation: "SMTP optional" };
   }
-  if (r.verdict === "unknown" && routable && r.smtp.rcpt_status === "blocked") {
-    return { title: "Routable — SMTP probe blocked", confidence: "Mailbox unverified", recommendation: "Review" };
+  if (r.verdict === "unknown" && routable && (r.mailbox_status === "probe_blocked" || r.smtp.rcpt_status === "blocked")) {
+    return { title: "Routable — SMTP probe blocked", confidence: "Mailbox unverified", recommendation: "Allowed", neutral: true };
   }
   return {
     title: titleCase(r.verdict),
     confidence: `${titleCase(r.confidence)} confidence`,
     recommendation: titleCase(r.recommendation),
+    neutral: false,
   };
 }
 
@@ -216,7 +223,7 @@ function Result({ r }: { r: CheckResult }) {
   const presentation = resultPresentation(r);
   return (
     <section className="border border-border rounded overflow-hidden">
-      <div className={`flex items-center gap-2 px-4 py-3 ${positive ? "text-success" : negative ? "text-error" : "text-warn"}`}>
+      <div className={`flex items-center gap-2 px-4 py-3 ${positive ? "text-success" : negative ? "text-error" : presentation.neutral ? "text-info" : "text-warn"}`}>
         {positive ? <CheckIcon /> : negative ? <XIcon /> : null}
         <span className="font-medium" style={{ fontSize: "16px" }}>
           {presentation.title}
@@ -251,6 +258,12 @@ function Result({ r }: { r: CheckResult }) {
             : <Badge text="Failed" cls="text-error" />}
         />
         {r.domain && <SignalRow label="Domain" badge={<span />} mono={r.domain} />}
+        {r.mailbox_status && (
+          <SignalRow
+            label="Mailbox status"
+            badge={<Badge text={titleCase(r.mailbox_status)} cls={r.risk_level === "elevated" ? "text-warn" : "text-info"} />}
+          />
+        )}
         {r.domain_status && (
           <SignalRow
             label="Mail routing"
@@ -279,7 +292,7 @@ function Result({ r }: { r: CheckResult }) {
         <SignalRow
           label="Role account"
           badge={r.role
-            ? <Badge text="Yes" cls="text-warn" />
+            ? <Badge text="Yes — informational" cls="text-info" />
             : <Badge text="No" cls="text-text-muted" />}
         />
       </div>
@@ -318,10 +331,10 @@ function Result({ r }: { r: CheckResult }) {
             label="Informative"
             badge={r.smtp.informative
               ? <Badge text="Yes" cls="text-success" />
-              : <Badge text="No" cls="text-warn" />}
+              : <Badge text="No" cls={r.smtp.rcpt_status === "catch_all" ? "text-info" : "text-warn"} />}
           />
           {r.smtp.catch_all !== undefined && (
-            <SignalRow label="Catch-all" badge={<Badge text={r.smtp.catch_all ? "Yes" : "No"} cls={r.smtp.catch_all ? "text-warn" : "text-success"} />} />
+            <SignalRow label="Catch-all" badge={<Badge text={r.smtp.catch_all ? "Yes — allowed" : "No"} cls={r.smtp.catch_all ? "text-info" : "text-success"} />} />
           )}
           {r.smtp.retryable && <SignalRow label="Retry" badge={<Badge text="Recommended" cls="text-warn" />} />}
           {r.smtp.attempts && r.smtp.attempts.length > 0 && (
@@ -346,7 +359,7 @@ function Result({ r }: { r: CheckResult }) {
           {r.provider.verdict && (
             <SignalRow
               label="Verdict"
-              badge={<Badge text={titleCase(r.provider.verdict)} cls={verdictBadgeClass(r.provider.verdict)} />}
+              badge={<Badge text={r.provider.catch_all ? "Catch-all — allowed" : titleCase(r.provider.verdict)} cls={r.provider.catch_all ? "text-info" : verdictBadgeClass(r.provider.verdict)} />}
             />
           )}
           {r.provider.status && <SignalRow label="Provider status" badge={<span />} mono={r.provider.status} />}
@@ -354,7 +367,7 @@ function Result({ r }: { r: CheckResult }) {
           {r.provider.score !== undefined && <SignalRow label="Score" badge={<span />} mono={String(r.provider.score)} />}
           {r.provider.suggested_email && <SignalRow label="Suggested email" badge={<span />} mono={r.provider.suggested_email} />}
           {r.provider.catch_all !== undefined && (
-            <SignalRow label="Catch-all" badge={<Badge text={r.provider.catch_all ? "Yes" : "No"} cls={r.provider.catch_all ? "text-warn" : "text-text-muted"} />} />
+            <SignalRow label="Catch-all" badge={<Badge text={r.provider.catch_all ? "Yes — allowed" : "No"} cls={r.provider.catch_all ? "text-info" : "text-text-muted"} />} />
           )}
           {r.provider.error && <SignalRow label="Provider error" badge={<span />} mono={r.provider.error} />}
         </div>

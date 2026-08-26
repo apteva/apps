@@ -155,7 +155,7 @@ func TestNormalizeProviderResponses(t *testing.T) {
 		{
 			name: "NeverBounce catchall", provider: "neverbounce",
 			payload: map[string]any{"result": "catchall", "flags": []any{"has_dns_mx", "accepts_all"}},
-			verdict: "risky", recommend: "review", status: "catchall",
+			verdict: "unknown", recommend: "allow", status: "catchall",
 		},
 		{
 			name: "Kickbox rejected", provider: "kickbox",
@@ -170,7 +170,7 @@ func TestNormalizeProviderResponses(t *testing.T) {
 		{
 			name: "Hunter envelope", provider: "hunter",
 			payload: map[string]any{"data": map[string]any{"status": "accept_all", "score": float64(82), "accept_all": true}},
-			verdict: "risky", recommend: "review", status: "accept_all",
+			verdict: "unknown", recommend: "allow", status: "accept_all",
 		},
 	}
 
@@ -181,6 +181,31 @@ func TestNormalizeProviderResponses(t *testing.T) {
 				t.Fatalf("normalize=%#v", got)
 			}
 		})
+	}
+}
+
+func TestProviderCatchAllStatusRemainsAllowed(t *testing.T) {
+	result := CheckResult{Valid: true, Routable: true, MailboxStatus: "not_checked", RiskLevel: "none"}
+	provider := ProviderResult{Verdict: "unknown", Recommendation: "allow", CatchAll: boolPtr(true)}
+	applyProviderStatus(&result, provider)
+	if result.MailboxStatus != "catch_all" || result.RiskLevel != "unassessed" {
+		t.Fatalf("provider catch-all was not neutral: %#v", result)
+	}
+}
+
+func TestProviderCatchAllDoesNotEraseIndependentRisk(t *testing.T) {
+	result := CheckResult{Valid: true, Routable: true, MailboxStatus: "not_checked", RiskLevel: "elevated"}
+	provider := ProviderResult{Verdict: "unknown", Recommendation: "allow", CatchAll: boolPtr(true)}
+	applyProviderStatus(&result, provider)
+	if result.RiskLevel != "elevated" {
+		t.Fatalf("catch-all erased independent risk: %#v", result)
+	}
+
+	normalized := normalizeProviderResponse("zerobounce", map[string]any{
+		"status": "catch_all", "catchall_domain": true, "did_you_mean": "person@example.com",
+	}, 17)
+	if normalized.Recommendation == "allow" {
+		t.Fatalf("provider suggestion was incorrectly treated as catch-all only: %#v", normalized)
 	}
 }
 
