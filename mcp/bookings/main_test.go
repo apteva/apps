@@ -117,6 +117,36 @@ func TestManifestDeclaresPublicGatewayRoutes(t *testing.T) {
 	}
 }
 
+func TestPublicManagementURLsRetainProjectScope(t *testing.T) {
+	_, ctx := newBookingsTest(t, newBookingPlatform())
+	manageURL := publicManageURL(ctx, "project with spaces", "manage-token")
+	if !strings.Contains(manageURL, "/b/manage-token?project_id=project+with+spaces") {
+		t.Fatalf("manage URL lost project scope: %s", manageURL)
+	}
+
+	booking := &Booking{
+		ProjectID:         "test-proj",
+		Status:            "confirmed",
+		StartAt:           futureSlot().Format(time.RFC3339),
+		CancellationToken: "cancel-token",
+		RescheduleToken:   "reschedule-token",
+	}
+	bookingType := &BookingType{Title: "Client call", Slug: "client-call"}
+	page := managePageHTML(booking, bookingType)
+	for _, action := range []string{
+		"/b/reschedule-token/reschedule?project_id=test-proj",
+		"/b/cancel-token/cancel?project_id=test-proj",
+	} {
+		if !strings.Contains(page, action) {
+			t.Fatalf("manage page action lost project scope %q", action)
+		}
+	}
+	reschedulePage := reschedulePageHTML("test-proj", "reschedule-token", bookingType)
+	if !strings.Contains(reschedulePage, "/reschedule?project_id='+encodeURIComponent(PID)") {
+		t.Fatal("reschedule submission lost project scope")
+	}
+}
+
 func createTestType(t *testing.T, app *App, ctx *sdk.AppCtx, calls bool) *BookingType {
 	t.Helper()
 	location := "external_url"

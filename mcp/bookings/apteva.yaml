@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: bookings
 display_name: Bookings
-version: 0.2.1
+version: 0.2.2
 description: |
   Calendly-style booking links for client meetings. Booking
   types define availability, duration, conflict and destination calendars,

@@ -30,7 +30,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bookings
 display_name: Bookings
-version: 0.2.1
+version: 0.2.2
 description: Calendly-style booking links for client meetings.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bookings
@@ -1465,7 +1465,7 @@ func calendarDescription(ctx *sdk.AppCtx, bt *BookingType, b *Booking) string {
 	if b.AssignedAgentInstanceID != "" {
 		lines = append(lines, "Agent: "+b.AssignedAgentInstanceID)
 	}
-	lines = append(lines, "Manage: "+publicManageURL(ctx, b.CancellationToken))
+	lines = append(lines, "Manage: "+publicManageURL(ctx, b.ProjectID, b.CancellationToken))
 	return strings.Join(lines, "\n")
 }
 
@@ -1851,14 +1851,15 @@ func managePageHTML(b *Booking, bt *BookingType) string {
 	reschedule := ""
 	cancel := ""
 	if b.Status == "confirmed" || b.Status == "rescheduled" {
-		reschedule = `<p><a href="/api/apps/bookings/b/` + url.PathEscape(b.RescheduleToken) + `/reschedule">Choose a new time</a></p>`
-		cancel = `<form method="post" action="/api/apps/bookings/b/` + url.PathEscape(b.CancellationToken) + `/cancel" onsubmit="return confirm('Cancel this booking?')"><button type="submit">Cancel booking</button></form>`
+		projectQuery := "?project_id=" + url.QueryEscape(b.ProjectID)
+		reschedule = `<p><a href="/api/apps/bookings/b/` + url.PathEscape(b.RescheduleToken) + `/reschedule` + projectQuery + `">Choose a new time</a></p>`
+		cancel = `<form method="post" action="/api/apps/bookings/b/` + url.PathEscape(b.CancellationToken) + `/cancel` + projectQuery + `" onsubmit="return confirm('Cancel this booking?')"><button type="submit">Cancel booking</button></form>`
 	}
 	return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Booking</title><style>body{font-family:system-ui;margin:32px;max-width:680px}.muted{color:#6b7280}button{background:#991b1b;color:white;border:0;border-radius:6px;padding:10px 14px}</style></head><body><h1>` + html.EscapeString(bt.Title) + `</h1><p id="time" data-time="` + html.EscapeString(b.StartAt) + `"></p><p class="muted">Status: ` + html.EscapeString(b.Status) + `</p>` + bookingLocationHTML(b, bt) + reschedule + cancel + `<script>const el=document.getElementById('time');el.textContent=new Intl.DateTimeFormat(undefined,{dateStyle:'full',timeStyle:'short'}).format(new Date(el.dataset.time));</script></body></html>`
 }
 
 func reschedulePageHTML(pid, token string, bt *BookingType) string {
-	return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reschedule</title><style>body{font-family:system-ui;margin:32px;max-width:760px}.slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}.slot{padding:10px;border:1px solid #d1d5db;background:white;border-radius:6px;cursor:pointer}.error{color:#b91c1c}</style></head><body><h1>Choose a new time</h1><p id="zone"></p><div id="status">Loading available times…</div><div id="slots" class="slots"></div><script>const PID=` + jsString(pid) + `,SLUG=` + jsString(bt.Slug) + `,TOKEN=` + jsString(token) + `;const statusEl=document.getElementById('status'),slotsEl=document.getElementById('slots');document.getElementById('zone').textContent='Times shown in '+Intl.DateTimeFormat().resolvedOptions().timeZone;const fmt=s=>new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(new Date(s));async function load(){try{const res=await fetch('/api/apps/bookings/public/'+encodeURIComponent(SLUG)+'/slots?project_id='+encodeURIComponent(PID)+'&limit=40');if(!res.ok)throw new Error('Could not load available times');const data=await res.json();statusEl.textContent=data.slots.length?'Select a time:':'No times are currently available.';for(const slot of data.slots){const button=document.createElement('button');button.className='slot';button.textContent=fmt(slot.start);button.onclick=()=>choose(slot.start);slotsEl.appendChild(button)}}catch(error){statusEl.className='error';statusEl.textContent=error.message}}async function choose(start){if(!confirm('Move your appointment to '+fmt(start)+'?'))return;try{const res=await fetch('/api/apps/bookings/b/'+encodeURIComponent(TOKEN)+'/reschedule',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({start_at:start})});if(!res.ok)throw new Error(await res.text());slotsEl.replaceChildren();statusEl.textContent='Your appointment was rescheduled to '+fmt(start)+'.'}catch(error){statusEl.className='error';statusEl.textContent=error.message}}load();</script></body></html>`
+	return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reschedule</title><style>body{font-family:system-ui;margin:32px;max-width:760px}.slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}.slot{padding:10px;border:1px solid #d1d5db;background:white;border-radius:6px;cursor:pointer}.error{color:#b91c1c}</style></head><body><h1>Choose a new time</h1><p id="zone"></p><div id="status">Loading available times…</div><div id="slots" class="slots"></div><script>const PID=` + jsString(pid) + `,SLUG=` + jsString(bt.Slug) + `,TOKEN=` + jsString(token) + `;const statusEl=document.getElementById('status'),slotsEl=document.getElementById('slots');document.getElementById('zone').textContent='Times shown in '+Intl.DateTimeFormat().resolvedOptions().timeZone;const fmt=s=>new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(new Date(s));async function load(){try{const res=await fetch('/api/apps/bookings/public/'+encodeURIComponent(SLUG)+'/slots?project_id='+encodeURIComponent(PID)+'&limit=40');if(!res.ok)throw new Error('Could not load available times');const data=await res.json();statusEl.textContent=data.slots.length?'Select a time:':'No times are currently available.';for(const slot of data.slots){const button=document.createElement('button');button.className='slot';button.textContent=fmt(slot.start);button.onclick=()=>choose(slot.start);slotsEl.appendChild(button)}}catch(error){statusEl.className='error';statusEl.textContent=error.message}}async function choose(start){if(!confirm('Move your appointment to '+fmt(start)+'?'))return;try{const res=await fetch('/api/apps/bookings/b/'+encodeURIComponent(TOKEN)+'/reschedule?project_id='+encodeURIComponent(PID),{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({start_at:start})});if(!res.ok)throw new Error(await res.text());slotsEl.replaceChildren();statusEl.textContent='Your appointment was rescheduled to '+fmt(start)+'.'}catch(error){statusEl.className='error';statusEl.textContent=error.message}}load();</script></body></html>`
 }
 
 func bookingLocationHTML(b *Booking, bt *BookingType) string {
@@ -1967,7 +1968,7 @@ func scanBooking(ctx *sdk.AppCtx, row rowScanner) (*Booking, error) {
 	if crmID.Valid {
 		b.CRMContactID = crmID.Int64
 	}
-	b.PublicManageURL = publicManageURL(ctx, b.CancellationToken)
+	b.PublicManageURL = publicManageURL(ctx, b.ProjectID, b.CancellationToken)
 	return &b, nil
 }
 
@@ -2240,8 +2241,12 @@ func publicBookingURL(ctx *sdk.AppCtx, pid, slug string) string {
 	return u
 }
 
-func publicManageURL(ctx *sdk.AppCtx, token string) string {
-	return publicBase(ctx) + "/b/" + url.PathEscape(token)
+func publicManageURL(ctx *sdk.AppCtx, pid, token string) string {
+	u := publicBase(ctx) + "/b/" + url.PathEscape(token)
+	if pid != "" {
+		u += "?project_id=" + url.QueryEscape(pid)
+	}
+	return u
 }
 
 func randomToken() string {
