@@ -30,7 +30,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bookings
 display_name: Bookings
-version: 0.2.2
+version: 0.2.3
 description: Calendly-style booking links for client meetings.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bookings
@@ -1265,7 +1265,13 @@ func (a *App) attachOptionalCalls(ctx *sdk.AppCtx, pid string, bt *BookingType, 
 		} `json:"room"`
 		HostJoinURL string `json:"host_join_url"`
 	}
-	meta := map[string]any{"booking_id": b.ID, "booking_type_id": bt.ID, "target_kind": bt.TargetKind}
+	meta := map[string]any{
+		"booking_id":         b.ID,
+		"booking_type_id":    bt.ID,
+		"target_kind":        bt.TargetKind,
+		"scheduled_start_at": b.StartAt,
+		"scheduled_end_at":   b.EndAt,
+	}
 	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("calls", "calls_create_room", map[string]any{
 		"title":    calendarTitle(bt, b),
 		"metadata": meta,
