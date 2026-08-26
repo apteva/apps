@@ -30,7 +30,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bookings
 display_name: Bookings
-version: 0.2.0
+version: 0.2.1
 description: Calendly-style booking links for client meetings.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bookings
@@ -64,6 +64,10 @@ requires:
       label: "CRM"
 provides:
   http_routes:
+    - prefix: /public/
+      no_auth: true
+    - prefix: /b/
+      no_auth: true
     - prefix: /
   mcp_tools:
     - { name: booking_types_list, description: "List booking types." }

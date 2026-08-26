@@ -102,6 +102,21 @@ func newBookingsTest(t *testing.T, platform sdk.PlatformClient) (*App, *sdk.AppC
 	return app, ctx
 }
 
+func TestManifestDeclaresPublicGatewayRoutes(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	public := map[string]bool{}
+	for _, route := range manifest.Provides.HTTPRoutes {
+		if route.NoAuth {
+			public[route.Prefix] = true
+		}
+	}
+	for _, prefix := range []string{"/public/", "/b/"} {
+		if !public[prefix] {
+			t.Fatalf("manifest route %q must declare no_auth for the server proxy", prefix)
+		}
+	}
+}
+
 func createTestType(t *testing.T, app *App, ctx *sdk.AppCtx, calls bool) *BookingType {
 	t.Helper()
 	location := "external_url"
