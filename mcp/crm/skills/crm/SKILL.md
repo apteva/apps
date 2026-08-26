@@ -75,6 +75,10 @@ customer conversations, lists, segments, opportunities, and pipelines.
   contact or the phone's other transport.
 - `contacts_list_messageable` already excludes suppressed, quarantined, hard
   bounced, complained, and unsubscribed routes for the requested transport.
+- `contacts_resolve_audience` is the paginated bulk contract for downstream
+  apps. It evaluates one segment, list, or contact for a selected transport,
+  returns healthy resolved addresses, and reports exact raw, eligible, and
+  excluded counts without exposing CRM tables.
 
 ## Email verification
 

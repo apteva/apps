@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.9.0
+version: 0.9.1
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -128,6 +128,8 @@ provides:
       description: Receive an inbound message and normalized attachment metadata dispatched by Messaging and attach it to CRM contact activity.
     - name: contacts_list_messageable
       description: List contacts with at least one non-suppressed, non-quarantined route for the requested email, SMS, or WhatsApp transport.
+    - name: contacts_resolve_audience
+      description: Resolve a segment, list, or single contact into channel-eligible recipients, exclusions, and exact raw/eligible counts with cursor pagination.
     - name: contacts_list_conversations
       description: List a contact's recent conversations (with status + priority).
     - name: contacts_get_conversation
@@ -969,6 +971,21 @@ func (a *App) MCPTools() []sdk.Tool {
 				"limit":             map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolListMessageable,
+		},
+		{
+			Name:        "contacts_resolve_audience",
+			Description: "Resolve exactly one segment, list, or contact into currently messageable recipients for a channel. Returns exact raw/eligible/excluded counts, exclusion reasons, healthy addresses, and cursor pagination. Args: channel (email|sms|whatsapp), exactly one of segment_id/list_id/contact_id, limit? (default 1000, max 5000), after_contact_id?, include_automated? (default false).",
+			InputSchema: schemaObject(map[string]any{
+				"channel":           map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
+				"segment_id":        map[string]any{"type": "integer"},
+				"list_id":           map[string]any{"type": "integer"},
+				"contact_id":        map[string]any{"type": "integer"},
+				"limit":             map[string]any{"type": "integer", "minimum": 1, "maximum": 5000},
+				"after_contact_id":  map[string]any{"type": "integer"},
+				"include_automated": map[string]any{"type": "boolean"},
+				"include_counts":    map[string]any{"type": "boolean"},
+			}, []string{"channel"}),
+			Handler: a.toolResolveAudience,
 		},
 		{
 			Name:        "contacts_list_conversations",

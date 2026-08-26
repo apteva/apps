@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: campaigns
 display_name: Campaigns
-version: 0.2.15
+version: 0.2.16
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment (or
   a list — segments scoped to a list work too), schedule it, and the
@@ -35,9 +35,15 @@ requires:
     - platform.apps.call
   apps:
     - name: messaging
+      version: ">=0.13.46"
       reason: Sends campaign recipients and receives message.event delivery/open/bounce updates.
       events:
         - message.event
+    - name: crm
+      version: ">=0.9.1"
+      reason: Resolves channel-specific eligible segment/list recipients and deliverability exclusions.
+      events:
+        - contact.channel.deliverability.changed
   integrations:
     - role: crm
       kind: app
@@ -45,7 +51,7 @@ requires:
       capabilities: [contacts.list, segments.eval]
       required: true
       label: "CRM (audience source)"
-      hint: "Audience is a segment (or a list — wrap it in a segment with in_list). CRM owns contacts, segments, and lists."
+      hint: "CRM v0.9.1+ owns contacts, segments, lists, and channel-specific audience eligibility. Campaigns never reads CRM tables directly."
     - role: jobs
       kind: app
       compatible_app_names: [jobs]
@@ -140,6 +146,8 @@ provides:
         updated: integer
         failed: integer
         stats: object
+    - name: campaign.audience_changed
+      description: CRM reported a channel deliverability change; draft and scheduled audience eligibility counts should be refreshed.
     - name: campaign.unsubscribed
       description: A recipient used a campaign unsubscribe link and was added to Messaging suppression.
       payload:
