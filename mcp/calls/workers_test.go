@@ -72,6 +72,33 @@ func TestIdleCloserUsesLastActivityAndEndsOnlyInactiveRooms(t *testing.T) {
 	}
 }
 
+func TestIdleCloserKeepsScheduledRoomsUntilAppointmentEnds(t *testing.T) {
+	app, ctx, _ := newTestApp(t)
+	room := createRoom(t, app, ctx)
+	if _, err := ctx.AppDB().Exec(`UPDATE rooms SET last_activity_at=datetime('now','-2 hours'), metadata=? WHERE id=?`,
+		`{"scheduled_start_at":"2999-01-01T10:00:00Z","scheduled_end_at":"2999-01-01T10:30:00Z"}`, room.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.runRoomIdleCloser(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := app.dbGetRoom(ctx, "test-proj", room.ID)
+	if after.Status != "open" {
+		t.Fatalf("scheduled room closed before appointment: status=%s", after.Status)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE rooms SET metadata=? WHERE id=?`,
+		`{"scheduled_start_at":"2000-01-01T10:00:00Z","scheduled_end_at":"2000-01-01T10:30:00Z"}`, room.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.runRoomIdleCloser(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, _ = app.dbGetRoom(ctx, "test-proj", room.ID)
+	if after.Status != "ended" {
+		t.Fatalf("scheduled room stayed open after appointment: status=%s", after.Status)
+	}
+}
+
 func TestSessionCleanerHonorsContextAndRemovesOldSignals(t *testing.T) {
 	app, ctx, _ := newTestApp(t)
 	room := createRoom(t, app, ctx)

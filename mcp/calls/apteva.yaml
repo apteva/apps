@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: calls
 display_name: Calls
-version: 0.2.1
+version: 0.2.2
 description: |
   Secure realtime audio/video rooms using authenticated WebRTC mesh
   signaling, expiring join links, unified human/agent/service

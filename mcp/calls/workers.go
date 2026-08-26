@@ -65,6 +65,11 @@ func (a *App) runRoomIdleCloser(ctx context.Context, app *sdk.AppCtx) error {
 		   FROM rooms r
 		  WHERE r.status = 'open'
 		    AND COALESCE(r.last_activity_at, r.created_at) < datetime('now', ?)
+		    AND (
+		      json_valid(r.metadata) = 0
+		      OR COALESCE(json_extract(r.metadata, '$.scheduled_end_at'), '') = ''
+		      OR julianday(json_extract(r.metadata, '$.scheduled_end_at')) <= julianday('now')
+		    )
 		    AND NOT EXISTS (
 		      SELECT 1 FROM participants p
 		       WHERE p.room_id = r.id AND p.project_id = r.project_id
