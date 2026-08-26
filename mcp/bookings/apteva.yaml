@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: bookings
 display_name: Bookings
-version: 0.2.3
+version: 0.3.0
 description: |
   Calendly-style booking links for client meetings. Booking
   types define availability, duration, conflict and destination calendars,
@@ -71,7 +71,7 @@ provides:
     - name: bookings_get
       description: Fetch one booking.
     - name: bookings_list
-      description: List bookings by status, booking type, or time window.
+      description: List bookings by lifecycle state, booking type, time window, or Calls-room presence, with controllable time ordering.
     - name: bookings_reschedule
       description: Reschedule a booking and update the linked Calendar event.
     - name: bookings_cancel
@@ -89,6 +89,39 @@ provides:
       label: Bookings
       icon: calendar-plus
       entry: /ui/BookingsPanel.mjs
+  ui_components:
+    - name: booked-calls
+      label: Booked calls
+      description: Upcoming client calls with quick host access.
+      entry: /ui/BookedCallsWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [booking.created, booking.rescheduled, booking.cancelled, booking.completed, booking.no_show]
+      settings_schema:
+        type: object
+        properties:
+          horizon_days:
+            type: integer
+            title: Days ahead
+            description: Upcoming window to display. Use 0 for all future calls.
+            default: 30
+            minimum: 0
+            maximum: 365
+          max_items:
+            type: integer
+            title: Maximum calls
+            default: 6
+            minimum: 1
+            maximum: 20
+          booking_type_id:
+            type: integer
+            title: Booking type ID
+            description: Show every Calls booking type when unset or 0.
+            default: 0
+            minimum: 0
 
 runtime:
   kind: source

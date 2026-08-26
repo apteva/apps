@@ -117,6 +117,32 @@ func TestManifestDeclaresPublicGatewayRoutes(t *testing.T) {
 	}
 }
 
+func TestManifestDeclaresHomeBookedCallsWidget(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	if len(manifest.Provides.UIComponents) != 1 {
+		t.Fatalf("ui components=%+v", manifest.Provides.UIComponents)
+	}
+	component := manifest.Provides.UIComponents[0]
+	if component.Name != "booked-calls" || component.Entry != "/ui/BookedCallsWidget.mjs" {
+		t.Fatalf("component identity=%+v", component)
+	}
+	if !component.Suggested || component.Visibility != "project" || component.DefaultSize != "half" {
+		t.Fatalf("component placement=%+v", component)
+	}
+	if len(component.Slots) != 1 || component.Slots[0] != "dashboard.home" {
+		t.Fatalf("component slots=%+v", component.Slots)
+	}
+	if len(component.SupportedSizes) != 2 || component.SupportedSizes[0] != "half" || component.SupportedSizes[1] != "full" {
+		t.Fatalf("component sizes=%+v", component.SupportedSizes)
+	}
+	if len(component.RefreshTopics) != 5 {
+		t.Fatalf("component refresh topics=%+v", component.RefreshTopics)
+	}
+	if component.SettingsSchema["type"] != "object" {
+		t.Fatalf("component settings schema=%+v", component.SettingsSchema)
+	}
+}
+
 func TestPublicManagementURLsRetainProjectScope(t *testing.T) {
 	_, ctx := newBookingsTest(t, newBookingPlatform())
 	manageURL := publicManageURL(ctx, "project with spaces", "manage-token")
@@ -347,5 +373,56 @@ func TestTimezoneAndZeroNoticeRules(t *testing.T) {
 	start := time.Date(2026, time.January, 5, 8, 0, 0, 0, time.UTC)
 	if !withinWorkingHours(start, start.Add(30*time.Minute), loc, rules.WorkingHours) {
 		t.Fatal("timezone-aware working hours rejected a valid Madrid slot")
+	}
+}
+
+func TestBookingsListCanSelectUpcomingCallsForWidget(t *testing.T) {
+	app, ctx := newBookingsTest(t, newBookingPlatform())
+	bookingType := createTestType(t, app, ctx, true)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	type fixture struct {
+		status string
+		start  time.Time
+		end    time.Time
+		room   any
+	}
+	fixtures := []fixture{
+		{status: "confirmed", start: now.Add(2 * time.Hour), end: now.Add(150 * time.Minute), room: 12},
+		{status: "rescheduled", start: now.Add(time.Hour), end: now.Add(90 * time.Minute), room: 11},
+		{status: "cancelled", start: now.Add(30 * time.Minute), end: now.Add(time.Hour), room: 10},
+		{status: "confirmed", start: now.Add(45 * time.Minute), end: now.Add(75 * time.Minute), room: nil},
+		{status: "confirmed", start: now.Add(-time.Hour), end: now.Add(-30 * time.Minute), room: 9},
+	}
+	for index, item := range fixtures {
+		if _, err := ctx.AppDB().Exec(`INSERT INTO bookings (
+			project_id, booking_type_id, status, start_at, end_at, timezone,
+			invitee_name, invitee_email, calls_room_id, cancellation_token,
+			reschedule_token, idempotency_key
+		) VALUES (?, ?, ?, ?, ?, 'UTC', ?, ?, ?, ?, ?, ?)`,
+			"test-proj", bookingType.ID, item.status, item.start.Format(time.RFC3339), item.end.Format(time.RFC3339),
+			fmt.Sprintf("Guest %d", index), fmt.Sprintf("guest-%d@example.com", index), item.room,
+			fmt.Sprintf("cancel-%d", index), fmt.Sprintf("reschedule-%d", index), fmt.Sprintf("widget-%d", index),
+		); err != nil {
+			t.Fatalf("insert fixture %d: %v", index, err)
+		}
+	}
+
+	result, err := app.toolBookingsList(ctx, map[string]any{
+		"_project_id": "test-proj",
+		"active":      true,
+		"calls_only":  true,
+		"ends_after":  now.Format(time.RFC3339),
+		"order":       "asc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bookings := result.(map[string]any)["bookings"].([]*Booking)
+	if len(bookings) != 2 {
+		t.Fatalf("bookings=%+v, want two upcoming active Calls bookings", bookings)
+	}
+	if bookings[0].Status != "rescheduled" || bookings[1].Status != "confirmed" || bookings[0].StartAt >= bookings[1].StartAt {
+		t.Fatalf("bookings not in ascending widget order: %+v", bookings)
 	}
 }

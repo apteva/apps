@@ -30,7 +30,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bookings
 display_name: Bookings
-version: 0.2.3
+version: 0.3.0
 description: Calendly-style booking links for client meetings.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bookings
@@ -90,6 +90,23 @@ provides:
       label: Bookings
       icon: calendar-plus
       entry: /ui/BookingsPanel.mjs
+  ui_components:
+    - name: booked-calls
+      label: Booked calls
+      description: Upcoming client calls with quick host access.
+      entry: /ui/BookedCallsWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [booking.created, booking.rescheduled, booking.cancelled, booking.completed, booking.no_show]
+      settings_schema:
+        type: object
+        properties:
+          horizon_days: { type: integer, title: "Days ahead", description: "Upcoming window to display. Use 0 for all future calls.", default: 30, minimum: 0, maximum: 365 }
+          max_items: { type: integer, title: "Maximum calls", default: 6, minimum: 1, maximum: 20 }
+          booking_type_id: { type: integer, title: "Booking type ID", description: "Show every Calls booking type when unset or 0.", default: 0, minimum: 0 }
 runtime:
   kind: source
   source: { repo: github.com/apteva/apps, ref: main, entry: mcp/bookings }
@@ -173,8 +190,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			"booking_type_id": map[string]any{"type": "integer"}, "slug": map[string]any{"type": "string"}, "start_at": map[string]any{"type": "string"}, "invitee_name": map[string]any{"type": "string"}, "invitee_email": map[string]any{"type": "string"}, "invitee_phone": map[string]any{"type": "string"}, "intake_answers": map[string]any{"type": "object"}, "source": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"},
 		}, []string{"start_at"}), Handler: a.toolBookingsCreate},
 		{Name: "bookings_get", Description: "Fetch one booking. Args: id.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolBookingsGet},
-		{Name: "bookings_list", Description: "List bookings. Args: status?, booking_type_id?, from?, to?, limit?.", InputSchema: schemaObject(map[string]any{
-			"status": map[string]any{"type": "string"}, "booking_type_id": map[string]any{"type": "integer"}, "from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"},
+		{Name: "bookings_list", Description: "List bookings. Args: status?, active?, calls_only?, booking_type_id?, from?, to?, ends_after?, order? (asc|desc), limit?.", InputSchema: schemaObject(map[string]any{
+			"status": map[string]any{"type": "string"}, "active": map[string]any{"type": "boolean"}, "calls_only": map[string]any{"type": "boolean"}, "booking_type_id": map[string]any{"type": "integer"}, "from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"}, "ends_after": map[string]any{"type": "string"}, "order": map[string]any{"type": "string", "enum": []string{"asc", "desc"}}, "limit": map[string]any{"type": "integer"},
 		}, nil), Handler: a.toolBookingsList},
 		{Name: "bookings_reschedule", Description: "Reschedule a booking. Args: id, start_at.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "start_at": map[string]any{"type": "string"}}, []string{"id", "start_at"}), Handler: a.toolBookingsReschedule},
 		{Name: "bookings_cancel", Description: "Cancel a booking and delete its Calendar event. Args: id, reason?.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "reason": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolBookingsCancel},
@@ -734,9 +751,14 @@ func (a *App) toolBookingsList(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	where := []string{"project_id=?"}
 	qargs := []any{pid}
-	if status := strArg(args, "status"); status != "" {
+	if boolArg(args, "active", false) {
+		where = append(where, "status IN ('confirmed','rescheduled')")
+	} else if status := strArg(args, "status"); status != "" {
 		where = append(where, "status=?")
 		qargs = append(qargs, status)
+	}
+	if boolArg(args, "calls_only", false) {
+		where = append(where, "calls_room_id IS NOT NULL AND calls_room_id>0")
 	}
 	if tid := int64Arg(args, "booking_type_id"); tid > 0 {
 		where = append(where, "booking_type_id=?")
@@ -758,17 +780,26 @@ func (a *App) toolBookingsList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		where = append(where, "start_at<=?")
 		qargs = append(qargs, t.UTC().Format(time.RFC3339))
 	}
+	if endsAfter := strArg(args, "ends_after"); endsAfter != "" {
+		t, err := time.Parse(time.RFC3339, endsAfter)
+		if err != nil {
+			return nil, fmt.Errorf("ends_after: %w", err)
+		}
+		where = append(where, "end_at>=?")
+		qargs = append(qargs, t.UTC().Format(time.RFC3339))
+	}
 	limit := intArg(args, "limit", 100)
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
+	order := strings.ToUpper(enumArg(args, "order", "desc", []string{"asc", "desc"}))
 	qargs = append(qargs, limit)
 	rows, err := ctx.AppDB().Query(`SELECT id, project_id, booking_type_id, status, start_at, end_at, timezone,
 		       invitee_name, invitee_email, invitee_phone, intake_answers,
 		       calendar_event_id, calls_room_id, calls_guest_join_url, calls_host_join_url, crm_contact_id,
 		       assigned_target_kind, assigned_agent_instance_id, cancellation_token, reschedule_token,
 		       source, idempotency_key, created_at, updated_at
-		  FROM bookings WHERE `+strings.Join(where, " AND ")+` ORDER BY start_at DESC LIMIT ?`, qargs...)
+		  FROM bookings WHERE `+strings.Join(where, " AND ")+` ORDER BY start_at `+order+`, id `+order+` LIMIT ?`, qargs...)
 	if err != nil {
 		return nil, err
 	}
