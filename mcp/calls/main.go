@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -20,58 +22,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: calls
-display_name: Calls
-version: 0.1.6
-description: Standalone realtime audio/video calls with unified participants.
-author: Apteva
-icon: /ui/icon.svg
-icon_style: monochrome
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - net.egress
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - { name: calls_create_room,        description: "Create a call room." }
-    - { name: calls_get_room,           description: "Get a room snapshot." }
-    - { name: calls_list_rooms,         description: "List call rooms." }
-    - { name: calls_end_room,           description: "End a call room." }
-    - { name: calls_create_join_token,  description: "Create a room join token." }
-    - { name: calls_join_room,          description: "Join a room with a token." }
-    - { name: calls_leave_room,         description: "Leave a room." }
-    - { name: calls_list_participants,  description: "List room participants." }
-    - { name: calls_update_participant, description: "Patch participant fields." }
-    - { name: calls_remove_participant, description: "Remove a participant." }
-    - { name: calls_send_message,       description: "Send a room message." }
-    - { name: calls_get_messages,       description: "Get room messages." }
-    - { name: calls_get_transcript,     description: "Get room transcript items." }
-    - { name: calls_append_transcript,  description: "Append a transcript item." }
-  ui_panels:
-    - slot: project.page
-      label: Calls
-      icon: video
-      entry: /ui/CallsPanel.mjs
-runtime:
-  kind: source
-  source: { repo: github.com/apteva/apps, ref: main, entry: mcp/calls }
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/calls.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML []byte
 
 type App struct{}
 
 func (a *App) Manifest() sdk.Manifest {
-	m, err := sdk.ParseManifest([]byte(manifestYAML))
+	m, err := sdk.ParseManifest(manifestYAML)
 	if err != nil {
 		panic("invalid embedded manifest: " + err.Error())
 	}
@@ -83,15 +40,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("calls requires a db block")
 	}
 	globalCtx = ctx
-	globalApp = a
-	if _, err := ctx.AppDB().Exec(
-		`UPDATE peer_sessions
-		    SET status='closed', closed_at = CURRENT_TIMESTAMP, error='sidecar restarted'
-		  WHERE status IN ('negotiating','connected');
-		  UPDATE media_tracks SET status='ended', ended_at = CURRENT_TIMESTAMP WHERE status='live';
-		  UPDATE participants SET status='left', left_at = CURRENT_TIMESTAMP WHERE status IN ('joining','active')`); err != nil {
-		return fmt.Errorf("reconcile: %w", err)
-	}
+	// WebRTC media is peer-to-peer, so a sidecar restart must not tear down
+	// healthy browser connections. Heartbeats and the presence reaper reconcile
+	// genuinely stale participants after the process is available again.
 	ctx.Logger().Info("calls mounted")
 	return nil
 }
@@ -164,24 +115,25 @@ func (a *App) MCPTools() []sdk.Tool {
 func main() { sdk.Run(&App{}) }
 
 type Room struct {
-	ID        int64  `json:"id"`
-	ProjectID string `json:"project_id,omitempty"`
-	Slug      string `json:"slug"`
-	Title     string `json:"title"`
-	Status    string `json:"status"`
-	CreatedBy string `json:"created_by,omitempty"`
-	CreatedAt string `json:"created_at"`
-	StartedAt string `json:"started_at,omitempty"`
-	EndedAt   string `json:"ended_at,omitempty"`
-	Metadata  string `json:"metadata"`
-	JoinURL   string `json:"join_url,omitempty"`
+	ID             int64  `json:"id"`
+	ProjectID      string `json:"project_id,omitempty"`
+	Slug           string `json:"slug"`
+	Title          string `json:"title"`
+	Status         string `json:"status"`
+	CreatedBy      string `json:"created_by,omitempty"`
+	CreatedAt      string `json:"created_at"`
+	StartedAt      string `json:"started_at,omitempty"`
+	EndedAt        string `json:"ended_at,omitempty"`
+	Metadata       string `json:"metadata"`
+	LastActivityAt string `json:"last_activity_at,omitempty"`
+	JoinURL        string `json:"join_url,omitempty"`
 }
 
 type JoinToken struct {
 	ID              int64  `json:"id"`
 	ProjectID       string `json:"project_id,omitempty"`
 	RoomID          int64  `json:"room_id"`
-	Token           string `json:"token"`
+	Token           string `json:"token,omitempty"`
 	ParticipantKind string `json:"participant_kind"`
 	Role            string `json:"role"`
 	DisplayName     string `json:"display_name,omitempty"`
@@ -190,6 +142,7 @@ type JoinToken struct {
 	MaxUses         int    `json:"max_uses"`
 	Uses            int    `json:"uses"`
 	CreatedAt       string `json:"created_at"`
+	RevokedAt       string `json:"revoked_at,omitempty"`
 	JoinURL         string `json:"join_url,omitempty"`
 }
 
@@ -197,7 +150,7 @@ type Participant struct {
 	ID             int64  `json:"id"`
 	ProjectID      string `json:"project_id,omitempty"`
 	RoomID         int64  `json:"room_id"`
-	ParticipantKey string `json:"participant_key"`
+	ParticipantKey string `json:"-"`
 	Kind           string `json:"kind"`
 	Role           string `json:"role"`
 	DisplayName    string `json:"display_name,omitempty"`
@@ -270,9 +223,18 @@ type TranscriptItem struct {
 	CreatedAt     string  `json:"created_at"`
 }
 
+type SignalMessage struct {
+	ID                int64           `json:"id"`
+	RoomID            int64           `json:"room_id"`
+	FromParticipantID int64           `json:"from_participant_id"`
+	ToParticipantID   int64           `json:"to_participant_id"`
+	Kind              string          `json:"kind"`
+	Payload           json.RawMessage `json:"payload"`
+	CreatedAt         string          `json:"created_at"`
+}
+
 var (
 	globalCtx *sdk.AppCtx
-	globalApp *App
 	slugRe    = regexp.MustCompile(`[^a-z0-9]+`)
 )
 
@@ -289,6 +251,12 @@ func resolveProjectFromArgs(args map[string]any) (string, error) {
 func resolveProjectFromRequest(r *http.Request) (string, error) {
 	if env := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); env != "" {
 		return env, nil
+	}
+	if trusted := strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID")); trusted != "" {
+		if requested := strings.TrimSpace(r.URL.Query().Get("project_id")); requested != "" && requested != trusted {
+			return "", errors.New("project_id does not match authenticated project")
+		}
+		return trusted, nil
 	}
 	if v := strings.TrimSpace(r.URL.Query().Get("project_id")); v != "" {
 		return v, nil
@@ -337,6 +305,11 @@ func randomToken() string {
 		panic("rand.Read: " + err.Error())
 	}
 	return base64.RawURLEncoding.EncodeToString(b[:])
+}
+
+func hashSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 func slugify(s string) string {
@@ -440,6 +413,51 @@ func metadataArg(args map[string]any, key string) (string, error) {
 	return "{}", nil
 }
 
+func capabilities(raw string) map[string]bool {
+	out := map[string]bool{}
+	_ = json.Unmarshal([]byte(raw), &out)
+	return out
+}
+
+func validateJSONObject(raw, label string) error {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil || obj == nil {
+		return fmt.Errorf("%s must be a JSON object", label)
+	}
+	return nil
+}
+
+func validateCapabilitiesJSON(raw string) error {
+	var obj map[string]bool
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil || obj == nil {
+		return errors.New("capabilities must be an object of boolean values")
+	}
+	allowed := map[string]bool{
+		"audio": true, "video": true, "screen": true, "chat": true,
+		"transcript_read": true, "transcript_write": true, "room_control": true,
+	}
+	for key := range obj {
+		if !allowed[key] {
+			return fmt.Errorf("unknown capability %q", key)
+		}
+	}
+	return nil
+}
+
+func hasCapability(p *Participant, name string) bool {
+	if p == nil {
+		return false
+	}
+	return capabilities(p.Capabilities)[name]
+}
+
+func requireLength(label, value string, max int) error {
+	if len(value) > max {
+		return fmt.Errorf("%s exceeds %d bytes", label, max)
+	}
+	return nil
+}
+
 func validateKind(kind string) string {
 	switch kind {
 	case "agent", "service":
@@ -484,8 +502,6 @@ func validateTrackKind(kind string) (string, error) {
 		return "", fmt.Errorf("track kind must be audio|video|screen, got %q", kind)
 	}
 }
-
-func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }
 
 func httpJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
