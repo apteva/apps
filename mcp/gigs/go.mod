@@ -4,6 +4,7 @@ go 1.25.1
 
 require (
 	github.com/apteva/app-sdk v0.57.0
+	github.com/yuin/goldmark v1.7.8
 	modernc.org/sqlite v1.50.0
 )
 

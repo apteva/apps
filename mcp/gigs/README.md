@@ -1,4 +1,4 @@
-# Gigs (v0.3.4)
+# Gigs (v0.3.5)
 
 Gigs is a generic work marketplace and execution engine. Agents can define
 standard services and packages, know the usual customer offer and worker pay,

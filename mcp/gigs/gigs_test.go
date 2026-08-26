@@ -96,7 +96,7 @@ func seedAssignment(t *testing.T, ctx *sdk.AppCtx, gigID, workerID int64, status
 
 func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.3.4" {
+	if manifest.Version != "0.3.5" {
 		t.Fatalf("version=%q", manifest.Version)
 	}
 	var public []sdk.RouteSpec
@@ -140,6 +140,7 @@ func TestWorkerPageRendersStructuredContentBlocks(t *testing.T) {
 	for _, want := range []string{
 		`case "content":`,
 		`renderContentBlocks(body.blocks || [])`,
+		`markdownBlock(block.markdown_html, block.markdown || "")`,
 		`case "image":`,
 		`img.loading = "lazy"`,
 		`case "callout":`,
@@ -149,6 +150,31 @@ func TestWorkerPageRendersStructuredContentBlocks(t *testing.T) {
 		if !strings.Contains(html, want) {
 			t.Fatalf("worker page missing content renderer marker %q", want)
 		}
+	}
+}
+
+func TestWorkerMarkdownRendersFormattingWithoutRawHTML(t *testing.T) {
+	got := renderWorkerMarkdown("## Welcome **Holly**\n\n<script>alert('no')</script>")
+	if !strings.Contains(got, "<h2>Welcome <strong>Holly</strong></h2>") {
+		t.Fatalf("markdown heading was not rendered: %q", got)
+	}
+	if strings.Contains(got, "<script") || strings.Contains(got, "alert('no')") {
+		t.Fatalf("raw HTML was rendered: %q", got)
+	}
+}
+
+func TestContentMarkdownGetsRenderedWithoutMutatingStoredBody(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(storagePlatformStub{}))
+	body := map[string]any{"blocks": []any{
+		map[string]any{"type": "markdown", "markdown": "## Welcome"},
+	}}
+	enriched := enrichContentBlockURLs(ctx, "project-a", body, 3600)
+	block := enriched["blocks"].([]any)[0].(map[string]any)
+	if block["markdown_html"] != "<h2>Welcome</h2>\n" {
+		t.Fatalf("rendered markdown = %q", block["markdown_html"])
+	}
+	if _, exists := body["blocks"].([]any)[0].(map[string]any)["markdown_html"]; exists {
+		t.Fatal("markdown rendering mutated stored instruction body")
 	}
 }
 

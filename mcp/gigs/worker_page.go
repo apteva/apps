@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	"github.com/yuin/goldmark"
 )
 
 // The worker page is served at /worker/<token>[/sub] with NoAuth — the
@@ -131,6 +133,23 @@ func workerPageHTML(token string) string {
   .instr-title { font-size: 16px; font-weight: 650; }
   .instr-body { padding: 18px; display: grid; gap: 14px; }
   .instruction-copy { white-space: pre-wrap; font-size: 16px; line-height: 1.55; }
+  .instruction-markdown { font-size: 16px; line-height: 1.6; overflow-wrap: anywhere; }
+  .instruction-markdown > :first-child { margin-top: 0; }
+  .instruction-markdown > :last-child { margin-bottom: 0; }
+  .instruction-markdown h1, .instruction-markdown h2, .instruction-markdown h3, .instruction-markdown h4 { margin: 1.1em 0 0.45em; line-height: 1.2; }
+  .instruction-markdown h1 { font-size: 28px; }
+  .instruction-markdown h2 { font-size: 23px; }
+  .instruction-markdown h3 { font-size: 19px; }
+  .instruction-markdown h4 { font-size: 16px; }
+  .instruction-markdown p { margin: 0.7em 0; }
+  .instruction-markdown ul, .instruction-markdown ol { margin: 0.7em 0; padding-left: 1.6em; }
+  .instruction-markdown li + li { margin-top: 0.3em; }
+  .instruction-markdown blockquote { margin: 0.8em 0; padding: 0.1em 0 0.1em 1em; border-left: 3px solid var(--line); color: var(--muted); }
+  .instruction-markdown code { padding: 0.12em 0.35em; border-radius: 4px; background: var(--surface-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+  .instruction-markdown pre { overflow-x: auto; padding: 12px; border-radius: 8px; background: var(--surface-2); }
+  .instruction-markdown pre code { padding: 0; background: transparent; }
+  .instruction-markdown a { color: var(--accent); font-weight: 600; }
+  .instruction-markdown hr { border: 0; border-top: 1px solid var(--line); margin: 1.2em 0; }
   .media-frame { border: 1px solid var(--line); background: #050505; border-radius: 8px; padding: 10px; }
   audio, video, img { width: 100%; max-width: 100%; border-radius: 6px; display: block; }
   audio { min-height: 44px; }
@@ -385,7 +404,7 @@ func workerPageHTML(token string) string {
       wrap.className = "instr-body";
       switch (it.instruction_kind) {
         case "text":
-          wrap.appendChild(textBlock(body.markdown || ""));
+          wrap.appendChild(markdownBlock(body.markdown_html, body.markdown || ""));
           break;
         case "content":
           wrap.appendChild(renderContentBlocks(body.blocks || []));
@@ -468,7 +487,7 @@ func workerPageHTML(token string) string {
         if (!block || typeof block !== "object") return;
         switch (String(block.type || "")) {
           case "markdown":
-            container.appendChild(textBlock(block.markdown || ""));
+            container.appendChild(markdownBlock(block.markdown_html, block.markdown || ""));
             break;
           case "image": {
             const figure = document.createElement("figure");
@@ -513,6 +532,14 @@ func workerPageHTML(token string) string {
       const div = document.createElement("div");
       div.className = "instruction-copy";
       div.textContent = text || "";
+      return div;
+    }
+
+    function markdownBlock(html, fallback) {
+      const div = document.createElement("div");
+      div.className = "instruction-markdown";
+      if (html) div.innerHTML = html;
+      else div.textContent = fallback || "";
       return div;
     }
 
@@ -1436,7 +1463,9 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token 
 	}
 	for _, it := range composition {
 		body := it.RenderedBody
-		if it.InstructionKind == kindContent {
+		if it.InstructionKind == kindText {
+			body = enrichMarkdownBody(body)
+		} else if it.InstructionKind == kindContent {
 			body = enrichContentBlockURLs(ctx, pid, body, ttl)
 		}
 		m := map[string]any{
@@ -1519,7 +1548,12 @@ func enrichContentBlockURLs(ctx *sdk.AppCtx, pid string, body map[string]any, tt
 		for key, value := range block {
 			copy[key] = value
 		}
-		if strOf(copy["type"]) == "image" {
+		switch strOf(copy["type"]) {
+		case "markdown":
+			if markdown := strOf(copy["markdown"]); markdown != "" {
+				copy["markdown_html"] = renderWorkerMarkdown(markdown)
+			}
+		case "image":
 			if fid := int64Cast(copy["storage_file_id"]); fid > 0 {
 				if url, err := storageSignedURL(ctx, pid, fid, ttl); err == nil {
 					copy["signed_url"] = url
@@ -1529,6 +1563,27 @@ func enrichContentBlockURLs(ctx *sdk.AppCtx, pid string, body map[string]any, tt
 		enriched[i] = copy
 	}
 	out["blocks"] = enriched
+	return out
+}
+
+var workerMarkdown = goldmark.New()
+
+func renderWorkerMarkdown(source string) string {
+	var out bytes.Buffer
+	if err := workerMarkdown.Convert([]byte(source), &out); err != nil {
+		return ""
+	}
+	return out.String()
+}
+
+func enrichMarkdownBody(body map[string]any) map[string]any {
+	out := make(map[string]any, len(body)+1)
+	for key, value := range body {
+		out[key] = value
+	}
+	if markdown := strOf(out["markdown"]); markdown != "" {
+		out["markdown_html"] = renderWorkerMarkdown(markdown)
+	}
 	return out
 }
 
