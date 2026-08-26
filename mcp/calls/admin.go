@@ -32,7 +32,11 @@ func (a *App) handleAdminRooms(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, out)
 	case http.MethodPost:
 		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := requireSameOrigin(r); err != nil {
+			httpErr(w, http.StatusForbidden, err.Error())
+			return
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&body); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid json")
 			return
 		}
@@ -49,6 +53,12 @@ func (a *App) handleAdminRooms(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminRoomItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		if err := requireSameOrigin(r); err != nil {
+			httpErr(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -86,23 +96,7 @@ func (a *App) handleAdminRoomItem(w http.ResponseWriter, r *http.Request) {
 			a.handleAdminTranscript(w, r, pid, id)
 			return
 		case "join-tokens":
-			if r.Method != http.MethodPost {
-				httpErr(w, http.StatusMethodNotAllowed, "POST")
-				return
-			}
-			var body map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			if body == nil {
-				body = map[string]any{}
-			}
-			body["_project_id"] = pid
-			body["room_id"] = id
-			out, err := a.toolCreateJoinToken(globalCtx, body)
-			if err != nil {
-				httpErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			httpJSON(w, out)
+			a.handleAdminJoinTokens(w, r, pid, id, parts)
 			return
 		}
 	}
@@ -117,6 +111,53 @@ func (a *App) handleAdminRoomItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (a *App) handleAdminJoinTokens(w http.ResponseWriter, r *http.Request, pid string, roomID int64, parts []string) {
+	if len(parts) == 2 && r.Method == http.MethodGet {
+		items, err := a.listJoinTokens(pid, roomID)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"join_tokens": items, "count": len(items)})
+		return
+	}
+	if len(parts) == 2 && r.Method == http.MethodPost {
+		if err := requireSameOrigin(r); err != nil {
+			httpErr(w, http.StatusForbidden, err.Error())
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		body["_project_id"] = pid
+		body["room_id"] = roomID
+		out, err := a.toolCreateJoinToken(globalCtx, body)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, out)
+		return
+	}
+	if len(parts) == 4 && parts[3] == "revoke" && r.Method == http.MethodPost {
+		tokenID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil || tokenID <= 0 {
+			httpErr(w, http.StatusBadRequest, "invalid token id")
+			return
+		}
+		revoked, err := revokeJoinToken(pid, roomID, tokenID)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"revoked": revoked})
+		return
+	}
+	httpErr(w, http.StatusMethodNotAllowed, "unsupported join-token operation")
 }
 
 func (a *App) handleAdminParticipants(w http.ResponseWriter, r *http.Request, pid string, roomID int64, parts []string) {
@@ -150,7 +191,10 @@ func (a *App) handleAdminParticipants(w http.ResponseWriter, r *http.Request, pi
 			return
 		}
 		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json")
+			return
+		}
 		if body == nil {
 			body = map[string]any{}
 		}
@@ -169,7 +213,10 @@ func (a *App) handleAdminParticipants(w http.ResponseWriter, r *http.Request, pi
 			return
 		}
 		var patch map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&patch)
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&patch); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json")
+			return
+		}
 		out, err := a.toolUpdateParticipant(globalCtx, map[string]any{
 			"_project_id":    pid,
 			"room_id":        roomID,
@@ -203,7 +250,10 @@ func (a *App) handleAdminMessages(w http.ResponseWriter, r *http.Request, pid st
 		httpJSON(w, out)
 	case http.MethodPost:
 		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json")
+			return
+		}
 		if body == nil {
 			body = map[string]any{}
 		}
@@ -221,6 +271,10 @@ func (a *App) handleAdminMessages(w http.ResponseWriter, r *http.Request, pid st
 }
 
 func (a *App) handleAdminTranscript(w http.ResponseWriter, r *http.Request, pid string, roomID int64) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET")
+		return
+	}
 	args := map[string]any{"_project_id": pid, "room_id": roomID}
 	if v := r.URL.Query().Get("since_id"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
