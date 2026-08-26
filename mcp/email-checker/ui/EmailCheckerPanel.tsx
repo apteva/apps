@@ -7,7 +7,7 @@
 // That's the same store-nothing logic the email_check MCP tool runs, so
 // the panel is just the human-facing front door to it.
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 const API = "/api/apps/email-checker";
 
@@ -24,11 +24,18 @@ interface CheckResult {
   reasons: string[];
   syntax_ok: boolean;
   domain?: string;
+  domain_status?: string;
+  implicit_mx: boolean;
   mx?: string[];
+  suggested_email?: string;
   disposable: boolean;
   role: boolean;
   free: boolean;
   smtp: SMTPProbe;
+  verdict: "deliverable" | "undeliverable" | "risky" | "unknown";
+  confidence: "high" | "medium" | "low";
+  recommendation: "send" | "do_not_send" | "review" | "retry" | "run_smtp_probe";
+  provider?: ProviderResult;
 }
 
 interface SMTPProbe {
@@ -39,20 +46,58 @@ interface SMTPProbe {
   code?: number;
   response?: string;
   informative?: boolean;
+  catch_all?: boolean;
+  retryable: boolean;
   note?: string;
+  attempts?: SMTPAttempt[];
+}
+
+interface SMTPAttempt {
+  mx: string;
+  kind: "recipient" | "catch_all";
+  status: string;
+  code?: number;
+  response?: string;
+}
+
+interface ProviderResult {
+  checked: boolean;
+  provider: string;
+  connection_id?: number;
+  verdict?: string;
+  recommendation?: string;
+  status?: string;
+  reason?: string;
+  score?: number;
+  suggested_email?: string;
+  catch_all?: boolean;
+  disposable?: boolean;
+  role?: boolean;
+  free?: boolean;
+  error?: string;
+}
+
+interface ProviderBinding {
+  provider: string;
+  connection_id: number;
+  default: boolean;
 }
 
 // Disqualifying reasons → human labels. Falls back to the raw key for
 // anything the server adds before this map catches up.
 const REASON_LABELS: Record<string, string> = {
   bad_syntax: "Invalid syntax",
-  no_mx_records: "Domain has no MX records",
+  no_mail_server: "No receiving mail server",
+  domain_does_not_accept_mail: "Domain explicitly rejects email",
+  dns_temporary_error: "Temporary DNS failure",
   disposable_domain: "Disposable provider",
   role_account: "Role account",
+  possible_typo: "Possible domain typo",
 };
 
 const SMTP_STATUS_LABELS: Record<string, string> = {
   ok: "Accepted",
+  catch_all: "Catch-all",
   reject: "Rejected",
   tempfail: "Temporary failure",
   timeout: "Timeout",
@@ -109,6 +154,8 @@ function smtpBadgeClass(status?: string) {
   switch (status) {
     case "ok":
       return "text-success";
+    case "catch_all":
+      return "text-warn";
     case "reject":
     case "bad_syntax":
     case "no_mx":
@@ -123,20 +170,41 @@ function smtpBadgeClass(status?: string) {
   }
 }
 
+function verdictBadgeClass(verdict?: string) {
+  switch (verdict) {
+    case "deliverable": return "text-success";
+    case "undeliverable": return "text-error";
+    case "risky": return "text-warn";
+    default: return "text-text-muted";
+  }
+}
+
+function titleCase(value: string) {
+  return value.replace(/[_-]+/g, " ").replace(/\b\w/g, (x) => x.toUpperCase());
+}
+
 function Result({ r }: { r: CheckResult }) {
   const hasMX = !!(r.mx && r.mx.length);
+  const positive = r.verdict === "deliverable";
+  const negative = r.verdict === "undeliverable";
   return (
     <section className="border border-border rounded overflow-hidden">
-      <div className={`flex items-center gap-2 px-4 py-3 ${r.valid ? "text-success" : "text-error"}`}>
-        {r.valid ? <CheckIcon /> : <XIcon />}
+      <div className={`flex items-center gap-2 px-4 py-3 ${positive ? "text-success" : negative ? "text-error" : "text-warn"}`}>
+        {positive ? <CheckIcon /> : negative ? <XIcon /> : null}
         <span className="font-medium" style={{ fontSize: "16px" }}>
-          {r.valid ? "Valid" : "Invalid"}
+          {titleCase(r.verdict)}
         </span>
         <span
           className="text-text-muted text-sm ml-2"
           style={{ fontFamily: "ui-monospace, monospace" }}
         >
           {r.email}
+        </span>
+        <span className="ml-auto">
+          <span className="flex items-center gap-2">
+            <Badge text={`${titleCase(r.confidence)} confidence`} cls={verdictBadgeClass(r.verdict)} />
+            <Badge text={titleCase(r.recommendation)} cls={verdictBadgeClass(r.verdict)} />
+          </span>
         </span>
       </div>
 
@@ -156,6 +224,13 @@ function Result({ r }: { r: CheckResult }) {
             : <Badge text="Failed" cls="text-error" />}
         />
         {r.domain && <SignalRow label="Domain" badge={<span />} mono={r.domain} />}
+        {r.domain_status && (
+          <SignalRow
+            label="Mail routing"
+            badge={<Badge text={r.implicit_mx ? "A/AAAA fallback" : titleCase(r.domain_status)} cls={hasMX ? "text-success" : "text-error"} />}
+          />
+        )}
+        {r.suggested_email && <SignalRow label="Did you mean?" badge={<span />} mono={r.suggested_email} />}
         <SignalRow
           label="MX records"
           badge={hasMX
@@ -217,20 +292,66 @@ function Result({ r }: { r: CheckResult }) {
               ? <Badge text="Yes" cls="text-success" />
               : <Badge text="No" cls="text-warn" />}
           />
+          {r.smtp.catch_all !== undefined && (
+            <SignalRow label="Catch-all" badge={<Badge text={r.smtp.catch_all ? "Yes" : "No"} cls={r.smtp.catch_all ? "text-warn" : "text-success"} />} />
+          )}
+          {r.smtp.retryable && <SignalRow label="Retry" badge={<Badge text="Recommended" cls="text-warn" />} />}
+          {r.smtp.attempts && r.smtp.attempts.length > 0 && (
+            <SignalRow label="SMTP attempts" badge={<span />} mono={String(r.smtp.attempts.length)} />
+          )}
           {r.smtp.note && <SignalRow label="Note" badge={<span />} mono={r.smtp.note} />}
           {r.smtp.response && <SignalRow label="Response" badge={<span />} mono={r.smtp.response} />}
+        </div>
+      )}
+
+      {r.provider && (
+        <div className="border-t border-border">
+          <div className="px-4 py-2 text-text-dim text-xs uppercase">
+            Provider verification — {titleCase(r.provider.provider)}
+          </div>
+          <SignalRow
+            label="Provider call"
+            badge={r.provider.checked
+              ? <Badge text="Completed" cls="text-success" />
+              : <Badge text="Skipped" cls="text-text-muted" />}
+          />
+          {r.provider.verdict && (
+            <SignalRow
+              label="Verdict"
+              badge={<Badge text={titleCase(r.provider.verdict)} cls={verdictBadgeClass(r.provider.verdict)} />}
+            />
+          )}
+          {r.provider.status && <SignalRow label="Provider status" badge={<span />} mono={r.provider.status} />}
+          {r.provider.reason && <SignalRow label="Reason" badge={<span />} mono={r.provider.reason} />}
+          {r.provider.score !== undefined && <SignalRow label="Score" badge={<span />} mono={String(r.provider.score)} />}
+          {r.provider.suggested_email && <SignalRow label="Suggested email" badge={<span />} mono={r.provider.suggested_email} />}
+          {r.provider.catch_all !== undefined && (
+            <SignalRow label="Catch-all" badge={<Badge text={r.provider.catch_all ? "Yes" : "No"} cls={r.provider.catch_all ? "text-warn" : "text-text-muted"} />} />
+          )}
+          {r.provider.error && <SignalRow label="Provider error" badge={<span />} mono={r.provider.error} />}
         </div>
       )}
     </section>
   );
 }
 
-export default function EmailCheckerPanel(_props: NativePanelProps) {
+export default function EmailCheckerPanel(props: NativePanelProps) {
   const [email, setEmail] = useState("");
   const [smtp, setSmtp] = useState(false);
+  const [provider, setProvider] = useState("local");
+  const [providers, setProviders] = useState<ProviderBinding[]>([]);
   const [result, setResult] = useState<CheckResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (props.projectId) params.set("project_id", props.projectId);
+    fetch(`${API}/providers?${params.toString()}`, { credentials: "same-origin" })
+      .then((res) => res.ok ? res.json() : Promise.reject(new Error(`Provider list failed: ${res.status}`)))
+      .then((body: { providers?: ProviderBinding[] }) => setProviders(body.providers ?? []))
+      .catch(() => setProviders([]));
+  }, [props.projectId]);
 
   const run = useCallback(async () => {
     const q = email.trim();
@@ -239,7 +360,13 @@ export default function EmailCheckerPanel(_props: NativePanelProps) {
     setError("");
     try {
       const params = new URLSearchParams({ email: q });
+      if (props.projectId) params.set("project_id", props.projectId);
       if (smtp) params.set("smtp", "true");
+      if (provider !== "local") {
+        const [providerSlug, connectionId] = provider.split(":");
+        params.set("provider", providerSlug);
+        if (connectionId) params.set("connection_id", connectionId);
+      }
       const res = await fetch(`${API}/check?${params.toString()}`, {
         credentials: "same-origin",
       });
@@ -255,14 +382,14 @@ export default function EmailCheckerPanel(_props: NativePanelProps) {
     } finally {
       setLoading(false);
     }
-  }, [email, smtp]);
+  }, [email, smtp, provider, props.projectId]);
 
   return (
     <div className="h-full flex flex-col">
       <header className="flex items-center gap-3 border-b border-border px-4 py-2">
         <div className="text-text font-medium">Email Checker</div>
         <span className="text-text-dim text-xs">
-          Stateless validation — syntax, MX, classification
+          Local checks with optional mailbox-verification providers
         </span>
       </header>
 
@@ -293,6 +420,22 @@ export default function EmailCheckerPanel(_props: NativePanelProps) {
               onChange={(e) => setSmtp(e.target.checked)}
             />
             <span>SMTP probe</span>
+          </label>
+          <label className="flex items-center gap-2 text-sm text-text-muted">
+            <span>Verification provider</span>
+            <select
+              value={provider}
+              onChange={(e) => setProvider(e.target.value)}
+              className="bg-bg-input border border-border rounded px-2 py-1 text-sm text-text"
+            >
+              <option value="local">Local checks only</option>
+              {providers.map((binding) => (
+                <option key={binding.connection_id} value={`${binding.provider}:${binding.connection_id}`}>
+                  {titleCase(binding.provider)}{binding.default ? " (default)" : ""}
+                </option>
+              ))}
+            </select>
+            {provider !== "local" && <span className="text-text-dim text-xs">May consume provider credits</span>}
           </label>
         </section>
 
