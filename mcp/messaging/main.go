@@ -65,7 +65,7 @@ const (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.45
+version: 0.13.46
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through Twilio.
 author: Apteva
@@ -2598,7 +2598,7 @@ func upsertSuppressionAndEmit(ctx *sdk.AppCtx, pid, channel, kind, address, reas
 }
 
 func emitSuppressionChanged(ctx *sdk.AppCtx, pid, operation string, suppression Suppression) {
-	emitMessagingEvent(ctx, pid, "suppression.changed", map[string]any{
+	payload := map[string]any{
 		"operation":  operation,
 		"suppressed": operation != "remove",
 		"channel":    suppression.Channel,
@@ -2608,7 +2608,13 @@ func emitSuppressionChanged(ctx *sdk.AppCtx, pid, operation string, suppression 
 		"source":     suppression.Source,
 		"first_seen": suppression.FirstSeen,
 		"last_seen":  suppression.LastSeen,
-	})
+	}
+	emitMessagingEvent(ctx, pid, "suppression.changed", payload)
+	if operation == "remove" {
+		emitMessagingEvent(ctx, pid, "suppression.removed", payload)
+		return
+	}
+	emitMessagingEvent(ctx, pid, "suppression.added", payload)
 }
 
 func normaliseSuppressionTarget(channel, kind, raw string) (string, string, string, error) {
@@ -4641,6 +4647,7 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 	if occurred == "" {
 		occurred = time.Now().UTC().Format(time.RFC3339)
 	}
+	eventID := stableProviderEventID(msg, ev)
 
 	var suppression *Suppression
 	if (ev.Kind == "bounced" && ev.Permanent) || ev.Kind == "complained" || (ev.Kind == "subscription_changed" && ev.UnsubscribeAll) {
@@ -4668,7 +4675,7 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 	res, err := tx.Exec(
 		`INSERT OR IGNORE INTO delivery_events (message_id, provider_event_id, kind, recipient, reason, raw, occurred_at)
 		 VALUES (?, NULLIF(?, ''), ?, ?, ?, ?, ?)`,
-		msg.ID, ev.ProviderEventID, ev.Kind, ev.Recipient, ev.Reason, string(raw), occurred,
+		msg.ID, eventID, ev.Kind, ev.Recipient, ev.Reason, string(raw), occurred,
 	)
 	if err != nil {
 		return false, fmt.Errorf("persist provider event: %w", err)
@@ -4708,16 +4715,19 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 		emitSuppressionChanged(ctx, msg.ProjectID, "add", *suppression)
 	}
 	payload := map[string]any{
+		"event_id":            eventID,
+		"provider_event_id":   eventID,
 		"message_id":          msg.ID,
+		"channel":             msg.Channel,
 		"provider":            ev.Provider,
 		"provider_message_id": ev.ProviderMessageID,
 		"kind":                ev.Kind,
 		"recipient":           ev.Recipient,
 		"occurred_at":         occurred,
 		"metadata":            ev.Metadata,
+		"permanent":           ev.Permanent,
 	}
 	if ev.Kind == "bounced" {
-		payload["permanent"] = ev.Permanent
 		payload["bounce_type"] = ev.BounceType
 		payload["bounce_subtype"] = ev.BounceSubType
 		payload["reason"] = ev.Reason
@@ -4727,6 +4737,30 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 	emitMessagingEvent(ctx, msg.ProjectID, "message."+ev.Kind, payload)
 	emitMessagingEvent(ctx, msg.ProjectID, "message.event", payload)
 	return true, nil
+}
+
+// stableProviderEventID preserves a provider-supplied identity when available.
+// The deterministic fallback makes provider events safe to replay even when an
+// upstream integration omitted its own event ID. It intentionally excludes the
+// generated occurred_at value, which would change between retries.
+func stableProviderEventID(msg *Message, ev providerEvent) string {
+	if id := strings.TrimSpace(ev.ProviderEventID); id != "" {
+		return id
+	}
+	metadata, _ := json.Marshal(ev.Metadata)
+	parts := []string{
+		strconv.FormatInt(msg.ID, 10),
+		ev.Provider,
+		ev.ProviderMessageID,
+		ev.Kind,
+		ev.Recipient,
+		ev.Reason,
+		ev.OccurredAt,
+		string(metadata),
+		string(ev.Raw),
+	}
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return "generated:" + hex.EncodeToString(digest[:16])
 }
 
 // ─── SES inbound parsing ───────────────────────────────────────────

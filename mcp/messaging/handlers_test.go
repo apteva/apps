@@ -1559,6 +1559,47 @@ func TestSuppressionChangedEvent_AddAndRemove(t *testing.T) {
 	if addPayload["suppressed"] != true || removePayload["suppressed"] != false {
 		t.Fatalf("suppressed flags add=%#v remove=%#v", addPayload, removePayload)
 	}
+	added := recorder.EventsByTopic("suppression.added")
+	removed := recorder.EventsByTopic("suppression.removed")
+	if len(added) != 1 || len(removed) != 1 {
+		t.Fatalf("explicit suppression events added=%d removed=%d", len(added), len(removed))
+	}
+	if added[0].Data.(map[string]any)["operation"] != "add" ||
+		removed[0].Data.(map[string]any)["operation"] != "remove" {
+		t.Fatalf("explicit payloads added=%#v removed=%#v", added[0].Data, removed[0].Data)
+	}
+}
+
+func TestDomainSuppressionEmitsExplicitAddedAndRemovedEvents(t *testing.T) {
+	recorder := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, nil, tk.WithEmitter(recorder))
+	app := &App{}
+
+	if _, err := app.toolSuppressionAdd(ctx, map[string]any{
+		"address": "blocked.test",
+		"kind":    "domain",
+		"reason":  "policy",
+		"source":  "crm",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolSuppressionRemove(ctx, map[string]any{
+		"address": "blocked.test",
+		"kind":    "domain",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, topic := range []string{"suppression.added", "suppression.removed"} {
+		events := recorder.EventsByTopic(topic)
+		if len(events) != 1 {
+			t.Fatalf("%s events=%d, want 1", topic, len(events))
+		}
+		payload := events[0].Data.(map[string]any)
+		if payload["kind"] != "domain" || payload["channel"] != channelEmail || payload["address"] != "blocked.test" {
+			t.Fatalf("%s payload=%#v", topic, payload)
+		}
+	}
 }
 
 func TestSuppressionListPaginationReturnsFilteredTotal(t *testing.T) {

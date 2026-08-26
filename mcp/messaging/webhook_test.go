@@ -174,7 +174,13 @@ func TestSESBounceEventPublishesTypedClassificationAndSuppressionChange(t *testi
 		t.Fatalf("message.event count=%d", len(messageEvents))
 	}
 	payload := messageEvents[0].Data.(map[string]any)
-	if payload["permanent"] != true || payload["bounce_type"] != "Permanent" || payload["bounce_subtype"] != "NoEmail" || payload["reason"] != "smtp; 550 5.1.1 user unknown" {
+	if payload["event_id"] != "sns:sns-typed-bounce:0" ||
+		payload["provider_event_id"] != "sns:sns-typed-bounce:0" ||
+		payload["channel"] != channelEmail ||
+		payload["permanent"] != true ||
+		payload["bounce_type"] != "Permanent" ||
+		payload["bounce_subtype"] != "NoEmail" ||
+		payload["reason"] != "smtp; 550 5.1.1 user unknown" {
 		t.Fatalf("typed bounce payload=%#v", payload)
 	}
 	suppressionEvents := recorder.EventsByTopic("suppression.changed")
@@ -184,6 +190,9 @@ func TestSESBounceEventPublishesTypedClassificationAndSuppressionChange(t *testi
 	suppressionPayload := suppressionEvents[0].Data.(map[string]any)
 	if suppressionPayload["operation"] != "add" || suppressionPayload["address"] != "missing@example.com" {
 		t.Fatalf("suppression payload=%#v", suppressionPayload)
+	}
+	if added := recorder.EventsByTopic("suppression.added"); len(added) != 1 {
+		t.Fatalf("suppression.added events=%#v", added)
 	}
 }
 
@@ -216,7 +225,13 @@ func TestSESTransientBounceClassifiesWithoutSuppressing(t *testing.T) {
 		t.Fatalf("transient bounce suppressions=%#v", suppressions)
 	}
 	payload := recorder.EventsByTopic("message.event")[0].Data.(map[string]any)
-	if payload["permanent"] != false || payload["bounce_type"] != "Transient" || payload["bounce_subtype"] != "MailboxFull" || payload["reason"] != "mailbox full" {
+	if payload["event_id"] != "sns:transient:0" ||
+		payload["provider_event_id"] != "sns:transient:0" ||
+		payload["channel"] != channelEmail ||
+		payload["permanent"] != false ||
+		payload["bounce_type"] != "Transient" ||
+		payload["bounce_subtype"] != "MailboxFull" ||
+		payload["reason"] != "mailbox full" {
 		t.Fatalf("transient payload=%#v", payload)
 	}
 }
@@ -419,6 +434,14 @@ func TestProviderEvent_GlobalInstallEmitsForMessageProject(t *testing.T) {
 		if events[0].ProjectID != "test-proj" {
 			t.Fatalf("%s project=%q, want test-proj", topic, events[0].ProjectID)
 		}
+		payload := events[0].Data.(map[string]any)
+		if payload["channel"] != channelWhatsApp || payload["permanent"] != false {
+			t.Fatalf("%s payload=%#v", topic, payload)
+		}
+		id, ok := payload["event_id"].(string)
+		if !ok || !strings.HasPrefix(id, "generated:") || payload["provider_event_id"] != id {
+			t.Fatalf("%s event identity payload=%#v", topic, payload)
+		}
 	}
 }
 
@@ -461,6 +484,38 @@ func TestProviderEventIsIdempotent(t *testing.T) {
 	}
 	if events, _ := dbDeliveryEvents(ctx.AppDB(), id); len(events) != 1 {
 		t.Fatalf("events=%d", len(events))
+	}
+}
+
+func TestProviderEventWithoutUpstreamIDUsesStableFallback(t *testing.T) {
+	recorder := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, nil, tk.WithEmitter(recorder))
+	res, err := ctx.AppDB().Exec(`INSERT INTO messages
+		(project_id, channel, direction, from_addr, to_addrs, status)
+		VALUES ('test-proj', 'whatsapp', 'out', '+15551112222', '["+15553334444"]', 'sent')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	message, _ := dbMessageGet(ctx.AppDB(), "test-proj", id)
+	event := providerEvent{
+		Provider: "twilio", Kind: "opened", Recipient: "+15553334444",
+		Raw: json.RawMessage(`{"MessageStatus":"read"}`),
+	}
+	firstID := stableProviderEventID(message, event)
+	if secondID := stableProviderEventID(message, event); firstID != secondID || !strings.HasPrefix(firstID, "generated:") {
+		t.Fatalf("fallback IDs first=%q second=%q", firstID, secondID)
+	}
+	for i, wantPersisted := range []bool{true, false} {
+		persisted, persistErr := persistAndEmitProviderEvent(ctx, message, event)
+		if persistErr != nil || persisted != wantPersisted {
+			t.Fatalf("attempt %d persisted=%v want=%v err=%v", i+1, persisted, wantPersisted, persistErr)
+		}
+	}
+	if events := recorder.EventsByTopic("message.event"); len(events) != 1 {
+		t.Fatalf("message.event count=%d, want 1", len(events))
+	} else if payload := events[0].Data.(map[string]any); payload["event_id"] != firstID {
+		t.Fatalf("message.event payload=%#v", payload)
 	}
 }
 
