@@ -30,6 +30,13 @@ cloud integrations.
 |---|---|
 | `instance_list_providers` | List bound provider connections and the configured default. |
 | `instance_create` | Provision compute through the bound provider, including VPS, GPU Pods, Scaleway Dedibox, and Apple silicon. |
+| `instance_storage_capabilities` | Describe boot/data support, storage classes, tiers, and lifecycle operations for a provider. |
+| `instance_list_storage_types` | List generic storage tiers and their provider-native mappings. |
+| `instance_volume_create` | Create a managed data volume, optionally attaching it to an existing instance. |
+| `instance_volume_list` / `instance_volume_get` | Inspect volumes tracked by Instances. |
+| `instance_volume_attach` / `instance_volume_detach` | Attach or retain data storage independently of compute. |
+| `instance_volume_resize` | Grow a provider volume; shrinking is refused. |
+| `instance_volume_delete` | Delete a detached app-managed data volume with explicit confirmation. |
 | `instance_get` | Fetch one instance row |
 | `instance_list` | List all instances; optional `provider` / `status` filters |
 | `instance_destroy` | Terminate the provider-managed resource and remove its row where supported (refused for local id 0) |
@@ -56,6 +63,21 @@ provider is specified. The app has provider adapters for Hetzner, DigitalOcean, 
 AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Catalog,
 provisioning, SSH readiness, recovery, and deletion are normalized into the
 same instance contract.
+
+## Storage model
+
+Storage uses independent `role` and `storage_class` dimensions. `boot` versus
+`data` describes what the disk does; `local`, `block`, `network`, or
+`ephemeral` describes how the provider implements it. A Scaleway SBS boot disk
+is therefore `role=boot` and `storage_class=block`.
+
+Omitting `storage` from `instance_create` preserves the provider/image default.
+Providers that support configurable boot storage accept
+`storage.boot.size_gb`, `tier`, and `delete_policy`. Data volumes default to
+`delete_policy=retain`; app-owned volumes can instead use `with_instance`.
+Destroy first detaches retained data volumes and only deletes managed volumes
+whose policy is `with_instance`. Existing/external volumes are never formatted
+or deleted implicitly.
 
 A normal VPS provision:
 

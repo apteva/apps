@@ -37,7 +37,7 @@ import (
 // Returns the freshly-created instance row (status='provisioning'
 // initially; caller can poll instance_get for the transition).
 func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error) {
-	bound, err := instanceProviderBinding(ctx, "hetzner")
+	bound, err := storageBinding(ctx, "hetzner", in.ProviderConnectionID)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +209,7 @@ func reconcileHetznerProvisioning(ctx *sdk.AppCtx) {
 // hetznerDestroy terminates the upstream resource. Idempotent on
 // already-destroyed instances (Hetzner returns 404 → we soft-pass).
 func hetznerDestroy(ctx *sdk.AppCtx, inst *Instance) error {
-	bound, err := instanceProviderBinding(ctx, "hetzner")
+	bound, err := storageBinding(ctx, "hetzner", inst.ProviderConnectionID)
 	if err != nil {
 		return err
 	}
@@ -281,7 +281,7 @@ func hetznerUpgrade(ctx *sdk.AppCtx, inst *Instance, in UpgradeInstanceInput) (*
 		return nil, err
 	}
 
-	bound, err := instanceProviderBinding(ctx, "hetzner")
+	bound, err := storageBinding(ctx, "hetzner", inst.ProviderConnectionID)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +381,7 @@ func reconcileHetznerUpgrading(ctx *sdk.AppCtx) {
 }
 
 func recoverHetznerUpgrade(ctx *sdk.AppCtx, inst *Instance) error {
-	bound, err := instanceProviderBinding(ctx, "hetzner")
+	bound, err := storageBinding(ctx, "hetzner", inst.ProviderConnectionID)
 	if err != nil {
 		return err
 	}

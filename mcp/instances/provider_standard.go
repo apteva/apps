@@ -44,7 +44,11 @@ func executeProviderTool(ctx *sdk.AppCtx, provider, tool string, args map[string
 	if err != nil {
 		return nil, err
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, args)
+	return executeProviderToolOnConnection(ctx, bound.ConnectionID, provider, tool, args)
+}
+
+func executeProviderToolOnConnection(ctx *sdk.AppCtx, connectionID int64, provider, tool string, args map[string]any) (json.RawMessage, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connectionID, tool, args)
 	if err != nil {
 		return nil, fmt.Errorf("%s.%s: %w", provider, tool, err)
 	}
@@ -219,7 +223,8 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	if !isAPIProvider(provider) {
 		return nil, providerAdapterUnavailable(provider, "provisioning")
 	}
-	if _, err := apiProviderBound(ctx, provider); err != nil {
+	bound, err := storageBinding(ctx, provider, in.ProviderConnectionID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -294,7 +299,7 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
 		return nil, err
 	}
-	data, err := executeProviderTool(ctx, provider, tool, args)
+	data, err := executeProviderToolOnConnection(ctx, bound.ConnectionID, provider, tool, args)
 	if err != nil {
 		if appleMac {
 			if cleanupErr := deleteScalewayAppleSSHKey(ctx, parseScalewayAppleMetadata(inst.ProviderMetadataJSON).SSHKeyID); cleanupErr != nil {
@@ -335,14 +340,14 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	}
 
 	if provider == "scaleway" && !appleMac {
-		_, err = executeProviderTool(ctx, provider, "server_set_cloud_init", map[string]any{
+		_, err = executeProviderToolOnConnection(ctx, bound.ConnectionID, provider, "server_set_cloud_init", map[string]any{
 			"zone": in.Region, "server_id": provID, "content": buildCloudInit(pubKey),
 		})
 		if err != nil {
 			_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
 			return nil, err
 		}
-		_, err = executeProviderTool(ctx, provider, "server_action", map[string]any{"zone": in.Region, "server_id": provID, "action": "poweron"})
+		_, err = executeProviderToolOnConnection(ctx, bound.ConnectionID, provider, "server_action", map[string]any{"zone": in.Region, "server_id": provID, "action": "poweron"})
 		if err != nil {
 			_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
 			return nil, err
@@ -452,18 +457,25 @@ func apiProviderCreateRequest(ctx *sdk.AppCtx, provider string, in CreateInstanc
 		}
 		return "create_instance", map[string]any{"region": in.Region, "plan": in.Size, "os_id": osID, "label": in.Name, "hostname": in.Name, "user_data": base64.StdEncoding.EncodeToString([]byte(cloudInit)), "enable_ipv6": true}, nil
 	case "aws-ec2":
-		return "create_instance", map[string]any{
+		args := map[string]any{
 			"Action": "RunInstances", "Version": "2016-11-15", "ImageId": in.Image, "InstanceType": in.Size,
 			"MinCount": 1, "MaxCount": 1, "Placement.AvailabilityZone": in.Region,
 			"UserData":                        base64.StdEncoding.EncodeToString([]byte(cloudInit)),
 			"TagSpecification.1.ResourceType": "instance", "TagSpecification.1.Tag.1.Key": "Name", "TagSpecification.1.Tag.1.Value": in.Name,
-		}, nil
+		}
+		if boot := in.Storage.Boot; boot != nil {
+			args["BlockDeviceMapping.1.DeviceName"] = "/dev/sda1"
+			args["BlockDeviceMapping.1.Ebs.VolumeSize"] = boot.SizeGB
+			args["BlockDeviceMapping.1.Ebs.VolumeType"] = providerTypeForTier(provider, boot.Tier, boot.ProviderType)
+			args["BlockDeviceMapping.1.Ebs.DeleteOnTermination"] = boot.DeletePolicy != "retain"
+		}
+		return "create_instance", args, nil
 	case "scaleway":
-		project, err := scalewayDefaultProject(ctx)
+		project, err := scalewayDefaultProjectForConnection(ctx, in.ProviderConnectionID)
 		if err != nil {
 			return "", nil, err
 		}
-		return "server_create", map[string]any{
+		args := map[string]any{
 			"zone": in.Region, "project": project, "name": in.Name, "commercial_type": in.Size, "image": in.Image,
 			"dynamic_ip_required": true, "routed_ip_enabled": true, "enable_ipv6": true,
 			// Scaleway's image tooling installs per-server SSH keys from
@@ -471,15 +483,27 @@ func apiProviderCreateRequest(ctx *sdk.AppCtx, provider string, in CreateInstanc
 			// module alone is not sufficient because scw-fetch-ssh-keys may
 			// replace root's authorized_keys later in the same boot.
 			"tags": []string{scalewaySSHKeyTag(pubKey)},
-		}, nil
+		}
+		if boot := in.Storage.Boot; boot != nil {
+			args["volumes"] = map[string]any{"0": map[string]any{
+				"name": in.Name + "-boot", "size": int64(boot.SizeGB) * 1_000_000_000,
+				"volume_type": "sbs_volume", "boot": true,
+			}}
+		}
+		return "server_create", args, nil
 	case "huawei-cloud":
-		vpcID, subnetID, err := huaweiDefaultNetwork(ctx)
+		vpcID, subnetID, err := huaweiDefaultNetworkForConnection(ctx, in.ProviderConnectionID)
 		if err != nil {
 			return "", nil, err
 		}
+		rootVolume := map[string]any{"volumetype": "GPSSD"}
+		if boot := in.Storage.Boot; boot != nil {
+			rootVolume["size"] = boot.SizeGB
+			rootVolume["volumetype"] = providerTypeForTier(provider, boot.Tier, boot.ProviderType)
+		}
 		server := map[string]any{
 			"name": in.Name, "imageRef": in.Image, "flavorRef": in.Size, "availability_zone": in.Region,
-			"vpcid": vpcID, "nics": []map[string]any{{"subnet_id": subnetID}}, "root_volume": map[string]any{"volumetype": "SAS"},
+			"vpcid": vpcID, "nics": []map[string]any{{"subnet_id": subnetID}}, "root_volume": rootVolume,
 			"count": 1, "user_data": base64.StdEncoding.EncodeToString([]byte(cloudInit)),
 			"publicip": map[string]any{"eip": map[string]any{"iptype": "5_bgp", "bandwidth": map[string]any{"size": 1, "sharetype": "PER", "chargemode": "traffic", "name": in.Name + "-bandwidth"}}, "delete_on_termination": true},
 		}
@@ -516,7 +540,7 @@ func resolveProviderCreateResponse(ctx *sdk.AppCtx, provider string, in CreateIn
 	}
 	deadline := time.Now().Add(5 * time.Minute)
 	for {
-		jobData, err := executeProviderTool(ctx, provider, "get_job", map[string]any{"job_id": jobID})
+		jobData, err := executeProviderToolOnConnection(ctx, in.ProviderConnectionID, provider, "get_job", map[string]any{"job_id": jobID})
 		if err != nil {
 			return "", "", "", err
 		}
@@ -571,7 +595,7 @@ func apiProviderDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 	default:
 		return providerAdapterUnavailable(provider, "destroy")
 	}
-	bound, err := apiProviderBound(ctx, provider)
+	bound, err := storageBinding(ctx, provider, inst.ProviderConnectionID)
 	if err != nil {
 		return err
 	}
@@ -589,7 +613,7 @@ func apiProviderDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 }
 
 func scalewayStandardDestroy(ctx *sdk.AppCtx, inst *Instance) error {
-	bound, err := apiProviderBound(ctx, "scaleway")
+	bound, err := storageBinding(ctx, "scaleway", inst.ProviderConnectionID)
 	if err != nil {
 		return err
 	}
@@ -673,7 +697,7 @@ func waitAPIProviderNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Durati
 		if err != nil {
 			return nil, err
 		}
-		data, err := executeProviderTool(ctx, inst.Provider, tool, args)
+		data, err := executeProviderToolOnConnection(ctx, inst.ProviderConnectionID, inst.Provider, tool, args)
 		if err != nil {
 			return nil, err
 		}
@@ -769,7 +793,11 @@ func providerTypePrice(t ServerType) float64 {
 }
 
 func scalewayDefaultProject(ctx *sdk.AppCtx) (string, error) {
-	bound, err := apiProviderBound(ctx, "scaleway")
+	return scalewayDefaultProjectForConnection(ctx, 0)
+}
+
+func scalewayDefaultProjectForConnection(ctx *sdk.AppCtx, connectionID int64) (string, error) {
+	bound, err := storageBinding(ctx, "scaleway", connectionID)
 	if err != nil {
 		return "", err
 	}
@@ -778,7 +806,7 @@ func scalewayDefaultProject(ctx *sdk.AppCtx) (string, error) {
 			return id, nil
 		}
 		if accessKey := strings.TrimSpace(config.Fields["access_key"]); accessKey != "" {
-			if data, lookupErr := executeProviderTool(ctx, "scaleway", "api_key_get", map[string]any{"access_key": accessKey}); lookupErr == nil {
+			if data, lookupErr := executeProviderToolOnConnection(ctx, bound.ConnectionID, "scaleway", "api_key_get", map[string]any{"access_key": accessKey}); lookupErr == nil {
 				if id := jsonStringAt(data, "default_project_id"); id != "" {
 					return id, nil
 				}
@@ -814,7 +842,15 @@ func scalewayDefaultProject(ctx *sdk.AppCtx) (string, error) {
 }
 
 func huaweiDefaultNetwork(ctx *sdk.AppCtx) (string, string, error) {
-	vpcData, err := executeProviderTool(ctx, "huawei-cloud", "list_vpcs", map[string]any{"limit": 100})
+	return huaweiDefaultNetworkForConnection(ctx, 0)
+}
+
+func huaweiDefaultNetworkForConnection(ctx *sdk.AppCtx, connectionID int64) (string, string, error) {
+	bound, err := storageBinding(ctx, "huawei-cloud", connectionID)
+	if err != nil {
+		return "", "", err
+	}
+	vpcData, err := executeProviderToolOnConnection(ctx, bound.ConnectionID, "huawei-cloud", "list_vpcs", map[string]any{"limit": 100})
 	if err != nil {
 		return "", "", err
 	}
@@ -822,7 +858,7 @@ func huaweiDefaultNetwork(ctx *sdk.AppCtx) (string, string, error) {
 	if vpcID == "" {
 		return "", "", errors.New("huawei-cloud account has no VPC; create one before provisioning an instance")
 	}
-	subnetData, err := executeProviderTool(ctx, "huawei-cloud", "list_subnets", map[string]any{"vpc_id": vpcID, "limit": 100})
+	subnetData, err := executeProviderToolOnConnection(ctx, bound.ConnectionID, "huawei-cloud", "list_subnets", map[string]any{"vpc_id": vpcID, "limit": 100})
 	if err != nil {
 		return "", "", err
 	}

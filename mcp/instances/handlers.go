@@ -184,12 +184,14 @@ func (a *App) httpGet(w http.ResponseWriter, r *http.Request, id int64) {
 func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 	ctx := appCtxForRequest(r)
 	var body struct {
-		Name     string `json:"name"`
-		Provider string `json:"provider"`
-		Region   string `json:"region"`
-		Size     string `json:"size"`
-		Image    string `json:"image"`
-		TagsJSON string `json:"tags_json"`
+		Name                 string                 `json:"name"`
+		Provider             string                 `json:"provider"`
+		Region               string                 `json:"region"`
+		Size                 string                 `json:"size"`
+		Image                string                 `json:"image"`
+		TagsJSON             string                 `json:"tags_json"`
+		ProviderConnectionID int64                  `json:"provider_connection_id"`
+		Storage              InstanceStorageRequest `json:"storage"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -202,7 +204,7 @@ func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 	in := CreateInstanceInput{
 		Name: body.Name, Provider: body.Provider,
 		Region: body.Region, Size: body.Size, Image: body.Image,
-		TagsJSON: body.TagsJSON,
+		TagsJSON: body.TagsJSON, ProviderConnectionID: body.ProviderConnectionID, Storage: body.Storage,
 	}
 	inst, err := provisionInstance(ctx, in)
 	if err != nil {

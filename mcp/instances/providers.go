@@ -177,6 +177,14 @@ func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, erro
 		return nil, err
 	}
 	in.Provider = provider
+	bound, err := storageBinding(ctx, provider, in.ProviderConnectionID)
+	if err != nil {
+		return nil, err
+	}
+	in.ProviderConnectionID = bound.ConnectionID
+	if err := validateStorageRequest(provider, in.Storage); err != nil {
+		return nil, err
+	}
 	switch provider {
 	case "hetzner":
 		return hetznerProvision(ctx, in)
@@ -226,6 +234,10 @@ func destroyManagedInstance(ctx *sdk.AppCtx, inst *Instance) error {
 	}
 	claimedInst, err := dbGetInstance(ctx.AppDB(), inst.ID)
 	if err != nil {
+		return err
+	}
+	if err := prepareVolumesForInstanceDestroy(ctx, inst.ID); err != nil {
+		_, _, _ = transitionInstanceAndEmit(ctx, inst.ID, []string{"destroying"}, previous, map[string]any{"error_message": err.Error()})
 		return err
 	}
 	if err := destroyProviderInstance(ctx, claimedInst); err != nil {

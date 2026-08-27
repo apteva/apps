@@ -22,15 +22,61 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Args: name (req), provider? (defaults to the configured default binding), region?, size?, image?, tags_json?. " +
 				"Local instance (id 0) is auto-seeded; passing provider=local is refused.",
 			InputSchema: schemaObject(map[string]any{
-				"name":      map[string]any{"type": "string"},
-				"provider":  map[string]any{"type": "string"},
-				"region":    map[string]any{"type": "string"},
-				"size":      map[string]any{"type": "string"},
-				"image":     map[string]any{"type": "string"},
-				"tags_json": map[string]any{"type": "string"},
+				"name":                   map[string]any{"type": "string"},
+				"provider":               map[string]any{"type": "string"},
+				"provider_connection_id": map[string]any{"type": "integer", "description": "Choose a specific bound account when more than one connection exists for the provider"},
+				"region":                 map[string]any{"type": "string"},
+				"size":                   map[string]any{"type": "string"},
+				"image":                  map[string]any{"type": "string"},
+				"tags_json":              map[string]any{"type": "string"},
+				"storage": map[string]any{
+					"type":        "object",
+					"description": "Optional provider-neutral boot storage. Omit to preserve the provider/image default.",
+					"properties": map[string]any{
+						"boot": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"size_gb":       map[string]any{"type": "integer", "minimum": 1},
+								"tier":          map[string]any{"type": "string", "enum": []string{"provider-default", "balanced", "performance"}},
+								"provider_type": map[string]any{"type": "string"},
+								"delete_policy": map[string]any{"type": "string", "enum": []string{"with_instance", "retain"}},
+							},
+							"required": []string{"size_gb"},
+						},
+					},
+				},
 			}, []string{"name"}),
 			Handler: a.toolCreate,
 		},
+		{
+			Name:        "instance_storage_capabilities",
+			Description: "Describe boot/data storage support for a bound provider. Returns separate boot_size_configurable, data_volumes, dynamic_attach, detach, resize, snapshots, storage_classes, and provider tier mappings.",
+			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}}, nil),
+			Handler:     a.toolStorageCapabilities,
+		},
+		{
+			Name:        "instance_list_storage_types",
+			Description: "List provider-neutral storage classes and tiers with their native provider type mappings.",
+			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}}, nil),
+			Handler:     a.toolListStorageTypes,
+		},
+		{
+			Name:        "instance_volume_create",
+			Description: "Create a managed data volume and optionally attach it to an existing instance. Data volumes default to delete_policy=retain. Unsupported providers fail before creating anything.",
+			InputSchema: schemaObject(map[string]any{
+				"instance_id": map[string]any{"type": "integer"}, "provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"},
+				"name": map[string]any{"type": "string"}, "size_gb": map[string]any{"type": "integer", "minimum": 1}, "region": map[string]any{"type": "string"},
+				"tier": map[string]any{"type": "string", "enum": []string{"provider-default", "balanced", "performance"}}, "provider_type": map[string]any{"type": "string"},
+				"delete_policy": map[string]any{"type": "string", "enum": []string{"retain", "with_instance"}},
+			}, []string{"name", "size_gb"}),
+			Handler: a.toolVolumeCreate,
+		},
+		{Name: "instance_volume_get", Description: "Get one managed volume by Instances volume id.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolVolumeGet},
+		{Name: "instance_volume_list", Description: "List volumes tracked by Instances. Optional filters: instance_id, provider.", InputSchema: schemaObject(map[string]any{"instance_id": map[string]any{"type": "integer"}, "provider": map[string]any{"type": "string"}}, nil), Handler: a.toolVolumeList},
+		{Name: "instance_volume_attach", Description: "Attach an available managed volume to an existing instance in the same provider and region.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "instance_id": map[string]any{"type": "integer"}}, []string{"id", "instance_id"}), Handler: a.toolVolumeAttach},
+		{Name: "instance_volume_detach", Description: "Detach a data volume without deleting it. Boot volumes are refused.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolVolumeDetach},
+		{Name: "instance_volume_resize", Description: "Increase a managed volume size. Shrinking is refused. Filesystem growth remains a separate guest operation.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "size_gb": map[string]any{"type": "integer", "minimum": 1}}, []string{"id", "size_gb"}), Handler: a.toolVolumeResize},
+		{Name: "instance_volume_delete", Description: "Permanently delete a detached, app-managed data volume. Requires confirm=true; external and boot volumes are refused.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "confirm": map[string]any{"type": "boolean"}}, []string{"id", "confirm"}), Handler: a.toolVolumeDelete},
 		{
 			Name:        "instance_get",
 			Description: "Fetch one instance by id (0 for local).",
@@ -177,18 +223,31 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	provider := strArg(args, "provider")
 	in := CreateInstanceInput{
-		Name:     name,
-		Provider: provider,
-		Region:   strArg(args, "region"),
-		Size:     strArg(args, "size"),
-		Image:    strArg(args, "image"),
-		TagsJSON: strArg(args, "tags_json"),
+		Name:                 name,
+		Provider:             provider,
+		ProviderConnectionID: int64Arg(args, "provider_connection_id"),
+		Region:               strArg(args, "region"),
+		Size:                 strArg(args, "size"),
+		Image:                strArg(args, "image"),
+		TagsJSON:             strArg(args, "tags_json"),
+		Storage:              storageRequestArg(args),
 	}
 	inst, err := provisionInstance(ctx, in)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"instance": inst.stripSecrets()}, nil
+}
+
+func storageRequestArg(args map[string]any) InstanceStorageRequest {
+	storage, _ := args["storage"].(map[string]any)
+	boot, _ := storage["boot"].(map[string]any)
+	if len(boot) == 0 {
+		return InstanceStorageRequest{}
+	}
+	return InstanceStorageRequest{Boot: &BootStorageRequest{
+		SizeGB: intArg(boot, "size_gb", 0), Tier: strArg(boot, "tier"), ProviderType: strArg(boot, "provider_type"), DeletePolicy: strArg(boot, "delete_policy"),
+	}}
 }
 
 func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {

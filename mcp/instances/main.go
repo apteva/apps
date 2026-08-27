@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.31
+version: 0.4.32
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -80,6 +80,15 @@ provides:
   mcp_tools:
     - { name: instance_list_providers, description: "List bound VPS provider connections and identify the configured default provider." }
     - { name: instance_create,       description: "Provision a new instance via a bound VPS provider. Args: name, provider? (configured default when omitted), region?, size?, image?, tags?." }
+    - { name: instance_storage_capabilities, description: "Describe boot and data-volume capabilities for a bound provider." }
+    - { name: instance_list_storage_types, description: "List provider-neutral storage classes and tiers with native mappings." }
+    - { name: instance_volume_create, description: "Create a managed data volume and optionally attach it to an instance." }
+    - { name: instance_volume_get, description: "Fetch one managed volume." }
+    - { name: instance_volume_list, description: "List managed volumes." }
+    - { name: instance_volume_attach, description: "Attach an available managed volume to an instance." }
+    - { name: instance_volume_detach, description: "Detach a managed data volume without deleting it." }
+    - { name: instance_volume_resize, description: "Increase the size of a managed volume." }
+    - { name: instance_volume_delete, description: "Permanently delete a detached managed data volume with explicit confirmation." }
     - { name: instance_get,          description: "Fetch one instance by id." }
     - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
     - { name: instance_destroy,      description: "Terminate the provider-managed instance and remove its row where supported (refused for local id 0 and Contabo). Args: id." }
@@ -163,7 +172,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.31
+    ref: instances/v0.4.32
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -244,6 +253,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/instances-server-types", Handler: a.handleListServerTypes},
 		{Pattern: "/api/instances-locations", Handler: a.handleListLocations},
 		{Pattern: "/api/instances-images", Handler: a.handleListImages},
+		{Pattern: "/api/instances-storage-capabilities", Handler: a.handleStorageCapabilities},
+		{Pattern: "/api/instance-volumes", Handler: a.handleVolumesCollection},
+		{Pattern: "/api/instance-volumes/", Handler: a.handleVolumeItem},
 	}
 }
 

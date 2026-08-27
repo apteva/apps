@@ -68,7 +68,7 @@ func digitalOceanListImages(ctx *sdk.AppCtx) ([]Image, error) {
 }
 
 func digitalOceanProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error) {
-	bound, err := digitalOceanBound(ctx)
+	bound, err := storageBinding(ctx, "digitalocean", in.ProviderConnectionID)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +156,7 @@ func digitalOceanProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, 
 }
 
 func digitalOceanDestroy(ctx *sdk.AppCtx, inst *Instance) error {
-	bound, err := digitalOceanBound(ctx)
+	bound, err := storageBinding(ctx, "digitalocean", inst.ProviderConnectionID)
 	if err != nil {
 		return err
 	}
@@ -209,7 +209,7 @@ func kickDigitalOceanReadinessProbe(ctx *sdk.AppCtx, id int64) {
 }
 
 func waitDigitalOceanDropletNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Duration) (*Instance, error) {
-	bound, err := digitalOceanBound(ctx)
+	bound, err := storageBinding(ctx, "digitalocean", inst.ProviderConnectionID)
 	if err != nil {
 		return nil, err
 	}

@@ -35,6 +35,7 @@ interface Instance {
   ssh_user?: string;
   ssh_public_key?: string;
   resources_json?: string;
+  storage_json?: string;
   ports_json?: string;
   monthly_cost_cents: number;
   error?: string;
@@ -49,6 +50,33 @@ interface Instance {
     destroy: boolean;
     upgrade: boolean;
   };
+}
+
+interface InstanceVolumeWire {
+  id: number;
+  instance_id?: number;
+  provider: string;
+  provider_volume_id: string;
+  name: string;
+  role: "boot" | "data";
+  storage_class: "local" | "block" | "network" | "ephemeral";
+  tier: string;
+  provider_type?: string;
+  size_gb: number;
+  region?: string;
+  status: string;
+  delete_policy: "retain" | "with_instance";
+  error?: string;
+}
+
+interface StorageCapabilitiesWire {
+  provider: string;
+  boot_size_configurable: boolean;
+  data_volumes: boolean;
+  dynamic_attach: boolean;
+  resize: boolean;
+  notes?: string;
+  tiers: Array<{ name: string; provider_type?: string; description?: string }>;
 }
 
 interface MetricsWire {
@@ -352,6 +380,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
   const [showCreate, setShowCreate] = useState(false);
   const [pendingDestroy, setPendingDestroy] = useState<Instance | null>(null);
   const [pendingUpgrade, setPendingUpgrade] = useState<Instance | null>(null);
+  const [volumeInstance, setVolumeInstance] = useState<Instance | null>(null);
 
   const withParams = useCallback(
     () =>
@@ -478,6 +507,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
               withParams={withParams}
               busy={busy}
               onUpgrade={() => setPendingUpgrade(inst)}
+              onVolumes={() => setVolumeInstance(inst)}
               onDestroy={() => setPendingDestroy(inst)}
             />
           ))
@@ -490,6 +520,15 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
           busy={busy}
           onCancel={() => setPendingDestroy(null)}
           onConfirm={() => destroy(pendingDestroy)}
+        />
+      )}
+
+      {volumeInstance && (
+        <VolumesDialog
+          inst={volumeInstance}
+          withParams={withParams}
+          onClose={() => setVolumeInstance(null)}
+          setError={setError}
         />
       )}
 
@@ -791,12 +830,13 @@ const HISTORY_MAX = 360;          // 10s polling × 360 = 1 hour
 const STALE_THRESHOLD_MS = 30000; // 30s without a successful poll → "stale"
 
 function InstanceCard({
-  inst, withParams, busy, onUpgrade, onDestroy,
+  inst, withParams, busy, onUpgrade, onVolumes, onDestroy,
 }: {
   inst: Instance;
   withParams: () => string;
   busy: boolean;
   onUpgrade: () => void;
+  onVolumes: () => void;
   onDestroy: () => void;
 }) {
   const [metrics, setMetrics] = useState<MetricsWire | null>(null);
@@ -883,6 +923,12 @@ function InstanceCard({
           <button type="button" onClick={onUpgrade} disabled={busy || inst.status !== "ready"}
             className="px-2 py-0.5 text-[10px] border border-blue/60 text-blue rounded hover:bg-blue hover:text-white disabled:opacity-50">
             Upgrade
+          </button>
+        )}
+        {!isLocal && (
+          <button type="button" onClick={onVolumes} disabled={busy}
+            className="px-2 py-0.5 text-[10px] border border-border text-text-muted rounded hover:text-text disabled:opacity-50">
+            Volumes
           </button>
         )}
         {canDestroy && (
@@ -1293,6 +1339,157 @@ function SectionHeader({ title, right }: { title: string; right?: string }) {
   );
 }
 
+function VolumesDialog({ inst, withParams, onClose, setError }: {
+  inst: Instance;
+  withParams: () => string;
+  onClose: () => void;
+  setError: (message: string) => void;
+}) {
+  const [volumes, setVolumes] = useState<InstanceVolumeWire[]>([]);
+  const [capabilities, setCapabilities] = useState<StorageCapabilitiesWire | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [name, setName] = useState(`${inst.name}-data`);
+  const [sizeGB, setSizeGB] = useState(80);
+  const [tier, setTier] = useState("");
+  const [deletePolicy, setDeletePolicy] = useState<"retain" | "with_instance">("retain");
+  const params = useCallback(() => {
+    const value = new URLSearchParams(withParams());
+    value.set("instance_id", String(inst.id));
+    return value.toString();
+  }, [inst.id, withParams]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const capParams = new URLSearchParams(withParams());
+      capParams.set("provider", inst.provider);
+      const [volumesResponse, capabilitiesResponse] = await Promise.all([
+        fetch(`${API}/instance-volumes?${params()}`, { credentials: "same-origin" }),
+        fetch(`${API}/instances-storage-capabilities?${capParams}`, { credentials: "same-origin" }),
+      ]);
+      if (!volumesResponse.ok) throw new Error(`${volumesResponse.status}: ${await volumesResponse.text()}`);
+      if (!capabilitiesResponse.ok) throw new Error(`${capabilitiesResponse.status}: ${await capabilitiesResponse.text()}`);
+      const volumeBody = await volumesResponse.json();
+      const capabilitiesBody = await capabilitiesResponse.json();
+      const nextCapabilities = capabilitiesBody.capabilities as StorageCapabilitiesWire;
+      setVolumes(volumeBody.volumes || []);
+      setCapabilities(nextCapabilities);
+      if (!tier) setTier(nextCapabilities.tiers?.[0]?.name || "provider-default");
+    } catch (error) {
+      setError("Volumes failed: " + (error as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [inst.provider, params, setError, tier, withParams]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const mutate = async (path: string, method: string, body?: Record<string, unknown>) => {
+    setBusy(true);
+    try {
+      const response = await fetch(`${API}${path}${path.includes("?") ? "&" : "?"}${withParams()}`, {
+        method,
+        credentials: "same-origin",
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+      await load();
+    } catch (error) {
+      setError("Volume operation failed: " + (error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!name.trim() || sizeGB <= 0) return;
+    await mutate("/instance-volumes", "POST", {
+      instance_id: inst.id,
+      name: name.trim(),
+      size_gb: sizeGB,
+      tier,
+      delete_policy: deletePolicy,
+    });
+  };
+
+  let requestedBoot: { size_gb?: number; tier?: string } | null = null;
+  try { requestedBoot = JSON.parse(inst.storage_json || "{}").boot || null; } catch { requestedBoot = null; }
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" style={{ padding: 24 }} onClick={onClose}>
+      <div className="bg-bg border border-border rounded shadow-xl overflow-hidden" style={{ width: "min(680px, 100%)" }} onClick={(event) => event.stopPropagation()}>
+        <div className="px-5 py-4 flex items-start gap-3" style={{ borderBottom: `1px solid ${SUBTLE_BORDER}` }}>
+          <div>
+            <h2 className="text-text font-semibold">Volumes · {inst.name}</h2>
+            <p className="text-xs text-text-muted">Boot storage and attached data storage are tracked separately. New data volumes default to retain.</p>
+          </div>
+          <span className="flex-1" />
+          <button type="button" onClick={onClose} className="text-text-muted hover:text-text">×</button>
+        </div>
+        <div className="p-5 space-y-4 max-h-[70vh] overflow-auto">
+          <div className="rounded p-3 flex items-center gap-2" style={{ border: `1px solid ${SUBTLE_BORDER}`, backgroundColor: SUB_CARD_BG }}>
+            <div>
+              <div className="text-sm text-text font-medium">Boot volume</div>
+              <div className="text-[10px] text-text-dim">
+                boot · {requestedBoot?.size_gb ? `${requestedBoot.size_gb} GB · ${requestedBoot.tier || "provider-default"}` : "provider/image default"} · lifecycle tied to instance
+              </div>
+            </div>
+            <span className="flex-1" />
+            <span className="text-[10px] uppercase text-text-dim">boot</span>
+          </div>
+          {loading ? <div className="text-xs text-text-muted">Loading volumes…</div> : volumes.length === 0 ? (
+            <div className="text-xs text-text-dim">No managed data volumes are attached.</div>
+          ) : (
+            <div className="space-y-2">
+              {volumes.map((volume) => (
+                <div key={volume.id} className="rounded p-3 flex flex-wrap items-center gap-2" style={{ border: `1px solid ${SUBTLE_BORDER}`, backgroundColor: SUB_CARD_BG }}>
+                  <div className="min-w-0">
+                    <div className="text-sm text-text font-medium">{volume.name}</div>
+                    <div className="text-[10px] text-text-dim">{volume.role} · {volume.storage_class} · {volume.size_gb} GB · {volume.tier} · {volume.status} · {volume.delete_policy}</div>
+                  </div>
+                  <span className="flex-1" />
+                  {capabilities?.resize && <button type="button" disabled={busy} className="px-2 py-1 text-[10px] border border-border rounded" onClick={() => {
+                    const value = window.prompt("New size in GB (must be larger)", String(volume.size_gb));
+                    if (value) mutate(`/instance-volumes/${volume.id}/resize`, "POST", { size_gb: Number(value) });
+                  }}>Resize</button>}
+                  {volume.role === "data" && capabilities?.detach && <button type="button" disabled={busy} className="px-2 py-1 text-[10px] border border-border rounded" onClick={() => mutate(`/instance-volumes/${volume.id}/detach`, "POST")}>Detach</button>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {capabilities?.data_volumes ? (
+            <form className="space-y-3 rounded p-3" style={{ border: `1px solid ${SUBTLE_BORDER}` }} onSubmit={create}>
+              <div className="text-xs text-text font-medium">Add data volume</div>
+              <div className="grid grid-cols-2 gap-2">
+                <input value={name} onChange={(event) => setName(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono" placeholder="volume name" />
+                <input type="number" min={1} value={sizeGB} onChange={(event) => setSizeGB(Number(event.target.value))} className="bg-bg-input border border-border rounded px-2 py-1 text-sm" />
+                <select value={tier} onChange={(event) => setTier(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm">
+                  {(capabilities.tiers || []).map((candidate) => <option key={candidate.name} value={candidate.name}>{candidate.name}{candidate.provider_type ? ` (${candidate.provider_type})` : ""}</option>)}
+                </select>
+                <select value={deletePolicy} onChange={(event) => setDeletePolicy(event.target.value as "retain" | "with_instance")} className="bg-bg-input border border-border rounded px-2 py-1 text-sm">
+                  <option value="retain">Retain when instance is destroyed</option>
+                  <option value="with_instance">Delete with instance</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-text-dim">The provider creates and attaches the volume automatically. Guest filesystem formatting is intentionally separate.</span>
+                <span className="flex-1" />
+                <button type="submit" disabled={busy || !name.trim() || sizeGB <= 0} className="px-3 py-1.5 text-xs rounded bg-blue text-white disabled:opacity-50">{busy ? "Working…" : "Create & attach"}</button>
+              </div>
+            </form>
+          ) : (
+            <div className="text-xs text-amber">{capabilities?.notes || `${inst.provider} does not expose attachable data volumes.`}</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface ServerTypeWire {
   name: string;
   description?: string;
@@ -1364,6 +1561,7 @@ function CreateDialog({
   const [busy, setBusy] = useState(false);
   const [providers, setProviders] = useState<ProviderBindingWire[]>([]);
   const [provider, setProvider] = useState("");
+  const [providerConnectionID, setProviderConnectionID] = useState(0);
   const [providersLoading, setProvidersLoading] = useState(true);
   // Live catalog from the selected bound provider.
   // Empty arrays mean either still-loading or the provider isn't
@@ -1375,6 +1573,10 @@ function CreateDialog({
   const [catalogProvider, setCatalogProvider] = useState("");
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [storageCapabilities, setStorageCapabilities] = useState<StorageCapabilitiesWire | null>(null);
+  const [customBootStorage, setCustomBootStorage] = useState(false);
+  const [bootSizeGB, setBootSizeGB] = useState(80);
+  const [bootTier, setBootTier] = useState("balanced");
 
   const selectedType = serverTypes.find((candidate) => candidate.name === size);
   const compatibleLocations = locations.filter((candidate) =>
@@ -1412,14 +1614,11 @@ function CreateDialog({
         const r = await fetch(`${API}/instances-providers?${withParams()}`, { credentials: "same-origin" });
         if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
         const body = await r.json();
-        const bySlug = new Map<string, ProviderBindingWire>();
-        for (const binding of (body.providers || []) as ProviderBindingWire[]) {
-          const current = bySlug.get(binding.provider);
-          if (!current || binding.default) bySlug.set(binding.provider, binding);
-        }
-        const available = Array.from(bySlug.values()).sort((a, b) => a.provider.localeCompare(b.provider));
+        const available = ((body.providers || []) as ProviderBindingWire[]).sort((a, b) => a.provider.localeCompare(b.provider) || a.connection_id - b.connection_id);
+        const selected = available.find((binding) => binding.default) || available[0];
         setProviders(available);
-        setProvider(body.default || available[0]?.provider || "");
+        setProvider(selected?.provider || body.default || "");
+        setProviderConnectionID(selected?.connection_id || 0);
       } catch (e) {
         setCatalogError((e as Error).message);
         setCatalogLoading(false);
@@ -1444,24 +1643,33 @@ function CreateDialog({
       setServerTypes([]);
       setLocations([]);
       setImages([]);
+      setStorageCapabilities(null);
+      setCustomBootStorage(false);
       setSize("");
       setRegion("");
       setImage("");
       const params = new URLSearchParams(withParams());
       params.set("provider", provider);
+      if (providerConnectionID) params.set("provider_connection_id", String(providerConnectionID));
       const qs = params.toString();
       try {
-        const [stRes, locRes, imgRes] = await Promise.all([
+        const [stRes, locRes, imgRes, storageRes] = await Promise.all([
           fetch(`${API}/instances-server-types?${qs}`, { credentials: "same-origin" }),
           fetch(`${API}/instances-locations?${qs}`, { credentials: "same-origin" }),
           fetch(`${API}/instances-images?${qs}`, { credentials: "same-origin" }),
+          fetch(`${API}/instances-storage-capabilities?${qs}`, { credentials: "same-origin" }),
         ]);
         if (!stRes.ok) throw new Error(`server_types: ${stRes.status} ${await stRes.text().catch(() => "")}`);
         if (!locRes.ok) throw new Error(`locations: ${locRes.status} ${await locRes.text().catch(() => "")}`);
         if (!imgRes.ok) throw new Error(`images: ${imgRes.status} ${await imgRes.text().catch(() => "")}`);
+        if (!storageRes.ok) throw new Error(`storage: ${storageRes.status} ${await storageRes.text().catch(() => "")}`);
         const stJson = await stRes.json();
         const locJson = await locRes.json();
         const imgJson = await imgRes.json();
+        const storageJson = await storageRes.json();
+        const nextStorageCapabilities = storageJson.capabilities as StorageCapabilitiesWire;
+        setStorageCapabilities(nextStorageCapabilities);
+        setBootTier(nextStorageCapabilities.tiers?.[0]?.name || "balanced");
         setCatalogProvider(stJson.provider || locJson.provider || imgJson.provider || "");
         // Hide deprecated server types from the default view —
         // they still come back in the API for completeness but
@@ -1494,7 +1702,7 @@ function CreateDialog({
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider, providersLoading]);
+  }, [provider, providerConnectionID, providersLoading]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1505,7 +1713,10 @@ function CreateDialog({
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), provider, size, region, image }),
+        body: JSON.stringify({
+          name: name.trim(), provider, provider_connection_id: providerConnectionID, size, region, image,
+          storage: customBootStorage ? { boot: { size_gb: bootSizeGB, tier: bootTier, delete_policy: "with_instance" } } : undefined,
+        }),
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       onCreated();
@@ -1580,15 +1791,20 @@ function CreateDialog({
         <div>
           <label className="text-xs text-text-muted block mb-1">Provider</label>
           <select
-            value={provider}
-            onChange={(e) => setProvider(e.target.value)}
+            value={providerConnectionID || ""}
+            onChange={(e) => {
+              const connectionID = Number(e.target.value);
+              const binding = providers.find((candidate) => candidate.connection_id === connectionID);
+              setProviderConnectionID(connectionID);
+              setProvider(binding?.provider || "");
+            }}
             disabled={providersLoading || providers.length === 0}
             className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
           >
             {providers.length === 0 && <option value="">No provider bound</option>}
             {providers.map((binding) => (
-              <option key={binding.connection_id} value={binding.provider}>
-                {binding.provider}{binding.default ? " (default)" : ""}
+              <option key={binding.connection_id} value={binding.connection_id}>
+                {binding.provider} · connection {binding.connection_id}{binding.default ? " (default)" : ""}
               </option>
             ))}
           </select>
@@ -1680,6 +1896,24 @@ function CreateDialog({
             </div>
           </div>
         </div>
+        {storageCapabilities?.boot_size_configurable && (
+          <div className="rounded p-3 space-y-2" style={{ border: `1px solid ${SUBTLE_BORDER}` }}>
+            <label className="flex items-center gap-2 text-xs text-text-muted">
+              <input type="checkbox" checked={customBootStorage} onChange={(event) => setCustomBootStorage(event.target.checked)} />
+              <span className="text-text">Custom boot volume</span>
+              <span>— otherwise the provider/image default is used</span>
+            </label>
+            {customBootStorage && (
+              <div className="grid grid-cols-2 gap-2">
+                <input type="number" min={1} value={bootSizeGB} onChange={(event) => setBootSizeGB(Number(event.target.value))} className="bg-bg-input border border-border rounded px-2 py-1 text-sm" aria-label="Boot volume size in GB" />
+                <select value={bootTier} onChange={(event) => setBootTier(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm">
+                  {(storageCapabilities.tiers || []).map((candidate) => <option key={candidate.name} value={candidate.name}>{candidate.name}{candidate.provider_type ? ` (${candidate.provider_type})` : ""}</option>)}
+                </select>
+                <span className="col-span-2 text-[10px] text-text-dim">Boot · {bootSizeGB} GB · deleted with the instance</span>
+              </div>
+            )}
+          </div>
+        )}
         <div className="flex justify-end gap-2 pt-1">
           {selectedType?.resource_class === "bare_metal" && selectedType.platform === "macos" && (
             <span className="mr-auto text-[11px] text-amber">24-hour minimum allocation</span>
