@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.0
+
+- Replaced the seed-first panel with a project overview showing tracked sites,
+  competitors, keywords, opportunities, quick workflows, and recent activity.
+- Added a searchable domain explorer with separate Sites, Competitors, and All
+  views plus focused Overview, Rankings, and Backlinks tabs for each domain.
+- Consolidated research and tracked SERP results under Explorer, with search
+  engine controls shown only inside workflows where they apply.
+- Moved DataForSEO, YepAPI, locations, and activity into Settings so refresh
+  infrastructure no longer competes with the application's primary navigation.
+- Kept paid refresh actions explicit while making cached data browsing and
+  backlink history easier to discover.
+
+## 0.6.3
+
+- Added a dedicated backlink detail view from each domain's movement panel.
+- Added cached pagination, source/target/anchor search, active/lost filters, and
+  follow/nofollow filters through the read-only `backlinks_browse` tool.
+- Shows complete source and destination links, link attributes, authority,
+  provider, status, and first/last-seen dates without making provider requests.
+
 ## 0.6.2
 
 - Added the read-only `backlink_movement` tool with configurable 1-730 day

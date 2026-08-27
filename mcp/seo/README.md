@@ -3,7 +3,7 @@
 Generic SEO research workbench for Apteva. Track domains, keywords, rankings,
 and backlinks; pull metrics from any provider behind one pluggable role.
 
-## Schema (v0.6.2)
+## Schema (v0.7.0)
 
 Twenty tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz and extended with generic search-engine entities:
 
@@ -41,7 +41,7 @@ provider response, so provider-specific fields survive without schema churn.
 
 ## Status
 
-v0.6.2 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
+v0.7.0 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
 An installation may bind multiple providers and designate a default; paid MCP
 tools and panel actions can select a specific provider. Provider locations,
 metrics, rankings, backlinks, and SERP snapshots remain separately tagged.
@@ -62,12 +62,22 @@ Google and YouTube country/language rows. Domain, keyword-metric, and backlink
 refreshes remain UI/HTTP-driven; `serp_search` and refreshed keyword ideas are
 explicit paid MCP actions.
 
+The panel opens on a project overview and separates the primary workspaces into
+Domains, Keywords, and Explorer. Domains are searchable and distinguish owned
+sites from discovered competitors; rankings and backlinks live in dedicated
+domain tabs. Provider selection, location catalogs, and activity are kept in
+Settings because they configure refreshes rather than represent SEO data.
+
 Cached backlink analytics use the provider-supplied `first_seen`, `last_seen`,
 and current `is_lost` values already stored on each backlink. The
 `backlink_movement` tool and domain panel derive daily gained/lost counts, net
 movement, current active/lost totals, and timestamp coverage without creating
 snapshots or calling the provider. For a lost link, `last_seen` is used as its
 loss marker; the coverage fields make incomplete provider timestamps explicit.
+
+The domain panel links to a paginated backlink detail view powered by the
+cached-only `backlinks_browse` tool. It supports URL/anchor search and
+active/lost and follow/nofollow filters without making provider requests.
 
 Google keyword metric refreshes are HTTP/UI-only bulk jobs. DataForSEO requests
 are grouped by locale and sent in batches of up to 1,000 keywords, with separate
