@@ -29,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.6.3
+version: 0.7.0
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -64,6 +64,12 @@ description: |
   position, offset, width, height, scale, opacity, z_index, and layout alias
   fields. Overlay/PIP video audio is muted by default unless source_audio is
   explicitly set to keep.
+  Stable V1 screen-recording clips can reuse one video or audio source through
+  source_start/source_end ranges. Visual sources support normalized crop
+  rectangles and eased source-space pan/zoom keyframes in both local and remote
+  ffmpeg renders. Editable timeline markers preserve browser and recorder
+  events, including optional active-region metadata, and the panel exposes the
+  new ranges, crops, camera motion, and markers.
   ElevenLabs narration continuity is planned in timeline order across silence
   and SFX, uses stable text context for cache identity, and shares one
   server-side generation path between the panel and renderer. Provider request

@@ -81,6 +81,55 @@ func TestValidateEdit_RejectsZeroLength(t *testing.T) {
 	}
 }
 
+func TestValidateEdit_AcceptsScreenRecordingPrimitives(t *testing.T) {
+	body := `{"timeline":{"markers":[{"id":"send","time":1.2,"type":"agent_status","label":"Send","value":"thinking","region":{"x":0.7,"y":0.8,"width":0.2,"height":0.1}}],"tracks":[{"clips":[{
+		"asset":{"type":"video","src":"storage:1"},"start":0,"length":4,"source_start":8,"source_end":12,
+		"crop":{"x":0.1,"y":0.2,"width":0.8,"height":0.7},
+		"transform":{"x":0.5,"y":0.5,"scale":1,"keyframes":[{"time":1,"x":0.75,"y":0.7,"scale":2,"easing":"ease_in_out"},{"time":3,"scale":1.2,"easing":"ease_out"}]}
+	}] }]}}`
+	edit, err := parseEditJSON(body)
+	if err != nil {
+		t.Fatalf("screen-recording primitives should validate: %v", err)
+	}
+	clip := edit.Timeline.Tracks[0].Clips[0]
+	if clip.SourceStart != 8 || clip.SourceEnd != 12 || clip.Crop == nil || clip.Transform == nil || len(clip.Transform.Keyframes) != 2 {
+		t.Fatalf("screen-recording fields did not survive parse: %+v", clip)
+	}
+	if len(edit.Timeline.Markers) != 1 || edit.Timeline.Markers[0].Type != "agent_status" || edit.Timeline.Markers[0].Value != "thinking" {
+		t.Fatalf("markers did not survive parse: %+v", edit.Timeline.Markers)
+	}
+}
+
+func TestValidateEdit_RejectsInvalidScreenRecordingPrimitives(t *testing.T) {
+	tests := []struct {
+		name string
+		clip string
+		want string
+	}{
+		{"source range", `"source_start":3,"source_end":2`, "source_end"},
+		{"crop bounds", `"crop":{"x":0.8,"y":0,"width":0.4,"height":1}`, "rectangle"},
+		{"keyframe order", `"transform":{"keyframes":[{"time":2},{"time":1}]}`, "ordered"},
+		{"audio camera", `"asset":{"type":"audio","src":"storage:1"},"transform":{"scale":2}`, "crop/transform"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			asset := `"asset":{"type":"video","src":"storage:1"}`
+			if strings.Contains(test.clip, `"asset"`) {
+				asset = ""
+			}
+			body := `{"timeline":{"tracks":[{"type":"` + map[bool]string{true: "audio", false: "visual"}[test.name == "audio camera"] + `","clips":[{` + asset
+			if asset != "" {
+				body += ","
+			}
+			body += test.clip + `,"start":0,"length":4}]}]}}`
+			_, err := parseEditJSON(body)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("want error containing %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
 func TestValidateEdit_AcceptsAIClipWithoutMaterializedSource(t *testing.T) {
 	body := `{"timeline":{"tracks":[{"clips":[{
 		"uid":"clip-ai",
@@ -218,6 +267,68 @@ func TestVisualOverlayClipRefsSortByZIndex(t *testing.T) {
 }
 
 // --- ffmpeg cmd builder ------------------------------------------
+
+func TestBuildLocalFFmpegArgs_ScreenRecordingPrimitives(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[{"clips":[{
+		"asset":{"src":"https://recording","type":"video"},"start":0,"length":4,"source_start":8,"source_end":12,"source_audio":"keep",
+		"crop":{"x":0.25,"y":0.1,"width":0.5,"height":0.8},
+		"transform":{"x":0.5,"y":0.5,"scale":1,"keyframes":[{"time":2,"x":0.8,"y":0.7,"scale":2,"easing":"ease_in_out"}]}
+	}] }]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := buildLocalFFmpegArgsWithAudioInfo(e, defaultOutput(), []string{"https://recording"}, -1, "out.mp4", []bool{true})
+	cmd := strings.Join(args, " ")
+	for _, want := range []string{
+		"trim=start=8:end=12,setpts=PTS-STARTPTS",
+		"crop=iw*0.5:ih*0.8:iw*0.25:ih*0.1",
+		"zoompan=z=",
+		"[0:a]atrim=start=8:end=12,asetpts=PTS-STARTPTS,apad",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("missing %q in ffmpeg args: %s", want, cmd)
+		}
+	}
+}
+
+func TestScreenRecordingPrimitives_FFmpegSmoke(t *testing.T) {
+	ffmpeg, err := exec.LookPath(ffmpegPath())
+	if err != nil {
+		t.Skip("ffmpeg not available")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "recording.mp4")
+	generated, err := exec.Command(ffmpeg,
+		"-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=4",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=4",
+		"-shortest", "-c:v", "mpeg4", "-q:v", "5", "-c:a", "aac", source,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate source fixture: %v\n%s", err, generated)
+	}
+	e, err := parseEditJSON(`{"timeline":{"tracks":[{"clips":[{
+		"asset":{"src":"fixture","type":"video"},"start":0,"length":2,"source_start":1,"source_end":3,"source_audio":"keep",
+		"crop":{"x":0.1,"y":0.1,"width":0.8,"height":0.8},
+		"transform":{"x":0.5,"y":0.5,"scale":1,"keyframes":[{"time":1,"x":0.72,"y":0.62,"scale":1.8,"easing":"ease_in_out"},{"time":2,"x":0.5,"y":0.5,"scale":1.1,"easing":"ease_out"}]}
+	}] }]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := Output{Format: "mp4", Resolution: "sd", Aspect: "16:9", FPS: 24}
+	destination := filepath.Join(dir, "render.mp4")
+	args := buildLocalFFmpegArgsWithAudioInfo(e, output, []string{source}, -1, destination, []bool{true})
+	rendered, err := exec.Command(ffmpeg, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("render source range/crop/keyframes: %v\n%s\nargs=%s", err, rendered, strings.Join(args, " "))
+	}
+	info, err := os.Stat(destination)
+	if err != nil || info.Size() == 0 {
+		t.Fatalf("render output missing or empty: info=%v err=%v", info, err)
+	}
+	if got := probeRenderDuration(destination); got < 1.8 || got > 2.3 {
+		t.Fatalf("render duration = %v, want about 2s", got)
+	}
+}
 
 func TestBuildLocalFFmpegArgs_TwoClipsBasic(t *testing.T) {
 	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
@@ -1787,6 +1898,7 @@ func TestEditFromArgs_ReconstructsTimeline(t *testing.T) {
 		}},
 		"soundtrack": map[string]any{"src": "storage:2", "volume": 0.7},
 		"background": "#101010",
+		"markers":    []any{map[string]any{"id": "send", "time": 1.25, "type": "click", "label": "Send"}},
 	}
 	e, err := editFromArgs(args)
 	if err != nil {
@@ -1797,6 +1909,9 @@ func TestEditFromArgs_ReconstructsTimeline(t *testing.T) {
 	}
 	if e.Timeline.Soundtrack == nil || e.Timeline.Soundtrack.Volume != 0.7 {
 		t.Errorf("soundtrack lost: %+v", e.Timeline.Soundtrack)
+	}
+	if len(e.Timeline.Markers) != 1 || e.Timeline.Markers[0].ID != "send" {
+		t.Errorf("markers lost: %+v", e.Timeline.Markers)
 	}
 	b, _ := json.Marshal(e)
 	if !strings.Contains(string(b), `"length":3`) {

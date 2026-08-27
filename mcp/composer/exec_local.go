@@ -224,13 +224,10 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 	// Build the filter graph.
 	var filter strings.Builder
 	for i, c := range track.Clips {
-		// Scale + pad to output dims, set fps, set SAR=1.
-		fmt.Fprintf(&filter,
-			"[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,"+
-				"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=%s,"+
-				"setsar=1,fps=%d",
-			i, w, h, w, h, escFFmpegColor(edit.Timeline.Background), output.FPS,
-		)
+		// Select the source range/crop, fit it to the canvas, then apply
+		// source-space camera keyframes. The clip is still trimmed to its
+		// timeline length below, so one source can back many timeline clips.
+		fmt.Fprintf(&filter, "[%d:v]%s", i, buildBaseVisualFilter(c, w, h, output.FPS, edit.Timeline.Background))
 		// Trim length — important for video clips that are longer than
 		// the requested clip length. Image clips are already length-pinned
 		// via -t on input.
@@ -263,7 +260,7 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 			// no-audio videos so concat audio stream count matches.
 			fmt.Fprintf(&filter, "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration=%s[a%d];", trimFloat(clipDuration(c)), i)
 		} else {
-			fmt.Fprintf(&filter, "[%d:a]apad,atrim=duration=%s,asetpts=PTS-STARTPTS[a%d];", i, trimFloat(clipDuration(c)), i)
+			fmt.Fprintf(&filter, "[%d:a]%sapad,atrim=duration=%s,asetpts=PTS-STARTPTS[a%d];", i, sourceAudioFilterPrefix(c), trimFloat(clipDuration(c)), i)
 		}
 	}
 
@@ -513,7 +510,7 @@ func buildVisualOverlayChain(inputIdx int, baseLabel, outLabel string, c Clip, c
 	d := trimFloat(clipDuration(c))
 	start := trimFloat(c.Start)
 	end := trimFloat(c.Start + clipDuration(c))
-	chain := visualFitFilter(layout, fps)
+	chain := buildLayerVisualFilter(c, layout, fps)
 	if layout.opacity < 1 {
 		chain += ",colorchannelmixer=aa=" + trimFloat(layout.opacity)
 	}
@@ -533,6 +530,172 @@ func visualFitFilter(layout resolvedClipLayout, fps int) string {
 		return fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=decrease,setsar=1,fps=%d", w, h, fps)
 	default: // crop
 		return fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,fps=%d", w, h, w, h, fps)
+	}
+}
+
+func buildBaseVisualFilter(c Clip, w, h, fps int, background string) string {
+	parts := sourceVisualFilters(c)
+	fit := strings.ToLower(strings.TrimSpace(c.Fit))
+	if c.Layout != nil && strings.TrimSpace(c.Layout.Fit) != "" {
+		fit = strings.ToLower(strings.TrimSpace(c.Layout.Fit))
+	}
+	switch fit {
+	case "crop", "cover":
+		parts = append(parts, fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,fps=%d", w, h, w, h, fps))
+	case "stretch":
+		parts = append(parts, fmt.Sprintf("format=rgba,scale=%d:%d,setsar=1,fps=%d", w, h, fps))
+	default:
+		parts = append(parts, fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=%s,setsar=1,fps=%d", w, h, w, h, escFFmpegColor(background), fps))
+	}
+	if camera := cameraZoomPanFilter(c, w, h, fps); camera != "" {
+		parts = append(parts, camera)
+	}
+	return strings.Join(parts, ",")
+}
+
+func buildLayerVisualFilter(c Clip, layout resolvedClipLayout, fps int) string {
+	parts := sourceVisualFilters(c)
+	parts = append(parts, visualFitFilter(layout, fps))
+	if camera := cameraZoomPanFilter(c, layout.width, layout.height, fps); camera != "" {
+		parts = append(parts, camera)
+	}
+	return strings.Join(parts, ",")
+}
+
+func sourceVisualFilters(c Clip) []string {
+	parts := []string{}
+	if trim := sourceTrimFilter("trim", c); trim != "" {
+		parts = append(parts, trim, "setpts=PTS-STARTPTS")
+	}
+	if crop := c.Crop; crop != nil {
+		parts = append(parts, fmt.Sprintf(
+			"crop=iw*%s:ih*%s:iw*%s:ih*%s",
+			trimFloat(crop.Width), trimFloat(crop.Height), trimFloat(crop.X), trimFloat(crop.Y),
+		))
+	}
+	return parts
+}
+
+func sourceAudioFilterPrefix(c Clip) string {
+	if trim := sourceTrimFilter("atrim", c); trim != "" {
+		return trim + ",asetpts=PTS-STARTPTS,"
+	}
+	return ""
+}
+
+func sourceTrimFilter(name string, c Clip) string {
+	if c.SourceStart <= 0 && c.SourceEnd <= 0 {
+		return ""
+	}
+	parts := []string{}
+	if c.SourceStart > 0 {
+		parts = append(parts, "start="+trimFloat(c.SourceStart))
+	}
+	if c.SourceEnd > 0 {
+		parts = append(parts, "end="+trimFloat(c.SourceEnd))
+	}
+	return name + "=" + strings.Join(parts, ":")
+}
+
+type cameraPoint struct {
+	time   float64
+	x      float64
+	y      float64
+	scale  float64
+	easing string
+}
+
+// cameraZoomPanFilter converts source-space transform keyframes into a
+// frame-evaluated FFmpeg zoompan expression. The output size is fixed, so it
+// composes safely with both fullscreen base clips and timed overlay layers.
+func cameraZoomPanFilter(c Clip, w, h, fps int) string {
+	if c.Transform == nil || w <= 0 || h <= 0 || fps <= 0 {
+		return ""
+	}
+	points := cameraPoints(c.Transform)
+	if len(points) == 0 {
+		return ""
+	}
+	timeExpr := fmt.Sprintf("on/%d", fps)
+	z := cameraPropertyExpr(points, timeExpr, func(p cameraPoint) float64 { return p.scale })
+	x := cameraPropertyExpr(points, timeExpr, func(p cameraPoint) float64 { return p.x })
+	y := cameraPropertyExpr(points, timeExpr, func(p cameraPoint) float64 { return p.y })
+	return fmt.Sprintf(
+		"zoompan=z='%s':x='max(0,min(iw-iw/zoom,iw*(%s)-iw/(2*zoom)))':y='max(0,min(ih-ih/zoom,ih*(%s)-ih/(2*zoom)))':d=1:s=%dx%d:fps=%d,format=rgba",
+		z, x, y, w, h, fps,
+	)
+}
+
+func cameraPoints(t *Transform) []cameraPoint {
+	if t == nil {
+		return nil
+	}
+	x, y, scale := 0.5, 0.5, 1.0
+	if t.X != nil {
+		x = *t.X
+	}
+	if t.Y != nil {
+		y = *t.Y
+	}
+	if t.Scale > 0 {
+		scale = t.Scale
+	}
+	points := []cameraPoint{{time: 0, x: x, y: y, scale: scale, easing: "linear"}}
+	for _, keyframe := range t.Keyframes {
+		if keyframe.X != nil {
+			x = *keyframe.X
+		}
+		if keyframe.Y != nil {
+			y = *keyframe.Y
+		}
+		if keyframe.Scale > 0 {
+			scale = keyframe.Scale
+		}
+		point := cameraPoint{time: keyframe.Time, x: x, y: y, scale: scale, easing: strings.ToLower(strings.TrimSpace(keyframe.Easing))}
+		if point.easing == "" {
+			point.easing = "linear"
+		}
+		if point.time == 0 {
+			points[0] = point
+			continue
+		}
+		points = append(points, point)
+	}
+	return points
+}
+
+func cameraPropertyExpr(points []cameraPoint, timeExpr string, value func(cameraPoint) float64) string {
+	if len(points) == 0 {
+		return "0"
+	}
+	if len(points) == 1 {
+		return trimFloat(value(points[0]))
+	}
+	expr := trimFloat(value(points[len(points)-1]))
+	for i := len(points) - 2; i >= 0; i-- {
+		from, to := points[i], points[i+1]
+		duration := to.time - from.time
+		if duration <= 0 {
+			continue
+		}
+		progress := fmt.Sprintf("max(0,min(1,((%s)-%s)/%s))", timeExpr, trimFloat(from.time), trimFloat(duration))
+		progress = cameraEaseExpr(progress, to.easing)
+		segment := fmt.Sprintf("%s+(%s-%s)*(%s)", trimFloat(value(from)), trimFloat(value(to)), trimFloat(value(from)), progress)
+		expr = fmt.Sprintf("if(lt(%s\\,%s)\\,%s\\,%s)", timeExpr, trimFloat(to.time), segment, expr)
+	}
+	return expr
+}
+
+func cameraEaseExpr(progress, easing string) string {
+	switch strings.ToLower(strings.TrimSpace(easing)) {
+	case "ease_in":
+		return "(" + progress + ")*(" + progress + ")"
+	case "ease_out":
+		return "1-(1-(" + progress + "))*(1-(" + progress + "))"
+	case "ease_in_out":
+		return fmt.Sprintf("if(lt((%s)\\,0.5)\\,2*(%s)*(%s)\\,1-pow(-2*(%s)+2\\,2)/2)", progress, progress, progress, progress)
+	default:
+		return progress
 	}
 }
 
@@ -753,6 +916,9 @@ func buildLocalAudioFFmpegArgs(edit *Edit, output Output, inputs []string, sound
 
 func writeTimedAudioFilter(filter *strings.Builder, inputIdx int, c Clip, delayMS int, label string) {
 	chain := []string{}
+	if trim := sourceTrimFilter("atrim", c); trim != "" {
+		chain = append(chain, trim, "asetpts=PTS-STARTPTS")
+	}
 	if c.Audio != nil && c.Audio.TrimSilence {
 		chain = append(chain, "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.05")
 	}
