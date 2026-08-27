@@ -52,6 +52,7 @@ type dfsTask struct {
 	ID         string            `json:"id"`
 	StatusCode int               `json:"status_code"`
 	StatusMsg  string            `json:"status_message"`
+	Cost       float64           `json:"cost"`
 	Result     []json.RawMessage `json:"result"`
 }
 

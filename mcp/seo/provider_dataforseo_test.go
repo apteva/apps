@@ -614,6 +614,7 @@ func TestAllSEOMigrationsApplyInOrder(t *testing.T) {
 		"migrations/004_search_entities.sql",
 		"migrations/005_search_engine_keyword_backfill.sql",
 		"migrations/006_serp_consistency_and_retention.sql",
+		"migrations/007_daily_rank_tracking.sql",
 	)
 	var indexCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_search_serp_snapshots_latest'`).Scan(&indexCount); err != nil {
@@ -621,6 +622,12 @@ func TestAllSEOMigrationsApplyInOrder(t *testing.T) {
 	}
 	if indexCount != 1 {
 		t.Fatalf("latest snapshot index count = %d", indexCount)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'serp_rank_observations'`).Scan(&indexCount); err != nil {
+		t.Fatal(err)
+	}
+	if indexCount != 1 {
+		t.Fatalf("rank observation table count = %d", indexCount)
 	}
 }
 
