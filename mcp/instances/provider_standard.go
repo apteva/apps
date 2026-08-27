@@ -529,7 +529,7 @@ func apiProviderDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 	case "aws-ec2":
 		tool, args = "terminate_instance", map[string]any{"Action": "TerminateInstances", "Version": "2016-11-15", "InstanceId.1": inst.ProviderID}
 	case "scaleway":
-		tool, args = "server_delete", map[string]any{"zone": inst.Region, "server_id": inst.ProviderID}
+		return scalewayStandardDestroy(ctx, inst)
 	case "huawei-cloud":
 		tool, args = "delete_servers", map[string]any{"servers": []map[string]any{{"id": inst.ProviderID}}, "delete_publicip": true, "delete_volume": true}
 	case "linode":
@@ -554,6 +554,63 @@ func apiProviderDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 		return fmt.Errorf("%s.%s returned: %s", provider, tool, upstreamErrorString(res))
 	}
 	return nil
+}
+
+func scalewayStandardDestroy(ctx *sdk.AppCtx, inst *Instance) error {
+	bound, err := apiProviderBound(ctx, "scaleway")
+	if err != nil {
+		return err
+	}
+	call := func(tool string, args map[string]any) (*sdk.ExecuteResult, bool, error) {
+		res, callErr := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, args)
+		if callErr != nil {
+			return nil, false, fmt.Errorf("scaleway.%s: %w", tool, callErr)
+		}
+		if res == nil || !res.Success {
+			if status := upstreamStatus(res); status == 404 || status == 410 {
+				return res, true, nil
+			}
+			return res, false, fmt.Errorf("scaleway.%s returned: %s", tool, upstreamErrorString(res))
+		}
+		return res, false, nil
+	}
+	serverArgs := map[string]any{"zone": inst.Region, "server_id": inst.ProviderID}
+	res, gone, err := call("server_get", serverArgs)
+	if err != nil || gone {
+		return err
+	}
+	var details struct {
+		Server struct {
+			State string `json:"state"`
+		} `json:"server"`
+	}
+	_ = json.Unmarshal(res.Data, &details)
+	state := strings.ToLower(strings.TrimSpace(details.Server.State))
+	if state != "stopped" && state != "stopped_in_place" {
+		if _, gone, err = call("server_action", map[string]any{
+			"zone": inst.Region, "server_id": inst.ProviderID, "action": "poweroff",
+		}); err != nil || gone {
+			return err
+		}
+		deadline := time.Now().Add(5 * time.Minute)
+		for {
+			res, gone, err = call("server_get", serverArgs)
+			if err != nil || gone {
+				return err
+			}
+			_ = json.Unmarshal(res.Data, &details)
+			state = strings.ToLower(strings.TrimSpace(details.Server.State))
+			if state == "stopped" || state == "stopped_in_place" {
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("scaleway server %s did not stop before deletion", inst.ProviderID)
+			}
+			time.Sleep(5 * time.Second)
+		}
+	}
+	_, _, err = call("server_delete", serverArgs)
+	return err
 }
 
 func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {

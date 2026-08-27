@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 func TestAPIProviderAdaptersAreCompatible(t *testing.T) {
@@ -111,5 +114,44 @@ func TestScalewaySSHKeyTagMatchesOfficialCLIEncoding(t *testing.T) {
 	want := "AUTHORIZED_KEY=ssh-ed25519_AAAAC3NzaC1lZDI1NTE5AAAAITest_apteva-instance"
 	if got := scalewaySSHKeyTag("  " + publicKey + "\n"); got != want {
 		t.Fatalf("scalewaySSHKeyTag() = %q, want %q", got, want)
+	}
+}
+
+type scalewayDestroyPlatform struct {
+	tk.BasePlatformClient
+	tools []string
+}
+
+func (p *scalewayDestroyPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+	return &sdk.InstallIdentity{Bindings: map[string]any{"provider": float64(7)}}, nil
+}
+
+func (p *scalewayDestroyPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	return &sdk.PlatformConnection{ID: id, AppSlug: "scaleway"}, nil
+}
+
+func (p *scalewayDestroyPlatform) ExecuteIntegrationTool(_ int64, tool string, _ map[string]any) (*sdk.ExecuteResult, error) {
+	p.tools = append(p.tools, tool)
+	data := json.RawMessage(`{}`)
+	if tool == "server_get" {
+		state := "running"
+		if len(p.tools) > 2 {
+			state = "stopped"
+		}
+		data = json.RawMessage(`{"server":{"state":"` + state + `"}}`)
+	}
+	return &sdk.ExecuteResult{Success: true, Status: 200, Data: data}, nil
+}
+
+func TestScalewayDestroyStopsRunningServerBeforeDelete(t *testing.T) {
+	platform := &scalewayDestroyPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	err := apiProviderDestroy(ctx, &Instance{Provider: "scaleway", ProviderID: "server-1", Region: "fr-par-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"server_get", "server_action", "server_get", "server_delete"}
+	if strings.Join(platform.tools, ",") != strings.Join(want, ",") {
+		t.Fatalf("tools = %#v, want %#v", platform.tools, want)
 	}
 }
