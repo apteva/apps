@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.32
+version: 0.4.33
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -82,10 +82,11 @@ provides:
     - { name: instance_create,       description: "Provision a new instance via a bound VPS provider. Args: name, provider? (configured default when omitted), region?, size?, image?, tags?." }
     - { name: instance_storage_capabilities, description: "Describe boot and data-volume capabilities for a bound provider." }
     - { name: instance_list_storage_types, description: "List provider-neutral storage classes and tiers with native mappings." }
-    - { name: instance_volume_create, description: "Create a managed data volume and optionally attach it to an instance." }
+    - { name: instance_volume_create, description: "Create a managed data volume and optionally attach and prepare it inside the guest." }
     - { name: instance_volume_get, description: "Fetch one managed volume." }
     - { name: instance_volume_list, description: "List managed volumes." }
-    - { name: instance_volume_attach, description: "Attach an available managed volume to an instance." }
+    - { name: instance_volume_attach, description: "Attach an available managed volume to an instance and optionally prepare it inside the guest." }
+    - { name: instance_volume_prepare, description: "Safely format-if-blank, persist, mount, and verify an attached Linux data volume over SSH." }
     - { name: instance_volume_detach, description: "Detach a managed data volume without deleting it." }
     - { name: instance_volume_resize, description: "Increase the size of a managed volume." }
     - { name: instance_volume_delete, description: "Permanently delete a detached managed data volume with explicit confirmation." }
@@ -172,7 +173,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.32
+    ref: instances/v0.4.33
     entry: mcp/instances
   port: 8080
   health_check: /health

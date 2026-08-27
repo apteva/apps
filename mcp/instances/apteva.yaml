@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.4.32
+version: 0.4.33
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
@@ -71,13 +71,15 @@ provides:
     - name: instance_list_storage_types
       description: List provider-neutral storage classes and tiers with native provider mappings.
     - name: instance_volume_create
-      description: Create a managed data volume and optionally attach it to an existing instance.
+      description: Create a managed data volume and optionally attach and prepare it inside the guest.
     - name: instance_volume_get
       description: Fetch one managed volume.
     - name: instance_volume_list
       description: List volumes tracked by Instances.
     - name: instance_volume_attach
-      description: Attach an available managed volume to an existing instance.
+      description: Attach an available managed volume to an existing instance and optionally prepare it inside the guest.
+    - name: instance_volume_prepare
+      description: Safely format-if-blank, persist, mount, and verify an attached Linux data volume over SSH.
     - name: instance_volume_detach
       description: Detach a managed data volume without deleting it.
     - name: instance_volume_resize
@@ -196,7 +198,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.32
+    ref: instances/v0.4.33
     entry: mcp/instances
   port: 8080
   health_check: /health

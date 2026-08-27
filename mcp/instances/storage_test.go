@@ -38,7 +38,7 @@ func (p *recordingVolumePlatform) ExecuteIntegrationTool(connectionID int64, too
 
 func TestStorageCapabilities_DistinguishesBootAndData(t *testing.T) {
 	scaleway := storageCapabilities("scaleway")
-	if !scaleway.BootSizeConfigurable || !scaleway.DataVolumes || !scaleway.DynamicAttach {
+	if !scaleway.BootSizeConfigurable || !scaleway.DataVolumes || !scaleway.DynamicAttach || !scaleway.GuestPrepare || len(scaleway.GuestFilesystems) != 2 {
 		t.Fatalf("scaleway capabilities = %#v", scaleway)
 	}
 	runpod := storageCapabilities("runpod")

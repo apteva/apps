@@ -65,6 +65,10 @@ interface InstanceVolumeWire {
   size_gb: number;
   region?: string;
   status: string;
+  filesystem?: string;
+  mount_path?: string;
+  device_path?: string;
+  guest_ready?: boolean;
   delete_policy: "retain" | "with_instance";
   error?: string;
 }
@@ -75,6 +79,8 @@ interface StorageCapabilitiesWire {
   data_volumes: boolean;
   dynamic_attach: boolean;
   resize: boolean;
+  guest_prepare?: boolean;
+  guest_filesystems?: string[];
   notes?: string;
   tiers: Array<{ name: string; provider_type?: string; description?: string }>;
 }
@@ -1353,6 +1359,10 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
   const [sizeGB, setSizeGB] = useState(80);
   const [tier, setTier] = useState("");
   const [deletePolicy, setDeletePolicy] = useState<"retain" | "with_instance">("retain");
+  const [prepareGuest, setPrepareGuest] = useState(true);
+  const [filesystem, setFilesystem] = useState<"ext4" | "xfs">("ext4");
+  const [mountPath, setMountPath] = useState(`/srv/${inst.name.replace(/[^A-Za-z0-9._-]+/g, "-")}-data`);
+  const [mountOwner, setMountOwner] = useState("root:root");
   const params = useCallback(() => {
     const value = new URLSearchParams(withParams());
     value.set("instance_id", String(inst.id));
@@ -1412,6 +1422,14 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
       size_gb: sizeGB,
       tier,
       delete_policy: deletePolicy,
+      prepare: prepareGuest && capabilities?.guest_prepare ? {
+        filesystem,
+        mount_path: mountPath.trim(),
+        owner: mountOwner.trim() || "root:root",
+        mode: "0755",
+        mount_options: "defaults,nofail",
+        format_if_blank: true,
+      } : undefined,
     });
   };
 
@@ -1449,12 +1467,18 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
                   <div className="min-w-0">
                     <div className="text-sm text-text font-medium">{volume.name}</div>
                     <div className="text-[10px] text-text-dim">{volume.role} · {volume.storage_class} · {volume.size_gb} GB · {volume.tier} · {volume.status} · {volume.delete_policy}</div>
+                    {volume.mount_path && <div className="text-[10px] text-green font-mono">mounted {volume.mount_path} · {volume.filesystem} · {volume.device_path}</div>}
+                    {!volume.mount_path && volume.role === "data" && <div className="text-[10px] text-amber">Attached block device is not mounted in the guest.</div>}
                   </div>
                   <span className="flex-1" />
                   {capabilities?.resize && <button type="button" disabled={busy} className="px-2 py-1 text-[10px] border border-border rounded" onClick={() => {
                     const value = window.prompt("New size in GB (must be larger)", String(volume.size_gb));
                     if (value) mutate(`/instance-volumes/${volume.id}/resize`, "POST", { size_gb: Number(value) });
                   }}>Resize</button>}
+                  {volume.role === "data" && !volume.mount_path && capabilities?.guest_prepare && <button type="button" disabled={busy} className="px-2 py-1 text-[10px] border border-blue/60 text-blue rounded" onClick={() => {
+                    const value = window.prompt("Mount path. A blank device will be formatted ext4; existing signatures are never overwritten.", `/srv/${volume.name.replace(/[^A-Za-z0-9._-]+/g, "-")}`);
+                    if (value) mutate(`/instance-volumes/${volume.id}/prepare`, "POST", { filesystem: "ext4", mount_path: value, owner: "root:root", mode: "0755", mount_options: "defaults,nofail", format_if_blank: true });
+                  }}>Prepare & mount</button>}
                   {volume.role === "data" && capabilities?.detach && <button type="button" disabled={busy} className="px-2 py-1 text-[10px] border border-border rounded" onClick={() => mutate(`/instance-volumes/${volume.id}/detach`, "POST")}>Detach</button>}
                 </div>
               ))}
@@ -1475,10 +1499,23 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
                   <option value="with_instance">Delete with instance</option>
                 </select>
               </div>
+              {capabilities.guest_prepare && <label className="flex items-center gap-2 text-xs text-text">
+                <input type="checkbox" checked={prepareGuest} onChange={(event) => setPrepareGuest(event.target.checked)} />
+                Format if blank and mount automatically over SSH
+              </label>}
+              {prepareGuest && capabilities.guest_prepare && <div className="grid grid-cols-2 gap-2">
+                <input value={mountPath} onChange={(event) => setMountPath(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono" placeholder="/srv/media" />
+                <select value={filesystem} onChange={(event) => setFilesystem(event.target.value as "ext4" | "xfs")} className="bg-bg-input border border-border rounded px-2 py-1 text-sm">
+                  <option value="ext4">ext4</option>
+                  <option value="xfs">xfs</option>
+                </select>
+                <input value={mountOwner} onChange={(event) => setMountOwner(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono" placeholder="owner, e.g. 1000:1000" />
+                <span className="text-[10px] text-text-dim self-center">Persistent UUID mount · defaults,nofail · mode 0755</span>
+              </div>}
               <div className="flex items-center gap-2">
-                <span className="text-[10px] text-text-dim">The provider creates and attaches the volume automatically. Guest filesystem formatting is intentionally separate.</span>
+                <span className="text-[10px] text-text-dim">Device discovery must be unambiguous. Existing filesystems are preserved; unknown signatures are refused.</span>
                 <span className="flex-1" />
-                <button type="submit" disabled={busy || !name.trim() || sizeGB <= 0} className="px-3 py-1.5 text-xs rounded bg-blue text-white disabled:opacity-50">{busy ? "Working…" : "Create & attach"}</button>
+                <button type="submit" disabled={busy || !name.trim() || sizeGB <= 0 || (prepareGuest && !!capabilities.guest_prepare && !mountPath.trim())} className="px-3 py-1.5 text-xs rounded bg-blue text-white disabled:opacity-50">{busy ? "Working…" : prepareGuest && capabilities.guest_prepare ? "Create, attach & mount" : "Create & attach"}</button>
               </div>
             </form>
           ) : (

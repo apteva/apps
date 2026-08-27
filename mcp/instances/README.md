@@ -32,9 +32,10 @@ cloud integrations.
 | `instance_create` | Provision compute through the bound provider, including VPS, GPU Pods, Scaleway Dedibox, and Apple silicon. |
 | `instance_storage_capabilities` | Describe boot/data support, storage classes, tiers, and lifecycle operations for a provider. |
 | `instance_list_storage_types` | List generic storage tiers and their provider-native mappings. |
-| `instance_volume_create` | Create a managed data volume, optionally attaching it to an existing instance. |
+| `instance_volume_create` | Create a managed data volume, optionally attaching and preparing it inside the guest. |
 | `instance_volume_list` / `instance_volume_get` | Inspect volumes tracked by Instances. |
-| `instance_volume_attach` / `instance_volume_detach` | Attach or retain data storage independently of compute. |
+| `instance_volume_attach` / `instance_volume_detach` | Attach or retain data storage independently of compute; detach safely unmounts prepared filesystems first. |
+| `instance_volume_prepare` | Safely format-if-blank, persist by UUID, mount, and verify an attached Linux data block volume over SSH. |
 | `instance_volume_resize` | Grow a provider volume; shrinking is refused. |
 | `instance_volume_delete` | Delete a detached app-managed data volume with explicit confirmation. |
 | `instance_get` | Fetch one instance row |
@@ -78,6 +79,36 @@ Providers that support configurable boot storage accept
 Destroy first detaches retained data volumes and only deletes managed volumes
 whose policy is `with_instance`. Existing/external volumes are never formatted
 or deleted implicitly.
+
+Guest activation is provider-neutral. `instance_volume_prepare` discovers the
+attached device through stable `/dev/disk/by-id` identifiers and a strict size
+fallback. It refuses ambiguous devices, partitions, unsupported filesystems,
+and unknown signatures. With `format_if_blank=true`, a genuinely blank device
+can be formatted as ext4 or XFS, mounted at a dedicated path, recorded in
+`/etc/fstab` by filesystem UUID, assigned an owner/mode, and verified. The same
+`prepare` object can be passed to `instance_volume_create` or
+`instance_volume_attach`; create defaults `format_if_blank` to true because the
+volume was just created, while attach defaults it to false for retained data.
+
+For example, a media host can create usable storage in one call:
+
+```json
+{
+  "instance_id": 42,
+  "name": "media-data",
+  "size_gb": 80,
+  "delete_policy": "retain",
+  "prepare": {
+    "filesystem": "ext4",
+    "mount_path": "/srv/media",
+    "owner": "1000:1000"
+  }
+}
+```
+
+The returned volume reports `guest_ready=true` only after the mount is
+verified. Higher-level apps can use the persisted `mount_path` as their data
+directory or container bind-mount source.
 
 A normal VPS provision:
 
@@ -144,9 +175,8 @@ the linguistic collision.
 
 ## Current limitations
 
-- Provider selection is by provider slug. Multiple different providers can be
-  bound simultaneously; selecting between multiple accounts of the same
-  provider is not exposed yet.
+- Provider selection supports provider slug plus an optional connection id, so
+  multiple providers and multiple accounts of the same provider can coexist.
 - In-place resizing is currently available only for Hetzner.
 - Metrics are pull-only through `instance_metrics`, cached for 5 seconds.
 

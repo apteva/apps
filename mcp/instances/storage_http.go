@@ -96,6 +96,14 @@ func (a *App) handleVolumeItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result, err = a.toolVolumeAttach(ctx, args)
+	case "prepare":
+		if r.Method != http.MethodPost || !decode() {
+			if r.Method != http.MethodPost {
+				httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			}
+			return
+		}
+		result, err = a.toolVolumePrepare(ctx, args)
 	case "detach":
 		if r.Method != http.MethodPost {
 			httpErr(w, http.StatusMethodNotAllowed, "POST only")

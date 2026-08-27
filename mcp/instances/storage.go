@@ -23,6 +23,8 @@ type StorageCapabilities struct {
 	Detach               bool          `json:"detach"`
 	Resize               bool          `json:"resize"`
 	Snapshots            bool          `json:"snapshots"`
+	GuestPrepare         bool          `json:"guest_prepare"`
+	GuestFilesystems     []string      `json:"guest_filesystems,omitempty"`
 	StorageClasses       []string      `json:"storage_classes"`
 	Tiers                []StorageTier `json:"tiers"`
 	Notes                string        `json:"notes,omitempty"`
@@ -62,6 +64,7 @@ type InstanceVolume struct {
 	Filesystem           string `json:"filesystem,omitempty"`
 	MountPath            string `json:"mount_path,omitempty"`
 	DevicePath           string `json:"device_path,omitempty"`
+	GuestReady           bool   `json:"guest_ready"`
 	Managed              bool   `json:"managed"`
 	DeletePolicy         string `json:"delete_policy"`
 	ProviderMetadataJSON string `json:"provider_metadata_json,omitempty"`
@@ -80,6 +83,7 @@ type CreateVolumeInput struct {
 	Tier                 string
 	ProviderType         string
 	DeletePolicy         string
+	Prepare              *VolumePrepareRequest
 }
 
 var ErrVolumeNotFound = errors.New("volume not found")
@@ -127,6 +131,13 @@ func storageCapabilities(provider string) StorageCapabilities {
 		cap.Notes = "Network volumes can only be attached when a Pod is created; an existing Pod must be recreated to change the network volume."
 	case "contabo":
 		cap.Notes = "Contabo's public API exposes Object Storage, not attachable block volumes; VPS disk size is fixed by the product."
+	}
+	for _, class := range cap.StorageClasses {
+		if class == "block" {
+			cap.GuestPrepare = true
+			cap.GuestFilesystems = []string{"ext4", "xfs"}
+			break
+		}
 	}
 	return cap
 }
@@ -182,6 +193,7 @@ func scanVolume(s rowScanner) (*InstanceVolume, error) {
 		v.InstanceID = &instanceID.Int64
 	}
 	v.Managed = managed != 0
+	v.GuestReady = v.Filesystem != "" && v.MountPath != "" && v.DevicePath != ""
 	return &v, nil
 }
 
@@ -535,6 +547,9 @@ func prepareVolumesForInstanceDestroy(ctx *sdk.AppCtx, instanceID int64) error {
 		if v.Role == "boot" {
 			continue
 		}
+		if err := unmountPreparedVolume(ctx, v); err != nil {
+			return err
+		}
 		if err := detachProviderVolume(ctx, v); err != nil {
 			return fmt.Errorf("detach volume %d before instance destroy: %w", v.ID, err)
 		}
@@ -557,6 +572,14 @@ func prepareVolumesForInstanceDestroy(ctx *sdk.AppCtx, instanceID int64) error {
 func createManagedVolume(ctx *sdk.AppCtx, in CreateVolumeInput) (*InstanceVolume, error) {
 	if in.Name == "" || in.SizeGB <= 0 {
 		return nil, errors.New("name and positive size_gb are required")
+	}
+	if in.Prepare != nil {
+		if err := validateVolumePrepareRequest(in.Prepare); err != nil {
+			return nil, fmt.Errorf("prepare: %w", err)
+		}
+		if in.InstanceID <= 0 {
+			return nil, errors.New("prepare requires instance_id so the new volume can be attached")
+		}
 	}
 	var inst *Instance
 	if in.InstanceID > 0 {
@@ -639,7 +662,18 @@ func createManagedVolume(ctx *sdk.AppCtx, in CreateVolumeInput) (*InstanceVolume
 			return nil, fmt.Errorf("volume %d was created and recorded but attachment failed: %w", v.ID, err)
 		}
 		_ = dbUpdateVolume(ctx.AppDB(), v.ID, map[string]any{"status": "attached", "instance_id": inst.ID, "error_message": ""})
-		return dbGetVolume(ctx.AppDB(), v.ID)
+		v, err = dbGetVolume(ctx.AppDB(), v.ID)
+		if err != nil {
+			return nil, err
+		}
+		if in.Prepare != nil {
+			prepared, _, prepareErr := prepareAttachedVolume(ctx, v, in.Prepare)
+			if prepareErr != nil {
+				return nil, prepareErr
+			}
+			return prepared, nil
+		}
+		return v, nil
 	}
 	return v, nil
 }
@@ -676,10 +710,14 @@ func (a *App) toolListStorageTypes(ctx *sdk.AppCtx, args map[string]any) (any, e
 }
 
 func (a *App) toolVolumeCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	prepare, err := volumePrepareRequestArg(args, "prepare", true)
+	if err != nil {
+		return nil, err
+	}
 	v, err := createManagedVolume(ctx, CreateVolumeInput{
 		InstanceID: int64Arg(args, "instance_id"), Provider: strArg(args, "provider"), ProviderConnectionID: int64Arg(args, "provider_connection_id"),
 		Name: strArg(args, "name"), SizeGB: intArg(args, "size_gb", 0), Region: strArg(args, "region"),
-		Tier: strArg(args, "tier"), ProviderType: strArg(args, "provider_type"), DeletePolicy: strArg(args, "delete_policy"),
+		Tier: strArg(args, "tier"), ProviderType: strArg(args, "provider_type"), DeletePolicy: strArg(args, "delete_policy"), Prepare: prepare,
 	})
 	if err != nil {
 		return nil, err
@@ -704,6 +742,10 @@ func (a *App) toolVolumeList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolVolumeAttach(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	prepare, err := volumePrepareRequestArg(args, "prepare", false)
+	if err != nil {
+		return nil, err
+	}
 	v, err := dbGetVolume(ctx.AppDB(), int64Arg(args, "id"))
 	if err != nil {
 		return nil, err
@@ -718,11 +760,24 @@ func (a *App) toolVolumeAttach(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if v.Provider != inst.Provider {
 		return nil, errors.New("volume and instance providers must match")
 	}
+	if v.ProviderConnectionID != inst.ProviderConnectionID {
+		return nil, errors.New("volume and instance must use the same provider connection")
+	}
+	if v.Region != "" && inst.Region != "" && v.Region != inst.Region {
+		return nil, fmt.Errorf("volume region %q does not match instance region %q", v.Region, inst.Region)
+	}
 	if err = attachProviderVolume(ctx, v, inst); err != nil {
 		return nil, err
 	}
 	_ = dbUpdateVolume(ctx.AppDB(), v.ID, map[string]any{"instance_id": inst.ID, "status": "attached", "error_message": ""})
 	v, _ = dbGetVolume(ctx.AppDB(), v.ID)
+	if prepare != nil {
+		prepared, result, prepareErr := prepareAttachedVolume(ctx, v, prepare)
+		if prepareErr != nil {
+			return nil, prepareErr
+		}
+		return map[string]any{"volume": prepared, "prepared": result}, nil
+	}
 	return map[string]any{"volume": v}, nil
 }
 
@@ -733,6 +788,9 @@ func (a *App) toolVolumeDetach(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	if v.Role == "boot" {
 		return nil, errors.New("boot volumes cannot be detached through instance_volume_detach")
+	}
+	if err = unmountPreparedVolume(ctx, v); err != nil {
+		return nil, err
 	}
 	if err = detachProviderVolume(ctx, v); err != nil {
 		return nil, err
