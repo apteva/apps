@@ -29,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.7.0
+version: 0.7.1
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -93,6 +93,9 @@ description: |
   same bytes to local and remote render hosts. Validation and render QA report
   family substitutions and unsupported spacing fields instead of silently
   depending on host Fontconfig packages or proprietary fonts.
+  Local Storage resolution decodes files_get's wrapped found/file response and
+  reads disk-backed blobs directly when present, avoiding unnecessary fallback
+  to signed public URLs for local ffmpeg renders.
 author: Apteva
 scopes: [project, global]
 requires:

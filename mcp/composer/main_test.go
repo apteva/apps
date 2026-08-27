@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"net/http"
@@ -297,7 +298,12 @@ func TestScreenRecordingPrimitives_FFmpegSmoke(t *testing.T) {
 		t.Skip("ffmpeg not available")
 	}
 	dir := t.TempDir()
-	source := filepath.Join(dir, "recording.mp4")
+	appData := filepath.Join(dir, "apps", "composer", "data", "60")
+	storageKey := "recording.mp4"
+	source := filepath.Join(dir, "apps", "storage", "data", "6", "storage-blobs", "ab", storageKey)
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	generated, err := exec.Command(ffmpeg,
 		"-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=4",
 		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=4",
@@ -305,6 +311,16 @@ func TestScreenRecordingPrimitives_FFmpegSmoke(t *testing.T) {
 	).CombinedOutput()
 	if err != nil {
 		t.Fatalf("generate source fixture: %v\n%s", err, generated)
+	}
+	t.Setenv("APTEVA_DATA_DIR", appData)
+	platform := &storageFilesGetPlatform{response: json.RawMessage(`{"found":true,"file":{"id":11701,"storage_key":"recording.mp4"}}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	resolvedSource, err := resolveAssetLocal(ctx, "storage:11701")
+	if err != nil {
+		t.Fatalf("resolve wrapped Storage response to local blob: %v", err)
+	}
+	if resolvedSource != source {
+		t.Fatalf("resolved source = %q, want local blob %q", resolvedSource, source)
 	}
 	e, err := parseEditJSON(`{"timeline":{"tracks":[{"clips":[{
 		"asset":{"src":"fixture","type":"video"},"start":0,"length":2,"source_start":1,"source_end":3,"source_audio":"keep",
@@ -316,7 +332,7 @@ func TestScreenRecordingPrimitives_FFmpegSmoke(t *testing.T) {
 	}
 	output := Output{Format: "mp4", Resolution: "sd", Aspect: "16:9", FPS: 24}
 	destination := filepath.Join(dir, "render.mp4")
-	args := buildLocalFFmpegArgsWithAudioInfo(e, output, []string{source}, -1, destination, []bool{true})
+	args := buildLocalFFmpegArgsWithAudioInfo(e, output, []string{resolvedSource}, -1, destination, []bool{true})
 	rendered, err := exec.Command(ffmpeg, args...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("render source range/crop/keyframes: %v\n%s\nargs=%s", err, rendered, strings.Join(args, " "))
@@ -1713,6 +1729,64 @@ func TestStorageLocalPathForKey_FindsSiblingStorageBlob(t *testing.T) {
 	}
 	if got != storageBlob {
 		t.Fatalf("path = %q, want %q", got, storageBlob)
+	}
+}
+
+type storageFilesGetPlatform struct {
+	tk.BasePlatformClient
+	response json.RawMessage
+	calls    int
+}
+
+func (p *storageFilesGetPlatform) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	if appName != "storage" || tool != "files_get" {
+		return fmt.Errorf("unexpected app call %s.%s", appName, tool)
+	}
+	p.calls++
+	return json.Unmarshal(p.response, out)
+}
+
+func TestStorageLocalPath_DecodesWrappedFilesGetResponse(t *testing.T) {
+	root := t.TempDir()
+	appData := filepath.Join(root, "apps", "composer", "data", "60")
+	storageKey := "b1ddf51f-5b5b-4dad-8365-d60e5ef3ece8.mp4"
+	storageBlob := filepath.Join(root, "apps", "storage", "data", "6", "storage-blobs", "2b", storageKey)
+	if err := os.MkdirAll(filepath.Dir(storageBlob), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storageBlob, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APTEVA_DATA_DIR", appData)
+	platform := &storageFilesGetPlatform{response: json.RawMessage(`{
+		"found": true,
+		"file": {
+			"id": 11701,
+			"name": "apteva-conversations-crm-demo-source.mp4",
+			"storage_key": "b1ddf51f-5b5b-4dad-8365-d60e5ef3ece8.mp4"
+		}
+	}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+
+	got, err := storageLocalPath(ctx, 11701)
+	if err != nil {
+		t.Fatalf("storage local path from wrapped files_get: %v", err)
+	}
+	if got != storageBlob {
+		t.Fatalf("path = %q, want %q", got, storageBlob)
+	}
+	if platform.calls != 1 {
+		t.Fatalf("files_get calls = %d, want 1", platform.calls)
+	}
+}
+
+func TestStorageLocalPath_RejectsMissingWrappedFile(t *testing.T) {
+	platform := &storageFilesGetPlatform{response: json.RawMessage(`{"found":false,"file":null}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+
+	_, err := storageLocalPath(ctx, 11701)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("want not-found error, got %v", err)
 	}
 }
 

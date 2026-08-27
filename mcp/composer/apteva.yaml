@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.7.0
+version: 0.7.1
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — layered visual tracks, timed audio tracks, optional
@@ -10,6 +10,13 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.7.1 fixes local Storage asset resolution. Composer now decodes the
+  wrapped files_get response, validates found/file before reading storage_key,
+  and resolves disk-backed Storage assets directly instead of falling through
+  to a signed public URL when the local blob is available. Regression coverage
+  exercises the real wrapped response shape and a native ranged, cropped, and
+  keyframed ffmpeg render from the resolved sibling Storage blob.
 
   v0.7.0 adds screen-recording editing primitives to stable V1. Video and
   audio clips can reuse a source with source_start/source_end ranges; visual
