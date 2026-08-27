@@ -18,6 +18,11 @@ const (
 	goalBlocked         = "blocked"
 	goalCompleted       = "completed"
 	goalCancelled       = "cancelled"
+
+	validationBuildOnly  = "build_only"
+	validationSimulated  = "simulated"
+	validationContinuous = "continuous"
+	validationCheckKey   = "builder_validation"
 )
 
 var validGoalStatuses = stringSet(goalPlanning, goalActive, goalWaitingApproval, goalBlocked, goalCompleted, goalCancelled)
@@ -27,24 +32,43 @@ var validCheckStatuses = stringSet("pending", "passing", "failing", "blocked")
 var validResourceKinds = stringSet("agent", "app", "integration", "credential", "connection", "project_setting", "other")
 var validResourceStatuses = stringSet("planned", "creating", "configured", "ready", "drifted", "needs_attention", "removed")
 var validEventKinds = stringSet("created", "plan", "progress", "decision", "risk", "approval", "operator_input", "status", "check", "resource", "note")
+var validValidationModes = stringSet(validationBuildOnly, validationSimulated, validationContinuous)
+
+type ValidationPolicy struct {
+	MaxRuns           int  `json:"max_runs"`
+	MaxRepairAttempts int  `json:"max_repair_attempts"`
+	AutoRepair        bool `json:"auto_repair"`
+	InstallSafeApps   bool `json:"install_safe_apps"`
+	RunOnChange       bool `json:"run_on_change"`
+}
+
+type ValidationPolicyInput struct {
+	MaxRuns           *int  `json:"max_runs"`
+	MaxRepairAttempts *int  `json:"max_repair_attempts"`
+	AutoRepair        *bool `json:"auto_repair"`
+	InstallSafeApps   *bool `json:"install_safe_apps"`
+	RunOnChange       *bool `json:"run_on_change"`
+}
 
 type Goal struct {
-	ID                string   `json:"id"`
-	ProjectID         string   `json:"project_id"`
-	OwnerAgentID      int64    `json:"owner_agent_id"`
-	Title             string   `json:"title"`
-	Objective         string   `json:"objective"`
-	Status            string   `json:"status"`
-	CurrentPhase      string   `json:"current_phase"`
-	Summary           string   `json:"summary"`
-	NextAction        string   `json:"next_action"`
-	SuccessCriteria   []string `json:"success_criteria"`
-	Constraints       []string `json:"constraints"`
-	IdempotencyKey    string   `json:"idempotency_key,omitempty"`
-	CreatedByThreadID string   `json:"created_by_thread_id,omitempty"`
-	CreatedAt         string   `json:"created_at"`
-	UpdatedAt         string   `json:"updated_at"`
-	CompletedAt       string   `json:"completed_at,omitempty"`
+	ID                string           `json:"id"`
+	ProjectID         string           `json:"project_id"`
+	OwnerAgentID      int64            `json:"owner_agent_id"`
+	Title             string           `json:"title"`
+	Objective         string           `json:"objective"`
+	Status            string           `json:"status"`
+	CurrentPhase      string           `json:"current_phase"`
+	Summary           string           `json:"summary"`
+	NextAction        string           `json:"next_action"`
+	SuccessCriteria   []string         `json:"success_criteria"`
+	Constraints       []string         `json:"constraints"`
+	ValidationMode    string           `json:"validation_mode"`
+	ValidationPolicy  ValidationPolicy `json:"validation_policy"`
+	IdempotencyKey    string           `json:"idempotency_key,omitempty"`
+	CreatedByThreadID string           `json:"created_by_thread_id,omitempty"`
+	CreatedAt         string           `json:"created_at"`
+	UpdatedAt         string           `json:"updated_at"`
+	CompletedAt       string           `json:"completed_at,omitempty"`
 }
 
 type Step struct {
@@ -126,14 +150,24 @@ type GoalIdentity struct {
 }
 
 type CreateGoalInput struct {
-	ProjectID       string
-	OwnerAgentID    int64
-	ThreadID        string
-	Title           string
-	Objective       string
-	SuccessCriteria []string
-	Constraints     []string
-	IdempotencyKey  string
+	ProjectID        string
+	OwnerAgentID     int64
+	ThreadID         string
+	Title            string
+	Objective        string
+	SuccessCriteria  []string
+	Constraints      []string
+	ValidationMode   string
+	ValidationPolicy ValidationPolicyInput
+	IdempotencyKey   string
+}
+
+type SetValidationInput struct {
+	Mode          string
+	Policy        ValidationPolicyInput
+	ActorAgentID  int64
+	ActorThreadID string
+	EventKey      string
 }
 
 type PlanStepInput struct {
@@ -220,6 +254,10 @@ func (s *builderStore) CreateGoal(input CreateGoalInput) (*Goal, bool, error) {
 	if input.ProjectID == "" || input.OwnerAgentID <= 0 || input.Title == "" || input.Objective == "" {
 		return nil, false, errors.New("project, owner agent, title, and objective are required")
 	}
+	validationMode, validationPolicy, err := normalizeValidationPolicy(input.ValidationMode, input.ValidationPolicy)
+	if err != nil {
+		return nil, false, err
+	}
 	if input.IdempotencyKey != "" {
 		goal, err := s.goalByIdempotency(input.ProjectID, input.OwnerAgentID, input.IdempotencyKey)
 		if err == nil {
@@ -236,6 +274,7 @@ func (s *builderStore) CreateGoal(input CreateGoalInput) (*Goal, bool, error) {
 		Title: input.Title, Objective: input.Objective, Status: goalPlanning,
 		CurrentPhase: "Planning", NextAction: "Inspect current state and set the execution plan",
 		SuccessCriteria: cleanStrings(input.SuccessCriteria), Constraints: cleanStrings(input.Constraints),
+		ValidationMode: validationMode, ValidationPolicy: validationPolicy,
 		IdempotencyKey: input.IdempotencyKey, CreatedByThreadID: strings.TrimSpace(input.ThreadID),
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -245,10 +284,11 @@ func (s *builderStore) CreateGoal(input CreateGoalInput) (*Goal, bool, error) {
 	}
 	defer tx.Rollback()
 	_, err = tx.Exec(`INSERT INTO builder_goals
-		(id,project_id,owner_agent_id,title,objective,status,current_phase,summary,next_action,success_criteria,constraints_json,idempotency_key,created_by_thread,created_at,updated_at,completed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		(id,project_id,owner_agent_id,title,objective,status,current_phase,summary,next_action,success_criteria,constraints_json,validation_mode,validation_policy_json,idempotency_key,created_by_thread,created_at,updated_at,completed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		goal.ID, goal.ProjectID, goal.OwnerAgentID, goal.Title, goal.Objective, goal.Status,
 		goal.CurrentPhase, goal.Summary, goal.NextAction, encodeJSON(goal.SuccessCriteria), encodeJSON(goal.Constraints),
+		goal.ValidationMode, encodeJSON(goal.ValidationPolicy),
 		goal.IdempotencyKey, goal.CreatedByThreadID, goal.CreatedAt, goal.UpdatedAt, goal.CompletedAt)
 	if err != nil {
 		if input.IdempotencyKey != "" && isUniqueConstraint(err) {
@@ -260,6 +300,7 @@ func (s *builderStore) CreateGoal(input CreateGoalInput) (*Goal, bool, error) {
 	}
 	_, err = recordEventTx(tx, goal.ID, RecordEventInput{
 		Kind: "created", Title: "Goal created", Detail: goal.Objective,
+		Data:         map[string]any{"validation_mode": goal.ValidationMode, "validation_policy": goal.ValidationPolicy},
 		ActorAgentID: input.OwnerAgentID, ActorThreadID: input.ThreadID,
 		EventKey: eventKey("goal-created", input.IdempotencyKey),
 	})
@@ -350,6 +391,70 @@ func (s *builderStore) GetBundle(identity GoalIdentity, goalID string) (*GoalBun
 	}, nil
 }
 
+func (s *builderStore) SetValidation(identity GoalIdentity, goalID string, input SetValidationInput) (*GoalBundle, error) {
+	mode, policy, err := normalizeValidationPolicy(input.Mode, input.Policy)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	goal, err := goalForUpdateTx(tx, identity, goalID)
+	if err != nil {
+		return nil, err
+	}
+	if goal.Status == goalCompleted || goal.Status == goalCancelled {
+		return nil, fmt.Errorf("cannot change validation for a %s goal", goal.Status)
+	}
+	eKey := eventKey("validation", input.EventKey)
+	if eKey != "" {
+		var exists int
+		if err := tx.QueryRow(`SELECT 1 FROM builder_events WHERE goal_id=? AND event_key=?`, goalID, eKey).Scan(&exists); err == nil {
+			_ = tx.Rollback()
+			return s.GetBundle(identity, goalID)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+	now := nowUTC()
+	if _, err := tx.Exec(`UPDATE builder_goals SET validation_mode=?,validation_policy_json=?,updated_at=? WHERE id=?`,
+		mode, encodeJSON(policy), now, goalID); err != nil {
+		return nil, err
+	}
+	if mode == validationBuildOnly {
+		if _, err := tx.Exec(`DELETE FROM builder_checks WHERE goal_id=? AND check_key=?`, goalID, validationCheckKey); err != nil {
+			return nil, err
+		}
+	} else {
+		var stepCount int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM builder_steps WHERE goal_id=?`, goalID).Scan(&stepCount); err != nil {
+			return nil, err
+		}
+		if stepCount > 0 {
+			if _, err := tx.Exec(`INSERT INTO builder_checks(id,goal_id,check_key,name,description,status,result,evidence_json,checked_at,created_at,updated_at)
+				VALUES(?,?,?,?,?,'pending','','{}','',?,?) ON CONFLICT(goal_id,check_key) DO NOTHING`,
+				newID("check"), goalID, validationCheckKey, "Virtual-world workflow validation",
+				"Evals must pass against an isolated Environments runtime with authoritative suite, experiment, environment, and run evidence.", now, now); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := recordEventTx(tx, goalID, RecordEventInput{
+		Kind: "decision", Title: "Validation mode set to " + mode,
+		Detail:       "Optional virtual-world validation policy updated",
+		Data:         map[string]any{"validation_mode": mode, "validation_policy": policy},
+		ActorAgentID: input.ActorAgentID, ActorThreadID: input.ActorThreadID, EventKey: eKey,
+	}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.GetBundle(identity, goalID)
+}
+
 func (s *builderStore) SetPlan(identity GoalIdentity, goalID string, steps []PlanStepInput, checks []PlanCheckInput, actorAgentID int64, actorThreadID, callKey string) (*GoalBundle, error) {
 	if len(steps) == 0 {
 		return nil, errors.New("at least one plan step is required")
@@ -402,6 +507,22 @@ func (s *builderStore) SetPlan(identity GoalIdentity, goalID string, steps []Pla
 		if _, err := tx.Exec(`INSERT INTO builder_steps(id,goal_id,position,title,detail,status,approval_state,blocking_reason,created_at,updated_at,completed_at) VALUES(?,?,?,?,?,'pending',?,'',?,?,'')`,
 			newID("step"), goalID, i+1, title, strings.TrimSpace(input.Detail), approval, now, now); err != nil {
 			return nil, err
+		}
+	}
+	if goal.ValidationMode != validationBuildOnly {
+		hasValidationCheck := false
+		for _, input := range checks {
+			if stableKey(input.Key, input.Name) == validationCheckKey {
+				hasValidationCheck = true
+				break
+			}
+		}
+		if !hasValidationCheck {
+			checks = append(checks, PlanCheckInput{
+				Key:         validationCheckKey,
+				Name:        "Virtual-world workflow validation",
+				Description: "Evals must pass against an isolated Environments runtime with authoritative suite, experiment, environment, and run evidence.",
+			})
 		}
 	}
 	seenChecks := map[string]bool{}
@@ -600,6 +721,9 @@ func (s *builderStore) RecordCheck(identity GoalIdentity, goalID string, input R
 	if !validCheckStatuses[input.Status] {
 		return nil, fmt.Errorf("invalid check status %q", input.Status)
 	}
+	if input.Key == validationCheckKey && input.Status == "passing" && len(input.Evidence) == 0 {
+		return nil, errors.New("passing virtual-world validation requires authoritative Environments and Evals evidence")
+	}
 	now := nowUTC()
 	checkedAt := ""
 	if input.Status != "pending" {
@@ -730,20 +854,23 @@ func (s *builderStore) UpdateGoal(identity GoalIdentity, goalID string, input Up
 	return s.GetBundle(identity, goalID)
 }
 
-const goalSelect = `SELECT id,project_id,owner_agent_id,title,objective,status,current_phase,summary,next_action,success_criteria,constraints_json,idempotency_key,created_by_thread,created_at,updated_at,completed_at FROM builder_goals`
+const goalSelect = `SELECT id,project_id,owner_agent_id,title,objective,status,current_phase,summary,next_action,success_criteria,constraints_json,validation_mode,validation_policy_json,idempotency_key,created_by_thread,created_at,updated_at,completed_at FROM builder_goals`
 
 type rowScanner interface{ Scan(...any) error }
 
 func scanGoal(row rowScanner) (*Goal, error) {
 	var goal Goal
-	var criteriaRaw, constraintsRaw string
+	var criteriaRaw, constraintsRaw, validationPolicyRaw string
 	if err := row.Scan(&goal.ID, &goal.ProjectID, &goal.OwnerAgentID, &goal.Title, &goal.Objective, &goal.Status,
-		&goal.CurrentPhase, &goal.Summary, &goal.NextAction, &criteriaRaw, &constraintsRaw, &goal.IdempotencyKey,
+		&goal.CurrentPhase, &goal.Summary, &goal.NextAction, &criteriaRaw, &constraintsRaw, &goal.ValidationMode, &validationPolicyRaw, &goal.IdempotencyKey,
 		&goal.CreatedByThreadID, &goal.CreatedAt, &goal.UpdatedAt, &goal.CompletedAt); err != nil {
 		return nil, err
 	}
 	decodeJSON(criteriaRaw, &goal.SuccessCriteria)
 	decodeJSON(constraintsRaw, &goal.Constraints)
+	var validationInput ValidationPolicyInput
+	decodeJSON(validationPolicyRaw, &validationInput)
+	_, goal.ValidationPolicy, _ = normalizeValidationPolicy(goal.ValidationMode, validationInput)
 	if goal.SuccessCriteria == nil {
 		goal.SuccessCriteria = []string{}
 	}
@@ -751,6 +878,54 @@ func scanGoal(row rowScanner) (*Goal, error) {
 		goal.Constraints = []string{}
 	}
 	return &goal, nil
+}
+
+func normalizeValidationPolicy(mode string, input ValidationPolicyInput) (string, ValidationPolicy, error) {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		mode = validationBuildOnly
+	}
+	if !validValidationModes[mode] {
+		return "", ValidationPolicy{}, fmt.Errorf("invalid validation mode %q", mode)
+	}
+	policy := ValidationPolicy{}
+	if mode != validationBuildOnly {
+		policy = ValidationPolicy{
+			MaxRuns: 20, MaxRepairAttempts: 2, AutoRepair: true,
+			InstallSafeApps: true, RunOnChange: mode == validationContinuous,
+		}
+	}
+	if input.MaxRuns != nil {
+		policy.MaxRuns = *input.MaxRuns
+	}
+	if input.MaxRepairAttempts != nil {
+		policy.MaxRepairAttempts = *input.MaxRepairAttempts
+	}
+	if input.AutoRepair != nil {
+		policy.AutoRepair = *input.AutoRepair
+	}
+	if input.InstallSafeApps != nil {
+		policy.InstallSafeApps = *input.InstallSafeApps
+	}
+	if input.RunOnChange != nil {
+		policy.RunOnChange = *input.RunOnChange
+	}
+	if mode == validationBuildOnly {
+		policy = ValidationPolicy{}
+		return mode, policy, nil
+	}
+	if policy.MaxRuns < 1 || policy.MaxRuns > 100 {
+		return "", ValidationPolicy{}, errors.New("validation max_runs must be between 1 and 100")
+	}
+	if policy.MaxRepairAttempts < 0 || policy.MaxRepairAttempts > 10 {
+		return "", ValidationPolicy{}, errors.New("validation max_repair_attempts must be between 0 and 10")
+	}
+	if mode == validationSimulated {
+		policy.RunOnChange = false
+	} else if mode == validationContinuous {
+		policy.RunOnChange = true
+	}
+	return mode, policy, nil
 }
 
 func goalForUpdateTx(tx *sql.Tx, identity GoalIdentity, goalID string) (*Goal, error) {

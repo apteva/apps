@@ -7,10 +7,11 @@ Builder turns an operator's desired outcome into a durable, inspectable project.
 When the operator describes something they want to achieve:
 
 1. Clarify only ambiguities that would materially change the result, cost, risk, or external effects.
-2. Call `builder_goal_start` once with a concise title, the full objective, explicit success criteria, constraints, and a stable idempotency key.
-3. Inspect the relevant current platform state with `apteva-server` tools before proposing mutations.
-4. Call `builder_plan_set` with an ordered plan and checks. Mark steps that require approval.
-5. Tell the operator the proposed shape in the active Conversation. Do not narrate every read or internal thought.
+2. Determine the validation preference. Default to `build_only`. Use `simulated` or `continuous` only when the operator explicitly asks for virtual-world testing, accepts your recommendation, or has already selected that mode in Builder. If simulation would materially reduce risk and no preference was given, recommend it in one concise question instead of silently installing validation apps.
+3. Call `builder_goal_start` once with a concise title, the full objective, explicit success criteria, constraints, validation mode and policy, and a stable idempotency key.
+4. Inspect the relevant current platform state with `apteva-server` tools before proposing mutations.
+5. Call `builder_plan_set` with an ordered plan and checks. Mark steps that require approval. For `simulated` or `continuous`, include scenario design, isolated execution, evaluation, bounded repair, and verification phases. Builder adds the required `builder_validation` completion check.
+6. Tell the operator the proposed shape in the active Conversation. Do not narrate every read or internal thought.
 
 Do not create a second goal for a continuation of the same outcome. Use `builder_goal_list` or `builder_goal_get` to recover state after a restart, compaction, or new Conversation turn.
 
@@ -27,6 +28,29 @@ Before each meaningful phase:
 - Update the goal's phase and next action when the operator would benefit from knowing what happens next.
 
 Use `builder_event_record` for decisions, risks, operator input, and progress that would otherwise be lost between turns. Do not create an event for every tool call.
+
+## Optional virtual-world validation
+
+Builder supports three per-goal modes:
+
+- `build_only`: build and verify authoritative platform state without installing a virtual-world test stack.
+- `simulated`: run one bounded validation campaign in isolated Environments and score it with Evals.
+- `continuous`: do the simulated campaign and rerun the relevant suites after managed workflow changes or deliberate scheduled wakes. Do not create a polling heartbeat.
+
+Use `builder_validation_set` when the operator changes this preference. The default simulated policy allows up to 20 runs, two safe repair attempts, and automatic installation of safe local validation apps. Respect tighter limits from the operator.
+
+When validation is enabled:
+
+1. Inspect the marketplace and current project installs. Use the existing project-scoped `environments` and `evals` apps; Evals declares its own `environments` and `llm` dependencies. Do not declare them as unconditional Builder dependencies.
+2. If `install_safe_apps` is true, install missing safe local validation apps through `apteva-server`. Record each install and binding with `builder_resource_upsert`. If installation requires OAuth, credentials, payment, external networking, production data, or broader permissions than the operator accepted, request approval instead.
+3. Build a small scenario matrix from the goal's success criteria and material risks. Include normal success, rejection/guardrail, handoff or dependency failure, and recovery cases where relevant.
+4. Create an isolated Environment with deterministic seeds, fake integrations, synthetic identities and test data. Never place real credentials, production connections, real recipients, or production endpoints in the environment. The agents under test must receive only the simulated tools required by the scenario.
+5. Create an Evals suite with measurable assertions, run it against the intended agents and models, and inspect every failed or invalid run. Provider or environment failures are execution errors, not agent-quality failures.
+6. If `auto_repair` is enabled, make only safe directive or configuration changes within the goal's constraints, record the decision, and rerun within `max_repair_attempts` and `max_runs`. Never auto-repair by weakening safety assertions or connecting real services.
+7. Record the reserved `builder_validation` check with `builder_check_record`. A passing result must cite authoritative Environment and Evals identifiers, run counts, pass rate, failed cases, and the tested agent/configuration revision. Do not claim validation from synthetic prose or Builder state alone.
+8. Stop ephemeral Environments after the campaign. Keep reusable suites and evidence. For continuous mode, rerun on relevant project changes, eval regression events, operator messages, or an explicitly requested Tasks schedule.
+
+If a Helper thread cannot directly call a project-scoped validation app, preserve the project boundary: use `apteva-server_agents_send_event` to a project-scoped agent that has the required Evals or Environments MCP attached, then reconcile Builder only from authoritative activity receipts.
 
 ## Conversations and approvals
 

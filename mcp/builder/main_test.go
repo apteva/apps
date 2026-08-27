@@ -32,7 +32,7 @@ func TestManifestMatchesRuntimeContract(t *testing.T) {
 		t.Fatalf("parse apteva.yaml: %v", err)
 	}
 	runtime := (&App{}).Manifest()
-	if runtime.Name != "builder" || runtime.Version != "0.1.1" {
+	if runtime.Name != "builder" || runtime.Version != "0.2.0" {
 		t.Fatalf("runtime identity = %s@%s", runtime.Name, runtime.Version)
 	}
 	if runtime.Name != onDisk.Name || runtime.Version != onDisk.Version {
@@ -50,7 +50,7 @@ func TestManifestMatchesRuntimeContract(t *testing.T) {
 	if len(runtime.Provides.UIComponents) != 1 || runtime.Provides.UIComponents[0].Name != "builder-workspace" {
 		t.Fatalf("Builder workspace contribution missing: %+v", runtime.Provides.UIComponents)
 	}
-	wantTools := []string{"goal_start", "goal_list", "goal_get", "plan_set", "step_update", "resource_upsert", "check_record", "event_record", "goal_update"}
+	wantTools := []string{"goal_start", "goal_list", "goal_get", "validation_set", "plan_set", "step_update", "resource_upsert", "check_record", "event_record", "goal_update"}
 	gotTools := make([]string, 0, len(runtime.Provides.MCPTools))
 	for _, tool := range runtime.Provides.MCPTools {
 		gotTools = append(gotTools, tool.Name)
@@ -234,6 +234,117 @@ func TestGoalScopeIsHelperAndProjectBound(t *testing.T) {
 	}
 }
 
+func TestOptionalValidationPolicyAndCompletionGate(t *testing.T) {
+	app, appCtx := newTestApp(t)
+	createdRaw, err := app.toolGoalStart(callerContext(testAgent, testThread, testProject, "validation-create"), appCtx, map[string]any{
+		"title": "Validate support workflow", "objective": "Build and validate a support workflow in a virtual world",
+		"success_criteria":  []any{"The workflow passes its behavioral scenarios"},
+		"validation_mode":   "simulated",
+		"validation_policy": map[string]any{"max_runs": 8, "max_repair_attempts": 1, "auto_repair": true},
+		"idempotency_key":   "validate-support-workflow",
+	})
+	if err != nil {
+		t.Fatalf("goal_start with validation: %v", err)
+	}
+	goal := createdRaw.(map[string]any)["goal"].(*Goal)
+	if goal.ValidationMode != validationSimulated || goal.ValidationPolicy.MaxRuns != 8 || goal.ValidationPolicy.MaxRepairAttempts != 1 || !goal.ValidationPolicy.InstallSafeApps {
+		t.Fatalf("validation policy = mode %s policy %+v", goal.ValidationMode, goal.ValidationPolicy)
+	}
+
+	planRaw, err := app.toolPlanSet(callerContext(testAgent, testThread, testProject, "validation-plan"), appCtx, map[string]any{
+		"goal_id": goal.ID,
+		"steps":   []any{map[string]any{"title": "Build and test workflow"}},
+		"checks":  []any{map[string]any{"key": "workflow-ready", "name": "Workflow is ready"}},
+	})
+	if err != nil {
+		t.Fatalf("plan_set: %v", err)
+	}
+	plan := planRaw.(*GoalBundle)
+	validationCheck := bundleCheck(plan, validationCheckKey)
+	if len(plan.Checks) != 2 || validationCheck == nil || validationCheck.Status != "pending" {
+		t.Fatalf("validation completion check = %+v", plan.Checks)
+	}
+	if _, err := app.toolStepUpdate(callerContext(testAgent, testThread, testProject, "validation-step"), appCtx, map[string]any{
+		"goal_id": goal.ID, "step_id": plan.Steps[0].ID, "status": "completed", "note": "Build complete",
+	}); err != nil {
+		t.Fatalf("complete step: %v", err)
+	}
+	if _, err := app.toolCheckRecord(callerContext(testAgent, testThread, testProject, "validation-ready-check"), appCtx, map[string]any{
+		"goal_id": goal.ID, "key": "workflow-ready", "name": "Workflow is ready", "status": "passing", "result": "Ready",
+	}); err != nil {
+		t.Fatalf("ordinary check: %v", err)
+	}
+	if _, err := app.toolGoalUpdate(callerContext(testAgent, testThread, testProject, "validation-premature-complete"), appCtx, map[string]any{
+		"goal_id": goal.ID, "status": "completed",
+	}); err == nil {
+		t.Fatal("simulated goal completed before virtual-world validation passed")
+	}
+	if _, err := app.toolCheckRecord(callerContext(testAgent, testThread, testProject, "validation-empty-evidence"), appCtx, map[string]any{
+		"goal_id": goal.ID, "key": validationCheckKey, "name": "Virtual-world workflow validation", "status": "passing", "result": "Passed",
+	}); err == nil {
+		t.Fatal("validation passed without authoritative evidence")
+	}
+	if _, err := app.toolCheckRecord(callerContext(testAgent, testThread, testProject, "validation-passed"), appCtx, map[string]any{
+		"goal_id": goal.ID, "key": validationCheckKey, "name": "Virtual-world workflow validation", "status": "passing", "result": "8/8 scenarios passed",
+		"evidence": map[string]any{"environment_run_id": "env-run-1", "eval_experiment_id": "experiment-1", "run_count": 8, "pass_rate": 1.0, "agent_ids": []any{101}},
+	}); err != nil {
+		t.Fatalf("record validation: %v", err)
+	}
+	if _, err := app.toolGoalUpdate(callerContext(testAgent, testThread, testProject, "validation-complete"), appCtx, map[string]any{
+		"goal_id": goal.ID, "status": "completed", "summary": "Workflow passed isolated validation",
+	}); err != nil {
+		t.Fatalf("complete validated goal: %v", err)
+	}
+}
+
+func TestValidationCanBeEnabledOrDisabledBeforeCompletion(t *testing.T) {
+	app, appCtx := newTestApp(t)
+	goal, _, err := app.store.CreateGoal(CreateGoalInput{
+		ProjectID: testProject, OwnerAgentID: testAgent, ThreadID: testThread,
+		Title: "Optional validation", Objective: "Choose validation later", SuccessCriteria: []string{"Ready"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if goal.ValidationMode != validationBuildOnly || goal.ValidationPolicy.MaxRuns != 0 {
+		t.Fatalf("default validation = %s %+v", goal.ValidationMode, goal.ValidationPolicy)
+	}
+	planRaw, err := app.toolPlanSet(callerContext(testAgent, testThread, testProject, "optional-plan"), appCtx, map[string]any{
+		"goal_id": goal.ID, "steps": []any{map[string]any{"title": "Build"}}, "checks": []any{map[string]any{"key": "ready", "name": "Ready"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(planRaw.(*GoalBundle).Checks) != 1 {
+		t.Fatal("build-only plan unexpectedly required virtual-world validation")
+	}
+	enabledRaw, err := app.toolValidationSet(callerContext(testAgent, testThread, testProject, "optional-enable"), appCtx, map[string]any{
+		"goal_id": goal.ID, "mode": "continuous", "policy": map[string]any{"max_runs": 12, "run_on_change": true},
+	})
+	if err != nil {
+		t.Fatalf("enable validation: %v", err)
+	}
+	enabled := enabledRaw.(*GoalBundle)
+	if enabled.Goal.ValidationMode != validationContinuous || len(enabled.Checks) != 2 || bundleCheck(enabled, validationCheckKey) == nil {
+		t.Fatalf("enabled bundle = %+v", enabled)
+	}
+	disabledRaw, err := app.toolValidationSet(callerContext(testAgent, testThread, testProject, "optional-disable"), appCtx, map[string]any{
+		"goal_id": goal.ID, "mode": "build_only",
+	})
+	if err != nil {
+		t.Fatalf("disable validation: %v", err)
+	}
+	disabled := disabledRaw.(*GoalBundle)
+	if disabled.Goal.ValidationMode != validationBuildOnly || len(disabled.Checks) != 1 {
+		t.Fatalf("disabled bundle = %+v", disabled)
+	}
+	if _, err := app.toolValidationSet(callerContext(testAgent, testThread, testProject, "optional-invalid"), appCtx, map[string]any{
+		"goal_id": goal.ID, "mode": "production",
+	}); err == nil {
+		t.Fatal("invalid validation mode accepted")
+	}
+}
+
 func TestGoalHTTPReadModel(t *testing.T) {
 	app, _ := newTestApp(t)
 	goal, _, err := app.store.CreateGoal(CreateGoalInput{
@@ -379,4 +490,13 @@ func containsPermission(values []sdk.Permission, wanted sdk.Permission) bool {
 		}
 	}
 	return false
+}
+
+func bundleCheck(bundle *GoalBundle, key string) *GoalCheck {
+	for _, check := range bundle.Checks {
+		if check.Key == key {
+			return check
+		}
+	}
+	return nil
 }

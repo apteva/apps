@@ -29,6 +29,14 @@ interface Goal {
   summary: string;
   next_action: string;
   success_criteria: string[];
+  validation_mode: "build_only" | "simulated" | "continuous";
+  validation_policy: {
+    max_runs: number;
+    max_repair_attempts: number;
+    auto_repair: boolean;
+    install_safe_apps: boolean;
+    run_on_change: boolean;
+  };
   updated_at: string;
 }
 
@@ -44,6 +52,7 @@ interface Step {
 
 interface GoalCheck {
   id: string;
+  key: string;
   name: string;
   description: string;
   status: string;
@@ -88,7 +97,7 @@ type ConversationsWidget = ComponentType<{
   eventRevision?: number;
 }>;
 
-type TrackerTab = "plan" | "checks" | "resources" | "activity";
+type TrackerTab = "plan" | "validation" | "checks" | "resources" | "activity";
 
 const statusTone: Record<string, string> = {
   active: "border-accent/30 bg-accent/10 text-accent",
@@ -122,6 +131,12 @@ async function getJSON<T>(path: string): Promise<T> {
 
 function pretty(value: string): string {
   return value.replaceAll("_", " ");
+}
+
+function validationLabel(mode?: Goal["validation_mode"]): string {
+  if (mode === "simulated") return "Simulated";
+  if (mode === "continuous") return "Continuous";
+  return "Build only";
 }
 
 function StatusPill({ value }: { value: string }) {
@@ -163,6 +178,11 @@ function Tracker({
   const completedSteps = bundle?.steps.filter((step) => ["completed", "skipped"].includes(step.status)).length ?? 0;
   const totalSteps = bundle?.steps.length ?? 0;
   const progress = totalSteps ? Math.round((completedSteps / totalSteps) * 100) : 0;
+  const validationCheck = bundle?.checks.find((check) => check.key === "builder_validation");
+  const validationResources = bundle?.resources.filter((resource) => {
+    const name = resource.name.toLowerCase();
+    return name.includes("eval") || name.includes("environment");
+  }) ?? [];
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-bg-card">
@@ -199,6 +219,9 @@ function Tracker({
             <p className="mt-1 text-xs leading-5 text-text-muted">
               Tell Helper what you want in the conversation. Its goal, plan, checks, resources, and decisions will appear here automatically.
             </p>
+            <p className="mt-3 rounded border border-border bg-bg-input p-2 text-[10px] leading-4 text-text-dim">
+              Validation is optional: build only, test once in a simulated environment, or continuously rerun tests after workflow changes.
+            </p>
           </div>
         </div>
       ) : (
@@ -209,6 +232,9 @@ function Tracker({
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="text-sm font-bold text-text">{goal.title}</h3>
                   <StatusPill value={goal.status} />
+                  <span className="rounded border border-border bg-bg-input px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-text-muted">
+                    Validation: {validationLabel(goal.validation_mode)}
+                  </span>
                 </div>
                 <p className="mt-1 line-clamp-3 text-xs leading-5 text-text-muted">{goal.objective}</p>
               </div>
@@ -232,7 +258,7 @@ function Tracker({
           </div>
 
           <nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-border p-2">
-            {(["plan", "checks", "resources", "activity"] as TrackerTab[]).map((item) => (
+            {(["plan", "validation", "checks", "resources", "activity"] as TrackerTab[]).map((item) => (
               <button
                 key={item}
                 type="button"
@@ -281,6 +307,57 @@ function Tracker({
                   </article>
                 ))}
                 {!bundle.checks.length && <EmptyLine text="Success checks will appear when Helper sets the plan." />}
+              </div>
+            )}
+            {tab === "validation" && (
+              <div className="space-y-3">
+                <article className="rounded border border-border bg-bg p-3">
+                  <div className="flex items-center gap-2">
+                    <p className="min-w-0 flex-1 text-xs font-semibold text-text">{validationLabel(goal.validation_mode)}</p>
+                    {goal.validation_mode === "build_only" ? (
+                      <StatusPill value="ready" />
+                    ) : validationCheck ? (
+                      <StatusPill value={validationCheck.status} />
+                    ) : (
+                      <StatusPill value="planning" />
+                    )}
+                  </div>
+                  {goal.validation_mode === "build_only" ? (
+                    <p className="mt-2 text-[10px] leading-4 text-text-muted">
+                      Virtual-world testing is off. Helper will still verify authoritative project state. Ask Helper to enable simulated or continuous validation when you want isolated workflow testing.
+                    </p>
+                  ) : (
+                    <>
+                      <p className="mt-2 text-[10px] leading-4 text-text-muted">
+                        Evals runs agents inside isolated Environments with synthetic data and fake integrations before production activation.
+                      </p>
+                      <dl className="mt-3 grid grid-cols-2 gap-2 text-[10px]">
+                        <div className="rounded bg-bg-input p-2"><dt className="text-text-dim">Maximum runs</dt><dd className="mt-0.5 font-semibold text-text">{goal.validation_policy.max_runs}</dd></div>
+                        <div className="rounded bg-bg-input p-2"><dt className="text-text-dim">Repair attempts</dt><dd className="mt-0.5 font-semibold text-text">{goal.validation_policy.max_repair_attempts}</dd></div>
+                        <div className="rounded bg-bg-input p-2"><dt className="text-text-dim">Safe auto-repair</dt><dd className="mt-0.5 font-semibold text-text">{goal.validation_policy.auto_repair ? "Allowed" : "Off"}</dd></div>
+                        <div className="rounded bg-bg-input p-2"><dt className="text-text-dim">Run on change</dt><dd className="mt-0.5 font-semibold text-text">{goal.validation_policy.run_on_change ? "On" : "Off"}</dd></div>
+                      </dl>
+                    </>
+                  )}
+                </article>
+                {validationCheck && (
+                  <article className="rounded border border-border bg-bg p-3">
+                    <div className="flex items-center gap-2">
+                      <p className="min-w-0 flex-1 text-xs font-semibold text-text">Workflow evaluation</p>
+                      <StatusPill value={validationCheck.status} />
+                    </div>
+                    <p className="mt-1 text-[10px] leading-4 text-text-muted">{validationCheck.result || validationCheck.description}</p>
+                  </article>
+                )}
+                {validationResources.map((resource) => (
+                  <article key={resource.id} className="rounded border border-border bg-bg p-3">
+                    <div className="flex items-center gap-2">
+                      <span className="rounded bg-bg-input px-1.5 py-0.5 text-[9px] uppercase text-text-dim">{pretty(resource.kind)}</span>
+                      <p className="min-w-0 flex-1 truncate text-xs font-semibold text-text">{resource.name}</p>
+                      <StatusPill value={resource.status} />
+                    </div>
+                  </article>
+                ))}
               </div>
             )}
             {tab === "resources" && (
@@ -407,7 +484,7 @@ export default function BuilderPanel(props: HostProps) {
         <div className="grid h-8 w-8 place-items-center rounded border border-accent/30 bg-accent/10 text-accent">✦</div>
         <div className="min-w-0 flex-1">
           <h1 className="text-sm font-bold text-text">Builder</h1>
-          <p className="truncate text-[10px] text-text-dim">Set the outcome. Helper plans, builds, verifies, and asks before consequential actions.</p>
+          <p className="truncate text-[10px] text-text-dim">Set the outcome. Helper builds, optionally simulates and evaluates, then asks before consequential actions.</p>
         </div>
         {helper && (
           <span className="inline-flex items-center gap-1.5 rounded border border-border px-2 py-1 text-[9px] font-bold text-text-muted">

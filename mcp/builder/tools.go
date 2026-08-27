@@ -16,13 +16,15 @@ func (a *App) tools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "goal_start",
-			Description: "Create one durable Builder goal as soon as the operator has stated a concrete desired outcome. Use a stable idempotency_key so retries or a new Conversation turn recover the same goal. Capture measurable success criteria and material constraints before planning. Returns the goal and whether it was newly created.",
+			Description: "Create one durable Builder goal as soon as the operator has stated a concrete desired outcome. Use a stable idempotency_key so retries or a new Conversation turn recover the same goal. Capture measurable success criteria, material constraints, and the operator's optional virtual-world validation preference before planning. Defaults to build_only unless the operator opts into simulated or continuous validation. Returns the goal and whether it was newly created.",
 			InputSchema: objectSchema([]string{"title", "objective", "success_criteria"}, map[string]any{
-				"title":            map[string]any{"type": "string", "description": "Short operator-facing goal title."},
-				"objective":        map[string]any{"type": "string", "description": "Complete desired outcome, not an implementation task."},
-				"success_criteria": map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string"}},
-				"constraints":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"idempotency_key":  map[string]any{"type": "string", "description": "Stable key derived from the outcome, reused across retries."},
+				"title":             map[string]any{"type": "string", "description": "Short operator-facing goal title."},
+				"objective":         map[string]any{"type": "string", "description": "Complete desired outcome, not an implementation task."},
+				"success_criteria":  map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string"}},
+				"constraints":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"validation_mode":   map[string]any{"type": "string", "enum": sortedKeys(validValidationModes), "description": "build_only unless the operator explicitly opts into isolated simulated or continuous validation."},
+				"validation_policy": validationPolicySchema(),
+				"idempotency_key":   map[string]any{"type": "string", "description": "Stable key derived from the outcome, reused across retries."},
 			}), Meta: wake, HandlerCtx: a.toolGoalStart,
 		},
 		{
@@ -39,6 +41,15 @@ func (a *App) tools() []sdk.Tool {
 			InputSchema: objectSchema([]string{"goal_id"}, map[string]any{
 				"goal_id": map[string]any{"type": "string"},
 			}), HandlerCtx: a.toolGoalGet,
+		},
+		{
+			Name:        "validation_set",
+			Description: "Set or change the optional validation policy for an active goal. build_only performs ordinary authoritative checks without a virtual world. simulated installs/uses project-scoped Evals and Environments for a bounded test campaign. continuous also reruns relevant suites on workflow changes. The operator must opt into simulated or continuous mode; safe local app installation may be automatic only when install_safe_apps is true.",
+			InputSchema: objectSchema([]string{"goal_id", "mode"}, map[string]any{
+				"goal_id": map[string]any{"type": "string"},
+				"mode":    map[string]any{"type": "string", "enum": sortedKeys(validValidationModes)},
+				"policy":  validationPolicySchema(),
+			}), Meta: wake, HandlerCtx: a.toolValidationSet,
 		},
 		{
 			Name:        "plan_set",
@@ -153,7 +164,9 @@ func (a *App) toolGoalStart(ctx context.Context, app *sdk.AppCtx, args map[strin
 	goal, created, err := a.store.CreateGoal(CreateGoalInput{
 		ProjectID: identity.ProjectID, OwnerAgentID: identity.OwnerAgentID, ThreadID: caller.ThreadID,
 		Title: stringArg(args, "title"), Objective: stringArg(args, "objective"),
-		SuccessCriteria: criteria, Constraints: stringSliceArg(args, "constraints"), IdempotencyKey: key,
+		SuccessCriteria: criteria, Constraints: stringSliceArg(args, "constraints"),
+		ValidationMode: stringArg(args, "validation_mode"), ValidationPolicy: validationPolicyArg(args, "validation_policy"),
+		IdempotencyKey: key,
 	})
 	if err != nil {
 		return nil, err
@@ -179,6 +192,17 @@ func (a *App) toolGoalGet(ctx context.Context, app *sdk.AppCtx, args map[string]
 		return nil, err
 	}
 	return a.store.GetBundle(identity, stringArg(args, "goal_id"))
+}
+
+func (a *App) toolValidationSet(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	caller, identity, err := builderIdentity(ctx, app)
+	if err != nil {
+		return nil, err
+	}
+	return a.store.SetValidation(identity, stringArg(args, "goal_id"), SetValidationInput{
+		Mode: stringArg(args, "mode"), Policy: validationPolicyArg(args, "policy"),
+		ActorAgentID: caller.AgentID, ActorThreadID: caller.ThreadID, EventKey: caller.ToolCallID,
+	})
 }
 
 func (a *App) toolPlanSet(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
@@ -309,11 +333,31 @@ func (a *App) toolGoalUpdate(ctx context.Context, app *sdk.AppCtx, args map[stri
 }
 
 func objectSchema(required []string, properties map[string]any) map[string]any {
-	schema := map[string]any{"type": "object", "properties": properties, "additionalProperties": false}
+	// Keep the schema portable across the providers Helper can fall back to.
+	// Gemini's function-declaration API rejects JSON Schema's
+	// additionalProperties keyword, while the handlers below already perform
+	// the authoritative argument validation.
+	schema := map[string]any{"type": "object", "properties": properties}
 	if len(required) > 0 {
 		schema["required"] = required
 	}
 	return schema
+}
+
+func validationPolicySchema() map[string]any {
+	return objectSchema(nil, map[string]any{
+		"max_runs":            map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum evaluation runs in one validation campaign."},
+		"max_repair_attempts": map[string]any{"type": "integer", "minimum": 0, "maximum": 10, "description": "Maximum safe automatic repair-and-retest iterations."},
+		"auto_repair":         map[string]any{"type": "boolean", "description": "Allow safe directive/configuration repairs within the goal's constraints."},
+		"install_safe_apps":   map[string]any{"type": "boolean", "description": "Allow automatic project-scoped installation of safe local Evals, Environments, and required dependencies."},
+		"run_on_change":       map[string]any{"type": "boolean", "description": "Rerun relevant suites after managed workflow changes; effective only in continuous mode."},
+	})
+}
+
+func validationPolicyArg(args map[string]any, key string) ValidationPolicyInput {
+	var policy ValidationPolicyInput
+	_ = decodeArg(args[key], &policy)
+	return policy
 }
 
 func stringArg(args map[string]any, key string) string {

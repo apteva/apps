@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: builder
 display_name: Builder
-version: 0.1.1
-description: Goal-driven orchestration for Apteva Helper. Turns an outcome into a durable plan, tracks the agents, apps, integrations, credentials, checks, and decisions involved, and keeps execution grounded in explicit success criteria.
+version: 0.2.0
+description: Goal-driven orchestration for Apteva Helper. Turns an outcome into a durable plan, optionally validates the resulting workflow with Evals and isolated Environments, tracks managed resources and decisions, and keeps execution grounded in explicit success criteria.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/builder
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [agents, orchestration, goals, planning, approvals]
+tags: [agents, orchestration, goals, planning, approvals, evals, simulation]
 
 scopes: [global]
 min_apteva_version: "0.40.1"
@@ -28,6 +28,7 @@ provides:
     - { name: goal_start,      description: "Create or idempotently recover one durable project goal from the operator's desired outcome." }
     - { name: goal_list,       description: "List Builder goals for the current Helper and project." }
     - { name: goal_get,        description: "Read a complete goal with its plan, checks, resources, events, and completion readiness." }
+    - { name: validation_set,  description: "Set optional build-only, simulated, or continuous validation policy for an active goal." }
     - { name: plan_set,        description: "Set the initial ordered execution plan and success checks before substantive platform changes." }
     - { name: step_update,     description: "Move one plan step through active, approval, blocked, failed, skipped, or completed state." }
     - { name: resource_upsert, description: "Track the desired and observed state of an agent, app, integration, credential, or other managed resource." }
@@ -56,16 +57,17 @@ provides:
       body_file: skills/building-with-helper.md
       description: |
         Goal-first operating protocol for Apteva Helper: plan before mutation,
-        use apteva-server tools for platform changes, keep Builder state current,
-        stream meaningful progress through Conversations, and request approval
-        before consequential actions.
+        use apteva-server tools for platform changes, optionally validate workflows
+        with Evals and isolated Environments, keep Builder state current, stream
+        meaningful progress through Conversations, and request approval before
+        consequential actions.
       metadata:
         category: orchestration
         icon: wand-sparkles
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: main, entry: mcp/builder }
+  source: { repo: github.com/apteva/apps, ref: builder/v0.2.0, entry: mcp/builder }
   port: 8080
   health_check: /health
   resources:
