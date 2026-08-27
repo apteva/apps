@@ -60,10 +60,34 @@ interface Backlink {
   dest_url: string;
   anchor: string;
   is_dofollow?: number;
+  is_nofollow?: number;
+  is_ugc?: number;
+  is_sponsored?: number;
   source_authority?: number;
   first_seen?: number;
   last_seen?: number;
   is_lost: number;
+}
+
+type BacklinkStatus = "all" | "active" | "lost";
+type BacklinkFollowFilter = "all" | "follow" | "nofollow";
+
+interface BacklinkBrowseArgs {
+  status: BacklinkStatus;
+  query?: string;
+  dofollow?: boolean;
+  limit: number;
+  offset: number;
+}
+
+interface BacklinkPage {
+  rows: Backlink[];
+  total: number;
+  limit: number;
+  offset: number;
+  status: BacklinkStatus;
+  provider: string;
+  query?: string;
 }
 
 interface BacklinkMovementPoint {
@@ -420,6 +444,14 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setBacklinkMovement(movement);
     setActiveBacklinks(active || []);
     setLostBacklinks(lost || []);
+  }, [callTool, provider]);
+
+  const browseBacklinks = useCallback(async (domainId: number, args: BacklinkBrowseArgs) => {
+    return callTool<BacklinkPage>("backlinks_browse", {
+      domain_id: domainId,
+      ...(provider ? { provider } : {}),
+      ...args,
+    });
   }, [callTool, provider]);
 
   const reloadKeywords = useCallback(async () => {
@@ -1016,6 +1048,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
             await reloadDomains();
           }}
           onRefresh={refreshDomain}
+          onBrowseBacklinks={browseBacklinks}
           locationById={locationById}
           busy={busy}
         />
@@ -1444,16 +1477,19 @@ function DomainsView(props: {
   onAdd(host: string, label: string, locationId?: number): Promise<void>;
   onRemove(id: number): Promise<void>;
   onRefresh(d: Domain, backlinks?: boolean): Promise<void>;
+  onBrowseBacklinks(domainId: number, args: BacklinkBrowseArgs): Promise<BacklinkPage>;
   locationById: Map<number, SEOLocation>;
   busy: boolean;
 }) {
   const [host, setHost] = useState("");
   const [label, setLabel] = useState("");
   const [locationId, setLocationId] = useState<number | "">("");
+  const [detailView, setDetailView] = useState<"overview" | "backlinks">("overview");
   const selectedLoc = props.selected?.default_location_id
     ? props.locationById.get(props.selected.default_location_id)
     : undefined;
   const keywordById = useMemo(() => new Map(props.keywords.map((k) => [k.id, k])), [props.keywords]);
+  useEffect(() => setDetailView("overview"), [props.selected?.id]);
   return (
     <div className="flex-1 min-h-0 flex">
       <div className="w-80 border-r border-border flex flex-col min-h-0">
@@ -1492,6 +1528,16 @@ function DomainsView(props: {
       </div>
       <div className="flex-1 min-w-0 p-6 overflow-auto">
         {props.selected ? (
+          detailView === "backlinks" ? (
+            <BacklinkDetail
+              domain={props.selected}
+              movement={props.backlinkMovement}
+              busy={props.busy}
+              onBack={() => setDetailView("overview")}
+              onRefresh={() => props.onRefresh(props.selected!, true)}
+              onLoad={props.onBrowseBacklinks}
+            />
+          ) : (
           <div className="space-y-6">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -1519,6 +1565,7 @@ function DomainsView(props: {
               movement={props.backlinkMovement}
               active={props.activeBacklinks}
               lost={props.lostBacklinks}
+              onViewAll={() => setDetailView("backlinks")}
             />
             <RankingExplorer
               rankings={props.rankings}
@@ -1528,6 +1575,7 @@ function DomainsView(props: {
               keywordById={keywordById}
             />
           </div>
+          )
         ) : (
           <div className="text-sm text-text-dim">No domain selected.</div>
         )}
@@ -1536,7 +1584,7 @@ function DomainsView(props: {
   );
 }
 
-function BacklinkInsights(props: { movement: BacklinkMovement | null; active: Backlink[]; lost: Backlink[] }) {
+function BacklinkInsights(props: { movement: BacklinkMovement | null; active: Backlink[]; lost: Backlink[]; onViewAll(): void }) {
   const movement = props.movement;
   if (!movement) {
     return (
@@ -1556,7 +1604,10 @@ function BacklinkInsights(props: { movement: BacklinkMovement | null; active: Ba
           <h3 className="text-sm font-semibold">Backlink Movement</h3>
           <div className="text-xs text-text-dim">Cached provider history · {movement.from_date} to {movement.to_date} · no extra provider request</div>
         </div>
-        <div className="text-xs text-text-dim">{movement.provider}</div>
+        <div className="flex items-center gap-3">
+          <div className="text-xs text-text-dim">{movement.provider}</div>
+          <button type="button" className={buttonCls} onClick={props.onViewAll}>View all links</button>
+        </div>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-5 gap-px bg-border border-b border-border">
         {[
@@ -1597,6 +1648,181 @@ function BacklinkInsights(props: { movement: BacklinkMovement | null; active: Ba
         <BacklinkRows title="Recently lost links" rows={props.lost} empty="No cached lost links." />
       </div>
     </section>
+  );
+}
+
+function BacklinkDetail(props: {
+  domain: Domain;
+  movement: BacklinkMovement | null;
+  busy: boolean;
+  onBack(): void;
+  onRefresh(): Promise<void>;
+  onLoad(domainId: number, args: BacklinkBrowseArgs): Promise<BacklinkPage>;
+}) {
+  const pageSize = 25;
+  const [status, setStatus] = useState<BacklinkStatus>("all");
+  const [follow, setFollow] = useState<BacklinkFollowFilter>("all");
+  const [query, setQuery] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState<BacklinkPage | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [reloadToken, setReloadToken] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    const args: BacklinkBrowseArgs = { status, query: query.trim(), limit: pageSize, offset };
+    if (follow !== "all") args.dofollow = follow === "follow";
+    props.onLoad(props.domain.id, args)
+      .then((result) => {
+        if (!cancelled) setPage(result);
+      })
+      .catch((reason) => {
+        if (!cancelled) setError((reason as Error).message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [follow, offset, props.domain.id, props.onLoad, query, reloadToken, status]);
+
+  const total = page?.total || 0;
+  const rows = page?.rows || [];
+  const first = total === 0 ? 0 : offset + 1;
+  const last = Math.min(offset + rows.length, total);
+  const setFilter = (nextStatus: BacklinkStatus) => {
+    setStatus(nextStatus);
+    setOffset(0);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <button type="button" className="text-sm text-text-dim hover:text-text" onClick={props.onBack}>← Back to domain</button>
+          <h2 className="mt-2 text-xl font-semibold">Backlinks for {props.domain.host}</h2>
+          <div className="text-sm text-text-dim">Cached links only · browsing does not call the provider</div>
+        </div>
+        <button
+          type="button"
+          className={buttonCls}
+          disabled={props.busy}
+          onClick={async () => {
+            await props.onRefresh();
+            setOffset(0);
+            setReloadToken((value) => value + 1);
+          }}
+        >
+          Refresh Links
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-border border border-border rounded overflow-hidden">
+        {[
+          ["All cached", props.movement ? props.movement.active_links + props.movement.lost_links : total],
+          ["Active", props.movement?.active_links],
+          ["Lost", props.movement?.lost_links],
+          ["Provider", props.movement?.provider || page?.provider || "-"],
+        ].map(([label, value]) => (
+          <div key={String(label)} className="bg-bg p-3">
+            <div className="text-xs text-text-dim">{label}</div>
+            <div className="mt-1 text-lg font-semibold tabular-nums">{typeof value === "number" ? fmt(value) : value || "-"}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="border border-border rounded overflow-hidden">
+        <div className="p-3 border-b border-border flex flex-wrap items-center gap-2">
+          <div className="flex rounded border border-border overflow-hidden">
+            {(["all", "active", "lost"] as BacklinkStatus[]).map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={`px-3 py-2 text-sm capitalize ${status === value ? "bg-surface-2 text-text" : "text-text-dim hover:text-text"}`}
+                onClick={() => setFilter(value)}
+              >
+                {value}
+              </button>
+            ))}
+          </div>
+          <select
+            className={`${inputCls} w-auto min-w-36`}
+            value={follow}
+            onChange={(event) => { setFollow(event.target.value as BacklinkFollowFilter); setOffset(0); }}
+          >
+            <option value="all">All link types</option>
+            <option value="follow">Follow only</option>
+            <option value="nofollow">Nofollow only</option>
+          </select>
+          <input
+            className={`${inputCls} min-w-64 flex-1`}
+            value={query}
+            onChange={(event) => { setQuery(event.target.value); setOffset(0); }}
+            placeholder="Search source, target, or anchor"
+          />
+          <div className="ml-auto text-xs text-text-dim">{first}-{last} of {fmt(total)}</div>
+        </div>
+
+        {error ? (
+          <div className="p-4 text-sm text-red-300">{error}</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1100px] text-sm">
+              <thead className="bg-surface-2 text-text-dim">
+                <tr>
+                  <th className="text-left font-medium px-3 py-2">Source page</th>
+                  <th className="text-left font-medium px-3 py-2">Target</th>
+                  <th className="text-left font-medium px-3 py-2">Anchor</th>
+                  <th className="text-left font-medium px-3 py-2 w-32">Attributes</th>
+                  <th className="text-left font-medium px-3 py-2 w-24">Authority</th>
+                  <th className="text-left font-medium px-3 py-2 w-28">First seen</th>
+                  <th className="text-left font-medium px-3 py-2 w-28">Last seen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading && rows.length === 0 ? (
+                  <tr><td colSpan={7} className="px-3 py-8 text-center text-text-dim">Loading cached backlinks…</td></tr>
+                ) : rows.length === 0 ? (
+                  <tr><td colSpan={7} className="px-3 py-8 text-center text-text-dim">No cached backlinks match these filters.</td></tr>
+                ) : rows.map((row) => (
+                  <tr key={`${row.provider}-${row.id}`} className="border-t border-border align-top">
+                    <td className="px-3 py-3 max-w-72">
+                      <a href={row.source_url} target="_blank" rel="noreferrer" className="font-medium hover:underline block truncate" title={row.source_url}>
+                        {hostFromURL(row.source_url) || row.source_url}
+                      </a>
+                      <div className="mt-1 text-xs text-text-dim truncate" title={row.source_url}>{row.source_url}</div>
+                      <div className="mt-1 text-xs text-text-dim">{row.provider} · {row.is_lost ? <span className="text-red-300">lost</span> : <span className="text-emerald-300">active</span>}</div>
+                    </td>
+                    <td className="px-3 py-3 max-w-64">
+                      <a href={row.dest_url} target="_blank" rel="noreferrer" className="hover:underline block truncate" title={row.dest_url}>{row.dest_url}</a>
+                    </td>
+                    <td className="px-3 py-3 max-w-80 text-text-dim" title={row.anchor || ""}>{row.anchor || "No anchor"}</td>
+                    <td className="px-3 py-3 text-xs">
+                      <div>{row.is_dofollow ? "follow" : "nofollow"}</div>
+                      {row.is_ugc ? <div className="text-text-dim">ugc</div> : null}
+                      {row.is_sponsored ? <div className="text-text-dim">sponsored</div> : null}
+                    </td>
+                    <td className="px-3 py-3 tabular-nums">{fmt(row.source_authority)}</td>
+                    <td className="px-3 py-3 text-text-dim whitespace-nowrap">{date(row.first_seen)}</td>
+                    <td className="px-3 py-3 text-text-dim whitespace-nowrap">{date(row.last_seen)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="px-3 py-3 border-t border-border flex items-center justify-between gap-3">
+          <div className="text-xs text-text-dim">{loading ? "Loading…" : `${first}-${last} of ${fmt(total)} cached links`}</div>
+          <div className="flex gap-2">
+            <button type="button" className={buttonCls} disabled={loading || offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))}>Previous</button>
+            <button type="button" className={buttonCls} disabled={loading || offset + rows.length >= total} onClick={() => setOffset(offset + pageSize)}>Next</button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 

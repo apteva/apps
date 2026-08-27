@@ -375,6 +375,18 @@ func (a *App) MCPTools() []sdk.Tool {
 				"limit":     map[string]any{"type": "integer"},
 			}, []string{"domain_id"}),
 			Handler: a.toolBacklinksList},
+		{Name: "backlinks_browse",
+			Description: "Browse cached backlinks with pagination and search. Args: domain_id, provider? (default binding; all for every provider), status? (all, active, lost), query?, dofollow?, limit?, offset?.",
+			InputSchema: schemaObject(map[string]any{
+				"domain_id": map[string]any{"type": "integer"},
+				"provider":  map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
+				"status":    map[string]any{"type": "string", "enum": []string{"all", "active", "lost"}},
+				"query":     map[string]any{"type": "string"},
+				"dofollow":  map[string]any{"type": "boolean"},
+				"limit":     map[string]any{"type": "integer"},
+				"offset":    map[string]any{"type": "integer"},
+			}, []string{"domain_id"}),
+			Handler: a.toolBacklinksBrowse},
 		{Name: "backlink_movement",
 			Description: "Summarize cached backlink gains and losses from provider first_seen/last_seen timestamps. No refresh or snapshot is created. Args: domain_id, provider? (default binding; all for every provider), days? (default 90, max 730).",
 			InputSchema: schemaObject(map[string]any{
@@ -1139,6 +1151,16 @@ type Backlink struct {
 	IsLost          int64  `json:"is_lost"`
 }
 
+type BacklinkPage struct {
+	Rows     []Backlink `json:"rows"`
+	Total    int64      `json:"total"`
+	Limit    int        `json:"limit"`
+	Offset   int        `json:"offset"`
+	Status   string     `json:"status"`
+	Provider string     `json:"provider"`
+	Query    string     `json:"query,omitempty"`
+}
+
 type BacklinkMovementPoint struct {
 	Date   string `json:"date"`
 	Gained int64  `json:"gained"`
@@ -1480,6 +1502,117 @@ func (a *App) toolBacklinksList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+func (a *App) toolBacklinksBrowse(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := toInt64(args["domain_id"])
+	if id == 0 {
+		return nil, errors.New("domain_id required")
+	}
+	if _, err := getDomain(ctx.AppDB(), projectScopeFromArgs(ctx, args), id); err != nil {
+		return nil, err
+	}
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	var dofollow *bool
+	if value, ok := args["dofollow"].(bool); ok {
+		dofollow = &value
+	}
+	return cachedBacklinksPage(
+		ctx.AppDB(),
+		id,
+		provider,
+		strArg(args, "status", "all"),
+		strArg(args, "query", ""),
+		dofollow,
+		int(toInt64(args["limit"])),
+		int(toInt64(args["offset"])),
+	)
+}
+
+func cachedBacklinksPage(db *sql.DB, domainID int64, provider, status, query string, dofollow *bool, limit, offset int) (*BacklinkPage, error) {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "" {
+		status = "all"
+	}
+	if status != "all" && status != "active" && status != "lost" {
+		return nil, errors.New("status must be all, active, or lost")
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	query = strings.TrimSpace(query)
+
+	where := ` WHERE domain_id = ?`
+	args := []any{domainID}
+	if provider != "" {
+		where += ` AND provider = ?`
+		args = append(args, provider)
+	}
+	switch status {
+	case "active":
+		where += ` AND is_lost = 0`
+	case "lost":
+		where += ` AND is_lost = 1`
+	}
+	if dofollow != nil {
+		where += ` AND is_dofollow = ?`
+		args = append(args, boolToInt(*dofollow))
+	}
+	if query != "" {
+		pattern := backlinkSearchPattern(query)
+		where += ` AND (LOWER(source_url) LIKE ? ESCAPE '\' OR LOWER(dest_url) LIKE ? ESCAPE '\' OR LOWER(anchor) LIKE ? ESCAPE '\')`
+		args = append(args, pattern, pattern, pattern)
+	}
+
+	var total int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM backlinks`+where, args...).Scan(&total); err != nil {
+		return nil, err
+	}
+	rowArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := db.Query(`SELECT id, domain_id, provider, source_url, dest_url, anchor,
+		is_dofollow, is_nofollow, is_ugc, is_sponsored,
+		source_authority, first_seen, last_seen, is_lost
+		FROM backlinks`+where+` ORDER BY is_lost ASC, last_seen DESC, id DESC LIMIT ? OFFSET ?`, rowArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Backlink{}
+	for rows.Next() {
+		var item Backlink
+		if err := rows.Scan(&item.ID, &item.DomainID, &item.Provider, &item.SourceURL, &item.DestURL, &item.Anchor,
+			&item.IsDofollow, &item.IsNofollow, &item.IsUGC, &item.IsSponsored,
+			&item.SourceAuthority, &item.FirstSeen, &item.LastSeen, &item.IsLost); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	displayProvider := provider
+	if displayProvider == "" {
+		displayProvider = "all"
+	}
+	return &BacklinkPage{
+		Rows: items, Total: total, Limit: limit, Offset: offset,
+		Status: status, Provider: displayProvider, Query: query,
+	}, nil
+}
+
+func backlinkSearchPattern(query string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(strings.ToLower(query))
+	return "%" + escaped + "%"
 }
 
 func (a *App) toolBacklinkMovement(ctx *sdk.AppCtx, args map[string]any) (any, error) {

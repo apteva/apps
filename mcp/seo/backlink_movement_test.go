@@ -62,6 +62,53 @@ func TestCachedBacklinkMovementDefaultsAndCapsRange(t *testing.T) {
 	}
 }
 
+func TestCachedBacklinksPageFiltersSearchAndPaginates(t *testing.T) {
+	db := newSEOTestDB(t, "migrations/001_init.sql")
+	result, err := db.Exec(`INSERT INTO domains (project_id, host, label) VALUES ('project-1', 'example.com', 'Example')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domainID, _ := result.LastInsertId()
+	insertDetailBacklink(t, db, domainID, "dataforseo", "https://alpha.test/new", "https://example.com/a", "special anchor", true, false, 40)
+	insertDetailBacklink(t, db, domainID, "dataforseo", "https://beta.test/link", "https://example.com/b", "ordinary", false, false, 30)
+	insertDetailBacklink(t, db, domainID, "dataforseo", "https://lost.test/link", "https://example.com/c", "gone", true, true, 20)
+	insertDetailBacklink(t, db, domainID, "yepapi", "https://other.test/link", "https://example.com/d", "special provider", true, false, 10)
+
+	page, err := cachedBacklinksPage(db, domainID, "", "all", "", nil, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 4 || len(page.Rows) != 2 || page.Provider != "all" || page.Limit != 2 {
+		t.Fatalf("first page = %+v", page)
+	}
+	page, err = cachedBacklinksPage(db, domainID, "", "all", "", nil, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 4 || len(page.Rows) != 2 || page.Offset != 2 {
+		t.Fatalf("second page = %+v", page)
+	}
+
+	page, err = cachedBacklinksPage(db, domainID, "dataforseo", "active", "SPECIAL", boolPointer(true), 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Rows) != 1 || page.Rows[0].SourceURL != "https://alpha.test/new" {
+		t.Fatalf("filtered page = %+v", page)
+	}
+
+	page, err = cachedBacklinksPage(db, domainID, "dataforseo", "lost", "", nil, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Rows) != 1 || page.Rows[0].IsLost != 1 {
+		t.Fatalf("lost page = %+v", page)
+	}
+	if _, err := cachedBacklinksPage(db, domainID, "", "deleted", "", nil, 50, 0); err == nil {
+		t.Fatal("expected invalid status error")
+	}
+}
+
 func insertMovementBacklink(t *testing.T, db *sql.DB, domainID int64, provider, source string, firstSeen, lastSeen int64, lost bool) {
 	t.Helper()
 	_, err := db.Exec(`INSERT INTO backlinks
@@ -72,6 +119,20 @@ func insertMovementBacklink(t *testing.T, db *sql.DB, domainID int64, provider, 
 		t.Fatal(err)
 	}
 }
+
+func insertDetailBacklink(t *testing.T, db *sql.DB, domainID int64, provider, sourceURL, destURL, anchor string, dofollow, lost bool, authority int64) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO backlinks
+		(domain_id, provider, source_url, dest_url, anchor, is_dofollow,
+		 source_authority, first_seen, last_seen, is_lost)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 100, ?, ?)`,
+		domainID, provider, sourceURL, destURL, anchor, boolToInt(dofollow), authority, authority, boolToInt(lost))
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
 
 func movementPoint(points []BacklinkMovementPoint, date string) *BacklinkMovementPoint {
 	for i := range points {

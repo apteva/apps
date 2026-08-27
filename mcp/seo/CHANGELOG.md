@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.3
+
+- Added a dedicated backlink detail view from each domain's movement panel.
+- Added cached pagination, source/target/anchor search, active/lost filters, and
+  follow/nofollow filters through the read-only `backlinks_browse` tool.
+- Shows complete source and destination links, link attributes, authority,
+  provider, status, and first/last-seen dates without making provider requests.
+
 ## 0.6.2
 
 - Added the read-only `backlink_movement` tool with configurable 1-730 day
