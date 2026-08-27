@@ -10,7 +10,9 @@
 // v0.6 adds budgeted scheduled rank tracking through app-sdk workers and the
 // DataForSEO Standard Queue, with durable compact rank history. v0.6.1 adds
 // daily, weekly, and monthly cadence choices. v0.6.2 derives backlink
-// movement directly from cached provider first_seen/last_seen fields.
+// movement directly from cached provider first_seen/last_seen fields. v0.6.3
+// adds cached backlink browsing. v0.7 reorganizes the panel around an overview,
+// domain explorer, keywords, research, and settings.
 //
 // project_id comes from the worker/request AppCtx, then APTEVA_PROJECT_ID;
 // ” = global scope. Children (pages, *_metrics, rankings, backlinks) inherit
@@ -37,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.6.2
+version: 0.7.0
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]

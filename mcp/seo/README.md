@@ -3,7 +3,7 @@
 Generic SEO research workbench for Apteva. Track domains, keywords, rankings,
 and backlinks; pull metrics from any provider behind one pluggable role.
 
-## Schema (v0.6.3)
+## Schema (v0.7.0)
 
 Twenty tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz and extended with generic search-engine entities:
 
@@ -41,7 +41,7 @@ provider response, so provider-specific fields survive without schema churn.
 
 ## Status
 
-v0.6.3 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
+v0.7.0 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
 An installation may bind multiple providers and designate a default; paid MCP
 tools and panel actions can select a specific provider. Provider locations,
 metrics, rankings, backlinks, and SERP snapshots remain separately tagged.
@@ -61,6 +61,12 @@ Location sync uses each provider's catalog strategy and always creates explicit
 Google and YouTube country/language rows. Domain, keyword-metric, and backlink
 refreshes remain UI/HTTP-driven; `serp_search` and refreshed keyword ideas are
 explicit paid MCP actions.
+
+The panel opens on a project overview and separates the primary workspaces into
+Domains, Keywords, and Explorer. Domains are searchable and distinguish owned
+sites from discovered competitors; rankings and backlinks live in dedicated
+domain tabs. Provider selection, location catalogs, and activity are kept in
+Settings because they configure refreshes rather than represent SEO data.
 
 Cached backlink analytics use the provider-supplied `first_seen`, `last_seen`,
 and current `is_lost` values already stored on each backlink. The
