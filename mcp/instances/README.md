@@ -29,7 +29,7 @@ cloud integrations.
 | Tool | Purpose |
 |---|---|
 | `instance_list_providers` | List bound provider connections and the configured default. |
-| `instance_create` | Provision compute through the bound provider, including VPS, GPU Pods, and Scaleway Apple silicon. |
+| `instance_create` | Provision compute through the bound provider, including VPS, GPU Pods, Scaleway Dedibox, and Apple silicon. |
 | `instance_get` | Fetch one instance row |
 | `instance_list` | List all instances; optional `provider` / `status` filters |
 | `instance_destroy` | Terminate the provider-managed resource and remove its row where supported (refused for local id 0) |
@@ -89,6 +89,17 @@ the returned key ID privately, and deletes exactly that key after the matching
 Mac is deleted. Provisioning uses a non-renewing 24-hour commitment. The
 mandatory minimum allocation is exposed as `deletable_at`; Destroy remains
 disabled until that timestamp. No account password is stored.
+
+### Scaleway Dedibox
+
+Dedibox offers are exposed as `dedibox/<offer-id>` server types and normalized
+as `bare_metal` Linux hosts. They reuse the bound Scaleway connection and its
+default project. Provisioning creates one project-scoped IAM SSH key, orders the
+physical server, follows the returned service until hardware delivery, selects
+the requested Linux release from the server-compatible OS catalog, installs it,
+and waits for SSH. The service and SSH-key IDs are retained privately so a
+restart can resume provisioning and Destroy terminates only the matching
+subscription and owned key.
 
 ## Metrics
 

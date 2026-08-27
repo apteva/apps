@@ -1526,8 +1526,12 @@ function CreateDialog({
     if (t.architecture && t.architecture !== "x86") parts.push(t.architecture.toUpperCase());
     const specs = parts.join(", ");
     const price = formatCatalogMonthlyPrice(t);
-    const displayName = t.name.replace(/^apple-silicon\//, "");
-    const hostKind = t.resource_class === "bare_metal" ? "Mac mini bare metal" : "";
+    const displayName = t.name.startsWith("dedibox/")
+      ? (t.description?.split(" — ")[0] || t.name.replace(/^dedibox\//, "Dedibox "))
+      : t.name.replace(/^apple-silicon\//, "");
+    const hostKind = t.name.startsWith("dedibox/")
+      ? "dedicated physical server"
+      : t.resource_class === "bare_metal" ? "Mac mini bare metal" : "";
     return [displayName, hostKind && `· ${hostKind}`, price && `(${price}`, specs && (price ? `, ${specs})` : `(${specs})`)]
       .filter(Boolean)
       .join(" ");

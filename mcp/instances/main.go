@@ -40,12 +40,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.28
+version: 0.4.31
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
   integrations: Hetzner Cloud, DigitalOcean, Contabo, Vultr, AWS EC2,
-  Scaleway (virtual instances and Apple silicon Mac minis), Huawei Cloud,
+  Scaleway (virtual instances, Dedibox, and Apple silicon Mac minis), Huawei Cloud,
   Linode, OVHcloud, and RunPod. Foundation layer
   consumed by Live Link, Deploy, Backup, Containers via cross-app
   calls.
@@ -71,8 +71,9 @@ requires:
         to provision remote instances through the generic Instances interface.
         Every compatible provider has catalog, provisioning, readiness, and
         recovery adapters. Immediate destroy is available except on Contabo,
-        whose API only schedules contract cancellation. Scaleway macOS hosts
-        have a mandatory 24-hour minimum allocation before Destroy is enabled.
+        whose API only schedules contract cancellation. Scaleway Dedibox orders
+        physical hardware and installs Linux after delivery; macOS hosts have a
+        mandatory 24-hour minimum allocation before Destroy is enabled.
 provides:
   http_routes:
     - prefix: /
@@ -162,7 +163,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.28
+    ref: instances/v0.4.31
     entry: mcp/instances
   port: 8080
   health_check: /health

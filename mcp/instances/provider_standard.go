@@ -92,6 +92,12 @@ func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType,
 		}
 	}
 	if provider == "scaleway" {
+		dediboxTypes, dediboxErr := scalewayDediboxListServerTypes(ctx)
+		if dediboxErr == nil {
+			types = append(types, dediboxTypes...)
+		} else {
+			ctx.Logger().Warn("instances: Scaleway Dedibox catalog unavailable", "err", dediboxErr)
+		}
 		appleData, appleErr := executeProviderTool(ctx, provider, "apple_products_list", map[string]any{
 			"product_types": []string{"apple_silicon"}, "page_size": 100,
 		})
@@ -189,6 +195,7 @@ func apiProviderListImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
 		}
 	}
 	if provider == "scaleway" {
+		images = append(images, scalewayDediboxImages()...)
 		for _, zone := range scalewayAppleZones {
 			appleData, appleErr := executeProviderTool(ctx, provider, "apple_os_list", map[string]any{"zone": zone, "page_size": 100})
 			if appleErr != nil {
@@ -218,6 +225,9 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 
 	if err := applyAPIProviderDefaults(ctx, provider, &in); err != nil {
 		return nil, err
+	}
+	if provider == "scaleway" && isScalewayDediboxSize(in.Size) {
+		return scalewayDediboxProvision(ctx, in)
 	}
 	privKey, pubKey, err := generateSSHKeypair()
 	if err != nil {
@@ -383,6 +393,17 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 			if in.Image == "" {
 				return fmt.Errorf("Scaleway returned no Apple silicon OS compatible with %s in %s", in.Size, in.Region)
 			}
+		} else if provider == "scaleway" && isScalewayDediboxSize(in.Size) {
+			for _, image := range images {
+				if strings.HasPrefix(image.Name, scalewayDediboxPrefix) &&
+					(len(image.AvailableIn) == 0 || containsString(image.AvailableIn, in.Region)) {
+					in.Image = image.Name
+					break
+				}
+			}
+			if in.Image == "" {
+				return fmt.Errorf("Scaleway returned no Dedibox OS compatible with %s in %s", in.Size, in.Region)
+			}
 		} else {
 			in.Image = preferredLinuxImage(images)
 		}
@@ -393,6 +414,14 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 		}
 		if !strings.HasPrefix(in.Image, scalewayApplePrefix) {
 			return fmt.Errorf("Scaleway Apple silicon size %s requires a compatible Apple silicon OS image", in.Size)
+		}
+	}
+	if provider == "scaleway" && isScalewayDediboxSize(in.Size) {
+		if !containsString(scalewayDediboxZones, in.Region) {
+			return fmt.Errorf("Scaleway Dedibox is not available in %s; choose one of %s", in.Region, strings.Join(scalewayDediboxZones, ", "))
+		}
+		if !strings.HasPrefix(in.Image, scalewayDediboxPrefix) {
+			return fmt.Errorf("Scaleway Dedibox size %s requires a compatible Dedibox OS image", in.Size)
 		}
 	}
 	return nil
@@ -516,6 +545,9 @@ func apiProviderDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 			return deleteScalewayAppleSSHKey(ctx, parseScalewayAppleMetadata(inst.ProviderMetadataJSON).SSHKeyID)
 		}
 		return scalewayAppleDestroy(ctx, inst)
+	}
+	if isScalewayDediboxInstance(inst) {
+		return scalewayDediboxDestroy(ctx, inst)
 	}
 	if inst.ProviderID == "" {
 		return nil
@@ -677,6 +709,9 @@ func apiProviderGetRequest(inst *Instance) (string, map[string]any, error) {
 		if isScalewayAppleInstance(inst) {
 			return "apple_server_get", map[string]any{"zone": inst.Region, "server_id": inst.ProviderID}, nil
 		}
+		if isScalewayDediboxInstance(inst) {
+			return "dedibox_server_get", map[string]any{"zone": inst.Region, "server_id": numericOrString(inst.ProviderID)}, nil
+		}
 		return "server_get", map[string]any{"zone": inst.Region, "server_id": inst.ProviderID}, nil
 	case "huawei-cloud":
 		return "get_server", map[string]any{"server_id": inst.ProviderID}, nil
@@ -697,6 +732,10 @@ func reconcileAPIProviderProvisioning(ctx *sdk.AppCtx) {
 			continue
 		}
 		for _, inst := range rows {
+			if isScalewayDediboxInstance(inst) {
+				kickScalewayDediboxProvisioning(ctx, inst.ID)
+				continue
+			}
 			if inst.ProviderID != "" {
 				kickAPIProviderReadinessProbe(ctx, inst.ID)
 				continue

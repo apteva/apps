@@ -445,15 +445,18 @@ func parseProviderResource(provider string, data json.RawMessage) (id, ipv4, ipv
 			}
 		case "scaleway":
 			candidateID = mapString(obj, "id")
-			if candidateID != "" && (mapValue(obj, "commercial_type") != nil || mapValue(obj, "public_ip") != nil || mapValue(obj, "ssh_username") != nil) {
+			if candidateID != "" && (mapValue(obj, "commercial_type") != nil || mapValue(obj, "public_ip") != nil || mapValue(obj, "ssh_username") != nil || mapValue(obj, "interfaces") != nil) {
 				ipv4 = nestedMapString(obj, "public_ip", "address")
 				if ipv4 == "" {
 					ipv4 = firstAddress(obj, "public_ips", 4)
 				}
 				if ipv4 == "" {
+					ipv4 = firstAddress(obj, "interfaces", 4)
+				}
+				if ipv4 == "" {
 					ipv4 = mapString(obj, "ip")
 				}
-				ipv6 = firstNonEmpty(nestedMapString(obj, "ipv6", "address"), firstAddress(obj, "public_ips", 6))
+				ipv6 = firstNonEmpty(nestedMapString(obj, "ipv6", "address"), firstAddress(obj, "public_ips", 6), firstAddress(obj, "interfaces", 6))
 			}
 		case "huawei-cloud":
 			candidateID = firstMapString(obj, "id", "server_id")

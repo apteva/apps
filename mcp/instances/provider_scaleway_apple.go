@@ -30,7 +30,7 @@ func scalewayAppleID(value string) string {
 
 func isScalewayAppleInstance(inst *Instance) bool {
 	return inst != nil && normalizeProvider(inst.Provider) == "scaleway" &&
-		(isScalewayAppleSize(inst.Size) || inst.ResourceClass == "bare_metal")
+		(isScalewayAppleSize(inst.Size) || (inst.ResourceClass == "bare_metal" && inst.Platform == "macos"))
 }
 
 func parseScalewayAppleProducts(data json.RawMessage) ([]ServerType, error) {
