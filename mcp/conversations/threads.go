@@ -132,6 +132,10 @@ func (a *App) ensureConversationThreadForAgent(
 	if agentID <= 0 {
 		return "", false, fmt.Errorf("agent id required")
 	}
+	projectID := strings.TrimSpace(conv.ProjectID)
+	if projectID == "" {
+		return "", false, fmt.Errorf("conversation project id required")
+	}
 	tc, ok := app.PlatformAPI().(sdk.ThreadClient)
 	if !ok {
 		// Platform (or test stub) without thread support: main thread.
@@ -158,6 +162,7 @@ func (a *App) ensureConversationThreadForAgent(
 	desired := sdk.ThreadSpawnRequest{
 		AgentID:         agentID,
 		ThreadID:        threadID,
+		ProjectID:       projectID,
 		DirectiveSuffix: suffix,
 		Tools:           append([]string(nil), conversationThreadTools...),
 		// MCP nil → the platform supplies the agent's spawnable MCP
