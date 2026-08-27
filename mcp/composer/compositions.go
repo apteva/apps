@@ -58,10 +58,11 @@ type Clip struct {
 	SectionID       string      `json:"section_id,omitempty"`
 	GroupID         string      `json:"group_id,omitempty"`
 	Asset           Asset       `json:"asset"`
-	Start           float64     `json:"start"`                  // seconds from composition start
-	Length          float64     `json:"length"`                 // seconds
-	SourceStart     float64     `json:"source_start,omitempty"` // seconds from source start
-	SourceEnd       float64     `json:"source_end,omitempty"`   // absolute source time; 0 means unbounded
+	Start           float64     `json:"start"`                   // seconds from composition start
+	Length          float64     `json:"length"`                  // seconds
+	SourceStart     float64     `json:"source_start,omitempty"`  // seconds from source start
+	SourceEnd       float64     `json:"source_end,omitempty"`    // absolute source time; 0 means unbounded
+	PlaybackRate    float64     `json:"playback_rate,omitempty"` // source speed multiplier; default 1
 	Duration        float64     `json:"duration,omitempty"`
 	Crop            *SourceCrop `json:"crop,omitempty"`      // normalized source-space rectangle
 	Transform       *Transform  `json:"transform,omitempty"` // source-space focus and zoom
@@ -387,6 +388,9 @@ func validateEdit(e *Edit) error {
 			if err := validateSourceRange(c, at); err != nil {
 				return fmt.Errorf("track[%d].clip[%d]: %w", ti, i, err)
 			}
+			if err := validatePlaybackRate(c.PlaybackRate, at); err != nil {
+				return fmt.Errorf("track[%d].clip[%d]: %w", ti, i, err)
+			}
 			if (c.Crop != nil || c.Transform != nil) && at != "video" && at != "image" {
 				return fmt.Errorf("track[%d].clip[%d]: crop/transform require a video or image asset", ti, i)
 			}
@@ -486,6 +490,19 @@ func validateSourceRange(c *Clip, assetType string) error {
 	}
 	if (c.SourceStart > 0 || c.SourceEnd > 0) && assetType != "video" && assetType != "audio" {
 		return fmt.Errorf("source ranges require a video or audio asset (got %s)", assetType)
+	}
+	return nil
+}
+
+func validatePlaybackRate(rate float64, assetType string) error {
+	if rate == 0 || rate == 1 {
+		return nil
+	}
+	if assetType != "video" && assetType != "audio" {
+		return fmt.Errorf("playback_rate requires a video or audio asset (got %s)", assetType)
+	}
+	if rate < 0.25 || rate > 16 {
+		return errors.New("playback_rate must be between 0.25 and 16")
 	}
 	return nil
 }

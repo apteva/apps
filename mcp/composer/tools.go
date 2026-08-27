@@ -25,7 +25,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "composition_create",
-			Description: "Create a V1 timeline composition. Args: name?, tracks, markers?, soundtrack?, background?, output?. Clips can reuse source assets with source_start/source_end, crop normalized source regions, and animate source-space focus/zoom through transform.keyframes. Timeline markers preserve external recording events for editing. The first visual track is the fullscreen base layer; additional visual tracks render timed image/video layers with clip-level fit, position, offset, width, height, scale, opacity, z_index, or layout. Returns {id, version, duration_seconds}.",
+			Description: "Create a V1 timeline composition. Args: name?, tracks, markers?, soundtrack?, background?, output?. Video and audio clips can reuse source assets with source_start/source_end and playback_rate; retained audio stays synchronized. Visual clips can crop normalized source regions and animate source-space focus/zoom through transform.keyframes with oversampled subpixel rendering. Timeline markers preserve external recording events for editing. The first visual track is the fullscreen base layer; additional visual tracks render timed image/video layers with clip-level fit, position, offset, width, height, scale, opacity, z_index, or layout. Returns {id, version, duration_seconds}.",
 			InputSchema: schemaObject(map[string]any{
 				"name":       map[string]any{"type": "string"},
 				"tracks":     map[string]any{"type": "array"},
@@ -38,7 +38,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_update",
-			Description: "Patch a V1 composition. Args: id, patch. Send subset of {name, tracks, markers, soundtrack, background, output}. Visual clips support source ranges, normalized crop, source-space transform keyframes, Shotstack-style layout fields, or Composer's layout alias.",
+			Description: "Patch a V1 composition. Args: id, patch. Send subset of {name, tracks, markers, soundtrack, background, output}. Video/audio clips support source ranges and playback_rate. Visual clips support normalized crop, source-space transform keyframes, Shotstack-style layout fields, or Composer's layout alias.",
 			InputSchema: schemaObject(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"patch": map[string]any{"type": "object"},

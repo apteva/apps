@@ -535,37 +535,76 @@ func visualFitFilter(layout resolvedClipLayout, fps int) string {
 
 func buildBaseVisualFilter(c Clip, w, h, fps int, background string) string {
 	parts := sourceVisualFilters(c)
+	workingW, workingH := cameraWorkingSize(c, w, h)
+	parts = append(parts, baseVisualFitFilter(c, workingW, workingH, fps, background))
+	if camera := cameraZoomPanFilter(c, workingW, workingH, fps); camera != "" {
+		parts = append(parts, camera)
+	}
+	if workingW != w || workingH != h {
+		parts = append(parts, fmt.Sprintf("scale=%d:%d:flags=lanczos,setsar=1,fps=%d", w, h, fps))
+	}
+	return strings.Join(parts, ",")
+}
+
+func baseVisualFitFilter(c Clip, w, h, fps int, background string) string {
 	fit := strings.ToLower(strings.TrimSpace(c.Fit))
 	if c.Layout != nil && strings.TrimSpace(c.Layout.Fit) != "" {
 		fit = strings.ToLower(strings.TrimSpace(c.Layout.Fit))
 	}
 	switch fit {
 	case "crop", "cover":
-		parts = append(parts, fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,fps=%d", w, h, w, h, fps))
+		return fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,fps=%d", w, h, w, h, fps)
 	case "stretch":
-		parts = append(parts, fmt.Sprintf("format=rgba,scale=%d:%d,setsar=1,fps=%d", w, h, fps))
+		return fmt.Sprintf("format=rgba,scale=%d:%d,setsar=1,fps=%d", w, h, fps)
 	default:
-		parts = append(parts, fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=%s,setsar=1,fps=%d", w, h, w, h, escFFmpegColor(background), fps))
+		return fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=%s,setsar=1,fps=%d", w, h, w, h, escFFmpegColor(background), fps)
 	}
-	if camera := cameraZoomPanFilter(c, w, h, fps); camera != "" {
-		parts = append(parts, camera)
-	}
-	return strings.Join(parts, ",")
 }
 
 func buildLayerVisualFilter(c Clip, layout resolvedClipLayout, fps int) string {
 	parts := sourceVisualFilters(c)
-	parts = append(parts, visualFitFilter(layout, fps))
-	if camera := cameraZoomPanFilter(c, layout.width, layout.height, fps); camera != "" {
+	workingW, workingH := cameraWorkingSize(c, layout.width, layout.height)
+	workingLayout := layout
+	workingLayout.width = workingW
+	workingLayout.height = workingH
+	parts = append(parts, visualFitFilter(workingLayout, fps))
+	if camera := cameraZoomPanFilter(c, workingW, workingH, fps); camera != "" {
 		parts = append(parts, camera)
 	}
+	if workingW != layout.width || workingH != layout.height {
+		parts = append(parts, fmt.Sprintf("scale=%d:%d:flags=lanczos,setsar=1,fps=%d", layout.width, layout.height, fps))
+	}
 	return strings.Join(parts, ",")
+}
+
+const cameraMaxWorkingDimension = 4096
+
+// cameraWorkingSize oversamples camera motion at 4x where practical and 2x
+// for HD/full-HD canvases. zoompan positions its source crop on integer pixels;
+// oversampling makes those steps quarter/half-output-pixel movements, and the
+// Lanczos downscale turns them into stable subpixel motion. Native 4K stays at
+// 1x to avoid an unbounded memory and render-time penalty.
+func cameraWorkingSize(c Clip, w, h int) (int, int) {
+	if c.Transform == nil || w <= 0 || h <= 0 {
+		return w, h
+	}
+	for factor := 4; factor >= 2; factor /= 2 {
+		if w*factor <= cameraMaxWorkingDimension && h*factor <= cameraMaxWorkingDimension {
+			return w * factor, h * factor
+		}
+	}
+	return w, h
 }
 
 func sourceVisualFilters(c Clip) []string {
 	parts := []string{}
 	if trim := sourceTrimFilter("trim", c); trim != "" {
-		parts = append(parts, trim, "setpts=PTS-STARTPTS")
+		parts = append(parts, trim)
+	}
+	if rate := clipPlaybackRate(c); rate != 1 {
+		parts = append(parts, "setpts=(PTS-STARTPTS)/"+trimFloat(rate))
+	} else if len(parts) > 0 {
+		parts = append(parts, "setpts=PTS-STARTPTS")
 	}
 	if crop := c.Crop; crop != nil {
 		parts = append(parts, fmt.Sprintf(
@@ -577,10 +616,47 @@ func sourceVisualFilters(c Clip) []string {
 }
 
 func sourceAudioFilterPrefix(c Clip) string {
+	parts := []string{}
 	if trim := sourceTrimFilter("atrim", c); trim != "" {
-		return trim + ",asetpts=PTS-STARTPTS,"
+		parts = append(parts, trim)
 	}
-	return ""
+	if len(parts) > 0 || clipPlaybackRate(c) != 1 {
+		parts = append(parts, "asetpts=PTS-STARTPTS")
+	}
+	parts = append(parts, playbackRateAudioFilters(clipPlaybackRate(c))...)
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, ",") + ","
+}
+
+func clipPlaybackRate(c Clip) float64 {
+	if c.PlaybackRate > 0 {
+		return c.PlaybackRate
+	}
+	return 1
+}
+
+// atempo is kept in the portable 0.5..2 range and chained for larger
+// speed changes. This preserves pitch while keeping retained source audio in
+// sync with the video's setpts-based playback rate.
+func playbackRateAudioFilters(rate float64) []string {
+	if rate <= 0 {
+		rate = 1
+	}
+	var filters []string
+	for rate > 2.000001 {
+		filters = append(filters, "atempo=2")
+		rate /= 2
+	}
+	for rate < 0.499999 {
+		filters = append(filters, "atempo=0.5")
+		rate /= 0.5
+	}
+	if rate < 0.999999 || rate > 1.000001 {
+		filters = append(filters, "atempo="+trimFloat(rate))
+	}
+	return filters
 }
 
 func sourceTrimFilter(name string, c Clip) string {
@@ -917,8 +993,12 @@ func buildLocalAudioFFmpegArgs(edit *Edit, output Output, inputs []string, sound
 func writeTimedAudioFilter(filter *strings.Builder, inputIdx int, c Clip, delayMS int, label string) {
 	chain := []string{}
 	if trim := sourceTrimFilter("atrim", c); trim != "" {
-		chain = append(chain, trim, "asetpts=PTS-STARTPTS")
+		chain = append(chain, trim)
 	}
+	if len(chain) > 0 || clipPlaybackRate(c) != 1 {
+		chain = append(chain, "asetpts=PTS-STARTPTS")
+	}
+	chain = append(chain, playbackRateAudioFilters(clipPlaybackRate(c))...)
 	if c.Audio != nil && c.Audio.TrimSilence {
 		chain = append(chain, "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.05")
 	}

@@ -213,6 +213,7 @@ interface ClipDraft {
   length: number;
   source_start?: number;
   source_end?: number;
+  playback_rate?: number;
   crop?: SourceCrop;
   transform?: SourceTransform;
   source_audio?: "auto" | "keep" | "mute";
@@ -244,6 +245,7 @@ interface AudioClipDraft {
   length: number;
   source_start?: number;
   source_end?: number;
+  playback_rate?: number;
   duration_mode?: DurationMode;
   estimated_length?: number;
   actual_length?: number;
@@ -622,6 +624,7 @@ function parseComposition(c: Composition | null): DraftState {
         length: Number(clip.length) || 1,
         source_start: Number(clip.source_start || 0) || undefined,
         source_end: Number(clip.source_end || 0) || undefined,
+        playback_rate: Number(clip.playback_rate || 0) || undefined,
         crop: clip.crop,
         transform: clip.transform,
         source_audio: clip.source_audio,
@@ -663,6 +666,7 @@ function parseComposition(c: Composition | null): DraftState {
         length: Number(clip.length ?? clip.duration) || 1,
         source_start: Number(clip.source_start || 0) || undefined,
         source_end: Number(clip.source_end || 0) || undefined,
+        playback_rate: Number(clip.playback_rate || 0) || undefined,
         duration_mode: clip.duration_mode || defaultDurationMode(clip.ai?.media_kind),
         estimated_length: Number(clip.estimated_length || clip.ai?.estimated_duration_seconds || 0) || undefined,
         actual_length: Number(clip.actual_length || clip.ai?.actual_duration_seconds || 0) || undefined,
@@ -738,6 +742,7 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
     if (clip.source_audio) out.source_audio = clip.source_audio;
     if (clip.source_start) out.source_start = clip.source_start;
     if (clip.source_end) out.source_end = clip.source_end;
+    if (clip.playback_rate && clip.playback_rate !== 1) out.playback_rate = clip.playback_rate;
     if (clip.crop) out.crop = clip.crop;
     if (clip.transform) out.transform = clip.transform;
     if (clip.ai) out.ai = clip.ai;
@@ -785,6 +790,7 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
     if (clip.ai) out.ai = clip.ai;
     if (clip.source_start) out.source_start = clip.source_start;
     if (clip.source_end) out.source_end = clip.source_end;
+    if (clip.playback_rate && clip.playback_rate !== 1) out.playback_rate = clip.playback_rate;
     if (clip.duration_mode) out.duration_mode = clip.duration_mode;
     if (clip.estimated_length) out.estimated_length = clip.estimated_length;
     if (clip.actual_length) out.actual_length = clip.actual_length;
@@ -2612,7 +2618,7 @@ function PreviewStage({
           ))}
           {!muted && activeAudio.map((clip) => {
             const url = resolved[clip.asset.src]?.url;
-            return url ? <SyncedAudio key={clip.id} src={url} playing={playing} playhead={playhead} start={clip.start} volume={clip.volume} /> : null;
+            return url ? <SyncedAudio key={clip.id} src={url} playing={playing} playhead={playhead} start={clip.start} volume={clip.volume} sourceStart={clip.source_start} sourceEnd={clip.source_end} playbackRate={clip.playback_rate} /> : null;
           })}
           {!muted && soundtrack?.src && resolved[soundtrack.src]?.url && (
             <SyncedAudio src={resolved[soundtrack.src].url} playing={playing} playhead={playhead} start={0} volume={soundtrack.volume} loop />
@@ -2661,11 +2667,13 @@ function PreviewVisualLayer({ clip, asset, playing, playhead, muted, base }: { c
   useEffect(() => {
     const media = mediaRef.current;
     if (!media) return;
-    const sourceTime = (clip.source_start || 0) + localTime;
+    const playbackRate = clip.playback_rate || 1;
+    const sourceTime = (clip.source_start || 0) + localTime * playbackRate;
     const cappedTime = clip.source_end ? Math.min(sourceTime, Math.max(0, clip.source_end - 0.01)) : sourceTime;
     if (Number.isFinite(media.duration) && Math.abs(media.currentTime - cappedTime) > 0.35) media.currentTime = Math.min(cappedTime, Math.max(0, media.duration - 0.05));
+    media.playbackRate = playbackRate;
     if (playing) media.play().catch(() => {}); else media.pause();
-  }, [playing, playhead, clip.start, clip.source_start, clip.source_end, localTime, url]);
+  }, [playing, playhead, clip.start, clip.source_start, clip.source_end, clip.playback_rate, localTime, url]);
   const fit = clip.layout?.fit || clip.fit || "cover";
   const camera = previewCameraAt(clip.transform, localTime);
   const crop = clip.crop;
@@ -2725,17 +2733,19 @@ function previewEase(progress: number, easing: TransformKeyframe["easing"]): num
   return progress;
 }
 
-function SyncedAudio({ src, playing, playhead, start, volume, loop }: { src: string; playing: boolean; playhead: number; start: number; volume: number; loop?: boolean }) {
+function SyncedAudio({ src, playing, playhead, start, volume, loop, sourceStart = 0, sourceEnd, playbackRate = 1 }: { src: string; playing: boolean; playhead: number; start: number; volume: number; loop?: boolean; sourceStart?: number; sourceEnd?: number; playbackRate?: number }) {
   const ref = useRef<HTMLAudioElement | null>(null);
   useEffect(() => {
     const audio = ref.current;
     if (!audio) return;
-    const raw = Math.max(0, playhead - start);
+    const raw = sourceStart + Math.max(0, playhead - start) * playbackRate;
     const local = loop && Number.isFinite(audio.duration) && audio.duration > 0 ? raw % audio.duration : raw;
-    if (Math.abs(audio.currentTime - local) > 0.35) audio.currentTime = Math.min(local, Math.max(0, (audio.duration || local + 1) - 0.05));
+    const capped = sourceEnd ? Math.min(local, Math.max(0, sourceEnd - 0.01)) : local;
+    if (Math.abs(audio.currentTime - capped) > 0.35) audio.currentTime = Math.min(capped, Math.max(0, (audio.duration || capped + 1) - 0.05));
     audio.volume = Math.max(0, Math.min(1, volume || 1));
+    audio.playbackRate = playbackRate;
     if (playing) audio.play().catch(() => {}); else audio.pause();
-  }, [playing, playhead, start, src, volume, loop]);
+  }, [playing, playhead, start, src, volume, loop, sourceStart, sourceEnd, playbackRate]);
   return <audio ref={ref} src={src} preload="metadata" />;
 }
 
@@ -3085,11 +3095,12 @@ function SourceFramingEditor({ clip, onChange }: { clip: ClipDraft; onChange: (p
   return <div className="border-t border-border pt-3 space-y-3">
     <div className="flex items-center gap-2">
       <div className="text-[10px] uppercase tracking-wide text-text-dim flex-1">Source framing</div>
-      {(clip.source_start || clip.source_end || clip.crop || clip.transform) && <button type="button" onClick={() => onChange({ source_start: undefined, source_end: undefined, crop: undefined, transform: undefined })} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Reset</button>}
+      {(clip.source_start || clip.source_end || (clip.playback_rate && clip.playback_rate !== 1) || clip.crop || clip.transform) && <button type="button" onClick={() => onChange({ source_start: undefined, source_end: undefined, playback_rate: undefined, crop: undefined, transform: undefined })} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Reset</button>}
     </div>
-    {clip.asset.type === "video" && <div className="grid grid-cols-2 gap-2">
+    {clip.asset.type === "video" && <div className="grid grid-cols-3 gap-2">
       <Field label="Source in (seconds)"><input type="number" min={0} step={0.1} value={clip.source_start ?? 0} onChange={(e) => onChange({ source_start: Math.max(0, Number(e.target.value)) || undefined })} className={field} /></Field>
       <Field label="Source out (seconds)"><input type="number" min={0} step={0.1} value={clip.source_end ?? 0} onChange={(e) => onChange({ source_end: Math.max(0, Number(e.target.value)) || undefined })} className={field} /></Field>
+      <Field label="Playback rate"><input type="number" min={0.25} max={16} step={0.25} value={clip.playback_rate ?? 1} onChange={(e) => { const rate = Number(e.target.value); onChange({ playback_rate: rate === 1 ? undefined : rate }); }} className={field} /></Field>
     </div>}
     <div className="flex items-center gap-2">
       <label className="flex items-center gap-2 text-xs text-text-muted flex-1"><input type="checkbox" checked={!!clip.crop} onChange={(e) => onChange({ crop: e.target.checked ? { x: 0, y: 0, width: 1, height: 1 } : undefined })} />Crop source</label>
@@ -3467,6 +3478,7 @@ function ClipEditorModal({
               </Field>
               {audioClip.asset.type !== "silence" && <Field label="Source in"><input type="number" min={0} step={0.1} value={audioClip.source_start ?? 0} onChange={(e) => onAudioClip(audioClip.id, { source_start: Math.max(0, Number(e.target.value)) || undefined })} className={field} /></Field>}
               {audioClip.asset.type !== "silence" && <Field label="Source out"><input type="number" min={0} step={0.1} value={audioClip.source_end ?? 0} onChange={(e) => onAudioClip(audioClip.id, { source_end: Math.max(0, Number(e.target.value)) || undefined })} className={field} /></Field>}
+              {audioClip.asset.type !== "silence" && <Field label="Playback rate"><input type="number" min={0.25} max={16} step={0.25} value={audioClip.playback_rate ?? 1} onChange={(e) => { const rate = Number(e.target.value); onAudioClip(audioClip.id, { playback_rate: rate === 1 ? undefined : rate }); }} className={field} /></Field>}
               {audioClip.ai && (
                 <Field label="Duration mode">
                   <select value={audioClip.duration_mode || defaultDurationMode(audioClip.ai.media_kind)} onChange={(e) => onAudioClip(audioClip.id, { duration_mode: e.target.value as DurationMode })} className={field}>
@@ -3838,6 +3850,7 @@ function Inspector({
                     </Field>
                     {audio.asset.type !== "silence" && <Field label="Source in"><input type="number" min={0} step={0.1} value={audio.source_start ?? 0} onChange={(e) => onAudioClip(audio.id, { source_start: Math.max(0, Number(e.target.value)) || undefined })} className={field} /></Field>}
                     {audio.asset.type !== "silence" && <Field label="Source out"><input type="number" min={0} step={0.1} value={audio.source_end ?? 0} onChange={(e) => onAudioClip(audio.id, { source_end: Math.max(0, Number(e.target.value)) || undefined })} className={field} /></Field>}
+                    {audio.asset.type !== "silence" && <Field label="Playback rate"><input type="number" min={0.25} max={16} step={0.25} value={audio.playback_rate ?? 1} onChange={(e) => { const rate = Number(e.target.value); onAudioClip(audio.id, { playback_rate: rate === 1 ? undefined : rate }); }} className={field} /></Field>}
                     {audio.ai && (
                       <Field label="Duration mode">
                         <select value={audio.duration_mode || defaultDurationMode(audio.ai.media_kind)} onChange={(e) => onAudioClip(audio.id, { duration_mode: e.target.value as DurationMode })} className={field}>
