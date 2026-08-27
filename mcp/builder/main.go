@@ -61,7 +61,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			UpdatedAt: nowUTC(),
 		})
 	}
-	ctx.Logger().Info("builder mounted", "version", "0.1.0")
+	ctx.Logger().Info("builder mounted", "version", "0.1.1")
 	return nil
 }
 
@@ -69,6 +69,8 @@ func (a *App) OnUnmount(*sdk.AppCtx) error { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/goals", Handler: a.handleGoals},
+		{Pattern: "/goals/", Handler: a.handleGoals},
 		{Pattern: "/setup/status", Handler: a.handleSetupStatus},
 		{Pattern: "/setup/reconcile", Handler: a.handleSetupReconcile},
 	}

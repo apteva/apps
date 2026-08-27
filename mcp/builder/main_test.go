@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"sync"
@@ -29,7 +32,7 @@ func TestManifestMatchesRuntimeContract(t *testing.T) {
 		t.Fatalf("parse apteva.yaml: %v", err)
 	}
 	runtime := (&App{}).Manifest()
-	if runtime.Name != "builder" || runtime.Version != "0.1.0" {
+	if runtime.Name != "builder" || runtime.Version != "0.1.1" {
 		t.Fatalf("runtime identity = %s@%s", runtime.Name, runtime.Version)
 	}
 	if runtime.Name != onDisk.Name || runtime.Version != onDisk.Version {
@@ -40,6 +43,12 @@ func TestManifestMatchesRuntimeContract(t *testing.T) {
 	}
 	if len(runtime.Requires.Apps) != 1 || runtime.Requires.Apps[0].Name != "conversations" || runtime.Requires.Apps[0].Optional {
 		t.Fatalf("requires.apps = %+v, want required conversations", runtime.Requires.Apps)
+	}
+	if len(runtime.Provides.UIPanels) != 1 || runtime.Provides.UIPanels[0].Entry != "/ui/BuilderPanel.mjs" {
+		t.Fatalf("Builder panel missing: %+v", runtime.Provides.UIPanels)
+	}
+	if len(runtime.Provides.UIComponents) != 1 || runtime.Provides.UIComponents[0].Name != "builder-workspace" {
+		t.Fatalf("Builder workspace contribution missing: %+v", runtime.Provides.UIComponents)
 	}
 	wantTools := []string{"goal_start", "goal_list", "goal_get", "plan_set", "step_update", "resource_upsert", "check_record", "event_record", "goal_update"}
 	gotTools := make([]string, 0, len(runtime.Provides.MCPTools))
@@ -222,6 +231,56 @@ func TestGoalScopeIsHelperAndProjectBound(t *testing.T) {
 	}
 	if _, _, err := builderIdentity(context.Background(), nil); err == nil {
 		t.Fatal("missing trusted caller was accepted")
+	}
+}
+
+func TestGoalHTTPReadModel(t *testing.T) {
+	app, _ := newTestApp(t)
+	goal, _, err := app.store.CreateGoal(CreateGoalInput{
+		ProjectID: testProject, OwnerAgentID: testAgent, ThreadID: testThread,
+		Title: "Visible project", Objective: "Show the durable Builder state", SuccessCriteria: []string{"Visible"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/goals?project_id="+testProject+"&owner_agent_id=41", nil)
+	listRec := httptest.NewRecorder()
+	app.handleGoals(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var list goalListResponse
+	if err := json.Unmarshal(listRec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Goals) != 1 || list.Goals[0].ID != goal.ID {
+		t.Fatalf("goals = %+v", list.Goals)
+	}
+
+	detailReq := httptest.NewRequest(http.MethodGet, "/goals/"+goal.ID+"?project_id="+testProject+"&owner_agent_id=41", nil)
+	detailRec := httptest.NewRecorder()
+	app.handleGoals(detailRec, detailReq)
+	if detailRec.Code != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", detailRec.Code, detailRec.Body.String())
+	}
+	var bundle GoalBundle
+	if err := json.Unmarshal(detailRec.Body.Bytes(), &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Goal == nil || bundle.Goal.ID != goal.ID || bundle.Steps == nil || bundle.Checks == nil || bundle.Resources == nil || bundle.Events == nil {
+		t.Fatalf("bundle = %+v", bundle)
+	}
+
+	wrongScope := httptest.NewRecorder()
+	app.handleGoals(wrongScope, httptest.NewRequest(http.MethodGet, "/goals/"+goal.ID+"?project_id="+testProject+"&owner_agent_id=42", nil))
+	if wrongScope.Code != http.StatusNotFound {
+		t.Fatalf("wrong owner status=%d body=%s", wrongScope.Code, wrongScope.Body.String())
+	}
+	missingScope := httptest.NewRecorder()
+	app.handleGoals(missingScope, httptest.NewRequest(http.MethodGet, "/goals", nil))
+	if missingScope.Code != http.StatusBadRequest {
+		t.Fatalf("missing scope status=%d", missingScope.Code)
 	}
 }
 

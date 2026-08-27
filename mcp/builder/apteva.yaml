@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: builder
 display_name: Builder
-version: 0.1.0
+version: 0.1.1
 description: Goal-driven orchestration for Apteva Helper. Turns an outcome into a durable plan, tracks the agents, apps, integrations, credentials, checks, and decisions involved, and keeps execution grounded in explicit success criteria.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/builder
@@ -23,7 +23,7 @@ requires:
 
 provides:
   http_routes:
-    - prefix: /setup/
+    - prefix: /
   mcp_tools:
     - { name: goal_start,      description: "Create or idempotently recover one durable project goal from the operator's desired outcome." }
     - { name: goal_list,       description: "List Builder goals for the current Helper and project." }
@@ -34,6 +34,22 @@ provides:
     - { name: check_record,    description: "Record a success check as pending, passing, failing, or blocked with concrete evidence." }
     - { name: event_record,    description: "Record a meaningful progress note, decision, risk, approval, or operator input." }
     - { name: goal_update,     description: "Update goal-level phase, summary, next action, or terminal status. Completion is gated by steps and checks." }
+  ui_panels:
+    - slot: project.page
+      label: Builder
+      icon: wand-sparkles
+      entry: /ui/BuilderPanel.mjs
+      suggested: true
+  ui_components:
+    - name: builder-workspace
+      label: Builder workspace
+      description: Work with Apteva Helper while following the durable goal, plan, checks, resources, and activity it maintains.
+      entry: /ui/BuilderPanel.mjs
+      slots: [dashboard.build]
+      suggested: true
+      visibility: project
+      supported_sizes: [full]
+      default_size: full
   skills:
     - name: building-with-helper
       command: /builder
