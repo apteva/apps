@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"sort"
@@ -386,11 +388,53 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.5.4" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.5.5" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
 		t.Fatalf("manifest runtime ref=%v version=%s", manifest.Runtime.Source, manifest.Version)
+	}
+}
+
+func TestCreateToolSchemasExposeCanonicalWorkflow(t *testing.T) {
+	tools := map[string]sdk.Tool{}
+	for _, tool := range (&App{}).MCPTools() {
+		tools[tool.Name] = tool
+	}
+	for _, name := range []string{"eval_suite_create", "eval_case_create", "eval_experiment_create"} {
+		schema := tools[name].InputSchema
+		if schema == nil {
+			t.Fatalf("tool %s has no schema", name)
+		}
+		if additional, ok := schema["additionalProperties"].(bool); !ok || additional {
+			t.Fatalf("tool %s must reject unknown properties: %#v", name, schema)
+		}
+	}
+	caseProperties, _ := tools["eval_case_create"].InputSchema["properties"].(map[string]any)
+	for _, field := range []string{"suite_id", "name", "prompt", "goals", "assertions", "environment_id", "timeout_seconds", "max_turns"} {
+		if _, found := caseProperties[field]; !found {
+			t.Errorf("eval_case_create schema is missing %q", field)
+		}
+	}
+	assertions, _ := caseProperties["assertions"].(map[string]any)
+	assertionItems, _ := assertions["items"].(map[string]any)
+	assertionProperties, _ := assertionItems["properties"].(map[string]any)
+	for _, field := range []string{"name", "type", "path", "equals"} {
+		if _, found := assertionProperties[field]; !found {
+			t.Errorf("assertion schema is missing %q", field)
+		}
+	}
+	experimentProperties, _ := tools["eval_experiment_create"].InputSchema["properties"].(map[string]any)
+	targets, _ := experimentProperties["targets"].(map[string]any)
+	targetItems, _ := targets["items"].(map[string]any)
+	targetProperties, _ := targetItems["properties"].(map[string]any)
+	for _, field := range []string{"agent_id", "provider", "model"} {
+		if _, found := targetProperties[field]; !found {
+			t.Errorf("target schema is missing %q", field)
+		}
+	}
+	if _, err := (&App{}).toolCreateExperiment(nil, map[string]any{"suite_id": "suite-one", "targets": []any{}, "unexpected": true}); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("strict experiment arguments error=%v", err)
 	}
 }
 
@@ -418,6 +462,145 @@ type evalPlatformStub struct {
 	testkit.BasePlatformClient
 	t     *testing.T
 	calls []recordedAppCall
+}
+
+type evalCampaignPlatformStub struct {
+	testkit.BasePlatformClient
+	sdk.RuntimeClient
+	t           *testing.T
+	definitions map[string]EnvironmentDefinition
+	created     int
+	spawned     int
+	stopped     int
+	asserted    int
+	prompts     []string
+}
+
+func (s *evalCampaignPlatformStub) ListRuntimeCatalogAgents(string) ([]sdk.RuntimeCatalogAgent, error) {
+	return []sdk.RuntimeCatalogAgent{{ID: 7, Name: "Test Agent", Directive: "Resolve support requests", DirectiveETag: "etag-one", ProjectID: "project-one"}}, nil
+}
+
+func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[string]any, out any) error {
+	if app != "environments" {
+		s.t.Fatalf("unexpected app call %s/%s", app, tool)
+	}
+	var value any
+	switch tool {
+	case "environment_get":
+		id, _ := input["id"].(string)
+		value = s.definitions[id]
+	case "environment_run_create":
+		s.created++
+		value = EnvironmentRun{ID: fmt.Sprintf("environment-run-%d", s.created), RuntimeID: fmt.Sprintf("runtime-%d", s.created), Status: "running"}
+	case "environment_agent_spawn":
+		s.spawned++
+		value = sdk.RuntimeAgent{Alias: "main", Status: "paused"}
+	case "environment_agent_send":
+		message, _ := input["message"].(string)
+		s.prompts = append(s.prompts, message)
+		value = map[string]any{"ok": true}
+	case "environment_agent_control":
+		value = map[string]any{"ok": true}
+	case "environment_agent_wait":
+		value = sdk.RuntimeAgentExecution{
+			Status:   "completed",
+			ThreadID: "main",
+			Turns:    1,
+			Trace:    []sdk.RuntimeTraceEvent{{Index: 1, ThreadID: "main", Role: "assistant", Content: "support request resolved"}},
+			Metrics:  sdk.RuntimeAgentMetrics{LLMCalls: 1, TokensIn: 8, TokensOut: 4},
+		}
+	case "environment_assert":
+		s.asserted++
+		name, _ := input["name"].(string)
+		value = AssertionResult{Name: name, Passed: true, Actual: "resolved"}
+	case "environment_run_stop":
+		s.stopped++
+		value = map[string]any{"ok": true}
+	default:
+		s.t.Fatalf("unexpected app call %s/%s", app, tool)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func TestFourCaseCampaignRunsPromptsAssertionsAndStopsEnvironments(t *testing.T) {
+	platform := &evalCampaignPlatformStub{
+		t: t,
+		definitions: map[string]EnvironmentDefinition{
+			"env-one": {ID: "env-one", Name: "Support sandbox", Spec: map[string]any{"version": 1, "network_mode": "block", "integration_mode": "mock"}},
+		},
+	}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-four", Name: "Billing campaign", EnvironmentID: "env-one"}, true); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 4; i++ {
+		_, err := svc.saveCase(&Case{
+			ID:         fmt.Sprintf("billing-%d", i),
+			SuiteID:    "suite-four",
+			Name:       fmt.Sprintf("Billing case %d", i),
+			Prompt:     fmt.Sprintf("support request %d", i),
+			Assertions: []Assertion{{Name: "request resolved", Type: "app_state", App: "crm", Tool: "contact_get", Path: "status", Equals: "resolved"}},
+		}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	experiment, err := svc.createExperiment("suite-four", "Four cases", "manual", []Target{{AgentID: 7, Provider: "openai", Model: "gpt-test"}}, 1, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(experiment.Runs) != 4 {
+		t.Fatalf("created %d eval runs, want 4", len(experiment.Runs))
+	}
+	for range 4 {
+		if err := svc.runNext(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	completed, err := svc.db.getExperiment(experiment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != "completed" || len(completed.Runs) != 4 {
+		t.Fatalf("experiment=%#v", completed)
+	}
+	for _, run := range completed.Runs {
+		if run.Status != "pass" || run.Execution == nil || len(run.Execution.Trace) == 0 || len(run.Assertions) != 1 || !run.Assertions[0].Passed || run.EnvironmentRunID == "" {
+			t.Errorf("incomplete persisted run=%#v", run)
+		}
+	}
+	if platform.created != 4 || platform.spawned != 4 || len(platform.prompts) != 4 || platform.asserted != 4 || platform.stopped != 4 {
+		t.Fatalf("orchestration created=%d spawned=%d prompts=%d asserted=%d stopped=%d", platform.created, platform.spawned, len(platform.prompts), platform.asserted, platform.stopped)
+	}
+	for _, prompt := range platform.prompts {
+		if !strings.Contains(prompt, "support request") {
+			t.Errorf("agent did not receive case prompt: %q", prompt)
+		}
+	}
+}
+
+func TestExperimentRejectsInvalidEnvironmentBeforeQueueingRuns(t *testing.T) {
+	platform := &evalCampaignPlatformStub{t: t, definitions: map[string]EnvironmentDefinition{}}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-invalid-environment", Name: "Invalid environment", EnvironmentID: "env-missing"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.saveCase(&Case{ID: "case-one", SuiteID: "suite-invalid-environment", Name: "Case", Prompt: "Help", Assertions: []Assertion{{Name: "done", Type: "app_state"}}}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.createExperiment("suite-invalid-environment", "", "manual", []Target{{AgentID: 7}}, 1, 0, ""); err == nil || !strings.Contains(err.Error(), "not found or inaccessible") {
+		t.Fatalf("invalid environment error=%v", err)
+	}
+	experiments, err := svc.db.listExperiments(10)
+	if err != nil || len(experiments) != 0 {
+		t.Fatalf("experiments=%#v err=%v", experiments, err)
+	}
 }
 
 func (s *evalPlatformStub) CallAppResult(app, tool string, input map[string]any, out any) error {

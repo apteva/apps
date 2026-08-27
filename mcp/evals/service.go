@@ -153,7 +153,39 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 		judgeModel = suite.JudgeModel
 	}
 
-	agents, _ := s.ctx.RuntimeAPI().ListRuntimeCatalogAgents(s.ctx.CurrentProject())
+	cases := []Case{}
+	validatedEnvironments := map[string]bool{}
+	for _, item := range suite.Cases {
+		if !item.Enabled {
+			continue
+		}
+		if item.EnvironmentID == "" {
+			item.EnvironmentID = suite.EnvironmentID
+		}
+		if item.EnvironmentID != "" && !validatedEnvironments[item.EnvironmentID] {
+			var definition EnvironmentDefinition
+			if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_get", map[string]any{"id": item.EnvironmentID}, &definition); err != nil {
+				return nil, fmt.Errorf("case %s: load environment %s: %w", item.ID, item.EnvironmentID, err)
+			}
+			if definition.ID != item.EnvironmentID {
+				return nil, fmt.Errorf("case %s: environment %s not found or inaccessible", item.ID, item.EnvironmentID)
+			}
+			validatedEnvironments[item.EnvironmentID] = true
+		}
+		cases = append(cases, item)
+	}
+	if len(cases) == 0 {
+		return nil, errors.New("suite has no enabled cases")
+	}
+
+	runtimeAPI := s.ctx.RuntimeAPI()
+	if runtimeAPI == nil {
+		return nil, errors.New("runtime catalog API unavailable")
+	}
+	agents, err := runtimeAPI.ListRuntimeCatalogAgents(s.ctx.CurrentProject())
+	if err != nil {
+		return nil, fmt.Errorf("list target agents: %w", err)
+	}
 	byID := map[int64]sdk.RuntimeCatalogAgent{}
 	for _, agent := range agents {
 		byID[agent.ID] = agent
@@ -171,16 +203,6 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 			parts := strings.SplitN(targets[i].Model, "/", 2)
 			targets[i].Provider, targets[i].Model = parts[0], parts[1]
 		}
-	}
-	cases := []Case{}
-	for _, item := range suite.Cases {
-		if !item.Enabled {
-			continue
-		}
-		if item.EnvironmentID == "" {
-			item.EnvironmentID = suite.EnvironmentID
-		}
-		cases = append(cases, item)
 	}
 	exp := &Experiment{ID: "exp_" + token(12), SuiteID: suite.ID, SuiteRevision: suite.Revision, Name: strings.TrimSpace(name), TriggerType: trigger, Status: "queued", Targets: targets, Repetitions: repetitions, JudgeModel: judgeModel, BaselineTarget: baseline, CreatedAt: time.Now().UTC()}
 	if err := s.db.createExperiment(exp, cases); err != nil {
