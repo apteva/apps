@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.33
+version: 0.4.34
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -90,9 +90,17 @@ provides:
     - { name: instance_volume_detach, description: "Detach a managed data volume without deleting it." }
     - { name: instance_volume_resize, description: "Increase the size of a managed volume." }
     - { name: instance_volume_delete, description: "Permanently delete a detached managed data volume with explicit confirmation." }
+    - { name: object_storage_list_providers, description: "List bound providers capable of provisioning object storage." }
+    - { name: object_storage_list_plans, description: "List object-storage regions/clusters and plans/tiers." }
+    - { name: object_storage_create, description: "Provision object storage and return its S3 credentials once without creating a Connection." }
+    - { name: object_storage_get, description: "Fetch one object-storage resource without its secret." }
+    - { name: object_storage_list, description: "List object-storage resources tracked by Instances." }
+    - { name: object_storage_rotate_credentials, description: "Rotate credentials and return the new secret once." }
+    - { name: object_storage_destroy, description: "Permanently delete an object-storage resource with explicit confirmation." }
+    - { name: instance_register,     description: "Register an externally managed SSH host such as a Mac. Generates a dedicated SSH key. Args: name, ssh_host, ssh_user, ssh_port?, tags_json?." }
     - { name: instance_get,          description: "Fetch one instance by id." }
     - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
-    - { name: instance_destroy,      description: "Terminate the provider-managed instance and remove its row where supported (refused for local id 0 and Contabo). Args: id." }
+    - { name: instance_destroy,      description: "Terminate a managed instance and remove its row, or forget an external host without modifying it (refused for local id 0 and Contabo). Args: id." }
     - { name: instance_upgrade,      description: "In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today. Args: id, size, upgrade_disk?. Always waits for SSH readiness." }
     - { name: instance_run_command,  description: "Execute a shell command. Local: exec; remote: SSH. Args: id, cmd, timeout_s?." }
     - { name: instance_upload_file,  description: "Write a file. Local: filesystem (path-allowlisted); remote: SCP. Args: id, path, content_b64." }
@@ -173,7 +181,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.33
+    ref: instances/v0.4.34
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -257,6 +265,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/instances-storage-capabilities", Handler: a.handleStorageCapabilities},
 		{Pattern: "/api/instance-volumes", Handler: a.handleVolumesCollection},
 		{Pattern: "/api/instance-volumes/", Handler: a.handleVolumeItem},
+		{Pattern: "/api/object-storage-providers", Handler: a.handleObjectStorageProviders},
+		{Pattern: "/api/object-storage-plans", Handler: a.handleObjectStoragePlans},
+		{Pattern: "/api/object-storage", Handler: a.handleObjectStoragesCollection},
+		{Pattern: "/api/object-storage/", Handler: a.handleObjectStorageItem},
 	}
 }
 

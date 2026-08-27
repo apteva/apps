@@ -21,8 +21,8 @@ instance_metrics(host_id)
 ```
 
 `host_id=0` is the **local Apteva machine**, auto-seeded at app mount.
-Other ids are provider-managed compute provisioned through one of the bound
-cloud integrations.
+Other ids are remote hosts provisioned via one of the bound cloud integrations or
+registered as externally managed SSH machines.
 
 ## Tools
 
@@ -30,6 +30,14 @@ cloud integrations.
 |---|---|
 | `instance_list_providers` | List bound provider connections and the configured default. |
 | `instance_create` | Provision compute through the bound provider, including VPS, GPU Pods, Scaleway Dedibox, and Apple silicon. |
+| `instance_register` | Register an existing SSH host, including a Mac, and generate its dedicated SSH key. |
+| `instance_get` | Fetch one instance row |
+| `instance_list` | List all instances; optional `provider` / `status` filters |
+| `instance_destroy` | Terminate managed upstream + remove row, or only forget an external host (refused for local id 0) |
+| `instance_run_command` | Shell command. Local: in-process exec. Remote: SSH. |
+| `instance_upload_file` | Write a file. Local: filesystem (path-allowlisted to `<dataDir>/local-files/`). Remote: SCP-equivalent over SSH. |
+| `instance_wait_ready` | Poll until SSH reachable. |
+| `instance_metrics` | CPU / mem / disk / network / load / uptime. 5s cache. |
 | `instance_storage_capabilities` | Describe boot/data support, storage classes, tiers, and lifecycle operations for a provider. |
 | `instance_list_storage_types` | List generic storage tiers and their provider-native mappings. |
 | `instance_volume_create` | Create a managed data volume, optionally attaching and preparing it inside the guest. |
@@ -38,13 +46,11 @@ cloud integrations.
 | `instance_volume_prepare` | Safely format-if-blank, persist by UUID, mount, and verify an attached Linux data block volume over SSH. |
 | `instance_volume_resize` | Grow a provider volume; shrinking is refused. |
 | `instance_volume_delete` | Delete a detached app-managed data volume with explicit confirmation. |
-| `instance_get` | Fetch one instance row |
-| `instance_list` | List all instances; optional `provider` / `status` filters |
-| `instance_destroy` | Terminate the provider-managed resource and remove its row where supported (refused for local id 0) |
-| `instance_run_command` | Shell command. Local: in-process exec. Remote: SSH. |
-| `instance_upload_file` | Write a file. Local: filesystem (path-allowlisted to `<dataDir>/local-files/`). Remote: SCP-equivalent over SSH. |
-| `instance_wait_ready` | Poll until SSH reachable. |
-| `instance_metrics` | CPU / mem / disk / network / load / uptime. 5s cache. |
+| `object_storage_list_providers`, `object_storage_list_plans` | Discover bound object-storage providers, locations, and tiers. |
+| `object_storage_create` | Provision object storage and return its S3 credentials once. |
+| `object_storage_get`, `object_storage_list` | Inspect managed object-storage resources without exposing secrets. |
+| `object_storage_rotate_credentials` | Rotate credentials and return the new secret once. |
+| `object_storage_destroy` | Delete provider storage and revoke its managed credentials with explicit confirmation. |
 
 ## Local instance (id=0)
 
@@ -154,6 +160,35 @@ and waits for SSH. The service and SSH-key IDs are retained privately so a
 restart can resume provisioning and Destroy terminates only the matching
 subscription and owned key.
 
+## Existing SSH hosts and Macs
+
+`instance_register(name, ssh_host, ssh_user, ssh_port?)` adds an existing
+machine without provisioning or otherwise changing it. Instances returns a
+new Ed25519 public key. Add that key to the selected user's
+`~/.ssh/authorized_keys`, then call `instance_wait_ready(id)` to verify access
+and mark the row ready.
+
+These hosts use the same command, file-transfer, and loopback tunnel tools as
+managed instances. `instance_destroy` only forgets an external row; it never
+shuts down, deletes, or reconfigures the machine. The current remote metrics
+collector requires a declared platform, so metrics are not advertised for
+external hosts by default.
+
+## Object storage
+
+Object storage is a provider resource, not a filesystem volume. Instances can
+provision it through a bound Scaleway or Vultr connection and return the S3
+endpoint, region, bucket where applicable, access key, and secret key. It does
+not create another Apteva Connection and does not mount or consume the storage.
+
+Secrets are deliberately never written to the Instances database. They are
+shown only in the create or rotate response and in the UI's one-time credential
+dialog. Scaleway resources use a dedicated project-scoped IAM application and
+policy; Vultr credentials are owned by its Object Storage subscription. Destroy
+deletes the provider storage and revokes the managed credentials. A partial IAM
+cleanup keeps the local record in an error state so the operation can be safely
+retried.
+
 ## Metrics
 
 Local: `gopsutil` for CPU / memory / disk / network / load / uptime.
@@ -175,8 +210,8 @@ the linguistic collision.
 
 ## Current limitations
 
-- Provider selection supports provider slug plus an optional connection id, so
-  multiple providers and multiple accounts of the same provider can coexist.
+- Multiple different providers and multiple accounts of the same provider can
+  be selected by connection ID for provisioning requests.
 - In-place resizing is currently available only for Hetzner.
 - Metrics are pull-only through `instance_metrics`, cached for 5 seconds.
 

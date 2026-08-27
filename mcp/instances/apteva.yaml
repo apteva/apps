@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.4.33
+version: 0.4.34
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
@@ -30,7 +30,7 @@ author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/instances
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [instances, hosts, vps, compute, infrastructure]
+tags: [instances, hosts, vps, compute, infrastructure, object-storage, s3]
 
 scopes: [global]
 min_apteva_version: "0.10.0"
@@ -86,12 +86,28 @@ provides:
       description: Increase a managed volume size; shrinking is refused.
     - name: instance_volume_delete
       description: Permanently delete a detached app-managed data volume with explicit confirmation.
+    - name: object_storage_list_providers
+      description: List bound provider accounts capable of provisioning object storage.
+    - name: object_storage_list_plans
+      description: List object-storage regions/clusters and plans/tiers for a provider.
+    - name: object_storage_create
+      description: Provision object storage and return its S3 credentials once without creating a Connection or persisting the secret.
+    - name: object_storage_get
+      description: Fetch one provisioned object-storage resource without its secret.
+    - name: object_storage_list
+      description: List object-storage resources tracked by Instances.
+    - name: object_storage_rotate_credentials
+      description: Rotate object-storage credentials and return the new secret once.
+    - name: object_storage_destroy
+      description: Permanently delete a managed object-storage resource with explicit confirmation.
+    - name: instance_register
+      description: Register an externally managed SSH host such as a Mac. Generates a dedicated SSH key and returns the public key to authorize on that host.
     - name: instance_get
       description: Fetch one instance by id (0 for local).
     - name: instance_list
       description: List instances, optionally filtered by provider or status.
     - name: instance_destroy
-      description: Terminate the provider-managed resource and remove its row where immediate deletion is supported. Refused for local (id 0) and Contabo.
+      description: Terminate a managed upstream resource and remove its row, or forget an externally registered host without modifying it. Refused for local (id 0) and Contabo.
     - name: instance_upgrade
       description: In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today and the operation always waits for SSH readiness.
     - name: instance_run_command
@@ -198,7 +214,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.33
+    ref: instances/v0.4.34
     entry: mcp/instances
   port: 8080
   health_check: /health

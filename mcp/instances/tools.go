@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -87,6 +88,41 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "instance_volume_detach", Description: "Detach a data volume without deleting it. Boot volumes are refused.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolVolumeDetach},
 		{Name: "instance_volume_resize", Description: "Increase a managed volume size. Shrinking is refused. Filesystem growth remains a separate guest operation.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "size_gb": map[string]any{"type": "integer", "minimum": 1}}, []string{"id", "size_gb"}), Handler: a.toolVolumeResize},
 		{Name: "instance_volume_delete", Description: "Permanently delete a detached, app-managed data volume. Requires confirm=true; external and boot volumes are refused.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "confirm": map[string]any{"type": "boolean"}}, []string{"id", "confirm"}), Handler: a.toolVolumeDelete},
+		{
+			Name:        "object_storage_list_providers",
+			Description: "List bound provider accounts that can provision object storage through Instances.",
+			InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolObjectStorageListProviders,
+		},
+		{
+			Name:        "object_storage_list_plans",
+			Description: "List object-storage regions/clusters and plans/tiers for a bound provider.",
+			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}}, nil), Handler: a.toolObjectStorageListPlans,
+		},
+		{
+			Name:        "object_storage_create",
+			Description: "Provision object storage and return its S3 credentials once. Instances stores resource metadata and access-key ID, never the secret and never an automatic Connection.",
+			InputSchema: schemaObject(map[string]any{
+				"name": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"},
+				"region": map[string]any{"type": "string", "description": "Scaleway region or Vultr cluster ID"}, "plan": map[string]any{"type": "string", "description": "Provider tier ID; optional where supported"},
+				"bucket": map[string]any{"type": "string", "description": "Optional Scaleway bucket name; a globally unique name is generated when omitted"},
+			}, []string{"name"}), Handler: a.toolObjectStorageCreate,
+		},
+		{Name: "object_storage_get", Description: "Get one provisioned object-storage resource. Secrets are never persisted and are not returned here.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolObjectStorageGet},
+		{Name: "object_storage_list", Description: "List object-storage resources tracked by Instances. Optional provider filter.", InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}}, nil), Handler: a.toolObjectStorageList},
+		{Name: "object_storage_rotate_credentials", Description: "Rotate credentials and return the new secret once. The previous provider key is invalidated where supported.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolObjectStorageRotateCredentials},
+		{Name: "object_storage_destroy", Description: "Delete a managed object-storage resource. Requires confirm=true. Scaleway buckets must be empty.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "confirm": map[string]any{"type": "boolean"}}, []string{"id", "confirm"}), Handler: a.toolObjectStorageDestroy},
+		{
+			Name:        "instance_register",
+			Description: "Register an externally managed SSH host such as a Mac. Instances generates a dedicated keypair and returns the public key to add to the remote user's authorized_keys. The row remains provisioning until instance_wait_ready succeeds. Args: name, ssh_host, ssh_user, ssh_port?, tags_json?.",
+			InputSchema: schemaObject(map[string]any{
+				"name":      map[string]any{"type": "string"},
+				"ssh_host":  map[string]any{"type": "string"},
+				"ssh_user":  map[string]any{"type": "string"},
+				"ssh_port":  map[string]any{"type": "integer"},
+				"tags_json": map[string]any{"type": "string"},
+			}, []string{"name", "ssh_host", "ssh_user"}),
+			Handler: a.toolRegister,
+		},
 		{
 			Name:        "instance_get",
 			Description: "Fetch one instance by id (0 for local).",
@@ -249,14 +285,9 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	provider := strArg(args, "provider")
 	in := CreateInstanceInput{
-		Name:                 name,
-		Provider:             provider,
-		ProviderConnectionID: int64Arg(args, "provider_connection_id"),
-		Region:               strArg(args, "region"),
-		Size:                 strArg(args, "size"),
-		Image:                strArg(args, "image"),
-		TagsJSON:             strArg(args, "tags_json"),
-		Storage:              storageRequestArg(args),
+		Name: name, Provider: provider, ProviderConnectionID: int64Arg(args, "provider_connection_id"),
+		Region: strArg(args, "region"), Size: strArg(args, "size"), Image: strArg(args, "image"), TagsJSON: strArg(args, "tags_json"),
+		Storage: storageRequestArg(args),
 	}
 	inst, err := provisionInstance(ctx, in)
 	if err != nil {
@@ -274,6 +305,48 @@ func storageRequestArg(args map[string]any) InstanceStorageRequest {
 	return InstanceStorageRequest{Boot: &BootStorageRequest{
 		SizeGB: intArg(boot, "size_gb", 0), Tier: strArg(boot, "tier"), ProviderType: strArg(boot, "provider_type"), DeletePolicy: strArg(boot, "delete_policy"),
 	}}
+}
+
+func (a *App) toolRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	name := strings.TrimSpace(strArg(args, "name"))
+	host := strings.TrimSpace(strArg(args, "ssh_host"))
+	user := strings.TrimSpace(strArg(args, "ssh_user"))
+	port := intArg(args, "ssh_port", 22)
+	if name == "" || host == "" || user == "" {
+		return nil, errors.New("name, ssh_host, and ssh_user are required")
+	}
+	if strings.ContainsAny(host, " /\\\t\r\n") {
+		return nil, errors.New("ssh_host must be a hostname or IP address without whitespace")
+	}
+	if strings.ContainsAny(user, " /\\\t\r\n@:") {
+		return nil, errors.New("ssh_user contains invalid characters")
+	}
+	if port <= 0 || port > 65535 {
+		return nil, errors.New("ssh_port must be between 1 and 65535")
+	}
+	privateKey, publicKey, err := generateSSHKeypair()
+	if err != nil {
+		return nil, err
+	}
+	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
+		Name: name, Provider: "external", ProviderID: host + ":" + fmt.Sprint(port),
+		Status: "provisioning", SSHHost: host, SSHPort: port, SSHUser: user,
+		SSHPrivateKey: privateKey, SSHPublicKey: publicKey,
+		TagsJSON: strArg(args, "tags_json"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	emitInstanceCreated(ctx, inst)
+	emitInstanceStatus(ctx, inst)
+	return map[string]any{
+		"instance": inst.stripSecrets(),
+		"authorization": map[string]any{
+			"ssh_user": user, "ssh_host": host, "ssh_port": port,
+			"public_key": publicKey,
+			"next_step":  "Add public_key as one line in the remote user's ~/.ssh/authorized_keys, then call instance_wait_ready with this instance id.",
+		},
+	}, nil
 }
 
 func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {

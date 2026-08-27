@@ -73,6 +73,37 @@ interface InstanceVolumeWire {
   error?: string;
 }
 
+interface ObjectStorageWire {
+  id: number;
+  name: string;
+  provider: string;
+  provider_connection_id: number;
+  provider_id: string;
+  status: string;
+  region?: string;
+  plan?: string;
+  endpoint?: string;
+  bucket?: string;
+  access_key_id?: string;
+  error?: string;
+  created_at?: string;
+}
+
+interface ObjectStorageCredentialsWire {
+  endpoint: string;
+  region?: string;
+  bucket?: string;
+  access_key_id: string;
+  secret_access_key: string;
+  shown_once: boolean;
+}
+
+interface ObjectStorageProviderWire {
+  provider: string;
+  connection_id: number;
+  default: boolean;
+}
+
 interface StorageCapabilitiesWire {
   provider: string;
   boot_size_configurable: boolean;
@@ -380,6 +411,8 @@ function MultiLineChart({
 }
 
 export default function InstancesPanel({ projectId, installId }: NativePanelProps) {
+  const [view, setView] = useState<"compute" | "object-storage">("compute");
+  const [objectStorageRefresh, setObjectStorageRefresh] = useState(0);
   const [instances, setInstances] = useState<Instance[] | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -467,10 +500,20 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
       <header className="px-4 py-3 border-b border-border flex flex-wrap items-baseline gap-3">
         <h1 className="text-text font-semibold">Instances</h1>
         <span className="hidden md:inline text-xs text-text-muted">
-          Host inventory — local + remote across bound VPS providers.
+          Provision compute, block volumes, and object storage across bound cloud providers.
         </span>
+        <div className="flex items-center gap-1 ml-2">
+          <button type="button" onClick={() => setView("compute")}
+            className={`px-2 py-1 text-xs rounded ${view === "compute" ? "bg-bg-input text-text" : "text-text-muted hover:text-text"}`}>
+            Compute
+          </button>
+          <button type="button" onClick={() => setView("object-storage")}
+            className={`px-2 py-1 text-xs rounded ${view === "object-storage" ? "bg-bg-input text-text" : "text-text-muted hover:text-text"}`}>
+            Object storage
+          </button>
+        </div>
         <span className="flex-1" />
-        {remoteCount > 0 && (
+        {view === "compute" && remoteCount > 0 && (
           <span
             className="text-xs text-text-muted px-2 py-0.5 rounded bg-bg-input/40 border border-border/40"
             title="Sum of monthly cost across non-local instances (0 when the catalog hasn't priced them yet)"
@@ -485,14 +528,14 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
             <span className="text-text-dim">{remoteCount} remote</span>
           </span>
         )}
-        <button
+        {view === "compute" && <button
           type="button"
           onClick={() => setShowCreate(true)}
           className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
-        >+ Provision</button>
+        >+ Provision</button>}
         <button
           type="button"
-          onClick={load}
+          onClick={() => view === "object-storage" ? setObjectStorageRefresh((value) => value + 1) : load()}
           disabled={busy}
           className="px-2 py-0.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
         >Refresh</button>
@@ -501,7 +544,9 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
       {error && <div className="px-4 py-2 text-red text-xs border-b border-border">{error}</div>}
 
       <main className="flex-1 overflow-auto p-3 space-y-2">
-        {instances === null ? (
+        {view === "object-storage" ? (
+          <ObjectStorageSection withParams={withParams} setError={setError} refresh={objectStorageRefresh} />
+        ) : instances === null ? (
           <div className="p-6 text-text-muted text-sm">Loading…</div>
         ) : instances.length === 0 ? (
           <div className="p-6 text-text-muted text-sm">No instances. Local should auto-seed at app boot.</div>
@@ -556,6 +601,334 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
           setError={setError}
         />
       )}
+    </div>
+  );
+}
+
+function ObjectStorageSection({ withParams, setError, refresh }: {
+  withParams: () => string;
+  setError: (value: string) => void;
+  refresh: number;
+}) {
+  const [items, setItems] = useState<ObjectStorageWire[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [credentialResult, setCredentialResult] = useState<{
+    object_storage: ObjectStorageWire;
+    credentials: ObjectStorageCredentialsWire;
+    warning?: string;
+    warnings?: string[];
+  } | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch(`${API}/object-storage?${withParams()}`, { credentials: "same-origin" });
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+      const body = await response.json();
+      setItems(body.object_storages || []);
+      setError("");
+    } catch (error) {
+      setItems([]);
+      setError("Object storage failed: " + (error as Error).message);
+    }
+  }, [setError, withParams]);
+
+  useEffect(() => { load(); }, [load, refresh]);
+
+  const rotate = async (item: ObjectStorageWire) => {
+    if (!window.confirm(`Rotate credentials for ${item.name}? The previous key will stop working.`)) return;
+    setBusy(true);
+    try {
+      const response = await fetch(`${API}/object-storage/${item.id}/rotate-credentials?${withParams()}`, {
+        method: "POST", credentials: "same-origin",
+      });
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+      setCredentialResult(await response.json());
+      await load();
+    } catch (error) {
+      setError("Credential rotation failed: " + (error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const destroy = async (item: ObjectStorageWire) => {
+    const scope = item.bucket ? `bucket ${item.bucket}` : `subscription ${item.name}`;
+    if (!window.confirm(`Permanently delete ${scope}? Scaleway buckets must be empty. This cannot be undone.`)) return;
+    setBusy(true);
+    try {
+      const response = await fetch(`${API}/object-storage/${item.id}?confirm=true&${withParams()}`, {
+        method: "DELETE", credentials: "same-origin",
+      });
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+      await load();
+    } catch (error) {
+      setError("Object storage destroy failed: " + (error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 px-1 pb-1">
+        <div>
+          <div className="text-sm text-text font-medium">Object storage</div>
+          <div className="text-[11px] text-text-muted">Instances provisions the resource and displays S3 credentials once. It does not store objects or create a Connection.</div>
+        </div>
+        <span className="flex-1" />
+        <button type="button" onClick={() => setShowCreate(true)}
+          className="px-2 py-1 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg">
+          + Provision object storage
+        </button>
+      </div>
+
+      {items === null ? (
+        <div className="p-6 text-sm text-text-muted">Loading object storage…</div>
+      ) : items.length === 0 ? (
+        <div className="rounded p-6 text-sm text-text-muted" style={{ border: `1px solid ${SUBTLE_BORDER}` }}>
+          No object-storage resources are tracked yet.
+        </div>
+      ) : items.map((item) => (
+        <article key={item.id} className="rounded overflow-hidden" style={{ border: `1px solid ${SUBTLE_BORDER}` }}>
+          <div className="px-3 py-2 flex flex-wrap items-center gap-2" style={{ backgroundColor: HEADER_STRIP_BG }}>
+            <span className={statusColor(item.status) + " text-sm"}>●</span>
+            <div className="min-w-0">
+              <div className="text-sm text-text font-semibold truncate">{item.name}</div>
+              <div className="text-[10px] text-text-dim">{[item.provider, item.region, item.plan].filter(Boolean).join(" · ")}</div>
+            </div>
+            <span className="flex-1" />
+            <span className={statusColor(item.status) + " text-[10px] uppercase tracking-wider"}>{item.status}</span>
+            <button type="button" disabled={busy} onClick={() => rotate(item)}
+              className="px-2 py-0.5 text-[10px] border border-blue/60 text-blue rounded disabled:opacity-50">
+              Rotate credentials
+            </button>
+            <button type="button" disabled={busy} onClick={() => destroy(item)}
+              className="px-2 py-0.5 text-[10px] border border-red/60 text-red rounded disabled:opacity-50">
+              Destroy
+            </button>
+          </div>
+          <div className="p-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-[11px]">
+            <div><span className="text-text-dim block uppercase tracking-wider text-[9px]">Endpoint</span><span className="text-text font-mono break-all">{item.endpoint || "—"}</span></div>
+            <div><span className="text-text-dim block uppercase tracking-wider text-[9px]">Bucket / resource</span><span className="text-text font-mono break-all">{item.bucket || item.provider_id}</span></div>
+            <div><span className="text-text-dim block uppercase tracking-wider text-[9px]">Access key ID</span><span className="text-text font-mono break-all">{item.access_key_id || "—"}</span></div>
+          </div>
+          {item.error && <div className="px-3 pb-3 text-[11px] text-red">{item.error}</div>}
+        </article>
+      ))}
+
+      {showCreate && (
+        <CreateObjectStorageDialog
+          withParams={withParams}
+          onClose={() => setShowCreate(false)}
+          onCreated={(result) => { setShowCreate(false); setCredentialResult(result); load(); }}
+          setError={setError}
+        />
+      )}
+      {credentialResult && (
+        <ObjectStorageCredentialsDialog result={credentialResult} onClose={() => setCredentialResult(null)} />
+      )}
+    </section>
+  );
+}
+
+function CreateObjectStorageDialog({ withParams, onClose, onCreated, setError }: {
+  withParams: () => string;
+  onClose: () => void;
+  onCreated: (result: { object_storage: ObjectStorageWire; credentials: ObjectStorageCredentialsWire; warning?: string }) => void;
+  setError: (value: string) => void;
+}) {
+  const [providers, setProviders] = useState<ObjectStorageProviderWire[]>([]);
+  const [connectionID, setConnectionID] = useState(0);
+  const [locations, setLocations] = useState<any[]>([]);
+  const [plans, setPlans] = useState<any[]>([]);
+  const [name, setName] = useState("");
+  const [region, setRegion] = useState("");
+  const [plan, setPlan] = useState("");
+  const [bucket, setBucket] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [localError, setLocalError] = useState("");
+
+  const selectedProvider = providers.find((provider) => provider.connection_id === connectionID);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const response = await fetch(`${API}/object-storage-providers?${withParams()}`, { credentials: "same-origin" });
+        if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+        const body = await response.json();
+        const available = (body.providers || []) as ObjectStorageProviderWire[];
+        setProviders(available);
+        setConnectionID((available.find((provider) => provider.default) || available[0])?.connection_id || 0);
+      } catch (error) {
+        setLocalError((error as Error).message);
+        setLoading(false);
+      }
+    })();
+  }, [withParams]);
+
+  useEffect(() => {
+    if (!selectedProvider) {
+      if (providers.length === 0) setLoading(false);
+      return;
+    }
+    (async () => {
+      setLoading(true);
+      setLocalError("");
+      try {
+        const params = new URLSearchParams(withParams());
+        params.set("provider", selectedProvider.provider);
+        params.set("provider_connection_id", String(selectedProvider.connection_id));
+        const response = await fetch(`${API}/object-storage-plans?${params}`, { credentials: "same-origin" });
+        if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+        const body = await response.json();
+        const nextLocations = body.locations || [];
+        const nextPlans = body.plans || [];
+        setLocations(nextLocations);
+        setPlans(nextPlans);
+        setRegion(String(nextLocations[0]?.id ?? nextLocations[0]?.cluster_id ?? ""));
+        setPlan(String(nextPlans[0]?.id ?? nextPlans[0]?.tier_id ?? ""));
+      } catch (error) {
+        setLocalError((error as Error).message);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [providers, selectedProvider, withParams]);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selectedProvider) return;
+    setBusy(true);
+    setLocalError("");
+    try {
+      const response = await fetch(`${API}/object-storage?${withParams()}`, {
+        method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim(), provider: selectedProvider.provider, provider_connection_id: selectedProvider.connection_id,
+          region, plan, bucket: selectedProvider.provider === "scaleway" ? bucket.trim() : "",
+        }),
+      });
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+      onCreated(await response.json());
+    } catch (error) {
+      const message = (error as Error).message;
+      setLocalError(message);
+      setError("Object storage provisioning failed: " + message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const locationLabel = (location: any) => [location.name, location.location, location.region, location.country].filter(Boolean).join(" · ") || String(location.id);
+  const planLabel = (candidate: any) => [candidate.name, candidate.label, candidate.description].filter(Boolean).join(" · ") || String(candidate.id);
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" style={{ padding: 24 }} onClick={() => !busy && onClose()} role="presentation">
+      <form onSubmit={submit} onClick={(event) => event.stopPropagation()} className="bg-bg border border-border rounded shadow-xl overflow-hidden" style={{ width: "min(560px, 100%)" }}>
+        <div className="px-5 py-4 space-y-1" style={{ borderBottom: `1px solid ${SUBTLE_BORDER}` }}>
+          <h2 className="text-text font-semibold">Provision object storage</h2>
+          <p className="text-xs text-text-muted">Creates provider infrastructure and returns S3 credentials. No Connection is created.</p>
+        </div>
+        <div className="p-5 space-y-4">
+          {localError && <div className="text-xs text-red">{localError}</div>}
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Provider account</label>
+            <select value={connectionID} onChange={(event) => setConnectionID(Number(event.target.value))} disabled={busy || providers.length === 0}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50">
+              {providers.length === 0 && <option value={0}>No compatible provider bound</option>}
+              {providers.map((provider) => <option key={provider.connection_id} value={provider.connection_id}>{provider.provider} · connection {provider.connection_id}{provider.default ? " (default)" : ""}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Name</label>
+            <input value={name} onChange={(event) => setName(event.target.value)} required className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm" placeholder="media-production" />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Region / cluster</label>
+              <select value={region} onChange={(event) => setRegion(event.target.value)} disabled={loading || !locations.length}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50">
+                {locations.map((location) => {
+                  const value = String(location.id ?? location.cluster_id ?? "");
+                  return <option key={value} value={value}>{locationLabel(location)}</option>;
+                })}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Plan / tier</label>
+              <select value={plan} onChange={(event) => setPlan(event.target.value)} disabled={loading || !plans.length}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50">
+                {plans.map((candidate) => {
+                  const value = String(candidate.id ?? candidate.tier_id ?? "");
+                  return <option key={value} value={value}>{planLabel(candidate)}</option>;
+                })}
+              </select>
+            </div>
+          </div>
+          {selectedProvider?.provider === "scaleway" && (
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Bucket name <span className="text-text-dim">(optional)</span></label>
+              <input value={bucket} onChange={(event) => setBucket(event.target.value.toLowerCase())}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono" placeholder="Generated automatically when blank" />
+            </div>
+          )}
+          <div className="rounded p-3 text-[11px] text-amber" style={{ backgroundColor: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.18)" }}>
+            The secret key will be displayed once after provisioning. Instances does not save it, so copy it before closing the next screen.
+          </div>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={onClose} disabled={busy} className="px-3 py-1.5 text-sm border border-border rounded disabled:opacity-50">Cancel</button>
+            <button type="submit" disabled={busy || loading || !name.trim() || !selectedProvider || !region || (selectedProvider?.provider === "vultr" && !plan)}
+              className="px-3 py-1.5 text-sm bg-blue text-white rounded disabled:opacity-50">{busy ? "Provisioning…" : "Provision"}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ObjectStorageCredentialsDialog({ result, onClose }: {
+  result: { object_storage: ObjectStorageWire; credentials: ObjectStorageCredentialsWire; warning?: string; warnings?: string[] };
+  onClose: () => void;
+}) {
+  const credentials = result.credentials;
+  const copy = (value: string) => navigator.clipboard.writeText(value);
+  const copyAll = () => copy([
+    `S3_ENDPOINT=${credentials.endpoint}`,
+    credentials.region ? `S3_REGION=${credentials.region}` : "",
+    credentials.bucket ? `S3_BUCKET=${credentials.bucket}` : "",
+    `S3_ACCESS_KEY_ID=${credentials.access_key_id}`,
+    `S3_SECRET_ACCESS_KEY=${credentials.secret_access_key}`,
+  ].filter(Boolean).join("\n"));
+  const rows = [
+    ["Endpoint", credentials.endpoint], ["Region", credentials.region || ""], ["Bucket", credentials.bucket || ""],
+    ["Access key ID", credentials.access_key_id], ["Secret access key", credentials.secret_access_key],
+  ].filter((row) => row[1]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" style={{ padding: 24 }} role="presentation">
+      <div role="dialog" aria-modal="true" className="bg-bg border border-amber/40 rounded shadow-xl overflow-hidden" style={{ width: "min(680px, 100%)" }}>
+        <div className="px-5 py-4 space-y-1" style={{ borderBottom: `1px solid ${SUBTLE_BORDER}` }}>
+          <h2 className="text-text font-semibold">Save object-storage credentials</h2>
+          <p className="text-xs text-amber">Shown once. Closing this dialog permanently removes the secret from the Instances UI.</p>
+        </div>
+        <div className="p-5 space-y-3">
+          {rows.map(([label, value]) => (
+            <div key={label}>
+              <span className="text-[10px] text-text-dim uppercase tracking-wider block mb-1">{label}</span>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 min-w-0 bg-bg-input border border-border rounded px-2 py-2 text-xs text-text break-all select-all">{value}</code>
+                <button type="button" onClick={() => copy(value)} className="px-2 py-1 text-xs border border-border rounded">Copy</button>
+              </div>
+            </div>
+          ))}
+          {(result.warnings || []).map((warning) => <div key={warning} className="text-xs text-amber">{warning}</div>)}
+          <div className="flex justify-between items-center pt-2">
+            <button type="button" onClick={copyAll} className="px-3 py-1.5 text-sm border border-blue/60 text-blue rounded">Copy all as environment variables</button>
+            <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm bg-blue text-white rounded">I saved them</button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

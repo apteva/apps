@@ -13,6 +13,14 @@ type providerBindingPlatform struct {
 	slug string
 }
 
+func (p providerBindingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+	return &sdk.InstallIdentity{Bindings: map[string]any{"provider": float64(7)}}, nil
+}
+
+func (p providerBindingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	return &sdk.PlatformConnection{ID: id, AppSlug: p.slug}, nil
+}
+
 type multiProviderBindingPlatform struct {
 	tk.BasePlatformClient
 	bindings  map[int64]string
@@ -33,14 +41,6 @@ func (p multiProviderBindingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 
 func (p multiProviderBindingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
 	return &sdk.PlatformConnection{ID: id, AppSlug: p.bindings[id]}, nil
-}
-
-func (p providerBindingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
-	return &sdk.InstallIdentity{Bindings: map[string]any{"provider": float64(7)}}, nil
-}
-
-func (p providerBindingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
-	return &sdk.PlatformConnection{ID: id, AppSlug: p.slug}, nil
 }
 
 func TestResolveInstanceProvider_DefaultsToBoundProvider(t *testing.T) {
