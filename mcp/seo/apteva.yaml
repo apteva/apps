@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.5.1
+version: 0.6.0
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -67,6 +67,10 @@ description: |
         enriches ambiguous YepAPI difficulty, preserves upstream HTTP errors,
         and falls back to video-only YepAPI YouTube search when its SERP
         endpoint has a retryable server failure.
+  v0.6.0: adds budgeted daily Google rank tracking through app-sdk workers and
+        DataForSEO's cheaper Standard Queue. Compact observations retain both
+        ranks and explicit not-found checks for long-term history while full
+        SERP snapshots remain bounded.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo
@@ -106,6 +110,11 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  workers:
+    - name: rank_tracking_scheduler
+      schedule: "@every 15m"
+    - name: rank_tracking_collector
+      schedule: "@every 1m"
   mcp_tools:
     - { name: search_engines_list, description: "List supported search engines and generic SEO capabilities. Google is the default." }
     - { name: providers_list, description: "List bound SEO providers and the default provider." }
@@ -117,6 +126,8 @@ provides:
     - { name: keyword_ideas, description: "Find keyword/content ideas. Args: provider?, search_engine? (google default or youtube), seed_keywords or keywords, location_id or country_iso+language_code, limit?, refresh?." }
     - { name: rankings_for_entity, description: "List cached ranking rows for a generic search entity. Args: entity_id, provider? (default binding; all for every provider), since?, limit?." }
     - { name: rankings_for_keywords, description: "List cached SERP rankings for multiple keywords. Args: keyword_ids, provider? (default binding; all for every provider), since?, limit?, history?." }
+    - { name: rank_trackers_list, description: "List automatic rank trackers and their status. Args: keyword_id?." }
+    - { name: rank_history, description: "Read durable daily rank/not-found observations. Args: tracker_id, limit?." }
     - { name: content_opportunities, description: "Summarize latest cached SERP snapshots into content opportunities. Args: provider? (default binding; all for every provider), search_engine? (google default), limit?. YouTube uses video results only." }
     - { name: locations_list, description: "List active SEO provider locations. Args: provider? (default binding; all for every provider), search_engine?, country_iso?, language_code?, q?, limit?. Sync locations from the SEO panel first." }
     # ── domain CRUD (v0.1) ──────────────────────────────────────────

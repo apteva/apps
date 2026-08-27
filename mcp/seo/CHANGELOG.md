@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0
+
+- Added opt-in daily Google rank tracking through app-sdk workers and
+  DataForSEO's lower-cost Standard Queue.
+- Added a configurable monthly spend cap, top-20 daily checks, and top-100
+  Sunday checks with deterministic scheduling jitter.
+- Deduplicated provider work by keyword, locale, device, provider, and day so
+  multiple tracked targets share one paid SERP request.
+- Added durable compact observations for both ranked and explicit not-found
+  results while retaining the existing bounded full-SERP snapshot policy.
+- Added rank tracking, budget, status, and historical views to the SEO panel
+  plus read-only MCP tools for tracker status and history.
+- Preserved v0.5.1 provider isolation and v0.4.11 resumable bulk keyword metric
+  jobs alongside the new rank-tracking workers.
+
 ## 0.5.1
 
 - Made every provider-sensitive cached read use the configured default provider;

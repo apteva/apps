@@ -7,11 +7,11 @@
 //   - keywords: (text, country_iso, language_iso) identity, also
 //     project-scoped. Text is normalised (trimmed, lowercased).
 //
-// v0.3 adds locale-aware tracking and UI/HTTP-driven refreshes; scheduled
-// refresh remains a future jobs-app extension.
+// v0.6 adds budgeted daily rank tracking through app-sdk workers and the
+// DataForSEO Standard Queue, with durable compact rank history.
 //
-// project_id comes from APTEVA_PROJECT_ID at runtime; ” = global
-// scope. Children (pages, *_metrics, rankings, backlinks) inherit
+// project_id comes from the worker/request AppCtx, then APTEVA_PROJECT_ID;
+// ” = global scope. Children (pages, *_metrics, rankings, backlinks) inherit
 // scope via FK rather than carrying their own column.
 package main
 
@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.5.1
+version: 0.6.0
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -53,6 +53,9 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  workers:
+    - { name: rank_tracking_scheduler, schedule: "@every 15m" }
+    - { name: rank_tracking_collector, schedule: "@every 1m" }
   mcp_tools:
     - { name: search_engines_list, description: "List supported search engines and generic SEO capabilities. Google is the default." }
     - { name: providers_list, description: "List bound SEO providers and the default provider." }
@@ -64,6 +67,8 @@ provides:
     - { name: keyword_ideas, description: "Find keyword/content ideas. Args: search_engine? (google default or youtube), seed_keywords or keywords, location_id or country_iso+language_code, limit?, refresh?." }
     - { name: rankings_for_entity, description: "List cached ranking rows for a generic search entity. Args: entity_id, since?, limit?." }
     - { name: rankings_for_keywords, description: "List cached SERP rankings for multiple keywords. Args: keyword_ids, since?, limit?, history?." }
+    - { name: rank_trackers_list, description: "List automatic rank trackers and their status. Args: keyword_id?." }
+    - { name: rank_history, description: "Read durable daily rank/not-found observations. Args: tracker_id, limit?." }
     - { name: content_opportunities, description: "Summarize latest cached SERP snapshots into content opportunities. Args: search_engine? (google default), limit?. YouTube uses video results only." }
     - { name: locations_list, description: "List active SEO provider locations." }
     - { name: domains_add,    description: "Add a domain (hostname) to track; accepts location_id or country_iso+language_code for the default locale." }
@@ -132,9 +137,14 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{
+		{Name: "rank_tracking_scheduler", Schedule: "@every 15m", Run: a.runRankTrackingScheduler},
+		{Name: "rank_tracking_collector", Schedule: "@every 1m", Run: a.runRankTrackingCollector},
+	}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // ─── HTTP routes (refresh lives here, NOT in MCPTools) ───────────
@@ -145,6 +155,10 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/rank-tracking/settings", Handler: a.handleRankTrackingSettings},
+		{Pattern: "/rank-tracking/", Handler: a.handleRankTrackingItem},
+		{Pattern: "/rank-tracking", Handler: a.handleRankTracking},
+		{Pattern: "/rank-history", Handler: a.handleRankHistory},
 		{Pattern: "/domains/", Handler: a.handleDomainsItem},
 		{Pattern: "/keywords/", Handler: a.handleKeywordsItem},
 		{Pattern: "/keyword-metric-jobs", Handler: a.handleKeywordMetricJobs},
@@ -235,6 +249,19 @@ func (a *App) MCPTools() []sdk.Tool {
 				"limit":     map[string]any{"type": "integer"},
 			}, []string{"entity_id"}),
 			Handler: a.toolRankingsForEntity},
+		{Name: "rank_trackers_list",
+			Description: "List automatic rank trackers and status. Args: keyword_id?.",
+			InputSchema: schemaObject(map[string]any{
+				"keyword_id": map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolRankTrackersList},
+		{Name: "rank_history",
+			Description: "Read durable daily rank history, including explicit not-found observations. Args: tracker_id, limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"tracker_id": map[string]any{"type": "integer"},
+				"limit":      map[string]any{"type": "integer"},
+			}, []string{"tracker_id"}),
+			Handler: a.toolRankHistory},
 		{Name: "rankings_for_keywords",
 			Description: "List cached SERP rankings for multiple keywords in one call. Returns the latest snapshot for each keyword by default, or retained snapshots with history=true. Args: keyword_ids, provider? (default binding; all for every provider), since?, limit?, history?.",
 			InputSchema: schemaObject(map[string]any{
@@ -489,6 +516,11 @@ type keywordIdea struct {
 // ─── Scope ───────────────────────────────────────────────────────
 
 func projectScope(ctxs ...*sdk.AppCtx) string {
+	if len(ctxs) > 0 && ctxs[0] != nil {
+		if pid := strings.TrimSpace(ctxs[0].CurrentProject()); pid != "" {
+			return pid
+		}
+	}
 	return strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")) // '' = global
 }
 
@@ -1867,76 +1899,13 @@ func (a *App) toolSERPSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	items, err := decodeSERPItems(providerResponse.ResultRaw)
+	var keywordIDPtr *int64
+	if id, ok := keywordID.(int64); ok {
+		keywordIDPtr = &id
+	}
+	snapshotID, stored, err := persistSERPSnapshot(db, pid, search_engine, keywordIDPtr,
+		keywordText, loc.ID, provider.Slug(), depth, providerResponse)
 	if err != nil {
-		return nil, err
-	}
-	now := time.Now().Unix()
-	tx, err := db.Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	res, err := tx.Exec(
-		`INSERT INTO search_serp_snapshots
-		    (project_id, search_engine, keyword_id, keyword_text, location_id, provider, ts, raw_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, search_engine, keywordID, keywordText, loc.ID, provider.Slug(), now, string(providerResponse.Raw))
-	if err != nil {
-		return nil, err
-	}
-	snapshotID, _ := res.LastInsertId()
-	stored := []SearchRanking{}
-	for index, raw := range items {
-		item := normalizeSERPItem(search_engine, raw)
-		if item.Rank == nil {
-			rank := int64(index + 1)
-			item.Rank = &rank
-		}
-		if search_engine == "youtube" && item.ResultType != "video" {
-			continue
-		}
-		if item.Identifier == "" && item.URL == "" && item.Title == "" {
-			continue
-		}
-		if len(stored) >= depth {
-			break
-		}
-		var entityID any
-		if item.EntityType != "" && item.Identifier != "" {
-			id, err := upsertSearchEntity(tx, pid, search_engine, item.EntityType, item.Identifier, item.Title, item.URL, loc.ID, item.RawJSON)
-			if err != nil {
-				return nil, err
-			}
-			entityID = id
-		}
-		rowRes, err := tx.Exec(
-			`INSERT INTO search_serp_results
-			    (snapshot_id, entity_id, rank, result_type, title, url, identifier,
-			     channel_identifier, channel_title, snippet, published_at, raw_json)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			snapshotID, entityID, item.Rank, item.ResultType, item.Title, item.URL, item.Identifier,
-			item.ChannelIdentifier, item.ChannelTitle, item.Snippet, item.PublishedAt, item.RawJSON)
-		if err != nil {
-			return nil, err
-		}
-		resultID, _ := rowRes.LastInsertId()
-		var eid *int64
-		if v, ok := entityID.(int64); ok {
-			eid = &v
-		}
-		stored = append(stored, SearchRanking{
-			ID: resultID, SnapshotID: snapshotID, EntityID: eid, SearchEngine: search_engine,
-			KeywordText: keywordText, LocationID: &loc.ID, Provider: provider.Slug(), TS: now,
-			Rank: item.Rank, ResultType: item.ResultType, Title: item.Title, URL: item.URL,
-			Identifier: item.Identifier, ChannelIdentifier: item.ChannelIdentifier,
-			ChannelTitle: item.ChannelTitle, Snippet: item.Snippet, PublishedAt: item.PublishedAt,
-		})
-	}
-	if err := pruneSERPSnapshots(tx, pid, search_engine, keywordText, loc.ID, 30); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return map[string]any{
@@ -1949,6 +1918,87 @@ func (a *App) toolSERPSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		"results":       stored,
 		"count":         len(stored),
 	}, nil
+}
+
+// persistSERPSnapshot is shared by interactive live searches and the scheduled
+// DataForSEO queue collector. Full snapshots are bounded; compact tracked-rank
+// observations are written separately by completeRefreshJob.
+func persistSERPSnapshot(db *sql.DB, pid, searchEngine string, keywordID *int64,
+	keywordText string, locationID int64, provider string, depth int, response *providerSERPResponse) (int64, []SearchRanking, error) {
+	items, err := decodeSERPItems(response.ResultRaw)
+	if err != nil {
+		return 0, nil, err
+	}
+	now := time.Now().Unix()
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
+		`INSERT INTO search_serp_snapshots
+		    (project_id, search_engine, keyword_id, keyword_text, location_id, provider, ts, raw_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, searchEngine, keywordID, keywordText, locationID, provider, now, string(response.Raw))
+	if err != nil {
+		return 0, nil, err
+	}
+	snapshotID, _ := res.LastInsertId()
+	stored := []SearchRanking{}
+	for index, raw := range items {
+		item := normalizeSERPItem(searchEngine, raw)
+		if item.Rank == nil {
+			rank := int64(index + 1)
+			item.Rank = &rank
+		}
+		if searchEngine == "youtube" && item.ResultType != "video" {
+			continue
+		}
+		if item.Identifier == "" && item.URL == "" && item.Title == "" {
+			continue
+		}
+		if depth > 0 && len(stored) >= depth {
+			break
+		}
+		var entityID any
+		if item.EntityType != "" && item.Identifier != "" {
+			id, err := upsertSearchEntity(tx, pid, searchEngine, item.EntityType, item.Identifier, item.Title, item.URL, locationID, item.RawJSON)
+			if err != nil {
+				return 0, nil, err
+			}
+			entityID = id
+		}
+		rowRes, err := tx.Exec(
+			`INSERT INTO search_serp_results
+			    (snapshot_id, entity_id, rank, result_type, title, url, identifier,
+			     channel_identifier, channel_title, snippet, published_at, raw_json)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			snapshotID, entityID, item.Rank, item.ResultType, item.Title, item.URL, item.Identifier,
+			item.ChannelIdentifier, item.ChannelTitle, item.Snippet, item.PublishedAt, item.RawJSON)
+		if err != nil {
+			return 0, nil, err
+		}
+		resultID, _ := rowRes.LastInsertId()
+		var eid *int64
+		if value, ok := entityID.(int64); ok {
+			eid = &value
+		}
+		stored = append(stored, SearchRanking{
+			ID: resultID, SnapshotID: snapshotID, EntityID: eid, SearchEngine: searchEngine,
+			KeywordID: keywordID, KeywordText: keywordText, LocationID: &locationID,
+			Provider: provider, TS: now, Rank: item.Rank, ResultType: item.ResultType,
+			Title: item.Title, URL: item.URL, Identifier: item.Identifier,
+			ChannelIdentifier: item.ChannelIdentifier, ChannelTitle: item.ChannelTitle,
+			Snippet: item.Snippet, PublishedAt: item.PublishedAt,
+		})
+	}
+	if err := pruneSERPSnapshots(tx, pid, searchEngine, keywordText, locationID, 30); err != nil {
+		return 0, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, nil, err
+	}
+	return snapshotID, stored, nil
 }
 
 func pruneSERPSnapshots(tx *sql.Tx, pid, searchEngine, keywordText string, locationID int64, keep int) error {

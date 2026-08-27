@@ -128,6 +128,42 @@ interface SearchRanking {
   published_at?: string;
 }
 
+interface RankTracker {
+  id: number;
+  keyword_id: number;
+  entity_id: number;
+  entity_type: string;
+  entity_identifier: string;
+  entity_label?: string;
+  provider: string;
+  device: string;
+  enabled: boolean;
+  daily_depth: number;
+  weekly_depth: number;
+  next_run_at: number;
+  last_success_at?: number;
+  last_error?: string;
+}
+
+interface RankObservation {
+  id: number;
+  tracker_id: number;
+  observed_date: string;
+  ts: number;
+  found: boolean;
+  rank?: number;
+  rank_url?: string;
+  checked_depth: number;
+  provider: string;
+}
+
+interface RankTrackingSettings {
+  enabled: boolean;
+  monthly_budget_usd: number;
+  daily_depth: number;
+  weekly_depth: number;
+}
+
 interface KeywordIdea {
   keyword: string;
   source_keyword?: string;
@@ -271,6 +307,14 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const [keywordIdeas, setKeywordIdeas] = useState<KeywordIdea[]>([]);
   const [opportunities, setOpportunities] = useState<ContentOpportunity[]>([]);
   const [metricJobs, setMetricJobs] = useState<KeywordMetricJob[]>([]);
+  const [rankTrackers, setRankTrackers] = useState<RankTracker[]>([]);
+  const [rankHistory, setRankHistory] = useState<Record<number, RankObservation[]>>({});
+  const [trackingSettings, setTrackingSettings] = useState<RankTrackingSettings>({
+    enabled: true,
+    monthly_budget_usd: 5,
+    daily_depth: 20,
+    weekly_depth: 100,
+  });
   const [activity, setActivity] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -363,18 +407,40 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setMetricJobs(response.jobs || []);
   }, [api]);
 
+  const reloadTrackingSettings = useCallback(async () => {
+    const settings = await api<RankTrackingSettings>("GET", "/rank-tracking/settings");
+    setTrackingSettings(settings);
+  }, [api]);
+
+  const reloadRankTracking = useCallback(async (keywordId: number) => {
+    const response = await api<{ trackers: RankTracker[] }>("GET", "/rank-tracking", { keyword_id: String(keywordId) });
+    const trackers = response.trackers || [];
+    setRankTrackers(trackers);
+    const entries = await Promise.all(trackers.map(async (tracker) => {
+      const result = await api<{ history: RankObservation[] }>("GET", "/rank-history", {
+        tracker_id: String(tracker.id),
+        limit: "400",
+      });
+      return [tracker.id, result.history || []] as const;
+    }));
+    setRankHistory(Object.fromEntries(entries));
+  }, [api]);
+
   const reloadAll = useCallback(async () => {
     setBusy(true);
     setErr("");
     try {
-      await Promise.all([reloadProviders(), reloadLocations(), reloadDomains(), reloadKeywords(), reloadEntities(), reloadOpportunities(), reloadMetricJobs()]);
+      await Promise.all([
+        reloadProviders(), reloadLocations(), reloadDomains(), reloadKeywords(),
+        reloadEntities(), reloadOpportunities(), reloadMetricJobs(), reloadTrackingSettings(),
+      ]);
       setStatus("Updated");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
-  }, [reloadDomains, reloadEntities, reloadKeywords, reloadLocations, reloadMetricJobs, reloadOpportunities, reloadProviders]);
+  }, [reloadDomains, reloadEntities, reloadKeywords, reloadLocations, reloadMetricJobs, reloadOpportunities, reloadProviders, reloadTrackingSettings]);
 
   useEffect(() => {
     if (!engineViews(searchEngine).includes(view)) {
@@ -436,6 +502,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     if (!selectedKeyword) {
       setKeywordMetrics(null);
       setSerpResults([]);
+      setRankTrackers([]);
+      setRankHistory({});
       return;
     }
     callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: selectedKeyword.id, ...(provider ? { provider } : {}) })
@@ -444,7 +512,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     callTool<SearchRanking[]>("rankings_for_keyword", { keyword_id: selectedKeyword.id, ...(provider ? { provider } : {}), limit: 100 })
       .then((rows) => setSerpResults(rows || []))
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, provider, searchEngine, selectedKeyword]);
+    reloadRankTracking(selectedKeyword.id).catch((e) => setErr((e as Error).message));
+  }, [callTool, provider, reloadRankTracking, searchEngine, selectedKeyword]);
 
   useEffect(() => {
     if (!selectedEntity) {
@@ -639,6 +708,58 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       await Promise.all([reloadEntities(), reloadOpportunities()]);
       setStatus(`Cached ${fmt(resp.count || 0)} ${(keyword.search_engine || searchEngine)} results`);
       pushActivity(`Searched ${(keyword.search_engine || searchEngine)}: ${keyword.text}`);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function enableRankTracking(keyword: Keyword, target: string) {
+    setBusy(true);
+    setErr("");
+    try {
+      const [kind, rawId] = target.split(":");
+      const id = Number(rawId);
+      await api("POST", "/rank-tracking", {}, {
+        keyword_id: keyword.id,
+        ...(kind === "domain" ? { domain_id: id } : { entity_id: id }),
+        provider: "dataforseo",
+        device: "desktop",
+        daily_depth: trackingSettings.daily_depth,
+        weekly_depth: trackingSettings.weekly_depth,
+      });
+      await reloadRankTracking(keyword.id);
+      setStatus("Daily rank tracking enabled");
+      pushActivity(`Enabled daily DataForSEO rank tracking: ${keyword.text}`);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disableRankTracking(keyword: Keyword, trackerId: number) {
+    setBusy(true);
+    setErr("");
+    try {
+      await api("DELETE", `/rank-tracking/${trackerId}`);
+      await reloadRankTracking(keyword.id);
+      setStatus("Rank tracking disabled; history retained");
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveTrackingSettings(settings: RankTrackingSettings) {
+    setBusy(true);
+    setErr("");
+    try {
+      const saved = await api<RankTrackingSettings>("PATCH", "/rank-tracking/settings", {}, settings);
+      setTrackingSettings(saved);
+      setStatus("Rank tracking budget saved");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -874,6 +995,11 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           selected={selectedKeyword}
           metrics={keywordMetrics}
           serpResults={serpResults}
+          domains={domains}
+          entities={entities}
+          rankTrackers={rankTrackers}
+          rankHistory={rankHistory}
+          trackingSettings={trackingSettings}
           searchEngine={searchEngine}
           onSelect={setSelectedKeyword}
           onAdd={async (text, locationId) => {
@@ -889,6 +1015,9 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           onRefresh={refreshKeyword}
           onRefreshAll={refreshAllKeywordMetrics}
           onRefreshSERP={refreshKeywordSERP}
+          onEnableTracking={enableRankTracking}
+          onDisableTracking={disableRankTracking}
+          onSaveTrackingSettings={saveTrackingSettings}
           locationById={locationById}
           busy={busy}
         />
@@ -1547,9 +1676,14 @@ function SeedView(props: {
 function KeywordsView(props: {
   keywords: Keyword[];
   locations: SEOLocation[];
+  domains: Domain[];
+  entities: SearchEntity[];
   selected: Keyword | null;
   metrics: KeywordMetrics | null;
   serpResults: SearchRanking[];
+  rankTrackers: RankTracker[];
+  rankHistory: Record<number, RankObservation[]>;
+  trackingSettings: RankTrackingSettings;
   searchEngine: SearchEngine;
   onSelect(k: Keyword): void;
   onAdd(text: string, locationId: number): Promise<void>;
@@ -1557,6 +1691,9 @@ function KeywordsView(props: {
   onRefresh(k: Keyword): Promise<void>;
   onRefreshAll(): Promise<void>;
   onRefreshSERP(k: Keyword): Promise<void>;
+  onEnableTracking(k: Keyword, target: string): Promise<void>;
+  onDisableTracking(k: Keyword, trackerId: number): Promise<void>;
+  onSaveTrackingSettings(settings: RankTrackingSettings): Promise<void>;
   locationById: Map<number, SEOLocation>;
   busy: boolean;
 }) {
@@ -1642,6 +1779,18 @@ function KeywordsView(props: {
                   ]}
                 />
                 <div className="text-xs text-text-dim">Last metrics refresh: {date(props.metrics?.ts)}</div>
+                <RankTrackingPanel
+                  keyword={props.selected}
+                  domains={props.domains}
+                  entities={props.entities.filter((entity) => entity.search_engine === props.searchEngine)}
+                  trackers={props.rankTrackers}
+                  history={props.rankHistory}
+                  settings={props.trackingSettings}
+                  busy={props.busy}
+                  onEnable={props.onEnableTracking}
+                  onDisable={props.onDisableTracking}
+                  onSaveSettings={props.onSaveTrackingSettings}
+                />
                 <SERPResultsTable rows={selectedSerpRows} />
               </>
             ) : (
@@ -1653,6 +1802,119 @@ function KeywordsView(props: {
         )}
       </div>
     </div>
+  );
+}
+
+function RankTrackingPanel(props: {
+  keyword: Keyword;
+  domains: Domain[];
+  entities: SearchEntity[];
+  trackers: RankTracker[];
+  history: Record<number, RankObservation[]>;
+  settings: RankTrackingSettings;
+  busy: boolean;
+  onEnable(keyword: Keyword, target: string): Promise<void>;
+  onDisable(keyword: Keyword, trackerId: number): Promise<void>;
+  onSaveSettings(settings: RankTrackingSettings): Promise<void>;
+}) {
+  const [target, setTarget] = useState("");
+  const [budget, setBudget] = useState(props.settings.monthly_budget_usd);
+  const targets = [
+    ...props.domains.map((domain) => ({ value: `domain:${domain.id}`, label: domain.label || domain.host })),
+    ...props.entities.map((entity) => ({ value: `entity:${entity.id}`, label: entity.label || entity.identifier })),
+  ];
+
+  useEffect(() => {
+    setBudget(props.settings.monthly_budget_usd);
+  }, [props.settings.monthly_budget_usd]);
+
+  useEffect(() => {
+    if (target && !targets.some((item) => item.value === target)) setTarget("");
+  }, [target, targets]);
+
+  return (
+    <section className="border border-border rounded overflow-hidden">
+      <div className="px-4 py-3 border-b border-border flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold">Daily Rank History</h3>
+          <div className="text-xs text-text-dim">DataForSEO Standard Queue · top {props.settings.daily_depth} daily · top {props.settings.weekly_depth} Sundays</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-text-dim">Monthly cap $</label>
+          <input
+            className={`${inputCls} w-24`}
+            type="number"
+            min="0"
+            step="0.5"
+            value={budget}
+            onChange={(event) => setBudget(Math.max(0, Number(event.target.value) || 0))}
+          />
+          <button
+            type="button"
+            className={buttonCls}
+            disabled={props.busy || budget === props.settings.monthly_budget_usd}
+            onClick={() => props.onSaveSettings({ ...props.settings, monthly_budget_usd: budget })}
+          >Save cap</button>
+        </div>
+      </div>
+      <div className="p-4 border-b border-border flex flex-wrap gap-2">
+        <select className={`${inputCls} max-w-md`} value={target} onChange={(event) => setTarget(event.target.value)}>
+          <option value="">Choose a domain or entity</option>
+          {targets.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+        </select>
+        <button
+          type="button"
+          className={primaryBtn}
+          disabled={props.busy || !target}
+          onClick={async () => { await props.onEnable(props.keyword, target); setTarget(""); }}
+        >Track daily</button>
+      </div>
+      {props.trackers.length === 0 ? (
+        <div className="p-4 text-sm text-text-dim">No automatic target tracking for this keyword.</div>
+      ) : (
+        <div className="divide-y divide-border">
+          {props.trackers.map((tracker) => {
+            const observations = props.history[tracker.id] || [];
+            const latest = observations[0];
+            return (
+              <div key={tracker.id} className="p-4 space-y-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium">{tracker.entity_label || tracker.entity_identifier}</div>
+                    <div className="text-xs text-text-dim">
+                      {tracker.enabled ? `Next check ${date(tracker.next_run_at)}` : "Disabled · history retained"}
+                      {tracker.last_error ? ` · ${tracker.last_error}` : ""}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm font-semibold tabular-nums">
+                      {!latest ? "No checks yet" : latest.found ? `#${latest.rank}` : `Not in top ${latest.checked_depth}`}
+                    </span>
+                    {tracker.enabled && (
+                      <button type="button" className={buttonCls} disabled={props.busy} onClick={() => props.onDisable(props.keyword, tracker.id)}>Disable</button>
+                    )}
+                  </div>
+                </div>
+                {observations.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {observations.slice(0, 31).reverse().map((observation) => (
+                      <span
+                        key={observation.id}
+                        title={`${observation.observed_date}: ${observation.found ? `#${observation.rank}` : `not found in top ${observation.checked_depth}`}`}
+                        className={`px-2 py-1 rounded text-xs tabular-nums ${observation.found ? "bg-surface-2 text-text" : "bg-red-500/10 text-red-300"}`}
+                      >{observation.found ? `#${observation.rank}` : "—"}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="px-4 py-2 border-t border-border text-xs text-text-dim">
+        Trackers are opt-in. One provider query is shared by every target using the same keyword, locale, device, and day.
+      </div>
+    </section>
   );
 }
 
