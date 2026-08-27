@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 func floatClose(got *float64, want float64) bool {
@@ -151,6 +157,9 @@ func TestAnalyzeExistingSourceWithFFmpeg(t *testing.T) {
 	if !got.DecodeOK || got.Visual == nil || got.Visual.SampledFrames == 0 {
 		t.Fatalf("visual analysis incomplete: %+v", got)
 	}
+	if got.Executor != "local" || got.HostID != 0 {
+		t.Fatalf("executor=%q host_id=%d want local/0", got.Executor, got.HostID)
+	}
 	if got.Audio == nil || got.Audio.IntegratedLUFS == nil || got.Audio.MaxTruePeakDBTP == nil {
 		t.Fatalf("audio analysis incomplete: %+v", got.Audio)
 	}
@@ -158,5 +167,172 @@ func TestAnalyzeExistingSourceWithFFmpeg(t *testing.T) {
 	// proves terminal freeze_start events are closed at the range end.
 	if len(got.Visual.FrozenSegments) != 1 || got.Visual.FrozenSegments[0].EndMs != 3_000 {
 		t.Fatalf("terminal freeze not reported: %+v", got.Visual.FrozenSegments)
+	}
+}
+
+func TestRemoteAnalysisScriptWithFFmpeg(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	source := filepath.Join(t.TempDir(), "sample.mp4")
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "color=c=blue:s=320x240:d=3",
+		"-f", "lavfi", "-i", "sine=frequency=1000:duration=3",
+		"-shortest", "-c:v", "mpeg4", "-c:a", "aac", source)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create fixture: %v: %s", err, out)
+	}
+	row := &MediaRow{FileID: "1", HasVideo: true, HasAudio: true, DurationMs: 3_000}
+	opts := analysisOptions{Depth: "full", EndMs: 3_000, SilenceThresholdDB: -50, SilenceMinMs: 1_000, Timeout: 30 * time.Second}
+	script := buildRemoteAnalysisScript("ffmpeg", source, row, opts)
+	out, err := exec.Command("bash", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("remote script: %v: %s", err, out)
+	}
+	wire, err := parseRemoteAnalysisResult(string(out))
+	if err != nil {
+		t.Fatalf("parse marker: %v", err)
+	}
+	visualLog, err := decodeRemoteAnalysisLog(wire.VisualLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audioLog, err := decodeRemoteAnalysisLog(wire.AudioLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visual := parseVisualAnalysis(visualLog, 0, 3_000)
+	audio := parseAudioAnalysis(audioLog, opts)
+	if wire.VisualExit != 0 || wire.AudioExit != 0 || visual.SampledFrames == 0 || audio.IntegratedLUFS == nil {
+		t.Fatalf("wire=%+v visual=%+v audio=%+v", wire, visual, audio)
+	}
+	if strings.Contains(visualLog, source) || strings.Contains(audioLog, source) {
+		t.Fatal("compacted logs retained source path")
+	}
+}
+
+func TestAnalyzeExistingSourceFollowsRemoteRenderHost(t *testing.T) {
+	originalEnsure := ensureRemoteAnalysisFFmpeg
+	originalRun := runRemoteAnalysisCommand
+	t.Cleanup(func() {
+		ensureRemoteAnalysisFFmpeg = originalEnsure
+		runRemoteAnalysisCommand = originalRun
+	})
+
+	ensureRemoteAnalysisFFmpeg = func(_ context.Context, _ *sdk.AppCtx, hostID int64) (installedPaths, error) {
+		if hostID != 7 {
+			t.Fatalf("ensure host_id=%d want 7", hostID)
+		}
+		return installedPaths{FFmpeg: "/remote/bin/ffmpeg", FFprobe: "/remote/bin/ffprobe"}, nil
+	}
+	visualLog := `[metadata] frame:0 pts:0 pts_time:0
+[metadata] lavfi.signalstats.YAVG=42
+[metadata] lavfi.blur=3.5
+[metadata] lavfi.block=1.2
+`
+	audioLog := `Integrated loudness:
+  I: -18.0 LUFS
+True peak:
+  Peak: -0.4 dBFS
+`
+	runRemoteAnalysisCommand = func(_ context.Context, _ *sdk.AppCtx, hostID int64, script string, timeoutS int) (string, int, error) {
+		if hostID != 7 || timeoutS != 30 {
+			t.Fatalf("remote call host=%d timeout=%d", hostID, timeoutS)
+		}
+		for _, want := range []string{"/remote/bin/ffmpeg", "https://signed.example/source.mp4", remoteAnalysisMarker, "signalstats", "Peak level dB:", "-f", "null"} {
+			if !strings.Contains(script, want) {
+				t.Errorf("remote script missing %q\n%s", want, script)
+			}
+		}
+		wire := remoteAnalysisWireResult{
+			VisualRan: true, VisualLog: base64.StdEncoding.EncodeToString([]byte(visualLog)),
+			AudioRan: true, AudioLog: base64.StdEncoding.EncodeToString([]byte(audioLog)),
+		}
+		raw, _ := json.Marshal(wire)
+		return "installer chatter\n" + remoteAnalysisMarker + string(raw) + "\n", 0, nil
+	}
+
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj),
+		tk.WithConfig(map[string]string{"render_host_id": "7"}))
+	row := &MediaRow{FileID: "1", HasVideo: true, HasAudio: true, DurationMs: 3_000}
+	opts := analysisOptions{Depth: "full", EndMs: 3_000, SilenceThresholdDB: -50, SilenceMinMs: 1_000, Timeout: 30 * time.Second}
+	got, err := analyzeExistingSource(ctx, "https://signed.example/source.mp4", row, opts)
+	if err != nil {
+		t.Fatalf("remote analyze: %v", err)
+	}
+	if got.Executor != "remote-instance" || got.HostID != 7 || !got.DecodeOK {
+		t.Fatalf("remote result=%+v", got)
+	}
+	if got.Visual == nil || got.Visual.SampledFrames != 1 || !floatClose(got.Visual.MeanLuma, 42) {
+		t.Fatalf("visual=%+v", got.Visual)
+	}
+	if got.Audio == nil || !floatClose(got.Audio.IntegratedLUFS, -18) {
+		t.Fatalf("audio=%+v", got.Audio)
+	}
+}
+
+func TestAnalyzeExistingSourceRemoteFailsClosed(t *testing.T) {
+	originalEnsure := ensureRemoteAnalysisFFmpeg
+	originalRun := runRemoteAnalysisCommand
+	t.Cleanup(func() {
+		ensureRemoteAnalysisFFmpeg = originalEnsure
+		runRemoteAnalysisCommand = originalRun
+	})
+	ensureRemoteAnalysisFFmpeg = func(_ context.Context, _ *sdk.AppCtx, _ int64) (installedPaths, error) {
+		return installedPaths{}, errors.New("host offline")
+	}
+	runRemoteAnalysisCommand = func(context.Context, *sdk.AppCtx, int64, string, int) (string, int, error) {
+		t.Fatal("remote command should not run after installer failure")
+		return "", 0, nil
+	}
+
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj),
+		tk.WithConfig(map[string]string{"render_host_id": "9"}))
+	_, err := analyzeExistingSource(ctx, "https://signed.example/source.mp4",
+		&MediaRow{FileID: "1", HasVideo: true},
+		analysisOptions{Depth: "full", EndMs: 1_000, Timeout: 30 * time.Second})
+	if err == nil || !strings.Contains(err.Error(), "ANALYSIS_EXECUTOR_UNAVAILABLE") || !strings.Contains(err.Error(), "host_id=9") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestAnalyzeExistingSourceRemoteReportsFFmpegSignal(t *testing.T) {
+	originalEnsure := ensureRemoteAnalysisFFmpeg
+	originalRun := runRemoteAnalysisCommand
+	t.Cleanup(func() {
+		ensureRemoteAnalysisFFmpeg = originalEnsure
+		runRemoteAnalysisCommand = originalRun
+	})
+	ensureRemoteAnalysisFFmpeg = func(context.Context, *sdk.AppCtx, int64) (installedPaths, error) {
+		return installedPaths{FFmpeg: "/remote/ffmpeg"}, nil
+	}
+	runRemoteAnalysisCommand = func(context.Context, *sdk.AppCtx, int64, string, int) (string, int, error) {
+		wire := remoteAnalysisWireResult{
+			VisualRan: true, VisualExit: 139,
+			VisualLog: base64.StdEncoding.EncodeToString([]byte("decoder stopped")),
+		}
+		raw, _ := json.Marshal(wire)
+		return remoteAnalysisMarker + string(raw), 0, nil
+	}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj),
+		tk.WithConfig(map[string]string{"render_host_id": "5"}))
+	got, err := analyzeExistingSource(ctx, "https://signed.example/image.png",
+		&MediaRow{FileID: "1", HasVideo: true, IsImage: true},
+		analysisOptions{Depth: "full", Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DecodeOK || len(got.Issues) != 1 || got.Issues[0].Code != "VISUAL_ANALYSIS_FAILED" ||
+		!strings.Contains(got.Issues[0].Message, "signal 11") {
+		t.Fatalf("result=%+v", got)
+	}
+}
+
+func TestParseRemoteAnalysisResultLastMarkerWins(t *testing.T) {
+	wire := remoteAnalysisWireResult{VisualRan: true, VisualExit: 1, VisualLog: "YQ=="}
+	raw, _ := json.Marshal(wire)
+	got, err := parseRemoteAnalysisResult("old output\n" + remoteAnalysisMarker + `{}` + "\n" + remoteAnalysisMarker + string(raw))
+	if err != nil || !got.VisualRan || got.VisualExit != 1 || got.VisualLog != "YQ==" {
+		t.Fatalf("got=%+v err=%v", got, err)
 	}
 }

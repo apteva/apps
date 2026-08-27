@@ -76,6 +76,8 @@ type audioAnalysis struct {
 
 type analysisCoverage struct {
 	Depth              string  `json:"depth"`
+	Executor           string  `json:"executor"`
+	HostID             int64   `json:"host_id,omitempty"`
 	StartMs            int64   `json:"start_ms"`
 	EndMs              int64   `json:"end_ms,omitempty"`
 	AnalyzedDurationMs int64   `json:"analyzed_duration_ms,omitempty"`
@@ -148,6 +150,8 @@ func (a *App) toolAnalyze(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	result.Audio = quality.Audio
 	result.Issues = append(result.Issues, quality.Issues...)
 	result.Technical["decode_ok"] = quality.DecodeOK
+	result.Analysis.Executor = quality.Executor
+	result.Analysis.HostID = quality.HostID
 	sort.SliceStable(result.Issues, func(i, j int) bool {
 		if result.Issues[i].StartMs == result.Issues[j].StartMs {
 			return result.Issues[i].Code < result.Issues[j].Code
@@ -361,9 +365,21 @@ type qualityAnalysis struct {
 	Audio    *audioAnalysis
 	Issues   []analysisIssue
 	DecodeOK bool
+	Executor string
+	HostID   int64
 }
 
 func analyzeExistingSource(app *sdk.AppCtx, sourceURL string, row *MediaRow, opts analysisOptions) (qualityAnalysis, error) {
+	hostID := int64(parseConfigIntFallback(app.Config().Get("render_host_id"), 0))
+	if hostID > 0 {
+		return analyzeExistingSourceRemote(app, sourceURL, row, opts, hostID)
+	}
+	result, err := analyzeExistingSourceLocal(app, sourceURL, row, opts)
+	result.Executor = "local"
+	return result, err
+}
+
+func analyzeExistingSourceLocal(app *sdk.AppCtx, sourceURL string, row *MediaRow, opts analysisOptions) (qualityAnalysis, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
 	defer cancel()
 	ffmpegPath := strings.TrimSpace(app.Config().Get("ffmpeg_path"))

@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.0
+version: 0.14.1
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,9 +31,9 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.14.0 strengthens generic Smart Crop confidence,
-  exposes effective resolved render parameters, and adds a non-destructive
-  contain fit for compositions wider than the target crop.
+  through storage. v0.14.1 routes read-only media analysis through the
+  configured remote instance when render_host_id is set, fails closed when
+  that executor is unavailable, and reports the effective executor and host.
 author: Apteva
 scopes: [project, global]
 min_apteva_version: "0.25.9"
@@ -54,7 +54,7 @@ requires:
     - name: instances
       version: ">=0.2.0"
       optional: true
-      reason: optional — when render_host_id > 0, renders run on that instances host via SSH
+      reason: optional — when render_host_id > 0, renders, indexing, and read-only analysis run on that instances host via SSH
   integrations:
     - role: transcripts
       kind: integration
@@ -108,7 +108,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_get,             description: "Fetch one media record by storage file_id, including arbitrary metadata and metadata_version. External ingestion URL delivery defaults to apteva/inline; callers can explicitly request proxy, direct, or attachment disposition. Returned delivery, disposition, and expires_at are Storage-confirmed." }
-    - { name: media_analyze,         description: "Read-only technical and quality analysis for an image, video, or audio file. Returns encoding metadata, decode integrity, visual measurements and timeline anomalies, and audio loudness/peak/silence measurements where applicable. Creates no artifacts." }
+    - { name: media_analyze,         description: "Read-only technical and quality analysis for an image, video, or audio file. Follows render_host_id when configured, reports the effective executor, and never silently falls back to local execution. Returns encoding metadata, decode integrity, visual measurements and timeline anomalies, and audio loudness/peak/silence measurements where applicable. Creates no artifacts." }
     - { name: media_ask,             description: "Ask a grounded question using only existing source images, cached thumbnails/keyframes, and completed transcripts. Never runs ffmpeg, creates derivations, or writes files." }
     - { name: media_search,          description: "Compact catalog discovery with q/filename/title, folder_scope exact|subtree, type, aspect, duration, rating, dimensions, codec, and arbitrary metadata equality filters. Empty exact searches diagnose matching descendants; call media_get for full details." }
     - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
@@ -284,7 +284,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.0
+    ref: media/v0.14.1
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -465,7 +465,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_analyze",
-			Description: "Analyze an existing image, video, or audio source without modifying it. Returns catalog/stream encoding details, decode integrity, sampled visual measurements, black/frozen video segments, and LUFS/peak/RMS/silence audio measurements where applicable. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. No render, derivation, or Storage object is created.",
+			Description: "Analyze an existing image, video, or audio source without modifying it. Returns catalog/stream encoding details, decode integrity, sampled visual measurements, black/frozen video segments, and LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback; the result reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. No render, derivation, or Storage object is created.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":              map[string]any{"type": "string"},
 				"depth":                map[string]any{"type": "string", "enum": []string{"standard", "full"}, "default": "standard"},
