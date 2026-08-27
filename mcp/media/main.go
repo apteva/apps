@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.98
+version: 0.13.99
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,8 +31,8 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.13.98 hardens portrait smart cropping for
-  hair-obscured and reclining subjects without regressing prior cases.
+  through storage. v0.13.99 restores dedicated-host rendering on
+  POSIX-compatible remote shells while retaining the smart-crop corrections.
 author: Apteva
 scopes: [project, global]
 min_apteva_version: "0.25.9"
@@ -283,7 +283,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.13.98
+    ref: media/v0.13.99
     entry: mcp/media
   port: 8080
   health_check: /health

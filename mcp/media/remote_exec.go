@@ -301,7 +301,7 @@ func (e *remoteExecutor) buildScript(
 	b.WriteString("echo $$ > pid\n")
 	// Always-rm cleanup. Runs on any exit including non-zero/abort.
 	b.WriteString(`trap 'cd "$WORK_ROOT" && rm -rf "$WORK"' EXIT` + "\n")
-	b.WriteString(`CURL_RETRY=(--retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors)` + "\n")
+	b.WriteString(`curl_retry() { curl -sS --retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors "$@"; }` + "\n")
 	b.WriteString(remoteSourceCacheScriptFragment)
 
 	// Materialize every source through the persistent remote cache.
@@ -371,7 +371,7 @@ func (e *remoteExecutor) buildScript(
 // Chunked fallback: POST /uploads, PUT fixed-size parts, complete
 // with sha256. Last resort: single POST /files for old storage.
 const uploadScriptFragment = `INIT_BODY_FILE=$(mktemp)
-INIT_CODE=$(curl -sS "${CURL_RETRY[@]}" -o "$INIT_BODY_FILE" -w "%{http_code}" \
+INIT_CODE=$(curl_retry -o "$INIT_BODY_FILE" -w "%{http_code}" \
   -X POST \
   -H "Authorization: Bearer $STORAGE_TOKEN" \
   -H "Content-Type: application/json" \
@@ -391,8 +391,8 @@ if [ "$INIT_CODE" = "200" ]; then
   UPLOAD_ID=$(sed -n 's/.*"upload_id":[[:space:]]*"\([^"]*\)".*/\1/p' "$INIT_BODY_FILE")
   if [ -n "$UPLOAD_URL" ] && [ -n "$UPLOAD_ID" ]; then
     NEED_MULTIPART=0
-    curl -sS "${CURL_RETRY[@]}" --fail -o /dev/null -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"
-    FIN_BODY=$(curl -sS "${CURL_RETRY[@]}" --fail -X POST \
+    curl_retry --fail -o /dev/null -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"
+    FIN_BODY=$(curl_retry --fail -X POST \
       -H "Authorization: Bearer $STORAGE_TOKEN" \
       -H "Content-Type: application/json" \
       -d "{\"sha256\":\"$SHA\"}" \
@@ -426,7 +426,7 @@ fi
 rm -f "$INIT_BODY_FILE"
 if [ "$NEED_MULTIPART" = "1" ]; then
   UPLOADS_INIT_FILE=$(mktemp)
-  UPLOADS_INIT_CODE=$(curl -sS "${CURL_RETRY[@]}" -o "$UPLOADS_INIT_FILE" -w "%{http_code}" \
+  UPLOADS_INIT_CODE=$(curl_retry -o "$UPLOADS_INIT_FILE" -w "%{http_code}" \
     -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     -H "Content-Type: application/json" \
@@ -451,7 +451,7 @@ if [ "$NEED_MULTIPART" = "1" ]; then
         PART=1
         while [ "$OFFSET" -lt "$SIZE" ]; do
           dd if="$OUT" of="$PART_FILE" bs="$PART_SIZE" skip="$OFFSET" count="$PART_SIZE" iflag=skip_bytes,count_bytes status=none
-          curl -sS "${CURL_RETRY[@]}" --fail -o /dev/null -X PUT \
+          curl_retry --fail -o /dev/null -X PUT \
             -H "Content-Type: application/octet-stream" \
             --data-binary "@$PART_FILE" \
             "$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID"
@@ -459,7 +459,7 @@ if [ "$NEED_MULTIPART" = "1" ]; then
           PART=$((PART + 1))
         done
         rm -f "$PART_FILE"
-        COMPLETE_BODY=$(curl -sS "${CURL_RETRY[@]}" --fail -X POST \
+        COMPLETE_BODY=$(curl_retry --fail -X POST \
           -H "Authorization: Bearer $STORAGE_TOKEN" \
           -H "Content-Type: application/json" \
           -d "{\"sha256\":\"$SHA\"}" \
@@ -477,7 +477,7 @@ if [ "$NEED_MULTIPART" = "1" ]; then
   rm -f "$UPLOADS_INIT_FILE"
 fi
 if [ "$NEED_MULTIPART" = "1" ]; then
-  RESP=$(curl -sS "${CURL_RETRY[@]}" --fail -X POST \
+  RESP=$(curl_retry --fail -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     -F "folder=$FOLDER" \
     -F "visibility=private" \
@@ -636,7 +636,7 @@ materialize_source() {
   tmp="$cache.tmp.$$"
   rm -f "$tmp"
   echo "REMOTE_SOURCE_CACHE_MISS file_id=$fid path=$cache" >&2
-  if ! curl -sS "${CURL_RETRY[@]}" --fail -L -o "$tmp" "$url"; then
+  if ! curl_retry --fail -L -o "$tmp" "$url"; then
     rm -f "$tmp"
     rm -rf "$lock"
     exit 1

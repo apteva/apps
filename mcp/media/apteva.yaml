@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.98
+version: 0.13.99
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -19,8 +19,8 @@ description: |
   by default, Cloudinary when bound. A wedged encode releases its
   slot without disturbing the indexer.
 
-  v0.13.98 hardens portrait smart cropping for hair-obscured and reclining
-  subjects while preserving established crop paths for prior production cases.
+  v0.13.99 restores dedicated-host rendering on POSIX-compatible remote shells
+  while retaining the v0.13.98 smart-crop corrections.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media
@@ -499,7 +499,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.13.98
+    ref: media/v0.13.99
     entry: mcp/media
   port: 8080
   health_check: /health

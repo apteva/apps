@@ -142,7 +142,7 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		`REMOTE_SCRATCH_FULL root=$WORK_ROOT`,
 		"echo $$ > pid",
 		`trap 'cd "$WORK_ROOT" && rm -rf "$WORK"' EXIT`,
-		`CURL_RETRY=(--retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors)`,
+		`curl_retry() { curl -sS --retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors "$@"; }`,
 		`cache_valid()`,
 		`REMOTE_SOURCE_CACHE_HIT file_id=$fid`,
 		`REMOTE_SOURCE_CACHE_MISS file_id=$fid`,
@@ -150,7 +150,7 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		`REMOTE_SOURCE_CACHE_PRUNE bytes=$victim_size`,
 		`REMOTE_SOURCE_CACHE_STALE_LOCK file_id=$fid`,
 		`REMOTE_SOURCE_CACHE_LOCK_TIMEOUT file_id=$fid`,
-		`curl -sS "${CURL_RETRY[@]}" --fail -L -o "$tmp" "$url"`,
+		`curl_retry --fail -L -o "$tmp" "$url"`,
 		`materialize_source '100' 'https://signed.example.com/file/100?sig=abc' 'src-100.mp4' 'file-100-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4' 123456 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'`,
 		"'/root/.apteva-render/ffmpeg-7.0.2/ffmpeg' '-y' '-i' 'src-100.mp4'",
 		`OUT='clip.mp4'`,
@@ -169,7 +169,7 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		// Presigned-PUT branch markers.
 		`"$STORAGE_BASE/files/init?project_id=$PROJECT_ID"`,
 		`if [ "$INIT_CODE" = "200" ]`,
-		`curl -sS "${CURL_RETRY[@]}" --fail -o /dev/null -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"`,
+		`curl_retry --fail -o /dev/null -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"`,
 		`"$STORAGE_BASE/files/$UPLOAD_ID/finalize?project_id=$PROJECT_ID"`,
 		// Dedup-hit branch (storage already has these bytes).
 		`"was_existing"`,
@@ -185,6 +185,9 @@ func TestBuildScript_TrimShape(t *testing.T) {
 	}
 	if strings.Contains(script, "stat -f%z") {
 		t.Errorf("script still contains unsupported BSD stat form: %s", script)
+	}
+	if strings.Contains(script, "CURL_RETRY") {
+		t.Errorf("script still contains non-portable shell array retry arguments: %s", script)
 	}
 }
 
