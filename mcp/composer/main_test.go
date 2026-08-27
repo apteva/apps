@@ -1885,6 +1885,50 @@ func TestStorageLocalPath_RejectsMissingWrappedFile(t *testing.T) {
 	}
 }
 
+func TestToolAssetInspect_UsesLocalStorageBlob(t *testing.T) {
+	ffmpeg, err := exec.LookPath(ffmpegPath())
+	if err != nil {
+		t.Skip("ffmpeg not available")
+	}
+	ffprobe, err := exec.LookPath(ffprobePath())
+	if err != nil {
+		t.Skip("ffprobe not available")
+	}
+
+	root := t.TempDir()
+	appData := filepath.Join(root, "apps", "composer", "data", "60")
+	storageKey := "private-inspect.wav"
+	storageBlob := filepath.Join(root, "apps", "storage", "data", "6", "storage-blobs", "ab", storageKey)
+	if err := os.MkdirAll(filepath.Dir(storageBlob), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	generated, err := exec.Command(ffmpeg,
+		"-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.25",
+		"-c:a", "pcm_s16le", storageBlob,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate local storage fixture: %v\n%s", err, generated)
+	}
+
+	t.Setenv("APTEVA_DATA_DIR", appData)
+	t.Setenv("FFPROBE_PATH", ffprobe)
+	platform := &storageFilesGetPlatform{response: json.RawMessage(`{"found":true,"file":{"id":11701,"storage_key":"private-inspect.wav"}}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+
+	got, err := (&App{}).toolAssetInspect(ctx, map[string]any{"src": "storage:11701"})
+	if err != nil {
+		t.Fatalf("inspect private local Storage asset: %v", err)
+	}
+	probe, ok := got.(map[string]any)
+	streams, streamsOK := probe["streams"].([]any)
+	if !ok || !streamsOK || len(streams) == 0 {
+		t.Fatalf("unexpected ffprobe result: %#v", got)
+	}
+	if platform.calls != 1 {
+		t.Fatalf("Storage calls = %d, want one files_get call and no files_get_url call", platform.calls)
+	}
+}
+
 func TestAIKindHasMediaDuration(t *testing.T) {
 	for _, kind := range []string{"audio_tts", "audio_sfx", "music", "video", "avatar"} {
 		if !aiKindHasMediaDuration(kind) {

@@ -899,7 +899,7 @@ func (a *App) toolAssetInspect(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if src == "" {
 		return nil, errors.New("src required")
 	}
-	url, err := resolveAssetURL(ctx, src)
+	url, err := resolveAssetLocal(ctx, src)
 	if err != nil {
 		return nil, fmt.Errorf("resolve: %w", err)
 	}
