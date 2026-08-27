@@ -4481,6 +4481,7 @@ function PostListRow({
         </button>
         <div className="flex-shrink-0 flex flex-col items-end gap-2 py-1" style={{ width: 104 }}>
           <StatusPill status={post.status} />
+          {post.source === "provider" && <ProviderImportPill />}
           {(post.status === "failed" || post.status === "partial") && (
             <button
               type="button"
@@ -4685,6 +4686,7 @@ function CalendarPostEvent({ post, projectId, onOpen, mobile = false }: {
         <div className="flex items-center gap-1 text-[10px]">
           <span className="text-text">{date?.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>
           <StatusPill status={post.status} />
+          {post.source === "provider" && <ProviderImportPill compact />}
         </div>
         <div className={`${mobile ? "text-xs" : "text-[10px]"} text-text truncate`}>{post.body || "No caption"}</div>
         {mobile && (
@@ -4831,6 +4833,7 @@ function PostDetailPanel({
             <div className="text-text-dim text-xs">{postLifecycleDate(post)?.toLocaleString()}</div>
           </div>
           <StatusPill status={post.status} />
+          {post.source === "provider" && <ProviderImportPill />}
           <button type="button" onClick={onClose} className="w-8 h-8 text-text-muted hover:text-text" aria-label="Close">×</button>
         </div>
         <div className="flex-1 overflow-y-auto">
@@ -6406,6 +6409,17 @@ function StatusPill({ status }: { status: string }) {
     status === "rejected" ? "text-error" :
     "text-text-dim";
   return <span className={"text-xs uppercase " + tone}>{status}</span>;
+}
+
+function ProviderImportPill({ compact = false }: { compact?: boolean }) {
+  return (
+    <span
+      className="inline-flex items-center rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[9px] uppercase text-accent"
+      title="Imported from a connected social provider; not created by this Social agent"
+    >
+      {compact ? "imported" : "provider import"}
+    </span>
+  );
 }
 
 function TargetChip({ target }: { target: PostTarget }) {

@@ -206,17 +206,33 @@ func (a *App) syncProviderWorkflow(ctx *sdk.AppCtx, postID int64, intent, schedu
 	return results
 }
 
-func zernioWorkflowStatus(item map[string]any) (status, requestedMode, scheduleAt string) {
-	raw := strings.ToLower(strings.TrimSpace(firstString(item, "status", "state", "postStatus")))
-	isDraft, _ := item["isDraft"].(bool)
-	scheduleAt = firstString(item, "scheduledFor", "scheduled_for", "scheduleAt", "schedule_at")
+func zernioWorkflowStatus(item, platformItem map[string]any) (status, requestedMode, scheduleAt string) {
+	raw := strings.ToLower(strings.TrimSpace(firstString(platformItem, "status", "state", "postStatus")))
+	if raw == "" {
+		raw = strings.ToLower(strings.TrimSpace(firstString(item, "status", "state", "postStatus")))
+	}
+	isDraft, _ := platformItem["isDraft"].(bool)
+	if !isDraft {
+		isDraft, _ = item["isDraft"].(bool)
+	}
+	scheduleAt = firstString(platformItem, "scheduledFor", "scheduled_for", "scheduleAt", "schedule_at")
+	if scheduleAt == "" {
+		scheduleAt = firstString(item, "scheduledFor", "scheduled_for", "scheduleAt", "schedule_at")
+	}
+	publishedEvidence := firstString(platformItem,
+		"publishedAt", "published_at", "platformPostId", "platform_post_id", "platformPostUrl", "platform_post_url")
+	if publishedEvidence == "" {
+		publishedEvidence = firstString(item, "publishedAt", "published_at", "platformPostId", "platform_post_id")
+	}
 	switch {
 	case isDraft || strings.Contains(raw, "draft"):
 		return "draft", postModeDraft, ""
-	case scheduleAt != "" || strings.Contains(raw, "schedul") || strings.Contains(raw, "queue"):
-		return "scheduled", postModeSchedule, scheduleAt
 	case strings.Contains(raw, "fail") || strings.Contains(raw, "error"):
 		return "failed", postModePublish, scheduleAt
+	case strings.Contains(raw, "publish") || strings.Contains(raw, "complete") || publishedEvidence != "":
+		return "published", postModePublish, scheduleAt
+	case scheduleAt != "" || strings.Contains(raw, "schedul") || strings.Contains(raw, "queue"):
+		return "scheduled", postModeSchedule, scheduleAt
 	default:
 		return "published", postModePublish, scheduleAt
 	}
@@ -224,8 +240,8 @@ func zernioWorkflowStatus(item map[string]any) (status, requestedMode, scheduleA
 
 func (a *App) reconcileImportedProviderPost(
 	ctx *sdk.AppCtx, pid string, accountID, profileID int64,
-	body, providerPostID, platformPostID, platformURL, status, requestedMode, scheduleAt, occurredAt string,
-	mediaURLs []string, raw map[string]any,
+	body, providerPostID, platformPostID, platformURL, status, requestedMode, scheduleAt string,
+	createdAt, publishedAt string, mediaURLs []string, raw map[string]any,
 ) (bool, error) {
 	if providerPostID == "" {
 		return false, errors.New("provider post id required")
@@ -238,15 +254,16 @@ func (a *App) reconcileImportedProviderPost(
 		accountID, providerPostID,
 	).Scan(&targetID, &postID)
 	if err == nil {
-		publishedAt := any(nil)
+		storedPublishedAt := any(nil)
 		if status == "published" {
-			publishedAt = nullable(occurredAt)
+			storedPublishedAt = nullable(publishedAt)
 		}
 		_, err = ctx.AppDB().Exec(
 			`UPDATE posts SET body=?, status=?, requested_mode=?, schedule_at=?, external_media_urls=?,
-			        published_at=?, provider_sync_mode='mirror', source='provider', updated_at=CURRENT_TIMESTAMP
+			        created_at=COALESCE(NULLIF(?,''),created_at), published_at=?,
+			        provider_sync_mode='mirror', source='provider', updated_at=CURRENT_TIMESTAMP
 			  WHERE id=? AND project_id=?`,
-			body, status, requestedMode, nullable(scheduleAt), string(mediaJSON), publishedAt, postID, pid,
+			body, status, requestedMode, nullable(scheduleAt), string(mediaJSON), createdAt, storedPublishedAt, postID, pid,
 		)
 		if err != nil {
 			return false, err
@@ -256,7 +273,7 @@ func (a *App) reconcileImportedProviderPost(
 			        provider_sync_status=?, provider_updated_at=CURRENT_TIMESTAMP,
 			        published_at=CASE WHEN ?='published' THEN ? ELSE NULL END
 			  WHERE id=?`,
-			status, nullable(platformPostID), nullable(platformURL), string(rawJSON), status, status, nullable(occurredAt), targetID,
+			status, nullable(platformPostID), nullable(platformURL), string(rawJSON), status, status, nullable(publishedAt), targetID,
 		)
 		return false, err
 	}
@@ -268,16 +285,17 @@ func (a *App) reconcileImportedProviderPost(
 		return false, err
 	}
 	defer tx.Rollback()
-	publishedAt := any(nil)
+	storedPublishedAt := any(nil)
 	if status == "published" {
-		publishedAt = nullable(occurredAt)
+		storedPublishedAt = nullable(publishedAt)
 	}
 	postResult, err := tx.Exec(
 		`INSERT INTO posts
 		 (project_id, body, media_storage_ids, external_media_urls, schedule_at, status, profile_id,
-		  imported_at, published_at, revision, approval_status, requested_mode, provider_sync_mode, source, updated_at)
-		 VALUES (?, ?, '[]', ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, 1, 'not_requested', ?, 'mirror', 'provider', CURRENT_TIMESTAMP)`,
-		pid, body, string(mediaJSON), nullable(scheduleAt), status, profileID, publishedAt, requestedMode,
+		  created_at, imported_at, published_at, revision, approval_status, requested_mode, provider_sync_mode, source, updated_at)
+		 VALUES (?, ?, '[]', ?, ?, ?, ?, COALESCE(NULLIF(?,''),CURRENT_TIMESTAMP), CURRENT_TIMESTAMP,
+		         ?, 1, 'not_requested', ?, 'mirror', 'provider', CURRENT_TIMESTAMP)`,
+		pid, body, string(mediaJSON), nullable(scheduleAt), status, profileID, createdAt, storedPublishedAt, requestedMode,
 	)
 	if err != nil {
 		return false, err
@@ -290,7 +308,7 @@ func (a *App) reconcileImportedProviderPost(
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP,
 		         CASE WHEN ?='published' THEN ? ELSE NULL END)`,
 		postID, accountID, status, nullable(platformPostID), nullable(platformURL), providerPostID,
-		string(rawJSON), status, status, nullable(occurredAt),
+		string(rawJSON), status, status, nullable(publishedAt),
 	)
 	if err != nil {
 		return false, err

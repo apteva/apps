@@ -986,6 +986,10 @@ func (a *App) importZernioPosts(ctx *sdk.AppCtx, pid string, out importResult, a
 	if profileID == 0 {
 		profileID = projectDefaultProfileID(ctx, pid)
 	}
+	var accountPlatform string
+	_ = ctx.AppDB().QueryRow(
+		`SELECT platform FROM social_accounts WHERE id=? AND project_id=?`, accountID, pid,
+	).Scan(&accountPlatform)
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "sync_external_posts", map[string]any{
 		"accountId": providerAccountID,
 	})
@@ -1008,8 +1012,12 @@ func (a *App) importZernioPosts(ctx *sdk.AppCtx, pid string, out importResult, a
 		return out
 	}
 	for _, item := range jsonItems(list.Data, "posts", "data", "items", "results") {
+		platformItem := zernioPlatformPost(item, providerAccountID, accountPlatform)
 		providerPostID := firstString(item, "id", "_id", "postId")
-		platformPostID := firstString(item, "platformPostId", "platform_post_id", "externalId", "external_id")
+		platformPostID := firstString(platformItem, "platformPostId", "platform_post_id", "externalId", "external_id")
+		if platformPostID == "" {
+			platformPostID = firstString(item, "platformPostId", "platform_post_id", "externalId", "external_id")
+		}
 		if providerPostID == "" {
 			providerPostID = platformPostID
 		}
@@ -1017,12 +1025,27 @@ func (a *App) importZernioPosts(ctx *sdk.AppCtx, pid string, out importResult, a
 			continue
 		}
 		body := firstString(item, "content", "text", "caption", "description", "title", "body")
-		url := firstString(item, "platformUrl", "platform_url", "permalink", "permalinkUrl", "url", "shareUrl")
-		occurredAt := firstString(item, "publishedAt", "published_at", "updatedAt", "updated_at", "createdAt", "created_at")
-		status, requestedMode, scheduleAt := zernioWorkflowStatus(item)
+		url := firstString(platformItem, "platformPostUrl", "platform_post_url", "platformUrl", "platform_url", "permalink", "permalinkUrl", "url", "shareUrl")
+		if url == "" {
+			url = firstString(item, "platformPostUrl", "platform_post_url", "platformUrl", "platform_url", "permalink", "permalinkUrl", "url", "shareUrl")
+		}
+		status, requestedMode, scheduleAt := zernioWorkflowStatus(item, platformItem)
+		createdAt := firstString(item, "createdAt", "created_at")
+		if createdAt == "" {
+			createdAt = firstString(platformItem, "createdAt", "created_at")
+		}
+		publishedAt := firstString(platformItem, "publishedAt", "published_at")
+		if publishedAt == "" {
+			publishedAt = firstString(item, "publishedAt", "published_at")
+		}
+		if status == "published" && publishedAt == "" {
+			// Keep the fallback provider-owned. Import/synchronization time
+			// must never be substituted for an upstream publication time.
+			publishedAt = firstString(item, "updatedAt", "updated_at", "createdAt", "created_at")
+		}
 		imported, err := a.reconcileImportedProviderPost(
 			ctx, pid, accountID, profileID, body, providerPostID, platformPostID, url,
-			status, requestedMode, scheduleAt, occurredAt, zernioMediaURLs(item), item,
+			status, requestedMode, scheduleAt, createdAt, publishedAt, zernioMediaURLs(item), item,
 		)
 		if err != nil {
 			ctx.Logger().Warn("import: reconcile zernio post failed", "provider_post_id", providerPostID, "err", err)
@@ -1987,6 +2010,39 @@ func zernioMediaURLs(item map[string]any) []string {
 		}
 	}
 	return out
+}
+
+// zernioPlatformPost selects the provider's per-platform result for the
+// Social account being synchronized. Zernio keeps the durable provider post
+// at the top level and the actual network identity, URL, status, and publish
+// timestamp under platforms[]. Matching the account id first prevents a
+// cross-posted item from attaching another destination's identity.
+func zernioPlatformPost(item map[string]any, providerAccountID, platform string) map[string]any {
+	items, _ := item["platforms"].([]any)
+	var platformMatch map[string]any
+	for _, value := range items {
+		candidate, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		accountID := firstString(candidate,
+			"accountId._id", "accountId.id", "account_id._id", "account_id.id", "accountId", "account_id")
+		if providerAccountID != "" && accountID == providerAccountID {
+			return candidate
+		}
+		if platformMatch == nil && platform != "" && strings.EqualFold(firstString(candidate, "platform"), platform) {
+			platformMatch = candidate
+		}
+	}
+	if platformMatch != nil {
+		return platformMatch
+	}
+	if len(items) == 1 {
+		if only, ok := items[0].(map[string]any); ok {
+			return only
+		}
+	}
+	return map[string]any{}
 }
 
 func jsonItems(raw json.RawMessage, keys ...string) []map[string]any {

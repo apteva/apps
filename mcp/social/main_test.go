@@ -1032,6 +1032,33 @@ func TestPostList_DateRangeUsesLifecycleDate(t *testing.T) {
 	}
 }
 
+func TestPostList_OrdersByLifecycleDateBeforeLimit(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	for _, row := range []struct {
+		body, publishedAt string
+	}{
+		{body: "newer upstream post", publishedAt: "2026-03-16T10:00:37Z"},
+		{body: "older imported later", publishedAt: "2026-02-26T14:33:46Z"},
+	} {
+		if _, err := ctx.AppDB().Exec(
+			`INSERT INTO posts (project_id, body, status, created_at, published_at, source)
+			 VALUES ('test-proj', ?, 'published', ?, ?, 'provider')`,
+			row.body, row.publishedAt, row.publishedAt,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, err := (&App{}).listPosts(ctx, map[string]any{"limit": 1}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	posts := out.(map[string]any)["posts"].([]map[string]any)
+	if len(posts) != 1 || posts[0]["body"] != "newer upstream post" {
+		t.Fatalf("ordered posts = %+v, want newer upstream publication first", posts)
+	}
+}
+
 func TestPostList_DateRangeRejectsInvalidBounds(t *testing.T) {
 	ctx := newSocialCtx(t, nil)
 	for _, args := range []map[string]any{
@@ -1898,6 +1925,148 @@ func TestZernioImportReconcilesDraftAndScheduledLifecycle(t *testing.T) {
 	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts`).Scan(&postCount)
 	if postCount != 2 {
 		t.Fatalf("automatic reconciliation duplicated provider posts: count=%d", postCount)
+	}
+}
+
+func TestZernioImportPreservesPublishedPlatformHistoryAndRepairsExisting(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["sync_external_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}
+	pf.executeResponses["list_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"posts":[{
+			"_id":"69a059c7627edb9b6d64e139",
+			"content":"AgentDojo history",
+			"createdAt":"2026-02-26T14:33:43.886Z",
+			"scheduledFor":"2026-02-26T14:33:42.520Z",
+			"status":"published",
+			"updatedAt":"2026-02-26T14:33:47.089Z",
+			"platforms":[
+				{
+					"accountId":{"_id":"other-account"},
+					"platform":"facebook",
+					"platformPostId":"facebook-wrong",
+					"platformPostUrl":"https://facebook.example/wrong",
+					"publishedAt":"2026-02-26T14:33:45.000Z",
+					"scheduledFor":"2026-02-26T14:30:00.000Z",
+					"status":"published"
+				},
+				{
+					"accountId":{"_id":"za_linkedin"},
+					"platform":"linkedin",
+					"platformPostId":"urn:li:share:7432795016680497152",
+					"platformPostUrl":"https://www.linkedin.com/feed/update/urn:li:share:7432795016680497152/",
+					"publishedAt":"2026-02-26T14:33:46.829Z",
+					"scheduledFor":"2026-02-26T14:33:42.520Z",
+					"status":"published"
+				}
+			]
+		}]
+	}`)}
+	ctx := newSocialCtx(t, pf)
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'Apteva', 'active', 'zernio', 'za_linkedin')`,
+	)
+	accountID, _ := account.LastInsertId()
+	app := &App{}
+	result := app.importZernioPosts(ctx, "test-proj", importResult{}, accountID, 99, "za_linkedin", 0, 50)
+	if result.Status != "ok" || result.Imported != 1 {
+		t.Fatalf("import result = %+v", result)
+	}
+
+	assertStored := func() int64 {
+		t.Helper()
+		var postID int64
+		var status, requestedMode, createdAt, scheduleAt, publishedAt, source string
+		if err := ctx.AppDB().QueryRow(
+			`SELECT id,status,requested_mode,created_at,COALESCE(schedule_at,''),COALESCE(published_at,''),source
+			   FROM posts WHERE body='AgentDojo history'`,
+		).Scan(&postID, &status, &requestedMode, &createdAt, &scheduleAt, &publishedAt, &source); err != nil {
+			t.Fatal(err)
+		}
+		if status != "published" || requestedMode != postModePublish || source != "provider" ||
+			createdAt != "2026-02-26T14:33:43.886Z" || scheduleAt != "2026-02-26T14:33:42.520Z" ||
+			publishedAt != "2026-02-26T14:33:46.829Z" {
+			t.Fatalf("stored parent = status=%q mode=%q source=%q created=%q scheduled=%q published=%q",
+				status, requestedMode, source, createdAt, scheduleAt, publishedAt)
+		}
+		var targetStatus, platformID, platformURL, targetPublishedAt, providerID string
+		var attempts int
+		if err := ctx.AppDB().QueryRow(
+			`SELECT status,COALESCE(platform_post_id,''),COALESCE(platform_url,''),COALESCE(published_at,''),provider_post_id,attempts
+			   FROM post_targets WHERE post_id=?`, postID,
+		).Scan(&targetStatus, &platformID, &platformURL, &targetPublishedAt, &providerID, &attempts); err != nil {
+			t.Fatal(err)
+		}
+		if targetStatus != "published" || platformID != "urn:li:share:7432795016680497152" ||
+			platformURL != "https://www.linkedin.com/feed/update/urn:li:share:7432795016680497152/" ||
+			targetPublishedAt != "2026-02-26T14:33:46.829Z" || providerID != "69a059c7627edb9b6d64e139" || attempts != 0 {
+			t.Fatalf("stored target = status=%q platform_id=%q url=%q published=%q provider_id=%q attempts=%d",
+				targetStatus, platformID, platformURL, targetPublishedAt, providerID, attempts)
+		}
+		return postID
+	}
+
+	postID := assertStored()
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE posts SET status='published',requested_mode='schedule',created_at='2026-08-24 09:27:14',published_at='2026-08-27 09:41:51'
+		  WHERE id=?`, postID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE post_targets SET status='scheduled',platform_post_id=NULL,platform_url=NULL,published_at=NULL WHERE post_id=?`, postID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	result = app.importZernioPosts(ctx, "test-proj", importResult{}, accountID, 99, "za_linkedin", 0, 50)
+	if result.Status != "ok" || result.SkippedExisting != 1 {
+		t.Fatalf("reconcile result = %+v", result)
+	}
+	assertStored()
+	for _, call := range pf.executeCalls {
+		if call.Tool == "create_post" {
+			t.Fatalf("history import attempted upstream publication: %+v", pf.executeCalls)
+		}
+	}
+}
+
+func TestProviderImportedScheduleIsNeverPublishedByFallbackWorkerOrRollup(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'Apteva', 'active', 'zernio', 'za_linkedin')`,
+	)
+	accountID, _ := account.LastInsertId()
+	post, _ := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id,body,status,schedule_at,source,provider_sync_mode)
+		 VALUES ('test-proj','provider schedule','scheduled','2026-02-26T14:33:42Z','provider','mirror')`,
+	)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id,social_account_id,status,provider_post_id,provider_sync_status)
+		 VALUES (?,?,'scheduled','provider-1','scheduled')`, postID, accountID,
+	)
+
+	if err := (&App{}).runScheduledPublisher(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := (&App{}).rollupPostStatus(ctx, postID); got != "scheduled" {
+		t.Fatalf("rollup status = %q, want scheduled", got)
+	}
+	var parentStatus, targetStatus, publishedAt string
+	var attempts int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT p.status,COALESCE(p.published_at,''),t.status,t.attempts
+		   FROM posts p JOIN post_targets t ON t.post_id=p.id WHERE p.id=?`, postID,
+	).Scan(&parentStatus, &publishedAt, &targetStatus, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if parentStatus != "scheduled" || targetStatus != "scheduled" || publishedAt != "" || attempts != 0 {
+		t.Fatalf("provider schedule mutated: parent=%q target=%q published=%q attempts=%d",
+			parentStatus, targetStatus, publishedAt, attempts)
 	}
 }
 

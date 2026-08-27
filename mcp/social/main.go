@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.15.1
+version: 0.15.2
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -2778,7 +2778,7 @@ func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
 		return ""
 	}
 	defer rows.Close()
-	total, published, failed, active := 0, 0, 0, 0
+	total, published, failed, active, scheduled, drafts, unknown := 0, 0, 0, 0, 0, 0, 0
 	for rows.Next() {
 		var status string
 		if err := rows.Scan(&status); err != nil {
@@ -2792,6 +2792,12 @@ func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
 			failed++
 		case "pending", "publishing":
 			active++
+		case "scheduled":
+			scheduled++
+		case "draft", "in_review", "approved", "rejected":
+			drafts++
+		default:
+			unknown++
 		}
 	}
 	if total == 0 {
@@ -2800,6 +2806,21 @@ func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
 	if active > 0 {
 		_, _ = ctx.AppDB().Exec(`UPDATE posts SET status='publishing' WHERE id=? AND status NOT IN ('scheduled')`, postID)
 		return "publishing"
+	}
+	// A provider-imported scheduled/draft target is not a successful
+	// publication. Preserve its lifecycle and never manufacture a parent
+	// publish timestamp merely because no target is pending.
+	if scheduled > 0 {
+		_, _ = ctx.AppDB().Exec(`UPDATE posts SET status='scheduled', published_at=NULL WHERE id=?`, postID)
+		return "scheduled"
+	}
+	if drafts > 0 {
+		_, _ = ctx.AppDB().Exec(`UPDATE posts SET status='draft', published_at=NULL WHERE id=?`, postID)
+		return "draft"
+	}
+	if unknown > 0 || published+failed != total {
+		ctx.Logger().Warn("rollup post status: non-terminal target status", "post", postID, "unknown", unknown)
+		return ""
 	}
 	finalStatus := "published"
 	if failed > 0 && published == 0 {
@@ -4541,7 +4562,7 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		q += " AND datetime(" + effectiveTime + ") < datetime(?)"
 		qArgs = append(qArgs, to.UTC().Format(time.RFC3339))
 	}
-	q += " ORDER BY id DESC LIMIT ?"
+	q += " ORDER BY datetime(" + effectiveTime + ") DESC, id DESC LIMIT ?"
 	qArgs = append(qArgs, limit)
 	rows, err := ctx.AppDB().Query(q, qArgs...)
 	if err != nil {
@@ -4858,6 +4879,7 @@ func (a *App) runScheduledPublisher(runCtx context.Context, ctx *sdk.AppCtx) err
 	rows, err := ctx.AppDB().Query(
 		`SELECT id FROM posts
 		  WHERE project_id=? AND status='scheduled' AND job_id=0
+		    AND source!='provider'
 		    AND schedule_at IS NOT NULL AND datetime(schedule_at) <= CURRENT_TIMESTAMP
 		  ORDER BY schedule_at, id LIMIT 25`,
 		pid,
