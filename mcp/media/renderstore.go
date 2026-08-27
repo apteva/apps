@@ -23,10 +23,15 @@ type RenderRow struct {
 	Operation     string          `json:"operation"`
 	SourceFileIDs []string        `json:"source_file_ids"`
 	Params        json.RawMessage `json:"params"`
-	Status        string          `json:"status"`
-	ProgressPct   int             `json:"progress_pct"`
-	OutputFileID  string          `json:"output_file_id,omitempty"`
-	OutputName    string          `json:"output_name,omitempty"`
+	// ResolvedParams is populated when an executor has converted symbolic
+	// options into the effective ffmpeg inputs. For Smart Crop this includes
+	// crop_w/h/x/y and, for tracked reels, crop_path. Params remains the
+	// caller's original request.
+	ResolvedParams json.RawMessage `json:"resolved_params,omitempty"`
+	Status         string          `json:"status"`
+	ProgressPct    int             `json:"progress_pct"`
+	OutputFileID   string          `json:"output_file_id,omitempty"`
+	OutputName     string          `json:"output_name,omitempty"`
 	// OutputFolder — where the result lands in storage. Set per-call
 	// at submit time, falling back to the install's
 	// render_output_folder config when empty.
@@ -92,7 +97,7 @@ func claimNextPending(db *sql.DB) (*RenderRow, error) {
 		    ORDER BY created_at
 		    LIMIT 1
 		 )
-		 RETURNING id, project_id, operation, source_file_ids, params,
+		 RETURNING id, project_id, operation, source_file_ids, params, COALESCE(resolved_params,''),
 		           status, progress_pct, COALESCE(output_file_id,''),
 		           COALESCE(output_name,''), COALESCE(output_folder,''), error, COALESCE(requested_by,''),
 		           created_at, COALESCE(started_at,''), COALESCE(completed_at,'')`,
@@ -121,6 +126,17 @@ func renderUpdateProgress(db *sql.DB, id int64, pct int) error {
 		pct = 100
 	}
 	_, err := db.Exec(`UPDATE renders SET progress_pct = ? WHERE id = ? AND status = 'running'`, pct, id)
+	return err
+}
+
+// renderUpdateResolvedParams exposes the effective executor inputs without
+// overwriting the caller's submitted params. It is intentionally allowed only
+// while a render is running, before ffmpeg starts.
+func renderUpdateResolvedParams(db *sql.DB, id int64, params json.RawMessage) error {
+	if len(params) == 0 || !json.Valid(params) {
+		return errors.New("resolved render params must be valid JSON")
+	}
+	_, err := db.Exec(`UPDATE renders SET resolved_params = ? WHERE id = ? AND status = 'running'`, string(params), id)
 	return err
 }
 
@@ -178,7 +194,7 @@ func renderMarkCancelled(db *sql.DB, id int64) error {
 }
 
 func getRender(db *sql.DB, projectID string, id int64) (*RenderRow, error) {
-	q := `SELECT id, project_id, operation, source_file_ids, params,
+	q := `SELECT id, project_id, operation, source_file_ids, params, COALESCE(resolved_params,''),
 	             status, progress_pct, COALESCE(output_file_id,''),
 	             COALESCE(output_name,''), COALESCE(output_folder,''), error, COALESCE(requested_by,''),
 	             created_at, COALESCE(started_at,''), COALESCE(completed_at,'')
@@ -258,7 +274,7 @@ func queueSummary(db *sql.DB, projectID string) (*RenderQueueSummary, error) {
 	// by started_at so the panel can show "this one's been running
 	// for 3 min" intuitively.
 	runningRows, err := db.Query(`
-		SELECT id, project_id, operation, source_file_ids, params,
+		SELECT id, project_id, operation, source_file_ids, params, COALESCE(resolved_params,''),
 		       status, progress_pct, COALESCE(output_file_id,''),
 		       COALESCE(output_name,''), COALESCE(output_folder,''), error, COALESCE(requested_by,''),
 		       created_at, COALESCE(started_at,''), COALESCE(completed_at,'')
@@ -282,7 +298,7 @@ func queueSummary(db *sql.DB, projectID string) (*RenderQueueSummary, error) {
 	// them up). Cap at 20 so a 10k-deep queue doesn't bloat the
 	// response; the counts.pending tells the panel there's more.
 	pendingRows, err := db.Query(`
-		SELECT id, project_id, operation, source_file_ids, params,
+		SELECT id, project_id, operation, source_file_ids, params, COALESCE(resolved_params,''),
 		       status, progress_pct, COALESCE(output_file_id,''),
 		       COALESCE(output_name,''), COALESCE(output_folder,''), error, COALESCE(requested_by,''),
 		       created_at, COALESCE(started_at,''), COALESCE(completed_at,'')
@@ -306,7 +322,7 @@ func queueSummary(db *sql.DB, projectID string) (*RenderQueueSummary, error) {
 	// fall off the panel quickly anyway (drift past 24h or get pruned
 	// by the recent-counts window).
 	recentRows, err := db.Query(`
-		SELECT id, project_id, operation, source_file_ids, params,
+		SELECT id, project_id, operation, source_file_ids, params, COALESCE(resolved_params,''),
 		       status, progress_pct, COALESCE(output_file_id,''),
 		       COALESCE(output_name,''), COALESCE(output_folder,''), error, COALESCE(requested_by,''),
 		       created_at, COALESCE(started_at,''), COALESCE(completed_at,'')
@@ -330,7 +346,7 @@ func queueSummary(db *sql.DB, projectID string) (*RenderQueueSummary, error) {
 
 func listRenders(db *sql.DB, projectID string, f RenderFilters) ([]RenderRow, error) {
 	q := strings.Builder{}
-	q.WriteString(`SELECT id, project_id, operation, source_file_ids, params,
+	q.WriteString(`SELECT id, project_id, operation, source_file_ids, params, COALESCE(resolved_params,''),
 	                      status, progress_pct, COALESCE(output_file_id,''),
 	                      COALESCE(output_name,''), COALESCE(output_folder,''), error, COALESCE(requested_by,''),
 	                      created_at, COALESCE(started_at,''), COALESCE(completed_at,'')
@@ -376,9 +392,9 @@ func listRenders(db *sql.DB, projectID string, f RenderFilters) ([]RenderRow, er
 // type-checker is happy with.
 func scanRender(row *sql.Row) (*RenderRow, error) {
 	var r RenderRow
-	var srcRaw, paramsRaw string
+	var srcRaw, paramsRaw, resolvedParamsRaw string
 	err := row.Scan(
-		&r.ID, &r.ProjectID, &r.Operation, &srcRaw, &paramsRaw,
+		&r.ID, &r.ProjectID, &r.Operation, &srcRaw, &paramsRaw, &resolvedParamsRaw,
 		&r.Status, &r.ProgressPct, &r.OutputFileID,
 		&r.OutputName, &r.OutputFolder, &r.Error, &r.RequestedBy,
 		&r.CreatedAt, &r.StartedAt, &r.CompletedAt,
@@ -390,14 +406,17 @@ func scanRender(row *sql.Row) (*RenderRow, error) {
 		return nil, fmt.Errorf("decode source_file_ids: %w", err)
 	}
 	r.Params = json.RawMessage(paramsRaw)
+	if resolvedParamsRaw != "" {
+		r.ResolvedParams = json.RawMessage(resolvedParamsRaw)
+	}
 	return &r, nil
 }
 
 func scanRenderFromRows(rows *sql.Rows) (*RenderRow, error) {
 	var r RenderRow
-	var srcRaw, paramsRaw string
+	var srcRaw, paramsRaw, resolvedParamsRaw string
 	err := rows.Scan(
-		&r.ID, &r.ProjectID, &r.Operation, &srcRaw, &paramsRaw,
+		&r.ID, &r.ProjectID, &r.Operation, &srcRaw, &paramsRaw, &resolvedParamsRaw,
 		&r.Status, &r.ProgressPct, &r.OutputFileID,
 		&r.OutputName, &r.OutputFolder, &r.Error, &r.RequestedBy,
 		&r.CreatedAt, &r.StartedAt, &r.CompletedAt,
@@ -409,5 +428,8 @@ func scanRenderFromRows(rows *sql.Rows) (*RenderRow, error) {
 		return nil, fmt.Errorf("decode source_file_ids: %w", err)
 	}
 	r.Params = json.RawMessage(paramsRaw)
+	if resolvedParamsRaw != "" {
+		r.ResolvedParams = json.RawMessage(resolvedParamsRaw)
+	}
 	return &r, nil
 }

@@ -158,6 +158,17 @@ func TestBuildCloudinaryChain_Crop_TargetRatioCenterFallback(t *testing.T) {
 	}
 }
 
+func TestBuildCloudinaryChain_Crop_Contain(t *testing.T) {
+	chain, err := buildCloudinaryChain("crop",
+		json.RawMessage(`{"target_ratio":"9:16","output_width":1080,"fit_mode":"contain","crop_w":606,"crop_h":1080,"crop_x":1200}`), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chain != "c_pad,w_1080,h_1920,b_black,f_mp4" {
+		t.Fatalf("got %q", chain)
+	}
+}
+
 func TestBuildCloudinaryChain_Crop_RejectsNegative(t *testing.T) {
 	if _, err := buildCloudinaryChain("crop",
 		json.RawMessage(`{"x":-1,"y":0,"width":10,"height":10}`), ""); err == nil {
@@ -186,6 +197,17 @@ func TestBuildCloudinaryChain_ExtractFrame_WithWidth(t *testing.T) {
 	}
 	if chain != "so_1.500,c_scale,w_320,f_png" {
 		t.Errorf("got %q", chain)
+	}
+}
+
+func TestBuildCloudinaryChain_ExtractFrame_Contain(t *testing.T) {
+	chain, err := buildCloudinaryChain("extract_frame",
+		json.RawMessage(`{"at_ms":2500,"target_ratio":"9:16","output_width":1080,"fit_mode":"contain"}`), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chain != "so_2.500,c_pad,w_1080,h_1920,b_black,f_png" {
+		t.Fatalf("got %q", chain)
 	}
 }
 

@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.99
+version: 0.14.0
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,8 +31,9 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.13.99 restores dedicated-host rendering on
-  POSIX-compatible remote shells while retaining the smart-crop corrections.
+  through storage. v0.14.0 strengthens generic Smart Crop confidence,
+  exposes effective resolved render parameters, and adds a non-destructive
+  contain fit for compositions wider than the target crop.
 author: Apteva
 scopes: [project, global]
 min_apteva_version: "0.25.9"
@@ -175,7 +176,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_crop
-      description: "Crop or smart-reframe an image/video. Smart Crop v2 analyzes the cached canonical thumbnail, centers subjects, and protects visible faces/heads near portrait edges. Returns render_id."
+      description: "Crop or reframe an image/video. fit_mode=crop uses content-agnostic Smart Crop v2 evidence; fit_mode=contain preserves the complete source frame with padding. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -189,7 +190,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_frame
-      description: "Save a frame as PNG; Smart Crop v2 uses cached storyboard frames when dense, bounded temporary source screenshots when sparse, and automatic face/head edge protection. Returns render_id."
+      description: "Save a frame as PNG; fit_mode=crop uses generic cached/source visual evidence and fit_mode=contain preserves the complete frame. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -231,7 +232,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_reel
-      description: "Trim + reframe in one pass. Smart Crop v2 tracks subjects across bounded cached or temporary source screenshots, protects visible faces/heads near portrait edges, and uses a stable fixed crop when movement is low. Returns render_id."
+      description: "Trim + reframe in one pass. fit_mode=crop uses content-agnostic evidence and a stable path; fit_mode=contain preserves every source edge with padding. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -244,7 +245,7 @@ provides:
           match:
             render_id: "$result.render_id"
           expires_after: 24h
-    - { name: media_get_render,      description: "Status of one render — progress + output_file_id when ready." }
+    - { name: media_get_render,      description: "Status of one render, with original params and effective resolved_params once execution starts." }
     - { name: media_list_renders,    description: "List renders filtered by status / operation." }
     - { name: media_cancel_render,   description: "Cancel a pending or running render. Idempotent." }
     - { name: media_set_description, description: "Set title / description / alt_text on a media row. Partial update; omitted fields preserved." }
@@ -283,7 +284,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.13.99
+    ref: media/v0.14.0
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -657,7 +658,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_crop",
-			Description: "Crop or smart-reframe an existing video/image. Exact mode: file_id, x, y, width, height. Smart Crop v2 mode analyzes the canonical cached image/video thumbnail, centers subjects, and protects visible faces/heads near portrait edges: file_id, target_ratio, crop_mode? ('smart' default|'center'), output_width?. Use this for still images or a whole video; use media_extract_frame for a video timestamp.",
+			Description: "Crop or reframe an existing video/image. Exact mode: file_id, x, y, width, height. With target_ratio, fit_mode='crop' (default) uses content-agnostic Smart Crop v2 evidence—saliency, foreground change, motion, shape and optional face geometry—while fit_mode='contain' preserves the complete source frame with black padding. Args: file_id, target_ratio, crop_mode? ('smart' default|'center'), fit_mode? ('crop' default|'contain'), output_width?. Use media_extract_frame for a video timestamp.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string"},
 				"x":             map[string]any{"type": "integer", "description": "Exact crop left offset in pixels. Used with y, width, and height when target_ratio is not set."},
@@ -667,14 +668,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"target_ratio":  map[string]any{"type": "string", "description": "When set, crop/reframe to this aspect ratio ('W:H'), e.g. '9:16', '1:1', '4:5'. Enables smart/center mode for existing images and full video clips."},
 				"output_width":  map[string]any{"type": "integer", "description": "Optional scale width after target_ratio crop. Omit to preserve the computed crop dimensions."},
 				"crop_mode":     map[string]any{"type": "string", "description": "'smart' (default) for subject-aware crop via the source's cached thumbnail/keyframe saliency, or 'center' for geometric center. Smart falls back to center when derivations are unavailable."},
+				"fit_mode":      map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas and may remove source edges; 'contain' preserves the complete frame and pads unused canvas area."},
 				"output_name":   map[string]any{"type": "string"},
 				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id"}),
-			Handler: a.toolSubmitRender("crop", []string{"x", "y", "width", "height", "target_ratio", "output_width", "crop_mode"}, []string{"file_id"}),
+			Handler: a.toolSubmitRender("crop", []string{"x", "y", "width", "height", "target_ratio", "output_width", "crop_mode", "fit_mode"}, []string{"file_id"}),
 		},
 		{
 			Name:        "media_extract_frame",
-			Description: "Save a video frame as PNG. With target_ratio, Smart Crop v2 uses dense cached storyboard frames or bounded temporary source screenshots around at_ms, including zero-motion person centering and automatic face/head edge protection. Args: file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?.",
+			Description: "Save a video frame as PNG. With target_ratio, fit_mode='crop' uses generic cached/source visual evidence to reframe at at_ms; fit_mode='contain' preserves the complete frame with padding. Args: file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?, fit_mode?.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string"},
 				"at_ms":         map[string]any{"type": "integer"},
@@ -682,10 +684,11 @@ func (a *App) MCPTools() []sdk.Tool {
 				"target_ratio":  map[string]any{"type": "string", "description": "When set, crop + scale to this aspect ratio (\"W:H\"). E.g. \"1:1\", \"9:16\", \"4:5\"."},
 				"output_width":  map[string]any{"type": "integer", "description": "Output width when target_ratio is set. Default 1080; height derives from ratio."},
 				"crop_mode":     map[string]any{"type": "string", "description": "\"smart\" (default) for subject-aware crop via the nearest cached keyframe for timed operations, or \"center\" for geometric center. Smart falls back to thumbnail/center when keyframes are not ready."},
+				"fit_mode":      map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas; 'contain' preserves the complete frame with black padding."},
 				"output_name":   map[string]any{"type": "string"},
 				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "at_ms"}),
-			Handler: a.toolSubmitRender("extract_frame", []string{"at_ms", "width", "target_ratio", "output_width", "crop_mode"}, []string{"file_id"}),
+			Handler: a.toolSubmitRender("extract_frame", []string{"at_ms", "width", "target_ratio", "output_width", "crop_mode", "fit_mode"}, []string{"file_id"}),
 		},
 		{
 			Name:        "media_audio_extract",
@@ -713,7 +716,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_extract_reel",
-			Description: "Cut and reframe a clip in one ffmpeg pass. Smart Crop v2 analyzes a bounded cached storyboard or temporary source screenshots when sparse, centers stable people, protects visible faces/heads near portrait edges, and follows movement with a smoothed path. Args: file_id, start_ms, end_ms, target_ratio? (default '9:16'), output_width?, crop_mode? ('smart' default|'center').",
+			Description: "Cut and reframe a clip in one ffmpeg pass. fit_mode='crop' (default) uses content-agnostic Smart Crop v2 evidence and a smoothed path; fit_mode='contain' preserves every source edge with black padding when the composition cannot fit a destructive crop. Args: file_id, start_ms, end_ms, target_ratio? (default '9:16'), output_width?, crop_mode?, fit_mode?.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string", "description": "Storage file_id of the source video."},
 				"start_ms":      map[string]any{"type": "integer", "description": "Clip start, milliseconds from start of source. Same convention as media_trim."},
@@ -721,15 +724,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"target_ratio":  map[string]any{"type": "string", "description": "Output aspect ratio as 'W:H'. Default '9:16'. Common: '9:16' (vertical reels), '1:1' (square), '4:5' (Instagram portrait), '16:9' (passthrough crop)."},
 				"output_width":  map[string]any{"type": "integer", "description": "Output width in pixels. Default 1080. Height auto-derives from target_ratio (rounded to even for codec compatibility)."},
 				"crop_mode":     map[string]any{"type": "string", "description": "\"smart\" (default) keeps the most interesting subject in frame using the nearest cached keyframe for the reel/frame; \"center\" uses a geometric center crop. Smart falls back to thumbnail/center when keyframes are not ready."},
+				"fit_mode":      map[string]any{"type": "string", "description": "'crop' (default) fills the canvas with a tracked crop; 'contain' preserves the complete frame and pads unused canvas area."},
 				"output_name":   map[string]any{"type": "string", "description": "Optional output filename. Extension auto-corrected to .mp4."},
 				"output_folder": map[string]any{"type": "string", "description": "Optional storage folder for the rendered output. Defaults to install's render_output_folder (typically /renders/)."},
 			}, []string{"file_id", "start_ms", "end_ms"}),
-			Handler: a.toolSubmitRender("extract_reel", []string{"start_ms", "end_ms", "target_ratio", "output_width", "crop_mode"}, []string{"file_id"}),
+			Handler: a.toolSubmitRender("extract_reel", []string{"start_ms", "end_ms", "target_ratio", "output_width", "crop_mode", "fit_mode"}, []string{"file_id"}),
 		},
 		// ─── Render manage tools ────────────────────────────────────
 		{
 			Name:        "media_get_render",
-			Description: "Status of one render. Args: render_id.",
+			Description: "Status of one render. Returns the original params and, once execution starts, resolved_params with effective executor values such as Smart Crop coordinates/path. Args: render_id.",
 			InputSchema: schemaObject(map[string]any{"render_id": map[string]any{"type": "integer"}}, []string{"render_id"}),
 			Handler:     a.toolGetRender,
 		},
@@ -2386,7 +2390,13 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 		target.FocusMs = body.StartMs + (body.EndMs-body.StartMs)/2
 	}
 	target = target.Normalized()
-	win, err := computeSmartCrop(r.Context(), globalCtx, newStorageClient(), pid, body.FileID, rw, rh, mode, target)
+	var win *cropWindow
+	var cropPath []cropPathPoint
+	if op == "extract_reel" && mode == "smart" && target.HasRange() {
+		win, cropPath, err = computeSmartCropReelV2(r.Context(), globalCtx, newStorageClient(), pid, body.FileID, rw, rh, target)
+	} else {
+		win, err = computeSmartCrop(r.Context(), globalCtx, newStorageClient(), pid, body.FileID, rw, rh, mode, target)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -2401,6 +2411,9 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 		"source_width":  row.Width,
 		"source_height": row.Height,
 		"mode":          mode,
+	}
+	if len(cropPath) > 1 {
+		out["crop_path"] = cropPath
 	}
 	if mode == "smart" {
 		if d := pickSmartCropDerivation(row.Derivations, target); d.StorageFileID != "" {

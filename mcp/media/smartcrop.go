@@ -1241,6 +1241,13 @@ func preprocessSmartCrop(
 	if _, ok := parsed["crop_w"]; ok {
 		return params
 	}
+	fitMode, fitErr := normalizeFitMode(stringJSONValue(parsed["fit_mode"]))
+	if fitErr != nil || fitMode == "contain" {
+		// Contain intentionally preserves the complete frame, so subject
+		// detection and crop-path generation would be wasted work and could
+		// misleadingly appear in resolved_params.
+		return params
+	}
 	tr, _ := parsed["target_ratio"].(string)
 	if strings.TrimSpace(tr) == "" {
 		// extract_frame and crop default to no crop; extract_reel defaults to 9:16.
@@ -1320,6 +1327,11 @@ func preprocessSmartCrop(
 		return params
 	}
 	return out
+}
+
+func stringJSONValue(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 func smartCropFocus(op string, parsed map[string]any) smartCropTarget {

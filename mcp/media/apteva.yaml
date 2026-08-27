@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.99
+version: 0.14.0
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -19,8 +19,9 @@ description: |
   by default, Cloudinary when bound. A wedged encode releases its
   slot without disturbing the indexer.
 
-  v0.13.99 restores dedicated-host rendering on POSIX-compatible remote shells
-  while retaining the v0.13.98 smart-crop corrections.
+  v0.14.0 strengthens content-agnostic Smart Crop confidence and temporal
+  stability, exposes effective resolved render parameters, and adds an opt-in
+  non-destructive contain fit for compositions wider than the target crop.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media
@@ -190,7 +191,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_crop
-      description: Crop or smart-reframe an existing video/image. Exact mode args — file_id, x, y, width, height. Smart Crop v2 analyzes the canonical cached image/video thumbnail, centers subjects, and protects visible faces/heads near portrait edges; args — file_id, target_ratio, crop_mode? (smart default | center), output_width?. Use this for still images or a whole video; use media_extract_frame when selecting a video timestamp.
+      description: Crop or reframe an existing video/image. Exact mode args — file_id, x, y, width, height. With target_ratio, fit_mode=crop (default) uses content-agnostic Smart Crop v2 evidence (saliency, foreground change, motion, shape, and optional face geometry); fit_mode=contain preserves every source edge with black padding. Args — file_id, target_ratio, crop_mode? (smart default | center), fit_mode? (crop default | contain), output_width?.
       async_result:
         id_field: render_id
         notify:
@@ -204,7 +205,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_frame
-      description: Save a video frame as PNG. With target_ratio, Smart Crop v2 uses dense cached storyboard frames or bounded temporary source screenshots around at_ms, including zero-motion person centering and automatic face/head edge protection. Args — file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?.
+      description: Save a video frame as PNG. With target_ratio, fit_mode=crop uses generic cached/source visual evidence around at_ms; fit_mode=contain preserves the complete frame with padding. Args — file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?, fit_mode?.
       async_result:
         id_field: render_id
         notify:
@@ -247,7 +248,7 @@ provides:
           expires_after: 24h
     - name: media_extract_reel
       description: |
-        Cut and reframe a clip in one ffmpeg pass. Smart Crop v2 analyzes a bounded cached storyboard or temporary source screenshots when sparse, centers stable people, protects visible faces/heads near portrait edges, and follows movement with a smoothed path. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center). Returns render_id and notifies the caller on completion.
+        Cut and reframe a clip in one ffmpeg pass. fit_mode=crop (default) uses content-agnostic Smart Crop v2 evidence and a smoothed crop path; fit_mode=contain preserves the complete source frame with black padding. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center), fit_mode? (crop default | contain). Returns render_id and notifies the caller on completion.
       async_result:
         id_field: render_id
         notify:
@@ -263,7 +264,7 @@ provides:
 
     # Renders — manage
     - name: media_get_render
-      description: Status of one render (pending|running|ok|failed|cancelled), progress_pct, output_file_id when ready.
+      description: Status of one render, including original params and executor-resolved params (effective Smart Crop rectangle/path) once execution starts.
     - name: media_list_renders
       description: Filter renders by status, operation, or limit.
     - name: media_cancel_render
@@ -499,7 +500,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.13.99
+    ref: media/v0.14.0
     entry: mcp/media
   port: 8080
   health_check: /health

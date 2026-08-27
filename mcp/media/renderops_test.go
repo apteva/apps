@@ -135,6 +135,33 @@ func TestPlanCrop_TargetRatioUsesExplicitSmartCrop(t *testing.T) {
 	}
 }
 
+func TestPlanCropContainPreservesWholeFrame(t *testing.T) {
+	plan, err := buildPlan("crop", []string{"42"}, raw(t, map[string]any{
+		"target_ratio": "9:16",
+		"output_width": 1080,
+		"fit_mode":     "contain",
+		// Prove contain never consumes a previously resolved crop.
+		"crop_w": 606, "crop_h": 1080, "crop_x": 1200, "crop_y": 0,
+	}), "", ".mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(plan.Args, " ")
+	if !strings.Contains(got, "force_original_aspect_ratio=decrease") ||
+		!strings.Contains(got, "pad=1080:1920") || strings.Contains(got, "crop=") {
+		t.Fatalf("contain args = %q", got)
+	}
+}
+
+func TestPlanCropRejectsUnknownFitMode(t *testing.T) {
+	_, err := buildPlan("crop", []string{"42"}, raw(t, map[string]any{
+		"target_ratio": "9:16", "fit_mode": "guess",
+	}), "", ".mp4")
+	if err == nil || !strings.Contains(err.Error(), "fit_mode must be crop or contain") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestPlanCrop_TargetRatioWithoutOutputWidthPreservesCropSize(t *testing.T) {
 	plan, err := buildPlan("crop", []string{"42"},
 		raw(t, map[string]any{
@@ -605,6 +632,22 @@ func TestPlanExtractReel_DynamicCropPathAccountsForPreroll(t *testing.T) {
 	// sample five seconds into the reel is t=7 on the filter timeline.
 	if !strings.Contains(vf, `lt(t\,7.000)`) {
 		t.Fatalf("dynamic path is not aligned with preroll: %s", vf)
+	}
+}
+
+func TestPlanExtractReelContainIgnoresCropPath(t *testing.T) {
+	plan, err := buildPlan("extract_reel", []string{"42"}, raw(t, map[string]any{
+		"start_ms": 1000, "end_ms": 4000, "target_ratio": "9:16",
+		"output_width": 1080, "fit_mode": "contain",
+		"crop_w": 606, "crop_h": 1080,
+		"crop_path": []map[string]any{{"at_ms": 1000, "x": 0}, {"at_ms": 4000, "x": 1200}},
+	}), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(plan.Args, " ")
+	if !strings.Contains(got, "force_original_aspect_ratio=decrease") || strings.Contains(got, "crop=") {
+		t.Fatalf("contain reel args = %q", got)
 	}
 }
 

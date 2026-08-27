@@ -31,6 +31,7 @@ func newRenderTestDB(t *testing.T) *sql.DB {
 		  operation       TEXT    NOT NULL,
 		  source_file_ids TEXT    NOT NULL,
 		  params          TEXT    NOT NULL DEFAULT '{}',
+		  resolved_params TEXT,
 		  status          TEXT    NOT NULL DEFAULT 'pending',
 		  progress_pct    INTEGER NOT NULL DEFAULT 0,
 		  output_file_id  TEXT,
@@ -135,5 +136,32 @@ func TestQueueSummary_RejectsEmptyProjectID(t *testing.T) {
 	defer db.Close()
 	if _, err := queueSummary(db, ""); err == nil {
 		t.Error("queueSummary(\"\") should error — no global lookup allowed; ambiguous which project's queue to return")
+	}
+}
+
+func TestRenderResolvedParamsPreserveSubmittedParams(t *testing.T) {
+	db := newRenderTestDB(t)
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO renders
+		(id, project_id, operation, source_file_ids, params, status)
+		VALUES (20, 'p1', 'extract_reel', '["42"]', '{"target_ratio":"9:16"}', 'running')`); err != nil {
+		t.Fatal(err)
+	}
+	resolved := []byte(`{"target_ratio":"9:16","crop_w":606,"crop_h":1080,"crop_x":584,"crop_y":0,"crop_path":[{"at_ms":1000,"x":584},{"at_ms":2000,"x":640}]}`)
+	if err := renderUpdateResolvedParams(db, 20, resolved); err != nil {
+		t.Fatal(err)
+	}
+	render, err := getRender(db, "p1", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(render.Params) != `{"target_ratio":"9:16"}` {
+		t.Fatalf("submitted params changed: %s", render.Params)
+	}
+	if string(render.ResolvedParams) != string(resolved) {
+		t.Fatalf("resolved params = %s, want %s", render.ResolvedParams, resolved)
+	}
+	if err := renderUpdateResolvedParams(db, 20, []byte(`not-json`)); err == nil {
+		t.Fatal("invalid resolved params should fail")
 	}
 }

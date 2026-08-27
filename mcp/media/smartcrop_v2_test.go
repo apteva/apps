@@ -866,6 +866,56 @@ func TestSmartCropSceneSamplesDoNotCrossEdit(t *testing.T) {
 	}
 }
 
+func TestSmartCropStillBackgroundCannotLeaveAnchoredSubject(t *testing.T) {
+	context := smartCropTemporalResult{
+		X: 584, Samples: 8, Concentration: 0.82,
+		MeanActivity: 0.08, ActiveFraction: 0.06, SubjectAnchored: true, AnchorCoverage: 5,
+	}
+	weak := smartCropBackgroundResult{Concentration: 0.62, Improvement: 1.20, RowCoverage: 0.45}
+	if smartCropStillBackgroundCorrectionSupported(600, 1314, weak, context, true, 606) {
+		t.Fatal("disconnected background edge crop should not replace anchored subject")
+	}
+	if !smartCropStillBackgroundCorrectionSupported(1200, 620, weak, context, true, 606) {
+		t.Fatal("background correction toward the anchored subject should remain allowed")
+	}
+	if !smartCropStillBackgroundCorrectionSupported(600, 1314, weak, smartCropTemporalResult{}, false, 606) {
+		t.Fatal("unanchored scenes must retain the generic background-model path")
+	}
+}
+
+func TestSmartCropUnsupportedIsolatedExcursionIsRemoved(t *testing.T) {
+	samples := []smartCropV2Sample{
+		{point: cropPathPoint{AtMs: 0, X: 500}},
+		{point: cropPathPoint{AtMs: 5_000, X: 1314}, backgroundTracked: true},
+		{point: cropPathPoint{AtMs: 10_000, X: 520}},
+	}
+	if got := correctSmartCropUnsupportedExcursions(samples, 1920, 606); got != 1 {
+		t.Fatalf("corrected=%d samples=%+v", got, samples)
+	}
+	if samples[1].point.X != 510 || samples[1].backgroundTracked {
+		t.Fatalf("isolated excursion not interpolated: %+v", samples[1])
+	}
+}
+
+func TestSmartCropSupportedExcursionIsPreserved(t *testing.T) {
+	anchors := []smartCropV2Sample{
+		{point: cropPathPoint{AtMs: 0, X: 500}},
+		{point: cropPathPoint{AtMs: 5_000, X: 1200}, motionTracked: true},
+		{point: cropPathPoint{AtMs: 10_000, X: 520}},
+	}
+	if got := correctSmartCropUnsupportedExcursions(anchors, 1920, 606); got != 0 || anchors[1].point.X != 1200 {
+		t.Fatalf("motion-certified traversal was changed: corrected=%d sample=%+v", got, anchors[1])
+	}
+	cut := []smartCropV2Sample{
+		{point: cropPathPoint{AtMs: 0, X: 500}},
+		{point: cropPathPoint{AtMs: 5_000, X: 1200, Cut: true}},
+		{point: cropPathPoint{AtMs: 10_000, X: 520}},
+	}
+	if got := correctSmartCropUnsupportedExcursions(cut, 1920, 606); got != 0 {
+		t.Fatalf("scene cut was changed: corrected=%d", got)
+	}
+}
+
 func TestTemporalSubjectConsensusFindsMovingSubjectOverStaticTexture(t *testing.T) {
 	xs := []int{92, 98, 104, 110, 116, 122, 128, 134, 140}
 	samples := makeTemporalTestSamples(xs, 740)

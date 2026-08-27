@@ -253,6 +253,7 @@ type cropParams struct {
 	TargetRatio string `json:"target_ratio,omitempty"` // "1:1", "9:16", "4:5", … — if set, output is cropped/reframed to that ratio
 	OutputWidth int    `json:"output_width,omitempty"` // optional scale width after target_ratio crop; omitted preserves crop size
 	CropMode    string `json:"crop_mode,omitempty"`    // "smart" (default) | "center"; actual coords supplied by preprocessSmartCrop
+	FitMode     string `json:"fit_mode,omitempty"`     // "crop" (default) | "contain"; contain preserves the complete source frame
 
 	// crop_w/h/x/y are injected by preprocessSmartCrop at execute
 	// time. Agents and the UI shouldn't pass these directly.
@@ -279,18 +280,30 @@ func planCrop(sources []string, raw json.RawMessage, outputName, sourceExt strin
 		if err != nil {
 			return nil, fmt.Errorf("crop: %w", err)
 		}
-		if p.CropW > 0 && p.CropH > 0 {
-			vf = explicitCropFilter(p.CropW, p.CropH, p.CropX, p.CropY)
-		} else if p.Width > 0 && p.Height > 0 {
-			vf = explicitCropFilter(p.Width, p.Height, p.X, p.Y)
-		} else {
-			vf = symbolicCenterCropFilter(rw, rh)
+		fitMode, err := normalizeFitMode(p.FitMode)
+		if err != nil {
+			return nil, fmt.Errorf("crop: %w", err)
 		}
-		if p.OutputWidth > 0 {
+		if fitMode == "contain" {
 			outputWidth, outputHeight := ratioOutputDimensions(p.OutputWidth, rw, rh)
-			vf += "," + fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight)
+			vf = containFilter(outputWidth, outputHeight)
+		} else {
+			if p.CropW > 0 && p.CropH > 0 {
+				vf = explicitCropFilter(p.CropW, p.CropH, p.CropX, p.CropY)
+			} else if p.Width > 0 && p.Height > 0 {
+				vf = explicitCropFilter(p.Width, p.Height, p.X, p.Y)
+			} else {
+				vf = symbolicCenterCropFilter(rw, rh)
+			}
+			if p.OutputWidth > 0 {
+				outputWidth, outputHeight := ratioOutputDimensions(p.OutputWidth, rw, rh)
+				vf += "," + fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight)
+			}
 		}
 	} else {
+		if strings.TrimSpace(p.FitMode) != "" && !strings.EqualFold(strings.TrimSpace(p.FitMode), "crop") {
+			return nil, errors.New("crop: fit_mode requires target_ratio")
+		}
 		if p.Width <= 0 || p.Height <= 0 {
 			return nil, errors.New("crop: width and height must be > 0 unless target_ratio is set")
 		}
@@ -313,6 +326,7 @@ type extractFrameParams struct {
 	TargetRatio string `json:"target_ratio,omitempty"` // "1:1", "9:16", "4:5", … — if set, output is cropped + scaled to that ratio
 	OutputWidth int    `json:"output_width,omitempty"` // width when target_ratio is set; defaults to Width or 1080
 	CropMode    string `json:"crop_mode,omitempty"`    // informational — actual crop_w/h/x/y is supplied by preprocessSmartCrop
+	FitMode     string `json:"fit_mode,omitempty"`     // "crop" (default) | "contain"
 
 	// crop_w/h/x/y are injected by preprocessSmartCrop at execute
 	// time. When set, the filter chain uses explicit coords and
@@ -363,11 +377,24 @@ func planExtractFrame(sources []string, raw json.RawMessage, outputName string) 
 		if outW <= 0 {
 			outW = 1080
 		}
-		cropExpr := cropFilterForRatio(rw, rh, p.CropW, p.CropH, p.CropX, p.CropY)
 		outputWidth, outputHeight := ratioOutputDimensions(outW, rw, rh)
-		args = append(args, "-vf", cropExpr+","+fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight))
+		fitMode, err := normalizeFitMode(p.FitMode)
+		if err != nil {
+			return nil, fmt.Errorf("extract_frame: %w", err)
+		}
+		if fitMode == "contain" {
+			args = append(args, "-vf", containFilter(outputWidth, outputHeight))
+		} else {
+			cropExpr := cropFilterForRatio(rw, rh, p.CropW, p.CropH, p.CropX, p.CropY)
+			args = append(args, "-vf", cropExpr+","+fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight))
+		}
 	} else if p.Width > 0 {
+		if strings.TrimSpace(p.FitMode) != "" && !strings.EqualFold(strings.TrimSpace(p.FitMode), "crop") {
+			return nil, errors.New("extract_frame: fit_mode requires target_ratio")
+		}
 		args = append(args, "-vf", fmt.Sprintf("scale=%d:-2", p.Width))
+	} else if strings.TrimSpace(p.FitMode) != "" && !strings.EqualFold(strings.TrimSpace(p.FitMode), "crop") {
+		return nil, errors.New("extract_frame: fit_mode requires target_ratio")
 	}
 	if outputName == "" {
 		outputName = fmt.Sprintf("frame-%dms.png", p.AtMs)
@@ -412,6 +439,7 @@ type extractReelParams struct {
 	TargetRatio string `json:"target_ratio"`        // "9:16" (default), "1:1", "4:5", "16:9", …
 	OutputWidth int    `json:"output_width"`        // optional; default 1080
 	CropMode    string `json:"crop_mode,omitempty"` // "smart" (default) | "center" — passed through for logging; the actual crop_w/h/x/y is injected by preprocessSmartCrop
+	FitMode     string `json:"fit_mode,omitempty"`  // "crop" (default) | "contain"
 
 	// crop_w/h/x/y are injected by preprocessSmartCrop at execute
 	// time. When set, the filter chain uses explicit coords and
@@ -450,25 +478,34 @@ func planExtractReel(sources []string, raw json.RawMessage, outputName string) (
 	if err != nil {
 		return nil, fmt.Errorf("extract_reel: %w", err)
 	}
+	fitMode, err := normalizeFitMode(p.FitMode)
+	if err != nil {
+		return nil, fmt.Errorf("extract_reel: %w", err)
+	}
 	// Filter chain: explicit crop (when preprocessSmartCrop has
 	// already resolved smart/center coords into crop_w/h/x/y on the
 	// params) takes priority; otherwise fall back to the original
 	// symbolic iw/ih center expression so renders still proceed when
 	// the pre-pass bails (no probed dimensions, missing thumbnail,
 	// older media row, smartcrop analyzer error, …).
-	cropExpr := cropFilterForRatio(rw, rh, p.CropW, p.CropH, p.CropX, p.CropY)
 	outputWidth, outputHeight := ratioOutputDimensions(p.OutputWidth, rw, rh)
-	scaleExpr := fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight)
+	videoFilter := containFilter(outputWidth, outputHeight)
+	if fitMode == "crop" {
+		cropExpr := cropFilterForRatio(rw, rh, p.CropW, p.CropH, p.CropX, p.CropY)
+		scaleExpr := fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight)
+		videoFilter = cropExpr + "," + scaleExpr
+	}
 	seekStartMs := p.StartMs - extractReelSeekPrerollMs
 	if seekStartMs < 0 {
 		seekStartMs = 0
 	}
 	outputSeekMs := p.StartMs - seekStartMs
 	durationMs := p.EndMs - p.StartMs
-	if p.CropW > 0 && p.CropH > 0 && len(p.CropPath) > 1 {
+	if fitMode == "crop" && p.CropW > 0 && p.CropH > 0 && len(p.CropPath) > 1 {
 		// The input clock starts at seekStartMs because of the preroll. Shift
 		// the source-timeline path to that clock before building x(t).
-		cropExpr = cropFilterForPath(p.CropW, p.CropH, p.CropY, seekStartMs, p.CropPath)
+		cropExpr := cropFilterForPath(p.CropW, p.CropH, p.CropY, seekStartMs, p.CropPath)
+		videoFilter = cropExpr + "," + fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight)
 	}
 	args := []string{
 		"-y",
@@ -478,7 +515,7 @@ func planExtractReel(sources []string, raw json.RawMessage, outputName string) (
 		"-i", "{input}",
 		"-ss", msToSeconds(outputSeekMs),
 		"-t", msToSeconds(durationMs),
-		"-vf", cropExpr + "," + scaleExpr,
+		"-vf", videoFilter,
 		"-c:a", "copy", // audio passthrough — no re-encode
 		"-avoid_negative_ts", "make_zero",
 	}
@@ -496,6 +533,27 @@ func ratioOutputDimensions(width, ratioW, ratioH int) (int, int) {
 		h = 2
 	}
 	return w, h
+}
+
+func normalizeFitMode(mode string) (string, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return "crop", nil
+	}
+	switch mode {
+	case "crop", "contain":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("fit_mode must be crop or contain, got %q", mode)
+	}
+}
+
+// containFilter preserves every source pixel and letterboxes/pillarboxes only
+// the unused canvas area. It is the explicit alternative for compositions or
+// movement that cannot physically fit inside a narrow destructive crop.
+func containFilter(width, height int) string {
+	return fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1",
+		width, height, width, height)
 }
 
 // parseAspectRatio splits "9:16" / "1:1" / "16:9" into integer (w, h)

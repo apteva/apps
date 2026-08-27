@@ -85,6 +85,9 @@ func (e *cloudinaryExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *
 
 	sc := newStorageClient()
 	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+	if err := renderUpdateResolvedParams(app.AppDB(), row.ID, row.Params); err != nil {
+		return 0, fmt.Errorf("store resolved params: %w", err)
+	}
 
 	// Build the eager transformation chain.
 	chain, err := buildCloudinaryChain(row.Operation, row.Params, row.OutputName)
@@ -268,17 +271,26 @@ func buildCldCrop(raw json.RawMessage, outputName string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("crop: %w", err)
 		}
-		switch {
-		case p.CropW > 0 && p.CropH > 0:
-			step = fmt.Sprintf("c_crop,w_%d,h_%d,x_%d,y_%d", p.CropW, p.CropH, p.CropX, p.CropY)
-		case p.Width > 0 && p.Height > 0:
-			step = fmt.Sprintf("c_crop,w_%d,h_%d,x_%d,y_%d", p.Width, p.Height, p.X, p.Y)
-		default:
-			step = fmt.Sprintf("c_fill,ar_%d:%d", rw, rh)
+		fitMode, err := normalizeFitMode(p.FitMode)
+		if err != nil {
+			return "", fmt.Errorf("crop: %w", err)
 		}
-		if p.OutputWidth > 0 {
+		if fitMode == "contain" {
 			outputWidth, outputHeight := ratioOutputDimensions(p.OutputWidth, rw, rh)
-			step += fmt.Sprintf("/c_scale,w_%d,h_%d", outputWidth, outputHeight)
+			step = fmt.Sprintf("c_pad,w_%d,h_%d,b_black", outputWidth, outputHeight)
+		} else {
+			switch {
+			case p.CropW > 0 && p.CropH > 0:
+				step = fmt.Sprintf("c_crop,w_%d,h_%d,x_%d,y_%d", p.CropW, p.CropH, p.CropX, p.CropY)
+			case p.Width > 0 && p.Height > 0:
+				step = fmt.Sprintf("c_crop,w_%d,h_%d,x_%d,y_%d", p.Width, p.Height, p.X, p.Y)
+			default:
+				step = fmt.Sprintf("c_fill,ar_%d:%d", rw, rh)
+			}
+			if p.OutputWidth > 0 {
+				outputWidth, outputHeight := ratioOutputDimensions(p.OutputWidth, rw, rh)
+				step += fmt.Sprintf("/c_scale,w_%d,h_%d", outputWidth, outputHeight)
+			}
 		}
 	} else {
 		if p.Width <= 0 || p.Height <= 0 {
@@ -298,8 +310,38 @@ func buildCldExtractFrame(raw json.RawMessage, outputName string) (string, error
 		return "", errors.New("extract_frame: at_ms must be >= 0")
 	}
 	parts := []string{"so_" + msToCldFloat(p.AtMs)}
-	if p.Width > 0 {
+	if strings.TrimSpace(p.TargetRatio) != "" {
+		rw, rh, err := parseAspectRatio(p.TargetRatio)
+		if err != nil {
+			return "", fmt.Errorf("extract_frame: %w", err)
+		}
+		outW := p.OutputWidth
+		if outW <= 0 {
+			outW = p.Width
+		}
+		outputWidth, outputHeight := ratioOutputDimensions(outW, rw, rh)
+		fitMode, err := normalizeFitMode(p.FitMode)
+		if err != nil {
+			return "", fmt.Errorf("extract_frame: %w", err)
+		}
+		if fitMode == "contain" {
+			parts = append(parts, fmt.Sprintf("c_pad,w_%d,h_%d,b_black", outputWidth, outputHeight))
+		} else if p.CropW > 0 && p.CropH > 0 {
+			parts = append(parts,
+				fmt.Sprintf("c_crop,w_%d,h_%d,x_%d,y_%d", p.CropW, p.CropH, p.CropX, p.CropY),
+				fmt.Sprintf("c_scale,w_%d,h_%d", outputWidth, outputHeight))
+		} else {
+			parts = append(parts,
+				fmt.Sprintf("c_fill,ar_%d:%d", rw, rh),
+				fmt.Sprintf("c_scale,w_%d,h_%d", outputWidth, outputHeight))
+		}
+	} else if p.Width > 0 {
+		if strings.TrimSpace(p.FitMode) != "" && !strings.EqualFold(strings.TrimSpace(p.FitMode), "crop") {
+			return "", errors.New("extract_frame: fit_mode requires target_ratio")
+		}
 		parts = append(parts, fmt.Sprintf("c_scale,w_%d", p.Width))
+	} else if strings.TrimSpace(p.FitMode) != "" && !strings.EqualFold(strings.TrimSpace(p.FitMode), "crop") {
+		return "", errors.New("extract_frame: fit_mode requires target_ratio")
 	}
 	parts = append(parts, "f_png")
 	return strings.Join(parts, ","), nil

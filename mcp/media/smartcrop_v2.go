@@ -267,7 +267,8 @@ func computeSmartCropStillV2(
 		backgroundImages := downloadSmartCropBackgroundImages(ctx, sc, projectID, backgroundDerivs)
 		if backgroundX, backgroundResult, ok := backgroundAwareNarrowSmartCropX(sample.img, backgroundImages, x, row.Width, cw); ok {
 			motionHandoff := trackingStill && smartCropStillHasMotionEvidence(samples, target.FocusMs)
-			if !faceTrackOK || motionHandoff || absInt(backgroundX-faceTrackX) < absInt(x-faceTrackX) {
+			if smartCropStillBackgroundCorrectionSupported(x, backgroundX, backgroundResult, contextTemporal, contextTemporalOK, cw) &&
+				(!faceTrackOK || motionHandoff || absInt(backgroundX-faceTrackX) < absInt(x-faceTrackX)) {
 				x = backgroundX
 				method += "+background"
 				app.Logger().Info("smartcrop v2 background still correction",
@@ -514,6 +515,7 @@ func computeSmartCropReelV2(
 	faceFalsePositives += correctSmartCropWeakFaceExcursions(samples, row.Width, cw)
 	faceCorrections := correctSmartCropFaceTracks(samples, row.Width, cw)
 	backgroundCorrections += correctSmartCropBackgroundEdgeDeparturesFromFaces(samples, row.Width, cw)
+	unsupportedExcursions := correctSmartCropUnsupportedExcursions(samples, row.Width, cw)
 
 	path := make([]cropPathPoint, 0, len(samples)+2)
 	for _, sample := range samples {
@@ -538,6 +540,7 @@ func computeSmartCropReelV2(
 			"face_corrections", faceCorrections,
 			"face_false_positives", faceFalsePositives,
 			"background_corrections", backgroundCorrections,
+			"unsupported_excursions", unsupportedExcursions,
 			"tracking_frames", trackingFrames)
 		return &cropWindow{W: cw, H: ch, X: x, Y: 0}, nil, nil
 	}
@@ -553,8 +556,62 @@ func computeSmartCropReelV2(
 		"face_corrections", faceCorrections,
 		"face_false_positives", faceFalsePositives,
 		"background_corrections", backgroundCorrections,
+		"unsupported_excursions", unsupportedExcursions,
 		"tracking_frames", trackingFrames)
 	return &cropWindow{W: cw, H: ch, X: path[0].X, Y: 0}, path, nil
+}
+
+// smartCropStillBackgroundCorrectionSupported prevents a strong but
+// disconnected fixed-camera/background hypothesis from replacing an already
+// coherent subject track across the room. It does not assume what the subject
+// is: the anchor can come from motion, foreground extent, a silhouette, or a
+// face. Without a confident subject anchor, the existing background model
+// remains authoritative.
+func smartCropStillBackgroundCorrectionSupported(currentX, candidateX int, result smartCropBackgroundResult, context smartCropTemporalResult, contextOK bool, cropW int) bool {
+	if cropW <= 0 || !contextOK || !smartCropTemporalResultConfident(context) || !context.SubjectAnchored {
+		return true
+	}
+	candidateDistance := absInt(candidateX - context.X)
+	if candidateDistance <= maxInt(80, cropW/2) {
+		return true
+	}
+	// Exception for exceptionally clean foreground evidence that moves a bad
+	// current crop materially toward (not away from) the temporal subject.
+	return result.Concentration >= 0.85 && result.Improvement >= 1.40 && result.RowCoverage >= 0.70 &&
+		candidateDistance < absInt(currentX-context.X)
+}
+
+// correctSmartCropUnsupportedExcursions removes a final isolated crop jump
+// only when neither the jump nor the edit boundary has any independent
+// support. This is deliberately the last sample-level pass: all generic
+// anchors (motion, foreground, silhouette/head, face and temporal consensus)
+// have already had a chance to certify a real move.
+func correctSmartCropUnsupportedExcursions(samples []smartCropV2Sample, srcW, cropW int) int {
+	if len(samples) < 3 || srcW <= cropW || cropW <= 0 {
+		return 0
+	}
+	corrected := 0
+	for i := 1; i+1 < len(samples); i++ {
+		sample := &samples[i]
+		if sample.point.Cut || samples[i+1].point.Cut || sample.face != nil || sample.detailedFace != nil ||
+			sample.faceTracked || sample.headTracked || sample.motionTracked || sample.temporalTrack || sample.backgroundStrong {
+			continue
+		}
+		prev, next := samples[i-1].point, samples[i+1].point
+		if next.AtMs <= prev.AtMs || sample.point.AtMs-prev.AtMs > smartCropV2MaxGapMs ||
+			next.AtMs-sample.point.AtMs > smartCropV2MaxGapMs ||
+			absInt(prev.X-next.X) > maxInt(48, cropW/5) {
+			continue
+		}
+		expected := interpolateSmartCropStillX(prev, next, sample.point.AtMs)
+		if absInt(sample.point.X-expected) <= maxInt(80, cropW/3) {
+			continue
+		}
+		sample.point.X = clampInt(roundEven(expected), 0, srcW-cropW)
+		sample.backgroundTracked = false
+		corrected++
+	}
+	return corrected
 }
 
 // analyzeSmartCropV2Frame preserves v1's generic saliency so animals,

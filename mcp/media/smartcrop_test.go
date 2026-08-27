@@ -424,6 +424,11 @@ func TestPreprocessSmartCrop_NoOpPaths(t *testing.T) {
 	params = []byte(`{"start_ms":0,"end_ms":1000,"target_ratio":"9:16","crop_mode":"face-detect"}`)
 	got = preprocessSmartCrop(nil, nil, nil, "p", "extract_reel", []string{"20"}, params)
 	mustEqual(t, got, params, "unknown-crop-mode")
+
+	// 8. contain is deliberately non-destructive and never runs analysis.
+	params = []byte(`{"start_ms":0,"end_ms":1000,"target_ratio":"9:16","fit_mode":"contain"}`)
+	got = preprocessSmartCrop(nil, nil, nil, "p", "extract_reel", []string{"20"}, params)
+	mustEqual(t, got, params, "contain-fit")
 }
 
 // Verify the planner emits an explicit crop=W:H:X:Y filter when
