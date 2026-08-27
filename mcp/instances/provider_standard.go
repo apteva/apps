@@ -437,6 +437,11 @@ func apiProviderCreateRequest(ctx *sdk.AppCtx, provider string, in CreateInstanc
 		return "server_create", map[string]any{
 			"zone": in.Region, "project": project, "name": in.Name, "commercial_type": in.Size, "image": in.Image,
 			"dynamic_ip_required": true, "routed_ip_enabled": true, "enable_ipv6": true,
+			// Scaleway's image tooling installs per-server SSH keys from
+			// AUTHORIZED_KEY tags during boot. Relying on cloud-init's users
+			// module alone is not sufficient because scw-fetch-ssh-keys may
+			// replace root's authorized_keys later in the same boot.
+			"tags": []string{scalewaySSHKeyTag(pubKey)},
 		}, nil
 	case "huawei-cloud":
 		vpcID, subnetID, err := huaweiDefaultNetwork(ctx)
@@ -461,6 +466,13 @@ func apiProviderCreateRequest(ctx *sdk.AppCtx, provider string, in CreateInstanc
 	default:
 		return "", nil, providerAdapterUnavailable(provider, "provisioning")
 	}
+}
+
+// scalewaySSHKeyTag matches the encoding used by the official Scaleway CLI's
+// `instance ssh add-key` command. The key remains scoped to this server rather
+// than being registered project-wide.
+func scalewaySSHKeyTag(publicKey string) string {
+	return "AUTHORIZED_KEY=" + strings.ReplaceAll(strings.TrimSpace(publicKey), " ", "_")
 }
 
 func resolveProviderCreateResponse(ctx *sdk.AppCtx, provider string, in CreateInstanceInput, data json.RawMessage) (string, string, string, error) {

@@ -105,3 +105,11 @@ func TestVultrCreateRequestEncodesCloudInit(t *testing.T) {
 		t.Fatalf("user_data is not base64 cloud-init: %q, err=%v", encoded, err)
 	}
 }
+
+func TestScalewaySSHKeyTagMatchesOfficialCLIEncoding(t *testing.T) {
+	const publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest apteva-instance"
+	want := "AUTHORIZED_KEY=ssh-ed25519_AAAAC3NzaC1lZDI1NTE5AAAAITest_apteva-instance"
+	if got := scalewaySSHKeyTag("  " + publicKey + "\n"); got != want {
+		t.Fatalf("scalewaySSHKeyTag() = %q, want %q", got, want)
+	}
+}
