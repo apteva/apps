@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.15.2
+version: 0.15.3
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -76,8 +76,9 @@ provides:
     - { name: account_add,                 description: "Begin OAuth for a platform. Returns authorize_url + pending_account_id." }
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable pages/channels (FB pages, IG business accounts, YouTube channels)." }
     - { name: account_finalize,            description: "Commit a pending account into the active account list. For multi-page platforms, supply page_id." }
-    - { name: account_import_provider,     description: "Import provider-backed accounts such as Zernio into Social without changing Social's posting tools." }
-    - { name: account_list,                description: "List connected social accounts in this project." }
+    - { name: account_import_provider,     description: "Import provider-backed accounts such as Zernio. Publishing remains available while automatic history import defaults to managed_only." }
+    - { name: account_list,                description: "List connected social accounts in this project, including provider import mode." }
+    - { name: account_provider_sync_update, description: "Set automatic provider synchronization to off, managed_only (safe default), or explicitly opted-in full_history without changing publishing access." }
     - { name: account_check,               description: "Check that one or more connected social accounts still work; refreshes Meta page credentials when possible." }
     - { name: account_disconnect,          description: "Disconnect an account while preserving history; explicit confirmed hard delete can remove local history." }
     - { name: post_create,                 description: "Create a post with required explicit mode=draft|schedule|publish. Draft is optional and may omit targets; schedule remains a direct path and requires schedule_at; publish is immediate. Omitting mode never publishes. Args: mode, body or targets[].body, social_account_ids[] or targets[], schedule_at?, media_storage_ids?." }

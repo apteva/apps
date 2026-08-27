@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.15.2
+version: 0.15.3
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -102,6 +102,7 @@ provides:
     - { name: account_finalize,           description: "Commit a pending account into the active list." }
     - { name: account_import_provider,    description: "Import provider-backed accounts such as Zernio into Social." }
     - { name: account_list,               description: "List connected social accounts." }
+    - { name: account_provider_sync_update, description: "Set provider synchronization to off, managed_only, or explicitly opted-in full_history without changing publishing access." }
     - { name: account_check,              description: "Check that connected social accounts still work." }
     - { name: account_disconnect,         description: "Revoke a social account." }
     - { name: post_create,                description: "Create with required explicit mode=draft|schedule|publish. Drafts are optional; direct scheduling and publishing remain first-class. Missing mode never publishes." }
@@ -743,7 +744,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "account_import_provider",
 			Description: "Import accounts from an optional social provider integration into Social. " +
-				"Today provider must be zernio. The imported accounts behave like normal Social accounts: use post_create, post_list, account_check, metrics, and imports through Social. " +
+				"Today provider must be zernio. The imported accounts behave like normal Social accounts: use post_create, post_list, account_check, metrics, and explicit imports through Social. " +
+				"Account connection never opts into historical post import; automatic synchronization defaults to managed_only. " +
 				"Args: provider? (default zernio), provider_profile_id?, platforms?[], account_ids?[], profile_id?/profile?, dry_run?.",
 			InputSchema: schemaObject(map[string]any{
 				"provider":            map[string]any{"type": "string", "enum": []string{"zernio"}},
@@ -758,12 +760,24 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "account_list",
-			Description: "List connected social accounts in this project. Disconnected history-only rows are hidden unless status='disconnected' is requested. Args: platform? (filter), status? (active|needs_reauth|disconnected).",
+			Description: "List connected social accounts in this project, including provider_import_mode for provider-backed accounts. Disconnected history-only rows are hidden unless status='disconnected' is requested. Args: platform? (filter), status? (active|needs_reauth|disconnected).",
 			InputSchema: schemaObject(map[string]any{
 				"platform": map[string]any{"type": "string"},
 				"status":   map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolAccountList,
+		},
+		{
+			Name: "account_provider_sync_update",
+			Description: "Configure automatic provider synchronization for one provider-backed account without changing its publishing or direct-scheduling access. " +
+				"managed_only (default) reads only provider posts already created, mirrored, or explicitly imported through Social; it never imports unrelated account history. " +
+				"off disables automatic provider reads. full_history explicitly opts into automatic discovery/import of recent provider history. " +
+				"Manual Import history remains an explicit one-time full import in every mode. Args: social_account_id, mode.",
+			InputSchema: schemaObject(map[string]any{
+				"social_account_id": map[string]any{"type": "integer"},
+				"mode":              map[string]any{"type": "string", "enum": []string{providerImportModeOff, providerImportModeManaged, providerImportModeFullHistory}},
+			}, []string{"social_account_id", "mode"}),
+			Handler: a.toolAccountProviderSyncUpdate,
 		},
 		{
 			Name: "account_check",
@@ -914,7 +928,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "post_delete",
-			Description: "Delete a post locally and, where the platform/provider allows it, remove the upstream copy too. For each published target the app calls the native platform delete verb or the bound provider delete verb (for example Zernio). Some providers/platforms report published-post deletion as unsupported; in that case local rows still go and the response includes a per-target `upstream` array (status: deleted | unsupported | skipped | failed) so callers can flag platforms that still hold a copy. Cancels any scheduled job first. Args: post_id, force_local_only? (skip all upstream calls; default false).",
+			Description: "Delete a post locally and, where the platform/provider allows it, remove the upstream copy too. Provider imports receive a local tombstone so automatic or manual history imports cannot recreate them. For each published target the app calls the native platform delete verb or the bound provider delete verb (for example Zernio). Some providers/platforms report published-post deletion as unsupported; in that case local rows still go and the response includes a per-target `upstream` array (status: deleted | unsupported | skipped | failed) so callers can flag platforms that still hold a copy. Cancels any scheduled job first. Args: post_id, force_local_only? (skip all upstream calls; default false).",
 			InputSchema: schemaObject(map[string]any{
 				"post_id":          map[string]any{"type": "integer"},
 				"force_local_only": map[string]any{"type": "boolean", "description": "Skip upstream platform deletion; only remove local rows. Default false."},
@@ -1535,7 +1549,8 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	             COALESCE(last_check_at,''), COALESCE(last_check_status,''),
 	             COALESCE(last_check_error,''), COALESCE(last_check_details,''),
 	             COALESCE(provider_slug,'native'), COALESCE(provider_account_id,''),
-	             COALESCE(provider_profile_id,''), COALESCE(capabilities,'')
+	             COALESCE(provider_profile_id,''), COALESCE(capabilities,''),
+	             COALESCE(provider_import_mode,'managed_only')
 	      FROM social_accounts WHERE project_id=?`
 	qArgs := []any{pid}
 	if platformFilter != "" {
@@ -1565,9 +1580,9 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			platform, externalID, name, avatar, status, createdAt string
 			checkAt, checkStatus, checkError, checkDetails        string
 			providerSlug, providerAccountID, providerProfileID    string
-			capabilitiesRaw                                       string
+			capabilitiesRaw, providerImportMode                   string
 		)
-		if err := rows.Scan(&id, &platform, &connID, &externalID, &name, &avatar, &status, &createdAt, &profID, &checkAt, &checkStatus, &checkError, &checkDetails, &providerSlug, &providerAccountID, &providerProfileID, &capabilitiesRaw); err != nil {
+		if err := rows.Scan(&id, &platform, &connID, &externalID, &name, &avatar, &status, &createdAt, &profID, &checkAt, &checkStatus, &checkError, &checkDetails, &providerSlug, &providerAccountID, &providerProfileID, &capabilitiesRaw, &providerImportMode); err != nil {
 			continue
 		}
 		var details any
@@ -1585,23 +1600,24 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			}
 		}
 		out = append(out, map[string]any{
-			"id":                  id,
-			"platform":            platform,
-			"connection_id":       connID,
-			"external_account_id": externalID,
-			"display_name":        name,
-			"avatar_url":          avatar,
-			"status":              status,
-			"created_at":          createdAt,
-			"profile_id":          profID,
-			"last_check_at":       checkAt,
-			"last_check_status":   checkStatus,
-			"last_check_error":    checkError,
-			"last_check_details":  details,
-			"provider_slug":       providerSlug,
-			"provider_account_id": providerAccountID,
-			"provider_profile_id": providerProfileID,
-			"capabilities":        capabilities,
+			"id":                   id,
+			"platform":             platform,
+			"connection_id":        connID,
+			"external_account_id":  externalID,
+			"display_name":         name,
+			"avatar_url":           avatar,
+			"status":               status,
+			"created_at":           createdAt,
+			"profile_id":           profID,
+			"last_check_at":        checkAt,
+			"last_check_status":    checkStatus,
+			"last_check_error":     checkError,
+			"last_check_details":   details,
+			"provider_slug":        providerSlug,
+			"provider_account_id":  providerAccountID,
+			"provider_profile_id":  providerProfileID,
+			"provider_import_mode": providerImportMode,
+			"capabilities":         capabilities,
 		})
 	}
 	return map[string]any{"accounts": out}, nil
@@ -8638,6 +8654,16 @@ func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`INSERT OR IGNORE INTO provider_import_tombstones
+		 (social_account_id, provider_slug, provider_post_id, reason)
+		 SELECT t.social_account_id, a.provider_slug, t.provider_post_id, 'post_delete'
+		   FROM post_targets t JOIN social_accounts a ON a.id=t.social_account_id
+		  WHERE t.post_id=? AND COALESCE(a.provider_slug,'native')!='native'
+		    AND COALESCE(t.provider_post_id,'')!=''`, postID,
+	); err != nil {
+		return nil, fmt.Errorf("record provider deletion: %w", err)
+	}
 	if _, err := tx.Exec(`DELETE FROM post_targets WHERE post_id=?`, postID); err != nil {
 		return nil, fmt.Errorf("delete targets: %w", err)
 	}
@@ -9201,6 +9227,25 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out := a.importAccountPosts(globalCtx, projectScope(globalCtx, projectArgsFromRequest(r)), id, limit)
+		writeJSON(w, out)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "provider-sync" && r.Method == http.MethodPost {
+		var body struct {
+			Mode string `json:"mode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		args := projectArgsFromRequest(r)
+		args["social_account_id"] = id
+		args["mode"] = body.Mode
+		out, err := a.toolAccountProviderSyncUpdate(globalCtx, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, out)
 		return
 	}

@@ -11,6 +11,25 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+const (
+	providerImportModeOff         = "off"
+	providerImportModeManaged     = "managed_only"
+	providerImportModeFullHistory = "full_history"
+)
+
+func normalizeProviderImportMode(value string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	if mode == "" {
+		mode = providerImportModeManaged
+	}
+	switch mode {
+	case providerImportModeOff, providerImportModeManaged, providerImportModeFullHistory:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("provider import mode must be off, managed_only, or full_history")
+	}
+}
+
 // providerLifecycleCapabilities keeps the Social workflow provider-neutral.
 // A future provider can opt into any subset without changing the draft tools.
 type providerLifecycleCapabilities struct {
@@ -246,6 +265,18 @@ func (a *App) reconcileImportedProviderPost(
 	if providerPostID == "" {
 		return false, errors.New("provider post id required")
 	}
+	var suppressed int
+	tombstoneErr := ctx.AppDB().QueryRow(
+		`SELECT 1 FROM provider_import_tombstones
+		  WHERE social_account_id=? AND provider_slug=? AND provider_post_id=?`,
+		accountID, zernioProviderSlug, providerPostID,
+	).Scan(&suppressed)
+	if tombstoneErr == nil {
+		return false, nil
+	}
+	if tombstoneErr != sql.ErrNoRows {
+		return false, tombstoneErr
+	}
 	rawJSON, _ := json.Marshal(raw)
 	mediaJSON, _ := json.Marshal(mediaURLs)
 	var targetID, postID int64
@@ -319,22 +350,54 @@ func (a *App) reconcileImportedProviderPost(
 	return true, tx.Commit()
 }
 
-// runProviderReconciler imports and reconciles provider-native drafts,
-// schedules, and published posts. Native accounts remain untouched.
+func (a *App) toolAccountProviderSyncUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	accountID := int64(intArg(args, "social_account_id", intArg(args, "id", 0)))
+	if accountID <= 0 {
+		return mcpError("social_account_id required"), nil
+	}
+	mode, err := normalizeProviderImportMode(toString(args["mode"]))
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	pid := projectScope(ctx, args)
+	result, err := ctx.AppDB().Exec(
+		`UPDATE social_accounts SET provider_import_mode=?
+		  WHERE id=? AND project_id=? AND provider_slug!=?`,
+		mode, accountID, pid, "native",
+	)
+	if err != nil {
+		return nil, err
+	}
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		return mcpError("provider-backed account not found"), nil
+	}
+	return map[string]any{
+		"social_account_id":    accountID,
+		"provider_import_mode": mode,
+		"publishing_unchanged": true,
+	}, nil
+}
+
+// runProviderReconciler keeps provider-native posts already managed by Social
+// current by default. A provider account must be explicitly switched to
+// full_history before the worker may discover and import unrelated posts.
+// Native accounts and accounts with synchronization turned off remain untouched.
 func (a *App) runProviderReconciler(runCtx context.Context, ctx *sdk.AppCtx) error {
 	pid := projectScope(ctx)
 	if pid == "" {
 		return nil
 	}
 	type account struct {
-		id, connectionID, profileID int64
-		providerAccountID           string
+		id, connectionID, profileID   int64
+		providerAccountID, importMode string
 	}
 	rows, err := ctx.AppDB().Query(
-		`SELECT id, connection_id, COALESCE(provider_account_id,''), COALESCE(profile_id,0)
+		`SELECT id, connection_id, COALESCE(provider_account_id,''), COALESCE(profile_id,0),
+		        COALESCE(provider_import_mode,?)
 		   FROM social_accounts
 		  WHERE project_id=? AND status='active' AND provider_slug=?
-		  ORDER BY id`, pid, zernioProviderSlug,
+		  ORDER BY id`, providerImportModeManaged, pid, zernioProviderSlug,
 	)
 	if err != nil {
 		return err
@@ -342,7 +405,7 @@ func (a *App) runProviderReconciler(runCtx context.Context, ctx *sdk.AppCtx) err
 	accounts := []account{}
 	for rows.Next() {
 		var item account
-		if rows.Scan(&item.id, &item.connectionID, &item.providerAccountID, &item.profileID) == nil {
+		if rows.Scan(&item.id, &item.connectionID, &item.providerAccountID, &item.profileID, &item.importMode) == nil {
 			accounts = append(accounts, item)
 		}
 	}
@@ -351,7 +414,20 @@ func (a *App) runProviderReconciler(runCtx context.Context, ctx *sdk.AppCtx) err
 		if err := runCtx.Err(); err != nil {
 			return err
 		}
-		result := a.importZernioPosts(ctx, pid, importResult{}, item.id, item.connectionID, item.providerAccountID, item.profileID, 200)
+		mode, err := normalizeProviderImportMode(item.importMode)
+		if err != nil {
+			ctx.Logger().Warn("provider reconciliation skipped invalid mode", "account", item.id, "mode", item.importMode)
+			continue
+		}
+		if mode == providerImportModeOff {
+			continue
+		}
+		var result importResult
+		if mode == providerImportModeFullHistory {
+			result = a.importZernioPosts(ctx, pid, importResult{}, item.id, item.connectionID, item.providerAccountID, item.profileID, 200)
+		} else {
+			result = a.reconcileManagedZernioPosts(ctx, pid, item.id, item.connectionID, item.providerAccountID, item.profileID)
+		}
 		if result.Status == "failed" {
 			ctx.Logger().Warn("provider reconciliation failed", "account", item.id, "error", result.Error)
 		}

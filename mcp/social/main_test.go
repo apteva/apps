@@ -2032,6 +2032,146 @@ func TestZernioImportPreservesPublishedPlatformHistoryAndRepairsExisting(t *test
 	}
 }
 
+func TestProviderReconcilerManagedOnlyDoesNotDiscoverHistory(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["sync_external_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}
+	pf.executeResponses["list_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"posts":[{"id":"unmanaged-history","status":"published","content":"unrelated history"}]
+	}`)}
+	ctx := newSocialCtx(t, pf)
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug,
+		    provider_account_id, provider_profile_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'Apteva', 'active', 'zernio', 'za_1', 'zp_1')`,
+	)
+	accountID, _ := account.LastInsertId()
+
+	if err := (&App{}).runProviderReconciler(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	var postCount int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts`).Scan(&postCount)
+	if postCount != 0 {
+		t.Fatalf("managed-only reconciliation imported %d unrelated posts", postCount)
+	}
+	if len(pf.executeCalls) != 0 {
+		t.Fatalf("managed-only account with no managed posts called provider history tools: %+v", pf.executeCalls)
+	}
+
+	out, err := (&App{}).toolAccountProviderSyncUpdate(ctx, map[string]any{
+		"social_account_id": accountID,
+		"mode":              providerImportModeFullHistory,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["publishing_unchanged"] != true {
+		t.Fatalf("sync update response = %+v", out)
+	}
+	if err := (&App{}).runProviderReconciler(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts`).Scan(&postCount)
+	if postCount != 1 {
+		t.Fatalf("full-history opt-in imported %d posts, want 1", postCount)
+	}
+	if len(pf.executeCalls) != 2 || pf.executeCalls[0].Tool != "sync_external_posts" || pf.executeCalls[1].Tool != "list_posts" {
+		t.Fatalf("full-history calls = %+v", pf.executeCalls)
+	}
+	if pf.executeCalls[1].Input["accountId"] != "za_1" || pf.executeCalls[1].Input["profileId"] != "zp_1" {
+		t.Fatalf("full-history list was not account/profile scoped: %+v", pf.executeCalls[1].Input)
+	}
+}
+
+func TestProviderReconcilerManagedOnlyReadsExactKnownPost(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_post"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"data":{"post":{
+			"id":"known-1","content":"managed post","status":"published","createdAt":"2026-08-01T09:00:00Z",
+			"platforms":[{"accountId":{"_id":"za_1","profileId":"zp_1"},"platform":"linkedin",
+				"status":"published","platformPostId":"urn:li:share:1","platformPostUrl":"https://linkedin.example/1",
+				"publishedAt":"2026-08-01T09:05:00Z"}]
+		}}
+	}`)}
+	ctx := newSocialCtx(t, pf)
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug,
+		    provider_account_id, provider_profile_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'Apteva', 'active', 'zernio', 'za_1', 'zp_1')`,
+	)
+	accountID, _ := account.LastInsertId()
+	post, _ := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id,body,status,source,provider_sync_mode,requested_mode)
+		 VALUES ('test-proj','managed post','scheduled','provider','mirror','schedule')`,
+	)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id,social_account_id,status,provider_post_id,provider_sync_status)
+		 VALUES (?,?,'scheduled','known-1','scheduled')`, postID, accountID,
+	)
+
+	if err := (&App{}).runProviderReconciler(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "get_post" || pf.executeCalls[0].Input["postId"] != "known-1" {
+		t.Fatalf("managed reconciliation calls = %+v", pf.executeCalls)
+	}
+	var parentStatus, targetStatus, platformID, publishedAt string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT p.status,t.status,COALESCE(t.platform_post_id,''),COALESCE(t.published_at,'')
+		   FROM posts p JOIN post_targets t ON t.post_id=p.id WHERE p.id=?`, postID,
+	).Scan(&parentStatus, &targetStatus, &platformID, &publishedAt); err != nil {
+		t.Fatal(err)
+	}
+	if parentStatus != "published" || targetStatus != "published" || platformID != "urn:li:share:1" || publishedAt != "2026-08-01T09:05:00Z" {
+		t.Fatalf("managed reconciliation stored parent=%q target=%q id=%q published=%q", parentStatus, targetStatus, platformID, publishedAt)
+	}
+}
+
+func TestProviderImportDeletionTombstonePreventsReimport(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["sync_external_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}
+	pf.executeResponses["list_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"posts":[{"id":"deleted-provider-post","status":"published","content":"remove me","createdAt":"2026-02-01T10:00:00Z",
+			"platforms":[{"accountId":{"_id":"za_1"},"platform":"linkedin","status":"published",
+			"platformPostId":"urn:li:share:deleted","platformPostUrl":"https://linkedin.example/deleted",
+			"publishedAt":"2026-02-01T10:01:00Z"}]}]
+	}`)}
+	ctx := newSocialCtx(t, pf)
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'Apteva', 'active', 'zernio', 'za_1')`,
+	)
+	accountID, _ := account.LastInsertId()
+	app := &App{}
+	result := app.importZernioPosts(ctx, "test-proj", importResult{}, accountID, 99, "za_1", 0, 50)
+	if result.Imported != 1 {
+		t.Fatalf("initial import = %+v", result)
+	}
+	var postID int64
+	_ = ctx.AppDB().QueryRow(`SELECT id FROM posts WHERE body='remove me'`).Scan(&postID)
+	if _, err := app.toolPostDelete(ctx, map[string]any{"post_id": postID, "force_local_only": true}); err != nil {
+		t.Fatal(err)
+	}
+	var tombstones int
+	_ = ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM provider_import_tombstones
+		  WHERE social_account_id=? AND provider_post_id='deleted-provider-post'`, accountID,
+	).Scan(&tombstones)
+	if tombstones != 1 {
+		t.Fatalf("provider tombstones = %d, want 1", tombstones)
+	}
+	result = app.importZernioPosts(ctx, "test-proj", importResult{}, accountID, 99, "za_1", 0, 50)
+	var postCount int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts WHERE body='remove me'`).Scan(&postCount)
+	if postCount != 0 || result.Imported != 0 {
+		t.Fatalf("deleted provider post was reimported: count=%d result=%+v", postCount, result)
+	}
+}
+
 func TestProviderImportedScheduleIsNeverPublishedByFallbackWorkerOrRollup(t *testing.T) {
 	ctx := newSocialCtx(t, newRecordingPlatform())
 	account, _ := ctx.AppDB().Exec(
