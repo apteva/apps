@@ -90,6 +90,8 @@ func (p *scalewayApplePlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 		data = json.RawMessage(`{"servers":{}}`)
 	case "apple_products_list":
 		data = json.RawMessage(appleProductFixture)
+	case "api_key_get":
+		data = json.RawMessage(`{"access_key":"SCWACCESSKEY","default_project_id":"project-default"}`)
 	case "security_group_list":
 		data = json.RawMessage(`{"security_groups":[{"id":"sg-1","project":"project-1","project_default":true}]}`)
 	case "ssh_key_create":
@@ -103,6 +105,31 @@ func (p *scalewayApplePlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 		return &sdk.ExecuteResult{Success: false, Status: 404, Data: json.RawMessage(`{"error":"unexpected tool"}`)}, nil
 	}
 	return &sdk.ExecuteResult{Success: true, Status: status, Data: data}, nil
+}
+
+type scalewayConfiguredPlatform struct {
+	*scalewayApplePlatform
+}
+
+func (p *scalewayConfiguredPlatform) GetConnectionPublicConfig(id int64) (*sdk.ConnectionPublicConfig, error) {
+	return &sdk.ConnectionPublicConfig{ConnectionID: id, Slug: "scaleway", Fields: map[string]string{"access_key": "SCWACCESSKEY"}}, nil
+}
+
+func TestScalewayProjectDefaultsFromAPIKey(t *testing.T) {
+	base := &scalewayApplePlatform{}
+	platform := &scalewayConfiguredPlatform{scalewayApplePlatform: base}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+
+	projectID, err := scalewayDefaultProject(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projectID != "project-default" {
+		t.Fatalf("projectID=%q", projectID)
+	}
+	if len(base.tools) != 1 || base.tools[0] != "api_key_get" || base.args[0]["access_key"] != "SCWACCESSKEY" {
+		t.Fatalf("tools=%#v args=%#v", base.tools, base.args)
+	}
 }
 
 func TestScalewayAppleProvisionAndDestroyUseOwnedResources(t *testing.T) {

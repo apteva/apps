@@ -669,6 +669,13 @@ func scalewayDefaultProject(ctx *sdk.AppCtx) (string, error) {
 		if id := strings.TrimSpace(config.Fields["project_id"]); id != "" {
 			return id, nil
 		}
+		if accessKey := strings.TrimSpace(config.Fields["access_key"]); accessKey != "" {
+			if data, lookupErr := executeProviderTool(ctx, "scaleway", "api_key_get", map[string]any{"access_key": accessKey}); lookupErr == nil {
+				if id := jsonStringAt(data, "default_project_id"); id != "" {
+					return id, nil
+				}
+			}
+		}
 	}
 
 	// Account v3 requires organization_id when listing projects. Legacy
