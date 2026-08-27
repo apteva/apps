@@ -11,9 +11,15 @@ import (
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
+			Name:        "instance_list_providers",
+			Description: "List all VPS provider connections bound to this Instances install and identify the configured default. Read-only and does not call a provider API.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolListProviders,
+		},
+		{
 			Name: "instance_create",
-			Description: "Provision a new instance via the bound VPS provider. Compatible provider bindings: hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod. " +
-				"Implemented provisioning adapters today: hetzner, digitalocean, runpod. Args: name (req), provider? (defaults to the bound provider), region?, size?, image?, tags_json?. " +
+			Description: "Provision a new instance via a bound VPS provider. Compatible provider bindings: hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod. " +
+				"Args: name (req), provider? (defaults to the configured default binding), region?, size?, image?, tags_json?. " +
 				"Local instance (id 0) is auto-seeded; passing provider=local is refused.",
 			InputSchema: schemaObject(map[string]any{
 				"name":      map[string]any{"type": "string"},
@@ -151,6 +157,18 @@ func (a *App) MCPTools() []sdk.Tool {
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────
+
+func (a *App) toolListProviders(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	providers := boundInstanceProviders(ctx)
+	defaultProvider := ""
+	for _, provider := range providers {
+		if provider.Default {
+			defaultProvider = provider.Provider
+			break
+		}
+	}
+	return map[string]any{"providers": providers, "default": defaultProvider, "count": len(providers)}, nil
+}
 
 func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	name := strArg(args, "name")
@@ -347,27 +365,39 @@ func (a *App) toolMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolListServerTypes(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	types, err := listServerTypes(ctx, strArg(args, "provider"))
+	provider, err := resolveInstanceProvider(ctx, strArg(args, "provider"))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"server_types": types, "count": len(types)}, nil
+	types, err := listServerTypes(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"provider": provider, "server_types": types, "count": len(types)}, nil
 }
 
 func (a *App) toolListLocations(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	locs, err := listLocations(ctx, strArg(args, "provider"))
+	provider, err := resolveInstanceProvider(ctx, strArg(args, "provider"))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"locations": locs, "count": len(locs)}, nil
+	locs, err := listLocations(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"provider": provider, "locations": locs, "count": len(locs)}, nil
 }
 
 func (a *App) toolListImages(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	imgs, err := listImages(ctx, strArg(args, "provider"))
+	provider, err := resolveInstanceProvider(ctx, strArg(args, "provider"))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"images": imgs, "count": len(imgs)}, nil
+	imgs, err := listImages(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"provider": provider, "images": imgs, "count": len(imgs)}, nil
 }
 
 // ─── arg helpers ──────────────────────────────────────────────────

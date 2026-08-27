@@ -21,13 +21,14 @@ instance_metrics(host_id)
 ```
 
 `host_id=0` is the **local Apteva machine**, auto-seeded at app mount.
-Other ids are provider-managed compute provisioned through a bound cloud
-integration.
+Other ids are provider-managed compute provisioned through one of the bound
+cloud integrations.
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
+| `instance_list_providers` | List bound provider connections and the configured default. |
 | `instance_create` | Provision compute through the bound provider, including VPS, GPU Pods, and Scaleway Apple silicon. |
 | `instance_get` | Fetch one instance row |
 | `instance_list` | List all instances; optional `provider` / `status` filters |
@@ -49,7 +50,9 @@ with a 30s default timeout. `instance_upload_file` writes under
 
 ## Managed remote instances
 
-The app has provider adapters for Hetzner, DigitalOcean, Contabo, Vultr,
+An install can bind multiple cloud providers at once and choose one per
+catalog or provisioning request; the configured default is used when no
+provider is specified. The app has provider adapters for Hetzner, DigitalOcean, Contabo, Vultr,
 AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Catalog,
 provisioning, SSH readiness, recovery, and deletion are normalized into the
 same instance contract.
@@ -108,8 +111,9 @@ the linguistic collision.
 
 ## Current limitations
 
-- Provider bindings are one-per-install; one Instances install cannot
-  provision from multiple cloud accounts simultaneously.
+- Provider selection is by provider slug. Multiple different providers can be
+  bound simultaneously; selecting between multiple accounts of the same
+  provider is not exposed yet.
 - In-place resizing is currently available only for Hetzner.
 - Metrics are pull-only through `instance_metrics`, cached for 5 seconds.
 

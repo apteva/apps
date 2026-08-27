@@ -36,14 +36,7 @@ func isAPIProvider(provider string) bool {
 }
 
 func apiProviderBound(ctx *sdk.AppCtx, provider string) (*sdk.BoundIntegration, error) {
-	bound := ctx.IntegrationFor("provider")
-	if bound == nil || bound.ConnectionID == 0 {
-		return nil, fmt.Errorf("no VPS provider bound - bind a %s connection on the Instances install", provider)
-	}
-	if bound.AppSlug != "" && normalizeProvider(bound.AppSlug) != provider {
-		return nil, fmt.Errorf("%s adapter requires provider=%s; bound slug is %q", provider, provider, bound.AppSlug)
-	}
-	return bound, nil
+	return instanceProviderBinding(ctx, provider)
 }
 
 func executeProviderTool(ctx *sdk.AppCtx, provider, tool string, args map[string]any) (json.RawMessage, error) {

@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.25
+version: 0.4.26
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -61,11 +61,12 @@ requires:
   integrations:
     - role: provider
       kind: integration
+      mode: multiple
       required: false
       compatible_slugs: [hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
-      label: VPS provider
+      label: VPS providers
       hint: |
-        Optional — local instance always available. Bind a VPS integration
+        Optional — local instance always available. Bind one or more VPS integrations
         to provision remote instances through the generic Instances interface.
         Every compatible provider has catalog, provisioning, readiness, and
         recovery adapters. Immediate destroy is available except on Contabo,
@@ -75,7 +76,8 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: instance_create,       description: "Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Contabo, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Args: name, provider?, region?, size?, image?, tags?." }
+    - { name: instance_list_providers, description: "List bound VPS provider connections and identify the configured default provider." }
+    - { name: instance_create,       description: "Provision a new instance via a bound VPS provider. Args: name, provider? (configured default when omitted), region?, size?, image?, tags?." }
     - { name: instance_get,          description: "Fetch one instance by id." }
     - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
     - { name: instance_destroy,      description: "Terminate the provider-managed instance and remove its row where supported (refused for local id 0 and Contabo). Args: id." }
@@ -159,7 +161,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.25
+    ref: instances/v0.4.26
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -233,6 +235,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/api/instances", Handler: a.handleInstancesCollection},
 		{Pattern: "/api/instances/", Handler: a.handleInstanceItem},
+		{Pattern: "/api/instances-providers", Handler: a.handleListProviders},
 		// Live provider catalog. Sister surface to the MCP tools so the
 		// panel doesn't need an MCP client; ?provider= defaults to
 		// the bound provider. Returns the same shape as the MCP tools wrap.

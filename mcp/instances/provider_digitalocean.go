@@ -12,14 +12,7 @@ import (
 )
 
 func digitalOceanBound(ctx *sdk.AppCtx) (*sdk.BoundIntegration, error) {
-	bound := ctx.IntegrationFor("provider")
-	if bound == nil || bound.ConnectionID == 0 {
-		return nil, errors.New("no VPS provider bound — bind a DigitalOcean connection on the Instances install")
-	}
-	if bound.AppSlug != "" && bound.AppSlug != "digitalocean" {
-		return nil, fmt.Errorf("digitalocean adapter requires provider=digitalocean; bound slug is %q", bound.AppSlug)
-	}
-	return bound, nil
+	return instanceProviderBinding(ctx, "digitalocean")
 }
 
 func digitalOceanListServerTypes(ctx *sdk.AppCtx) ([]ServerType, error) {

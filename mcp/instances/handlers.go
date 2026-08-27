@@ -36,17 +36,35 @@ func (a *App) handleInstancesCollection(w http.ResponseWriter, r *http.Request) 
 
 // ─── catalog routes (panel-facing) ────────────────────────────────
 
+func (a *App) handleListProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	ctx := appCtxForRequest(r)
+	providers := boundInstanceProviders(ctx)
+	defaultProvider := ""
+	for _, provider := range providers {
+		if provider.Default {
+			defaultProvider = provider.Provider
+			break
+		}
+	}
+	httpJSON(w, map[string]any{"providers": providers, "default": defaultProvider, "count": len(providers)})
+}
+
 func (a *App) handleListServerTypes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	provider, err := resolveInstanceProvider(globalCtx, r.URL.Query().Get("provider"))
+	ctx := appCtxForRequest(r)
+	provider, err := resolveInstanceProvider(ctx, r.URL.Query().Get("provider"))
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	types, err := listServerTypes(globalCtx, provider)
+	types, err := listServerTypes(ctx, provider)
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -59,12 +77,13 @@ func (a *App) handleListLocations(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	provider, err := resolveInstanceProvider(globalCtx, r.URL.Query().Get("provider"))
+	ctx := appCtxForRequest(r)
+	provider, err := resolveInstanceProvider(ctx, r.URL.Query().Get("provider"))
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	locs, err := listLocations(globalCtx, provider)
+	locs, err := listLocations(ctx, provider)
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -77,12 +96,13 @@ func (a *App) handleListImages(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	provider, err := resolveInstanceProvider(globalCtx, r.URL.Query().Get("provider"))
+	ctx := appCtxForRequest(r)
+	provider, err := resolveInstanceProvider(ctx, r.URL.Query().Get("provider"))
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	imgs, err := listImages(globalCtx, provider)
+	imgs, err := listImages(ctx, provider)
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -247,6 +267,7 @@ func httpProviderErr(w http.ResponseWriter, err error) {
 	if errors.Is(err, ErrLocalInstanceImmutable) ||
 		strings.Contains(msg, "not a compatible Instances VPS provider") ||
 		strings.Contains(msg, "requested but this Instances install is bound to") ||
+		strings.Contains(msg, "requested but is not bound to this Instances install") ||
 		strings.Contains(msg, "adapter is not implemented yet") {
 		status = http.StatusBadRequest
 	} else if strings.Contains(msg, "lifecycle operation already in progress") ||

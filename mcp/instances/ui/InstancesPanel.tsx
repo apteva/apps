@@ -432,7 +432,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
       <header className="px-4 py-3 border-b border-border flex flex-wrap items-baseline gap-3">
         <h1 className="text-text font-semibold">Instances</h1>
         <span className="hidden md:inline text-xs text-text-muted">
-          Host inventory — local + remote through a bound VPS provider.
+          Host inventory — local + remote across bound VPS providers.
         </span>
         <span className="flex-1" />
         {remoteCount > 0 && (
@@ -1332,6 +1332,12 @@ interface ImageWire {
   compatible_types?: string[];
 }
 
+interface ProviderBindingWire {
+  provider: string;
+  connection_id: number;
+  default: boolean;
+}
+
 function catalogMonthlyPrice(t?: ServerTypeWire): number {
   return t?.monthly_price_eur ?? t?.monthly_price_usd ?? 0;
 }
@@ -1356,8 +1362,10 @@ function CreateDialog({
   const [region, setRegion] = useState("");
   const [image, setImage] = useState("");
   const [busy, setBusy] = useState(false);
-  // Live catalog from the bound provider — populated on mount via
-  // the new /api/instances-server-types|locations|images routes.
+  const [providers, setProviders] = useState<ProviderBindingWire[]>([]);
+  const [provider, setProvider] = useState("");
+  const [providersLoading, setProvidersLoading] = useState(true);
+  // Live catalog from the selected bound provider.
   // Empty arrays mean either still-loading or the provider isn't
   // bound; catalogError carries the failure message in the latter
   // case so the operator sees what to fix instead of an empty form.
@@ -1400,9 +1408,48 @@ function CreateDialog({
 
   useEffect(() => {
     (async () => {
+      try {
+        const r = await fetch(`${API}/instances-providers?${withParams()}`, { credentials: "same-origin" });
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
+        const body = await r.json();
+        const bySlug = new Map<string, ProviderBindingWire>();
+        for (const binding of (body.providers || []) as ProviderBindingWire[]) {
+          const current = bySlug.get(binding.provider);
+          if (!current || binding.default) bySlug.set(binding.provider, binding);
+        }
+        const available = Array.from(bySlug.values()).sort((a, b) => a.provider.localeCompare(b.provider));
+        setProviders(available);
+        setProvider(body.default || available[0]?.provider || "");
+      } catch (e) {
+        setCatalogError((e as Error).message);
+        setCatalogLoading(false);
+      } finally {
+        setProvidersLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!provider) {
+      if (!providersLoading) {
+        setCatalogError("No VPS provider is bound to this Instances install.");
+        setCatalogLoading(false);
+      }
+      return;
+    }
+    (async () => {
       setCatalogLoading(true);
       setCatalogError(null);
-      const qs = withParams();
+      setServerTypes([]);
+      setLocations([]);
+      setImages([]);
+      setSize("");
+      setRegion("");
+      setImage("");
+      const params = new URLSearchParams(withParams());
+      params.set("provider", provider);
+      const qs = params.toString();
       try {
         const [stRes, locRes, imgRes] = await Promise.all([
           fetch(`${API}/instances-server-types?${qs}`, { credentials: "same-origin" }),
@@ -1438,8 +1485,8 @@ function CreateDialog({
         setImages(imgs);
         // Sensible defaults: cheapest size, first location
         // alphabetically, ubuntu LTS if present otherwise first image.
-        if (types.length && !size) setSize(types[0].name);
-        if (locs.length && !region) setRegion(locs[0].name);
+        if (types.length) setSize(types[0].name);
+        if (locs.length) setRegion(locs[0].name);
       } catch (e) {
         setCatalogError((e as Error).message);
       } finally {
@@ -1447,7 +1494,7 @@ function CreateDialog({
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [provider, providersLoading]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1458,7 +1505,7 @@ function CreateDialog({
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), size, region, image }),
+        body: JSON.stringify({ name: name.trim(), provider, size, region, image }),
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       onCreated();
@@ -1516,16 +1563,32 @@ function CreateDialog({
         <h2 className="text-text font-semibold">Provision a new instance</h2>
         {catalogError ? (
           <p className="text-xs text-amber">
-            Couldn't load the bound provider catalog: {catalogError}. Enter provider-specific
-            size, region, and image values manually; the backend will use the provider bound to this install.
+            Couldn't load the selected provider catalog: {catalogError}. Enter provider-specific
+            size, region, and image values manually.
           </p>
         ) : catalogLoading ? (
-          <p className="text-xs text-text-muted">Loading server types, regions, and images from the bound provider…</p>
+          <p className="text-xs text-text-muted">Loading server types, regions, and images from the selected provider…</p>
         ) : (
           <p className="text-xs text-text-muted">
-            Live from {catalogProvider || "bound provider"}: {serverTypes.length} types · {locations.length} regions · {images.length} images.
+            Live from {catalogProvider || provider}: {serverTypes.length} types · {locations.length} regions · {images.length} images.
           </p>
         )}
+        <div>
+          <label className="text-xs text-text-muted block mb-1">Provider</label>
+          <select
+            value={provider}
+            onChange={(e) => setProvider(e.target.value)}
+            disabled={providersLoading || providers.length === 0}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
+          >
+            {providers.length === 0 && <option value="">No provider bound</option>}
+            {providers.map((binding) => (
+              <option key={binding.connection_id} value={binding.provider}>
+                {binding.provider}{binding.default ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
         <div>
           <label className="text-xs text-text-muted block mb-1">Name</label>
           <input
@@ -1625,7 +1688,7 @@ function CreateDialog({
           >Cancel</button>
           <button
             type="submit"
-            disabled={busy || !name.trim() || catalogLoading || !size || !region || !image}
+            disabled={busy || !name.trim() || !provider || catalogLoading || !size || !region || !image}
             className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
           >{busy ? "Provisioning…" : "Provision"}</button>
         </div>

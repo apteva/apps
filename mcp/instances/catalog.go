@@ -18,7 +18,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	sdk "github.com/apteva/app-sdk"
@@ -139,9 +138,9 @@ func listImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
 // ─── Hetzner adapters ──────────────────────────────────────────────
 
 func hetznerListServerTypes(ctx *sdk.AppCtx) ([]ServerType, error) {
-	bound := ctx.IntegrationFor("provider")
-	if bound == nil || bound.ConnectionID == 0 {
-		return nil, errors.New("no VPS provider bound — bind a Hetzner connection on the Instances install to load the live catalog")
+	bound, err := instanceProviderBinding(ctx, "hetzner")
+	if err != nil {
+		return nil, err
 	}
 	// per_page=50 hits Hetzner's max for server_types; the current
 	// catalog is well under that, so one page covers everything.
@@ -172,9 +171,9 @@ func activeServerTypes(types []ServerType) []ServerType {
 }
 
 func hetznerListLocations(ctx *sdk.AppCtx) ([]Location, error) {
-	bound := ctx.IntegrationFor("provider")
-	if bound == nil || bound.ConnectionID == 0 {
-		return nil, errors.New("no VPS provider bound")
+	bound, err := instanceProviderBinding(ctx, "hetzner")
+	if err != nil {
+		return nil, err
 	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "locations_list", map[string]any{})
 	if err != nil {
@@ -187,9 +186,9 @@ func hetznerListLocations(ctx *sdk.AppCtx) ([]Location, error) {
 }
 
 func hetznerListImages(ctx *sdk.AppCtx) ([]Image, error) {
-	bound := ctx.IntegrationFor("provider")
-	if bound == nil || bound.ConnectionID == 0 {
-		return nil, errors.New("no VPS provider bound")
+	bound, err := instanceProviderBinding(ctx, "hetzner")
+	if err != nil {
+		return nil, err
 	}
 	// type=system narrows to the OS images we'd boot a fresh server
 	// from. Excludes snapshots/backups/app images which aren't

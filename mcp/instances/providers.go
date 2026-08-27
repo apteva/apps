@@ -1,14 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
-
-const defaultProviderSlug = "hetzner"
 
 var compatibleProviderSlugs = []string{
 	"hetzner",
@@ -36,15 +35,97 @@ func isCompatibleProvider(p string) bool {
 	return false
 }
 
+type InstanceProviderBinding struct {
+	Provider     string `json:"provider"`
+	ConnectionID int64  `json:"connection_id"`
+	Default      bool   `json:"default"`
+}
+
+func providerSlugForBinding(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) string {
+	if bound == nil {
+		return ""
+	}
+	slug := normalizeProvider(bound.AppSlug)
+	if slug == "" && ctx != nil && ctx.PlatformAPI() != nil && bound.ConnectionID > 0 {
+		if conn, err := ctx.PlatformAPI().GetConnection(bound.ConnectionID); err == nil && conn != nil {
+			slug = normalizeProvider(conn.AppSlug)
+		}
+	}
+	return slug
+}
+
+func boundInstanceProviders(ctx *sdk.AppCtx) []InstanceProviderBinding {
+	if ctx == nil {
+		return nil
+	}
+	out := make([]InstanceProviderBinding, 0)
+	for _, bound := range ctx.IntegrationsFor("provider") {
+		if bound == nil || bound.ConnectionID <= 0 {
+			continue
+		}
+		slug := providerSlugForBinding(ctx, bound)
+		if !isCompatibleProvider(slug) {
+			continue
+		}
+		out = append(out, InstanceProviderBinding{
+			Provider: slug, ConnectionID: bound.ConnectionID, Default: bound.IsDefault,
+		})
+	}
+	return out
+}
+
+func instanceProviderBinding(ctx *sdk.AppCtx, provider string) (*sdk.BoundIntegration, error) {
+	provider = normalizeProvider(provider)
+	if !isCompatibleProvider(provider) {
+		return nil, fmt.Errorf("provider %q is not a compatible Instances VPS provider; compatible providers: %s", provider, strings.Join(compatibleProviderSlugs, ", "))
+	}
+	if ctx == nil {
+		return nil, errors.New("Instances app context is unavailable")
+	}
+	var first *sdk.BoundIntegration
+	for _, bound := range ctx.IntegrationsFor("provider") {
+		if bound == nil || bound.ConnectionID <= 0 || providerSlugForBinding(ctx, bound) != provider {
+			continue
+		}
+		if first == nil {
+			first = bound
+		}
+		if bound.IsDefault {
+			return bound, nil
+		}
+	}
+	if first != nil {
+		return first, nil
+	}
+	bindings := boundInstanceProviders(ctx)
+	if len(bindings) == 0 {
+		return nil, fmt.Errorf("provider %q requested but no VPS provider is bound to this Instances install", provider)
+	}
+	boundSlugs := make([]string, 0, len(bindings))
+	seen := map[string]bool{}
+	for _, binding := range bindings {
+		if !seen[binding.Provider] {
+			boundSlugs = append(boundSlugs, binding.Provider)
+			seen[binding.Provider] = true
+		}
+	}
+	if len(boundSlugs) == 1 {
+		return nil, fmt.Errorf("provider %q requested but this Instances install is bound to %q", provider, boundSlugs[0])
+	}
+	return nil, fmt.Errorf("provider %q requested but is not bound to this Instances install; bound providers: %s", provider, strings.Join(boundSlugs, ", "))
+}
+
 func resolveInstanceProvider(ctx *sdk.AppCtx, explicit string) (string, error) {
 	provider := normalizeProvider(explicit)
-	bound := ctx.IntegrationFor("provider")
-
-	if provider == "" && bound != nil {
-		provider = normalizeProvider(bound.AppSlug)
-	}
 	if provider == "" {
-		provider = defaultProviderSlug
+		if ctx == nil {
+			return "", errors.New("Instances app context is unavailable")
+		}
+		bound := ctx.IntegrationFor("provider")
+		if bound == nil || bound.ConnectionID <= 0 {
+			return "", errors.New("no VPS provider bound to this Instances install")
+		}
+		provider = providerSlugForBinding(ctx, bound)
 	}
 	if provider == "local" {
 		return "", ErrLocalInstanceImmutable
@@ -52,11 +133,8 @@ func resolveInstanceProvider(ctx *sdk.AppCtx, explicit string) (string, error) {
 	if !isCompatibleProvider(provider) {
 		return "", fmt.Errorf("provider %q is not a compatible Instances VPS provider; compatible providers: %s", provider, strings.Join(compatibleProviderSlugs, ", "))
 	}
-	if bound != nil {
-		boundSlug := normalizeProvider(bound.AppSlug)
-		if boundSlug != "" && boundSlug != provider {
-			return "", fmt.Errorf("provider %q requested but this Instances install is bound to %q", provider, boundSlug)
-		}
+	if _, err := instanceProviderBinding(ctx, provider); err != nil {
+		return "", err
 	}
 	return provider, nil
 }

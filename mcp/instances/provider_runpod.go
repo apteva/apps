@@ -56,14 +56,7 @@ type runPodPod struct {
 }
 
 func runPodBound(ctx *sdk.AppCtx) (*sdk.BoundIntegration, error) {
-	bound := ctx.IntegrationFor("provider")
-	if bound == nil || bound.ConnectionID == 0 {
-		return nil, errors.New("no VPS provider bound — bind a RunPod connection on the Instances install")
-	}
-	if bound.AppSlug != "" && bound.AppSlug != "runpod" {
-		return nil, fmt.Errorf("runpod adapter requires provider=runpod; bound slug is %q", bound.AppSlug)
-	}
-	return bound, nil
+	return instanceProviderBinding(ctx, "runpod")
 }
 
 func runPodListServerTypes(ctx *sdk.AppCtx) ([]ServerType, error) {
