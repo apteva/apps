@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.2
+
+- Added the read-only `backlink_movement` tool with configurable 1-730 day
+  gained/lost buckets, active/lost totals, net movement, and timestamp coverage.
+- Added cached backlink movement cards, a 30-day trend chart, and recent active
+  and lost link lists to the domain panel.
+- Derived all movement from the existing provider-supplied `first_seen`,
+  `last_seen`, and `is_lost` fields. No snapshots, migrations, or additional
+  provider calls are introduced.
+
 ## 0.6.1
 
 - Added per-tracker daily, weekly, and monthly automatic rank refresh choices.

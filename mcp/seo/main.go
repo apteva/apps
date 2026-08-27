@@ -9,7 +9,8 @@
 //
 // v0.6 adds budgeted scheduled rank tracking through app-sdk workers and the
 // DataForSEO Standard Queue, with durable compact rank history. v0.6.1 adds
-// daily, weekly, and monthly cadence choices.
+// daily, weekly, and monthly cadence choices. v0.6.2 derives backlink
+// movement directly from cached provider first_seen/last_seen fields.
 //
 // project_id comes from the worker/request AppCtx, then APTEVA_PROJECT_ID;
 // ” = global scope. Children (pages, *_metrics, rankings, backlinks) inherit
@@ -36,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.6.1
+version: 0.6.2
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -83,6 +84,7 @@ provides:
     - { name: rankings_for_domain,    description: "Cached current rankings for a domain; pass history=true for daily observations." }
     - { name: rankings_for_keyword,   description: "Cached SERP rankings for a keyword with one uniform Google/YouTube result shape." }
     - { name: backlinks_list,         description: "Cached backlinks pointing at a domain." }
+    - { name: backlink_movement,      description: "Cached gained/lost backlink trend computed from provider first_seen and last_seen timestamps; no refresh or snapshot." }
     - { name: keyword_volume_history, description: "Monthly search-volume series (cached)." }
   ui_panels:
     - slot: project.page
@@ -373,6 +375,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"limit":     map[string]any{"type": "integer"},
 			}, []string{"domain_id"}),
 			Handler: a.toolBacklinksList},
+		{Name: "backlink_movement",
+			Description: "Summarize cached backlink gains and losses from provider first_seen/last_seen timestamps. No refresh or snapshot is created. Args: domain_id, provider? (default binding; all for every provider), days? (default 90, max 730).",
+			InputSchema: schemaObject(map[string]any{
+				"domain_id": map[string]any{"type": "integer"},
+				"provider":  map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
+				"days":      map[string]any{"type": "integer", "minimum": 1, "maximum": 730},
+			}, []string{"domain_id"}),
+			Handler: a.toolBacklinkMovement},
 		{Name: "keyword_volume_history",
 			Description: "Monthly search-volume series for a keyword (cached). Args: keyword_id, provider? (default binding; all for every provider).",
 			InputSchema: schemaObject(map[string]any{
@@ -1129,6 +1139,29 @@ type Backlink struct {
 	IsLost          int64  `json:"is_lost"`
 }
 
+type BacklinkMovementPoint struct {
+	Date   string `json:"date"`
+	Gained int64  `json:"gained"`
+	Lost   int64  `json:"lost"`
+}
+
+type BacklinkMovement struct {
+	DomainID       int64                   `json:"domain_id"`
+	Provider       string                  `json:"provider"`
+	Days           int                     `json:"days"`
+	FromDate       string                  `json:"from_date"`
+	ToDate         string                  `json:"to_date"`
+	ActiveLinks    int64                   `json:"active_links"`
+	LostLinks      int64                   `json:"lost_links"`
+	GainedInRange  int64                   `json:"gained_in_range"`
+	LostInRange    int64                   `json:"lost_in_range"`
+	NetChange      int64                   `json:"net_change"`
+	KnownFirstSeen int64                   `json:"known_first_seen"`
+	KnownLostDate  int64                   `json:"known_lost_date"`
+	Points         []BacklinkMovementPoint `json:"points"`
+	DataBasis      string                  `json:"data_basis"`
+}
+
 type VolumeHistoryRow struct {
 	Provider   string `json:"provider"`
 	LocationID int64  `json:"location_id"`
@@ -1447,6 +1480,98 @@ func (a *App) toolBacklinksList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+func (a *App) toolBacklinkMovement(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := toInt64(args["domain_id"])
+	if id == 0 {
+		return nil, errors.New("domain_id required")
+	}
+	if _, err := getDomain(ctx.AppDB(), projectScopeFromArgs(ctx, args), id); err != nil {
+		return nil, err
+	}
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	days := int(toInt64(args["days"]))
+	return cachedBacklinkMovement(ctx.AppDB(), id, provider, days, time.Now().UTC())
+}
+
+func cachedBacklinkMovement(db *sql.DB, domainID int64, provider string, days int, now time.Time) (*BacklinkMovement, error) {
+	if days <= 0 {
+		days = 90
+	}
+	if days > 730 {
+		days = 730
+	}
+	now = now.UTC()
+	toDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	fromDay := toDay.AddDate(0, 0, -(days - 1))
+	endExclusive := toDay.AddDate(0, 0, 1)
+
+	query := `SELECT first_seen, last_seen, is_lost FROM backlinks WHERE domain_id = ?`
+	queryArgs := []any{domainID}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider != "" {
+		query += ` AND provider = ?`
+		queryArgs = append(queryArgs, provider)
+	}
+	rows, err := db.Query(query, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := &BacklinkMovement{
+		DomainID: domainID, Provider: provider, Days: days,
+		FromDate: fromDay.Format("2006-01-02"), ToDate: toDay.Format("2006-01-02"),
+		Points: make([]BacklinkMovementPoint, days), DataBasis: "provider_first_seen_last_seen",
+	}
+	if result.Provider == "" {
+		result.Provider = "all"
+	}
+	pointByDate := make(map[string]*BacklinkMovementPoint, days)
+	for i := 0; i < days; i++ {
+		point := &result.Points[i]
+		point.Date = fromDay.AddDate(0, 0, i).Format("2006-01-02")
+		pointByDate[point.Date] = point
+	}
+	for rows.Next() {
+		var firstSeen, lastSeen sql.NullInt64
+		var isLost int64
+		if err := rows.Scan(&firstSeen, &lastSeen, &isLost); err != nil {
+			return nil, err
+		}
+		if isLost != 0 {
+			result.LostLinks++
+		} else {
+			result.ActiveLinks++
+		}
+		if firstSeen.Valid && firstSeen.Int64 > 0 {
+			result.KnownFirstSeen++
+			seenAt := time.Unix(firstSeen.Int64, 0).UTC()
+			if !seenAt.Before(fromDay) && seenAt.Before(endExclusive) {
+				date := seenAt.Format("2006-01-02")
+				pointByDate[date].Gained++
+				result.GainedInRange++
+			}
+		}
+		if isLost != 0 && lastSeen.Valid && lastSeen.Int64 > 0 {
+			result.KnownLostDate++
+			lostAt := time.Unix(lastSeen.Int64, 0).UTC()
+			if !lostAt.Before(fromDay) && lostAt.Before(endExclusive) {
+				date := lostAt.Format("2006-01-02")
+				pointByDate[date].Lost++
+				result.LostInRange++
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result.NetChange = result.GainedInRange - result.LostInRange
+	return result, nil
 }
 
 func (a *App) toolKeywordVolumeHistory(ctx *sdk.AppCtx, args map[string]any) (any, error) {

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.6.1
+version: 0.6.2
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -73,6 +73,9 @@ description: |
         SERP snapshots remain bounded.
   v0.6.1: adds per-tracker daily, weekly, and monthly refresh choices while
         preserving existing history and the daily policy's deeper Sunday scan.
+  v0.6.2: adds cached backlink movement analytics and panel views derived from
+        provider first-seen, last-seen, and lost status fields without adding
+        snapshots or making extra provider requests.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo
@@ -149,6 +152,7 @@ provides:
     - { name: rankings_for_domain,   description: "List a domain's current rankings by default, or daily observations with history=true. Args: domain_id (required), provider? (default binding; all for every provider), since? (unix), limit? (default 200), history?." }
     - { name: rankings_for_keyword,  description: "List cached SERP rankings for a keyword with one uniform Google/YouTube result shape. Args: keyword_id (required), provider? (default binding; all for every provider), since? (unix), limit? (default 200), history?." }
     - { name: backlinks_list,        description: "List backlinks pointing at a domain (cached). Args: domain_id (required), provider? (default binding; all for every provider), lost? (bool, default false), dofollow? (bool, optional filter), limit? (default 200)." }
+    - { name: backlink_movement,     description: "Summarize cached backlink gains and losses from provider first_seen/last_seen timestamps without a refresh or snapshot. Args: domain_id (required), provider? (default binding; all for every provider), days? (default 90, max 730)." }
     - { name: keyword_volume_history, description: "Monthly search-volume series for a keyword (cached). Args: keyword_id (required), provider? (default binding; all for every provider)." }
   ui_panels:
     - slot: project.page

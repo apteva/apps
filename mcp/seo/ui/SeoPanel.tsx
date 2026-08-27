@@ -53,6 +53,42 @@ interface DomainMetrics {
   referring_domains_count?: number;
 }
 
+interface Backlink {
+  id: number;
+  provider: string;
+  source_url: string;
+  dest_url: string;
+  anchor: string;
+  is_dofollow?: number;
+  source_authority?: number;
+  first_seen?: number;
+  last_seen?: number;
+  is_lost: number;
+}
+
+interface BacklinkMovementPoint {
+  date: string;
+  gained: number;
+  lost: number;
+}
+
+interface BacklinkMovement {
+  domain_id: number;
+  provider: string;
+  days: number;
+  from_date: string;
+  to_date: string;
+  active_links: number;
+  lost_links: number;
+  gained_in_range: number;
+  lost_in_range: number;
+  net_change: number;
+  known_first_seen: number;
+  known_lost_date: number;
+  points: BacklinkMovementPoint[];
+  data_basis: string;
+}
+
 interface KeywordMetrics {
   id: number;
   location_id: number;
@@ -300,6 +336,9 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const [selectedKeyword, setSelectedKeyword] = useState<Keyword | null>(null);
   const [selectedEntity, setSelectedEntity] = useState<SearchEntity | null>(null);
   const [domainMetrics, setDomainMetrics] = useState<DomainMetrics | null>(null);
+  const [backlinkMovement, setBacklinkMovement] = useState<BacklinkMovement | null>(null);
+  const [activeBacklinks, setActiveBacklinks] = useState<Backlink[]>([]);
+  const [lostBacklinks, setLostBacklinks] = useState<Backlink[]>([]);
   const [keywordMetrics, setKeywordMetrics] = useState<KeywordMetrics | null>(null);
   const [domainRankings, setDomainRankings] = useState<Ranking[]>([]);
   const [entityRankings, setEntityRankings] = useState<SearchRanking[]>([]);
@@ -370,6 +409,18 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setDomains(rows || []);
     setSelectedDomain((cur) => cur || rows?.[0] || null);
   }, [callTool]);
+
+  const reloadBacklinkInsights = useCallback(async (domainId: number) => {
+    const providerArgs = provider ? { provider } : {};
+    const [movement, active, lost] = await Promise.all([
+      callTool<BacklinkMovement>("backlink_movement", { domain_id: domainId, ...providerArgs, days: 90 }),
+      callTool<Backlink[]>("backlinks_list", { domain_id: domainId, ...providerArgs, lost: false, limit: 20 }),
+      callTool<Backlink[]>("backlinks_list", { domain_id: domainId, ...providerArgs, lost: true, limit: 20 }),
+    ]);
+    setBacklinkMovement(movement);
+    setActiveBacklinks(active || []);
+    setLostBacklinks(lost || []);
+  }, [callTool, provider]);
 
   const reloadKeywords = useCallback(async () => {
     const rows = await callTool<Keyword[]>("keywords_list", {
@@ -462,6 +513,9 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     if (!selectedDomain) {
       setDomainMetrics(null);
       setDomainRankings([]);
+      setBacklinkMovement(null);
+      setActiveBacklinks([]);
+      setLostBacklinks([]);
       setSelectedRankURL(null);
       return;
     }
@@ -474,7 +528,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
         setSelectedRankURL(null);
       })
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, provider, selectedDomain]);
+    reloadBacklinkInsights(selectedDomain.id).catch((e) => setErr((e as Error).message));
+  }, [callTool, provider, reloadBacklinkInsights, selectedDomain]);
 
   useEffect(() => {
     if (!selectedRankURL && domainRankings.length > 0) {
@@ -584,6 +639,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
         ]);
         setDomainMetrics(detail.metrics || null);
         setDomainRankings(rows || []);
+      } else {
+        await reloadBacklinkInsights(domain.id);
       }
       setStatus(backlinks ? "Backlinks refreshed" : "Domain metrics refreshed");
       pushActivity(`${backlinks ? "Backlinks" : "Domain metrics"} refreshed for ${domain.host}`);
@@ -939,6 +996,9 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           locations={filteredLocations}
           selected={selectedDomain}
           metrics={domainMetrics}
+          backlinkMovement={backlinkMovement}
+          activeBacklinks={activeBacklinks}
+          lostBacklinks={lostBacklinks}
           rankings={domainRankings}
           pageSerpRows={pageSerpRows}
           selectedRankURL={selectedRankURL}
@@ -1373,6 +1433,9 @@ function DomainsView(props: {
   locations: SEOLocation[];
   selected: Domain | null;
   metrics: DomainMetrics | null;
+  backlinkMovement: BacklinkMovement | null;
+  activeBacklinks: Backlink[];
+  lostBacklinks: Backlink[];
   rankings: Ranking[];
   pageSerpRows: SearchRanking[];
   selectedRankURL: string | null;
@@ -1452,6 +1515,11 @@ function DomainsView(props: {
               ]}
             />
             <div className="text-xs text-text-dim">Last refresh: {date(props.metrics?.ts)}</div>
+            <BacklinkInsights
+              movement={props.backlinkMovement}
+              active={props.activeBacklinks}
+              lost={props.lostBacklinks}
+            />
             <RankingExplorer
               rankings={props.rankings}
               selectedURL={props.selectedRankURL}
@@ -1464,6 +1532,94 @@ function DomainsView(props: {
           <div className="text-sm text-text-dim">No domain selected.</div>
         )}
       </div>
+    </div>
+  );
+}
+
+function BacklinkInsights(props: { movement: BacklinkMovement | null; active: Backlink[]; lost: Backlink[] }) {
+  const movement = props.movement;
+  if (!movement) {
+    return (
+      <section className="border border-border rounded p-4">
+        <h3 className="text-sm font-semibold">Backlink Movement</h3>
+        <div className="mt-2 text-sm text-text-dim">No cached backlink history yet. Use Refresh Links to import provider history.</div>
+      </section>
+    );
+  }
+  const chart = movement.points.slice(-30);
+  const maxDaily = Math.max(1, ...chart.flatMap((point) => [point.gained, point.lost]));
+  const totalLinks = movement.active_links + movement.lost_links;
+  return (
+    <section className="border border-border rounded overflow-hidden">
+      <div className="px-4 py-3 border-b border-border flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold">Backlink Movement</h3>
+          <div className="text-xs text-text-dim">Cached provider history · {movement.from_date} to {movement.to_date} · no extra provider request</div>
+        </div>
+        <div className="text-xs text-text-dim">{movement.provider}</div>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-px bg-border border-b border-border">
+        {[
+          ["Cached active", fmt(movement.active_links), "text-text"],
+          ["Cached lost", fmt(movement.lost_links), "text-red-300"],
+          [`Gained ${movement.days}d`, `+${fmt(movement.gained_in_range)}`, "text-emerald-300"],
+          [`Lost ${movement.days}d`, `-${fmt(movement.lost_in_range)}`, "text-red-300"],
+          ["Net", `${movement.net_change >= 0 ? "+" : ""}${fmt(movement.net_change)}`, movement.net_change >= 0 ? "text-emerald-300" : "text-red-300"],
+        ].map(([label, value, tone]) => (
+          <div key={label} className="bg-bg p-3">
+            <div className="text-xs text-text-dim">{label}</div>
+            <div className={`mt-1 text-lg font-semibold tabular-nums ${tone}`}>{value}</div>
+          </div>
+        ))}
+      </div>
+      <div className="p-4 border-b border-border">
+        <div className="flex items-center justify-between gap-3 mb-3">
+          <div className="text-sm font-medium">Last 30 days</div>
+          <div className="flex gap-3 text-xs text-text-dim">
+            <span><span className="inline-block w-2 h-2 bg-emerald-400 mr-1" />Gained</span>
+            <span><span className="inline-block w-2 h-2 bg-red-400 mr-1" />Lost</span>
+          </div>
+        </div>
+        <div className="h-24 flex items-end gap-1">
+          {chart.map((point) => (
+            <div key={point.date} className="flex-1 min-w-0 h-full flex items-end gap-px" title={`${point.date}: +${point.gained} / -${point.lost}`}>
+              <div className="flex-1 bg-emerald-400/80 min-h-px" style={{ height: `${(point.gained / maxDaily) * 100}%` }} />
+              <div className="flex-1 bg-red-400/80 min-h-px" style={{ height: `${(point.lost / maxDaily) * 100}%` }} />
+            </div>
+          ))}
+        </div>
+        <div className="mt-2 text-xs text-text-dim">
+          Timestamp coverage: first seen {fmt(movement.known_first_seen)}/{fmt(totalLinks)} · lost date {fmt(movement.known_lost_date)}/{fmt(movement.lost_links)}
+        </div>
+      </div>
+      <div className="grid grid-cols-1 xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-border">
+        <BacklinkRows title="Recent active links" rows={props.active} empty="No cached active links." />
+        <BacklinkRows title="Recently lost links" rows={props.lost} empty="No cached lost links." />
+      </div>
+    </section>
+  );
+}
+
+function BacklinkRows(props: { title: string; rows: Backlink[]; empty: string }) {
+  return (
+    <div className="min-w-0">
+      <div className="px-4 py-2 text-sm font-medium border-b border-border">{props.title}</div>
+      {props.rows.length === 0 ? (
+        <div className="p-4 text-sm text-text-dim">{props.empty}</div>
+      ) : (
+        <div className="divide-y divide-border">
+          {props.rows.slice(0, 10).map((row) => (
+            <div key={row.id} className="px-4 py-3 min-w-0">
+              <div className="flex items-center justify-between gap-3">
+                <a href={row.source_url} target="_blank" rel="noreferrer" className="text-sm font-medium truncate hover:underline">{hostFromURL(row.source_url) || row.source_url}</a>
+                <span className="text-xs text-text-dim shrink-0">{row.is_dofollow ? "follow" : "nofollow"}</span>
+              </div>
+              <div className="mt-1 text-xs text-text-dim truncate">{row.anchor || "No anchor"} · authority {fmt(row.source_authority)}</div>
+              <div className="mt-1 text-xs text-text-dim">First {date(row.first_seen)} · Last {date(row.last_seen)}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
