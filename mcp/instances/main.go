@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.26
+version: 0.4.27
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -58,6 +58,7 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.execute
+    - platform.connections.read_public_config
   integrations:
     - role: provider
       kind: integration
@@ -161,7 +162,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.26
+    ref: instances/v0.4.27
     entry: mcp/instances
   port: 8080
   health_check: /health

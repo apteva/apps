@@ -661,15 +661,41 @@ func providerTypePrice(t ServerType) float64 {
 }
 
 func scalewayDefaultProject(ctx *sdk.AppCtx) (string, error) {
-	data, err := executeProviderTool(ctx, "scaleway", "project_list", map[string]any{"page_size": 100})
+	bound, err := apiProviderBound(ctx, "scaleway")
 	if err != nil {
 		return "", err
 	}
-	id := firstJSONScalar(data, "projects", "id")
-	if id == "" {
-		return "", errors.New("scaleway account has no project available for provisioning")
+	if config, configErr := sdk.GetConnectionPublicConfig(ctx.PlatformAPI(), bound.ConnectionID); configErr == nil && config != nil {
+		if id := strings.TrimSpace(config.Fields["project_id"]); id != "" {
+			return id, nil
+		}
 	}
-	return id, nil
+
+	// Account v3 requires organization_id when listing projects. Legacy
+	// Scaleway connections stored only the secret key, so discover their
+	// project from the default security group that Scaleway creates per
+	// project instead of issuing an invalid unscoped project_list call.
+	var lastErr error
+	for _, zone := range []string{"fr-par-1", "nl-ams-1", "pl-waw-1", "it-mil-1"} {
+		res, executeErr := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "security_group_list", map[string]any{
+			"zone": zone, "project_default": true, "per_page": 100,
+		})
+		if executeErr != nil {
+			lastErr = executeErr
+			continue
+		}
+		if res == nil || !res.Success {
+			lastErr = fmt.Errorf("status=%d: %s", upstreamStatus(res), upstreamErrorString(res))
+			continue
+		}
+		if id := firstJSONScalar(res.Data, "security_groups", "project"); id != "" {
+			return id, nil
+		}
+	}
+	if lastErr != nil {
+		return "", fmt.Errorf("discover Scaleway project from default security groups: %w", lastErr)
+	}
+	return "", errors.New("scaleway account has no default project available for provisioning; set Default Project ID on the Scaleway connection")
 }
 
 func huaweiDefaultNetwork(ctx *sdk.AppCtx) (string, string, error) {
