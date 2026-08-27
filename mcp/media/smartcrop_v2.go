@@ -54,8 +54,13 @@ type smartCropV2Sample struct {
 	headTracked       bool
 	headTrackX        int
 	backgroundTracked bool
-	motionTracked     bool
-	temporalTrack     bool
+	// backgroundStrong marks a crop backed by an unusually concentrated,
+	// high-improvement fixed-camera foreground model. Later temporal passes
+	// may use it as provenance; backgroundTracked alone remains intentionally
+	// permissive enough for ordinary local corrections.
+	backgroundStrong bool
+	motionTracked    bool
+	temporalTrack    bool
 }
 
 // computeSmartCropStillV2 reframes both ordinary images and exact video

@@ -1401,6 +1401,27 @@ func TestReelStationaryRunsRejectLowConfidenceBackground(t *testing.T) {
 	}
 }
 
+func TestStationaryRunRecognizesBackgroundMotionContinuity(t *testing.T) {
+	const cropW = 404
+	samples := make([]smartCropV2Sample, 15)
+	for i := range samples {
+		samples[i].point = cropPathPoint{AtMs: int64(i) * smartCropTrackingIntervalMs, X: 488}
+	}
+	samples[0].point.X, samples[0].motionTracked = 732, true
+	samples[14].point.X, samples[14].motionTracked = 724, true
+	for _, i := range []int{1, 3, 4, 5, 6, 7, 9, 10, 11} {
+		samples[i].point.X = 716
+		samples[i].backgroundTracked = true
+	}
+	if !smartCropStationaryRunHasBackgroundContinuity(samples, 1, 14, cropW) {
+		t.Fatal("clustered background observations aligned with both motion anchors were rejected")
+	}
+	samples[14].point.X = 1_050
+	if smartCropStationaryRunHasBackgroundContinuity(samples, 1, 14, cropW) {
+		t.Fatal("divergent motion anchors were treated as one stationary subject")
+	}
+}
+
 func TestReelStationarySubjectTailFollowsClusteredHandoff(t *testing.T) {
 	samples := make([]smartCropV2Sample, 11)
 	for i := range samples {

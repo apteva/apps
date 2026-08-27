@@ -199,7 +199,7 @@ func downloadSmartCropBackgroundImages(ctx context.Context, sc *storageClient, p
 func correctSmartCropBackgroundSamples(samples []smartCropV2Sample, references []image.Image, srcW, cropW int) int {
 	corrected := 0
 	for i := range samples {
-		x, _, ok := backgroundAwareNarrowSmartCropX(samples[i].img, references, samples[i].point.X, srcW, cropW)
+		x, result, ok := backgroundAwareNarrowSmartCropX(samples[i].img, references, samples[i].point.X, srcW, cropW)
 		if !ok {
 			continue
 		}
@@ -210,6 +210,13 @@ func correctSmartCropBackgroundSamples(samples []smartCropV2Sample, references [
 		}
 		samples[i].point.X = x
 		samples[i].backgroundTracked = true
+		// This deliberately sits well above the ordinary acceptance gate. It is
+		// reserved for fixed-camera clips where the foreground occupies almost
+		// one portrait window and the alternative crop explains far less of it.
+		// Such evidence is stable enough to survive a later, broader temporal
+		// vote even when hair or an occluded face defeats the face detectors.
+		samples[i].backgroundStrong = result.Concentration >= 0.85 &&
+			result.Improvement >= 1.40 && result.RowCoverage >= 0.70
 		corrected++
 	}
 	return corrected

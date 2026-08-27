@@ -328,6 +328,34 @@ func TestSmartCropBackgroundSubjectState(t *testing.T) {
 	}
 }
 
+func TestSmartCropStrongBackgroundSubjectStateWithoutFace(t *testing.T) {
+	samples := make([]smartCropV2Sample, 9)
+	for i := range samples {
+		samples[i].point.X = 392
+		samples[i].backgroundTracked = true
+		if i >= 2 {
+			samples[i].backgroundStrong = true
+		}
+	}
+	if !smartCropSceneHasBackgroundSubjectState(samples, 404) {
+		t.Fatal("strict fixed-camera foreground supermajority was not preserved")
+	}
+	samples[0].point.X = 464
+	samples[1].point.X = 464
+	if corrected := correctSmartCropReelTemporalOutliers(samples, 1280, 404); corrected != 2 {
+		t.Fatalf("normalized %d weak background observations, want 2", corrected)
+	}
+	for i := range samples {
+		if samples[i].point.X != 392 {
+			t.Fatalf("background observation %d remained at x=%d", i, samples[i].point.X)
+		}
+	}
+	samples[8].point.X = 700
+	if smartCropSceneHasBackgroundSubjectState(samples, 404) {
+		t.Fatal("diffuse strict foreground candidates were over-protected")
+	}
+}
+
 func TestSmartCropFaceContainmentGeometry(t *testing.T) {
 	const srcW, cropW = 1920, 606
 	cases := []struct {

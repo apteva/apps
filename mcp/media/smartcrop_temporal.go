@@ -678,6 +678,19 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 			end++
 		}
 		scene := samples[start:end]
+		if x, ok := smartCropStrongBackgroundSubjectX(scene, cropW); ok {
+			// Normalize only other background-model observations in the same tight
+			// state. Generic, face, and motion points remain available to represent
+			// a real transition.
+			for i := start; i < end; i++ {
+				if samples[i].backgroundTracked && absInt(samples[i].point.X-x) <= cropW/4 && samples[i].point.X != x {
+					samples[i].point.X = x
+					corrected++
+				}
+			}
+			start = end
+			continue
+		}
 		if smartCropSceneHasBackgroundSubjectState(scene, cropW) {
 			// A distributed fixed-camera model has independently located a
 			// repeated foreground state. Scene-wide temporal activity is broader
@@ -774,6 +787,13 @@ func smartCropSceneHasBackgroundSubjectState(samples []smartCropV2Sample, cropW 
 			xs = append(xs, sample.point.X)
 		}
 	}
+	// A supermajority of strict fixed-camera foreground observations is an
+	// independent subject state even without a detectable face. This covers
+	// hair-obscured and downward-looking people while keeping the ordinary
+	// background model dependent on face/motion corroboration below.
+	if _, ok := smartCropStrongBackgroundSubjectX(samples, cropW); ok {
+		return true
+	}
 	if len(xs) < 4 {
 		return false
 	}
@@ -795,6 +815,26 @@ func smartCropSceneHasBackgroundSubjectState(samples []smartCropV2Sample, cropW 
 		}
 	}
 	return false
+}
+
+func smartCropStrongBackgroundSubjectX(samples []smartCropV2Sample, cropW int) (int, bool) {
+	if len(samples) < 4 || cropW <= 0 {
+		return 0, false
+	}
+	strongXs := make([]int, 0, len(samples))
+	for _, sample := range samples {
+		if sample.backgroundStrong {
+			strongXs = append(strongXs, sample.point.X)
+		}
+	}
+	if len(strongXs) < maxInt(4, (2*len(samples)+2)/3) {
+		return 0, false
+	}
+	sort.Ints(strongXs)
+	if strongXs[len(strongXs)-1]-strongXs[0] > maxInt(24, cropW/8) {
+		return 0, false
+	}
+	return roundEven(strongXs[len(strongXs)/2]), true
 }
 
 func smartCropStaticCandidateTouchesSceneSubject(result smartCropTemporalResult, samples []smartCropV2Sample, cropW int) bool {
@@ -1081,6 +1121,17 @@ func correctSmartCropStationaryRuns(samples []smartCropV2Sample, srcW, cropW int
 			i = end
 			continue
 		}
+		// When both motion anchors and a majority of fixed-camera foreground
+		// observations agree, resolve isolated saliency misses from that identity
+		// continuity before computing a broad activity window. The latter can be
+		// dominated by a chair or by the previous position of long hair.
+		if smartCropStationaryRunHasBackgroundContinuity(samples, i, end, cropW) {
+			if n := correctSmartCropStationaryRunFromMotionContinuity(samples, i, end, srcW, cropW); n > 0 {
+				corrected += n
+				i = end
+				continue
+			}
+		}
 		// A locally dense foreground means this nominally "stationary" run is
 		// actually a posture change or a traversal that the pairwise motion
 		// detector did not certify at every frame. Resolve that run from its own
@@ -1128,6 +1179,32 @@ func correctSmartCropStationaryRuns(samples []smartCropV2Sample, srcW, cropW int
 		i = end
 	}
 	return corrected
+}
+
+func smartCropStationaryRunHasBackgroundContinuity(samples []smartCropV2Sample, start, end, cropW int) bool {
+	if start <= 0 || end >= len(samples) || end-start < smartCropTemporalMinSamples || cropW <= 0 ||
+		samples[start].point.Cut || samples[end].point.Cut ||
+		!samples[start-1].motionTracked || !samples[end].motionTracked {
+		return false
+	}
+	leftAnchor, rightAnchor := samples[start-1].point.X, samples[end].point.X
+	if absInt(leftAnchor-rightAnchor) > cropW/3 {
+		return false
+	}
+	xs := make([]int, 0, end-start)
+	for i := start; i < end; i++ {
+		if samples[i].backgroundTracked {
+			xs = append(xs, samples[i].point.X)
+		}
+	}
+	if len(xs) < maxInt(4, (end-start+1)/2) {
+		return false
+	}
+	sort.Ints(xs)
+	lo, hi := xs[(len(xs)-1)/5], xs[(len(xs)-1)*4/5]
+	median := xs[len(xs)/2]
+	return hi-lo <= maxInt(32, cropW/8) &&
+		absInt(median-leftAnchor) <= cropW/6 && absInt(median-rightAnchor) <= cropW/6
 }
 
 // correctSmartCropStationarySubjectTails handles the final hand-off from
