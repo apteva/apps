@@ -50,6 +50,9 @@ func normalisePath(p string) (string, error) {
 		if seg == ".." {
 			return "", errors.New("path escapes repository")
 		}
+		if strings.EqualFold(seg, ".git") {
+			return "", errors.New(".git is reserved")
+		}
 	}
 	return cleaned, nil
 }

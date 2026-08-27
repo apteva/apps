@@ -110,6 +110,29 @@ interface Repo {
   template_icon?: string;
 }
 
+interface GitRemote {
+  fetch_url: string;
+  provider_slug?: string;
+  default_branch?: string;
+  last_fetch_at?: string;
+  last_push_at?: string;
+  last_error?: string;
+}
+
+interface GitStatus {
+  git_backed: boolean;
+  branch?: string;
+  detached?: boolean;
+  head_sha?: string;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  conflicted: boolean;
+  changes?: Array<{ path: string; original_path?: string; index: string; worktree: string }>;
+  remote?: GitRemote;
+}
+
 interface TemplateEntry {
   kind: "user" | "embedded";
   name: string;
@@ -389,6 +412,8 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [error, setError] = useState("");
   const [loadingTree, setLoadingTree] = useState(false);
   const [loadingFile, setLoadingFile] = useState(false);
+  const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
+  const [gitBusy, setGitBusy] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [showImportGithub, setShowImportGithub] = useState(false);
   const [zipImportTarget, setZipImportTarget] = useState<"new" | string | null>(null);
@@ -509,6 +534,17 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     [api],
   );
 
+  const loadGitStatus = useCallback(
+    async (slug: string) => {
+      try {
+        setGitStatus(await api<GitStatus>("GET", `/repos/${slug}/git/status`));
+      } catch {
+        setGitStatus(null);
+      }
+    },
+    [api],
+  );
+
   const [confirmState, setConfirmState] = useState<ConfirmRequest | null>(null);
   const [markTemplateFor, setMarkTemplateFor] = useState<string | null>(null);
 
@@ -520,6 +556,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     setActiveView("code");
     setExpandedDirs(new Set()); // reset; loadTree seeds top-level dirs.
     loadTree(slug);
+    loadGitStatus(slug);
   };
   const selectRepo = (slug: string) => {
     if (dirty) {
@@ -568,8 +605,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     if (initialLinkApplied.current || initialLink.view !== "repositories" || !initialLink.repo) return;
     initialLinkApplied.current = true;
     loadTree(initialLink.repo);
+    loadGitStatus(initialLink.repo);
     if (initialLink.path) openPath(initialLink.repo, initialLink.path);
-  }, [initialLink, loadTree, openPath]);
+  }, [initialLink, loadGitStatus, loadTree, openPath]);
 
   const initialLineApplied = useRef(false);
   useEffect(() => {
@@ -628,8 +666,72 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
           }
         }
         break;
+      case "repo.git.connected":
+      case "repo.git.fetched":
+      case "repo.git.pulled":
+      case "repo.git.committed":
+      case "repo.git.pushed":
+      case "repo.git.switched":
+        if (selectedSlug && ev.data?.slug === selectedSlug) {
+          loadGitStatus(selectedSlug);
+          loadTree(selectedSlug);
+        }
+        break;
     }
   });
+
+  const runGitAction = async (action: "fetch" | "pull" | "push") => {
+    if (!selectedSlug) return;
+    setGitBusy(true);
+    setError("");
+    try {
+      setGitStatus(await api<GitStatus>("POST", `/repos/${selectedSlug}/git/${action}`, {}));
+      if (action === "pull") {
+        await loadTree(selectedSlug);
+        if (openFile && !dirty) await openPath(selectedSlug, openFile.path);
+      }
+    } catch (e) {
+      setError(`Git ${action} failed: ${(e as Error).message}`);
+    } finally {
+      setGitBusy(false);
+    }
+  };
+
+  const commitGitChanges = async () => {
+    if (!selectedSlug) return;
+    const message = window.prompt("Commit message");
+    if (!message?.trim()) return;
+    setGitBusy(true);
+    setError("");
+    try {
+      setGitStatus(await api<GitStatus>("POST", `/repos/${selectedSlug}/git/commit`, { message: message.trim() }));
+    } catch (e) {
+      setError(`Git commit failed: ${(e as Error).message}`);
+    } finally {
+      setGitBusy(false);
+    }
+  };
+
+  const connectGitRemote = async () => {
+    if (!selectedSlug) return;
+    const remoteUrl = window.prompt("HTTPS Git remote URL");
+    if (!remoteUrl?.trim()) return;
+    setGitBusy(true);
+    setError("");
+    try {
+      const result = await api<{ status: GitStatus; reconciliation_required: boolean; safety_branch?: string }>(
+        "POST", `/repos/${selectedSlug}/git/connect`, { remote_url: remoteUrl.trim() },
+      );
+      setGitStatus(result.status);
+      if (result.reconciliation_required) {
+        setError(`Remote connected without overwriting local files. Reconciliation is required; local work is preserved on ${result.safety_branch || "a safety branch"}.`);
+      }
+    } catch (e) {
+      setError(`Connect failed: ${(e as Error).message}`);
+    } finally {
+      setGitBusy(false);
+    }
+  };
 
   const selectFile = (path: string) => {
     if (!selectedSlug) return;
@@ -859,9 +961,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             <button
               type="button"
               onClick={() => setShowImportGithub(true)}
-              title="Import a repository from GitHub"
+              title="Clone a Git repository"
               className="px-2 py-0.5 text-xs border border-border text-text-muted rounded hover:text-text hover:border-text"
-            >GitHub</button>
+            >Git</button>
             <button
               type="button"
               onClick={() => setZipImportTarget("new")}
@@ -981,6 +1083,29 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
               className="px-2 py-0.5 text-xs border border-red/50 text-red rounded hover:bg-red hover:text-white"
             >Archive</button>
           </header>
+
+          <div className="px-4 py-1.5 border-b border-border flex items-center gap-3 text-[11px] text-text-muted min-h-8">
+            {gitStatus?.git_backed ? (
+              <>
+                <span
+                  className={`font-mono truncate ${gitStatus.conflicted ? "text-red" : gitStatus.dirty ? "text-yellow" : "text-green"}`}
+                  title={gitStatus.remote?.fetch_url || "Git repository"}
+                >
+                  {gitStatus.detached ? "detached" : gitStatus.branch || "git"}{gitStatus.dirty ? "*" : ""}
+                </span>
+                {gitStatus.upstream && <span className="font-mono text-text-dim truncate">{gitStatus.upstream}</span>}
+                {gitStatus.ahead > 0 && <span title="Commits ahead">↑{gitStatus.ahead}</span>}
+                {gitStatus.behind > 0 && <span title="Commits behind">↓{gitStatus.behind}</span>}
+                <span className="flex-1" />
+                <button type="button" disabled={gitBusy} onClick={() => runGitAction("fetch")} className="hover:text-text disabled:opacity-40">Fetch</button>
+                <button type="button" disabled={gitBusy || gitStatus.dirty || gitStatus.conflicted} onClick={() => runGitAction("pull")} className="hover:text-text disabled:opacity-40" title="Fast-forward pull">Pull</button>
+                <button type="button" disabled={gitBusy || !gitStatus.dirty || gitStatus.conflicted} onClick={commitGitChanges} className="hover:text-text disabled:opacity-40">Commit</button>
+                <button type="button" disabled={gitBusy || gitStatus.conflicted} onClick={() => runGitAction("push")} className="hover:text-text disabled:opacity-40">Push</button>
+              </>
+            ) : (
+              <button type="button" disabled={gitBusy} onClick={connectGitRemote} className="text-accent hover:underline disabled:opacity-40">Connect Git remote</button>
+            )}
+          </div>
 
           <div className="flex-1 min-h-0 flex">
               <aside className="w-72 border-r border-border flex flex-col">
@@ -1831,14 +1956,13 @@ function MarkTemplateDialog({
 
 // ─── ImportGithubDialog ────────────────────────────────────────────
 //
-// Two-mode picker for importing a repository from GitHub. Mode A
-// renders a typeahead populated by `list_repos` (the bound github
-// integration's tool); mode B is free-text "owner/repo" for repos the
-// user has read access to but doesn't own.
+// Provider-neutral Git clone dialog. GitHub is used only as an optional
+// discovery picker; both picker and URL modes clone through the generic Git
+// service and retain history/upstream tracking.
 //
 // Wires through:
 //   GET  /api/github/repos        → integration → list_repos
-//   POST /api/github/import       → repos_import_github
+//   POST /api/git/import          → repos_git_import
 //
 // When the github connection isn't bound, the GET returns 424 (Failed
 // Dependency) and the dialog renders a "Connect GitHub" CTA pointing
@@ -1877,6 +2001,7 @@ function ImportGithubDialog({
 
   const [owner, setOwner] = useState("");
   const [repo, setRepo] = useState("");
+  const [remoteUrl, setRemoteUrl] = useState("");
   const [ref, setRef] = useState("");
   const [slug, setSlug] = useState("");
   const [framework, setFramework] = useState<(typeof FRAMEWORKS_IMPORT)[number]>("");
@@ -1921,24 +2046,28 @@ function ImportGithubDialog({
   const pickRepo = (r: GithubRepo) => {
     setOwner(r.owner?.login || r.full_name.split("/")[0] || "");
     setRepo(r.name);
+    setRemoteUrl(`https://github.com/${r.full_name}.git`);
     setRef(r.default_branch || "");
     if (!slug) setSlug(r.name);
   };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!owner.trim() || !repo.trim()) {
-      setErr("owner and repo are required");
+    const cloneURL = mode === "picker"
+      ? remoteUrl || (owner.trim() && repo.trim() ? `https://github.com/${owner.trim()}/${repo.trim()}.git` : "")
+      : remoteUrl.trim();
+    if (!cloneURL) {
+      setErr(mode === "picker" ? "choose a repository" : "Git remote URL is required");
       return;
     }
     setBusy(true);
     setErr("");
     try {
-      const r = await api<{ repository: { slug: string } }>("POST", "/github/import", {
-        owner: owner.trim(),
-        repo: repo.trim(),
+      const r = await api<{ repository: { slug: string } }>("POST", "/git/import", {
+        remote_url: cloneURL,
         ref: ref.trim(),
         slug: slug.trim(),
+        name: mode === "picker" && owner && repo ? `${owner}/${repo}` : undefined,
         framework,
       });
       onImported(r.repository.slug);
@@ -1957,7 +2086,7 @@ function ImportGithubDialog({
         className="w-[560px] bg-bg border border-border rounded p-5 space-y-4 max-h-[80vh] overflow-auto"
       >
         <div className="flex items-baseline justify-between">
-          <h2 className="text-text font-semibold">Import from GitHub</h2>
+          <h2 className="text-text font-semibold">Clone Git repository</h2>
           <div className="flex gap-1 text-[11px]">
             <button
               type="button"
@@ -1968,7 +2097,7 @@ function ImportGithubDialog({
               type="button"
               onClick={() => setMode("url")}
               className={`px-2 py-0.5 rounded border ${mode === "url" ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"}`}
-            >owner/repo</button>
+            >Git URL</button>
           </div>
         </div>
 
@@ -1977,13 +2106,13 @@ function ImportGithubDialog({
             <div className="text-xs text-text-muted">Loading repositories…</div>
           ) : reposErr === "github_not_connected" ? (
             <div className="text-xs text-text-muted space-y-2">
-              <div>GitHub isn't connected on this install.</div>
-              <div>Open Settings → Integrations in the dashboard, connect GitHub, then bind it to this install's "GitHub" role.</div>
+              <div>GitHub discovery isn't connected on this install.</div>
+              <div>Public repositories can still be cloned by URL. For private repositories, bind the matching GitHub, GitLab, or Bitbucket connection to this install's Git provider role.</div>
               <button
                 type="button"
                 onClick={() => setMode("url")}
                 className="text-accent hover:underline"
-              >Switch to owner/repo entry instead →</button>
+              >Switch to Git URL entry instead →</button>
             </div>
           ) : repos.length === 0 ? (
             <div className="text-xs text-text-muted">{reposErr || "No repositories accessible to this connection."}</div>
@@ -2027,27 +2156,16 @@ function ImportGithubDialog({
             </div>
           )
         ) : (
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="text-xs text-text-muted block mb-1">Owner</label>
-              <input
-                type="text"
-                value={owner}
-                onChange={(e) => setOwner(e.target.value)}
-                placeholder="apteva"
-                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-text-muted block mb-1">Repo</label>
-              <input
-                type="text"
-                value={repo}
-                onChange={(e) => setRepo(e.target.value)}
-                placeholder="apps"
-                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
-              />
-            </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">HTTPS Git remote</label>
+            <input
+              type="url"
+              value={remoteUrl}
+              onChange={(e) => setRemoteUrl(e.target.value)}
+              placeholder="https://git.example.com/team/repository.git"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+            <div className="text-[10px] text-text-dim mt-1">Public remotes work directly. Private remotes automatically use a matching bound provider connection.</div>
           </div>
         )}
 
@@ -2097,9 +2215,9 @@ function ImportGithubDialog({
           >Cancel</button>
           <button
             type="submit"
-            disabled={busy || !owner.trim() || !repo.trim()}
+            disabled={busy || (mode === "picker" ? !remoteUrl : !remoteUrl.trim())}
             className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
-          >{busy ? "Importing…" : "Import"}</button>
+          >{busy ? "Cloning…" : "Clone"}</button>
         </div>
       </form>
     </div>
