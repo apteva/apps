@@ -7,8 +7,9 @@
 //   - keywords: (text, country_iso, language_iso) identity, also
 //     project-scoped. Text is normalised (trimmed, lowercased).
 //
-// v0.6 adds budgeted daily rank tracking through app-sdk workers and the
-// DataForSEO Standard Queue, with durable compact rank history.
+// v0.6 adds budgeted scheduled rank tracking through app-sdk workers and the
+// DataForSEO Standard Queue, with durable compact rank history. v0.6.1 adds
+// daily, weekly, and monthly cadence choices.
 //
 // project_id comes from the worker/request AppCtx, then APTEVA_PROJECT_ID;
 // ” = global scope. Children (pages, *_metrics, rankings, backlinks) inherit
@@ -35,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.6.0
+version: 0.6.1
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -67,8 +68,8 @@ provides:
     - { name: keyword_ideas, description: "Find keyword/content ideas. Args: search_engine? (google default or youtube), seed_keywords or keywords, location_id or country_iso+language_code, limit?, refresh?." }
     - { name: rankings_for_entity, description: "List cached ranking rows for a generic search entity. Args: entity_id, since?, limit?." }
     - { name: rankings_for_keywords, description: "List cached SERP rankings for multiple keywords. Args: keyword_ids, since?, limit?, history?." }
-    - { name: rank_trackers_list, description: "List automatic rank trackers and their status. Args: keyword_id?." }
-    - { name: rank_history, description: "Read durable daily rank/not-found observations. Args: tracker_id, limit?." }
+    - { name: rank_trackers_list, description: "List automatic rank trackers, refresh frequency, and status. Args: keyword_id?." }
+    - { name: rank_history, description: "Read durable scheduled rank/not-found observations. Args: tracker_id, limit?." }
     - { name: content_opportunities, description: "Summarize latest cached SERP snapshots into content opportunities. Args: search_engine? (google default), limit?. YouTube uses video results only." }
     - { name: locations_list, description: "List active SEO provider locations." }
     - { name: domains_add,    description: "Add a domain (hostname) to track; accepts location_id or country_iso+language_code for the default locale." }
@@ -250,13 +251,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"entity_id"}),
 			Handler: a.toolRankingsForEntity},
 		{Name: "rank_trackers_list",
-			Description: "List automatic rank trackers and status. Args: keyword_id?.",
+			Description: "List automatic rank trackers, refresh frequency, and status. Args: keyword_id?.",
 			InputSchema: schemaObject(map[string]any{
 				"keyword_id": map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolRankTrackersList},
 		{Name: "rank_history",
-			Description: "Read durable daily rank history, including explicit not-found observations. Args: tracker_id, limit?.",
+			Description: "Read durable scheduled rank history, including explicit not-found observations. Args: tracker_id, limit?.",
 			InputSchema: schemaObject(map[string]any{
 				"tracker_id": map[string]any{"type": "integer"},
 				"limit":      map[string]any{"type": "integer"},

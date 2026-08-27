@@ -3,6 +3,11 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +25,7 @@ func newRankTrackingTestDB(t *testing.T) *sql.DB {
 		"migrations/006_serp_consistency_and_retention.sql",
 		"migrations/007_keyword_metric_jobs.sql",
 		"migrations/008_daily_rank_tracking.sql",
+		"migrations/009_rank_tracking_frequency.sql",
 	)
 }
 
@@ -39,11 +45,11 @@ func TestDailyRankTracking_QueuesOnceAndStoresFoundAndNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := enableRankTracker(db, "project-1", keywordID, 0, firstDomainID, "dataforseo", "desktop", 20, 100)
+	first, err := enableRankTracker(db, "project-1", keywordID, 0, firstDomainID, "dataforseo", "desktop", "daily", 20, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := enableRankTracker(db, "project-1", keywordID, 0, secondDomainID, "dataforseo", "desktop", 20, 100)
+	second, err := enableRankTracker(db, "project-1", keywordID, 0, secondDomainID, "dataforseo", "desktop", "daily", 20, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +116,7 @@ func TestRankTrackingBudget_BlocksBeforeProviderSubmission(t *testing.T) {
 	locID := insertProviderTestLocation(t, db, "dataforseo", "google", 2840, "United States", "US", "en")
 	keywordID, _ := insertKeywordRecord(db, "project-1", "google", "expensive query", locID, "US", "en")
 	domainID, _ := upsertDomainRecord(db, "project-1", "example.com", "Example", locID)
-	if _, err := enableRankTracker(db, "project-1", keywordID, 0, domainID, "dataforseo", "desktop", 20, 100); err != nil {
+	if _, err := enableRankTracker(db, "project-1", keywordID, 0, domainID, "dataforseo", "desktop", "daily", 20, 100); err != nil {
 		t.Fatal(err)
 	}
 	if err := saveRankTrackingSettings(db, rankTrackingSettings{
@@ -128,6 +134,81 @@ func TestRankTrackingBudget_BlocksBeforeProviderSubmission(t *testing.T) {
 	}
 	if status != "budget_blocked" {
 		t.Fatalf("job status = %q, want budget_blocked", status)
+	}
+}
+
+func TestRankTrackingFrequencySchedulesAndCost(t *testing.T) {
+	now := time.Date(2026, time.January, 31, 18, 0, 0, 0, time.UTC)
+	daily := time.Unix(nextTrackingRun(now, 7, "daily"), 0).UTC()
+	weekly := time.Unix(nextTrackingRun(now, 7, "weekly"), 0).UTC()
+	monthly := time.Unix(nextTrackingRun(now, 7, "monthly"), 0).UTC()
+
+	if daily.Year() != 2026 || daily.Month() != time.February || daily.Day() != 1 {
+		t.Fatalf("daily next run = %s, want 2026-02-01", daily)
+	}
+	if weekly.Year() != 2026 || weekly.Month() != time.February || weekly.Day() != 7 {
+		t.Fatalf("weekly next run = %s, want 2026-02-07", weekly)
+	}
+	if monthly.Year() != 2026 || monthly.Month() != time.February || monthly.Day() != 28 {
+		t.Fatalf("monthly next run = %s, want clamped 2026-02-28", monthly)
+	}
+	if got := estimateStandardSERPCost(20); math.Abs(got-0.00105) > 0.0000001 {
+		t.Fatalf("top-20 estimate = %f, want 0.00105", got)
+	}
+	if got := estimateStandardSERPCost(100); math.Abs(got-0.00465) > 0.0000001 {
+		t.Fatalf("top-100 estimate = %f, want 0.00465", got)
+	}
+}
+
+func TestEnableRankTracker_ValidatesAndStoresFrequency(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "project-1")
+	db := newRankTrackingTestDB(t)
+	locID := insertProviderTestLocation(t, db, "dataforseo", "google", 2840, "United States", "US", "en")
+	keywordID, _ := insertKeywordRecord(db, "project-1", "google", "weekly query", locID, "US", "en")
+	domainID, _ := upsertDomainRecord(db, "project-1", "example.com", "Example", locID)
+
+	tracker, err := enableRankTracker(db, "project-1", keywordID, 0, domainID, "dataforseo", "desktop", "weekly", 20, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tracker.Frequency != "weekly" {
+		t.Fatalf("frequency = %q, want weekly", tracker.Frequency)
+	}
+	if _, err := enableRankTracker(db, "project-1", keywordID, 0, domainID, "dataforseo", "desktop", "yearly", 20, 100); err == nil {
+		t.Fatal("expected invalid frequency error")
+	}
+}
+
+func TestRankTrackingPatch_ChangesFrequencyWithoutDisabling(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "project-1")
+	db := newRankTrackingTestDB(t)
+	locID := insertProviderTestLocation(t, db, "dataforseo", "google", 2840, "United States", "US", "en")
+	keywordID, _ := insertKeywordRecord(db, "project-1", "google", "monthly query", locID, "US", "en")
+	domainID, _ := upsertDomainRecord(db, "project-1", "example.com", "Example", locID)
+	tracker, err := enableRankTracker(db, "project-1", keywordID, 0, domainID, "dataforseo", "desktop", "daily", 20, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE serp_trackers SET next_run_at = 12345 WHERE id = ?`, tracker.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	previousCtx := globalCtx
+	globalCtx = sdk.NewAppCtxForTest(nil, db, nil, nil, nil)
+	t.Cleanup(func() { globalCtx = previousCtx })
+	request := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/rank-tracking/%d?project_id=project-1", tracker.ID), strings.NewReader(`{"frequency":"monthly"}`))
+	recorder := httptest.NewRecorder()
+	(&App{}).handleRankTrackingItem(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	trackers, err := listRankTrackers(db, "project-1", keywordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trackers) != 1 || !trackers[0].Enabled || trackers[0].Frequency != "monthly" || trackers[0].NextRunAt != 0 {
+		t.Fatalf("updated tracker = %+v", trackers)
 	}
 }
 

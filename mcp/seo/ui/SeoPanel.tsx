@@ -137,6 +137,7 @@ interface RankTracker {
   entity_label?: string;
   provider: string;
   device: string;
+  frequency: RefreshFrequency;
   enabled: boolean;
   daily_depth: number;
   weekly_depth: number;
@@ -196,6 +197,7 @@ interface PageRankingSummary {
 
 type SearchEngine = "google" | "youtube";
 type SEOProvider = "dataforseo" | "yepapi";
+type RefreshFrequency = "daily" | "weekly" | "monthly";
 type View = "seed" | "domains" | "keywords" | "discover" | "entities" | "locations";
 
 interface ProviderStatus {
@@ -715,7 +717,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     }
   }
 
-  async function enableRankTracking(keyword: Keyword, target: string) {
+  async function enableRankTracking(keyword: Keyword, target: string, frequency: RefreshFrequency) {
     setBusy(true);
     setErr("");
     try {
@@ -726,12 +728,28 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
         ...(kind === "domain" ? { domain_id: id } : { entity_id: id }),
         provider: "dataforseo",
         device: "desktop",
+        frequency,
         daily_depth: trackingSettings.daily_depth,
         weekly_depth: trackingSettings.weekly_depth,
       });
       await reloadRankTracking(keyword.id);
-      setStatus("Daily rank tracking enabled");
-      pushActivity(`Enabled daily DataForSEO rank tracking: ${keyword.text}`);
+      setStatus(`${frequency[0].toUpperCase()}${frequency.slice(1)} rank tracking enabled`);
+      pushActivity(`Enabled ${frequency} DataForSEO rank tracking: ${keyword.text}`);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeRankTrackingFrequency(keyword: Keyword, trackerId: number, frequency: RefreshFrequency) {
+    setBusy(true);
+    setErr("");
+    try {
+      await api("PATCH", `/rank-tracking/${trackerId}`, {}, { frequency });
+      await reloadRankTracking(keyword.id);
+      setStatus(`Rank tracking changed to ${frequency}`);
+      pushActivity(`Changed rank tracking to ${frequency}: ${keyword.text}`);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -1016,6 +1034,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           onRefreshAll={refreshAllKeywordMetrics}
           onRefreshSERP={refreshKeywordSERP}
           onEnableTracking={enableRankTracking}
+          onChangeTrackingFrequency={changeRankTrackingFrequency}
           onDisableTracking={disableRankTracking}
           onSaveTrackingSettings={saveTrackingSettings}
           locationById={locationById}
@@ -1691,7 +1710,8 @@ function KeywordsView(props: {
   onRefresh(k: Keyword): Promise<void>;
   onRefreshAll(): Promise<void>;
   onRefreshSERP(k: Keyword): Promise<void>;
-  onEnableTracking(k: Keyword, target: string): Promise<void>;
+  onEnableTracking(k: Keyword, target: string, frequency: RefreshFrequency): Promise<void>;
+  onChangeTrackingFrequency(k: Keyword, trackerId: number, frequency: RefreshFrequency): Promise<void>;
   onDisableTracking(k: Keyword, trackerId: number): Promise<void>;
   onSaveTrackingSettings(settings: RankTrackingSettings): Promise<void>;
   locationById: Map<number, SEOLocation>;
@@ -1788,6 +1808,7 @@ function KeywordsView(props: {
                   settings={props.trackingSettings}
                   busy={props.busy}
                   onEnable={props.onEnableTracking}
+                  onChangeFrequency={props.onChangeTrackingFrequency}
                   onDisable={props.onDisableTracking}
                   onSaveSettings={props.onSaveTrackingSettings}
                 />
@@ -1813,11 +1834,13 @@ function RankTrackingPanel(props: {
   history: Record<number, RankObservation[]>;
   settings: RankTrackingSettings;
   busy: boolean;
-  onEnable(keyword: Keyword, target: string): Promise<void>;
+  onEnable(keyword: Keyword, target: string, frequency: RefreshFrequency): Promise<void>;
+  onChangeFrequency(keyword: Keyword, trackerId: number, frequency: RefreshFrequency): Promise<void>;
   onDisable(keyword: Keyword, trackerId: number): Promise<void>;
   onSaveSettings(settings: RankTrackingSettings): Promise<void>;
 }) {
   const [target, setTarget] = useState("");
+  const [frequency, setFrequency] = useState<RefreshFrequency>("daily");
   const [budget, setBudget] = useState(props.settings.monthly_budget_usd);
   const targets = [
     ...props.domains.map((domain) => ({ value: `domain:${domain.id}`, label: domain.label || domain.host })),
@@ -1836,8 +1859,8 @@ function RankTrackingPanel(props: {
     <section className="border border-border rounded overflow-hidden">
       <div className="px-4 py-3 border-b border-border flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold">Daily Rank History</h3>
-          <div className="text-xs text-text-dim">DataForSEO Standard Queue · top {props.settings.daily_depth} daily · top {props.settings.weekly_depth} Sundays</div>
+          <h3 className="text-sm font-semibold">Rank History</h3>
+          <div className="text-xs text-text-dim">DataForSEO Standard Queue · top {props.settings.daily_depth} per regular check · daily trackers scan top {props.settings.weekly_depth} Sundays</div>
         </div>
         <div className="flex items-center gap-2">
           <label className="text-xs text-text-dim">Monthly cap $</label>
@@ -1862,12 +1885,17 @@ function RankTrackingPanel(props: {
           <option value="">Choose a domain or entity</option>
           {targets.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
         </select>
+        <select className={`${inputCls} w-32`} value={frequency} onChange={(event) => setFrequency(event.target.value as RefreshFrequency)}>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+        </select>
         <button
           type="button"
           className={primaryBtn}
           disabled={props.busy || !target}
-          onClick={async () => { await props.onEnable(props.keyword, target); setTarget(""); }}
-        >Track daily</button>
+          onClick={async () => { await props.onEnable(props.keyword, target, frequency); setTarget(""); }}
+        >Track</button>
       </div>
       {props.trackers.length === 0 ? (
         <div className="p-4 text-sm text-text-dim">No automatic target tracking for this keyword.</div>
@@ -1887,6 +1915,17 @@ function RankTrackingPanel(props: {
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
+                    <select
+                      className={`${inputCls} w-28 text-xs`}
+                      value={tracker.frequency}
+                      disabled={props.busy || !tracker.enabled}
+                      aria-label={`Refresh frequency for ${tracker.entity_label || tracker.entity_identifier}`}
+                      onChange={(event) => props.onChangeFrequency(props.keyword, tracker.id, event.target.value as RefreshFrequency)}
+                    >
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="monthly">Monthly</option>
+                    </select>
                     <span className="text-sm font-semibold tabular-nums">
                       {!latest ? "No checks yet" : latest.found ? `#${latest.rank}` : `Not in top ${latest.checked_depth}`}
                     </span>
@@ -1912,7 +1951,7 @@ function RankTrackingPanel(props: {
         </div>
       )}
       <div className="px-4 py-2 border-t border-border text-xs text-text-dim">
-        Trackers are opt-in. One provider query is shared by every target using the same keyword, locale, device, and day.
+        Trackers are opt-in and keep history when disabled or rescheduled. One provider query is shared by every target using the same keyword, locale, device, and day.
       </div>
     </section>
   );

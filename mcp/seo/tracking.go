@@ -16,7 +16,12 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-const dataForSEOStandardCostPerTen = 0.0006
+const (
+	dataForSEOStandardFirstPageCost      = 0.0006
+	dataForSEOStandardAdditionalPageCost = 0.00045
+)
+
+const defaultTrackingFrequency = "daily"
 
 type rankTrackingSettings struct {
 	ProjectID        string  `json:"project_id"`
@@ -39,6 +44,7 @@ type rankTracker struct {
 	EntityLabel      string `json:"entity_label,omitempty"`
 	Provider         string `json:"provider"`
 	Device           string `json:"device"`
+	Frequency        string `json:"frequency"`
 	Enabled          bool   `json:"enabled"`
 	DailyDepth       int    `json:"daily_depth"`
 	WeeklyDepth      int    `json:"weekly_depth"`
@@ -73,6 +79,13 @@ type refreshJob struct {
 	ObservedDate string
 	TaskID       string
 	Attempts     int
+}
+
+type dueTracker struct {
+	id, keywordID, locationID int64
+	engine, provider, device  string
+	frequency                 string
+	dailyDepth, weeklyDepth   int
 }
 
 func (a *App) runRankTrackingScheduler(_ context.Context, ctx *sdk.AppCtx) error {
@@ -113,7 +126,7 @@ func (a *App) runRankTrackingCollector(_ context.Context, ctx *sdk.AppCtx) error
 	}
 	dfs, ok := provider.(*dataForSEOProvider)
 	if !ok {
-		return errors.New("daily rank tracking requires DataForSEO")
+		return errors.New("automatic rank tracking requires DataForSEO")
 	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT j.id, j.project_id, j.keyword_id, k.text, j.location_id,
@@ -196,23 +209,18 @@ func saveRankTrackingSettings(db *sql.DB, settings rankTrackingSettings) error {
 
 func createDueRefreshJobs(db *sql.DB, pid string, settings rankTrackingSettings, now time.Time) error {
 	rows, err := db.Query(`SELECT t.id, t.keyword_id, k.location_id, k.search_engine,
-		 t.provider, t.device, t.daily_depth, t.weekly_depth
+		 t.provider, t.device, t.frequency, t.daily_depth, t.weekly_depth
 		 FROM serp_trackers t JOIN keywords k ON k.id = t.keyword_id
 		 WHERE t.project_id = ? AND t.enabled = 1 AND t.next_run_at <= ?
 		 ORDER BY t.id LIMIT 500`, pid, now.Unix())
 	if err != nil {
 		return err
 	}
-	type dueTracker struct {
-		id, keywordID, locationID int64
-		engine, provider, device  string
-		dailyDepth, weeklyDepth   int
-	}
 	due := []dueTracker{}
 	for rows.Next() {
 		var item dueTracker
 		if err := rows.Scan(&item.id, &item.keywordID, &item.locationID, &item.engine,
-			&item.provider, &item.device, &item.dailyDepth, &item.weeklyDepth); err != nil {
+			&item.provider, &item.device, &item.frequency, &item.dailyDepth, &item.weeklyDepth); err != nil {
 			rows.Close()
 			return err
 		}
@@ -226,19 +234,19 @@ func createDueRefreshJobs(db *sql.DB, pid string, settings rankTrackingSettings,
 		engine, provider, device string
 	}
 	type groupValue struct {
-		ids   []int64
-		depth int
+		trackers []dueTracker
+		depth    int
 	}
 	groups := map[groupKey]groupValue{}
 	weekly := now.Weekday() == time.Sunday
 	for _, tracker := range due {
 		depth := tracker.dailyDepth
-		if weekly && tracker.weeklyDepth > depth {
+		if tracker.frequency == defaultTrackingFrequency && weekly && tracker.weeklyDepth > depth {
 			depth = tracker.weeklyDepth
 		}
 		key := groupKey{tracker.keywordID, tracker.locationID, tracker.engine, tracker.provider, tracker.device}
 		value := groups[key]
-		value.ids = append(value.ids, tracker.id)
+		value.trackers = append(value.trackers, tracker)
 		if depth > value.depth {
 			value.depth = depth
 		}
@@ -253,7 +261,7 @@ func createDueRefreshJobs(db *sql.DB, pid string, settings rankTrackingSettings,
 	}
 	for key, value := range groups {
 		if key.provider != "dataforseo" || key.engine != "google" {
-			setTrackerSchedule(db, value.ids, now, "automatic tracking currently requires DataForSEO Google SERPs")
+			setTrackerSchedule(db, value.trackers, now, "automatic tracking currently requires DataForSEO Google SERPs")
 			continue
 		}
 		estimated := estimateStandardSERPCost(value.depth)
@@ -275,26 +283,45 @@ func createDueRefreshJobs(db *sql.DB, pid string, settings rankTrackingSettings,
 		if affected, _ := result.RowsAffected(); affected > 0 && status == "pending" {
 			committed += estimated
 		}
-		setTrackerSchedule(db, value.ids, now, errorText)
+		setTrackerSchedule(db, value.trackers, now, errorText)
 	}
 	return nil
 }
 
-func setTrackerSchedule(db *sql.DB, ids []int64, now time.Time, lastError string) {
-	for _, id := range ids {
-		_, _ = db.Exec(`UPDATE serp_trackers SET next_run_at = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, nextDailyRun(now, id), lastError, id)
+func setTrackerSchedule(db *sql.DB, trackers []dueTracker, now time.Time, lastError string) {
+	for _, tracker := range trackers {
+		_, _ = db.Exec(`UPDATE serp_trackers SET next_run_at = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, nextTrackingRun(now, tracker.id, tracker.frequency), lastError, tracker.id)
 	}
 }
 
-func nextDailyRun(now time.Time, trackerID int64) int64 {
-	next := now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
+func nextTrackingRun(now time.Time, trackerID int64, frequency string) int64 {
+	now = now.UTC()
+	var next time.Time
+	switch frequency {
+	case "weekly":
+		next = now.Truncate(24*time.Hour).AddDate(0, 0, 7)
+	case "monthly":
+		year, month, day := now.Date()
+		month++
+		lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+		if day > lastDay {
+			day = lastDay
+		}
+		next = time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	default:
+		next = now.Truncate(24*time.Hour).AddDate(0, 0, 1)
+	}
 	// Spread calls deterministically across the first six UTC hours.
 	jitter := time.Duration((trackerID*7919)%21600) * time.Second
 	return next.Add(jitter).Unix()
 }
 
 func estimateStandardSERPCost(depth int) float64 {
-	return math.Ceil(float64(depth)/10) * dataForSEOStandardCostPerTen
+	pages := int(math.Ceil(float64(depth) / 10))
+	if pages <= 1 {
+		return dataForSEOStandardFirstPageCost
+	}
+	return dataForSEOStandardFirstPageCost + float64(pages-1)*dataForSEOStandardAdditionalPageCost
 }
 
 func submitPendingRefreshJobs(ctx *sdk.AppCtx, pid string, now time.Time) error {
@@ -309,7 +336,7 @@ func submitPendingRefreshJobs(ctx *sdk.AppCtx, pid string, now time.Time) error 
 	provider, err := selectProvider(ctx, "dataforseo")
 	if err != nil {
 		if errors.Is(err, errProviderUnbound) {
-			message := "DataForSEO is not bound; daily check skipped"
+			message := "DataForSEO is not bound; scheduled check skipped"
 			_, _ = ctx.AppDB().Exec(`UPDATE serp_trackers SET last_error = ?, updated_at = CURRENT_TIMESTAMP
 				WHERE project_id = ? AND enabled = 1`, message, pid)
 			_, _ = ctx.AppDB().Exec(`UPDATE serp_refresh_jobs SET status = 'failed', completed_at = ?,
@@ -321,7 +348,7 @@ func submitPendingRefreshJobs(ctx *sdk.AppCtx, pid string, now time.Time) error 
 	}
 	dfs, ok := provider.(*dataForSEOProvider)
 	if !ok {
-		return errors.New("daily rank tracking requires DataForSEO")
+		return errors.New("automatic rank tracking requires DataForSEO")
 	}
 	rows, err := ctx.AppDB().Query(`SELECT j.id, j.project_id, j.keyword_id, k.text,
 		j.location_id, j.search_engine, j.provider, j.device, j.depth, j.observed_date,
@@ -441,7 +468,7 @@ func completeRefreshJob(db *sql.DB, job refreshJob, response *providerSERPRespon
 	rows, err := db.Query(`SELECT t.id, e.id, e.search_engine, e.entity_type, e.identifier,
 		e.label, e.url, e.created_at, e.updated_at
 		FROM serp_trackers t JOIN search_entities e ON e.id = t.entity_id
-		WHERE t.project_id = ? AND t.keyword_id = ? AND t.provider = ? AND t.device = ?`,
+		WHERE t.project_id = ? AND t.keyword_id = ? AND t.provider = ? AND t.device = ? AND t.enabled = 1`,
 		job.ProjectID, job.KeywordID, job.Provider, job.Device)
 	if err != nil {
 		return err
@@ -558,7 +585,7 @@ func normalizeTrackingURL(raw string) string {
 func listRankTrackers(db *sql.DB, pid string, keywordID int64) ([]rankTracker, error) {
 	query := `SELECT t.id, t.project_id, t.keyword_id, k.text, k.search_engine, k.location_id,
 		t.entity_id, e.entity_type, e.identifier, e.label, t.provider, t.device, t.enabled,
-		t.daily_depth, t.weekly_depth, t.next_run_at, t.last_attempt_at, t.last_success_at, t.last_error
+		t.frequency, t.daily_depth, t.weekly_depth, t.next_run_at, t.last_attempt_at, t.last_success_at, t.last_error
 		FROM serp_trackers t
 		JOIN keywords k ON k.id = t.keyword_id
 		JOIN search_entities e ON e.id = t.entity_id
@@ -582,7 +609,7 @@ func listRankTrackers(db *sql.DB, pid string, keywordID int64) ([]rankTracker, e
 		if err := rows.Scan(&item.ID, &item.ProjectID, &item.KeywordID, &item.KeywordText,
 			&item.SearchEngine, &item.LocationID, &item.EntityID, &item.EntityType,
 			&item.EntityIdentifier, &item.EntityLabel, &item.Provider, &item.Device,
-			&enabled, &item.DailyDepth, &item.WeeklyDepth, &item.NextRunAt,
+			&enabled, &item.Frequency, &item.DailyDepth, &item.WeeklyDepth, &item.NextRunAt,
 			&attempt, &success, &item.LastError); err != nil {
 			return nil, err
 		}
@@ -660,6 +687,7 @@ func (a *App) handleRankTracking(w http.ResponseWriter, r *http.Request) {
 			DomainID    int64  `json:"domain_id"`
 			Provider    string `json:"provider"`
 			Device      string `json:"device"`
+			Frequency   string `json:"frequency"`
 			DailyDepth  int    `json:"daily_depth"`
 			WeeklyDepth int    `json:"weekly_depth"`
 		}
@@ -668,7 +696,7 @@ func (a *App) handleRankTracking(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		tracker, err := enableRankTracker(ctx.AppDB(), pid, body.KeywordID, body.EntityID,
-			body.DomainID, body.Provider, body.Device, body.DailyDepth, body.WeeklyDepth)
+			body.DomainID, body.Provider, body.Device, body.Frequency, body.DailyDepth, body.WeeklyDepth)
 		writeJSONOrErr(w, tracker, err)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -687,25 +715,64 @@ func (a *App) handleRankTrackingItem(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := mustCtx(r)
 	pid := projectScopeFromRequest(ctx, r)
-	enabled := false
-	if r.Method == http.MethodPatch {
-		var body struct {
-			Enabled bool `json:"enabled"`
+	if r.Method == http.MethodDelete {
+		result, err := ctx.AppDB().Exec(`UPDATE serp_trackers SET enabled = 0,
+			updated_at = CURRENT_TIMESTAMP WHERE id = ? AND project_id = ?`, id, pid)
+		if err == nil {
+			if affected, _ := result.RowsAffected(); affected == 0 {
+				err = sql.ErrNoRows
+			}
 		}
+		writeJSONOrErr(w, map[string]any{"id": id, "enabled": false}, err)
+		return
+	}
+	var body struct {
+		Enabled   *bool   `json:"enabled"`
+		Frequency *string `json:"frequency"`
+	}
+	if r.Method == http.MethodPatch {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		enabled = body.Enabled
 	}
-	result, err := ctx.AppDB().Exec(`UPDATE serp_trackers SET enabled = ?, next_run_at = CASE WHEN ? = 1 THEN 0 ELSE next_run_at END,
-		updated_at = CURRENT_TIMESTAMP WHERE id = ? AND project_id = ?`, boolInt(enabled), boolInt(enabled), id, pid)
+	if body.Enabled == nil && body.Frequency == nil {
+		http.Error(w, "enabled or frequency required", http.StatusBadRequest)
+		return
+	}
+	var enabled int
+	var frequency string
+	if err := ctx.AppDB().QueryRow(`SELECT enabled, frequency FROM serp_trackers
+		WHERE id = ? AND project_id = ?`, id, pid).Scan(&enabled, &frequency); err != nil {
+		writeJSONOrErr(w, nil, err)
+		return
+	}
+	resetSchedule := false
+	if body.Enabled != nil {
+		enabled = boolInt(*body.Enabled)
+		resetSchedule = *body.Enabled
+	}
+	if body.Frequency != nil {
+		updatedFrequency := normalizeTrackingFrequency(*body.Frequency)
+		if updatedFrequency == "" {
+			http.Error(w, "frequency must be daily, weekly, or monthly", http.StatusBadRequest)
+			return
+		}
+		frequency = updatedFrequency
+		resetSchedule = true
+	}
+	result, err := ctx.AppDB().Exec(`UPDATE serp_trackers SET
+		enabled = ?, frequency = ?,
+		next_run_at = CASE WHEN ? = 1 THEN 0 ELSE next_run_at END,
+		last_error = CASE WHEN ? = 1 THEN '' ELSE last_error END,
+		updated_at = CURRENT_TIMESTAMP WHERE id = ? AND project_id = ?`,
+		enabled, frequency, boolInt(resetSchedule), boolInt(resetSchedule), id, pid)
 	if err == nil {
 		if affected, _ := result.RowsAffected(); affected == 0 {
 			err = sql.ErrNoRows
 		}
 	}
-	writeJSONOrErr(w, map[string]any{"id": id, "enabled": enabled}, err)
+	writeJSONOrErr(w, map[string]any{"id": id, "enabled": enabled != 0, "frequency": frequency}, err)
 }
 
 func (a *App) handleRankHistory(w http.ResponseWriter, r *http.Request) {
@@ -771,7 +838,7 @@ func (a *App) handleRankTrackingSettings(w http.ResponseWriter, r *http.Request)
 	writeJSONOrErr(w, settings, err)
 }
 
-func enableRankTracker(db *sql.DB, pid string, keywordID, entityID, domainID int64, provider, device string, dailyDepth, weeklyDepth int) (*rankTracker, error) {
+func enableRankTracker(db *sql.DB, pid string, keywordID, entityID, domainID int64, provider, device, frequency string, dailyDepth, weeklyDepth int) (*rankTracker, error) {
 	if keywordID <= 0 {
 		return nil, errors.New("keyword_id required")
 	}
@@ -792,6 +859,13 @@ func enableRankTracker(db *sql.DB, pid string, keywordID, entityID, domainID int
 	if device != "desktop" && device != "mobile" {
 		return nil, errors.New("device must be desktop or mobile")
 	}
+	if frequency == "" {
+		frequency = defaultTrackingFrequency
+	}
+	frequency = normalizeTrackingFrequency(frequency)
+	if frequency == "" {
+		return nil, errors.New("frequency must be daily, weekly, or monthly")
+	}
 	if dailyDepth == 0 {
 		dailyDepth = settings.DailyDepth
 	}
@@ -810,7 +884,7 @@ func enableRankTracker(db *sql.DB, pid string, keywordID, entityID, domainID int
 		return nil, err
 	}
 	if location.Provider != "dataforseo" || location.LocationCode == nil {
-		return nil, errors.New("daily DataForSEO tracking requires the keyword to use a DataForSEO locale")
+		return nil, errors.New("automatic DataForSEO tracking requires the keyword to use a DataForSEO locale")
 	}
 	if entityID <= 0 && domainID > 0 {
 		domain, err := getDomain(db, pid, domainID)
@@ -833,12 +907,12 @@ func enableRankTracker(db *sql.DB, pid string, keywordID, entityID, domainID int
 		return nil, fmt.Errorf("keyword uses %s but target entity uses %s", keyword.SearchEngine, entity.SearchEngine)
 	}
 	_, err = db.Exec(`INSERT INTO serp_trackers
-		(project_id, keyword_id, entity_id, provider, device, enabled, daily_depth, weekly_depth, next_run_at, last_error)
-		VALUES (?, ?, ?, ?, ?, 1, ?, ?, 0, '')
+		(project_id, keyword_id, entity_id, provider, device, frequency, enabled, daily_depth, weekly_depth, next_run_at, last_error)
+		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 0, '')
 		ON CONFLICT(project_id, keyword_id, entity_id, provider, device) DO UPDATE SET
-		 enabled = 1, daily_depth = excluded.daily_depth, weekly_depth = excluded.weekly_depth,
+		 enabled = 1, frequency = excluded.frequency, daily_depth = excluded.daily_depth, weekly_depth = excluded.weekly_depth,
 		 next_run_at = 0, last_error = '', updated_at = CURRENT_TIMESTAMP`,
-		pid, keywordID, entityID, provider, device, dailyDepth, weeklyDepth)
+		pid, keywordID, entityID, provider, device, frequency, dailyDepth, weeklyDepth)
 	if err != nil {
 		return nil, err
 	}
@@ -852,6 +926,19 @@ func enableRankTracker(db *sql.DB, pid string, keywordID, entityID, domainID int
 		}
 	}
 	return nil, sql.ErrNoRows
+}
+
+func normalizeTrackingFrequency(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "daily":
+		return "daily"
+	case "weekly":
+		return "weekly"
+	case "monthly":
+		return "monthly"
+	default:
+		return ""
+	}
 }
 
 func projectScopeFromRequest(ctx *sdk.AppCtx, r *http.Request) string {

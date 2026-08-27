@@ -3,7 +3,7 @@
 Generic SEO research workbench for Apteva. Track domains, keywords, rankings,
 and backlinks; pull metrics from any provider behind one pluggable role.
 
-## Schema (v0.6)
+## Schema (v0.6.1)
 
 Twenty tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz and extended with generic search-engine entities:
 
@@ -34,14 +34,14 @@ Twenty tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz
 - `serp_tracking_settings` — project-level scheduler and monthly budget controls
 - `serp_trackers` — opt-in keyword/target/device tracking configuration
 - `serp_refresh_jobs` — deduplicated DataForSEO Standard Queue task lifecycle
-- `serp_rank_observations` — durable daily rank or explicit not-found history
+- `serp_rank_observations` — durable scheduled rank or explicit not-found history
 
 Every snapshot table carries a `raw_json` column that stores the unflattened
 provider response, so provider-specific fields survive without schema churn.
 
 ## Status
 
-v0.6.0 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
+v0.6.1 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
 An installation may bind multiple providers and designate a default; paid MCP
 tools and panel actions can select a specific provider. Provider locations,
 metrics, rankings, backlinks, and SERP snapshots remain separately tagged.
@@ -69,9 +69,11 @@ retries rate limits with backoff, and resumes only missing fields after a
 partial or interrupted run. SERP/ranking refreshes stay separate because they
 have different provider costs.
 
-Daily Google rank tracking is opt-in and uses DataForSEO's asynchronous
-Standard Queue. The default policy checks the top 20 each day and top 100 on
-Sunday, with a configurable $5 monthly cap. Identical keyword/locale/device
-checks share one provider task across targets. Full SERP snapshots remain
-bounded, while compact rank and not-found observations are retained for
-long-term history and charts.
+Automatic Google rank tracking is opt-in and uses DataForSEO's asynchronous
+Standard Queue. Each tracker can run daily, weekly, or monthly. The daily
+policy checks the top 20 each day and top 100 on Sunday; weekly and monthly
+trackers use the regular top-20 depth on each run. A configurable $5 monthly
+cap applies across all schedules. Identical keyword/locale/device checks share
+one provider task across targets. Full SERP snapshots remain bounded, while
+compact rank and not-found observations are retained for long-term history and
+charts.

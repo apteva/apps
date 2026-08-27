@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1
+
+- Added per-tracker daily, weekly, and monthly automatic rank refresh choices.
+- Kept the existing daily policy of top-20 checks with a top-100 Sunday scan;
+  weekly and monthly trackers use the regular top-20 depth on each run.
+- Made cadence changes reschedule immediately without deleting rank history.
+- Updated the monthly budget estimator for DataForSEO's discounted additional
+  SERP pages.
+
 ## 0.6.0
 
 - Added opt-in daily Google rank tracking through app-sdk workers and
