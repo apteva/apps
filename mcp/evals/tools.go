@@ -18,7 +18,13 @@ func requiredSchema(fields ...string) map[string]any {
 	return map[string]any{"type": "object", "properties": props, "required": fields, "additionalProperties": true}
 }
 func decodeStrictArgs(args map[string]any, value any) error {
-	raw, err := json.Marshal(args)
+	clean := make(map[string]any, len(args))
+	for key, value := range args {
+		if key != "_project_id" {
+			clean[key] = value
+		}
+	}
+	raw, err := json.Marshal(clean)
 	if err != nil {
 		return err
 	}

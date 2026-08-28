@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.5.5
-description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments. v0.5.5 exposes strict typed creation schemas and validates Environment definitions before queuing runs.
+version: 0.5.6
+description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments. v0.5.6 preserves trusted project context across strict typed creation schemas.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
 icon: /ui/icon.svg
@@ -17,7 +17,7 @@ requires:
     - platform.runtime_catalog.read
     - platform.agents.directive.write
   apps:
-    - { name: environments, version: ">=0.7.1" }
+    - { name: environments, version: ">=0.7.2" }
     - { name: llm, version: ">=0.3.0" }
 provides:
   http_routes:
@@ -59,7 +59,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.5.5
+    ref: evals/v0.5.6
     entry: mcp/evals
   port: 8080
   health_check: /health

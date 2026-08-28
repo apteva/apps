@@ -342,6 +342,17 @@ func TestEnvironmentRunCreateSchemaIsStrictAndComplete(t *testing.T) {
 
 func TestEnvironmentRunCreateRejectsPseudoEvaluationArguments(t *testing.T) {
 	app := &App{}
+	argsWithProject := map[string]any{"_project_id": "project-one", "kind": "eval", "spec": map[string]any{"version": 1.0}}
+	var decoded struct {
+		Kind string           `json:"kind"`
+		Spec *EnvironmentSpec `json:"spec"`
+	}
+	if err := decodeStrictArgs(argsWithProject, &decoded); err != nil || decoded.Spec == nil || decoded.Spec.Version != 1 {
+		t.Fatalf("trusted project context rejected: decoded=%#v err=%v", decoded, err)
+	}
+	if argsWithProject["_project_id"] != "project-one" {
+		t.Fatal("strict decoder mutated caller arguments")
+	}
 	for name, args := range map[string]map[string]any{
 		"top-level suite": {
 			"environment_id": "env-one",

@@ -388,7 +388,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.5.5" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.5.6" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -432,6 +432,14 @@ func TestCreateToolSchemasExposeCanonicalWorkflow(t *testing.T) {
 		if _, found := targetProperties[field]; !found {
 			t.Errorf("target schema is missing %q", field)
 		}
+	}
+	argsWithProject := map[string]any{"_project_id": "project-one", "suite_id": "suite-one", "targets": []any{map[string]any{"agent_id": 7.0}}}
+	var decoded experimentInput
+	if err := decodeStrictArgs(argsWithProject, &decoded); err != nil || decoded.SuiteID != "suite-one" || len(decoded.Targets) != 1 {
+		t.Fatalf("trusted project context rejected: decoded=%#v err=%v", decoded, err)
+	}
+	if argsWithProject["_project_id"] != "project-one" {
+		t.Fatal("strict decoder mutated caller arguments")
 	}
 	if _, err := (&App{}).toolCreateExperiment(nil, map[string]any{"suite_id": "suite-one", "targets": []any{}, "unexpected": true}); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("strict experiment arguments error=%v", err)

@@ -62,7 +62,13 @@ func decodeArgs(args map[string]any, out any) error {
 }
 
 func decodeStrictArgs(args map[string]any, out any) error {
-	b, err := json.Marshal(args)
+	clean := make(map[string]any, len(args))
+	for key, value := range args {
+		if key != "_project_id" {
+			clean[key] = value
+		}
+	}
+	b, err := json.Marshal(clean)
 	if err != nil {
 		return err
 	}
