@@ -352,6 +352,13 @@ type scheduler struct {
 func (s *scheduler) Tick(now time.Time, projectID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	settled, err := s.store.ReconcileSettledExecutions(now.UTC(), projectID)
+	if err != nil {
+		return err
+	}
+	for _, task := range settled {
+		_ = s.app.notifyExecutionFailure(task, "agent_exited_without_terminal_status")
+	}
 	if err := s.reconcileUnaccepted(now.UTC(), projectID); err != nil {
 		return err
 	}

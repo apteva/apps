@@ -193,6 +193,9 @@ func TestTaskMutationsEmitDeclaredRefreshTopics(t *testing.T) {
 		"task.occurrence_redispatched",
 		"task.occurrence_accepted",
 		"task.occurrence_skipped_overlap",
+		"task.agent_execution_active",
+		"task.agent_execution_settled",
+		"task.agent_execution_error",
 	}
 	for _, componentIndex := range []int{0, 1} {
 		if got := manifest.Provides.UIComponents[componentIndex].RefreshTopics; !reflect.DeepEqual(got, wantTopics) {

@@ -17,7 +17,7 @@ var taskSkillBody string
 const manifestYAML = `schema: apteva-app/v1
 name: tasks
 display_name: Tasks
-version: 3.3.2
+version: 3.3.3
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -25,11 +25,12 @@ icon: /ui/icon.svg
 icon_style: monochrome
 tags: [productivity, agents, scheduling, automation]
 scopes: [project, global]
-min_apteva_version: "0.28.0"
+min_apteva_version: "0.40.6"
 requires:
   permissions:
     - db.write.app
     - platform.instances.read
+    - platform.instances.write
     - platform.threads.write
 provides:
   http_routes:
@@ -68,7 +69,7 @@ provides:
       supported_sizes: [half, full]
       default_size: half
       visibility: project
-      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap]
+      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap, task.agent_execution_active, task.agent_execution_settled, task.agent_execution_error]
       native:
         schema: apteva-native-surface/v1
         entry: /ui/surfaces/task-overview.json
@@ -101,7 +102,7 @@ provides:
       slots: [dashboard.agent_card, dashboard.agent_detail, dashboard.thread_sidebar]
       suggested: true
       visibility: attached
-      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap]
+      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap, task.agent_execution_active, task.agent_execution_settled, task.agent_execution_error]
       default_width: 1
     - name: task-card
       entry: /ui/TaskCard.mjs
@@ -180,9 +181,11 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	}
 }
 
-func (a *App) MCPTools() []sdk.Tool              { return a.tools() }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) MCPTools() []sdk.Tool           { return a.tools() }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{{Event: sdk.AgentEventLifecycleEvent, Handler: a.handleAgentEventLifecycle}}
+}
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{{Name: "scheduler", Schedule: "@every 2s", Run: func(_ context.Context, ctx *sdk.AppCtx) error {
 		if a.scheduler == nil {
@@ -210,7 +213,29 @@ func (discardLogger) Error(string, ...any) {}
 // between the caller's write and a re-read would redirect the event and leave
 // the thread this call just assigned paused forever.
 func (a *App) notifyAssigned(task *Task, threadID, eventType string) error {
-	if a.ctx == nil || a.ctx.ThreadAPI() == nil {
+	if a.ctx == nil {
+		return errors.New("platform API unavailable")
+	}
+	if eventType == "task.ready" && task != nil && task.ScheduledFor != nil {
+		if client := a.ctx.AgentEventsAPI(); client != nil {
+			sourceEventID := taskAgentEventSourceID(task.ID)
+			// Keep the tracked payload immutable across retries. The complete
+			// authoritative task definition and live attempt count remain in get.
+			payload := map[string]any{"type": eventType, "task_id": task.ID,
+				"scheduled_for": task.ScheduledFor, "parent_task_id": task.ParentTaskID}
+			receipt, err := client.SendTrackedAgentEvent(sdk.AgentEventRequest{
+				AgentID: task.AgentID, ThreadID: threadID, SourceEventID: sourceEventID, Message: payload,
+			})
+			if err != nil {
+				return err
+			}
+			if receipt == nil || strings.TrimSpace(receipt.ExecutionID) == "" {
+				return errors.New("tracked task event omitted execution_id")
+			}
+			return a.store.RecordAgentEventExecution(task.ID, sourceEventID, receipt.ExecutionID, nowUTC())
+		}
+	}
+	if a.ctx.ThreadAPI() == nil {
 		return errors.New("platform thread API unavailable")
 	}
 	payload := map[string]any{"type": eventType, "task_id": task.ID, "title": task.Title, "description": task.Description, "state": task.State, "scheduled_for": task.ScheduledFor, "parent_task_id": task.ParentTaskID, "dispatch_attempt": task.DispatchAttempts}
@@ -249,6 +274,29 @@ func (a *App) notifyDispatchFailure(task *Task) error {
 	payload := map[string]any{"type": "task.terminal", "task_id": task.ID, "title": task.Title,
 		"state": task.State, "error": task.Error, "parent_task_id": task.ParentTaskID,
 		"reason": "dispatch_unaccepted", "attention_required": true}
+	return a.ctx.ThreadAPI().SendThreadEvent(sdk.ThreadRef{AgentID: task.AgentID, ThreadID: target}, payload)
+}
+
+// notifyExecutionFailure wakes the occurrence owner even when creator and
+// assignee are the same thread. The execution has already returned idle or
+// errored, so no active turn can be assumed to have seen this reconciliation.
+func (a *App) notifyExecutionFailure(task *Task, reason string) error {
+	if task == nil {
+		return nil
+	}
+	target := strings.TrimSpace(task.CreatedByThreadID)
+	if target == "" {
+		target = strings.TrimSpace(task.AssignedThreadID)
+	}
+	if target == "" {
+		return nil
+	}
+	if a.ctx == nil || a.ctx.ThreadAPI() == nil {
+		return errors.New("platform thread API unavailable")
+	}
+	payload := map[string]any{"type": "task.terminal", "task_id": task.ID, "title": task.Title,
+		"state": task.State, "error": task.Error, "parent_task_id": task.ParentTaskID,
+		"reason": reason, "attention_required": true}
 	return a.ctx.ThreadAPI().SendThreadEvent(sdk.ThreadRef{AgentID: task.AgentID, ThreadID: target}, payload)
 }
 
