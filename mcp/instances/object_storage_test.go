@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -44,6 +45,8 @@ func (p *objectStoragePlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 		status, data = 204, json.RawMessage(`null`)
 	case "project_get":
 		data = json.RawMessage(`{"id":"project-1","organization_id":"organization-1"}`)
+	case "iam_security_settings_get":
+		data = json.RawMessage(`{"max_api_key_expiration_duration":"31536000s"}`)
 	case "iam_application_create":
 		data = json.RawMessage(`{"id":"application-1"}`)
 	case "iam_policy_create":
@@ -81,6 +84,9 @@ func TestScalewayObjectStorageLifecycleDoesNotPersistSecret(t *testing.T) {
 	if credentials.SecretAccessKey != "one-time-secret" || !credentials.ShownOnce {
 		t.Fatalf("credentials=%#v", credentials)
 	}
+	if _, err := time.Parse(time.RFC3339, credentials.ExpiresAt); err != nil {
+		t.Fatalf("credentials expiry=%q: %v", credentials.ExpiresAt, err)
+	}
 	stored, err := dbGetObjectStorage(ctx.AppDB(), item.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +101,7 @@ func TestScalewayObjectStorageLifecycleDoesNotPersistSecret(t *testing.T) {
 	if _, err := dbGetObjectStorage(ctx.AppDB(), item.ID); err != errObjectStorageNotFound {
 		t.Fatalf("destroy left row: %v", err)
 	}
-	for _, required := range []string{"object_bucket_create", "project_get", "iam_application_create", "iam_policy_create", "iam_api_key_create", "object_bucket_delete", "iam_api_key_delete", "iam_policy_delete", "iam_application_delete"} {
+	for _, required := range []string{"object_bucket_create", "project_get", "iam_security_settings_get", "iam_application_create", "iam_policy_create", "iam_api_key_create", "object_bucket_delete", "iam_api_key_delete", "iam_policy_delete", "iam_application_delete"} {
 		if !containsString(platform.tools, required) {
 			t.Errorf("missing provider call %s in %#v", required, platform.tools)
 		}

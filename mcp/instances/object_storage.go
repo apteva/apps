@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -44,6 +45,7 @@ type ObjectStorageCredentials struct {
 	Bucket          string `json:"bucket,omitempty"`
 	AccessKeyID     string `json:"access_key_id"`
 	SecretAccessKey string `json:"secret_access_key"`
+	ExpiresAt       string `json:"expires_at,omitempty"`
 	ShownOnce       bool   `json:"shown_once"`
 }
 
@@ -61,6 +63,7 @@ type objectStorageMetadata struct {
 	OrganizationID string `json:"organization_id,omitempty"`
 	ApplicationID  string `json:"application_id,omitempty"`
 	PolicyID       string `json:"policy_id,omitempty"`
+	KeyExpiresAt   string `json:"key_expires_at,omitempty"`
 	ClusterID      int    `json:"cluster_id,omitempty"`
 }
 
@@ -325,6 +328,10 @@ func createScalewayObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (
 	if organizationID == "" {
 		return nil, nil, errors.New("Scaleway project response did not include organization_id")
 	}
+	keyExpiresAt, err := scalewayObjectStorageKeyExpiry(ctx, in.ProviderConnectionID, organizationID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load Scaleway API-key expiration policy: %w", err)
+	}
 	resourceName := scalewayIAMName(in.Name)
 	appData, err := executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "iam_application_create", map[string]any{
 		"name": resourceName, "description": "Object Storage credentials managed by Apteva Instances", "organization_id": organizationID,
@@ -364,9 +371,13 @@ func createScalewayObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (
 	if policyID == "" {
 		return nil, nil, errors.New("Scaleway IAM policy create response did not include id")
 	}
-	keyData, err := executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "iam_api_key_create", map[string]any{
+	keyArgs := map[string]any{
 		"application_id": applicationID, "default_project_id": projectID, "description": "Object Storage key for " + in.Name,
-	})
+	}
+	if keyExpiresAt != "" {
+		keyArgs["expires_at"] = keyExpiresAt
+	}
+	keyData, err := executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "iam_api_key_create", keyArgs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create scoped Scaleway Object Storage credentials: %w", err)
 	}
@@ -374,14 +385,38 @@ func createScalewayObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (
 	if accessKeyID == "" || secret == "" {
 		return nil, nil, errors.New("Scaleway API key response did not include the one-time access and secret key")
 	}
-	metaBytes, _ := json.Marshal(objectStorageMetadata{ProjectID: projectID, OrganizationID: organizationID, ApplicationID: applicationID, PolicyID: policyID})
+	metaBytes, _ := json.Marshal(objectStorageMetadata{ProjectID: projectID, OrganizationID: organizationID, ApplicationID: applicationID, PolicyID: policyID, KeyExpiresAt: keyExpiresAt})
 	endpoint := "https://s3." + region + ".scw.cloud"
 	item, err := dbCreateObjectStorage(ctx.AppDB(), in, bucket, "ready", endpoint, accessKeyID, string(metaBytes))
 	if err != nil {
 		return nil, nil, fmt.Errorf("Scaleway bucket was created but could not be recorded: %w", err)
 	}
 	cleanupBucket, cleanupIAM = false, false
-	return item, &ObjectStorageCredentials{Endpoint: endpoint, Region: region, Bucket: bucket, AccessKeyID: accessKeyID, SecretAccessKey: secret, ShownOnce: true}, nil
+	return item, &ObjectStorageCredentials{Endpoint: endpoint, Region: region, Bucket: bucket, AccessKeyID: accessKeyID, SecretAccessKey: secret, ExpiresAt: keyExpiresAt, ShownOnce: true}, nil
+}
+
+func scalewayObjectStorageKeyExpiry(ctx *sdk.AppCtx, connectionID int64, organizationID string) (string, error) {
+	data, err := executeObjectStorageTool(ctx, connectionID, "scaleway", "iam_security_settings_get", map[string]any{"organization_id": organizationID})
+	if err != nil {
+		return "", err
+	}
+	maximum := strings.TrimSpace(jsonStringAt(data, "max_api_key_expiration_duration"))
+	if maximum == "" || maximum == "0" || maximum == "0s" {
+		return "", nil
+	}
+	duration, err := time.ParseDuration(maximum)
+	if err != nil || duration <= 0 {
+		return "", fmt.Errorf("invalid max_api_key_expiration_duration %q", maximum)
+	}
+	// Stay below the provider's exact maximum to tolerate small clock skew.
+	margin := 5 * time.Minute
+	if duration <= 10*time.Minute {
+		margin = time.Second
+	}
+	if duration <= margin {
+		return "", fmt.Errorf("API-key maximum duration %s is too short", maximum)
+	}
+	return time.Now().UTC().Add(duration - margin).Format(time.RFC3339), nil
 }
 
 func scalewayIAMName(name string) string {
@@ -476,9 +511,17 @@ func rotateObjectStorageCredentials(ctx *sdk.AppCtx, item *ObjectStorage) (*Obje
 	if metadata.ApplicationID == "" || metadata.ProjectID == "" {
 		return nil, nil, errors.New("managed Scaleway IAM metadata is incomplete; credentials cannot be rotated")
 	}
-	data, err := executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "iam_api_key_create", map[string]any{
+	keyExpiresAt, err := scalewayObjectStorageKeyExpiry(ctx, item.ProviderConnectionID, metadata.OrganizationID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load Scaleway API-key expiration policy: %w", err)
+	}
+	keyArgs := map[string]any{
 		"application_id": metadata.ApplicationID, "default_project_id": metadata.ProjectID, "description": "Rotated Object Storage key for " + item.Name,
-	})
+	}
+	if keyExpiresAt != "" {
+		keyArgs["expires_at"] = keyExpiresAt
+	}
+	data, err := executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "iam_api_key_create", keyArgs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -495,7 +538,7 @@ func rotateObjectStorageCredentials(ctx *sdk.AppCtx, item *ObjectStorage) (*Obje
 			warnings = append(warnings, "new credentials are active, but the previous Scaleway key could not be revoked: "+deleteErr.Error())
 		}
 	}
-	return &ObjectStorageCredentials{Endpoint: item.Endpoint, Region: item.Region, Bucket: item.Bucket, AccessKeyID: accessKey, SecretAccessKey: secret, ShownOnce: true}, warnings, nil
+	return &ObjectStorageCredentials{Endpoint: item.Endpoint, Region: item.Region, Bucket: item.Bucket, AccessKeyID: accessKey, SecretAccessKey: secret, ExpiresAt: keyExpiresAt, ShownOnce: true}, warnings, nil
 }
 
 func destroyObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage) ([]string, error) {

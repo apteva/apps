@@ -95,6 +95,7 @@ interface ObjectStorageCredentialsWire {
   bucket?: string;
   access_key_id: string;
   secret_access_key: string;
+  expires_at?: string;
   shown_once: boolean;
 }
 
@@ -900,10 +901,12 @@ function ObjectStorageCredentialsDialog({ result, onClose }: {
     credentials.bucket ? `S3_BUCKET=${credentials.bucket}` : "",
     `S3_ACCESS_KEY_ID=${credentials.access_key_id}`,
     `S3_SECRET_ACCESS_KEY=${credentials.secret_access_key}`,
+    credentials.expires_at ? `S3_CREDENTIALS_EXPIRES_AT=${credentials.expires_at}` : "",
   ].filter(Boolean).join("\n"));
   const rows = [
     ["Endpoint", credentials.endpoint], ["Region", credentials.region || ""], ["Bucket", credentials.bucket || ""],
     ["Access key ID", credentials.access_key_id], ["Secret access key", credentials.secret_access_key],
+    ["Credentials expire", credentials.expires_at || ""],
   ].filter((row) => row[1]);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" style={{ padding: 24 }} role="presentation">
