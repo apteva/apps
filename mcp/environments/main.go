@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.7.2
-description: Isolated test environments with project apps, managed MCP servers, fake or explicitly bound real connections, deterministic seeds, agents, interactive web, voice, and protocol fixtures, edge policies, and snapshots. v0.7.2 preserves trusted project context while strictly validating inline runtime specifications.
+version: 0.7.3
+description: Isolated test environments with project apps, managed MCP servers, fake or explicitly bound real connections, deterministic seeds, agents, interactive web, voice, and protocol fixtures, edge policies, and snapshots. v0.7.3 publishes its authoritative assertion type catalog.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -39,7 +39,7 @@ provides:
     - { name: environment_run_create, description: "Start an isolated runtime from an EnvironmentSpec. This does not execute Evals cases or assertions." }
     - { name: environment_run_get, description: "Get a run and its live runtime state." }
     - { name: environment_run_stop, description: "Stop an inline or definition-backed run." }
-    - { name: environment_catalog, description: "List project apps, managed MCP servers, connections, fake integrations, web fixtures, agents, and snapshots." }
+    - { name: environment_catalog, description: "List project apps, managed MCP servers, connections, fake integrations, supported assertion types, web fixtures, agents, and snapshots." }
     - { name: environment_seed, description: "Call a runtime app tool to seed or mutate test state." }
     - { name: environment_call, description: "Call any tool on an app cloned into a run." }
     - { name: environment_mcp_call, description: "Call any tool on a managed MCP server cloned into a run." }
@@ -71,7 +71,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.7.2, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.7.3, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }

@@ -89,6 +89,7 @@ type AssertionResult struct {
 	Passed  bool   `json:"passed"`
 	Actual  any    `json:"actual,omitempty"`
 	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
 	Gating  bool   `json:"gating,omitempty"`
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -388,7 +389,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.5.7" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.5.8" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -475,14 +476,16 @@ type evalPlatformStub struct {
 type evalCampaignPlatformStub struct {
 	testkit.BasePlatformClient
 	sdk.RuntimeClient
-	t           *testing.T
-	definitions map[string]EnvironmentDefinition
-	created     int
-	spawned     int
-	stopped     int
-	asserted    int
-	prompts     []string
-	models      []LLMModel
+	t            *testing.T
+	definitions  map[string]EnvironmentDefinition
+	created      int
+	spawned      int
+	stopped      int
+	asserted     int
+	prompts      []string
+	models       []LLMModel
+	assertionErr error
+	judgeCalls   int
 }
 
 func (s *evalCampaignPlatformStub) ListRuntimeCatalogAgents(string) ([]sdk.RuntimeCatalogAgent, error) {
@@ -490,8 +493,21 @@ func (s *evalCampaignPlatformStub) ListRuntimeCatalogAgents(string) ([]sdk.Runti
 }
 
 func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[string]any, out any) error {
-	if app == "llm" && tool == "llm_models_list" {
-		raw, err := json.Marshal(LLMModels{Models: s.models})
+	if app == "llm" {
+		var value any
+		switch tool {
+		case "llm_models_list":
+			value = LLMModels{Models: s.models}
+		case "llm_chat_complete":
+			s.judgeCalls++
+			value = map[string]any{
+				"model":   "openai-codex/gpt-5.6-sol",
+				"choices": []any{map[string]any{"message": map[string]any{"content": `{"passed":true,"score":100,"reasoning":"The goal was met.","per_goal":[{"goal":"Help the user","score":100,"passed":true,"why":"Met"}],"directive_suggestion":null}`}}},
+			}
+		default:
+			s.t.Fatalf("unexpected app call %s/%s", app, tool)
+		}
+		raw, err := json.Marshal(value)
 		if err != nil {
 			return err
 		}
@@ -502,6 +518,8 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 	}
 	var value any
 	switch tool {
+	case "environment_catalog":
+		value = map[string]any{"assertion_types": []string{"app_state", "mcp_state", "mcp_tool_call", "edge_call", "telemetry", "web_state", "web_event", "protocol_event"}}
 	case "environment_get":
 		id, _ := input["id"].(string)
 		value = s.definitions[id]
@@ -527,6 +545,9 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 		}
 	case "environment_assert":
 		s.asserted++
+		if s.assertionErr != nil {
+			return s.assertionErr
+		}
 		name, _ := input["name"].(string)
 		value = AssertionResult{Name: name, Passed: true, Actual: "resolved"}
 	case "environment_run_stop":
@@ -540,6 +561,123 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 		return err
 	}
 	return json.Unmarshal(raw, out)
+}
+
+func TestCaseRejectsUnsupportedAssertionBeforePersistence(t *testing.T) {
+	platform := &evalCampaignPlatformStub{t: t, definitions: map[string]EnvironmentDefinition{}}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-assertions", Name: "Assertion validation"}, true); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.saveCase(&Case{
+		ID: "case-unsupported", SuiteID: "suite-assertions", Name: "Unsupported", Prompt: "Help",
+		Assertions: []Assertion{{Name: "Invented output check", Type: "invented_output_equals", Equals: "urgent"}},
+	}, true)
+	if err == nil || !strings.Contains(err.Error(), `unsupported assertion type "invented_output_equals"`) || !strings.Contains(err.Error(), "app_state") || !strings.Contains(err.Error(), "output_equals") || !strings.Contains(err.Error(), "For agent output, use goals") {
+		t.Fatalf("unsupported assertion error=%v", err)
+	}
+	suite, err := svc.db.getSuite("suite-assertions")
+	if err != nil || suite == nil || len(suite.Cases) != 0 {
+		t.Fatalf("suite=%#v err=%v", suite, err)
+	}
+	_, err = svc.saveCase(&Case{
+		ID: "case-invalid-output", SuiteID: "suite-assertions", Name: "Invalid output", Prompt: "Help",
+		Assertions: []Assertion{{Name: "Exact output", Type: outputEqualsAssertionType, Equals: 7}},
+	}, true)
+	if err == nil || !strings.Contains(err.Error(), "output_equals requires equals to be a string") {
+		t.Fatalf("output_equals type error=%v", err)
+	}
+}
+
+func TestOutputEqualsUsesFinalAssistantMessageExactly(t *testing.T) {
+	execution := &sdk.RuntimeAgentExecution{ThreadID: "main", Trace: []sdk.RuntimeTraceEvent{
+		{Index: 1, ThreadID: "main", Role: "user", Content: "Classify this"},
+		{Index: 2, ThreadID: "side", Role: "assistant", Content: "routine"},
+		{Index: 3, ThreadID: "main", Role: "agent", Content: "urgent"},
+	}}
+	passed, err := evaluateOutputEquals(Assertion{Name: "Exact urgent", Type: outputEqualsAssertionType, Equals: "urgent"}, execution)
+	if err != nil || !passed.Passed || passed.Actual != "urgent" {
+		t.Fatalf("passed=%#v err=%v", passed, err)
+	}
+	failed, err := evaluateOutputEquals(Assertion{Name: "No punctuation", Type: outputEqualsAssertionType, Equals: "urgent."}, execution)
+	if err != nil || failed.Passed || failed.Actual != "urgent" {
+		t.Fatalf("failed=%#v err=%v", failed, err)
+	}
+}
+
+func TestOutputEqualsRunIsEvaluatedInsideEvals(t *testing.T) {
+	platform := &evalCampaignPlatformStub{t: t, definitions: map[string]EnvironmentDefinition{}}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-output", Name: "Native output"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.saveCase(&Case{
+		ID: "case-output", SuiteID: "suite-output", Name: "Exact output", Prompt: "Resolve support request",
+		Assertions: []Assertion{{Name: "Exact final message", Type: outputEqualsAssertionType, Equals: "support request resolved"}},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	experiment, err := svc.createExperiment("suite-output", "", "manual", []Target{{AgentID: 7}}, 1, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.runNext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := svc.db.getExperiment(experiment.ID)
+	if err != nil || completed == nil || len(completed.Runs) != 1 {
+		t.Fatalf("experiment=%#v err=%v", completed, err)
+	}
+	run := completed.Runs[0]
+	if run.Status != "pass" || run.CorrectnessScore == nil || *run.CorrectnessScore != 100 || run.OverallScore == nil || *run.OverallScore != 100 || len(run.Assertions) != 1 || !run.Assertions[0].Passed {
+		t.Fatalf("run=%#v", run)
+	}
+	if platform.asserted != 0 || platform.stopped != 1 {
+		t.Fatalf("environment assertions=%d stopped=%d", platform.asserted, platform.stopped)
+	}
+}
+
+func TestAssertionExecutionErrorPreservesJudgeAndDoesNotScoreAgent(t *testing.T) {
+	platform := &evalCampaignPlatformStub{
+		t:            t,
+		models:       []LLMModel{{Provider: "openai-codex", ModelID: "gpt-5.6-sol", GatewayModel: "openai-codex/gpt-5.6-sol"}},
+		definitions:  map[string]EnvironmentDefinition{},
+		assertionErr: errors.New("simulated fixture unavailable"),
+	}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-assertion-error", Name: "Assertion error"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.saveCase(&Case{
+		ID: "case-assertion-error", SuiteID: "suite-assertion-error", Name: "Case", Prompt: "Help", Goals: []string{"Help the user"},
+		Assertions: []Assertion{{Name: "CRM state", Type: "app_state", App: "crm", Tool: "record_get", Path: "status", Equals: "done"}},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	experiment, err := svc.createExperiment("suite-assertion-error", "", "manual", []Target{{AgentID: 7}}, 1, 0, "openai-codex/gpt-5.6-sol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.runNext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := svc.db.getExperiment(experiment.ID)
+	if err != nil || completed == nil || len(completed.Runs) != 1 {
+		t.Fatalf("experiment=%#v err=%v", completed, err)
+	}
+	run := completed.Runs[0]
+	if run.Status != "error" || run.Stage != "failed" || run.CorrectnessScore != nil || run.OverallScore != nil || run.Judge == nil || !run.Judge.Passed || run.JudgeScore == nil || *run.JudgeScore != 100 {
+		t.Fatalf("run=%#v", run)
+	}
+	if len(run.Assertions) != 1 || !strings.Contains(run.Assertions[0].Error, "fixture unavailable") || !strings.Contains(run.Error, "does not indicate agent failure") {
+		t.Fatalf("assertions=%#v run error=%q", run.Assertions, run.Error)
+	}
+	if platform.judgeCalls != 1 || platform.asserted != 1 || platform.stopped != 1 {
+		t.Fatalf("judge=%d asserted=%d stopped=%d", platform.judgeCalls, platform.asserted, platform.stopped)
+	}
 }
 
 func TestExperimentCanonicalizesJudgeModelBeforeQueueingRuns(t *testing.T) {
@@ -685,11 +823,12 @@ func (s *evalPlatformStub) CallAppResult(app, tool string, input map[string]any,
 	switch tool {
 	case "environment_catalog":
 		value = map[string]any{
-			"apps":         []map[string]any{{"install_id": 12, "name": "crm"}},
-			"connections":  []map[string]any{{"id": 4, "app_slug": "hubspot"}},
-			"integrations": []map[string]any{{"slug": "hubspot", "name": "HubSpot"}},
-			"agents":       []map[string]any{{"id": 7, "name": "Sales"}},
-			"snapshots":    []map[string]any{},
+			"assertion_types": []string{"app_state", "mcp_state", "mcp_tool_call", "edge_call", "telemetry", "web_state", "web_event", "protocol_event"},
+			"apps":            []map[string]any{{"install_id": 12, "name": "crm"}},
+			"connections":     []map[string]any{{"id": 4, "app_slug": "hubspot"}},
+			"integrations":    []map[string]any{{"slug": "hubspot", "name": "HubSpot"}},
+			"agents":          []map[string]any{{"id": 7, "name": "Sales"}},
+			"snapshots":       []map[string]any{},
 		}
 	case "environment_list":
 		value = []EnvironmentDefinition{{ID: "env-one", Name: "Project clone"}}
@@ -716,7 +855,7 @@ func TestCatalogAndEnvironmentCreationDelegateToEnvironments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(catalog["apps"].([]any)) != 1 || len(catalog["environments"].([]EnvironmentDefinition)) != 1 || len(catalog["models"].([]LLMModel)) != 1 {
+	if len(catalog["apps"].([]any)) != 1 || len(catalog["environments"].([]EnvironmentDefinition)) != 1 || len(catalog["models"].([]LLMModel)) != 1 || len(catalog["assertion_types"].([]string)) != 9 {
 		t.Fatalf("catalog=%#v", catalog)
 	}
 

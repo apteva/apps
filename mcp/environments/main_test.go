@@ -387,6 +387,18 @@ func TestEnvironmentRunCreateRejectsPseudoEvaluationArguments(t *testing.T) {
 	}
 }
 
+func TestAssertionTypeCatalogIsAuthoritative(t *testing.T) {
+	want := []string{"app_state", "mcp_state", "mcp_tool_call", "edge_call", "telemetry", "web_state", "web_event", "protocol_event"}
+	got := assertionTypeCatalog()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("assertion types=%v, want %v", got, want)
+	}
+	got[0] = "mutated"
+	if assertionTypeCatalog()[0] != "app_state" {
+		t.Fatal("assertion type catalog returned mutable shared state")
+	}
+}
+
 func TestPatreonFixtureLifecycleAndAssertions(t *testing.T) {
 	svc := &service{db: testStore(t)}
 	run := &Run{ID: "run-web", RuntimeID: "runtime-web", Kind: "test", Status: "starting", StartedAt: time.Now().UTC()}

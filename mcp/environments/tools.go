@@ -79,6 +79,21 @@ func decodeStrictArgs(args map[string]any, out any) error {
 
 var pseudoEvaluationFields = []string{"environment_id", "suite_id", "case_id", "prompt", "input", "assertions", "goals", "targets", "repetitions"}
 
+var environmentAssertionTypes = []string{
+	"app_state",
+	"mcp_state",
+	"mcp_tool_call",
+	"edge_call",
+	"telemetry",
+	"web_state",
+	"web_event",
+	"protocol_event",
+}
+
+func assertionTypeCatalog() []string {
+	return append([]string(nil), environmentAssertionTypes...)
+}
+
 func containsPseudoEvaluationArgs(args map[string]any) bool {
 	for _, field := range pseudoEvaluationFields {
 		if _, found := args[field]; found {
@@ -106,7 +121,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_run_create", Description: "Start an isolated runtime from an EnvironmentSpec. This does not execute Evals cases or assertions.", InputSchema: environmentRunCreateSchema, Handler: a.toolRunCreate},
 		{Name: "environment_run_get", Description: "Get a run and live runtime.", InputSchema: requiredSchema("id"), Handler: a.toolRunGet},
 		{Name: "environment_run_stop", Description: "Stop a run.", InputSchema: requiredSchema("id"), Handler: a.toolRunStop},
-		{Name: "environment_catalog", Description: "List selectable apps, managed MCP servers, connections, integrations, web and protocol fixtures, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
+		{Name: "environment_catalog", Description: "List selectable apps, managed MCP servers, connections, integrations, assertion types, web and protocol fixtures, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
 		{Name: "environment_seed", Description: "Call a tool on a runtime app to seed data.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
 		{Name: "environment_call", Description: "Call a tool on a runtime app.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
 		{Name: "environment_mcp_call", Description: "Call a tool on a managed MCP cloned into a runtime.", InputSchema: requiredSchema("run_id", "mcp", "tool"), Handler: a.toolMCPCall},
@@ -230,7 +245,7 @@ func (a *App) toolCatalog(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	snapshots, err := a.svc.runtime().ListRuntimeSnapshots()
 	realtimeProviders, _ := a.svc.runtime().ListRuntimeRealtimeProviders(a.svc.ctx.CurrentProject())
-	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "managed_mcps": managedMCPs, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog(), "protocol_fixtures": protocolFixtureCatalog(), "realtime_providers": realtimeProviders}, err
+	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "managed_mcps": managedMCPs, "agents": agents, "snapshots": snapshots, "assertion_types": assertionTypeCatalog(), "web_fixtures": webFixtureCatalog(), "protocol_fixtures": protocolFixtureCatalog(), "realtime_providers": realtimeProviders}, err
 }
 func (a *App) toolCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	r, err := a.runFor(args)

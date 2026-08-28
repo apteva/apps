@@ -28,7 +28,7 @@ var targetInputSchema = strictObject(map[string]any{
 
 var assertionInputSchema = strictObject(map[string]any{
 	"name":        map[string]any{"type": "string"},
-	"type":        map[string]any{"type": "string"},
+	"type":        map[string]any{"type": "string", "description": "Use a type listed by eval_catalog.assertion_types. output_equals is evaluated natively by Evals against the final assistant message."},
 	"app":         map[string]any{"type": "string"},
 	"mcp":         map[string]any{"type": "string"},
 	"tool":        map[string]any{"type": "string"},

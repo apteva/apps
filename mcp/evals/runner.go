@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"time"
 
@@ -132,11 +133,19 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 	if err = s.setRunStage(run, "checking_results"); err != nil {
 		return err
 	}
+	assertionErrors := []string{}
 	for _, assertion := range run.CaseSnapshot.Assertions {
-		input := map[string]any{"run_id": created.ID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "mcp": assertion.MCP, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType, "fixture": assertion.Fixture}
 		var result AssertionResult
-		if callErr := s.ctx.PlatformAPI().CallAppResult("environments", "environment_assert", input, &result); callErr != nil {
-			result = AssertionResult{Name: assertion.Name, Passed: false, Message: callErr.Error()}
+		var assertionErr error
+		if assertion.Type == outputEqualsAssertionType {
+			result, assertionErr = evaluateOutputEquals(assertion, run.Execution)
+		} else {
+			input := map[string]any{"run_id": created.ID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "mcp": assertion.MCP, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType, "fixture": assertion.Fixture}
+			assertionErr = s.ctx.PlatformAPI().CallAppResult("environments", "environment_assert", input, &result)
+		}
+		if assertionErr != nil {
+			result = AssertionResult{Name: assertion.Name, Error: assertionErr.Error()}
+			assertionErrors = append(assertionErrors, fmt.Sprintf("%s: %v", assertion.Name, assertionErr))
 		}
 		if result.Name == "" {
 			result.Name = assertion.Name
@@ -157,10 +166,29 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			return fmt.Errorf("judge: %w", judgeErr)
 		}
 		run.Judge = verdict
-		if verdict.DirectiveSuggestion != nil && strings.TrimSpace(verdict.DirectiveSuggestion.Directive) != "" {
+		if len(assertionErrors) == 0 && verdict.DirectiveSuggestion != nil && strings.TrimSpace(verdict.DirectiveSuggestion.Directive) != "" {
 			suggestion := &Suggestion{ID: "suggest_" + token(10), RunID: run.ID, AgentID: run.TargetSnapshot.AgentID, Directive: verdict.DirectiveSuggestion.Directive, ExpectedETag: run.TargetSnapshot.DirectiveETag, Reason: verdict.DirectiveSuggestion.Reason, Status: "proposed", CreatedAt: time.Now().UTC()}
 			_ = s.db.saveSuggestion(suggestion)
 		}
+	}
+	if len(assertionErrors) > 0 {
+		run.Status, run.Stage = "error", "failed"
+		run.CorrectnessScore, run.OverallScore = nil, nil
+		if run.Judge != nil {
+			value := run.Judge.Score
+			run.JudgeScore = &value
+		} else {
+			run.JudgeScore = nil
+		}
+		run.Error = "assertion evaluation failed; the evaluation result is invalid and does not indicate agent failure: " + strings.Join(assertionErrors, "; ")
+		finished := time.Now().UTC()
+		run.FinishedAt = &finished
+		if err = s.db.finishRun(run); err != nil {
+			return err
+		}
+		s.ctx.Emit("eval.run.failed", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": run.Stage, "error": run.Error})
+		s.emitExperimentCompleted(run.ExperimentID)
+		return nil
 	}
 
 	status, correctness, judgeScore, overall := scoreRun(run.Assertions, run.Judge)
@@ -233,7 +261,13 @@ func (s *service) judge(ctx context.Context, model string, run *Run) (*JudgeVerd
 	if run.Execution != nil {
 		trace = run.Execution.Trace
 	}
-	payload := map[string]any{"task": run.CaseSnapshot.Prompt, "goals": run.CaseSnapshot.Goals, "agent_directive": run.TargetSnapshot.Directive, "trace": trace, "voice_call": run.VoiceCall, "deterministic_assertions": run.Assertions}
+	deterministicAssertions := make([]AssertionResult, 0, len(run.Assertions))
+	for _, result := range run.Assertions {
+		if result.Error == "" {
+			deterministicAssertions = append(deterministicAssertions, result)
+		}
+	}
+	payload := map[string]any{"task": run.CaseSnapshot.Prompt, "goals": run.CaseSnapshot.Goals, "agent_directive": run.TargetSnapshot.Directive, "trace": trace, "voice_call": run.VoiceCall, "deterministic_assertions": deterministicAssertions}
 	request := judgeRequest(model, payload)
 	var response struct {
 		Model   string `json:"model"`
@@ -257,6 +291,31 @@ func (s *service) judge(ctx context.Context, model string, run *Run) (*JudgeVerd
 	alignJudgeGoals(verdict, run.CaseSnapshot.Goals)
 	verdict.Model, verdict.Usage = response.Model, response.Usage
 	return verdict, nil
+}
+
+func evaluateOutputEquals(assertion Assertion, execution *sdk.RuntimeAgentExecution) (AssertionResult, error) {
+	if execution == nil {
+		return AssertionResult{}, errors.New("output_equals requires a preserved agent execution")
+	}
+	actual, found := finalAssistantMessage(execution)
+	if !found {
+		actual = ""
+	}
+	return AssertionResult{Name: assertion.Name, Passed: reflect.DeepEqual(actual, assertion.Equals), Actual: actual}, nil
+}
+
+func finalAssistantMessage(execution *sdk.RuntimeAgentExecution) (string, bool) {
+	for i := len(execution.Trace) - 1; i >= 0; i-- {
+		event := execution.Trace[i]
+		if !strings.EqualFold(event.Role, "agent") && !strings.EqualFold(event.Role, "assistant") {
+			continue
+		}
+		if execution.ThreadID != "" && event.ThreadID != "" && event.ThreadID != execution.ThreadID {
+			continue
+		}
+		return event.Content, true
+	}
+	return "", false
 }
 
 func voiceAssertionResults(spec *VoiceCase, call *EnvironmentVoiceCall) []AssertionResult {
@@ -504,6 +563,9 @@ func scoreRun(assertions []AssertionResult, judge *JudgeVerdict) (string, *float
 	if len(assertions) > 0 {
 		count, total := 0, 0
 		for _, result := range assertions {
+			if result.Error != "" {
+				continue
+			}
 			if !result.Passed {
 				passed = false
 			}

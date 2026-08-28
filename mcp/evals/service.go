@@ -109,6 +109,9 @@ func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 	if len(item.Goals) == 0 && len(item.Assertions) == 0 {
 		return nil, errors.New("case requires a goal or deterministic assertion")
 	}
+	if err := s.validateAssertions(item.Assertions); err != nil {
+		return nil, err
+	}
 	if item.TimeoutSeconds < 0 || item.TimeoutSeconds > 1800 {
 		return nil, errors.New("timeout_seconds must be at most 1800")
 	}
@@ -122,6 +125,68 @@ func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 		return nil, err
 	}
 	return s.db.getCase(item.ID)
+}
+
+const outputEqualsAssertionType = "output_equals"
+
+func (s *service) validateAssertions(assertions []Assertion) error {
+	if len(assertions) == 0 {
+		return nil
+	}
+	assertionTypes, err := s.loadAssertionTypes()
+	if err != nil {
+		return fmt.Errorf("load supported assertion types: %w", err)
+	}
+	supported := make(map[string]bool, len(assertionTypes))
+	for _, assertionType := range assertionTypes {
+		supported[assertionType] = true
+	}
+	for i := range assertions {
+		assertions[i].Type = strings.TrimSpace(assertions[i].Type)
+		if !supported[assertions[i].Type] {
+			return fmt.Errorf("unsupported assertion type %q; supported types: %s. For agent output, use goals or the Evals-native %s assertion", assertions[i].Type, strings.Join(assertionTypes, ", "), outputEqualsAssertionType)
+		}
+		if assertions[i].Type == outputEqualsAssertionType {
+			if _, ok := assertions[i].Equals.(string); !ok {
+				return fmt.Errorf("assertion %q: output_equals requires equals to be a string", assertions[i].Name)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *service) loadAssertionTypes() ([]string, error) {
+	var environmentCatalog map[string]any
+	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_catalog", map[string]any{}, &environmentCatalog); err != nil {
+		return nil, err
+	}
+	return evalAssertionTypes(environmentCatalog), nil
+}
+
+func evalAssertionTypes(environmentCatalog map[string]any) []string {
+	result := []string{}
+	seen := map[string]bool{}
+	appendType := func(value string) {
+		value = strings.TrimSpace(value)
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	switch values := environmentCatalog["assertion_types"].(type) {
+	case []string:
+		for _, value := range values {
+			appendType(value)
+		}
+	case []any:
+		for _, value := range values {
+			if text, ok := value.(string); ok {
+				appendType(text)
+			}
+		}
+	}
+	appendType(outputEqualsAssertionType)
+	return result
 }
 
 func (s *service) createExperiment(suiteID, name, trigger string, targets []Target, repetitions, baseline int, judgeModel string) (*Experiment, error) {
@@ -279,6 +344,7 @@ func (s *service) catalog() (map[string]any, error) {
 	if environmentCatalog == nil {
 		environmentCatalog = map[string]any{}
 	}
+	environmentCatalog["assertion_types"] = evalAssertionTypes(environmentCatalog)
 	environmentCatalog["environments"] = environments
 	environmentCatalog["models"] = models.Models
 	return environmentCatalog, nil
