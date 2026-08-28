@@ -61,7 +61,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			UpdatedAt: nowUTC(),
 		})
 	}
-	ctx.Logger().Info("builder mounted", "version", "0.2.0")
+	ctx.Logger().Info("builder mounted", "version", "0.2.1")
 	return nil
 }
 

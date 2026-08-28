@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ func TestManifestMatchesRuntimeContract(t *testing.T) {
 		t.Fatalf("parse apteva.yaml: %v", err)
 	}
 	runtime := (&App{}).Manifest()
-	if runtime.Name != "builder" || runtime.Version != "0.2.0" {
+	if runtime.Name != "builder" || runtime.Version != "0.2.1" {
 		t.Fatalf("runtime identity = %s@%s", runtime.Name, runtime.Version)
 	}
 	if runtime.Name != onDisk.Name || runtime.Version != onDisk.Version {
@@ -69,6 +70,9 @@ func TestManifestMatchesRuntimeContract(t *testing.T) {
 	}
 	if len(runtime.Provides.Skills) != 1 || runtime.Provides.Skills[0].Body == "" || runtime.Provides.Skills[0].BodyFile != "" {
 		t.Fatalf("runtime skill was not embedded: %+v", runtime.Provides.Skills)
+	}
+	if body := runtime.Provides.Skills[0].Body; !strings.Contains(body, "eval_catalog.models[].gateway_model") || !strings.Contains(body, "Never copy a target agent's bare model name") {
+		t.Fatalf("Builder skill does not require canonical Evals judge models")
 	}
 	if len(app.Workers()) != 0 {
 		t.Fatal("Builder must not run a heartbeat worker")

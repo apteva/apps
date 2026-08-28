@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.5.6
-description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments. v0.5.6 preserves trusted project context across strict typed creation schemas.
+version: 0.5.7
+description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments. v0.5.7 validates and canonicalizes judge models before queueing runs.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
 icon: /ui/icon.svg
@@ -31,7 +31,7 @@ provides:
     - { name: eval_case_create, description: "Add a behavioral case to a suite. Execute cases with eval_experiment_create; do not call environment_run_create once per case." }
     - { name: eval_case_update, description: "Update a behavioral case." }
     - { name: eval_case_delete, description: "Delete a behavioral case." }
-    - { name: eval_experiment_create, description: "Execute a suite's enabled cases against agent/model targets. Create cases first; Evals creates and stops the isolated runtimes." }
+    - { name: eval_experiment_create, description: "Execute a suite's enabled cases against agent/model targets. Create cases first, and select judge_model from eval_catalog.models[].gateway_model; Evals creates and stops the isolated runtimes." }
     - { name: eval_experiment_list, description: "List evaluation experiments." }
     - { name: eval_experiment_get, description: "Get an experiment with its individual runs." }
     - { name: eval_experiment_cancel, description: "Cancel queued runs in an experiment." }
@@ -59,7 +59,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.5.6
+    ref: evals/v0.5.7
     entry: mcp/evals
   port: 8080
   health_check: /health

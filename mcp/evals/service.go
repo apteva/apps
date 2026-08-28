@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -152,6 +153,10 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 	if judgeModel == "" {
 		judgeModel = suite.JudgeModel
 	}
+	judgeModel, err = s.resolveJudgeModel(judgeModel)
+	if err != nil {
+		return nil, err
+	}
 
 	cases := []Case{}
 	validatedEnvironments := map[string]bool{}
@@ -210,6 +215,52 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 	}
 	s.ctx.Emit("eval.experiment.created", map[string]any{"experiment_id": exp.ID, "suite_id": suite.ID, "trigger_type": trigger})
 	return s.db.getExperiment(exp.ID)
+}
+
+func (s *service) resolveJudgeModel(requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return "", nil
+	}
+
+	var catalog LLMModels
+	if err := s.ctx.PlatformAPI().CallAppResult("llm", "llm_models_list", map[string]any{}, &catalog); err != nil {
+		return "", fmt.Errorf("resolve judge_model %q from LLM catalog: %w", requested, err)
+	}
+
+	canonicalMatches := map[string]struct{}{}
+	aliasMatches := map[string]struct{}{}
+	for _, model := range catalog.Models {
+		gatewayModel := strings.TrimSpace(model.GatewayModel)
+		if gatewayModel == "" {
+			continue
+		}
+		if requested == gatewayModel {
+			canonicalMatches[gatewayModel] = struct{}{}
+		}
+		if requested == strings.TrimSpace(model.ModelID) {
+			aliasMatches[gatewayModel] = struct{}{}
+		}
+	}
+	if len(canonicalMatches) == 1 {
+		for gatewayModel := range canonicalMatches {
+			return gatewayModel, nil
+		}
+	}
+	if len(aliasMatches) == 1 {
+		for gatewayModel := range aliasMatches {
+			return gatewayModel, nil
+		}
+	}
+	if len(aliasMatches) > 1 {
+		matches := make([]string, 0, len(aliasMatches))
+		for gatewayModel := range aliasMatches {
+			matches = append(matches, gatewayModel)
+		}
+		sort.Strings(matches)
+		return "", fmt.Errorf("judge_model %q is ambiguous; matching gateway models: %s; select eval_catalog.models[].gateway_model", requested, strings.Join(matches, ", "))
+	}
+	return "", fmt.Errorf("judge_model %q is not available; select eval_catalog.models[].gateway_model", requested)
 }
 
 func (s *service) catalog() (map[string]any, error) {

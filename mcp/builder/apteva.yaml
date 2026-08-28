@@ -2,8 +2,8 @@ schema: apteva-app/v1
 
 name: builder
 display_name: Builder
-version: 0.2.0
-description: Goal-driven orchestration for Apteva Helper. Turns an outcome into a durable plan, optionally validates the resulting workflow with Evals and isolated Environments, tracks managed resources and decisions, and keeps execution grounded in explicit success criteria.
+version: 0.2.1
+description: Goal-driven orchestration for Apteva Helper. Turns an outcome into a durable plan, optionally validates the resulting workflow with Evals and isolated Environments using canonical judge models, tracks managed resources and decisions, and keeps execution grounded in explicit success criteria.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/builder
 icon: /ui/icon.svg
@@ -67,7 +67,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: builder/v0.2.0, entry: mcp/builder }
+  source: { repo: github.com/apteva/apps, ref: builder/v0.2.1, entry: mcp/builder }
   port: 8080
   health_check: /health
   resources:

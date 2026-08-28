@@ -70,7 +70,7 @@ var evalSuiteCreateSchema = strictObject(map[string]any{
 	"name":               map[string]any{"type": "string"},
 	"description":        map[string]any{"type": "string"},
 	"environment_id":     map[string]any{"type": "string"},
-	"judge_model":        map[string]any{"type": "string"},
+	"judge_model":        map[string]any{"type": "string", "description": "Qualified gateway_model from eval_catalog.models[].gateway_model. Bare model IDs are accepted only when unambiguous."},
 	"continuous_targets": arraySchema(targetInputSchema),
 	"schedule_minutes":   map[string]any{"type": "integer", "minimum": 0},
 	"required_pass_rate": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
@@ -97,5 +97,5 @@ var evalExperimentCreateSchema = strictObject(map[string]any{
 	"targets":         nonEmptyArraySchema(targetInputSchema),
 	"repetitions":     map[string]any{"type": "integer", "minimum": 1, "maximum": 20},
 	"baseline_target": map[string]any{"type": "integer", "minimum": 0},
-	"judge_model":     map[string]any{"type": "string"},
+	"judge_model":     map[string]any{"type": "string", "description": "Qualified gateway_model from eval_catalog.models[].gateway_model. Bare model IDs are accepted only when unambiguous."},
 }, "suite_id", "targets")

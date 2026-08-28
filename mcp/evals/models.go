@@ -277,7 +277,14 @@ type EnvironmentWebFixture struct {
 }
 
 type LLMModels struct {
-	Models []map[string]any `json:"models"`
+	Models []LLMModel `json:"models"`
+}
+
+type LLMModel struct {
+	Provider     string `json:"provider"`
+	ModelID      string `json:"model_id"`
+	DisplayName  string `json:"display_name,omitempty"`
+	GatewayModel string `json:"gateway_model"`
 }
 
 func encodeJSON(value any) string {

@@ -388,7 +388,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.5.6" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.5.7" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -482,6 +482,7 @@ type evalCampaignPlatformStub struct {
 	stopped     int
 	asserted    int
 	prompts     []string
+	models      []LLMModel
 }
 
 func (s *evalCampaignPlatformStub) ListRuntimeCatalogAgents(string) ([]sdk.RuntimeCatalogAgent, error) {
@@ -489,6 +490,13 @@ func (s *evalCampaignPlatformStub) ListRuntimeCatalogAgents(string) ([]sdk.Runti
 }
 
 func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[string]any, out any) error {
+	if app == "llm" && tool == "llm_models_list" {
+		raw, err := json.Marshal(LLMModels{Models: s.models})
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(raw, out)
+	}
 	if app != "environments" {
 		s.t.Fatalf("unexpected app call %s/%s", app, tool)
 	}
@@ -532,6 +540,66 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 		return err
 	}
 	return json.Unmarshal(raw, out)
+}
+
+func TestExperimentCanonicalizesJudgeModelBeforeQueueingRuns(t *testing.T) {
+	platform := &evalCampaignPlatformStub{
+		t: t,
+		models: []LLMModel{
+			{Provider: "openai-codex", ModelID: "gpt-5.6-sol", GatewayModel: "openai-codex/gpt-5.6-sol"},
+		},
+		definitions: map[string]EnvironmentDefinition{},
+	}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-judge", Name: "Judge resolution"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.saveCase(&Case{ID: "case-judge", SuiteID: "suite-judge", Name: "Case", Prompt: "Help", Goals: []string{"Help the user"}}, true); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := svc.resolveJudgeModel("openai-codex/gpt-5.6-sol")
+	if err != nil || resolved != "openai-codex/gpt-5.6-sol" {
+		t.Fatalf("canonical judge model resolved=%q err=%v", resolved, err)
+	}
+	experiment, err := svc.createExperiment("suite-judge", "", "manual", []Target{{AgentID: 7}}, 1, 0, "gpt-5.6-sol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if experiment.JudgeModel != "openai-codex/gpt-5.6-sol" || len(experiment.Runs) != 1 {
+		t.Fatalf("experiment=%#v", experiment)
+	}
+}
+
+func TestExperimentRejectsUnknownOrAmbiguousJudgeModelBeforeQueueingRuns(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		requested string
+		models    []LLMModel
+		wantError string
+	}{
+		{name: "unknown", requested: "missing-model", models: []LLMModel{{Provider: "openai-codex", ModelID: "gpt-5.6-sol", GatewayModel: "openai-codex/gpt-5.6-sol"}}, wantError: "not available"},
+		{name: "ambiguous", requested: "shared-model", models: []LLMModel{{Provider: "provider-a", ModelID: "shared-model", GatewayModel: "provider-a/shared-model"}, {Provider: "provider-b", ModelID: "shared-model", GatewayModel: "provider-b/shared-model"}}, wantError: "ambiguous"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			platform := &evalCampaignPlatformStub{t: t, models: test.models, definitions: map[string]EnvironmentDefinition{}}
+			ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+			svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+			if _, err := svc.saveSuite(&Suite{ID: "suite-reject", Name: "Judge rejection"}, true); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := svc.saveCase(&Case{ID: "case-reject", SuiteID: "suite-reject", Name: "Case", Prompt: "Help", Goals: []string{"Help the user"}}, true); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := svc.createExperiment("suite-reject", "", "manual", []Target{{AgentID: 7}}, 1, 0, test.requested); err == nil || !strings.Contains(err.Error(), test.wantError) || !strings.Contains(err.Error(), "eval_catalog.models[].gateway_model") {
+				t.Fatalf("judge model error=%v", err)
+			}
+			experiments, err := svc.db.listExperiments(10)
+			if err != nil || len(experiments) != 0 {
+				t.Fatalf("experiments=%#v err=%v", experiments, err)
+			}
+		})
+	}
 }
 
 func TestFourCaseCampaignRunsPromptsAssertionsAndStopsEnvironments(t *testing.T) {
@@ -626,7 +694,7 @@ func (s *evalPlatformStub) CallAppResult(app, tool string, input map[string]any,
 	case "environment_list":
 		value = []EnvironmentDefinition{{ID: "env-one", Name: "Project clone"}}
 	case "llm_models_list":
-		value = LLMModels{Models: []map[string]any{{"gateway_model": "anthropic/claude-sonnet"}}}
+		value = LLMModels{Models: []LLMModel{{Provider: "anthropic", ModelID: "claude-sonnet", GatewayModel: "anthropic/claude-sonnet"}}}
 	case "environment_create":
 		value = EnvironmentDefinition{ID: "env-created", Name: input["name"].(string), Spec: input["spec"].(map[string]any)}
 	default:
@@ -648,7 +716,7 @@ func TestCatalogAndEnvironmentCreationDelegateToEnvironments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(catalog["apps"].([]any)) != 1 || len(catalog["environments"].([]EnvironmentDefinition)) != 1 || len(catalog["models"].([]map[string]any)) != 1 {
+	if len(catalog["apps"].([]any)) != 1 || len(catalog["environments"].([]EnvironmentDefinition)) != 1 || len(catalog["models"].([]LLMModel)) != 1 {
 		t.Fatalf("catalog=%#v", catalog)
 	}
 
