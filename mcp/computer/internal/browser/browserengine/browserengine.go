@@ -832,6 +832,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cursor unavailable, continuing click: %v\n", err)
 		}
 		guardOptions := clickguard.Options{
+			TargetID:     action.TargetID,
 			ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
 			EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
 		}
@@ -871,6 +872,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cursor unavailable, continuing double click: %v\n", err)
 		}
 		guardOptions := clickguard.Options{
+			TargetID:     action.TargetID,
 			ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
 			EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
 		}
@@ -1213,13 +1215,19 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
 			Placeholder: e.Placeholder, CurrentValue: e.CurrentValue, Pattern: e.Pattern,
 			FormatHint: e.FormatHint, DateLike: e.DateLike, Validity: e.Validity,
-			Disabled: e.Disabled, Loading: e.Loading, Dangerous: e.Dangerous, DestructiveEffect: e.DestructiveEffect,
+			Disabled: e.Disabled, Loading: e.Loading, TargetLoading: e.TargetLoading,
+			ContainerLoading: e.ContainerLoading, PageLoadingCount: e.PageLoadingCount,
+			Dangerous: e.Dangerous, Effect: e.Effect, DestructiveEffect: e.DestructiveEffect,
 		})
 	}
 	return out
 }
 
 func (c *Computer) DisplaySize() computer.DisplaySize { return c.display }
+
+func (c *Computer) EffectiveEnvironment() (computer.EffectiveEnvironment, error) {
+	return environment.Probe(c.ctx)
+}
 
 func (c *Computer) SessionType() string { return "browser-engine" }
 func (c *Computer) SessionID() string   { return c.sessionID }

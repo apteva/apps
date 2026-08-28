@@ -59,7 +59,11 @@ type Element struct {
 	Validity          *computer.FieldValidity `json:"validity,omitempty"`
 	Disabled          bool                    `json:"disabled"`
 	Loading           bool                    `json:"loading"`
+	TargetLoading     bool                    `json:"target_loading"`
+	ContainerLoading  bool                    `json:"container_loading"`
+	PageLoadingCount  int                     `json:"page_loading_indicators"`
 	Dangerous         bool                    `json:"dangerous"`
+	Effect            string                  `json:"effect,omitempty"`
 	DestructiveEffect string                  `json:"destructive_effect,omitempty"`
 }
 
@@ -121,10 +125,11 @@ const EnumScript = `
 
   var somState = window.__aptevaComputerSOM;
   if (!somState) {
-    somState = {names: Object.create(null)};
+    somState = {names: Object.create(null), targets: Object.create(null)};
     try { Object.defineProperty(window, '__aptevaComputerSOM', {value: somState, configurable: true}); }
     catch (e) { window.__aptevaComputerSOM = somState; }
   }
+  somState.targets = Object.create(null);
 
   function clean(v) { return String(v || '').replace(/\s+/g, ' ').trim(); }
 
@@ -178,9 +183,23 @@ const EnumScript = `
     var closest = el.closest && el.closest('label');
     return closest ? clean(closest.innerText || closest.textContent) : '';
   }
+  function adjacentRowLabel(el) {
+    if (!el || !el.matches || !el.matches('input[type="checkbox"],input[type="radio"],[role="checkbox"],[role="radio"],[role="switch"],[aria-checked]')) return '';
+    var selector = 'input[type="checkbox"],input[type="radio"],[role="checkbox"],[role="radio"],[role="switch"],[aria-checked]';
+    var best = '';
+    for (var row = el.parentElement, depth = 0; row && depth < 5; row = row.parentElement, depth++) {
+      var rect = row.getBoundingClientRect();
+      if (rect.height > 140 || rect.width > Math.min(window.innerWidth, 1200)) break;
+      var controls = row.querySelectorAll(selector);
+      if (controls.length !== 1 || controls[0] !== el) continue;
+      var label = clean(row.innerText || row.textContent || '');
+      if (label && label.length <= 180) { best = label; break; }
+    }
+    return best;
+  }
   function accessibleName(el) {
     return clean((el.getAttribute && el.getAttribute('aria-label')) || labelledBy(el) ||
-      associatedLabel(el) || (el.getAttribute && el.getAttribute('title')) || el.innerText || el.textContent ||
+      associatedLabel(el) || adjacentRowLabel(el) || (el.getAttribute && el.getAttribute('title')) || el.innerText || el.textContent ||
       el.value || (el.getAttribute && el.getAttribute('alt')) ||
       (el.getAttribute && el.getAttribute('aria-placeholder')) ||
       (el.getAttribute && el.getAttribute('placeholder')) ||
@@ -232,19 +251,49 @@ const EnumScript = `
     if (!el || !el.getBoundingClientRect) return false;
     var r = el.getBoundingClientRect(), s;
     try { s = styleWin.getComputedStyle(el); } catch (e) { return false; }
-    return r.width >= 2 && r.height >= 2 && s.display !== 'none' &&
-      s.visibility !== 'hidden' && parseFloat(s.opacity || '1') >= 0.1;
-  }
-  function isLoading(el, styleWin) {
-    for (var node = el; node && node !== node.ownerDocument.documentElement; node = node.parentElement) {
-      if (node.getAttribute && (node.getAttribute('aria-busy') === 'true' ||
-          node.getAttribute('data-loading') === 'true' || node.getAttribute('data-state') === 'loading')) return true;
-      var cls = clean(node.className).toLowerCase();
-      if (/(^|[-_\s])(loading|is-loading|pending)([-_\s]|$)/.test(cls)) return true;
+    if (r.width < 2 || r.height < 2) return false;
+    try {
+      if (el.checkVisibility && !el.checkVisibility({checkOpacity:true, checkVisibilityCSS:true})) return false;
+    } catch (e) {}
+    for (var node = el; node && node.nodeType === 1; node = node.parentElement) {
+      try { s = styleWin.getComputedStyle(node); } catch (e) { return false; }
+      if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity || '1') < 0.1) return false;
     }
+    return true;
+  }
+  function loadingMarker(node) {
+    if (!node || !node.getAttribute) return false;
+    if (node.getAttribute('aria-busy') === 'true' || node.getAttribute('data-loading') === 'true' || node.getAttribute('data-state') === 'loading') return true;
+    var cls = clean(node.className).toLowerCase();
+    return /(^|[-_\s])(loading|is-loading|pending)([-_\s]|$)/.test(cls);
+  }
+  function targetLoading(el, styleWin) {
+    if (loadingMarker(el)) return true;
     var indicators = el.querySelectorAll ? el.querySelectorAll('[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i],[data-loading="true"]') : [];
     for (var i = 0; i < indicators.length; i++) if (isVisible(indicators[i], styleWin)) return true;
+    var selector = 'button,input,select,textarea,[role="button"],[role="checkbox"],[role="radio"],[role="switch"],[aria-checked]';
+    for (var row = el.parentElement, depth = 0; row && depth < 3; row = row.parentElement, depth++) {
+      var rect = row.getBoundingClientRect();
+      if (rect.height > 140 || rect.width > Math.min(window.innerWidth, 1200)) break;
+      var controls = row.querySelectorAll(selector);
+      if (controls.length !== 1 || controls[0] !== el) continue;
+      if (loadingMarker(row)) return true;
+      var rowIndicators = row.querySelectorAll('[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i],[data-loading="true"]');
+      for (var j = 0; j < rowIndicators.length; j++) if (isVisible(rowIndicators[j], styleWin)) return true;
+      break;
+    }
     return false;
+  }
+  function containerLoading(el) {
+    for (var node = el && el.parentElement; node && node !== node.ownerDocument.documentElement; node = node.parentElement) {
+      if (loadingMarker(node)) return true;
+    }
+    return false;
+  }
+  function pageLoadingIndicators(doc, styleWin) {
+    var nodes = doc.querySelectorAll('[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i],[data-loading="true"],[aria-busy="true"]'), count = 0;
+    for (var i = 0; i < nodes.length; i++) if (isVisible(nodes[i], styleWin)) count++;
+    return count;
   }
   function destructiveEffect(name, text, tag, role, el) {
     var inputType = clean(el && el.type).toLowerCase();
@@ -254,16 +303,28 @@ const EnumScript = `
     // message", etc. Risk describes activating a consequential control, not
     // editing a draft, so editable targets are never classified here.
     if (!actionable || (el && el.isContentEditable) || role === 'textbox' || role === 'searchbox') return '';
-    var semantic = clean(name + ' ' + text).toLowerCase();
-	    if (/\b(set|choose|select|edit|change)\s+(the\s+)?(publish\s+)?(date|time)\b/.test(semantic)) return '';
-	    if (/\b(schedule (post|publication|publish)|confirm schedule|publish later)\b/.test(semantic) || /^schedule(?:\s+schedule)?$/.test(semantic)) return 'schedule_publish';
-	    if (/\bpublish\b/.test(semantic)) return 'immediate_publish';
-	    if (/\b(delete|destroy|erase)\b/.test(semantic)) return 'destructive_delete';
-	    if (/\b(send|post)\b/.test(semantic)) return 'immediate_send';
-	    if (/\b(pay|payout|purchase|buy|checkout|place order)\b/.test(semantic)) return 'financial_action';
-	    if (/\b(withdraw|withdrawal)\b/.test(semantic)) return 'financial_action';
-	    if (/\b(grant access|revoke access|change permissions|make admin|remove admin)\b/.test(semantic)) return 'permission_change';
-	    if (/\b(deactivate account|close account|transfer account)\b/.test(semantic)) return 'account_change';
+    // Consequence belongs to the control's own accessible name. Descendant or
+    // surrounding editor copy ("post", "publish date", help text) must not
+    // turn a navigation/configuration control into an external commit.
+    var semantic = clean(name).toLowerCase();
+    if (/^(create|new|edit|view|open)\s+(a\s+)?post\b/.test(semantic) || /^(publish|schedule)\s+(date|time)\b/.test(semantic)) return '';
+    if (/^(schedule|confirm schedule|schedule post|schedule publication|publish later)(\b|$)/.test(semantic)) return 'schedule_publish';
+    if (/^(publish|publish now|post now)(\b|$)/.test(semantic)) return 'immediate_publish';
+    if (/^(delete|destroy|erase|remove permanently)(\b|$)/.test(semantic)) return 'destructive_delete';
+    if (/^(send|send now)(\b|$)/.test(semantic)) return 'immediate_send';
+    if (/^(pay|payout|purchase|buy|checkout|place order|withdraw)(\b|$)/.test(semantic)) return 'financial_action';
+    if (/^(grant access|revoke access|change permissions|make admin|remove admin)(\b|$)/.test(semantic)) return 'permission_change';
+    if (/^(deactivate account|close account|transfer account)(\b|$)/.test(semantic)) return 'account_change';
+    return '';
+  }
+  function semanticEffect(name, text, tag, role, el) {
+    var dangerous = destructiveEffect(name, text, tag, role, el);
+    if (dangerous) return dangerous;
+    var semantic = clean(name).toLowerCase();
+    if ((el && el.isContentEditable) || role === 'textbox' || role === 'searchbox') return 'edit_draft';
+    if ((el && (el.getAttribute('aria-haspopup') || el.getAttribute('aria-controls'))) || /^(free access|paid access|more options|action menu)\b/.test(semantic)) return 'open_configuration';
+    if (/^(create|new|view|open)\s+(a\s+)?post\b/.test(semantic) || /^(publish|schedule)\s+(date|time)\b/.test(semantic)) return 'navigation_only';
+    if (tag === 'button' || tag === 'a' || role === 'button' || role === 'link' || role === 'menuitem') return 'navigation_only';
     return '';
   }
 
@@ -365,12 +426,15 @@ const EnumScript = `
         var field = fieldMetadata(el, name);
         var disabled = !!(el.disabled || (el.matches && el.matches(':disabled')) ||
           el.getAttribute('aria-disabled') === 'true' || (el.closest && el.closest('[inert]')));
-        var loading = isLoading(el, styleWin);
+        var targetBusy = targetLoading(el, styleWin);
+        var containerBusy = containerLoading(el);
+        var pageBusy = pageLoadingIndicators(el.ownerDocument || document, styleWin);
 		// Spinners commonly replace the visible text while autosave is active.
 		// Preserve the last stable semantic name for the same logical control.
-		if (loading && !name && somState.names[stableID]) name = somState.names[stableID];
-		if (!loading && name) somState.names[stableID] = name;
+		if (targetBusy && !name && somState.names[stableID]) name = somState.names[stableID];
+		if (!targetBusy && name) somState.names[stableID] = name;
         var effect = destructiveEffect(name, text, tag, role, el);
+        var semantic = semanticEffect(name, text, tag, role, el);
         candidates.push({
           el: el, id: stableID, x: x, y: y, w: w, h: h,
           tag: tag, role: role, text: text, accessible_name: name,
@@ -378,7 +442,9 @@ const EnumScript = `
           placeholder: field ? field.placeholder : '', current_value: field ? field.current_value : null,
           pattern: field ? field.pattern : '', format_hint: field ? field.format_hint : '',
           date_like: !!field, validity: field ? field.validity : null,
-          disabled: disabled, loading: loading, dangerous: effect !== '', destructive_effect: effect,
+          disabled: disabled, loading: targetBusy, target_loading: targetBusy,
+          container_loading: containerBusy, page_loading_indicators: pageBusy,
+          dangerous: effect !== '', effect: semantic, destructive_effect: effect,
           prio: priority(tag, role, el)
         });
       }
@@ -604,12 +670,15 @@ const EnumScript = `
   var out = [];
   for (var k = 0; k < visible.length; k++) {
     var c = visible[k];
+    somState.targets[c.id] = {element:c.el, x:c.x + c.w/2, y:c.y + c.h/2, name:c.accessible_name, role:c.role};
     out.push({
       id: c.id, x: c.x, y: c.y, w: c.w, h: c.h,
       tag: c.tag, role: c.role, text: c.text, accessible_name: c.accessible_name, type: c.type,
       placeholder: c.placeholder, current_value: c.current_value, pattern: c.pattern,
       format_hint: c.format_hint, date_like: c.date_like, validity: c.validity,
-      disabled: c.disabled, loading: c.loading, dangerous: c.dangerous, destructive_effect: c.destructive_effect,
+      disabled: c.disabled, loading: c.loading, target_loading: c.target_loading,
+      container_loading: c.container_loading, page_loading_indicators: c.page_loading_indicators,
+      dangerous: c.dangerous, effect: c.effect, destructive_effect: c.destructive_effect,
       label: k + 1
     });
   }

@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.80
+version: 0.7.81
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.80 adds semantic
-  scroll identities and atomic consequence confirmation while preserving all
-  previous browser, proxy, extraction, session, and input safeguards.
+  Watch, steer, and replay hosted browser sessions. v0.7.81 hardens long-lived
+  Patreon workflows with scoped loading, stable live targets, named switches,
+  verified environment/lifecycle diagnostics, and target-specific waits.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -57,7 +57,8 @@ provides:
         never populate optional fields with guessed or schema-default values.
         Computer ignores mechanically populated empty/default arguments and
         reports what it ignored. environment is an advanced
-        QA/device-emulation override only for a specifically requested user
+        QA/device-emulation override that requires environment_override=true
+        and is only for a specifically requested user
         agent, locale/languages, timezone, geolocation, device scale, mobile,
         or touch profile. Never send environment for normal navigation,
         read-only audits, or saved-login contexts. Proxy overrides are opt-in:
@@ -78,7 +79,9 @@ provides:
         open tabs, then browser_session(action=switch_tab, tab_id=...) or
         browser_session(action=close_tab, tab_id=...). Do not use keyboard
         shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch
-        browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id returned by computer_context_list
+        browser tabs. Cloud sessions default to an explicit 1800-second
+        lifetime and expose effective timeout, started/expires/age, provider
+        status, and browser-observed locale/timezone. Prefer context_id returned by computer_context_list
         to reopen saved browser state; context_name works across providers when
         unique. For a reusable saved context, pass context_name with
         auto_create_context=true; omitted names are only a fallback and are
@@ -116,7 +119,8 @@ provides:
         rejected before mouse dispatch. Omit both consequence fields for
         ordinary clicks. Coordinates receive the same consequence guard. For an
         operation outcome, prefer action=wait_for with declarative URL, text,
-        selector, or semantic-target conditions. It ignores unrelated
+        selector, or semantic-target conditions. target_state can wait for
+        ready/loading/enabled/disabled/checked/unchecked while ignoring unrelated
         background requests and embedded frames. To verify navigation away
         from a known current URL, use type=url_changed with that pre-action
         URL; use url_equals only when the destination URL is known. Use

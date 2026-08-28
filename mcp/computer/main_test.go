@@ -528,9 +528,10 @@ func TestBrowserSessionEnvironmentIsOptInAndPropagates(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
 
 	out, err := app.toolBrowserSession(ctx, map[string]any{
-		"action":   "open",
-		"backend":  "steel",
-		"viewport": map[string]any{"width": 390, "height": 844},
+		"action":               "open",
+		"backend":              "steel",
+		"viewport":             map[string]any{"width": 390, "height": 844},
+		"environment_override": true,
 		"environment": map[string]any{
 			"user_agent":          "Computer-Test/1.0",
 			"locale":              "fr-FR",
@@ -596,15 +597,27 @@ func TestBrowserSessionEnvironmentRejectsUnsupportedAndInvalidSettings(t *testin
 	app := &App{reg: &registry{m: map[string]*session{}}}
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
 	for name, args := range map[string]map[string]any{
-		"invalid timezone": {"action": "open", "backend": "local", "environment": map[string]any{"timezone": "Paris"}},
-		"service":          {"action": "open", "backend": "service", "environment": map[string]any{"locale": "de-DE"}},
-		"attach":           {"action": "open", "backend": "browserbase", "backend_session_id": "provider-1", "environment": map[string]any{"locale": "de-DE"}},
+		"invalid timezone": {"action": "open", "backend": "local", "environment_override": true, "environment": map[string]any{"timezone": "Paris"}},
+		"service":          {"action": "open", "backend": "service", "environment_override": true, "environment": map[string]any{"locale": "de-DE"}},
+		"attach":           {"action": "open", "backend": "browserbase", "backend_session_id": "provider-1", "environment_override": true, "environment": map[string]any{"locale": "de-DE"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := app.toolBrowserSession(ctx, args); err == nil {
 				t.Fatal("expected environment validation error")
 			}
 		})
+	}
+}
+
+func TestBrowserSessionEnvironmentRequiresExplicitOverride(t *testing.T) {
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	_, err := app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "backend": "local",
+		"environment": map[string]any{"timezone": "UTC", "geolocation": map[string]any{"latitude": 0.0, "longitude": 0.0}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "environment_override_required") {
+		t.Fatalf("meaningful environment without acknowledgement should fail closed: %v", err)
 	}
 }
 
@@ -3093,6 +3106,32 @@ func TestBrowserbaseOpenHidesAndDisablesKeepAlive(t *testing.T) {
 		}
 		if _, ok := props["keep_alive"]; ok {
 			t.Fatalf("%s schema exposes hidden keep_alive", toolName)
+		}
+	}
+}
+
+func TestCloudSessionDefaultLifetimeAndDiagnostics(t *testing.T) {
+	previous := newBackend
+	t.Cleanup(func() { newBackend = previous })
+	fake := &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://example.com"}
+	var gotCfg backends.Config
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		gotCfg = cfg
+		return fake, nil
+	}
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	out, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "browserbase"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if gotCfg.Timeout != 1800 || fake.openTimeout != 1800 || result["effective_timeout_seconds"] != 1800 {
+		t.Fatalf("30-minute default did not reach provider and output: cfg=%d open=%d result=%v", gotCfg.Timeout, fake.openTimeout, result)
+	}
+	for _, key := range []string{"session_started_at", "expires_at", "session_age_seconds"} {
+		if _, ok := result[key]; !ok {
+			t.Fatalf("missing lifetime diagnostic %q: %v", key, result)
 		}
 	}
 }

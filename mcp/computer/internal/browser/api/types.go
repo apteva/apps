@@ -91,6 +91,7 @@ type WaitCondition struct {
 	TargetID      string `json:"target_id,omitempty"`
 	Name          string `json:"name,omitempty"`
 	Role          string `json:"role,omitempty"`
+	State         string `json:"state,omitempty"`
 	CaseSensitive bool   `json:"case_sensitive,omitempty"`
 }
 
@@ -244,8 +245,12 @@ type SetOfMarkTarget struct {
 	DateLike          bool           `json:"date_like,omitempty"`
 	Validity          *FieldValidity `json:"validity,omitempty"`
 	Disabled          bool           `json:"disabled"`
-	Loading           bool           `json:"loading"`
+	Loading           bool           `json:"loading"` // compatibility alias for target_loading
+	TargetLoading     bool           `json:"target_loading"`
+	ContainerLoading  bool           `json:"container_loading"`
+	PageLoadingCount  int            `json:"page_loading_indicators"`
 	Dangerous         bool           `json:"dangerous"`
+	Effect            string         `json:"effect,omitempty"`
 	DestructiveEffect string         `json:"destructive_effect,omitempty"`
 }
 
@@ -528,6 +533,32 @@ type EnvironmentOptions struct {
 	Mobile            *bool               `json:"mobile,omitempty"`
 	Touch             *bool               `json:"touch,omitempty"`
 	MaxTouchPoints    *int                `json:"max_touch_points,omitempty"`
+}
+
+type EffectiveEnvironment struct {
+	Locale    string   `json:"locale,omitempty"`
+	Languages []string `json:"languages,omitempty"`
+	Timezone  string   `json:"timezone,omitempty"`
+	UserAgent string   `json:"user_agent,omitempty"`
+	Verified  bool     `json:"verified"`
+}
+
+type EnvironmentReporter interface {
+	EffectiveEnvironment() (EffectiveEnvironment, error)
+}
+
+// ProviderSessionState is lifecycle evidence from a hosted browser provider.
+// It lets the app distinguish an expired provider lease from a generic CDP
+// disconnect without attempting to replay the interrupted action.
+type ProviderSessionState struct {
+	Status      string `json:"status,omitempty"`
+	StartedAt   string `json:"started_at,omitempty"`
+	ExpiresAt   string `json:"expires_at,omitempty"`
+	CloseReason string `json:"close_reason,omitempty"`
+}
+
+type ProviderSessionStateReporter interface {
+	ProviderSessionState(context.Context) (ProviderSessionState, error)
 }
 
 // IsEmpty reports whether applying the environment would be a no-op.
