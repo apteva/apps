@@ -87,6 +87,20 @@ interface CompositionItem {
   result_key?: string;
   overrides?: Record<string, unknown>;
 }
+interface TemplateResponseRule {
+  instruction_kind: string;
+  response: {
+    note?: { enabled?: boolean; required?: boolean; label?: string; placeholder?: string };
+    files?: {
+      enabled?: boolean;
+      required?: boolean;
+      accept?: string[];
+      min_items?: number;
+      max_items?: number;
+      max_size_mb?: number;
+    };
+  };
+}
 interface TemplateVersion {
   id: number;
   version: number;
@@ -94,6 +108,7 @@ interface TemplateVersion {
   title_template: string;
   default_due_hours?: number;
   default_access_grace_days?: number;
+  response_rules?: TemplateResponseRule[];
   composition?: CompositionItem[];
   derived?: {
     result_schema: Record<string, unknown>;
@@ -1384,6 +1399,121 @@ function PublicDomainSelect({
   );
 }
 
+const TEMPLATE_RESPONSE_KINDS = [
+  "audio", "video", "image", "document", "content", "text", "link", "script", "warning", "example", "timer_hint",
+];
+
+function TemplateResponseRulesEditor({
+  rules, onChange,
+}: { rules: TemplateResponseRule[]; onChange: (rules: TemplateResponseRule[]) => void }) {
+  const updateResponse = (index: number, response: TemplateResponseRule["response"]) => {
+    onChange(rules.map((rule, i) => i === index ? { ...rule, response } : rule));
+  };
+  const setNoteMode = (index: number, mode: string) => {
+    const response = { ...rules[index].response };
+    if (mode === "none") delete response.note;
+    else response.note = { ...response.note, enabled: true, required: mode === "required" };
+    updateResponse(index, response);
+  };
+  const setFileMode = (index: number, mode: string) => {
+    const response = { ...rules[index].response };
+    if (mode === "none") delete response.files;
+    else response.files = {
+      ...response.files,
+      enabled: true,
+      required: mode === "required",
+      ...(mode === "required" && !response.files?.min_items ? { min_items: 1 } : {}),
+    };
+    updateResponse(index, response);
+  };
+  const setFileField = (index: number, field: "min_items" | "max_items" | "max_size_mb", value: string) => {
+    const response = { ...rules[index].response };
+    const files = { ...(response.files || {}) };
+    if (value === "") delete files[field];
+    else files[field] = Number(value);
+    response.files = files;
+    updateResponse(index, response);
+  };
+  const addRule = () => {
+    const used = new Set(rules.map((rule) => rule.instruction_kind));
+    const kind = TEMPLATE_RESPONSE_KINDS.find((candidate) => !used.has(candidate));
+    if (!kind) return;
+    onChange([...rules, {
+      instruction_kind: kind,
+      response: { files: { enabled: true, required: true, min_items: 1, max_items: 1 } },
+    }]);
+  };
+
+  return (
+    <div className="space-y-2 border-t border-border pt-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold">Default responses by instruction kind</div>
+          <div className="text-xs text-text-muted mt-0.5">
+            Enforced when a gig is dispatched, including dynamic instruction lists that name this template.
+          </div>
+        </div>
+        <Button type="button" size="xs" onClick={addRule} disabled={rules.length >= TEMPLATE_RESPONSE_KINDS.length}>Add rule</Button>
+      </div>
+      {rules.length === 0 && (
+        <div className="rounded border border-border bg-bg p-3 text-xs text-text-muted">No template response rules.</div>
+      )}
+      {rules.map((rule, index) => {
+        const noteMode = !rule.response.note?.enabled ? "none" : rule.response.note.required ? "required" : "optional";
+        const fileMode = !rule.response.files?.enabled ? "none" : rule.response.files.required ? "required" : "optional";
+        const usedElsewhere = new Set(rules.filter((_, i) => i !== index).map((item) => item.instruction_kind));
+        return (
+          <Panel key={`${rule.instruction_kind}-${index}`} className="p-3 space-y-2 bg-bg">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <label className="text-xs text-text-muted">
+                Instruction kind
+                <Field
+                  as="select"
+                  value={rule.instruction_kind}
+                  onChange={(event) => onChange(rules.map((item, i) => i === index ? { ...item, instruction_kind: event.target.value } : item))}
+                >
+                  {TEMPLATE_RESPONSE_KINDS.map((kind) => <option key={kind} value={kind} disabled={usedElsewhere.has(kind)}>{kind}</option>)}
+                </Field>
+              </label>
+              <label className="text-xs text-text-muted">
+                Note
+                <Field as="select" value={noteMode} onChange={(event) => setNoteMode(index, event.target.value)}>
+                  <option value="none">None</option><option value="optional">Optional</option><option value="required">Required</option>
+                </Field>
+              </label>
+              <label className="text-xs text-text-muted">
+                Files
+                <Field as="select" value={fileMode} onChange={(event) => setFileMode(index, event.target.value)}>
+                  <option value="none">None</option><option value="optional">Optional</option><option value="required">Required</option>
+                </Field>
+              </label>
+            </div>
+            {fileMode !== "none" && (
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                <Field
+                  value={(rule.response.files?.accept || []).join(", ")}
+                  onChange={(event) => {
+                    const response = { ...rule.response };
+                    response.files = { ...response.files, accept: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) };
+                    updateResponse(index, response);
+                  }}
+                  placeholder="Accepted types, e.g. video/*"
+                />
+                <Field type="number" min="0" value={rule.response.files?.min_items ?? ""} onChange={(event) => setFileField(index, "min_items", event.target.value)} placeholder="Minimum files" />
+                <Field type="number" min="0" value={rule.response.files?.max_items ?? ""} onChange={(event) => setFileField(index, "max_items", event.target.value)} placeholder="Maximum files" />
+                <Field type="number" min="0" value={rule.response.files?.max_size_mb ?? ""} onChange={(event) => setFileField(index, "max_size_mb", event.target.value)} placeholder="Max MB each" />
+              </div>
+            )}
+            <div className="flex justify-end">
+              <Button type="button" tone="danger" size="xs" onClick={() => onChange(rules.filter((_, i) => i !== index))}>Remove rule</Button>
+            </div>
+          </Panel>
+        );
+      })}
+    </div>
+  );
+}
+
 function InstructionOrderEditor({
   instructions, selectedIds, onChange,
 }: { instructions: Instruction[]; selectedIds: number[]; onChange: (ids: number[]) => void }) {
@@ -1754,6 +1884,11 @@ function TemplatesTab({ projectId }: { projectId: string }) {
                 {t.current_version.derived.media_manifest.length} media
               </div>
             )}
+            {(t.current_version?.response_rules?.length || 0) > 0 && (
+              <div className="mt-2 text-xs text-text-muted">
+                {t.current_version?.response_rules?.length} response rule{t.current_version?.response_rules?.length === 1 ? "" : "s"}
+              </div>
+            )}
             {t.current_version?.composition && t.current_version.composition.length > 0 && (
               <div className="mt-2 space-y-1">
                 {t.current_version.composition.slice(0, 3).map((c) => (
@@ -1796,11 +1931,13 @@ function TemplateComposer({
 }) {
   const initial = (template.current_version?.composition || []).map((c) => c.instruction_id);
   const [selectedIds, setSelectedIds] = useState<number[]>(initial);
+  const [responseRules, setResponseRules] = useState<TemplateResponseRule[]>(template.current_version?.response_rules || []);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     setSelectedIds((template.current_version?.composition || []).map((c) => c.instruction_id));
+    setResponseRules(template.current_version?.response_rules || []);
   }, [template.id, template.current_version?.id]);
 
   const save = async () => {
@@ -1810,6 +1947,7 @@ function TemplateComposer({
         method: "PUT",
         body: JSON.stringify({
           instructions: preserveCompositionMetadata(selectedIds, template.current_version?.composition || []),
+          response_rules: responseRules,
         }),
       });
       onDone();
@@ -1830,6 +1968,7 @@ function TemplateComposer({
         <Button onClick={onClose} tone="ghost" size="xs">Close</Button>
       </div>
       <InstructionOrderEditor instructions={instructions} selectedIds={selectedIds} onChange={setSelectedIds} />
+      <TemplateResponseRulesEditor rules={responseRules} onChange={setResponseRules} />
       {err && <div className="text-red text-xs">{err}</div>}
       <div className="flex gap-2">
         <Button disabled={busy} onClick={save} tone="primary">Save composition</Button>
