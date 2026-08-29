@@ -40,6 +40,11 @@ type platformStub struct {
 	invoiceGetPayments          []map[string]any
 	subscriptionDiscountCents   int64
 	discountPercentageBPS       int64
+	managedConnectionRequests   []sdk.ManagedConnectionRequest
+	managedTenantRequests       []sdk.ManagedTenantRequest
+	managedGrantRequests        []sdk.ManagedConnectionGrantRequest
+	integrationCalls            []integrationToolCall
+	integrationResult           *sdk.ExecuteResult
 }
 
 type callAppCall struct {
@@ -294,11 +299,27 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.9.1" {
-		t.Errorf("manifest.Version=%q, want 0.9.1", m.Version)
+	if m.Version != "0.10.0" {
+		t.Errorf("manifest.Version=%q, want 0.10.0", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
+	}
+	if m.MinAptevaVersion != "0.41.1" {
+		t.Fatalf("manifest.MinAptevaVersion=%q, want 0.41.1", m.MinAptevaVersion)
+	}
+	requiredPlatformPermissions := map[sdk.Permission]bool{}
+	for _, permission := range m.Requires.Permissions {
+		requiredPlatformPermissions[permission] = true
+	}
+	for _, permission := range []sdk.Permission{
+		sdk.PermConnectionsExecute,
+		sdk.PermConnectionsManageOwnedCredentials,
+		sdk.PermManagedTenantsManage,
+	} {
+		if !requiredPlatformPermissions[permission] {
+			t.Errorf("manifest missing platform permission %s", permission)
+		}
 	}
 	if m.DB == nil || m.DB.Migrations != "migrations/" {
 		t.Fatalf("manifest DB not declared correctly: %+v", m.DB)
@@ -327,7 +348,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	for _, tool := range m.Provides.MCPTools {
 		toolRequires[tool.Name] = tool.Requires
 	}
-	if toolRequires["saas_checkout_create"] != "saas.checkout" || toolRequires["saas_account_create"] != "saas.admin" || toolRequires["saas_account_reconcile"] != "saas.admin" || toolRequires["saas_plan_action_add"] != "saas.admin" || toolRequires["saas_billing_sync"] != "saas.admin" || toolRequires["saas_account_change_plan"] != "saas.admin" || toolRequires["saas_plan_change_get"] != "saas.read" {
+	if toolRequires["saas_checkout_create"] != "saas.checkout" || toolRequires["saas_account_create"] != "saas.admin" || toolRequires["saas_account_reconcile"] != "saas.admin" || toolRequires["saas_plan_action_add"] != "saas.admin" || toolRequires["saas_connection_ensure"] != "saas.admin" || toolRequires["saas_billing_sync"] != "saas.admin" || toolRequires["saas_account_change_plan"] != "saas.admin" || toolRequires["saas_plan_change_get"] != "saas.read" {
 		t.Fatalf("sensitive tools are not permission-gated: %+v", toolRequires)
 	}
 	for _, name := range []string{"catalog", "billing", "subscriptions", "entitlements", "auth"} {
