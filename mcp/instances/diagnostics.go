@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,8 @@ func compareInstanceProvider(ctx *sdk.AppCtx, inst *Instance) (*ProviderComparis
 	}
 	var data json.RawMessage
 	var err error
+	hetznerNormalizedID := ""
+	hetznerNeedsRepair := false
 	if isAPIProvider(inst.Provider) {
 		tool, args, requestErr := apiProviderGetRequest(inst)
 		if requestErr != nil {
@@ -41,14 +44,19 @@ func compareInstanceProvider(ctx *sdk.AppCtx, inst *Instance) (*ProviderComparis
 		}
 		data, err = executeProviderToolOnConnection(ctx, inst.ProviderConnectionID, inst.Provider, tool, args)
 	} else {
-		bound, bindErr := instanceProviderBinding(ctx, inst.Provider)
+		bound, bindErr := storageBinding(ctx, inst.Provider, inst.ProviderConnectionID)
 		if bindErr != nil {
 			return nil, bindErr
 		}
 		tool, args := "", map[string]any{}
 		switch inst.Provider {
 		case "hetzner":
-			tool, args = "server_get", map[string]any{"id": atoiAny(inst.ProviderID)}
+			hetznerNormalizedID, bindErr = validStoredHetznerID(inst.ProviderID)
+			if bindErr != nil {
+				return nil, bindErr
+			}
+			hetznerNeedsRepair = hetznerNormalizedID != strings.TrimSpace(inst.ProviderID)
+			tool, args = "server_get", map[string]any{"id": atoiAny(hetznerNormalizedID)}
 		case "digitalocean":
 			tool, args = "get_droplet", map[string]any{"droplet_id": atoiAny(inst.ProviderID)}
 		default:
@@ -64,9 +72,31 @@ func compareInstanceProvider(ctx *sdk.AppCtx, inst *Instance) (*ProviderComparis
 		}
 		return nil, err
 	}
+	if hetznerNeedsRepair {
+		if verifyErr := verifyHetznerRepairIdentity(inst, data); verifyErr != nil {
+			return nil, verifyErr
+		}
+		fields := map[string]any{"provider_id": hetznerNormalizedID}
+		providerState := firstNonEmpty(findJSONScalar(data, "state"), findJSONScalar(data, "status"))
+		if isReconciliationFailure(inst) && strings.EqualFold(providerState, "running") {
+			fields["status"] = "ready"
+			fields["lifecycle_stage"] = "Ready"
+			fields["primary_error"] = ""
+			fields["error_message"] = ""
+		}
+		repaired, repairErr := updateInstanceAndEmit(ctx, inst.ID, fields)
+		if repairErr != nil {
+			return nil, fmt.Errorf("repair stored Hetzner provider ID: %w", repairErr)
+		}
+		inst = repaired
+	}
 	result.ProviderExists = true
 	result.ProviderState = firstNonEmpty(findJSONScalar(data, "state"), findJSONScalar(data, "status"))
-	_, result.ProviderIPv4, result.ProviderIPv6 = parseProviderResource(inst.Provider, data)
+	if inst.Provider == "hetzner" {
+		_, result.ProviderIPv4, result.ProviderIPv6 = parseHetznerCreateResponse(data)
+	} else {
+		_, result.ProviderIPv4, result.ProviderIPv6 = parseProviderResource(inst.Provider, data)
+	}
 	if result.ProviderIPv4 == "" {
 		result.ProviderIPv4 = firstNonEmpty(findJSONScalar(data, "public_ipv4"), findJSONScalar(data, "address"))
 	}
@@ -81,6 +111,50 @@ func compareInstanceProvider(ctx *sdk.AppCtx, inst *Instance) (*ProviderComparis
 	result.Resources["volumes"] = volumes
 	persistProviderComparison(ctx, inst.ID, result)
 	return result, nil
+}
+
+func validStoredHetznerID(stored string) (string, error) {
+	normalized := normalizeHetznerID(stored)
+	value, err := strconv.ParseUint(normalized, 10, 63)
+	if err != nil || value == 0 {
+		return "", fmt.Errorf("invalid stored provider ID %q", stored)
+	}
+	return strconv.FormatUint(value, 10), nil
+}
+
+func verifyHetznerRepairIdentity(inst *Instance, data json.RawMessage) error {
+	providerName := hetznerServerName(data)
+	if providerName == "" || providerName != inst.Name {
+		return fmt.Errorf("refusing Hetzner provider ID repair: provider name %q does not match tracked name %q", providerName, inst.Name)
+	}
+	_, providerIPv4, providerIPv6 := parseHetznerCreateResponse(data)
+	hasTrackedIP := inst.PublicIPv4 != "" || inst.PublicIPv6 != ""
+	ipMatches := inst.PublicIPv4 != "" && providerIPv4 == inst.PublicIPv4 || inst.PublicIPv6 != "" && providerIPv6 == inst.PublicIPv6
+	if !hasTrackedIP || !ipMatches {
+		return fmt.Errorf("refusing Hetzner provider ID repair: provider IP %q/%q does not match tracked IP %q/%q", providerIPv4, providerIPv6, inst.PublicIPv4, inst.PublicIPv6)
+	}
+	return nil
+}
+
+func hetznerServerName(data json.RawMessage) string {
+	var response struct {
+		Server struct {
+			Name string `json:"name"`
+		} `json:"server"`
+	}
+	if json.Unmarshal(data, &response) != nil {
+		return ""
+	}
+	return response.Server.Name
+}
+
+func isReconciliationFailure(inst *Instance) bool {
+	if inst == nil || inst.Status != "error" {
+		return false
+	}
+	return strings.EqualFold(inst.LifecycleStage, "Reconcile") ||
+		strings.Contains(strings.ToLower(inst.PrimaryError), "provider reconciliation") ||
+		strings.Contains(strings.ToLower(inst.ErrorMessage), "provider reconciliation")
 }
 
 func persistProviderComparison(ctx *sdk.AppCtx, id int64, comparison *ProviderComparison) {
@@ -273,6 +347,10 @@ func reconcileTrackedProviderState(ctx *sdk.AppCtx) {
 		}
 		comparison, compareErr := compareInstanceProvider(ctx, inst)
 		if compareErr != nil {
+			if strings.Contains(compareErr.Error(), "invalid stored provider ID") {
+				message := "provider reconciliation: " + compareErr.Error()
+				_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "lifecycle_stage": "Reconcile", "primary_error": message, "error_message": message})
+			}
 			ctx.Logger().Warn("instances: provider reconciliation failed", "id", inst.ID, "provider", inst.Provider, "err", compareErr)
 			continue
 		}

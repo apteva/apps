@@ -50,6 +50,9 @@ func TestNormalizeHetznerID_ScientificNotation(t *testing.T) {
 	if got := normalizeHetznerID("1.2345678e+07"); got != "12345678" {
 		t.Fatalf("normalizeHetznerID = %q, want 12345678", got)
 	}
+	if got := normalizeHetznerID("1.32664013e+08"); got != "132664013" {
+		t.Fatalf("normalizeHetznerID = %q, want 132664013", got)
+	}
 }
 
 type recordingDeletePlatform struct {
