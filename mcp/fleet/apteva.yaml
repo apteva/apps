@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.10.1
+version: 0.10.2
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -33,6 +33,8 @@ description: |
   v0.10.1 makes hosted clone transfers source-disk safe: ordinary files stream
   directly with resumable rsync, live SQLite databases use sqlite3_rsync, and
   clones stay domainless and stopped until a quarantine rehearsal succeeds.
+
+  v0.10.2 fixes SQLite replica relative-path expansion in hosted clone scripts.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -190,7 +192,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.10.1
+    ref: fleet/v0.10.2
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

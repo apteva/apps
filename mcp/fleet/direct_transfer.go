@@ -325,7 +325,7 @@ rsync -rlptD --safe-links --delete-delay --partial --partial-dir=.fleet-rsync-pa
   "$SRC/" "$DEST:$STAGE/"
 db_count=0
 find "$SRC" -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print | while IFS= read -r db; do
-  rel=\${db#"$SRC"/}
+  rel=${db#"$SRC"/}
   echo "phase=sqlite database=$rel method=sqlite3_rsync resume=true"
   "$SQLITE_RSYNC" -vv "$db" "$DEST:$STAGE/$rel" --ssh "$KEYDIR/ssh" --exe %s
   db_count=$((db_count + 1))
@@ -348,7 +348,7 @@ rsync -rlptD --safe-links --delete-delay --partial --partial-dir=.fleet-rsync-pa
   --exclude='*-wal' --exclude='*-shm' --exclude='*-journal' --exclude='fleet.pid' \
   "$SRC/" "$STAGE/"
 find "$SRC" -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print | while IFS= read -r db; do
-  rel=\${db#"$SRC"/}
+  rel=${db#"$SRC"/}
   echo "phase=sqlite database=$rel method=sqlite3_rsync resume=true"
   "$SQLITE_RSYNC" -v "$db" "$STAGE/$rel"
 done

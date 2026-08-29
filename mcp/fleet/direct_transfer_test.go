@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -39,6 +40,49 @@ func TestSameHostDirectTransferUsesSQLiteRsyncAndPersistentDestinationStage(t *t
 	}
 	if strings.Contains(script, "/tmp/") || strings.Contains(script, "tar ") {
 		t.Fatalf("same-host transfer stages or archives source data:\n%s", script)
+	}
+}
+
+func TestDirectTransferScriptsExpandSQLiteRelativePath(t *testing.T) {
+	scripts := map[string]string{
+		"cross-host": crossHostDirectTransferScript(
+			"/var/lib/apteva-fleet/source",
+			"/var/lib/apteva-fleet/.clone-transfer-copy",
+			"/var/lib/apteva-fleet/.transfers/direct-test",
+			hostedSSHDestination{user: "root", host: "203.0.113.8", port: 22},
+			"203.0.113.8 ssh-ed25519 AAAATEST",
+		),
+		"same-host": sameHostDirectTransferScript(
+			"/var/lib/apteva-fleet/source",
+			"/var/lib/apteva-fleet/copy",
+			"/var/lib/apteva-fleet/.clone-transfer-copy",
+		),
+	}
+	for name, script := range scripts {
+		t.Run(name, func(t *testing.T) {
+			assignment := ""
+			for _, line := range strings.Split(script, "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "rel=") {
+					assignment = line
+					break
+				}
+			}
+			if assignment == "" {
+				t.Fatal("generated script has no relative-path assignment")
+			}
+			command := `SRC=/var/lib/apteva-fleet/source
+db="$SRC/apps/example/state.db"
+` + assignment + `
+printf '%s' "$rel"`
+			out, err := exec.Command("sh", "-c", command).CombinedOutput()
+			if err != nil {
+				t.Fatalf("execute generated relative-path assignment: %v: %s", err, out)
+			}
+			if got, want := string(out), "apps/example/state.db"; got != want {
+				t.Fatalf("relative SQLite path = %q, want %q (assignment %q)", got, want, assignment)
+			}
+		})
 	}
 }
 
