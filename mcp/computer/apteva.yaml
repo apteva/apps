@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.82
+version: 0.7.83
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.82 preserves saved
-  browser-context environments when callers omit overrides or serializers add
-  generated defaults, while retaining explicit environment safety checks.
+  Watch, steer, and replay hosted browser sessions. v0.7.83 makes
+  browser_session the sole agent-visible lifecycle tool and routes legacy
+  app-only aliases through canonical saved-context normalization.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -212,6 +212,7 @@ provides:
         sessions. Returns only safe routing metadata and never proxy URLs or
         credentials.
     - name: browser_open
+      exposure: app_only
       description: |
         Compatibility alias for browser_session(action=open). For ordinary
         browsing pass only url or context_id/context_name. Omit every advanced
@@ -240,6 +241,7 @@ provides:
         status=processing. Returns app-owned playlist URLs and never provider
         credentials or provider API URLs. Args: session_id.
     - name: browser_close
+      exposure: app_only
       description: |
         Close a session opened by this app and release browser/provider
         resources. Use this when finished unless the user explicitly wants the

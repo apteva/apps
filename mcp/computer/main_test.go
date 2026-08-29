@@ -1222,6 +1222,30 @@ func TestBrowserExtractIsAppOnly(t *testing.T) {
 	}
 }
 
+func TestLegacyBrowserLifecycleAliasesAreAppOnly(t *testing.T) {
+	app := &App{}
+	for _, name := range []string{"browser_open", "browser_close"} {
+		runtimeTool := findTool(t, app.MCPTools(), name)
+		if runtimeTool.Exposure != sdk.ToolExposureAppOnly {
+			t.Errorf("runtime %s exposure=%q, want app_only", name, runtimeTool.Exposure)
+		}
+
+		foundManifest := false
+		for _, manifestTool := range app.Manifest().Provides.MCPTools {
+			if manifestTool.Name != name {
+				continue
+			}
+			foundManifest = true
+			if manifestTool.Exposure != sdk.ToolExposureAppOnly {
+				t.Errorf("manifest %s exposure=%q, want app_only", name, manifestTool.Exposure)
+			}
+		}
+		if !foundManifest {
+			t.Errorf("manifest compatibility tool %s is not registered", name)
+		}
+	}
+}
+
 func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	app := &App{}
 	for _, tool := range app.MCPTools() {
@@ -2807,6 +2831,45 @@ func TestBrowserSessionSavedContextOpenPreservesProviderEnvironment(t *testing.T
 		"environment": map[string]any{"timezone": "Europe/Paris"},
 	}); err == nil || !strings.Contains(err.Error(), "environment_override_required") {
 		t.Fatalf("material environment without override authorization should fail: %v", err)
+	}
+}
+
+func TestBrowserOpenCompatibilityAliasUsesCanonicalSavedContextNormalization(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://www.patreon.com/c/alexaentranced"}
+	newBackend = func(backends.Config) (backends.Computer, error) { return fake, nil }
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	created, err := app.toolContextCreate(ctx, map[string]any{
+		"name": "Alexa Patreon", "backend": "local", "persist_default": true,
+	})
+	if err != nil {
+		t.Fatalf("create saved context: %v", err)
+	}
+	contextRow := created.(map[string]any)["context"].(*ComputerContext)
+
+	out, err := app.toolBrowserOpen(ctx, map[string]any{
+		"context_name": "Alexa Patreon", "url": "https://www.patreon.com/c/alexaentranced",
+		"environment": map[string]any{
+			"timezone": "UTC", "device_scale_factor": 0.5, "mobile": false, "touch": false,
+			"geolocation": map[string]any{"latitude": 0.0, "longitude": 0.0, "accuracy": 0.0, "permission": "prompt"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compatibility open with generated defaults: %v", err)
+	}
+	opened := out.(map[string]any)
+	if opened["app_context_id"] != contextRow.ID || fake.openContextID != contextRow.ProviderContextID {
+		t.Fatalf("compatibility alias did not reuse saved context: result=%#v provider_context=%q", opened, fake.openContextID)
+	}
+	if !fake.openEnvironment.IsEmpty() || opened["environment_applied"] != false {
+		t.Fatalf("compatibility alias applied generated environment: result=%#v backend=%+v", opened, fake.openEnvironment)
+	}
+	ignored, _ := opened["ignored_arguments"].([]string)
+	if !slices.Contains(ignored, "environment") {
+		t.Fatalf("compatibility alias did not use canonical normalization diagnostics: %#v", opened)
 	}
 }
 

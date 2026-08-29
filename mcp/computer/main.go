@@ -56,11 +56,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.82
+version: 0.7.83
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.82 preserves saved
-  browser-context environments when callers omit overrides or serializers add
-  generated defaults, while retaining explicit environment safety checks.
+  Watch, steer, and replay hosted browser sessions. v0.7.83 makes
+  browser_session the sole agent-visible lifecycle tool and routes legacy
+  app-only aliases through canonical saved-context normalization.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -109,6 +109,7 @@ provides:
     - name: computer_proxy_profile_list
       description: "List safe proxy profiles available for agent-selected browser sessions. Returns profile ids, names, providers, countries, protocols, and sticky policies; never credentials or proxy URLs."
     - name: browser_open
+      exposure: app_only
       description: "Compatibility alias for browser_session(action=open). For ordinary browsing pass only url or context_id/context_name. Omit every advanced optional field and never synthesize defaults. environment is only for explicitly requested QA/device emulation, never normal navigation, audits, or saved login."
     - name: browser_screenshot
       description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true). Returns screenshot_url, a stable app-owned URL that continues serving the clean final frame after the browser closes."
@@ -118,6 +119,7 @@ provides:
     - name: browser_recording
       description: "Retrieve recording metadata for active or historical app-owned sessions. Browserbase and Steel return app-owned HLS playback URLs; other backends return status=unsupported. Args: session_id."
     - name: browser_close
+      exposure: app_only
       description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Returns view, a browser-view component reference containing only session_id. Compatibility alias for browser_session(action=close)."
   ui_panels:
     - slot: project.page
@@ -737,7 +739,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler:     a.toolProxyProfileList,
 		},
 		{
-			Name: "browser_open",
+			Name:     "browser_open",
+			Exposure: sdk.ToolExposureAppOnly,
 			Description: "Compatibility alias for browser_session(action=open). For ordinary browsing pass only url or context_id/context_name; omit all advanced optional fields and never synthesize defaults. Args: backend? (local|browserbase|steel|browser-engine, default from Computer app settings), " +
 				"url? (navigate after open), context_name?, auto_create_context?, timeout?, viewport?, presentation_mode? (fast|demo, default fast). Use demo for visible, human-paced actions and non-interactive structured-control cues in live views and recordings. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
 				"Pass environment only for an explicitly requested QA/device-emulation profile; never send it for normal navigation, audits, or saved login. " +
@@ -809,6 +812,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "browser_close",
+			Exposure:    sdk.ToolExposureAppOnly,
 			Description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Args: session_id. Returns view, a copyable browser-view component reference containing only session_id. Idempotent — unknown ids return {closed:false}.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
@@ -1224,7 +1228,12 @@ func (a *App) toolBrowserCloseTab(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func (a *App) toolBrowserOpen(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return a.openBrowserSession(ctx, normalizeBrowserSessionArgs(args), false)
+	openArgs := make(map[string]any, len(args)+1)
+	for key, value := range args {
+		openArgs[key] = value
+	}
+	openArgs["action"] = "open"
+	return a.toolBrowserSession(ctx, openArgs)
 }
 
 type resolvedContext struct {
