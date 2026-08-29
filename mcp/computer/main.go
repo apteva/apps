@@ -56,11 +56,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.83
+version: 0.7.84
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.83 makes
-  browser_session the sole agent-visible lifecycle tool and routes legacy
-  app-only aliases through canonical saved-context normalization.
+  Watch, steer, and replay hosted browser sessions. v0.7.84 updates controlled
+  rich-text editors through native browser input, preserves embedded
+  non-editable widgets, and verifies the settled rendered value.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
