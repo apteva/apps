@@ -7,11 +7,118 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestComputerPatreonRealContenteditableWithLLM is an opt-in regression for
+// the real Patreon ProseMirror/Remirror post editor. A real authenticated LLM
+// chooses the post-body target from Computer's screenshot and SoM. The test
+// replaces only the disposable draft body, verifies the reconciled value and
+// protected paywall widget, then restores the exact original body. It never
+// clicks Save, Publish, or Schedule.
+//
+// Required:
+//
+//	RUN_COMPUTER_PATREON_TEXT_LIVE=1
+//	COMPUTER_PATREON_CONTEXT_ID=ctx_...
+//	COMPUTER_PATREON_DRAFT_URL=https://www.patreon.com/.../edit
+//	COMPUTER_PATREON_ORIGINAL_TEXT='exact disposable draft body'
+func TestComputerPatreonRealContenteditableWithLLM(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_PATREON_TEXT_LIVE") != "1" {
+		t.Skip("set RUN_COMPUTER_PATREON_TEXT_LIVE=1 to run the real LLM + Patreon contenteditable test")
+	}
+	if _, err := exec.LookPath("codex"); err != nil {
+		t.Skip("codex CLI is required for the authenticated LLM regression")
+	}
+	contextID := requireLiveEnv(t, "COMPUTER_PATREON_CONTEXT_ID")
+	draftURL := requireLiveEnv(t, "COMPUTER_PATREON_DRAFT_URL")
+	original := requireLiveEnv(t, "COMPUTER_PATREON_ORIGINAL_TEXT")
+	if parsed, err := url.Parse(draftURL); err != nil || !strings.HasSuffix(strings.ToLower(parsed.Hostname()), "patreon.com") || !strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/edit") {
+		t.Fatalf("COMPUTER_PATREON_DRAFT_URL must be a dedicated patreon.com edit URL, got %q", draftURL)
+	}
+
+	client := newLocalComputerMCPClient(t)
+	opened := client.call(t, "browser_session", map[string]any{
+		"action": "open", "context_id": contextID, "url": draftURL, "timeout": 900,
+	})
+	sessionID := stringValue(opened["session_id"])
+	if sessionID == "" {
+		t.Fatalf("open returned no session id: %v", opened)
+	}
+	defer client.call(t, "browser_session", map[string]any{"action": "close", "session_id": sessionID})
+
+	shot := liveScreenshot(t, client, sessionID)
+	frame := decodeScreenshot(t, shot)
+	marker := "COMPUTER_SET_TEXT_LIVE_PROBE_20260829"
+	var decision semanticTextDecision
+	callComputerLLM(t, frame,
+		"Select the single editable Patreon post-body textbox for a reversible test. Do not select or click Save, Publish, Schedule, or any button. Return set_text with the exact text "+marker+". Computer targets: "+mustJSON(shot["som"]),
+		`{"type":"object","additionalProperties":false,"properties":{"action":{"type":"string","enum":["set_text"]},"target_id":{"type":"string"},"expected_name":{"type":"string"},"expected_role":{"type":"string"},"text":{"type":"string","const":"COMPUTER_SET_TEXT_LIVE_PROBE_20260829"},"newline_mode":{"type":"string","enum":["preserve"]},"reason":{"type":"string"}},"required":["action","target_id","expected_name","expected_role","text","newline_mode","reason"]}`,
+		&decision)
+	if decision.TargetID == "" || decision.Text != marker || !strings.EqualFold(decision.ExpectedRole, "textbox") {
+		t.Fatalf("LLM did not select the post-body textbox safely: %+v", decision)
+	}
+	selected := findLiveTarget(t, mapsFromAny(shot["som"]), decision.ExpectedName, true)
+	if stringValue(selected["id"]) != decision.TargetID || boolFromAny(selected["dangerous"]) {
+		t.Fatalf("LLM target did not match the safe live editor: decision=%+v target=%v", decision, selected)
+	}
+
+	selector := "[contenteditable=true][role=textbox]"
+	restored := false
+	defer func() {
+		if restored {
+			return
+		}
+		result := client.call(t, "computer_use", map[string]any{
+			"session_id": sessionID, "action": "set_text", "selector": selector,
+			"text": original, "newline_mode": "preserve",
+		})
+		if !boolFromAny(result["text_verified"]) {
+			t.Errorf("cleanup could not verify restored Patreon body: %v", result)
+		}
+	}()
+
+	changed := client.call(t, "computer_use", map[string]any{
+		"session_id": sessionID, "action": decision.Action,
+		"target_id": decision.TargetID, "som_revision": shot["som_revision"],
+		"expected_name": decision.ExpectedName, "expected_role": decision.ExpectedRole,
+		"text": decision.Text, "newline_mode": decision.NewlineMode, "observation": "som_delta",
+	})
+	if got := stringValue(changed["text_selector"]); got != "" {
+		selector = got
+	}
+	if !boolFromAny(changed["text_verified"]) || stringValue(changed["text_verification"]) != "paragraphs_stable" || stringValue(changed["text_rendered"]) != marker {
+		t.Fatalf("Patreon editor did not retain the reconciled probe value: %v", changed)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	verifiedShot := liveScreenshot(t, client, sessionID)
+	verifiedEditor := findLiveTarget(t, mapsFromAny(verifiedShot["som"]), decision.ExpectedName, true)
+	visibleState := mustJSON(verifiedEditor)
+	if !strings.Contains(visibleState, marker[:12]) || !strings.Contains(visibleState, "Paid access starts here") {
+		t.Fatalf("Patreon visual state lost the probe or protected paywall widget: %s", visibleState)
+	}
+
+	restore := client.call(t, "computer_use", map[string]any{
+		"session_id": sessionID, "action": "set_text", "selector": selector,
+		"text": original, "newline_mode": "preserve",
+	})
+	if !boolFromAny(restore["text_verified"]) || stringValue(restore["text_rendered"]) != original {
+		t.Fatalf("Patreon body restoration was not verified: %v", restore)
+	}
+	restored = true
+	time.Sleep(1200 * time.Millisecond)
+	restoredShot := liveScreenshot(t, client, sessionID)
+	restoredEditor := findLiveTarget(t, mapsFromAny(restoredShot["som"]), decision.ExpectedName, true)
+	restoredState := mustJSON(restoredEditor)
+	if !strings.Contains(restoredState, original[:min(12, len(original))]) || !strings.Contains(restoredState, "Paid access starts here") || strings.Contains(restoredState, marker[:12]) {
+		t.Fatalf("Patreon final visual state was not restored exactly: %s", restoredState)
+	}
+	t.Logf("real LLM selected Patreon editor %s; native contenteditable edit, delayed verification, paywall preservation, and exact restoration passed", decision.TargetID)
+}
 
 // TestComputerPatreonRealSite is the destructive, opt-in release gate for the
 // real Patreon composer. It talks to the user's running local Apteva instance
@@ -181,9 +288,10 @@ func TestComputerPatreonRealSite(t *testing.T) {
 }
 
 type localComputerMCPClient struct {
-	endpoint string
-	apiKey   string
-	http     *http.Client
+	endpoint  string
+	apiKey    string
+	projectID string
+	http      *http.Client
 }
 
 func newLocalComputerMCPClient(t *testing.T) *localComputerMCPClient {
@@ -193,7 +301,7 @@ func newLocalComputerMCPClient(t *testing.T) *localComputerMCPClient {
 		if token == "" {
 			t.Fatal("COMPUTER_MCP_TOKEN is required with COMPUTER_MCP_ENDPOINT")
 		}
-		return &localComputerMCPClient{endpoint: endpoint, apiKey: token, http: &http.Client{Timeout: 90 * time.Second}}
+		return &localComputerMCPClient{endpoint: endpoint, apiKey: token, projectID: strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")), http: &http.Client{Timeout: 90 * time.Second}}
 	}
 	base := strings.TrimSpace(os.Getenv("APTEVA_BASE_URL"))
 	apiKey := strings.TrimSpace(os.Getenv("APTEVA_API_KEY"))
@@ -244,13 +352,16 @@ func newLocalComputerMCPClient(t *testing.T) *localComputerMCPClient {
 
 func (c *localComputerMCPClient) call(t *testing.T, tool string, arguments map[string]any) map[string]any {
 	t.Helper()
-	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": time.Now().UnixNano(), "method": "tools/call", "params": map[string]any{"name": tool, "arguments": arguments}})
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": tool, "arguments": arguments}})
 	req, err := http.NewRequest(http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.projectID != "" {
+		req.Header.Set("X-Apteva-Project-ID", c.projectID)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		t.Fatalf("call %s: %v", tool, err)
