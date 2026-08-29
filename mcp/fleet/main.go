@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.10.0
+version: 0.10.1
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 icon: /ui/icon.svg
@@ -72,7 +72,7 @@ provides:
     - name: tenant_apply_template
       description: Import and apply a project template to a managed tenant.
     - name: tenant_clone
-      description: Clone a Fleet tenant to local or an Instances host without stopping or modifying the source.
+      description: Clone a Fleet tenant with resumable direct hosted transfer and mandatory quarantine before activation.
     - name: tenant_attach_key
       description: Finish admin-driven setup by attaching the tenant's api_key.
     - name: tenant_connect
@@ -82,7 +82,7 @@ provides:
     - name: tenant_get
       description: Full record for one tenant.
     - name: tenant_start
-      description: Start a stopped local tenant.
+      description: Start a stopped tenant, rehearsing unvalidated clones in quarantine first.
     - name: tenant_stop
       description: Stop a running local tenant.
     - name: tenant_delete
@@ -385,7 +385,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_clone",
-			Description: "Clone a Fleet-managed tenant into a new tenant without stopping or modifying the source. Copies the source data dir to a new slug/config dir, creates a new Fleet row, clears public domain links on the clone, and optionally starts the clone on local or an Instances VPS. Args: source_tenant_id (required), slug (required), owner_email? (defaults to source), instance_id? (default source host; 0 = local parent, >0 = Instances VPS), port?, start? (default true).",
+			Description: "Clone a Fleet-managed tenant without stopping or modifying the source. Hosted-to-hosted copies stream directly with resumable rsync and sqlite3_rsync; no full source-side staging directory is created. The clone has no domains and is stopped by default. Its first tenant_start is a quarantine-only rehearsal; call tenant_start again to activate after validation. Args: source_tenant_id (required), slug (required), owner_email? (defaults to source), instance_id? (default source host; 0 = local parent, >0 = Instances VPS), port?, start? (default false; true performs the quarantine rehearsal now and leaves it stopped).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -454,7 +454,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_start",
-			Description: "Start a stopped local tenant. Re-spawns the apteva process at the tenant's existing port + data dir. Returns an error for remote tenants. Args: tenant_id.",
+			Description: "Start a stopped local tenant. For an unvalidated clone, the first call runs a quarantine-only rehearsal and leaves it stopped; call again to activate after validation. Other tenants re-spawn normally at the existing port and data dir. Returns an error for remote-connected tenants. Args: tenant_id.",
 			InputSchema: idOnlySchema(),
 			Handler:     a.toolStart,
 		},

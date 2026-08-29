@@ -75,6 +75,9 @@ type instanceInfo struct {
 	Provider   string `json:"provider"`
 	PublicIPv4 string `json:"public_ipv4"`
 	Status     string `json:"status"`
+	SSHUser    string `json:"ssh_user,omitempty"`
+	SSHHost    string `json:"ssh_host,omitempty"`
+	SSHPort    int    `json:"ssh_port,omitempty"`
 }
 
 func (a *App) getInstanceInfo(ctx *sdk.AppCtx, id int64) (*instanceInfo, error) {

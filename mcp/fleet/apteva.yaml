@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.10.0
+version: 0.10.1
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -29,6 +29,10 @@ description: |
 
   v0.10.0 reads project templates through the platform SDK and can import and
   apply them to new or existing Fleet-managed tenants.
+
+  v0.10.1 makes hosted clone transfers source-disk safe: ordinary files stream
+  directly with resumable rsync, live SQLite databases use sqlite3_rsync, and
+  clones stay domainless and stopped until a quarantine rehearsal succeeds.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -90,7 +94,7 @@ provides:
     - name: tenant_apply_template
       description: "Read a parent-project template, import an exact snapshot into an active tenant project, and apply its apps, agents, and dashboard. Args: tenant_id, template_id, project_description?, source_project_id?, target_project_id?."
     - name: tenant_clone
-      description: "Clone a Fleet-managed tenant without stopping or modifying the source. Copies into an isolated data dir and clears public domain links. With start=true (default), Fleet requires Apteva 0.25.4+, boots the copy in clone quarantine, verifies every source app runtime was rebased or reconstructed at its exact installed version, then stops the validated rehearsal; tenant_start is the explicit activation step. Args: source_tenant_id, slug, owner_email?, instance_id? (default source host; 0 = local parent, >0 = Instances VPS), port?, start?."
+      description: "Clone a Fleet-managed tenant without stopping or modifying the source. Hosted-to-hosted copies stream ordinary files directly with resumable rsync and live SQLite databases with sqlite3_rsync, without a full source-side staging directory. The clone has no domains and is stopped by default. Its first tenant_start runs a quarantine-only rehearsal and leaves it stopped; call tenant_start again to activate after validation. Args: source_tenant_id, slug, owner_email?, instance_id? (default source host; 0 = local parent, >0 = Instances VPS), port?, start? (default false; true runs the rehearsal immediately)."
     - name: tenant_attach_key
       description: "Finish admin-driven setup by attaching the tenant's api_key (created via the tenant dashboard after admin registration). Flips status to active. Args: tenant_id, api_key."
     - name: tenant_connect
@@ -100,7 +104,7 @@ provides:
     - name: tenant_get
       description: "Full record for one tenant + recent events. Args: tenant_id."
     - name: tenant_start
-      description: "Start a stopped local tenant. Args: tenant_id."
+      description: "Start a stopped local tenant. For an unvalidated clone, the first call runs a quarantine-only rehearsal and leaves it stopped; call again to activate. Args: tenant_id."
     - name: tenant_stop
       description: "Stop a running local tenant (process SIGTERM → SIGKILL). Registry only for remote-connected tenants. Args: tenant_id."
     - name: tenant_delete
@@ -186,7 +190,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.10.0
+    ref: fleet/v0.10.1
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

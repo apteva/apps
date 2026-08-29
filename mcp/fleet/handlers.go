@@ -496,6 +496,13 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil || port == 0 {
 		return nil, fmt.Errorf("cannot derive port from base_url %q", t.BaseURL)
 	}
+	requiresQuarantine, err := a.cloneRequiresQuarantine(t.ID)
+	if err != nil {
+		return nil, err
+	}
+	if requiresQuarantine {
+		return a.rehearseCloneInQuarantine(ctx, t, port)
+	}
 
 	// Hosted: re-spawn on the remote VPS. freshSetup=false → no
 	// token scrape; the api_key is still valid against the existing
@@ -568,6 +575,69 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		out["a2a"] = a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_start")
 	}
 	return out, nil
+}
+
+func (a *App) cloneRequiresQuarantine(tenantID string) (bool, error) {
+	cloned, err := a.store.hasEvent(tenantID, "cloned")
+	if err != nil || !cloned {
+		return false, err
+	}
+	validated, err := a.store.hasEvent(tenantID, "clone_rehearsal_validated")
+	if err != nil {
+		return false, err
+	}
+	return !validated, nil
+}
+
+// rehearseCloneInQuarantine is the mandatory first boot for a clone created
+// with start=false. It prepares copied app runtimes while agents, apps,
+// subscriptions, ingress, and refresh workers remain disabled. A second
+// tenant_start is the explicit activation step after this rehearsal succeeds.
+func (a *App) rehearseCloneInQuarantine(ctx *sdk.AppCtx, t *Tenant, port int) (any, error) {
+	version := tenantVersion(t)
+	if !supportsCloneRuntimeRecovery(version) {
+		return nil, fmt.Errorf("clone runs Apteva %q; quarantine rehearsal requires %s or newer — update it before starting", version, cloneQuarantineMinAptevaVersion)
+	}
+	host, err := a.resolveFleetHost(ctx, t.InstanceID)
+	if err != nil {
+		return nil, err
+	}
+	if !host.IsLocal() {
+		if err := a.ensureHostedRuntime(ctx, host.InstanceID); err != nil {
+			return nil, err
+		}
+	}
+	requiredApps, err := a.tenantAppRuntimes(ctx, host, t.ConfigDir)
+	if err != nil {
+		return nil, fmt.Errorf("inventory cloned app runtimes: %w", err)
+	}
+	_ = a.store.setStatus(t.ID, StatusStarting, "user")
+	baseURL, _, err := a.startTenantOnHostMode(ctx, host, t, t.ConfigDir, version, port, t.Status, true)
+	if err != nil {
+		_ = a.store.setStatus(t.ID, StatusFailed, "user")
+		return nil, fmt.Errorf("start clone quarantine: %w", err)
+	}
+	if err := a.waitForQuarantinedRuntimes(ctx, host, t.ConfigDir, requiredApps, 10*time.Minute); err != nil {
+		_ = a.stopTenantOnHost(ctx, t, port)
+		_ = a.store.setStatus(t.ID, StatusFailed, "user")
+		return nil, fmt.Errorf("validate cloned app runtimes: %w", err)
+	}
+	if err := a.stopTenantOnHost(ctx, t, port); err != nil {
+		_ = a.store.setStatus(t.ID, StatusFailed, "user")
+		return nil, fmt.Errorf("stop quarantined clone: %w", err)
+	}
+	if err := a.store.setLocation(t.ID, t.InstanceID, baseURL, t.ConfigDir); err != nil {
+		return nil, err
+	}
+	_ = a.store.setStatus(t.ID, StatusStopped, "user")
+	_ = a.store.recordEvent(t.ID, "clone_rehearsal_validated", "user", map[string]any{"port": port})
+	return map[string]any{
+		"tenant_id":            t.ID,
+		"status":               StatusStopped,
+		"quarantine_validated": true,
+		"started":              false,
+		"next_step":            "Call tenant_start again to activate the clone.",
+	}, nil
 }
 
 func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {

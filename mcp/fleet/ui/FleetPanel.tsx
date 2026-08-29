@@ -2007,7 +2007,7 @@ function CloneTenantDialog({
   );
   const [instanceID, setInstanceID] = useState(tenant.instance_id ?? 0);
   const [port, setPort] = useState("");
-  const [start, setStart] = useState(true);
+	const [start, setStart] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const target = hostOptions.find((i) => i.id === instanceID);
@@ -2068,7 +2068,7 @@ function CloneTenantDialog({
           onChange={(e) => setStart(e.target.checked)}
           className="h-3.5 w-3.5"
         />
-        Start clone after copy
+		Run the clone quarantine rehearsal after copy (the clone remains stopped)
       </label>
       {tenant.domain && (
         <div className="text-xs text-text-dim font-mono">

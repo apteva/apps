@@ -341,6 +341,15 @@ func (s *store) recentEvents(tenantID string, limit int) ([]Event, error) {
 	return out, rows.Err()
 }
 
+func (s *store) hasEvent(tenantID, kind string) (bool, error) {
+	var found int
+	err := s.db.QueryRow(`SELECT 1 FROM fleet_events WHERE tenant_id = ? AND kind = ? LIMIT 1`, tenantID, kind).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (s *store) hardDelete(id string) error {
 	_, err := s.db.Exec(`DELETE FROM fleet_tenants WHERE id = ?`, id)
 	return err

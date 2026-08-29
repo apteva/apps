@@ -73,17 +73,13 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	start := true
+	start := false
 	if v, ok := args["start"].(bool); ok {
 		start = v
 	}
 	cloneVersion := tenantVersion(source)
 	if start && !supportsCloneRuntimeRecovery(cloneVersion) {
 		return nil, fmt.Errorf("source tenant runs Apteva %q; clone rehearsal requires %s or newer — update the tenant before cloning", cloneVersion, cloneQuarantineMinAptevaVersion)
-	}
-	status := StatusStopped
-	if start {
-		status = StatusStarting
 	}
 	setupTokenEnc, err := a.store.getSetupToken(source.ID)
 	if err != nil && !errors.Is(err, ErrNotFound) {
@@ -114,7 +110,7 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		OwnerUserID:    source.OwnerUserID,
 		CurrentVersion: source.CurrentVersion,
 		TargetVersion:  source.TargetVersion,
-		Status:         status,
+		Status:         StatusStopped,
 		InstanceID:     targetID,
 	}
 	if err := a.store.insert(clone, apiKeyEnc, setupTokenEnc); err != nil {
@@ -131,9 +127,30 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			_ = a.removeTenantData(ctx, targetHost, slug, targetDir)
 		}
 	}()
-	if err := a.transferTenantData(ctx, sourceHost, targetHost, sourceDir, targetDir, slug, true); err != nil {
+	_ = a.store.recordEvent(clone.ID, "clone_transfer_started", "user", map[string]any{
+		"source_tenant_id": source.ID,
+		"from_instance_id": source.InstanceID,
+		"to_instance_id":   targetID,
+		"resumable":        sourceHost.InstanceID > 0 && targetHost.InstanceID > 0,
+	})
+	var lastProgress time.Time
+	lastDetail := ""
+	progress := func(phase, detail string) {
+		now := time.Now()
+		if detail == lastDetail || (!lastProgress.IsZero() && now.Sub(lastProgress) < 10*time.Second) {
+			return
+		}
+		lastProgress, lastDetail = now, detail
+		_ = a.store.recordEvent(clone.ID, "clone_transfer_progress", "system", map[string]any{
+			"phase": phase, "detail": detail,
+		})
+	}
+	if err := a.transferTenantDataWithProgress(ctx, sourceHost, targetHost, sourceDir, targetDir, slug, true, progress); err != nil {
 		return nil, fmt.Errorf("transfer clone: %w", err)
 	}
+	_ = a.store.recordEvent(clone.ID, "clone_transfer_completed", "system", map[string]any{
+		"resumable": sourceHost.InstanceID > 0 && targetHost.InstanceID > 0,
+	})
 	a2aIdentityReset, err := a.resetClonedA2AState(ctx, targetHost, targetDir)
 	if err != nil {
 		return nil, fmt.Errorf("reset cloned A2A identity: %w", err)
@@ -151,17 +168,20 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		cleanup = false
 		ctx.Logger().Info("fleet: tenant cloned without start", "source", source.ID, "clone", clone.ID, "slug", slug, "instance_id", targetID)
 		return map[string]any{
-			"tenant_id":          clone.ID,
-			"source_tenant_id":   source.ID,
-			"slug":               slug,
-			"base_url":           a.publicBaseURL(clone.BaseURL),
-			"status":             StatusStopped,
-			"started":            false,
-			"instance_id":        targetID,
-			"domains_copied":     false,
-			"a2a_identity_reset": a2aIdentityReset,
+			"tenant_id":           clone.ID,
+			"source_tenant_id":    source.ID,
+			"slug":                slug,
+			"base_url":            a.publicBaseURL(clone.BaseURL),
+			"status":              StatusStopped,
+			"started":             false,
+			"instance_id":         targetID,
+			"domains_copied":      false,
+			"requires_quarantine": true,
+			"transfer_resumable":  sourceHost.InstanceID > 0 && targetHost.InstanceID > 0,
+			"a2a_identity_reset":  a2aIdentityReset,
 		}, nil
 	}
+	_ = a.store.setStatus(clone.ID, StatusStarting, "user")
 	baseURL, _, err := a.startTenantOnHostMode(ctx, targetHost, clone, targetDir, cloneVersion, port, source.Status, true)
 	if err != nil {
 		_ = a.store.setStatus(clone.ID, StatusFailed, "user")
@@ -195,6 +215,8 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"rehearsal_validated": true,
 		"instance_id":         targetID,
 		"domains_copied":      false,
+		"requires_quarantine": false,
+		"transfer_resumable":  sourceHost.InstanceID > 0 && targetHost.InstanceID > 0,
 		"a2a_identity_reset":  a2aIdentityReset,
 	}, nil
 }

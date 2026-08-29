@@ -41,6 +41,8 @@ type tenantTransfer struct {
 	InUse          bool
 }
 
+type tenantTransferProgress func(phase, detail string)
+
 func (a *App) initTransferState() error {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
@@ -54,6 +56,10 @@ func (a *App) initTransferState() error {
 }
 
 func (a *App) transferTenantData(ctx *sdk.AppCtx, sourceHost, targetHost fleetHost, sourceDir, targetDir, slug string, snapshot bool) error {
+	return a.transferTenantDataWithProgress(ctx, sourceHost, targetHost, sourceDir, targetDir, slug, snapshot, nil)
+}
+
+func (a *App) transferTenantDataWithProgress(ctx *sdk.AppCtx, sourceHost, targetHost fleetHost, sourceDir, targetDir, slug string, snapshot bool, progress tenantTransferProgress) error {
 	var err error
 	if sourceHost.IsLocal() {
 		if _, err := os.Stat(sourceDir); err != nil {
@@ -67,15 +73,7 @@ func (a *App) transferTenantData(ctx *sdk.AppCtx, sourceHost, targetHost fleetHo
 	} else if targetHost.IsLocal() {
 		err = a.streamRemoteTenantToLocal(ctx, sourceHost.InstanceID, sourceDir, targetDir, slug, snapshot)
 	} else {
-		relay, relayErr := os.MkdirTemp(transferScratchRoot(), "relay-*")
-		if relayErr != nil {
-			return relayErr
-		}
-		defer os.RemoveAll(relay)
-		staged := filepath.Join(relay, "tenant")
-		if err = a.streamRemoteTenantToLocal(ctx, sourceHost.InstanceID, sourceDir, staged, slug, snapshot); err == nil {
-			err = a.streamLocalTenantToRemote(ctx, staged, targetHost.InstanceID, targetDir, slug)
-		}
+		err = a.streamRemoteTenantToRemote(ctx, sourceHost, targetHost, sourceDir, targetDir, slug, progress)
 	}
 	if err != nil {
 		return err
@@ -374,6 +372,10 @@ fi
 }
 
 func runHostedTransferJob(ctx *sdk.AppCtx, instanceID int64, script, slug string) error {
+	return runHostedTransferJobWithProgress(ctx, instanceID, script, slug, nil)
+}
+
+func runHostedTransferJobWithProgress(ctx *sdk.AppCtx, instanceID int64, script, slug string, progress tenantTransferProgress) error {
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
 	launch := fmt.Sprintf(`
 set -eu
@@ -411,7 +413,7 @@ printf '%%s\n' "$JOB"
 			_, _, _ = instanceRunCommand(ctx, instanceID, stop, 10)
 			return errors.New("remote transfer timed out")
 		}
-		poll := fmt.Sprintf(`if [ -f %s/done ]; then printf 'done:'; cat %s/done; tail -c 8192 %s/output.log 2>/dev/null || true; else PID=$(cat %s/pid 2>/dev/null || true); if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then echo running; else printf 'failed:'; tail -c 8192 %s/output.log 2>/dev/null || true; fi; fi`, sh(job), sh(job), sh(job), sh(job), sh(job))
+		poll := fmt.Sprintf(`if [ -f %s/done ]; then printf 'done:'; cat %s/done; tail -c 8192 %s/output.log 2>/dev/null || true; else PID=$(cat %s/pid 2>/dev/null || true); if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then printf 'running:\n'; tail -c 8192 %s/output.log 2>/dev/null || true; else printf 'failed:'; tail -c 8192 %s/output.log 2>/dev/null || true; fi; fi`, sh(job), sh(job), sh(job), sh(job), sh(job), sh(job))
 		status, pollCode, pollErr := instanceRunCommand(ctx, instanceID, poll, 15)
 		if pollErr != nil || pollCode != 0 {
 			return fmt.Errorf("poll remote transfer: %w (exit %d): %s", pollErr, pollCode, strings.TrimSpace(status))
@@ -426,6 +428,9 @@ printf '%%s\n' "$JOB"
 				return fmt.Errorf("remote transfer failed with exit %s: %s", strings.TrimSpace(lines[0]), log)
 			}
 			return nil
+		}
+		if strings.HasPrefix(status, "running:") && progress != nil {
+			progress("transfer", strings.TrimSpace(strings.TrimPrefix(status, "running:")))
 		}
 		if strings.HasPrefix(status, "failed:") {
 			return fmt.Errorf("remote transfer job exited without status: %s", strings.TrimSpace(strings.TrimPrefix(status, "failed:")))
