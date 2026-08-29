@@ -501,10 +501,10 @@ func apiProviderCreateRequest(ctx *sdk.AppCtx, provider string, in CreateInstanc
 			// replace root's authorized_keys later in the same boot.
 			"tags": []string{scalewaySSHKeyTag(pubKey)},
 		}
-		if boot := in.Storage.Boot; boot != nil {
+		if boot := in.Storage.Boot; boot != nil && !in.scalewayUseImageDefaultBoot {
 			args["volumes"] = map[string]any{"0": map[string]any{
-				"name": in.Name + "-boot", "size": int64(boot.SizeGB) * 1_000_000_000,
-				"volume_type": scalewayBootProviderType(boot), "boot": true,
+				"size":        int64(boot.SizeGB) * 1_000_000_000,
+				"volume_type": scalewayBootProviderType(boot),
 			}}
 		}
 		return "server_create", args, nil
@@ -649,8 +649,15 @@ func scalewayStandardDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 	}
 	serverArgs := map[string]any{"zone": inst.Region, "server_id": inst.ProviderID}
 	res, gone, err := call("server_get", serverArgs)
-	if err != nil || gone {
+	if err != nil {
 		return err
+	}
+	bootVolumes, err := scalewayBootVolumesForDestroy(ctx, inst, res, gone)
+	if err != nil {
+		return err
+	}
+	if gone {
+		return deleteScalewayBootVolumesAfterServer(ctx, inst, bootVolumes, call)
 	}
 	var details struct {
 		Server struct {
@@ -662,14 +669,20 @@ func scalewayStandardDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 	if state != "stopped" && state != "stopped_in_place" {
 		if _, gone, err = call("server_action", map[string]any{
 			"zone": inst.Region, "server_id": inst.ProviderID, "action": "poweroff",
-		}); err != nil || gone {
+		}); err != nil {
 			return err
+		}
+		if gone {
+			return deleteScalewayBootVolumesAfterServer(ctx, inst, bootVolumes, call)
 		}
 		deadline := time.Now().Add(5 * time.Minute)
 		for {
 			res, gone, err = call("server_get", serverArgs)
-			if err != nil || gone {
+			if err != nil {
 				return err
+			}
+			if gone {
+				return deleteScalewayBootVolumesAfterServer(ctx, inst, bootVolumes, call)
 			}
 			_ = json.Unmarshal(res.Data, &details)
 			state = strings.ToLower(strings.TrimSpace(details.Server.State))
@@ -682,8 +695,116 @@ func scalewayStandardDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 			time.Sleep(5 * time.Second)
 		}
 	}
-	_, _, err = call("server_delete", serverArgs)
-	return err
+	if _, _, err = call("server_delete", serverArgs); err != nil {
+		return err
+	}
+	return deleteScalewayBootVolumesAfterServer(ctx, inst, bootVolumes, call)
+}
+
+func scalewayBootVolumesForDestroy(ctx *sdk.AppCtx, inst *Instance, server *sdk.ExecuteResult, serverGone bool) ([]*InstanceVolume, error) {
+	tracked, err := dbListVolumes(ctx.AppDB(), inst.ID, "")
+	if err != nil {
+		return nil, fmt.Errorf("list Scaleway boot volumes before destroy: %w", err)
+	}
+	boot := make([]*InstanceVolume, 0, len(tracked)+1)
+	seen := map[string]bool{}
+	for _, volume := range tracked {
+		if volume.Role != "boot" || volume.ProviderVolumeID == "" {
+			continue
+		}
+		boot = append(boot, volume)
+		seen[volume.ProviderVolumeID] = true
+	}
+	if serverGone || server == nil || len(server.Data) == 0 {
+		return boot, nil
+	}
+	actual, parseErr := parseScalewayBootVolume(server.Data)
+	if parseErr != nil || seen[actual.ID] {
+		return boot, nil
+	}
+	deletePolicy := "with_instance"
+	if requested, requestErr := bootStorageRequestFromInstance(inst); requestErr != nil {
+		return nil, requestErr
+	} else if requested != nil && requested.DeletePolicy != "" {
+		deletePolicy = requested.DeletePolicy
+	}
+	boot = append(boot, &InstanceVolume{
+		Provider: "scaleway", ProviderConnectionID: inst.ProviderConnectionID,
+		ProviderVolumeID: actual.ID, Role: "boot", StorageClass: actual.StorageClass,
+		ProviderType: actual.ProviderType, Region: inst.Region, Managed: true,
+		DeletePolicy: deletePolicy,
+	})
+	return boot, nil
+}
+
+func deleteScalewayBootVolumesAfterServer(
+	ctx *sdk.AppCtx,
+	inst *Instance,
+	volumes []*InstanceVolume,
+	call func(string, map[string]any) (*sdk.ExecuteResult, bool, error),
+) error {
+	for _, volume := range volumes {
+		if volume.DeletePolicy == "retain" || !volume.Managed {
+			if volume.ID > 0 {
+				if err := dbUpdateVolume(ctx.AppDB(), volume.ID, map[string]any{
+					"instance_id": nil, "status": "available", "mount_path": "", "device_path": "",
+				}); err != nil {
+					return fmt.Errorf("retain Scaleway boot volume %s: %w", volume.ProviderVolumeID, err)
+				}
+			}
+			continue
+		}
+		getTool, deleteTool := "volume_get", "volume_delete"
+		if volume.ProviderType == "l_ssd" || volume.StorageClass == "local" {
+			getTool, deleteTool = "instance_volume_get", "instance_volume_delete"
+		}
+		args := map[string]any{"zone": inst.Region, "volume_id": volume.ProviderVolumeID}
+		deadline := time.Now().Add(5 * time.Minute)
+		for {
+			res, gone, err := call(getTool, args)
+			if err != nil {
+				return fmt.Errorf("wait for Scaleway boot volume %s: %w", volume.ProviderVolumeID, err)
+			}
+			if gone {
+				break
+			}
+			status := strings.ToLower(strings.TrimSpace(firstNonEmpty(findJSONScalar(res.Data, "state"), findJSONScalar(res.Data, "status"))))
+			if status == "" || status == "available" || status == "unattached" {
+				if _, gone, err = call(deleteTool, args); err != nil {
+					return fmt.Errorf("delete Scaleway boot volume %s: %w", volume.ProviderVolumeID, err)
+				}
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("Scaleway boot volume %s did not become available after server deletion (state=%s)", volume.ProviderVolumeID, status)
+			}
+			time.Sleep(5 * time.Second)
+		}
+		if volume.ID > 0 {
+			if _, err := ctx.AppDB().Exec(`DELETE FROM instance_volumes WHERE id=?`, volume.ID); err != nil {
+				return fmt.Errorf("remove absent Scaleway boot volume %s from inventory: %w", volume.ProviderVolumeID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func scalewaySSHProbeError(ctx *sdk.AppCtx, inst *Instance, probeErr error) error {
+	message := fmt.Sprintf("ssh probe: %v", probeErr)
+	if ctx == nil || inst == nil || inst.Provider != "scaleway" || isScalewayAppleInstance(inst) || isScalewayDediboxInstance(inst) {
+		return errors.New(message)
+	}
+	data, err := executeProviderToolOnConnection(ctx, inst.ProviderConnectionID, "scaleway", "server_get", map[string]any{
+		"zone": inst.Region, "server_id": inst.ProviderID,
+	})
+	if err != nil {
+		return errors.New(message)
+	}
+	state, detail := findJSONScalar(data, "state"), findJSONScalar(data, "state_detail")
+	if state != "" || detail != "" {
+		message += fmt.Sprintf(" (Scaleway state=%s, state_detail=%s)", firstNonEmpty(state, "unknown"), firstNonEmpty(detail, "none"))
+	}
+	return errors.New(message)
 }
 
 func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
@@ -712,7 +833,7 @@ func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
 			}
 		}
 		if err := probeSSHReadyFn(fresh, 5*time.Minute); err != nil {
-			_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "error", "error_message": fmt.Sprintf("ssh probe: %v", err)})
+			_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "error", "error_message": scalewaySSHProbeError(ctx, fresh, err).Error()})
 			return
 		}
 		if requestedBoot != nil {

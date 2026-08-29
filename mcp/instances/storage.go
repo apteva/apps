@@ -542,7 +542,11 @@ func deleteProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume) error {
 	case "aws-ec2":
 		tool, args = "volume_delete", map[string]any{"Action": "DeleteVolume", "Version": "2016-11-15", "VolumeId": v.ProviderVolumeID}
 	case "scaleway":
-		tool, args = "volume_delete", map[string]any{"zone": v.Region, "volume_id": v.ProviderVolumeID}
+		tool = "volume_delete"
+		if v.ProviderType == "l_ssd" || v.StorageClass == "local" {
+			tool = "instance_volume_delete"
+		}
+		args = map[string]any{"zone": v.Region, "volume_id": v.ProviderVolumeID}
 	case "huawei-cloud":
 		tool, args = "delete_volume", map[string]any{"volume_id": v.ProviderVolumeID}
 	case "linode":

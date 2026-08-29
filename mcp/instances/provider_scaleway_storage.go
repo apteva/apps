@@ -101,6 +101,12 @@ func validateScalewayBootStorage(ctx *sdk.AppCtx, in *CreateInstanceInput) error
 		if image.ProviderType != "" && image.ProviderType != expectedType {
 			return fmt.Errorf("Scaleway image %s is backed by %s and cannot create a %s boot volume; select the %s-compatible image variant", image.Description, image.ProviderType, expectedType, expectedType)
 		}
+		// For a marketplace image on a local-capable type, omitting volumes
+		// asks Scaleway to create the image-derived l_ssd at the type's maximum
+		// local capacity. This avoids the empty-volume form entirely.
+		in.scalewayUseImageDefaultBoot = expectedType == "l_ssd" &&
+			image.ProviderType == "l_ssd" && constraint.MaxSizeGB > 0 &&
+			boot.SizeGB == constraint.MaxSizeGB
 		return nil
 	}
 	return fmt.Errorf("Scaleway image %q is not present in the live catalog", in.Image)

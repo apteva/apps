@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -119,7 +120,8 @@ func TestScalewaySSHKeyTagMatchesOfficialCLIEncoding(t *testing.T) {
 
 type scalewayDestroyPlatform struct {
 	tk.BasePlatformClient
-	tools []string
+	tools      []string
+	serverData json.RawMessage
 }
 
 func (p *scalewayDestroyPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -134,6 +136,9 @@ func (p *scalewayDestroyPlatform) ExecuteIntegrationTool(_ int64, tool string, _
 	p.tools = append(p.tools, tool)
 	data := json.RawMessage(`{}`)
 	if tool == "server_get" {
+		if len(p.serverData) > 0 {
+			return &sdk.ExecuteResult{Success: true, Status: 200, Data: p.serverData}, nil
+		}
 		state := "running"
 		if len(p.tools) > 2 {
 			state = "stopped"
@@ -141,6 +146,15 @@ func (p *scalewayDestroyPlatform) ExecuteIntegrationTool(_ int64, tool string, _
 		data = json.RawMessage(`{"server":{"state":"` + state + `"}}`)
 	}
 	return &sdk.ExecuteResult{Success: true, Status: 200, Data: data}, nil
+}
+
+func TestScalewaySSHProbeErrorIncludesProviderStateDetail(t *testing.T) {
+	platform := &scalewayDestroyPlatform{serverData: json.RawMessage(`{"server":{"state":"starting","state_detail":"booting kernel"}}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	err := scalewaySSHProbeError(ctx, &Instance{Provider: "scaleway", ProviderConnectionID: 7, ProviderID: "server-1", Region: "fr-par-1"}, errors.New("timed out"))
+	if err == nil || !strings.Contains(err.Error(), "state=starting") || !strings.Contains(err.Error(), "state_detail=booting kernel") {
+		t.Fatalf("error = %v", err)
+	}
 }
 
 func TestScalewayDestroyStopsRunningServerBeforeDelete(t *testing.T) {
@@ -153,5 +167,36 @@ func TestScalewayDestroyStopsRunningServerBeforeDelete(t *testing.T) {
 	want := []string{"server_get", "server_action", "server_get", "server_delete"}
 	if strings.Join(platform.tools, ",") != strings.Join(want, ",") {
 		t.Fatalf("tools = %#v, want %#v", platform.tools, want)
+	}
+}
+
+func TestScalewayDestroyDeletesTrackedLocalBootVolumeAfterServer(t *testing.T) {
+	platform := &scalewayDestroyPlatform{serverData: json.RawMessage(`{"server":{"state":"stopped","volumes":{"0":{"id":"local-1","volume_type":"l_ssd","boot":true}}}}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
+		Name: "vm", Provider: "scaleway", ProviderConnectionID: 7, ProviderID: "server-1",
+		Region: "fr-par-1", Status: "ready",
+		Storage: InstanceStorageRequest{Boot: &BootStorageRequest{
+			SizeGB: 80, StorageClass: "local", Tier: "local", ProviderType: "l_ssd", DeletePolicy: "with_instance",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := persistScalewayBootVolume(ctx.AppDB(), inst, &scalewayBootVolume{
+		ID: "local-1", ProviderType: "l_ssd", StorageClass: "local", SizeGB: 80,
+	}, &BootStorageRequest{SizeGB: 80, StorageClass: "local", Tier: "local", ProviderType: "l_ssd", DeletePolicy: "with_instance"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiProviderDestroy(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"server_get", "server_delete", "instance_volume_get", "instance_volume_delete"}
+	if strings.Join(platform.tools, ",") != strings.Join(want, ",") {
+		t.Fatalf("tools = %#v, want %#v", platform.tools, want)
+	}
+	volumes, err := dbListVolumes(ctx.AppDB(), inst.ID, "")
+	if err != nil || len(volumes) != 0 {
+		t.Fatalf("boot volume inventory after destroy = %#v, err=%v", volumes, err)
 	}
 }

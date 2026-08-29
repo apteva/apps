@@ -85,15 +85,18 @@ func TestScalewayBootStorageRequestsMapLocalAndBlock(t *testing.T) {
 		name         string
 		size         string
 		image        string
+		sizeGB       int
 		storageClass string
 		wantType     string
+		wantOmitted  bool
 	}{
-		{name: "DEV1-L local SSD", size: "DEV1-L", image: "image-local", storageClass: "local", wantType: "l_ssd"},
-		{name: "POP2-HC block storage", size: "POP2-HC-2C-4G", image: "image-sbs", storageClass: "block", wantType: "sbs_volume"},
+		{name: "DEV1-L full local SSD", size: "DEV1-L", image: "image-local", sizeGB: 80, storageClass: "local", wantType: "l_ssd", wantOmitted: true},
+		{name: "DEV1-L custom local SSD", size: "DEV1-L", image: "image-local", sizeGB: 40, storageClass: "local", wantType: "l_ssd"},
+		{name: "POP2-HC block storage", size: "POP2-HC-2C-4G", image: "image-sbs", sizeGB: 80, storageClass: "block", wantType: "sbs_volume"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			in := CreateInstanceInput{Name: "vm", Provider: "scaleway", ProviderConnectionID: 7, Region: "fr-par-1", Size: tt.size, Image: tt.image, Storage: InstanceStorageRequest{Boot: &BootStorageRequest{SizeGB: 80, StorageClass: tt.storageClass, DeletePolicy: "with_instance"}}}
+			in := CreateInstanceInput{Name: "vm", Provider: "scaleway", ProviderConnectionID: 7, Region: "fr-par-1", Size: tt.size, Image: tt.image, Storage: InstanceStorageRequest{Boot: &BootStorageRequest{SizeGB: tt.sizeGB, StorageClass: tt.storageClass, DeletePolicy: "with_instance"}}}
 			if err := validateStorageRequest("scaleway", in.Storage); err != nil {
 				t.Fatal(err)
 			}
@@ -104,10 +107,26 @@ func TestScalewayBootStorageRequestsMapLocalAndBlock(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			volumes := args["volumes"].(map[string]any)
+			volumesValue, present := args["volumes"]
+			if tt.wantOmitted {
+				if present {
+					t.Fatalf("full-capacity local root must omit volumes, got %#v", volumesValue)
+				}
+				return
+			}
+			if !present {
+				t.Fatal("explicit root volume mapping is missing")
+			}
+			volumes := volumesValue.(map[string]any)
 			boot := volumes["0"].(map[string]any)
-			if boot["volume_type"] != tt.wantType || boot["size"] != int64(80_000_000_000) {
+			if boot["volume_type"] != tt.wantType || boot["size"] != int64(tt.sizeGB)*1_000_000_000 {
 				t.Fatalf("boot mapping = %#v", boot)
+			}
+			if _, present := boot["name"]; present {
+				t.Fatalf("image-derived root must not include name: %#v", boot)
+			}
+			if _, present := boot["boot"]; present {
+				t.Fatalf("image-derived root must not include boot: %#v", boot)
 			}
 		})
 	}

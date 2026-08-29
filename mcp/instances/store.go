@@ -103,6 +103,10 @@ type CreateInstanceInput struct {
 	MonthlyCostCents     int
 	PendingSize          string
 	Storage              InstanceStorageRequest
+	// scalewayUseImageDefaultBoot is set during live storage validation when
+	// Scaleway's marketplace image can create the requested full-capacity
+	// local root volume more safely than an explicit volumes map.
+	scalewayUseImageDefaultBoot bool
 }
 
 // ─── Errors ────────────────────────────────────────────────────────
@@ -292,10 +296,9 @@ func dbDeleteInstance(db *sql.DB, id int64) error {
 		return err
 	}
 	defer tx.Rollback()
-	// Boot volumes are destroyed with the upstream instance. Remove their
-	// inventory rows instead of leaving detached-looking records for storage
-	// that no longer exists. Retained data volumes have already been detached
-	// and had instance_id cleared by prepareVolumesForInstanceDestroy.
+	// Provider cleanup removes managed boot volumes and clears instance_id on
+	// retained ones before this transaction. Remove only any remaining attached
+	// boot inventory; retained boot and data volumes have instance_id cleared.
 	if _, err = tx.Exec(`DELETE FROM instance_volumes WHERE instance_id = ? AND role = 'boot'`, id); err != nil {
 		return err
 	}

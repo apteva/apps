@@ -95,7 +95,16 @@ types such as POP2 accept `storage_class=block`, which maps to `sbs_volume`.
 The chosen image must use a compatible local or SBS root snapshot. Readiness
 persists the provider-reported boot volume and verifies both its native type and
 size, then checks that the guest root filesystem expanded to use the requested
-space.
+space. Image-derived root-volume requests never send empty-volume fields. A
+full-capacity local request, such as DEV1-L with 80 GB, omits the volume map so
+Scaleway creates the marketplace image's maximum local root disk. Smaller local
+and explicit block roots send only `size` and `volume_type`.
+
+Scaleway server deletion snapshots the attached root-volume identity first,
+deletes the server, waits for the root volume to detach, and then deletes an
+app-managed boot volume whose policy is `with_instance`. Local `l_ssd` roots use
+the Instance API while SBS roots use the Block API. A retained boot volume is
+detached from the instance inventory instead of being silently discarded.
 
 Guest activation is provider-neutral. `instance_volume_prepare` discovers the
 attached device through stable `/dev/disk/by-id` identifiers and a strict size
