@@ -31,21 +31,27 @@ type Instance struct {
 	SSHPort              int    `json:"ssh_port,omitempty"`
 	// SSH keys are kept server-side only — never returned to MCP /
 	// REST callers. Cleared in API responses by stripSecrets().
-	SSHPrivateKey        string               `json:"-"`
-	SSHPublicKey         string               `json:"ssh_public_key,omitempty"`
-	SSHHostKey           string               `json:"-"`
-	TagsJSON             string               `json:"tags_json,omitempty"`
-	ResourcesJSON        string               `json:"resources_json,omitempty"`
-	StorageJSON          string               `json:"storage_json,omitempty"`
-	ProviderMetadataJSON string               `json:"-"`
-	PortsJSON            string               `json:"ports_json,omitempty"`
-	MonthlyCostCents     int                  `json:"monthly_cost_cents"`
-	PendingSize          string               `json:"pending_size,omitempty"`
-	Capabilities         InstanceCapabilities `json:"capabilities"`
-	ErrorMessage         string               `json:"error,omitempty"`
-	CreatedAt            string               `json:"created_at,omitempty"`
-	ReadyAt              string               `json:"ready_at,omitempty"`
-	DestroyedAt          string               `json:"destroyed_at,omitempty"`
+	SSHPrivateKey         string               `json:"-"`
+	SSHPublicKey          string               `json:"ssh_public_key,omitempty"`
+	SSHHostKey            string               `json:"-"`
+	TagsJSON              string               `json:"tags_json,omitempty"`
+	ResourcesJSON         string               `json:"resources_json,omitempty"`
+	StorageJSON           string               `json:"storage_json,omitempty"`
+	ProviderMetadataJSON  string               `json:"-"`
+	PortsJSON             string               `json:"ports_json,omitempty"`
+	MonthlyCostCents      int                  `json:"monthly_cost_cents"`
+	PendingSize           string               `json:"pending_size,omitempty"`
+	Capabilities          InstanceCapabilities `json:"capabilities"`
+	ErrorMessage          string               `json:"error,omitempty"`
+	LifecycleStage        string               `json:"lifecycle_stage,omitempty"`
+	PrimaryError          string               `json:"primary_error,omitempty"`
+	CleanupError          string               `json:"cleanup_error,omitempty"`
+	RetainOnFailure       bool                 `json:"retain_for_diagnosis"`
+	ProviderInventoryJSON string               `json:"provider_inventory_json,omitempty"`
+	ProviderCheckedAt     string               `json:"provider_checked_at,omitempty"`
+	CreatedAt             string               `json:"created_at,omitempty"`
+	ReadyAt               string               `json:"ready_at,omitempty"`
+	DestroyedAt           string               `json:"destroyed_at,omitempty"`
 }
 
 type InstanceCapabilities struct {
@@ -103,6 +109,9 @@ type CreateInstanceInput struct {
 	MonthlyCostCents     int
 	PendingSize          string
 	Storage              InstanceStorageRequest
+	ElasticMetal         *ElasticMetalConfig
+	RetainOnFailure      bool
+	RetainOnFailureSet   bool
 	// scalewayUseImageDefaultBoot is set during live storage validation when
 	// Scaleway's marketplace image can create the requested full-capacity
 	// local root volume more safely than an explicit volumes map.
@@ -136,6 +145,7 @@ func ensureLocalInstance(db *sql.DB) error {
 const instanceCols = `id, name, provider, provider_connection_id, provider_id, public_ipv4, public_ipv6,
 		status, region, size, image, platform, resource_class, deletable_at, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key, ssh_host_key,
 		tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, error_message,
+		lifecycle_stage, primary_error, cleanup_error, retain_on_failure, provider_inventory_json, COALESCE(provider_checked_at,''),
 		COALESCE(created_at,''), COALESCE(ready_at,''), COALESCE(destroyed_at,'')`
 
 func scanInstance(s rowScanner) (*Instance, error) {
@@ -143,6 +153,7 @@ func scanInstance(s rowScanner) (*Instance, error) {
 	if err := s.Scan(&i.ID, &i.Name, &i.Provider, &i.ProviderConnectionID, &i.ProviderID, &i.PublicIPv4, &i.PublicIPv6,
 		&i.Status, &i.Region, &i.Size, &i.Image, &i.Platform, &i.ResourceClass, &i.DeletableAt, &i.SSHUser, &i.SSHHost, &i.SSHPort, &i.SSHPrivateKey, &i.SSHPublicKey, &i.SSHHostKey,
 		&i.TagsJSON, &i.ResourcesJSON, &i.StorageJSON, &i.ProviderMetadataJSON, &i.PortsJSON, &i.MonthlyCostCents, &i.PendingSize, &i.ErrorMessage,
+		&i.LifecycleStage, &i.PrimaryError, &i.CleanupError, &i.RetainOnFailure, &i.ProviderInventoryJSON, &i.ProviderCheckedAt,
 		&i.CreatedAt, &i.ReadyAt, &i.DestroyedAt,
 	); err != nil {
 		return nil, err
@@ -174,6 +185,9 @@ func dbCreateInstance(db *sql.DB, in CreateInstanceInput) (*Instance, error) {
 	if in.SSHPort == 0 {
 		in.SSHPort = 22
 	}
+	if !in.RetainOnFailureSet {
+		in.RetainOnFailure = true
+	}
 	storageJSON := "{}"
 	if in.Storage.Boot != nil {
 		if encoded, marshalErr := json.Marshal(in.Storage); marshalErr == nil {
@@ -184,11 +198,11 @@ func dbCreateInstance(db *sql.DB, in CreateInstanceInput) (*Instance, error) {
 		INSERT INTO instances (
 			name, provider, provider_connection_id, provider_id, public_ipv4, public_ipv6, status,
 				region, size, image, platform, resource_class, deletable_at, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key, ssh_host_key,
-				tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, retain_on_failure, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.Name, in.Provider, in.ProviderConnectionID, in.ProviderID, in.PublicIPv4, in.PublicIPv6, in.Status,
 		in.Region, in.Size, in.Image, in.Platform, in.ResourceClass, in.DeletableAt, in.SSHUser, in.SSHHost, in.SSHPort, in.SSHPrivateKey, in.SSHPublicKey, in.SSHHostKey,
-		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), storageJSON, nullStr(in.ProviderMetadataJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, in.PendingSize, nowUTC(),
+		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), storageJSON, nullStr(in.ProviderMetadataJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, in.PendingSize, in.RetainOnFailure, nowUTC(),
 	)
 	if err != nil {
 		return nil, err
@@ -217,6 +231,7 @@ func dbUpdateInstance(db *sql.DB, id int64, fields map[string]any) error {
 		"region", "size", "image", "platform", "resource_class", "deletable_at", "ssh_user", "ssh_host", "ssh_port", "ssh_private_key",
 		"ssh_public_key", "ssh_host_key", "tags_json", "resources_json", "storage_json", "provider_metadata_json", "ports_json", "monthly_cost_cents", "pending_size",
 		"error_message", "ready_at", "destroyed_at",
+		"lifecycle_stage", "primary_error", "cleanup_error", "retain_on_failure", "provider_inventory_json", "provider_checked_at",
 	} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
@@ -242,7 +257,7 @@ func dbTransitionStatus(db *sql.DB, id int64, from []string, to string, fields m
 	fields["status"] = to
 	cols := make([]string, 0, len(fields))
 	args := make([]any, 0, len(fields)+len(from)+1)
-	for _, k := range []string{"status", "size", "pending_size", "error_message", "ready_at", "destroyed_at"} {
+	for _, k := range []string{"status", "size", "pending_size", "error_message", "ready_at", "destroyed_at", "lifecycle_stage", "primary_error", "cleanup_error", "provider_inventory_json", "provider_checked_at"} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
 			args = append(args, v)

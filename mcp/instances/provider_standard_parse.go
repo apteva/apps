@@ -73,6 +73,7 @@ func parseProviderServerTypes(provider string, data json.RawMessage) ([]ServerTy
 				Arch              string          `json:"arch"`
 				HourlyPrice       json.RawMessage `json:"hourly_price"`
 				MonthlyPrice      json.RawMessage `json:"monthly_price"`
+				BlockBandwidth    int64           `json:"block_bandwidth"`
 				VolumesConstraint struct {
 					MinSize int64 `json:"min_size"`
 					MaxSize int64 `json:"max_size"`
@@ -97,13 +98,14 @@ func parseProviderServerTypes(provider string, data json.RawMessage) ([]ServerTy
 				if maxSize > 0 {
 					bootStorage = append(bootStorage, StorageConstraint{
 						StorageClass: "local", ProviderType: "l_ssd",
-						MinSizeGB: decimalGBInt(maxInt64(p.VolumesConstraint.MinSize, local.MinSize)),
-						MaxSizeGB: decimalGBInt(maxSize),
+						MinSizeGB:  decimalGBInt(maxInt64(p.VolumesConstraint.MinSize, local.MinSize)),
+						MaxSizeGB:  decimalGBInt(maxSize),
+						Technology: "ssd", Persistent: false, Replication: "none", Billing: "included",
 					})
 				}
 			}
 			if p.Capabilities.BlockStorage {
-				bootStorage = append(bootStorage, StorageConstraint{StorageClass: "block", ProviderType: "sbs_volume"})
+				bootStorage = append(bootStorage, StorageConstraint{StorageClass: "block", ProviderType: "sbs_volume", Technology: "nvme", IOPS: 5000, BandwidthMbps: int(p.BlockBandwidth * 8 / 1_000_000), Persistent: true, Replication: "3 replicas", Billing: "per_gb"})
 			}
 			diskGB := 0
 			for _, constraint := range bootStorage {
@@ -475,7 +477,7 @@ func parseProviderResource(provider string, data json.RawMessage) (id, ipv4, ipv
 			}
 		case "scaleway":
 			candidateID = mapString(obj, "id")
-			if candidateID != "" && (mapValue(obj, "commercial_type") != nil || mapValue(obj, "public_ip") != nil || mapValue(obj, "ssh_username") != nil || mapValue(obj, "interfaces") != nil) {
+			if candidateID != "" && (mapValue(obj, "commercial_type") != nil || mapValue(obj, "public_ip") != nil || mapValue(obj, "ssh_username") != nil || mapValue(obj, "interfaces") != nil || mapValue(obj, "offer_id") != nil || mapValue(obj, "ips") != nil) {
 				ipv4 = nestedMapString(obj, "public_ip", "address")
 				if ipv4 == "" {
 					ipv4 = firstAddress(obj, "public_ips", 4)
@@ -484,9 +486,12 @@ func parseProviderResource(provider string, data json.RawMessage) (id, ipv4, ipv
 					ipv4 = firstAddress(obj, "interfaces", 4)
 				}
 				if ipv4 == "" {
+					ipv4 = firstAddress(obj, "ips", 4)
+				}
+				if ipv4 == "" {
 					ipv4 = mapString(obj, "ip")
 				}
-				ipv6 = firstNonEmpty(nestedMapString(obj, "ipv6", "address"), firstAddress(obj, "public_ips", 6), firstAddress(obj, "interfaces", 6))
+				ipv6 = firstNonEmpty(nestedMapString(obj, "ipv6", "address"), firstAddress(obj, "public_ips", 6), firstAddress(obj, "interfaces", 6), firstAddress(obj, "ips", 6))
 			}
 		case "huawei-cloud":
 			candidateID = firstMapString(obj, "id", "server_id")

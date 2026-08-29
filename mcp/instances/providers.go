@@ -218,7 +218,17 @@ func destroyProviderInstance(ctx *sdk.AppCtx, inst *Instance) error {
 	}
 }
 
+type DestroyOptions struct {
+	Force             bool
+	RetainVolumes     *bool
+	RetainFlexibleIPs bool
+}
+
 func destroyManagedInstance(ctx *sdk.AppCtx, inst *Instance) error {
+	return destroyManagedInstanceWithOptions(ctx, inst, DestroyOptions{})
+}
+
+func destroyManagedInstanceWithOptions(ctx *sdk.AppCtx, inst *Instance, options DestroyOptions) error {
 	if inst == nil {
 		return ErrInstanceNotFound
 	}
@@ -227,7 +237,7 @@ func destroyManagedInstance(ctx *sdk.AppCtx, inst *Instance) error {
 	}
 	previous := inst.Status
 	_, claimed, err := transitionInstanceAndEmit(ctx, inst.ID,
-		[]string{"pending", "provisioning", "ready", "error"}, "destroying", nil)
+		[]string{"pending", "provisioning", "ready", "error"}, "destroying", map[string]any{"lifecycle_stage": "Delete", "cleanup_error": ""})
 	if err != nil {
 		return err
 	}
@@ -238,12 +248,27 @@ func destroyManagedInstance(ctx *sdk.AppCtx, inst *Instance) error {
 	if err != nil {
 		return err
 	}
-	if err := prepareVolumesForInstanceDestroy(ctx, inst.ID); err != nil {
-		_, _, _ = transitionInstanceAndEmit(ctx, inst.ID, []string{"destroying"}, previous, map[string]any{"error_message": err.Error()})
+	if options.RetainVolumes != nil {
+		policy := "with_instance"
+		if *options.RetainVolumes {
+			policy = "retain"
+		}
+		if _, err = ctx.AppDB().Exec(`UPDATE instance_volumes SET delete_policy=? WHERE instance_id=? AND managed=1`, policy, inst.ID); err != nil {
+			return err
+		}
+	}
+	if err := prepareVolumesForInstanceDestroy(ctx, inst.ID, options.Force); err != nil {
+		_, _, _ = transitionInstanceAndEmit(ctx, inst.ID, []string{"destroying"}, previous, map[string]any{"cleanup_error": err.Error(), "lifecycle_stage": "Delete"})
 		return err
 	}
-	if err := destroyProviderInstance(ctx, claimedInst); err != nil {
-		_, _, _ = transitionInstanceAndEmit(ctx, inst.ID, []string{"destroying"}, previous, map[string]any{"error_message": err.Error()})
+	var providerErr error
+	if isScalewayElasticMetalInstance(claimedInst) {
+		providerErr = scalewayElasticMetalDestroyWithOptions(ctx, claimedInst, options.RetainFlexibleIPs)
+	} else {
+		providerErr = destroyProviderInstance(ctx, claimedInst)
+	}
+	if err := providerErr; err != nil {
+		_, _, _ = transitionInstanceAndEmit(ctx, inst.ID, []string{"destroying"}, previous, map[string]any{"cleanup_error": err.Error(), "lifecycle_stage": "Delete"})
 		return err
 	}
 	if err := deleteInstanceAndEmit(ctx, claimedInst); err != nil {

@@ -306,16 +306,9 @@ func createScalewayObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (
 	if in.Plan == "" {
 		in.Plan = "standard"
 	}
-	if _, err = executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "object_bucket_create", map[string]any{"bucket": bucket, "region": region}); err != nil {
-		return nil, nil, err
-	}
-	cleanupBucket := true
-	defer func() {
-		if cleanupBucket {
-			_, _ = executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "object_bucket_delete", map[string]any{"bucket": bucket, "region": region})
-		}
-	}()
-
+	// Resolve the default project and IAM policy before creating anything. This
+	// keeps an invalid credential/project configuration a genuinely read-only
+	// failure and avoids a bucket that immediately needs rollback.
 	projectID, err := scalewayDefaultProjectForConnection(ctx, in.ProviderConnectionID)
 	if err != nil {
 		return nil, nil, err
@@ -332,6 +325,16 @@ func createScalewayObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (
 	if err != nil {
 		return nil, nil, fmt.Errorf("load Scaleway API-key expiration policy: %w", err)
 	}
+	if _, err = executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "object_bucket_create", map[string]any{"bucket": bucket, "region": region}); err != nil {
+		return nil, nil, err
+	}
+	cleanupBucket := true
+	defer func() {
+		if cleanupBucket {
+			_, _ = executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "object_bucket_delete", map[string]any{"bucket": bucket, "region": region})
+		}
+	}()
+
 	resourceName := scalewayIAMName(in.Name)
 	appData, err := executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "iam_application_create", map[string]any{
 		"name": resourceName, "description": "Object Storage credentials managed by Apteva Instances", "organization_id": organizationID,
@@ -553,6 +556,13 @@ func destroyObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage) ([]string, error
 		if err != nil && !strings.Contains(err.Error(), "status=404") {
 			return nil, fmt.Errorf("delete Scaleway bucket (it must be empty): %w", err)
 		}
+		// Confirm provider state before deleting local inventory or IAM access.
+		// HEAD is read-only and a 404 is the only successful deletion proof.
+		if _, headErr := executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "object_bucket_head", map[string]any{"bucket": item.Bucket, "region": item.Region}); headErr == nil {
+			return nil, errors.New("Scaleway accepted bucket deletion but the bucket still exists")
+		} else if !strings.Contains(headErr.Error(), "status=404") {
+			return nil, fmt.Errorf("verify Scaleway bucket deletion: %w", headErr)
+		}
 		metadata := parseObjectStorageMetadata(item)
 		cleanupCalls := []struct {
 			tool string
@@ -594,6 +604,55 @@ func (a *App) toolObjectStorageListProviders(ctx *sdk.AppCtx, _ map[string]any) 
 
 func (a *App) toolObjectStorageListPlans(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return objectStorageCatalog(ctx, strArg(args, "provider"), int64Arg(args, "provider_connection_id"))
+}
+
+func (a *App) toolObjectStoragePreflight(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	provider := normalizeProvider(strArg(args, "provider"))
+	connectionID := int64Arg(args, "provider_connection_id")
+	provider, bound, err := objectStorageBinding(ctx, provider, connectionID)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]any{"provider": provider, "connection_id": bound.ConnectionID, "authenticated": true, "mutated": false}
+	if provider != "scaleway" {
+		plans, err := objectStorageCatalog(ctx, provider, bound.ConnectionID)
+		if err != nil {
+			return nil, err
+		}
+		result["plans"] = plans
+		return result, nil
+	}
+	region, err := normalizeScalewayObjectRegion(strArg(args, "region"))
+	if err != nil {
+		return nil, err
+	}
+	projectID, err := scalewayDefaultProjectForConnection(ctx, bound.ConnectionID)
+	if err != nil {
+		return nil, fmt.Errorf("Scaleway credential/default-project check failed: %w", err)
+	}
+	projectData, err := executeObjectStorageTool(ctx, bound.ConnectionID, provider, "project_get", map[string]any{"project_id": projectID})
+	if err != nil {
+		return nil, fmt.Errorf("Scaleway project access check failed: %w", err)
+	}
+	organizationID := findJSONScalar(projectData, "organization_id")
+	if organizationID != "" {
+		if _, err = executeObjectStorageTool(ctx, bound.ConnectionID, provider, "iam_security_settings_get", map[string]any{"organization_id": organizationID}); err != nil {
+			return nil, fmt.Errorf("Scaleway IAM capability check failed: %w", err)
+		}
+	}
+	result["project_id"], result["region"], result["iam_access"] = projectID, region, true
+	if bucket := strings.TrimSpace(strArg(args, "bucket")); bucket != "" {
+		_, headErr := executeObjectStorageTool(ctx, bound.ConnectionID, provider, "object_bucket_head", map[string]any{"bucket": bucket, "region": region})
+		result["bucket"] = bucket
+		if headErr == nil {
+			result["bucket_available"] = false
+		} else if strings.Contains(headErr.Error(), "status=404") {
+			result["bucket_available"] = true
+		} else {
+			return nil, fmt.Errorf("Scaleway bucket availability check failed: %w", headErr)
+		}
+	}
+	return result, nil
 }
 
 func (a *App) toolObjectStorageCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {

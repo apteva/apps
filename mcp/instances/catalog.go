@@ -45,8 +45,9 @@ type ServerType struct {
 	HourlyPriceUSD  float64          `json:"hourly_price_usd,omitempty"`
 	// AvailableIn lists location names where this type can be
 	// provisioned. Hetzner ships some types only in newer regions.
-	AvailableIn []string            `json:"available_in,omitempty"`
-	BootStorage []StorageConstraint `json:"boot_storage,omitempty"`
+	AvailableIn        []string            `json:"available_in,omitempty"`
+	BootStorage        []StorageConstraint `json:"boot_storage,omitempty"`
+	IncompatibleImages []string            `json:"incompatible_images,omitempty"`
 }
 
 // StorageConstraint describes one boot-storage option supported by a
@@ -54,10 +55,16 @@ type ServerType struct {
 // clouds such as Scaleway, where DEV1 supports local SSD but POP2 is
 // block-only.
 type StorageConstraint struct {
-	StorageClass string `json:"storage_class"`
-	ProviderType string `json:"provider_type,omitempty"`
-	MinSizeGB    int    `json:"min_size_gb,omitempty"`
-	MaxSizeGB    int    `json:"max_size_gb,omitempty"`
+	StorageClass  string `json:"storage_class"`
+	ProviderType  string `json:"provider_type,omitempty"`
+	MinSizeGB     int    `json:"min_size_gb,omitempty"`
+	MaxSizeGB     int    `json:"max_size_gb,omitempty"`
+	Technology    string `json:"technology,omitempty"`
+	IOPS          int    `json:"iops,omitempty"`
+	BandwidthMbps int    `json:"bandwidth_mbps,omitempty"`
+	Persistent    bool   `json:"persistent"`
+	Replication   string `json:"replication,omitempty"`
+	Billing       string `json:"billing,omitempty"`
 }
 
 // Location is one VPS region.

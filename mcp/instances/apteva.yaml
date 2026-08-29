@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.4.39
+version: 0.4.40
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
   instances are provisioned through a generic VPS provider binding.
   The install can bind Hetzner Cloud, DigitalOcean, Vultr, AWS EC2,
-  Contabo, Scaleway (virtual instances, Dedibox, and Apple silicon Mac minis), Huawei Cloud,
+  Contabo, Scaleway (virtual instances, Elastic Metal, Dedibox, and Apple silicon Mac minis), Huawei Cloud,
   Linode, OVHcloud, or RunPod; provider-specific
   adapters normalize into the same Instances contract.
 
@@ -90,6 +90,8 @@ provides:
       description: List bound provider accounts capable of provisioning object storage.
     - name: object_storage_list_plans
       description: List object-storage regions/clusters and plans/tiers for a provider.
+    - name: object_storage_preflight
+      description: Read-only credential, project, IAM, region, and optional bucket-name availability checks before creation.
     - name: object_storage_create
       description: Provision object storage and return its S3 credentials once without creating a Connection or persisting the secret.
     - name: object_storage_get
@@ -108,6 +110,12 @@ provides:
       description: List instances, optionally filtered by provider or status.
     - name: instance_destroy
       description: Terminate a managed upstream resource and remove its row, or forget an externally registered host without modifying it. Refused for local (id 0) and Contabo.
+    - name: instance_compare_provider
+      description: Compare tracked server, IP, status, and volume state with the provider without making changes.
+    - name: instance_provider_inventory
+      description: Read provider resources, including Scaleway virtual Instances, Elastic Metal servers, and Flexible IPs.
+    - name: instance_storage_benchmark
+      description: Run an optional bounded 256 MiB storage benchmark and save its result.
     - name: instance_upgrade
       description: In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today and the operation always waits for SSH readiness.
     - name: instance_run_command
@@ -214,7 +222,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.39
+    ref: instances/v0.4.40
     entry: mcp/instances
   port: 8080
   health_check: /health

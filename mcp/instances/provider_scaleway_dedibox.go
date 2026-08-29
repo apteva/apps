@@ -236,7 +236,7 @@ func scalewayDediboxProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instanc
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
 
-	keyMetadata, err := registerScalewayAppleSSHKey(ctx, inst.ID, in.Name, pubKey)
+	keyMetadata, err := registerScalewaySSHKeyOnConnection(ctx, in.ProviderConnectionID, inst.ID, in.Name, pubKey)
 	if err != nil {
 		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
 		return nil, err
@@ -245,7 +245,7 @@ func scalewayDediboxProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instanc
 		SSHKeyID: keyMetadata.SSHKeyID, ProjectID: keyMetadata.ProjectID, DesiredImage: in.Image,
 	}
 	if err := dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"provider_metadata_json": scalewayDediboxMetadataJSON(metadata)}); err != nil {
-		_ = deleteScalewayAppleSSHKey(ctx, metadata.SSHKeyID)
+		_ = deleteScalewaySSHKeyOnConnection(ctx, in.ProviderConnectionID, metadata.SSHKeyID)
 		return nil, err
 	}
 
@@ -254,14 +254,14 @@ func scalewayDediboxProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instanc
 		"zone": in.Region, "offer_id": offerID, "project_id": metadata.ProjectID, "server_option_ids": []int{},
 	})
 	if err != nil {
-		_ = deleteScalewayAppleSSHKey(ctx, metadata.SSHKeyID)
+		_ = deleteScalewaySSHKeyOnConnection(ctx, in.ProviderConnectionID, metadata.SSHKeyID)
 		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
 		return nil, err
 	}
 	serviceID := jsonStringAt(data, "id")
 	if serviceID == "" {
 		err = errors.New("scaleway.dedibox_server_create response missing service id")
-		_ = deleteScalewayAppleSSHKey(ctx, metadata.SSHKeyID)
+		_ = deleteScalewaySSHKeyOnConnection(ctx, in.ProviderConnectionID, metadata.SSHKeyID)
 		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
 		return nil, err
 	}
@@ -270,7 +270,7 @@ func scalewayDediboxProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instanc
 		"provider_id": "service:" + serviceID, "provider_metadata_json": scalewayDediboxMetadataJSON(metadata),
 	}); err != nil {
 		_ = scalewayDediboxDeleteService(ctx, in.Region, serviceID)
-		_ = deleteScalewayAppleSSHKey(ctx, metadata.SSHKeyID)
+		_ = deleteScalewaySSHKeyOnConnection(ctx, in.ProviderConnectionID, metadata.SSHKeyID)
 		return nil, fmt.Errorf("persist Dedibox service identity: %w; upstream order was cancelled", err)
 	}
 	kickScalewayDediboxProvisioning(ctx, inst.ID)
@@ -479,7 +479,7 @@ func scalewayDediboxDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 	if err != nil {
 		return err
 	}
-	return deleteScalewayAppleSSHKey(ctx, metadata.SSHKeyID)
+	return deleteScalewaySSHKeyOnConnection(ctx, inst.ProviderConnectionID, metadata.SSHKeyID)
 }
 
 func scalewayDediboxDeleteService(ctx *sdk.AppCtx, zone, serviceID string) error {

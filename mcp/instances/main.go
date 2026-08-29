@@ -40,12 +40,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.34
+version: 0.4.40
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
   integrations: Hetzner Cloud, DigitalOcean, Contabo, Vultr, AWS EC2,
-  Scaleway (virtual instances, Dedibox, and Apple silicon Mac minis), Huawei Cloud,
+  Scaleway (virtual instances, Elastic Metal, Dedibox, and Apple silicon Mac minis), Huawei Cloud,
   Linode, OVHcloud, and RunPod. Foundation layer
   consumed by Live Link, Deploy, Backup, Containers via cross-app
   calls.
@@ -92,6 +92,7 @@ provides:
     - { name: instance_volume_delete, description: "Permanently delete a detached managed data volume with explicit confirmation." }
     - { name: object_storage_list_providers, description: "List bound providers capable of provisioning object storage." }
     - { name: object_storage_list_plans, description: "List object-storage regions/clusters and plans/tiers." }
+    - { name: object_storage_preflight, description: "Read-only credential, project, IAM, region, and optional bucket-name availability checks before object-storage creation." }
     - { name: object_storage_create, description: "Provision object storage and return its S3 credentials once without creating a Connection." }
     - { name: object_storage_get, description: "Fetch one object-storage resource without its secret." }
     - { name: object_storage_list, description: "List object-storage resources tracked by Instances." }
@@ -101,6 +102,9 @@ provides:
     - { name: instance_get,          description: "Fetch one instance by id." }
     - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
     - { name: instance_destroy,      description: "Terminate a managed instance and remove its row, or forget an external host without modifying it (refused for local id 0 and Contabo). Args: id." }
+    - { name: instance_compare_provider, description: "Read provider state and compare it with the tracked server, IP, and volume inventory without making changes." }
+    - { name: instance_provider_inventory, description: "Read full provider resource inventory, including Scaleway Instances, Elastic Metal servers, Flexible IPs, and tracked storage." }
+    - { name: instance_storage_benchmark, description: "Run an optional bounded 256 MiB post-provision write benchmark and save its result. Args: id, target_path?." }
     - { name: instance_upgrade,      description: "In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today. Args: id, size, upgrade_disk?. Always waits for SSH readiness." }
     - { name: instance_run_command,  description: "Execute a shell command. Local: exec; remote: SSH. Args: id, cmd, timeout_s?." }
     - { name: instance_upload_file,  description: "Write a file. Local: filesystem (path-allowlisted); remote: SCP. Args: id, path, content_b64." }
@@ -181,7 +185,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.34
+    ref: instances/v0.4.40
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -234,6 +238,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	go reconcileAPIProviderProvisioning(ctx)
 	go reconcileHetznerUpgrading(ctx)
 	go reconcileDestroying(ctx)
+	go reconcileTrackedProviderState(ctx)
 
 	return nil
 }

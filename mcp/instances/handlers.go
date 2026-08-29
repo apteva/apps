@@ -148,9 +148,55 @@ func (a *App) handleInstanceItem(w http.ResponseWriter, r *http.Request) {
 		a.httpMetrics(w, r, id)
 	case "upgrade":
 		a.httpUpgrade(w, r, id)
+	case "compare":
+		a.httpCompareProvider(w, r, id)
+	case "storage-benchmark":
+		a.httpStorageBenchmark(w, r, id)
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
+}
+
+func (a *App) httpCompareProvider(w http.ResponseWriter, r *http.Request, id int64) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
+		return
+	}
+	ctx := appCtxForRequest(r)
+	inst, err := dbGetInstance(ctx.AppDB(), id)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	comparison, err := compareInstanceProvider(ctx, inst)
+	if err != nil {
+		httpProviderErr(w, err)
+		return
+	}
+	httpJSON(w, map[string]any{"comparison": comparison})
+}
+
+func (a *App) httpStorageBenchmark(w http.ResponseWriter, r *http.Request, id int64) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	ctx := appCtxForRequest(r)
+	var body struct {
+		TargetPath string `json:"target_path"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	inst, err := dbGetInstance(ctx.AppDB(), id)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	result, err := benchmarkInstanceStorage(ctx, inst, body.TargetPath)
+	if err != nil {
+		httpProviderErr(w, err)
+		return
+	}
+	httpJSON(w, map[string]any{"result": result})
 }
 
 // ─── handlers ─────────────────────────────────────────────────────
@@ -192,6 +238,8 @@ func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 		TagsJSON             string                 `json:"tags_json"`
 		ProviderConnectionID int64                  `json:"provider_connection_id"`
 		Storage              InstanceStorageRequest `json:"storage"`
+		RetainForDiagnosis   *bool                  `json:"retain_for_diagnosis"`
+		ElasticMetal         *ElasticMetalConfig    `json:"elastic_metal"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -204,7 +252,11 @@ func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 	in := CreateInstanceInput{
 		Name: body.Name, Provider: body.Provider,
 		Region: body.Region, Size: body.Size, Image: body.Image,
-		TagsJSON: body.TagsJSON, ProviderConnectionID: body.ProviderConnectionID, Storage: body.Storage,
+		TagsJSON: body.TagsJSON, ProviderConnectionID: body.ProviderConnectionID, Storage: body.Storage, ElasticMetal: body.ElasticMetal,
+	}
+	if body.RetainForDiagnosis != nil {
+		in.RetainOnFailureSet = true
+		in.RetainOnFailure = *body.RetainForDiagnosis
 	}
 	inst, err := provisionInstance(ctx, in)
 	if err != nil {
@@ -225,7 +277,13 @@ func (a *App) httpDestroy(w http.ResponseWriter, r *http.Request, id int64) {
 		httpErr(w, http.StatusNotFound, "instance not found")
 		return
 	}
-	if err := destroyManagedInstance(ctx, inst); err != nil {
+	force := r.URL.Query().Get("force") == "true" || r.URL.Query().Get("force") == "1"
+	options := DestroyOptions{Force: force, RetainFlexibleIPs: r.URL.Query().Get("retain_flexible_ips") == "true"}
+	if value := r.URL.Query().Get("retain_volumes"); value != "" {
+		retain := value == "true" || value == "1"
+		options.RetainVolumes = &retain
+	}
+	if err := destroyManagedInstanceWithOptions(ctx, inst, options); err != nil {
 		httpProviderErr(w, err)
 		return
 	}

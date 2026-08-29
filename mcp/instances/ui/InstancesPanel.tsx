@@ -39,6 +39,10 @@ interface Instance {
   ports_json?: string;
   monthly_cost_cents: number;
   error?: string;
+	lifecycle_stage?: string;
+	primary_error?: string;
+	cleanup_error?: string;
+	provider_checked_at?: string;
   created_at?: string;
   ready_at?: string;
   capabilities?: {
@@ -454,10 +458,12 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
     return () => clearInterval(t);
   }, [load]);
 
-  const destroy = async (inst: Instance) => {
+  const destroy = async (inst: Instance, options?: { force: boolean; retainVolumes?: boolean; retainFlexibleIPs: boolean }) => {
     setBusy(true);
     try {
-      const r = await fetch(`${API}/instances/${inst.id}?${withParams()}`, {
+	  const params = new URLSearchParams(withParams());
+	  if (options) { params.set("force", String(options.force)); if (options.retainVolumes !== undefined) params.set("retain_volumes", String(options.retainVolumes)); params.set("retain_flexible_ips", String(options.retainFlexibleIPs)); }
+      const r = await fetch(`${API}/instances/${inst.id}?${params.toString()}`, {
         method: "DELETE",
         credentials: "same-origin",
       });
@@ -572,7 +578,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
           inst={pendingDestroy}
           busy={busy}
           onCancel={() => setPendingDestroy(null)}
-          onConfirm={() => destroy(pendingDestroy)}
+		  onConfirm={(options) => destroy(pendingDestroy, options)}
         />
       )}
 
@@ -657,6 +663,7 @@ function ObjectStorageSection({ withParams, setError, refresh }: {
   const destroy = async (item: ObjectStorageWire) => {
     const scope = item.bucket ? `bucket ${item.bucket}` : `subscription ${item.name}`;
     if (!window.confirm(`Permanently delete ${scope}? Scaleway buckets must be empty. This cannot be undone.`)) return;
+	setCredentialResult(null);
     setBusy(true);
     try {
       const response = await fetch(`${API}/object-storage/${item.id}?confirm=true&${withParams()}`, {
@@ -943,9 +950,12 @@ function DestroyConfirmDialog({
   inst: Instance;
   busy: boolean;
   onCancel: () => void;
-  onConfirm: () => void;
+	 onConfirm: (options: { force: boolean; retainVolumes?: boolean; retainFlexibleIPs: boolean }) => void;
 }) {
   const ip = inst.public_ipv4 || inst.public_ipv6 || "—";
+	const [force, setForce] = useState(false);
+	const [volumePolicy, setVolumePolicy] = useState<"existing" | "retain" | "delete">("existing");
+	const [retainFlexibleIPs, setRetainFlexibleIPs] = useState(false);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1000,6 +1010,11 @@ function DestroyConfirmDialog({
               {inst.size && <span>Size: <span className="text-text font-mono">{inst.size}</span></span>}
             </div>
           </div>
+		  <div className="space-y-2 text-xs text-text-muted">
+			<label className="flex items-center gap-2">Managed volumes <select value={volumePolicy} onChange={(event) => setVolumePolicy(event.target.value as "existing" | "retain" | "delete")} className="bg-bg-input border border-border rounded px-2 py-1"><option value="existing">Use each volume policy</option><option value="retain">Retain all</option><option value="delete">Delete all managed volumes</option></select></label>
+			{inst.size?.startsWith("elastic-metal/") && <label className="flex items-center gap-2"><input type="checkbox" checked={retainFlexibleIPs} onChange={(event) => setRetainFlexibleIPs(event.target.checked)} /> Retain Elastic Metal Flexible IPs</label>}
+			<label className="flex items-center gap-2"><input type="checkbox" checked={force} onChange={(event) => setForce(event.target.checked)} /> Continue provider deletion if guest unmount over SSH fails</label>
+		  </div>
 
           <div className="flex justify-end gap-2">
             <button
@@ -1012,7 +1027,7 @@ function DestroyConfirmDialog({
             </button>
             <button
               type="button"
-              onClick={onConfirm}
+			  onClick={() => onConfirm({ force, retainVolumes: volumePolicy === "existing" ? undefined : volumePolicy === "retain", retainFlexibleIPs })}
               disabled={busy}
               className="px-3 py-1.5 text-sm rounded bg-red text-white hover:bg-red/90 disabled:opacity-50"
             >
@@ -1226,6 +1241,10 @@ function InstanceCard({
   const [metricsError, setMetricsError] = useState("");
   const [lastPollAt, setLastPollAt] = useState(0);
   const [expanded, setExpanded] = useState(false);
+	const [comparison, setComparison] = useState<{ differences?: string[]; provider_state?: string; checked_at?: string } | null>(null);
+	const [diagnosticBusy, setDiagnosticBusy] = useState(false);
+	const [benchmark, setBenchmark] = useState<{ output?: string; elapsed_seconds?: number; measured_at?: string } | null>(null);
+	const [benchmarkBusy, setBenchmarkBusy] = useState(false);
   const [, setNowTick] = useState(0);
 
   useEffect(() => {
@@ -1278,6 +1297,24 @@ function InstanceCard({
   const staleAge = lastPollAt ? Math.floor((Date.now() - lastPollAt) / 1000) : 0;
   const stale = staleAge > STALE_THRESHOLD_MS / 1000;
   const meta = [inst.provider, inst.size, inst.region, resources].filter(Boolean).join(" · ");
+	const compare = async () => {
+		setDiagnosticBusy(true);
+		try {
+			const response = await fetch(`${API}/instances/${inst.id}/compare?${withParams()}`, { method: "POST", credentials: "same-origin" });
+			if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`);
+			setComparison((await response.json()).comparison);
+		} catch (error) { setComparison({ differences: [(error as Error).message] }); }
+		finally { setDiagnosticBusy(false); }
+	};
+	const runBenchmark = async () => {
+		setBenchmarkBusy(true);
+		try {
+			const response = await fetch(`${API}/instances/${inst.id}/storage-benchmark?${withParams()}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target_path: "/" }) });
+			if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`);
+			setBenchmark((await response.json()).result);
+		} catch (error) { setBenchmark({ output: (error as Error).message }); }
+		finally { setBenchmarkBusy(false); }
+	};
 
   return (
     <article
@@ -1314,6 +1351,12 @@ function InstanceCard({
             Volumes
           </button>
         )}
+		{!isLocal && inst.provider !== "external" && (
+			<button type="button" onClick={compare} disabled={diagnosticBusy}
+				className="px-2 py-0.5 text-[10px] border border-border text-text-muted rounded hover:text-text disabled:opacity-50">
+				{diagnosticBusy ? "Comparing…" : "Compare provider"}
+			</button>
+		)}
         {canDestroy && (
           <button type="button" onClick={onDestroy} disabled={busy}
             className="px-2 py-0.5 text-[10px] border border-red/60 text-red rounded hover:bg-red hover:text-white disabled:opacity-50">
@@ -1331,7 +1374,8 @@ function InstanceCard({
         </button>
       </div>
 
-      {inst.error && <div className="px-3 py-1.5 text-[10px] text-red border-t border-red/20">{inst.error}</div>}
+      {inst.error && <div className="px-3 py-1.5 text-[10px] text-red border-t border-red/20">{inst.lifecycle_stage ? `${inst.lifecycle_stage}: ` : ""}{inst.error}{inst.cleanup_error ? ` · cleanup: ${inst.cleanup_error}` : ""}</div>}
+	  {comparison && <div className={`px-3 py-1.5 text-[10px] border-t ${comparison.differences?.length ? "text-amber border-amber/20" : "text-green border-green/20"}`}>Provider {comparison.provider_state || "state"}: {comparison.differences?.length ? comparison.differences.join(" · ") : "matches tracked state"}</div>}
 
       {metrics ? (
         <div
@@ -1339,7 +1383,7 @@ function InstanceCard({
           style={{ borderTop: `1px solid ${FAINT_DIVIDER}`, opacity: stale ? 0.6 : 1, columnGap: 24, rowGap: 10 }}
         >
           <CompactMetric label="CPU" value={formatCPUDetail(metrics.cpu)} pct={metrics.cpu.total_pct} />
-          <CompactMetric label="Memory" value={`${memPct.toFixed(0)}% · ${formatBytes(metrics.mem.used_bytes)}`} pct={memPct} />
+          <CompactMetric label="Memory" value={`${formatBytes(metrics.mem.used_bytes)} / ${formatBytes(metrics.mem.total_bytes)} used (${memPct.toFixed(0)}%)`} pct={memPct} />
           <CompactMetric label="Root disk" value={rootDisk ? `${rootDisk.used_pct.toFixed(0)}% · ${formatBytes(rootDisk.used_bytes)}` : "—"} pct={rootDisk?.used_pct} />
           <CompactMetric label="Load" value={metrics.cpu.cores ? `${metrics.load.l1.toFixed(2)} · ${loadPct.toFixed(0)}% cap` : metrics.load.l1.toFixed(2)} pct={loadPct} />
           <CompactMetric label="Uptime" value={`${formatUptime(metrics.uptime_s)} · ${metrics.process_count} proc`} />
@@ -1370,6 +1414,14 @@ function InstanceCard({
             {inst.provider_id && <span>Provider ID <span className="text-text font-mono">{inst.provider_id}</span></span>}
             {metrics && <span>Load 1/5/15 <span className="text-text font-mono">{metrics.load.l1.toFixed(2)} / {metrics.load.l5.toFixed(2)} / {metrics.load.l15.toFixed(2)}</span></span>}
           </div>
+		  {inst.status === "ready" && (
+			<div className="space-y-1">
+			  <button type="button" onClick={runBenchmark} disabled={benchmarkBusy} className="px-2 py-0.5 text-[10px] border border-border text-text-muted rounded hover:text-text disabled:opacity-50">
+				{benchmarkBusy ? "Benchmarking…" : "Benchmark root disk (256 MiB)"}
+			  </button>
+			  {benchmark?.output && <pre className="text-[10px] text-text-dim whitespace-pre-wrap break-all">{benchmark.output}</pre>}
+			</div>
+		  )}
         </div>
       )}
     </article>
@@ -1922,6 +1974,7 @@ interface ServerTypeWire {
   hourly_price_usd?: number;
   available_in?: string[];
   boot_storage?: Array<{ storage_class: "local" | "block" | "network" | "ephemeral"; provider_type?: string; min_size_gb?: number; max_size_gb?: number }>;
+	incompatible_images?: string[];
 }
 
 interface LocationWire {
@@ -1994,6 +2047,7 @@ function CreateDialog({
   const [bootSizeGB, setBootSizeGB] = useState(80);
   const [bootStorageClass, setBootStorageClass] = useState("block");
   const [bootTier, setBootTier] = useState("balanced");
+	const [elasticRAID, setElasticRAID] = useState("");
 
   const selectedType = serverTypes.find((candidate) => candidate.name === size);
 
@@ -2012,6 +2066,7 @@ function CreateDialog({
     if (selectedType?.platform && candidate.platform && candidate.platform !== selectedType.platform) return false;
     if (candidate.available_in?.length && region && !candidate.available_in.includes(region)) return false;
     if (candidate.compatible_types?.length && size && !candidate.compatible_types.includes(size)) return false;
+	if (selectedType?.incompatible_images?.includes(candidate.name)) return false;
     if (provider === "scaleway" && customBootStorage && candidate.provider_type) {
       const expectedType = bootStorageClass === "local" ? "l_ssd" : "sbs_volume";
       if (candidate.provider_type !== expectedType) return false;
@@ -2163,6 +2218,7 @@ function CreateDialog({
         body: JSON.stringify({
           name: name.trim(), provider, provider_connection_id: providerConnectionID, size, region, image,
           storage: customBootStorage ? { boot: { size_gb: bootSizeGB, storage_class: bootStorageClass, tier: bootTier, delete_policy: "with_instance" } } : undefined,
+		  elastic_metal: size.startsWith("elastic-metal/") && elasticRAID ? { raid_level: elasticRAID } : undefined,
         }),
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
@@ -2186,8 +2242,12 @@ function CreateDialog({
     const price = formatCatalogMonthlyPrice(t);
     const displayName = t.name.startsWith("dedibox/")
       ? (t.description?.split(" — ")[0] || t.name.replace(/^dedibox\//, "Dedibox "))
+	  : t.name.startsWith("elastic-metal/")
+		? (t.description?.split(" — ")[0] || t.name.replace(/^elastic-metal\//, "Elastic Metal "))
       : t.name.replace(/^apple-silicon\//, "");
-    const hostKind = t.name.startsWith("dedibox/")
+    const hostKind = t.name.startsWith("elastic-metal/")
+	  ? "on-demand dedicated server"
+	  : t.name.startsWith("dedibox/")
       ? "dedicated physical server"
       : t.resource_class === "bare_metal" ? "Mac mini bare metal" : "";
     return [displayName, hostKind && `· ${hostKind}`, price && `(${price}`, specs && (price ? `, ${specs})` : `(${specs})`)]
@@ -2343,7 +2403,7 @@ function CreateDialog({
             </div>
           </div>
         </div>
-        {storageCapabilities?.boot_size_configurable && (
+        {storageCapabilities?.boot_size_configurable && !size.startsWith("elastic-metal/") && (
           <div className="rounded p-3 space-y-2" style={{ border: `1px solid ${SUBTLE_BORDER}` }}>
             <label className="flex items-center gap-2 text-xs text-text-muted">
               <input type="checkbox" checked={customBootStorage} onChange={(event) => setCustomBootStorage(event.target.checked)} />
@@ -2364,6 +2424,16 @@ function CreateDialog({
             )}
           </div>
         )}
+		{size.startsWith("elastic-metal/") && (
+		  <div className="rounded p-3 space-y-2" style={{ border: `1px solid ${SUBTLE_BORDER}` }}>
+			<div className="text-xs text-text">Elastic Metal local disks</div>
+			<p className="text-[10px] text-text-dim">The selected offer's disks are included. Optionally apply RAID to Scaleway's default partitioning schema; the provider validates it before creation.</p>
+			<select value={elasticRAID} onChange={(event) => setElasticRAID(event.target.value)} className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm">
+			  <option value="">Provider default partitioning</option>
+			  <option value="raid_level_0">RAID 0</option><option value="raid_level_1">RAID 1</option><option value="raid_level_5">RAID 5</option><option value="raid_level_6">RAID 6</option><option value="raid_level_10">RAID 10</option>
+			</select>
+		  </div>
+		)}
         <div className="flex justify-end gap-2 pt-1">
           {selectedType?.resource_class === "bare_metal" && selectedType.platform === "macos" && (
             <span className="mr-auto text-[11px] text-amber">24-hour minimum allocation</span>

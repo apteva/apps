@@ -30,6 +30,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"size":                   map[string]any{"type": "string"},
 				"image":                  map[string]any{"type": "string"},
 				"tags_json":              map[string]any{"type": "string"},
+				"retain_for_diagnosis":   map[string]any{"type": "boolean", "description": "Keep a failed provider resource for diagnostics instead of automatic rollback; defaults to true"},
+				"elastic_metal": map[string]any{"type": "object", "description": "Optional Scaleway Elastic Metal install settings", "properties": map[string]any{
+					"raid_level":          map[string]any{"type": "string", "enum": []string{"raid0", "raid1", "raid5", "raid6", "raid10"}},
+					"partitioning_schema": map[string]any{"type": "object", "description": "Explicit Scaleway partitioning schema; validated before server creation"},
+					"retain_flexible_ips": map[string]any{"type": "boolean"},
+				}},
 				"storage": map[string]any{
 					"type":        "object",
 					"description": "Optional provider-neutral boot storage. Omit to preserve the provider/image default.",
@@ -99,6 +105,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "List object-storage regions/clusters and plans/tiers for a bound provider.",
 			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}}, nil), Handler: a.toolObjectStorageListPlans,
 		},
+		{Name: "object_storage_preflight", Description: "Read-only preflight for object storage. Scaleway verifies the default project, IAM settings, normalized region, and optional bucket-name availability without creating credentials or resources.", InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}, "region": map[string]any{"type": "string"}, "bucket": map[string]any{"type": "string"}}, nil), Handler: a.toolObjectStoragePreflight},
 		{
 			Name:        "object_storage_create",
 			Description: "Provision object storage and return its S3 credentials once. Instances stores resource metadata and access-key ID, never the secret and never an automatic Connection.",
@@ -141,10 +148,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "instance_destroy",
-			Description: "Terminate the upstream resource and remove the row. Refused for local (id 0). Idempotent.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
+			Description: "Terminate the upstream resource and remove the row. Provider deletion does not depend on SSH. Set force=true to continue provider-side volume cleanup when a guest unmount cannot run. Refused for local (id 0).",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "force": map[string]any{"type": "boolean"}, "retain_volumes": map[string]any{"type": "boolean", "description": "Override all managed volume policies: true retains, false deletes"}, "retain_flexible_ips": map[string]any{"type": "boolean", "description": "Keep Elastic Metal Flexible IPs; defaults to false"}}, []string{"id"}),
 			Handler:     a.toolDestroy,
 		},
+		{Name: "instance_compare_provider", Description: "Read provider state and compare it with tracked server, IP, status, and volumes. This action never changes provider resources.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolCompareProvider},
+		{Name: "instance_provider_inventory", Description: "Read provider resources for orphan detection. Scaleway includes virtual Instances, Elastic Metal servers, and Elastic Metal Flexible IPs across supported zones.", InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}}, nil), Handler: a.toolProviderInventory},
+		{Name: "instance_storage_benchmark", Description: "Run a bounded 256 MiB sequential write benchmark against target_path and save the result. The temporary file is always removed.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "target_path": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolStorageBenchmark},
 		{
 			Name: "instance_upgrade",
 			Description: "Change a remote instance to another server type in-place where the provider adapter supports it. Hetzner is implemented today. This shuts the server down, " +
@@ -288,13 +298,27 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	in := CreateInstanceInput{
 		Name: name, Provider: provider, ProviderConnectionID: int64Arg(args, "provider_connection_id"),
 		Region: strArg(args, "region"), Size: strArg(args, "size"), Image: strArg(args, "image"), TagsJSON: strArg(args, "tags_json"),
-		Storage: storageRequestArg(args),
+		Storage:      storageRequestArg(args),
+		ElasticMetal: elasticMetalConfigArg(args),
+	}
+	if value, present := args["retain_for_diagnosis"]; present {
+		in.RetainOnFailureSet = true
+		in.RetainOnFailure, _ = value.(bool)
 	}
 	inst, err := provisionInstance(ctx, in)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"instance": inst.stripSecrets()}, nil
+}
+
+func elasticMetalConfigArg(args map[string]any) *ElasticMetalConfig {
+	raw, _ := args["elastic_metal"].(map[string]any)
+	if len(raw) == 0 {
+		return nil
+	}
+	schema, _ := raw["partitioning_schema"].(map[string]any)
+	return &ElasticMetalConfig{RAIDLevel: strArg(raw, "raid_level"), PartitioningSchema: schema, RetainFlexibleIPs: boolArg(raw, "retain_flexible_ips", false)}
 }
 
 func storageRequestArg(args map[string]any) InstanceStorageRequest {
@@ -382,7 +406,12 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := destroyManagedInstance(ctx, inst); err != nil {
+	options := DestroyOptions{Force: boolArg(args, "force", false), RetainFlexibleIPs: boolArg(args, "retain_flexible_ips", false)}
+	if value, present := args["retain_volumes"]; present {
+		parsed, _ := value.(bool)
+		options.RetainVolumes = &parsed
+	}
+	if err := destroyManagedInstanceWithOptions(ctx, inst, options); err != nil {
 		return nil, err
 	}
 	return map[string]any{"destroyed": true, "id": id}, nil

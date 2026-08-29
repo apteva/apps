@@ -98,6 +98,15 @@ func TestLifecycleMigration_PreservesExistingRows(t *testing.T) {
 	if _, err := db.Exec(string(body)); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{"006_object_storage.sql", "007_operations_and_inventory.sql"} {
+		body, err = os.ReadFile(filepath.Join("migrations", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	inst, err := dbGetInstance(db, 7)
 	if err != nil {
 		t.Fatal(err)

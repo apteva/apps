@@ -96,6 +96,12 @@ func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType,
 		}
 	}
 	if provider == "scaleway" {
+		elasticTypes, elasticErr := scalewayElasticMetalListServerTypes(ctx)
+		if elasticErr == nil {
+			types = append(types, elasticTypes...)
+		} else {
+			ctx.Logger().Warn("instances: Scaleway Elastic Metal catalog unavailable", "err", elasticErr)
+		}
 		dediboxTypes, dediboxErr := scalewayDediboxListServerTypes(ctx)
 		if dediboxErr == nil {
 			types = append(types, dediboxTypes...)
@@ -199,6 +205,12 @@ func apiProviderListImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
 		}
 	}
 	if provider == "scaleway" {
+		elasticImages, elasticErr := scalewayElasticMetalImages(ctx)
+		if elasticErr == nil {
+			images = append(images, elasticImages...)
+		} else {
+			ctx.Logger().Warn("instances: Scaleway Elastic Metal OS catalog unavailable", "err", elasticErr)
+		}
 		images = append(images, scalewayDediboxImages()...)
 		for _, zone := range scalewayAppleZones {
 			appleData, appleErr := executeProviderTool(ctx, provider, "apple_os_list", map[string]any{"zone": zone, "page_size": 100})
@@ -231,13 +243,16 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	if err := applyAPIProviderDefaults(ctx, provider, &in); err != nil {
 		return nil, err
 	}
-	if provider == "scaleway" && in.Storage.Boot != nil {
+	if provider == "scaleway" && in.Storage.Boot != nil && !isScalewayElasticMetalSize(in.Size) {
 		if err := validateScalewayBootStorage(ctx, &in); err != nil {
 			return nil, fmt.Errorf("invalid storage request: %w", err)
 		}
 	}
 	if provider == "scaleway" && isScalewayDediboxSize(in.Size) {
 		return scalewayDediboxProvision(ctx, in)
+	}
+	if provider == "scaleway" && isScalewayElasticMetalSize(in.Size) {
+		return scalewayElasticMetalProvision(ctx, in)
 	}
 	privKey, pubKey, err := generateSSHKeypair()
 	if err != nil {
@@ -279,17 +294,18 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	}
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
+	_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"lifecycle_stage": "ProviderCreate"})
 
 	tool, args := "", map[string]any(nil)
 	if appleMac {
-		metadata, accessErr := registerScalewayAppleSSHKey(ctx, inst.ID, in.Name, pubKey)
+		metadata, accessErr := registerScalewaySSHKeyOnConnection(ctx, in.ProviderConnectionID, inst.ID, in.Name, pubKey)
 		if accessErr != nil {
-			_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": accessErr.Error()})
+			failInstanceStage(ctx, inst.ID, "ProviderCreate", accessErr)
 			return nil, accessErr
 		}
 		inst.ProviderMetadataJSON = scalewayAppleMetadataJSON(metadata)
 		if err := dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"provider_metadata_json": inst.ProviderMetadataJSON}); err != nil {
-			cleanupErr := deleteScalewayAppleSSHKey(ctx, metadata.SSHKeyID)
+			cleanupErr := deleteScalewaySSHKeyOnConnection(ctx, in.ProviderConnectionID, metadata.SSHKeyID)
 			return nil, fmt.Errorf("persist Scaleway Mac SSH key: %w (cleanup: %v)", err, cleanupErr)
 		}
 		tool, args = "apple_server_create", map[string]any{
@@ -301,17 +317,17 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 		tool, args, err = apiProviderCreateRequest(ctx, provider, in, pubKey)
 	}
 	if err != nil {
-		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
+		failInstanceStage(ctx, inst.ID, "ProviderCreate", err)
 		return nil, err
 	}
 	data, err := executeProviderToolOnConnection(ctx, bound.ConnectionID, provider, tool, args)
 	if err != nil {
 		if appleMac {
-			if cleanupErr := deleteScalewayAppleSSHKey(ctx, parseScalewayAppleMetadata(inst.ProviderMetadataJSON).SSHKeyID); cleanupErr != nil {
+			if cleanupErr := deleteScalewaySSHKeyOnConnection(ctx, in.ProviderConnectionID, parseScalewayAppleMetadata(inst.ProviderMetadataJSON).SSHKeyID); cleanupErr != nil {
 				ctx.Logger().Error("instances: failed to clean up Scaleway Mac SSH key after create failure", "id", inst.ID, "err", cleanupErr)
 			}
 		}
-		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
+		failInstanceStage(ctx, inst.ID, "ProviderCreate", err)
 		return nil, err
 	}
 	provID, ipv4, ipv6, err := resolveProviderCreateResponse(ctx, provider, in, data)
@@ -320,14 +336,14 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 			err = fmt.Errorf("%s.%s response missing provider id", provider, tool)
 		}
 		if appleMac {
-			if cleanupErr := deleteScalewayAppleSSHKey(ctx, parseScalewayAppleMetadata(inst.ProviderMetadataJSON).SSHKeyID); cleanupErr != nil {
+			if cleanupErr := deleteScalewaySSHKeyOnConnection(ctx, in.ProviderConnectionID, parseScalewayAppleMetadata(inst.ProviderMetadataJSON).SSHKeyID); cleanupErr != nil {
 				ctx.Logger().Error("instances: failed to clean up Scaleway Mac SSH key after invalid create response", "id", inst.ID, "err", cleanupErr)
 			}
 		}
-		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
+		failInstanceStage(ctx, inst.ID, "ProviderCreate", err)
 		return nil, err
 	}
-	persistFields := map[string]any{"provider_id": provID, "public_ipv4": ipv4, "public_ipv6": ipv6}
+	persistFields := map[string]any{"provider_id": provID, "public_ipv4": ipv4, "public_ipv6": ipv6, "lifecycle_stage": "Boot"}
 	if appleMac {
 		for key, value := range scalewayAppleResponseFields(data) {
 			persistFields[key] = value
@@ -345,16 +361,18 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	}
 
 	if provider == "scaleway" && !appleMac {
+		_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"lifecycle_stage": "CloudInit"})
 		_, err = executeProviderToolOnConnection(ctx, bound.ConnectionID, provider, "server_set_cloud_init", map[string]any{
 			"zone": in.Region, "server_id": provID, "content": buildCloudInit(pubKey),
 		})
 		if err != nil {
-			_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
+			failInstanceStage(ctx, inst.ID, "CloudInit", err)
 			return nil, err
 		}
+		_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"lifecycle_stage": "Boot"})
 		_, err = executeProviderToolOnConnection(ctx, bound.ConnectionID, provider, "server_action", map[string]any{"zone": in.Region, "server_id": provID, "action": "poweron"})
 		if err != nil {
-			_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
+			failInstanceStage(ctx, inst.ID, "Boot", err)
 			return nil, err
 		}
 	}
@@ -403,6 +421,18 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 			if in.Image == "" {
 				return fmt.Errorf("Scaleway returned no Apple silicon OS compatible with %s in %s", in.Size, in.Region)
 			}
+		} else if provider == "scaleway" && isScalewayElasticMetalSize(in.Size) {
+			for _, image := range images {
+				if strings.HasPrefix(image.Name, scalewayElasticMetalPrefix) &&
+					(len(image.AvailableIn) == 0 || containsString(image.AvailableIn, in.Region)) &&
+					(len(image.CompatibleTypes) == 0 || containsString(image.CompatibleTypes, in.Size)) {
+					in.Image = image.Name
+					break
+				}
+			}
+			if in.Image == "" {
+				return fmt.Errorf("Scaleway returned no Elastic Metal OS compatible with %s in %s", in.Size, in.Region)
+			}
 		} else if provider == "scaleway" && isScalewayDediboxSize(in.Size) {
 			for _, image := range images {
 				if strings.HasPrefix(image.Name, scalewayDediboxPrefix) &&
@@ -444,6 +474,14 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 		}
 		if !strings.HasPrefix(in.Image, scalewayDediboxPrefix) {
 			return fmt.Errorf("Scaleway Dedibox size %s requires a compatible Dedibox OS image", in.Size)
+		}
+	}
+	if provider == "scaleway" && isScalewayElasticMetalSize(in.Size) {
+		if !containsString(scalewayElasticMetalZones, in.Region) {
+			return fmt.Errorf("Scaleway Elastic Metal is not available in %s", in.Region)
+		}
+		if !strings.HasPrefix(in.Image, scalewayElasticMetalPrefix) {
+			return fmt.Errorf("Scaleway Elastic Metal size %s requires an Elastic Metal OS", in.Size)
 		}
 	}
 	return nil
@@ -581,9 +619,12 @@ func resolveProviderCreateResponse(ctx *sdk.AppCtx, provider string, in CreateIn
 
 func apiProviderDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 	provider := normalizeProvider(inst.Provider)
+	if isScalewayElasticMetalInstance(inst) {
+		return scalewayElasticMetalDestroy(ctx, inst)
+	}
 	if isScalewayAppleInstance(inst) {
 		if inst.ProviderID == "" {
-			return deleteScalewayAppleSSHKey(ctx, parseScalewayAppleMetadata(inst.ProviderMetadataJSON).SSHKeyID)
+			return deleteScalewaySSHKeyOnConnection(ctx, inst.ProviderConnectionID, parseScalewayAppleMetadata(inst.ProviderMetadataJSON).SSHKeyID)
 		}
 		return scalewayAppleDestroy(ctx, inst)
 	}
@@ -791,7 +832,7 @@ func deleteScalewayBootVolumesAfterServer(
 
 func scalewaySSHProbeError(ctx *sdk.AppCtx, inst *Instance, probeErr error) error {
 	message := fmt.Sprintf("ssh probe: %v", probeErr)
-	if ctx == nil || inst == nil || inst.Provider != "scaleway" || isScalewayAppleInstance(inst) || isScalewayDediboxInstance(inst) {
+	if ctx == nil || inst == nil || inst.Provider != "scaleway" || isScalewayAppleInstance(inst) || isScalewayDediboxInstance(inst) || isScalewayElasticMetalInstance(inst) {
 		return errors.New(message)
 	}
 	data, err := executeProviderToolOnConnection(ctx, inst.ProviderConnectionID, "scaleway", "server_get", map[string]any{
@@ -814,36 +855,97 @@ func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
 			return
 		}
 		if fresh.PublicIPv4 == "" && fresh.PublicIPv6 == "" {
+			_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"lifecycle_stage": "Network"})
 			fresh, err = waitAPIProviderNetwork(ctx, fresh, 5*time.Minute)
 			if err != nil {
-				_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "error", "error_message": fmt.Sprintf("%s network: %v", fresh.Provider, err)})
+				failInstanceStage(ctx, id, "Network", fmt.Errorf("%s network: %w", fresh.Provider, err))
 				return
 			}
 		}
 		var requestedBoot *BootStorageRequest
-		if fresh.Provider == "scaleway" && !isScalewayAppleInstance(fresh) && !isScalewayDediboxInstance(fresh) {
+		if fresh.Provider == "scaleway" && !isScalewayAppleInstance(fresh) && !isScalewayDediboxInstance(fresh) && !isScalewayElasticMetalInstance(fresh) {
 			requestedBoot, err = bootStorageRequestFromInstance(fresh)
 			if err != nil {
-				_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "error", "error_message": err.Error()})
+				failInstanceStage(ctx, id, "Storage", err)
 				return
 			}
 			if _, err = verifyAndPersistScalewayBootStorage(ctx, fresh); err != nil {
-				_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "error", "error_message": err.Error()})
+				failInstanceStage(ctx, id, "Storage", err)
 				return
 			}
 		}
-		if err := probeSSHReadyFn(fresh, 5*time.Minute); err != nil {
-			_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "error", "error_message": scalewaySSHProbeError(ctx, fresh, err).Error()})
+		_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"lifecycle_stage": "SSH"})
+		if err := probeSSHWithRetries(fresh, 3, 2*time.Minute); err != nil {
+			failInstanceStage(ctx, id, "SSH", scalewaySSHProbeError(ctx, fresh, err))
 			return
 		}
-		if requestedBoot != nil {
-			if err := verifyScalewayRootFilesystem(fresh, requestedBoot.SizeGB); err != nil {
-				_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "error", "error_message": err.Error()})
+		_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"lifecycle_stage": "CloudInit"})
+		if fresh.Platform != "macos" {
+			if err := verifyCloudInitComplete(fresh); err != nil {
+				failInstanceStage(ctx, id, "CloudInit", err)
 				return
 			}
 		}
-		_, _, _ = transitionInstanceAndEmit(ctx, id, []string{"provisioning"}, "ready", map[string]any{"ready_at": nowUTC(), "error_message": ""})
+		if requestedBoot != nil {
+			_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"lifecycle_stage": "Storage"})
+			if err := verifyScalewayRootFilesystem(fresh, requestedBoot.SizeGB); err != nil {
+				failInstanceStage(ctx, id, "Storage", err)
+				return
+			}
+		}
+		_, _, _ = transitionInstanceAndEmit(ctx, id, []string{"provisioning"}, "ready", map[string]any{"ready_at": nowUTC(), "error_message": "", "primary_error": "", "cleanup_error": "", "lifecycle_stage": "Ready"})
 	}()
+}
+
+func probeSSHWithRetries(inst *Instance, attempts int, timeout time.Duration) error {
+	var last error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := probeSSHReadyFn(inst, timeout); err == nil {
+			return nil
+		} else {
+			last = err
+		}
+		if attempt < attempts {
+			time.Sleep(time.Duration(attempt) * 5 * time.Second)
+		}
+	}
+	return last
+}
+
+func verifyCloudInitComplete(inst *Instance) error {
+	cmd := `command -v cloud-init >/dev/null 2>&1 || { echo "cloud-init is not installed" >&2; exit 127; }; cloud-init status --wait --long`
+	output, exitCode, err := runSSH(inst, cmd, 11*time.Minute)
+	if err != nil || exitCode != 0 {
+		return fmt.Errorf("cloud-init did not complete successfully (exit=%d): %s: %w", exitCode, strings.TrimSpace(output), err)
+	}
+	return nil
+}
+
+func failInstanceStage(ctx *sdk.AppCtx, id int64, stage string, failure error) {
+	if failure == nil {
+		return
+	}
+	message := failure.Error()
+	_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
+		"status": "error", "lifecycle_stage": stage, "primary_error": message, "error_message": message,
+	})
+	inst, err := dbGetInstance(ctx.AppDB(), id)
+	if err != nil || inst.RetainOnFailure || inst.ProviderID == "" {
+		return
+	}
+	_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"lifecycle_stage": "Rollback"})
+	if cleanupErr := prepareVolumesForInstanceDestroy(ctx, id, true); cleanupErr == nil {
+		cleanupErr = destroyProviderInstance(ctx, inst)
+		if cleanupErr == nil {
+			_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{
+				"provider_id": "", "public_ipv4": "", "public_ipv6": "", "cleanup_error": "", "lifecycle_stage": stage,
+			})
+			return
+		}
+		_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"cleanup_error": cleanupErr.Error(), "lifecycle_stage": "Rollback"})
+	} else {
+		_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"cleanup_error": cleanupErr.Error(), "lifecycle_stage": "Rollback"})
+	}
 }
 
 func waitAPIProviderNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Duration) (*Instance, error) {
@@ -886,6 +988,9 @@ func apiProviderGetRequest(inst *Instance) (string, map[string]any, error) {
 	case "aws-ec2":
 		return "list_instances", map[string]any{"Action": "DescribeInstances", "Version": "2016-11-15", "InstanceId.1": inst.ProviderID}, nil
 	case "scaleway":
+		if isScalewayElasticMetalInstance(inst) {
+			return "elastic_metal_server_get", map[string]any{"zone": inst.Region, "server_id": inst.ProviderID}, nil
+		}
 		if isScalewayAppleInstance(inst) {
 			return "apple_server_get", map[string]any{"zone": inst.Region, "server_id": inst.ProviderID}, nil
 		}

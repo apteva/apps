@@ -180,6 +180,19 @@ and waits for SSH. The service and SSH-key IDs are retained privately so a
 restart can resume provisioning and Destroy terminates only the matching
 subscription and owned key.
 
+### Scaleway Elastic Metal
+
+Elastic Metal offers are exposed as `elastic-metal/<offer-id>` server types,
+separately from virtual Instances, Dedibox, and Apple silicon. Catalog discovery
+includes live stock, dedicated CPU/RAM, included local disks, hourly pricing,
+compatible cloud-init operating systems, and supported zones. Provisioning uses
+the hourly offer, validates Scaleway's default partitioning schema, optionally
+applies RAID, installs the selected OS, and waits for both SSH and cloud-init.
+
+Destroy uses provider APIs even when the guest is unreachable. Managed Flexible
+IPs are deleted by default and can be explicitly retained. Scaleway continues
+billing a powered-off Elastic Metal server until it is fully deleted.
+
 ## Existing SSH hosts and Macs
 
 `instance_register(name, ssh_host, ssh_user, ssh_port?)` adds an existing
@@ -205,9 +218,27 @@ Secrets are deliberately never written to the Instances database. They are
 shown only in the create or rotate response and in the UI's one-time credential
 dialog. Scaleway resources use a dedicated project-scoped IAM application and
 policy; Vultr credentials are owned by its Object Storage subscription. Destroy
-deletes the provider storage and revokes the managed credentials. A partial IAM
+verifies that the provider bucket is gone, then revokes the managed credentials. A partial IAM
 cleanup keeps the local record in an error state so the operation can be safely
 retried.
+
+`object_storage_preflight` performs read-only project, IAM-policy, region, and
+optional bucket-availability checks. Provider and S3 secrets remain write-only;
+the S3 secret is returned once and is never persisted by Instances.
+
+## Diagnostics and reconciliation
+
+Provisioning records explicit ProviderCreate, Boot, Network, SSH, CloudInit,
+Storage, Rollback, and Delete stages while preserving the primary failure and
+any later cleanup failure separately. Failed resources are retained for
+diagnosis by default.
+
+`instance_compare_provider` compares a tracked server with its live provider
+state. `instance_provider_inventory` lists Scaleway virtual Instances, Elastic
+Metal servers, volumes, Flexible IPs, and Object Storage buckets and reports
+untracked server, volume, and bucket IDs. `instance_storage_benchmark` performs
+a bounded 256 MiB write benchmark, removes its temporary file, and saves the
+result.
 
 ## Metrics
 

@@ -31,10 +31,17 @@ type StorageCapabilities struct {
 }
 
 type StorageTier struct {
-	Name         string `json:"name"`
-	StorageClass string `json:"storage_class,omitempty"`
-	ProviderType string `json:"provider_type,omitempty"`
-	Description  string `json:"description,omitempty"`
+	Name          string `json:"name"`
+	StorageClass  string `json:"storage_class,omitempty"`
+	ProviderType  string `json:"provider_type,omitempty"`
+	Technology    string `json:"technology,omitempty"`
+	Attachment    string `json:"attachment,omitempty"`
+	IOPS          int    `json:"iops,omitempty"`
+	BandwidthMbps int    `json:"bandwidth_mbps,omitempty"`
+	Persistent    bool   `json:"persistent"`
+	Replication   string `json:"replication,omitempty"`
+	Billing       string `json:"billing,omitempty"`
+	Description   string `json:"description,omitempty"`
 }
 
 type BootStorageRequest struct {
@@ -97,43 +104,43 @@ func storageCapabilities(provider string) StorageCapabilities {
 	case "hetzner":
 		cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize, cap.Snapshots = true, true, true, true, false
 		cap.StorageClasses = []string{"block"}
-		cap.Tiers = []StorageTier{{Name: "provider-default", Description: "Hetzner network Block Storage"}}
+		cap.Tiers = []StorageTier{{Name: "provider-default", Technology: "ssd", Attachment: "network", Persistent: true, Billing: "per_gb", Description: "Hetzner network Block Storage"}}
 	case "digitalocean":
 		cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize, cap.Snapshots = true, true, true, true, true
 		cap.StorageClasses = []string{"block"}
-		cap.Tiers = []StorageTier{{Name: "provider-default", Description: "DigitalOcean Block Storage"}}
+		cap.Tiers = []StorageTier{{Name: "provider-default", Technology: "ssd", Attachment: "network", Persistent: true, Billing: "per_gb", Description: "DigitalOcean Block Storage"}}
 	case "vultr":
 		cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize = true, true, true, true
 		cap.StorageClasses = []string{"block"}
-		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "storage_opt"}, {Name: "performance", ProviderType: "high_perf"}}
+		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "storage_opt", Technology: "ssd", Attachment: "network", Persistent: true, Billing: "per_gb"}, {Name: "performance", ProviderType: "high_perf", Technology: "nvme", Attachment: "network", Persistent: true, Billing: "per_gb"}}
 	case "aws-ec2":
 		cap.BootSizeConfigurable, cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize, cap.Snapshots = true, true, true, true, true, true
 		cap.StorageClasses = []string{"block"}
-		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "gp3"}, {Name: "performance", ProviderType: "io2"}}
+		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "gp3", Technology: "ssd", Attachment: "network", Persistent: true, Replication: "within availability zone", Billing: "per_gb_iops_throughput"}, {Name: "performance", ProviderType: "io2", Technology: "ssd", Attachment: "network", Persistent: true, Replication: "within availability zone", Billing: "per_gb_iops"}}
 	case "scaleway":
 		cap.BootSizeConfigurable, cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize, cap.Snapshots = true, true, true, true, true, true
 		cap.StorageClasses = []string{"local", "block"}
 		cap.Tiers = []StorageTier{
-			{Name: "local", StorageClass: "local", ProviderType: "l_ssd", Description: "Instance-local SSD where supported by the selected server type"},
-			{Name: "balanced", StorageClass: "block", ProviderType: "sbs_5k", Description: "5,000 IOPS"},
-			{Name: "performance", StorageClass: "block", ProviderType: "sbs_15k", Description: "15,000 IOPS"},
+			{Name: "local", StorageClass: "local", ProviderType: "l_ssd", Technology: "ssd", Attachment: "local", Persistent: false, Replication: "none", Billing: "included", Description: "Instance-local SSD where supported; tied to the physical or virtual server lifecycle"},
+			{Name: "balanced", StorageClass: "block", ProviderType: "sbs_5k", Technology: "nvme", Attachment: "network", IOPS: 5000, Persistent: true, Replication: "3 replicas", Billing: "per_gb", Description: "Scaleway Block Storage 5K"},
+			{Name: "performance", StorageClass: "block", ProviderType: "sbs_15k", Technology: "nvme", Attachment: "network", IOPS: 15000, Persistent: true, Replication: "3 replicas", Billing: "per_gb", Description: "Scaleway Block Storage 15K"},
 		}
 	case "huawei-cloud":
 		cap.BootSizeConfigurable, cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize, cap.Snapshots = true, true, true, true, true, true
 		cap.StorageClasses = []string{"block"}
-		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "GPSSD"}, {Name: "performance", ProviderType: "SSD"}}
+		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "GPSSD", Technology: "ssd", Attachment: "network", Persistent: true, Billing: "per_gb"}, {Name: "performance", ProviderType: "SSD", Technology: "ssd", Attachment: "network", Persistent: true, Billing: "per_gb"}}
 	case "linode":
 		cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize = true, true, true, true
 		cap.StorageClasses = []string{"block"}
-		cap.Tiers = []StorageTier{{Name: "provider-default", Description: "Akamai Cloud Block Storage"}}
+		cap.Tiers = []StorageTier{{Name: "provider-default", Technology: "ssd", Attachment: "network", Persistent: true, Billing: "per_gb", Description: "Akamai Cloud Block Storage"}}
 	case "ovhcloud":
 		cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize, cap.Snapshots = true, true, true, true, true
 		cap.StorageClasses = []string{"block"}
-		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "classic"}, {Name: "performance", ProviderType: "high-speed"}}
+		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "classic", Attachment: "network", Persistent: true, Billing: "per_gb"}, {Name: "performance", ProviderType: "high-speed", Technology: "ssd", Attachment: "network", Persistent: true, Billing: "per_gb"}}
 	case "runpod":
 		cap.BootSizeConfigurable, cap.DataVolumes, cap.Resize = true, true, true
 		cap.StorageClasses = []string{"ephemeral", "network"}
-		cap.Tiers = []StorageTier{{Name: "provider-default", ProviderType: "network"}}
+		cap.Tiers = []StorageTier{{Name: "provider-default", ProviderType: "network", Attachment: "network", Persistent: true, Billing: "per_gb"}}
 		cap.Notes = "Network volumes can only be attached when a Pod is created; an existing Pod must be recreated to change the network volume."
 	case "contabo":
 		cap.Notes = "Contabo's public API exposes Object Storage, not attachable block volumes; VPS disk size is fixed by the product."
@@ -562,7 +569,7 @@ func deleteProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume) error {
 	return err
 }
 
-func prepareVolumesForInstanceDestroy(ctx *sdk.AppCtx, instanceID int64) error {
+func prepareVolumesForInstanceDestroy(ctx *sdk.AppCtx, instanceID int64, force bool) error {
 	volumes, err := dbListVolumes(ctx.AppDB(), instanceID, "")
 	if err != nil {
 		return err
@@ -572,7 +579,10 @@ func prepareVolumesForInstanceDestroy(ctx *sdk.AppCtx, instanceID int64) error {
 			continue
 		}
 		if err := unmountPreparedVolume(ctx, v); err != nil {
-			return err
+			if !force {
+				return fmt.Errorf("unmount volume %d: %w (retry with force=true to continue with provider-side detach/delete while the guest is unreachable)", v.ID, err)
+			}
+			ctx.Logger().Warn("instances: guest unmount failed; force destroy continues with provider APIs", "volume_id", v.ID, "err", err)
 		}
 		if err := detachProviderVolume(ctx, v); err != nil {
 			return fmt.Errorf("detach volume %d before instance destroy: %w", v.ID, err)
