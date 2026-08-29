@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.5.8
-description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments. v0.5.8 validates assertion types, evaluates exact output natively, and separates assertion infrastructure errors from agent failures.
+version: 0.5.9
+description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments. v0.5.9 preserves declared collaborators in multi-agent simulations and records their executions.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
 icon: /ui/icon.svg
@@ -35,7 +35,7 @@ provides:
     - { name: eval_experiment_list, description: "List evaluation experiments." }
     - { name: eval_experiment_get, description: "Get an experiment with its individual runs." }
     - { name: eval_experiment_cancel, description: "Cancel queued runs in an experiment." }
-    - { name: eval_run_get, description: "Inspect one run, including trace, metrics, assertions, and judge verdict." }
+    - { name: eval_run_get, description: "Inspect one run, including target and collaborator traces, metrics, assertions, and judge verdict." }
     - { name: eval_run_retry, description: "Queue a fresh retry of one run." }
     - { name: eval_compare, description: "Compare target performance within an experiment." }
     - { name: eval_catalog, description: "List available agents, models, Environments, and supported assertion types." }
@@ -59,7 +59,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.5.8
+    ref: evals/v0.5.9
     entry: mcp/evals
   port: 8080
   health_check: /health

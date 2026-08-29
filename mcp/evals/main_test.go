@@ -25,7 +25,7 @@ func testStore(t *testing.T) store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql", "migrations/004_simulation_retry.sql"} {
+	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql", "migrations/004_simulation_retry.sql", "migrations/005_collaborator_executions.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -389,7 +389,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.5.8" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.5.9" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -476,16 +476,21 @@ type evalPlatformStub struct {
 type evalCampaignPlatformStub struct {
 	testkit.BasePlatformClient
 	sdk.RuntimeClient
-	t            *testing.T
-	definitions  map[string]EnvironmentDefinition
-	created      int
-	spawned      int
-	stopped      int
-	asserted     int
-	prompts      []string
-	models       []LLMModel
-	assertionErr error
-	judgeCalls   int
+	t                      *testing.T
+	definitions            map[string]EnvironmentDefinition
+	created                int
+	createdSpecs           []map[string]any
+	spawned                int
+	spawnInputs            []map[string]any
+	stopped                int
+	asserted               int
+	prompts                []string
+	models                 []LLMModel
+	assertionErr           error
+	judgeCalls             int
+	judgeInputs            []map[string]any
+	collaboratorExecutions map[string]sdk.RuntimeAgentExecution
+	collaboratorWaits      []string
 }
 
 func (s *evalCampaignPlatformStub) ListRuntimeCatalogAgents(string) ([]sdk.RuntimeCatalogAgent, error) {
@@ -500,6 +505,7 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 			value = LLMModels{Models: s.models}
 		case "llm_chat_complete":
 			s.judgeCalls++
+			s.judgeInputs = append(s.judgeInputs, cloneMap(input))
 			value = map[string]any{
 				"model":   "openai-codex/gpt-5.6-sol",
 				"choices": []any{map[string]any{"message": map[string]any{"content": `{"passed":true,"score":100,"reasoning":"The goal was met.","per_goal":[{"goal":"Help the user","score":100,"passed":true,"why":"Met"}],"directive_suggestion":null}`}}},
@@ -525,9 +531,13 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 		value = s.definitions[id]
 	case "environment_run_create":
 		s.created++
+		if spec, ok := input["spec"].(map[string]any); ok {
+			s.createdSpecs = append(s.createdSpecs, cloneMap(spec))
+		}
 		value = EnvironmentRun{ID: fmt.Sprintf("environment-run-%d", s.created), RuntimeID: fmt.Sprintf("runtime-%d", s.created), Status: "running"}
 	case "environment_agent_spawn":
 		s.spawned++
+		s.spawnInputs = append(s.spawnInputs, cloneMap(input))
 		value = sdk.RuntimeAgent{Alias: "main", Status: "paused"}
 	case "environment_agent_send":
 		message, _ := input["message"].(string)
@@ -536,12 +546,22 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 	case "environment_agent_control":
 		value = map[string]any{"ok": true}
 	case "environment_agent_wait":
-		value = sdk.RuntimeAgentExecution{
-			Status:   "completed",
-			ThreadID: "main",
-			Turns:    1,
-			Trace:    []sdk.RuntimeTraceEvent{{Index: 1, ThreadID: "main", Role: "assistant", Content: "support request resolved"}},
-			Metrics:  sdk.RuntimeAgentMetrics{LLMCalls: 1, TokensIn: 8, TokensOut: 4},
+		alias, _ := input["agent"].(string)
+		if alias != "main" {
+			s.collaboratorWaits = append(s.collaboratorWaits, alias)
+			execution, found := s.collaboratorExecutions[alias]
+			if !found {
+				return fmt.Errorf("unexpected collaborator wait for %q", alias)
+			}
+			value = execution
+		} else {
+			value = sdk.RuntimeAgentExecution{
+				Status:   "completed",
+				ThreadID: "main",
+				Turns:    1,
+				Trace:    []sdk.RuntimeTraceEvent{{Index: 1, ThreadID: "main", Role: "assistant", Content: "support request resolved"}},
+				Metrics:  sdk.RuntimeAgentMetrics{LLMCalls: 1, TokensIn: 8, TokensOut: 4},
+			}
 		}
 	case "environment_assert":
 		s.asserted++
@@ -795,6 +815,187 @@ func TestFourCaseCampaignRunsPromptsAssertionsAndStopsEnvironments(t *testing.T)
 		if !strings.Contains(prompt, "support request") {
 			t.Errorf("agent did not receive case prompt: %q", prompt)
 		}
+	}
+}
+
+func TestMultiAgentEnvironmentPreservesAndCapturesCollaborators(t *testing.T) {
+	platform := &evalCampaignPlatformStub{
+		t:      t,
+		models: []LLMModel{{Provider: "openai-codex", ModelID: "gpt-5.6-sol", GatewayModel: "openai-codex/gpt-5.6-sol"}},
+		definitions: map[string]EnvironmentDefinition{
+			"env-team": {
+				ID:   "env-team",
+				Name: "Coordinator team",
+				Spec: map[string]any{
+					"version":          1,
+					"network_mode":     "block",
+					"integration_mode": "mock",
+					"app_install_ids":  []any{42},
+					"agents": []any{
+						map[string]any{"source_agent_id": 7, "alias": "coordinator", "start_paused": true},
+						map[string]any{"source_agent_id": 8, "alias": "specialist", "provider": "openai", "model": "specialist-model"},
+					},
+				},
+			},
+		},
+		collaboratorExecutions: map[string]sdk.RuntimeAgentExecution{
+			"specialist": {
+				Status:   "completed",
+				ThreadID: "specialist-thread",
+				Turns:    1,
+				Trace:    []sdk.RuntimeTraceEvent{{Index: 1, ThreadID: "specialist-thread", Role: "assistant", Content: "specialist resolved the request"}},
+				Metrics:  sdk.RuntimeAgentMetrics{LLMCalls: 1, TokensIn: 5, TokensOut: 5},
+			},
+		},
+	}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-team", Name: "Team simulation", EnvironmentID: "env-team"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.saveCase(&Case{
+		ID: "case-team", SuiteID: "suite-team", Name: "Delegate", Prompt: "Resolve with the specialist",
+		Goals:      []string{"Use the specialist to resolve the request"},
+		Assertions: []Assertion{{Name: "Final response", Type: outputEqualsAssertionType, Equals: "support request resolved"}},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	experiment, err := svc.createExperiment("suite-team", "Team run", "manual", []Target{{AgentID: 7, Provider: "openai", Model: "coordinator-model"}}, 1, 0, "openai-codex/gpt-5.6-sol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.runNext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := svc.db.getExperiment(experiment.ID)
+	if err != nil || completed == nil || len(completed.Runs) != 1 {
+		t.Fatalf("experiment=%#v err=%v", completed, err)
+	}
+	run := completed.Runs[0]
+	if run.Status != "pass" || run.Execution == nil || len(run.Collaborators) != 1 {
+		t.Fatalf("run=%#v", run)
+	}
+	collaborator := run.Collaborators[0]
+	if collaborator.Alias != "specialist" || collaborator.SourceAgentID != 8 || !collaborator.Participated || collaborator.Execution == nil || len(collaborator.Execution.Trace) != 1 {
+		t.Fatalf("collaborator=%#v", collaborator)
+	}
+	if platform.created != 1 || platform.spawned != 1 || platform.stopped != 1 || !reflect.DeepEqual(platform.collaboratorWaits, []string{"specialist"}) {
+		t.Fatalf("created=%d spawned=%d stopped=%d waits=%#v", platform.created, platform.spawned, platform.stopped, platform.collaboratorWaits)
+	}
+	if len(platform.spawnInputs) != 1 {
+		t.Fatalf("spawn inputs=%#v", platform.spawnInputs)
+	}
+	spawnAgent, ok := platform.spawnInputs[0]["agent"].(map[string]any)
+	if !ok || spawnAgent["source_agent_id"] != float64(7) || spawnAgent["alias"] != "main" || spawnAgent["provider"] != "openai" || spawnAgent["model"] != "coordinator-model" {
+		t.Fatalf("evaluated target was not replaced as main: %#v", platform.spawnInputs[0])
+	}
+	if platform.judgeCalls != 1 || len(platform.judgeInputs) != 1 {
+		t.Fatalf("judge calls=%d inputs=%#v", platform.judgeCalls, platform.judgeInputs)
+	}
+	messages, ok := platform.judgeInputs[0]["messages"].([]any)
+	if !ok || len(messages) != 2 {
+		t.Fatalf("judge messages=%#v", platform.judgeInputs[0]["messages"])
+	}
+	userMessage, ok := messages[1].(map[string]any)
+	if !ok {
+		t.Fatalf("judge user message=%#v", messages[1])
+	}
+	var judgePayload map[string]any
+	if err := json.Unmarshal([]byte(userMessage["content"].(string)), &judgePayload); err != nil {
+		t.Fatal(err)
+	}
+	judgeCollaborators, ok := judgePayload["collaborator_executions"].([]any)
+	if !ok || len(judgeCollaborators) != 1 {
+		t.Fatalf("judge collaborator payload=%#v", judgePayload["collaborator_executions"])
+	}
+	if len(platform.createdSpecs) != 1 {
+		t.Fatalf("created specs=%#v", platform.createdSpecs)
+	}
+	createdSpec := platform.createdSpecs[0]
+	appInstallIDs, ok := createdSpec["app_install_ids"].([]any)
+	if !ok || len(appInstallIDs) != 1 || appInstallIDs[0] != float64(42) {
+		t.Fatalf("app installs were not preserved: %#v", createdSpec)
+	}
+	rawAgents, ok := createdSpec["agents"].([]any)
+	if !ok || len(rawAgents) != 1 {
+		t.Fatalf("runtime agents=%#v", createdSpec["agents"])
+	}
+	createdCollaborator, ok := rawAgents[0].(map[string]any)
+	if !ok || createdCollaborator["alias"] != "specialist" || createdCollaborator["source_agent_id"] != float64(8) {
+		t.Fatalf("runtime collaborator=%#v", rawAgents[0])
+	}
+}
+
+func TestEnvironmentAgentMappingRejectedBeforeRuntimeCreation(t *testing.T) {
+	tests := []struct {
+		name      string
+		agents    []any
+		wantError string
+	}{
+		{name: "target missing", agents: []any{map[string]any{"source_agent_id": 8, "alias": "specialist"}}, wantError: "do not declare evaluation target"},
+		{name: "target ambiguous", agents: []any{map[string]any{"source_agent_id": 7, "alias": "coordinator-a"}, map[string]any{"source_agent_id": 7, "alias": "coordinator-b"}}, wantError: "2 mappings"},
+		{name: "duplicate alias", agents: []any{map[string]any{"source_agent_id": 7, "alias": "coordinator"}, map[string]any{"source_agent_id": 8, "alias": "specialist"}, map[string]any{"source_agent_id": 9, "alias": "specialist"}}, wantError: "duplicate environment agent alias"},
+		{name: "reserved collaborator alias", agents: []any{map[string]any{"source_agent_id": 7, "alias": "coordinator"}, map[string]any{"source_agent_id": 8, "alias": "main"}}, wantError: "reserved evaluation alias"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			platform := &evalCampaignPlatformStub{
+				t: t,
+				definitions: map[string]EnvironmentDefinition{
+					"env-invalid": {ID: "env-invalid", Spec: map[string]any{"version": 1, "agents": test.agents}},
+				},
+			}
+			ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+			svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+			if _, err := svc.saveSuite(&Suite{ID: "suite-invalid-team", Name: "Invalid team", EnvironmentID: "env-invalid"}, true); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := svc.saveCase(&Case{ID: "case-invalid-team", SuiteID: "suite-invalid-team", Name: "Case", Prompt: "Help", Goals: []string{"Help the user"}}, true); err != nil {
+				t.Fatal(err)
+			}
+			experiment, err := svc.createExperiment("suite-invalid-team", "", "manual", []Target{{AgentID: 7}}, 1, 0, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := svc.runNext(context.Background()); err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("run error=%v", err)
+			}
+			completed, err := svc.db.getExperiment(experiment.ID)
+			if err != nil || completed == nil || len(completed.Runs) != 1 {
+				t.Fatalf("experiment=%#v err=%v", completed, err)
+			}
+			run := completed.Runs[0]
+			if run.Status != "error" || !strings.Contains(run.Error, test.wantError) {
+				t.Fatalf("run=%#v", run)
+			}
+			if platform.created != 0 || platform.spawned != 0 || platform.stopped != 0 {
+				t.Fatalf("invalid mapping created runtime: created=%d spawned=%d stopped=%d", platform.created, platform.spawned, platform.stopped)
+			}
+		})
+	}
+}
+
+func TestCollaboratorFailureIsCapturedAsEvaluationError(t *testing.T) {
+	platform := &evalCampaignPlatformStub{
+		t: t,
+		collaboratorExecutions: map[string]sdk.RuntimeAgentExecution{
+			"specialist": {
+				Status:   "failed",
+				Reason:   "tool crashed",
+				ThreadID: "main",
+				Turns:    1,
+				Trace:    []sdk.RuntimeTraceEvent{{Index: 1, ThreadID: "main", Role: "agent", Content: "partial result"}},
+			},
+		},
+	}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	results, failures := svc.captureCollaboratorExecutions("environment-run-1", []EnvironmentAgentSpec{{SourceAgentID: 8, Alias: "specialist"}}, 600, 10)
+	if len(results) != 1 || results[0].Execution == nil || len(results[0].Execution.Trace) != 1 || !results[0].Participated || !strings.Contains(results[0].Error, "tool crashed") {
+		t.Fatalf("results=%#v", results)
+	}
+	if len(failures) != 1 || !strings.Contains(failures[0], "specialist") || !strings.Contains(failures[0], "tool crashed") {
+		t.Fatalf("failures=%#v", failures)
 	}
 }
 
