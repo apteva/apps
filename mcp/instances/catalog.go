@@ -45,7 +45,19 @@ type ServerType struct {
 	HourlyPriceUSD  float64          `json:"hourly_price_usd,omitempty"`
 	// AvailableIn lists location names where this type can be
 	// provisioned. Hetzner ships some types only in newer regions.
-	AvailableIn []string `json:"available_in,omitempty"`
+	AvailableIn []string            `json:"available_in,omitempty"`
+	BootStorage []StorageConstraint `json:"boot_storage,omitempty"`
+}
+
+// StorageConstraint describes one boot-storage option supported by a
+// particular server type. Provider-wide capabilities are not sufficient for
+// clouds such as Scaleway, where DEV1 supports local SSD but POP2 is
+// block-only.
+type StorageConstraint struct {
+	StorageClass string `json:"storage_class"`
+	ProviderType string `json:"provider_type,omitempty"`
+	MinSizeGB    int    `json:"min_size_gb,omitempty"`
+	MaxSizeGB    int    `json:"max_size_gb,omitempty"`
 }
 
 // Location is one VPS region.
@@ -71,6 +83,7 @@ type Image struct {
 	ResourceClass   string   `json:"resource_class,omitempty"`
 	AvailableIn     []string `json:"available_in,omitempty"`
 	CompatibleTypes []string `json:"compatible_types,omitempty"`
+	ProviderType    string   `json:"provider_type,omitempty"`
 }
 
 // ─── entry points ──────────────────────────────────────────────────

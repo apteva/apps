@@ -267,6 +267,7 @@ func httpProviderErr(w http.ResponseWriter, err error) {
 	msg := err.Error()
 	status := http.StatusBadGateway
 	if errors.Is(err, ErrLocalInstanceImmutable) ||
+		strings.Contains(msg, "invalid storage request:") ||
 		strings.Contains(msg, "not a compatible Instances VPS provider") ||
 		strings.Contains(msg, "requested but this Instances install is bound to") ||
 		strings.Contains(msg, "requested but is not bound to this Instances install") ||

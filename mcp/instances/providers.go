@@ -183,7 +183,7 @@ func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, erro
 	}
 	in.ProviderConnectionID = bound.ConnectionID
 	if err := validateStorageRequest(provider, in.Storage); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid storage request: %w", err)
 	}
 	switch provider {
 	case "hetzner":

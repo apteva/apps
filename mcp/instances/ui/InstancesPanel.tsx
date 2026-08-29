@@ -114,7 +114,8 @@ interface StorageCapabilitiesWire {
   guest_prepare?: boolean;
   guest_filesystems?: string[];
   notes?: string;
-  tiers: Array<{ name: string; provider_type?: string; description?: string }>;
+  storage_classes?: Array<"local" | "block" | "network" | "ephemeral">;
+  tiers: Array<{ name: string; storage_class?: string; provider_type?: string; description?: string }>;
 }
 
 interface MetricsWire {
@@ -1809,7 +1810,7 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
     });
   };
 
-  let requestedBoot: { size_gb?: number; tier?: string } | null = null;
+  let requestedBoot: { size_gb?: number; storage_class?: string; tier?: string; provider_type?: string } | null = null;
   try { requestedBoot = JSON.parse(inst.storage_json || "{}").boot || null; } catch { requestedBoot = null; }
 
   return (
@@ -1828,7 +1829,7 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
             <div>
               <div className="text-sm text-text font-medium">Boot volume</div>
               <div className="text-[10px] text-text-dim">
-                boot · {requestedBoot?.size_gb ? `${requestedBoot.size_gb} GB · ${requestedBoot.tier || "provider-default"}` : "provider/image default"} · lifecycle tied to instance
+                boot · {requestedBoot?.size_gb ? `${requestedBoot.storage_class || "provider-default"} · ${requestedBoot.size_gb} GB · ${requestedBoot.provider_type || requestedBoot.tier || "provider-default"}` : "provider/image default"} · lifecycle tied to instance
               </div>
             </div>
             <span className="flex-1" />
@@ -1920,6 +1921,7 @@ interface ServerTypeWire {
   monthly_price_usd?: number;
   hourly_price_usd?: number;
   available_in?: string[];
+  boot_storage?: Array<{ storage_class: "local" | "block" | "network" | "ephemeral"; provider_type?: string; min_size_gb?: number; max_size_gb?: number }>;
 }
 
 interface LocationWire {
@@ -1940,6 +1942,7 @@ interface ImageWire {
   resource_class?: string;
   available_in?: string[];
   compatible_types?: string[];
+  provider_type?: string;
 }
 
 interface ProviderBindingWire {
@@ -1989,9 +1992,18 @@ function CreateDialog({
   const [storageCapabilities, setStorageCapabilities] = useState<StorageCapabilitiesWire | null>(null);
   const [customBootStorage, setCustomBootStorage] = useState(false);
   const [bootSizeGB, setBootSizeGB] = useState(80);
+  const [bootStorageClass, setBootStorageClass] = useState("block");
   const [bootTier, setBootTier] = useState("balanced");
 
   const selectedType = serverTypes.find((candidate) => candidate.name === size);
+
+  const bootStorageOptions = selectedType?.boot_storage?.length
+    ? selectedType.boot_storage
+    : (storageCapabilities?.storage_classes || []).map((storageClass) => ({ storage_class: storageClass }));
+  const selectedBootConstraint = bootStorageOptions.find((candidate) => candidate.storage_class === bootStorageClass);
+  const compatibleBootTiers = (storageCapabilities?.tiers || []).filter((candidate) =>
+    !candidate.storage_class || candidate.storage_class === bootStorageClass
+  );
   const compatibleLocations = locations.filter((candidate) =>
     !selectedType?.available_in?.length || selectedType.available_in.includes(candidate.name)
   );
@@ -2000,8 +2012,28 @@ function CreateDialog({
     if (selectedType?.platform && candidate.platform && candidate.platform !== selectedType.platform) return false;
     if (candidate.available_in?.length && region && !candidate.available_in.includes(region)) return false;
     if (candidate.compatible_types?.length && size && !candidate.compatible_types.includes(size)) return false;
+    if (provider === "scaleway" && customBootStorage && candidate.provider_type) {
+      const expectedType = bootStorageClass === "local" ? "l_ssd" : "sbs_volume";
+      if (candidate.provider_type !== expectedType) return false;
+    }
     return true;
   });
+
+  useEffect(() => {
+    if (!customBootStorage || bootStorageOptions.length === 0) return;
+    const nextClass = bootStorageOptions.some((candidate) => candidate.storage_class === bootStorageClass)
+      ? bootStorageClass
+      : bootStorageOptions[0].storage_class;
+    if (nextClass !== bootStorageClass) {
+      setBootStorageClass(nextClass);
+      return;
+    }
+    const constraint = bootStorageOptions.find((candidate) => candidate.storage_class === nextClass);
+    if (constraint?.max_size_gb && bootSizeGB > constraint.max_size_gb) setBootSizeGB(constraint.max_size_gb);
+    if (constraint?.min_size_gb && bootSizeGB < constraint.min_size_gb) setBootSizeGB(constraint.min_size_gb);
+    const tiers = (storageCapabilities?.tiers || []).filter((candidate) => !candidate.storage_class || candidate.storage_class === nextClass);
+    if (tiers.length && !tiers.some((candidate) => candidate.name === bootTier)) setBootTier(tiers[0].name);
+  }, [customBootStorage, size, bootStorageClass, bootSizeGB, bootTier, storageCapabilities]);
 
   useEffect(() => {
     if (!selectedType) return;
@@ -2082,7 +2114,9 @@ function CreateDialog({
         const storageJson = await storageRes.json();
         const nextStorageCapabilities = storageJson.capabilities as StorageCapabilitiesWire;
         setStorageCapabilities(nextStorageCapabilities);
-        setBootTier(nextStorageCapabilities.tiers?.[0]?.name || "balanced");
+        const firstClass = nextStorageCapabilities.storage_classes?.[0] || "block";
+        setBootStorageClass(firstClass);
+        setBootTier(nextStorageCapabilities.tiers?.find((candidate) => !candidate.storage_class || candidate.storage_class === firstClass)?.name || "balanced");
         setCatalogProvider(stJson.provider || locJson.provider || imgJson.provider || "");
         // Hide deprecated server types from the default view —
         // they still come back in the API for completeness but
@@ -2128,7 +2162,7 @@ function CreateDialog({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: name.trim(), provider, provider_connection_id: providerConnectionID, size, region, image,
-          storage: customBootStorage ? { boot: { size_gb: bootSizeGB, tier: bootTier, delete_policy: "with_instance" } } : undefined,
+          storage: customBootStorage ? { boot: { size_gb: bootSizeGB, storage_class: bootStorageClass, tier: bootTier, delete_policy: "with_instance" } } : undefined,
         }),
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
@@ -2170,7 +2204,7 @@ function CreateDialog({
     const label = i.description && i.description !== i.name
       ? `${i.description} (${i.name})`
       : i.name;
-    const details = [i.architecture, i.os_flavor && i.os_version ? `${i.os_flavor} ${i.os_version}` : ""]
+    const details = [i.architecture, i.os_flavor && i.os_version ? `${i.os_flavor} ${i.os_version}` : "", i.provider_type]
       .filter(Boolean)
       .join(", ");
     return details ? `${label} — ${details}` : label;
@@ -2318,11 +2352,14 @@ function CreateDialog({
             </label>
             {customBootStorage && (
               <div className="grid grid-cols-2 gap-2">
-                <input type="number" min={1} value={bootSizeGB} onChange={(event) => setBootSizeGB(Number(event.target.value))} className="bg-bg-input border border-border rounded px-2 py-1 text-sm" aria-label="Boot volume size in GB" />
-                <select value={bootTier} onChange={(event) => setBootTier(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm">
-                  {(storageCapabilities.tiers || []).map((candidate) => <option key={candidate.name} value={candidate.name}>{candidate.name}{candidate.provider_type ? ` (${candidate.provider_type})` : ""}</option>)}
+                <select value={bootStorageClass} onChange={(event) => setBootStorageClass(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm" aria-label="Boot storage class">
+                  {bootStorageOptions.map((candidate) => <option key={candidate.storage_class} value={candidate.storage_class}>{candidate.storage_class}{candidate.max_size_gb ? ` (up to ${candidate.max_size_gb} GB)` : ""}</option>)}
                 </select>
-                <span className="col-span-2 text-[10px] text-text-dim">Boot · {bootSizeGB} GB · deleted with the instance</span>
+                <input type="number" min={selectedBootConstraint?.min_size_gb || 1} max={selectedBootConstraint?.max_size_gb || undefined} value={bootSizeGB} onChange={(event) => setBootSizeGB(Number(event.target.value))} className="bg-bg-input border border-border rounded px-2 py-1 text-sm" aria-label="Boot volume size in GB" />
+                <select value={bootTier} onChange={(event) => setBootTier(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm">
+                  {compatibleBootTiers.map((candidate) => <option key={candidate.name} value={candidate.name}>{candidate.name}{candidate.provider_type ? ` (${candidate.provider_type})` : ""}</option>)}
+                </select>
+                <span className="text-[10px] text-text-dim self-center">Boot · {bootStorageClass} · {bootSizeGB} GB · deleted with the instance</span>
               </div>
             )}
           </div>

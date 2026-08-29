@@ -80,11 +80,22 @@ is therefore `role=boot` and `storage_class=block`.
 
 Omitting `storage` from `instance_create` preserves the provider/image default.
 Providers that support configurable boot storage accept
-`storage.boot.size_gb`, `tier`, and `delete_policy`. Data volumes default to
+`storage.boot.size_gb`, `storage_class`, `tier`, and `delete_policy`.
+`provider_type` remains an advanced provider-native override. Provider/type
+catalog rows expose boot-storage constraints so unsupported combinations are
+rejected before provisioning. Data volumes default to
 `delete_policy=retain`; app-owned volumes can instead use `with_instance`.
 Destroy first detaches retained data volumes and only deletes managed volumes
 whose policy is `with_instance`. Existing/external volumes are never formatted
 or deleted implicitly.
+
+For Scaleway, `storage_class=local` maps to `l_ssd` and is offered only on
+server types with non-zero local-storage capacity, such as DEV1-L. Block-only
+types such as POP2 accept `storage_class=block`, which maps to `sbs_volume`.
+The chosen image must use a compatible local or SBS root snapshot. Readiness
+persists the provider-reported boot volume and verifies both its native type and
+size, then checks that the guest root filesystem expanded to use the requested
+space.
 
 Guest activation is provider-neutral. `instance_volume_prepare` discovers the
 attached device through stable `/dev/disk/by-id` identifiers and a strict size

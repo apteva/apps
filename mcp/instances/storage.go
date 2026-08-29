@@ -32,12 +32,14 @@ type StorageCapabilities struct {
 
 type StorageTier struct {
 	Name         string `json:"name"`
+	StorageClass string `json:"storage_class,omitempty"`
 	ProviderType string `json:"provider_type,omitempty"`
 	Description  string `json:"description,omitempty"`
 }
 
 type BootStorageRequest struct {
 	SizeGB       int    `json:"size_gb"`
+	StorageClass string `json:"storage_class,omitempty"`
 	Tier         string `json:"tier,omitempty"`
 	ProviderType string `json:"provider_type,omitempty"`
 	DeletePolicy string `json:"delete_policy,omitempty"`
@@ -110,8 +112,12 @@ func storageCapabilities(provider string) StorageCapabilities {
 		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "gp3"}, {Name: "performance", ProviderType: "io2"}}
 	case "scaleway":
 		cap.BootSizeConfigurable, cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize, cap.Snapshots = true, true, true, true, true, true
-		cap.StorageClasses = []string{"block"}
-		cap.Tiers = []StorageTier{{Name: "balanced", ProviderType: "sbs_5k", Description: "5,000 IOPS"}, {Name: "performance", ProviderType: "sbs_15k", Description: "15,000 IOPS"}}
+		cap.StorageClasses = []string{"local", "block"}
+		cap.Tiers = []StorageTier{
+			{Name: "local", StorageClass: "local", ProviderType: "l_ssd", Description: "Instance-local SSD where supported by the selected server type"},
+			{Name: "balanced", StorageClass: "block", ProviderType: "sbs_5k", Description: "5,000 IOPS"},
+			{Name: "performance", StorageClass: "block", ProviderType: "sbs_15k", Description: "15,000 IOPS"},
+		}
 	case "huawei-cloud":
 		cap.BootSizeConfigurable, cap.DataVolumes, cap.DynamicAttach, cap.Detach, cap.Resize, cap.Snapshots = true, true, true, true, true, true
 		cap.StorageClasses = []string{"block"}
@@ -160,7 +166,21 @@ func validateStorageRequest(provider string, req InstanceStorageRequest) error {
 		return errors.New("storage.boot.delete_policy must be with_instance or retain")
 	}
 	if req.Boot.Tier == "" {
-		req.Boot.Tier = "balanced"
+		if req.Boot.StorageClass == "local" || req.Boot.ProviderType == "l_ssd" {
+			req.Boot.Tier = "local"
+		} else {
+			req.Boot.Tier = "balanced"
+		}
+	}
+	if req.Boot.StorageClass == "" {
+		if req.Boot.ProviderType == "l_ssd" || req.Boot.Tier == "local" {
+			req.Boot.StorageClass = "local"
+		} else {
+			req.Boot.StorageClass = "block"
+		}
+	}
+	if !containsString(cap.StorageClasses, req.Boot.StorageClass) {
+		return fmt.Errorf("provider %q does not support boot storage class %q", provider, req.Boot.StorageClass)
 	}
 	return nil
 }

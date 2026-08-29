@@ -287,8 +287,22 @@ func dbDeleteInstance(db *sql.DB, id int64) error {
 	if id == 0 {
 		return ErrLocalInstanceImmutable
 	}
-	_, err := db.Exec(`DELETE FROM instances WHERE id = ?`, id)
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Boot volumes are destroyed with the upstream instance. Remove their
+	// inventory rows instead of leaving detached-looking records for storage
+	// that no longer exists. Retained data volumes have already been detached
+	// and had instance_id cleared by prepareVolumesForInstanceDestroy.
+	if _, err = tx.Exec(`DELETE FROM instance_volumes WHERE instance_id = ? AND role = 'boot'`, id); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM instances WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // dbListInstances returns every row, optionally filtered by

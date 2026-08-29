@@ -38,7 +38,8 @@ func (a *App) MCPTools() []sdk.Tool {
 							"type": "object",
 							"properties": map[string]any{
 								"size_gb":       map[string]any{"type": "integer", "minimum": 1},
-								"tier":          map[string]any{"type": "string", "enum": []string{"provider-default", "balanced", "performance"}},
+								"storage_class": map[string]any{"type": "string", "enum": []string{"local", "block", "network", "ephemeral"}},
+								"tier":          map[string]any{"type": "string", "enum": []string{"provider-default", "local", "balanced", "performance"}},
 								"provider_type": map[string]any{"type": "string"},
 								"delete_policy": map[string]any{"type": "string", "enum": []string{"with_instance", "retain"}},
 							},
@@ -303,7 +304,7 @@ func storageRequestArg(args map[string]any) InstanceStorageRequest {
 		return InstanceStorageRequest{}
 	}
 	return InstanceStorageRequest{Boot: &BootStorageRequest{
-		SizeGB: intArg(boot, "size_gb", 0), Tier: strArg(boot, "tier"), ProviderType: strArg(boot, "provider_type"), DeletePolicy: strArg(boot, "delete_policy"),
+		SizeGB: intArg(boot, "size_gb", 0), StorageClass: strArg(boot, "storage_class"), Tier: strArg(boot, "tier"), ProviderType: strArg(boot, "provider_type"), DeletePolicy: strArg(boot, "delete_policy"),
 	}}
 }
 

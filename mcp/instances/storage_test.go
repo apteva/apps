@@ -41,6 +41,9 @@ func TestStorageCapabilities_DistinguishesBootAndData(t *testing.T) {
 	if !scaleway.BootSizeConfigurable || !scaleway.DataVolumes || !scaleway.DynamicAttach || !scaleway.GuestPrepare || len(scaleway.GuestFilesystems) != 2 {
 		t.Fatalf("scaleway capabilities = %#v", scaleway)
 	}
+	if !containsString(scaleway.StorageClasses, "local") || !containsString(scaleway.StorageClasses, "block") {
+		t.Fatalf("scaleway storage classes = %#v", scaleway.StorageClasses)
+	}
 	runpod := storageCapabilities("runpod")
 	if !runpod.BootSizeConfigurable || !runpod.DataVolumes || runpod.DynamicAttach || !strings.Contains(runpod.Notes, "created") {
 		t.Fatalf("runpod capabilities = %#v", runpod)

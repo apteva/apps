@@ -231,6 +231,11 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	if err := applyAPIProviderDefaults(ctx, provider, &in); err != nil {
 		return nil, err
 	}
+	if provider == "scaleway" && in.Storage.Boot != nil {
+		if err := validateScalewayBootStorage(ctx, &in); err != nil {
+			return nil, fmt.Errorf("invalid storage request: %w", err)
+		}
+	}
 	if provider == "scaleway" && isScalewayDediboxSize(in.Size) {
 		return scalewayDediboxProvision(ctx, in)
 	}
@@ -409,6 +414,18 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 			if in.Image == "" {
 				return fmt.Errorf("Scaleway returned no Dedibox OS compatible with %s in %s", in.Size, in.Region)
 			}
+		} else if provider == "scaleway" && in.Storage.Boot != nil {
+			expectedType := scalewayBootProviderType(in.Storage.Boot)
+			compatible := make([]Image, 0, len(images))
+			for _, image := range images {
+				if image.ProviderType == "" || image.ProviderType == expectedType {
+					compatible = append(compatible, image)
+				}
+			}
+			if len(compatible) == 0 {
+				return fmt.Errorf("Scaleway returned no %s-compatible image for %s", expectedType, in.Size)
+			}
+			in.Image = preferredLinuxImage(compatible)
 		} else {
 			in.Image = preferredLinuxImage(images)
 		}
@@ -487,7 +504,7 @@ func apiProviderCreateRequest(ctx *sdk.AppCtx, provider string, in CreateInstanc
 		if boot := in.Storage.Boot; boot != nil {
 			args["volumes"] = map[string]any{"0": map[string]any{
 				"name": in.Name + "-boot", "size": int64(boot.SizeGB) * 1_000_000_000,
-				"volume_type": "sbs_volume", "boot": true,
+				"volume_type": scalewayBootProviderType(boot), "boot": true,
 			}}
 		}
 		return "server_create", args, nil
@@ -682,9 +699,27 @@ func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
 				return
 			}
 		}
+		var requestedBoot *BootStorageRequest
+		if fresh.Provider == "scaleway" && !isScalewayAppleInstance(fresh) && !isScalewayDediboxInstance(fresh) {
+			requestedBoot, err = bootStorageRequestFromInstance(fresh)
+			if err != nil {
+				_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "error", "error_message": err.Error()})
+				return
+			}
+			if _, err = verifyAndPersistScalewayBootStorage(ctx, fresh); err != nil {
+				_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "error", "error_message": err.Error()})
+				return
+			}
+		}
 		if err := probeSSHReadyFn(fresh, 5*time.Minute); err != nil {
 			_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "error", "error_message": fmt.Sprintf("ssh probe: %v", err)})
 			return
+		}
+		if requestedBoot != nil {
+			if err := verifyScalewayRootFilesystem(fresh, requestedBoot.SizeGB); err != nil {
+				_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "error", "error_message": err.Error()})
+				return
+			}
 		}
 		_, _, _ = transitionInstanceAndEmit(ctx, id, []string{"provisioning"}, "ready", map[string]any{"ready_at": nowUTC(), "error_message": ""})
 	}()
