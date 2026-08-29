@@ -333,6 +333,12 @@ func (s *LocalFileStore) list(slug, relPrefix string, recursive, skipGenerated b
 			if err != nil {
 				return err
 			}
+			if strings.EqualFold(d.Name(), ".git") {
+				if d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
 			rel, e := filepath.Rel(root, p)
 			if e != nil {
 				return nil
@@ -367,6 +373,9 @@ func (s *LocalFileStore) list(slug, relPrefix string, recursive, skipGenerated b
 			return nil, err
 		}
 		for _, e := range entries {
+			if strings.EqualFold(e.Name(), ".git") {
+				continue
+			}
 			rel := e.Name()
 			if relPrefix != "" {
 				rel = relPrefix + "/" + e.Name()
@@ -405,7 +414,16 @@ func (s *LocalFileStore) TotalSize(slug string) (int64, error) {
 	}
 	var total int64
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if strings.EqualFold(d.Name(), ".git") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		info, err := d.Info()

@@ -89,6 +89,8 @@ func (a *App) handleRepoItem(w http.ResponseWriter, r *http.Request) {
 		a.httpRepoIssueItem(w, r, slug, strings.TrimPrefix(tail, "issues/"))
 	case strings.HasPrefix(tail, "dev/") || tail == "dev":
 		a.httpRepoDev(w, r, slug, strings.TrimPrefix(tail, "dev/"))
+	case strings.HasPrefix(tail, "git/") || tail == "git":
+		a.httpRepoGit(w, r, slug, strings.TrimPrefix(tail, "git/"))
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
@@ -218,18 +220,17 @@ func (a *App) httpRepoMeta(w http.ResponseWriter, r *http.Request, slug string) 
 		}
 		httpJSON(w, map[string]any{"repository": repo})
 	case http.MethodDelete:
-		repo, err := requireRepoSlug(globalCtx, pid, slug)
+		_, err := requireRepoSlug(globalCtx, pid, slug)
 		if err != nil {
 			httpErr(w, http.StatusNotFound, err.Error())
 			return
 		}
 		force := r.URL.Query().Get("force") == "1"
 		if force {
-			if err := a.storeFor(repo).DropRepo(slug); err != nil {
+			if err := a.hardDeleteRepo(globalCtx.AppDB(), pid, slug); err != nil {
 				httpErr(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			_ = dbHardDeleteRepo(globalCtx.AppDB(), pid, slug)
 			if globalCtx != nil {
 				globalCtx.Emit("repo.deleted", map[string]any{"slug": slug})
 			}
@@ -1107,7 +1108,7 @@ func (a *App) handleGithubReposList(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "GET")
 		return
 	}
-	bound := globalCtx.IntegrationFor("github")
+	bound := boundGitIntegrationForSlug(globalCtx, "github")
 	if bound == nil || bound.ConnectionID == 0 {
 		httpErr(w, http.StatusFailedDependency, "github not connected: bind a github connection on this install first")
 		return

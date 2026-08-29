@@ -106,6 +106,23 @@ Do not mirror task progress into global agent status. Finish exactly once with
 `tasks_complete`, which records 100% and `Completed`, or use failed/cancelled
 when that is the real outcome.
 
+### The terminal write is mandatory
+
+`progress: 100` is not a terminal state, and a final-looking `current_step`
+does not complete a task. Before the thread calls `pace`, returns idle, stops,
+or sends its final response, inspect every task it advanced during that turn.
+If the outcome succeeded, it must call `tasks_complete` exactly once with the
+concrete result. If the outcome failed, it must record `failed` with a concrete
+error. Leave a task `running`, `waiting`, or `blocked` only when work genuinely
+remains or an external dependency is still outstanding.
+
+The same rule applies to delegation. A worker's final message is not a Tasks
+terminal write. As soon as the worker reports a successful result, main must
+record the remaining meaningful milestone and immediately call
+`tasks_complete` before main paces, idles, stops, or answers the user. Core
+lifecycle settlement is only a safety net for an omitted terminal write; it
+does not replace this MCP obligation.
+
 ## Scheduling
 
 Use `once` with an RFC3339 `at` timestamp or a relative `after` duration. Use
@@ -114,10 +131,20 @@ List, pause, resume, cancel, and run schedules through Tasks directly; do not
 ask another thread merely to inspect the schedule inventory.
 
 Every due schedule has an occurrence lifecycle. Scheduler dispatch is not
-workflow success: the assigned thread accepts an occurrence when it reads the
-authoritative record with `tasks_get`, then records running milestones and a
-terminal outcome. Always include a durable `result_reference` when the work
-creates an output ID or URL. A dispatched occurrence that is never accepted is
-failed automatically; do not recreate it merely because the parent schedule is
-still active. The recurring parent reports scheduler state separately from its
-latest occurrence status and error.
+workflow success. On platforms with tracked agent events, Tasks records
+acceptance automatically when Core claims the occurrence and records execution
+activity separately from business progress. The assigned thread must still
+read the authoritative record with `tasks_get` before any domain action; on
+older platforms that read also accepts the occurrence. The agent—not Core—then
+records meaningful running milestones and exactly one terminal outcome through
+the Tasks MCP tools. Always include a durable `result_reference` when the work
+creates an output ID or URL.
+
+When Core reports that the complete causal execution, including its workers,
+has settled, Tasks does not infer success. It allows a short terminal grace
+period. If the agent omitted completion or failure, Tasks fails the occurrence
+with `agent_exited_without_terminal_status` so an abandoned run cannot block
+the next schedule. A dispatched occurrence that is never accepted is failed
+automatically; do not recreate it merely because the parent schedule is still
+active. The recurring parent reports scheduler state separately from its latest
+occurrence status and error.

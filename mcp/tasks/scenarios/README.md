@@ -11,14 +11,14 @@ runs assertions against the running sidecar's REST surface.
 # Spawn a clean apteva-server in a temp dir and run every scenario.
 apteva test ./scenarios/
 
-# One scenario, verbose.
-apteva test ./scenarios/01-create-and-complete.yaml -v
+# One scenario, verbose. Flags must precede the scenario path.
+apteva test -v ./scenarios/01-create-and-complete.yaml
 
 # Use an already-running server (skip spawn).
-apteva test ./scenarios/ --server localhost:5280
+apteva test --server localhost:5280 ./scenarios/
 
 # Hard budget across scenarios.
-apteva test ./scenarios/ --max-budget-usd 0.50
+apteva test --max-budget-usd 0.50 ./scenarios/
 ```
 
 ## Scenarios in this directory
@@ -38,6 +38,7 @@ apteva test ./scenarios/ --max-budget-usd 0.50
 | `12-concurrent-multitask-workers.yaml` | Four tasks and four Core workers race assignments and reports without crossing progress, executors, or results. |
 | `13-authoritative-worker-task-fetch.yaml` | A general read-only worker fetches execution-critical values from the authoritative task before acting, with no corrective parent handoff. |
 | `14-edit-recurring-definition.yaml` | A paused recurring task is renamed and its description, interval, and timezone are edited atomically without resuming it or creating a replacement. |
+| `15-terminal-mcp-before-idle.yaml` | A successful task reaches a nonterminal 100% milestone, then follows Tasks guidance and records the mandatory terminal MCP write before stopping. |
 
 Scenario 13 also mounts a spawnable in-process `creator-sandbox` MCP. Its
 `verify_post` tool performs no external action; the assertion requires the

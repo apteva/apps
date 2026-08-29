@@ -150,7 +150,7 @@ func (p *idempotentMessagingPlatform) snapshot() (created int, calls []crmCallAp
 
 func TestSendMessageRejectsSubjectlessStandaloneEmailBeforePlatformCalls(t *testing.T) {
 	platform := &crmRecordingPlatform{}
-	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	ctx := newTestCtx(t, tk.WithPlatform(platform), tk.WithConfig(map[string]string{"email_verification_mode": "off"}))
 	app := &App{}
 	contact := mustCreate(t, ctx, map[string]any{
 		"display_name": "Alice",
@@ -280,7 +280,7 @@ func TestIntentionalTemplateSendForwardsTemplateFields(t *testing.T) {
 
 func TestReplyRejectsUnknownConversationBeforePlatformCalls(t *testing.T) {
 	platform := &crmRecordingPlatform{}
-	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	ctx := newTestCtx(t, tk.WithPlatform(platform), tk.WithConfig(map[string]string{"email_verification_mode": "off"}))
 	app := &App{}
 	contact := mustCreate(t, ctx, map[string]any{
 		"display_name": "Alice",

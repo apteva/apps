@@ -16,7 +16,7 @@ import (
 // MCPTools wires every tool to a handler that resolves the project,
 // validates args, and delegates to the store + edit engine.
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{
 			Name:        "repos_list",
 			Description: "List repositories in this project. Args: archived?, q?.",
@@ -460,6 +460,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolDevLogs,
 		},
 	}
+	return append(tools, a.gitMCPTools()...)
 }
 
 // ─── repos_dev_* handlers ─────────────────────────────────────────
@@ -1149,14 +1150,7 @@ func (a *App) toolReposArchive(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	force := boolArg(args, "force")
 	if force {
-		repo, err := requireRepo(ctx, pid, slug)
-		if err != nil {
-			return nil, err
-		}
-		if err := a.storeFor(repo).DropRepo(slug); err != nil {
-			return nil, err
-		}
-		if err := dbHardDeleteRepo(ctx.AppDB(), pid, slug); err != nil {
+		if err := a.hardDeleteRepo(ctx.AppDB(), pid, slug); err != nil {
 			return nil, err
 		}
 		if ctx != nil {

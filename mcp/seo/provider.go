@@ -305,7 +305,7 @@ func selectProvider(ctx *sdk.AppCtx, requested string) (providerAdapter, error) 
 			return provider, nil
 		}
 	}
-	return nil, fmt.Errorf("SEO provider %q is not bound to this install", requested)
+	return nil, fmt.Errorf("%w: SEO provider %q is not bound to this install", errProviderUnbound, requested)
 }
 
 // cachedProviderFromArgs applies the configured default to provider-sensitive

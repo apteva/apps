@@ -22,6 +22,22 @@ type Timeline struct {
 	Soundtrack *Soundtrack `json:"soundtrack,omitempty"`
 	Background string      `json:"background,omitempty"` // hex color, e.g. "#000000"
 	Tracks     []Track     `json:"tracks"`
+	Markers    []Marker    `json:"markers,omitempty"`
+}
+
+// Marker is an editable timeline event supplied by a recorder or an agent.
+// Composer stores markers with the composition and exposes them in the panel;
+// they do not change the render unless a caller uses them to author clips or
+// camera keyframes.
+type Marker struct {
+	ID       string         `json:"id,omitempty"`
+	Time     float64        `json:"time"`
+	Type     string         `json:"type"`
+	Label    string         `json:"label,omitempty"`
+	Value    any            `json:"value,omitempty"`
+	Duration float64        `json:"duration,omitempty"`
+	Region   *SourceCrop    `json:"region,omitempty"`
+	Meta     map[string]any `json:"meta,omitempty"`
 }
 
 type Soundtrack struct {
@@ -42,17 +58,22 @@ type Clip struct {
 	SectionID       string      `json:"section_id,omitempty"`
 	GroupID         string      `json:"group_id,omitempty"`
 	Asset           Asset       `json:"asset"`
-	Start           float64     `json:"start"`  // seconds from composition start
-	Length          float64     `json:"length"` // seconds
+	Start           float64     `json:"start"`                   // seconds from composition start
+	Length          float64     `json:"length"`                  // seconds
+	SourceStart     float64     `json:"source_start,omitempty"`  // seconds from source start
+	SourceEnd       float64     `json:"source_end,omitempty"`    // absolute source time; 0 means unbounded
+	PlaybackRate    float64     `json:"playback_rate,omitempty"` // source speed multiplier; default 1
 	Duration        float64     `json:"duration,omitempty"`
-	Fit             string      `json:"fit,omitempty"`     // crop|contain|cover|stretch|none
-	Width           float64     `json:"width,omitempty"`   // pixels; values 0..1 are treated as viewport-relative
-	Height          float64     `json:"height,omitempty"`  // pixels; values 0..1 are treated as viewport-relative
-	Scale           float64     `json:"scale,omitempty"`   // multiplier after fit sizing
-	Opacity         float64     `json:"opacity,omitempty"` // 0..1, default 1
-	Offset          *Offset     `json:"offset,omitempty"`  // Shotstack-style viewport-relative offset
-	Layout          *ClipLayout `json:"layout,omitempty"`  // Composer convenience alias, normalized at render time
-	ZIndex          int         `json:"z_index,omitempty"` // optional per-track ordering hint
+	Crop            *SourceCrop `json:"crop,omitempty"`      // normalized source-space rectangle
+	Transform       *Transform  `json:"transform,omitempty"` // source-space focus and zoom
+	Fit             string      `json:"fit,omitempty"`       // crop|contain|cover|stretch|none
+	Width           float64     `json:"width,omitempty"`     // pixels; values 0..1 are treated as viewport-relative
+	Height          float64     `json:"height,omitempty"`    // pixels; values 0..1 are treated as viewport-relative
+	Scale           float64     `json:"scale,omitempty"`     // multiplier after fit sizing
+	Opacity         float64     `json:"opacity,omitempty"`   // 0..1, default 1
+	Offset          *Offset     `json:"offset,omitempty"`    // Shotstack-style viewport-relative offset
+	Layout          *ClipLayout `json:"layout,omitempty"`    // Composer convenience alias, normalized at render time
+	ZIndex          int         `json:"z_index,omitempty"`   // optional per-track ordering hint
 	BorderRadius    float64     `json:"border_radius,omitempty"`
 	Shadow          bool        `json:"shadow,omitempty"`
 	DurationMode    string      `json:"duration_mode,omitempty"` // fixed_trim_pad | fit_generated | fit_generated_keep_start | fit_generated_reflow
@@ -217,6 +238,33 @@ type Offset struct {
 	Y float64 `json:"y,omitempty"`
 }
 
+// SourceCrop selects a normalized rectangle from the source before fitting it
+// into the output layout. Values are fractions in the inclusive 0..1 range.
+type SourceCrop struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+// Transform controls source-space camera motion. X and Y are normalized focus
+// points (0..1); Scale is zoom (1 is unchanged). Keyframe times are relative
+// to the clip, which keeps the motion intact when the clip moves on timeline.
+type Transform struct {
+	X         *float64            `json:"x,omitempty"`
+	Y         *float64            `json:"y,omitempty"`
+	Scale     float64             `json:"scale,omitempty"`
+	Keyframes []TransformKeyframe `json:"keyframes,omitempty"`
+}
+
+type TransformKeyframe struct {
+	Time   float64  `json:"time"`
+	X      *float64 `json:"x,omitempty"`
+	Y      *float64 `json:"y,omitempty"`
+	Scale  float64  `json:"scale,omitempty"`
+	Easing string   `json:"easing,omitempty"` // linear|ease_in|ease_out|ease_in_out
+}
+
 type ClipLayout struct {
 	Fit          string   `json:"fit,omitempty"`
 	X            *float64 `json:"x,omitempty"`
@@ -337,6 +385,21 @@ func validateEdit(e *Edit) error {
 			if c.Volume < 0 || c.Volume > 1 {
 				return fmt.Errorf("track[%d].clip[%d]: volume must be 0..1", ti, i)
 			}
+			if err := validateSourceRange(c, at); err != nil {
+				return fmt.Errorf("track[%d].clip[%d]: %w", ti, i, err)
+			}
+			if err := validatePlaybackRate(c.PlaybackRate, at); err != nil {
+				return fmt.Errorf("track[%d].clip[%d]: %w", ti, i, err)
+			}
+			if (c.Crop != nil || c.Transform != nil) && at != "video" && at != "image" {
+				return fmt.Errorf("track[%d].clip[%d]: crop/transform require a video or image asset", ti, i)
+			}
+			if err := validateSourceCrop(c.Crop); err != nil {
+				return fmt.Errorf("track[%d].clip[%d]: crop: %w", ti, i, err)
+			}
+			if err := validateTransform(c.Transform, clipDuration(*c)); err != nil {
+				return fmt.Errorf("track[%d].clip[%d]: transform: %w", ti, i, err)
+			}
 			if c.Opacity < 0 || c.Opacity > 1 {
 				return fmt.Errorf("track[%d].clip[%d]: opacity must be 0..1", ti, i)
 			}
@@ -383,6 +446,21 @@ func validateEdit(e *Edit) error {
 			}
 		}
 	}
+	for i := range e.Timeline.Markers {
+		m := &e.Timeline.Markers[i]
+		if m.Time < 0 {
+			return fmt.Errorf("marker[%d]: time must be >= 0", i)
+		}
+		if m.Duration < 0 {
+			return fmt.Errorf("marker[%d]: duration must be >= 0", i)
+		}
+		if strings.TrimSpace(m.Type) == "" {
+			return fmt.Errorf("marker[%d]: type required", i)
+		}
+		if err := validateSourceCrop(m.Region); err != nil {
+			return fmt.Errorf("marker[%d].region: %w", i, err)
+		}
+	}
 	if visualTracks == 0 && len(audioTimelineClips(e)) == 0 {
 		return errors.New("at least one visual or audio track required")
 	}
@@ -396,6 +474,98 @@ func validateEdit(e *Edit) error {
 		if err := validateTiming(s.Timing); err != nil {
 			return fmt.Errorf("soundtrack: %w", err)
 		}
+	}
+	return nil
+}
+
+func validateSourceRange(c *Clip, assetType string) error {
+	if c == nil {
+		return nil
+	}
+	if c.SourceStart < 0 || c.SourceEnd < 0 {
+		return errors.New("source_start/source_end must be >= 0")
+	}
+	if c.SourceEnd > 0 && c.SourceEnd <= c.SourceStart {
+		return errors.New("source_end must be greater than source_start")
+	}
+	if (c.SourceStart > 0 || c.SourceEnd > 0) && assetType != "video" && assetType != "audio" {
+		return fmt.Errorf("source ranges require a video or audio asset (got %s)", assetType)
+	}
+	return nil
+}
+
+func validatePlaybackRate(rate float64, assetType string) error {
+	if rate == 0 || rate == 1 {
+		return nil
+	}
+	if assetType != "video" && assetType != "audio" {
+		return fmt.Errorf("playback_rate requires a video or audio asset (got %s)", assetType)
+	}
+	if rate < 0.25 || rate > 16 {
+		return errors.New("playback_rate must be between 0.25 and 16")
+	}
+	return nil
+}
+
+func validateSourceCrop(c *SourceCrop) error {
+	if c == nil {
+		return nil
+	}
+	if c.X < 0 || c.Y < 0 || c.X > 1 || c.Y > 1 {
+		return errors.New("x/y must be between 0 and 1")
+	}
+	if c.Width <= 0 || c.Height <= 0 || c.Width > 1 || c.Height > 1 {
+		return errors.New("width/height must be greater than 0 and at most 1")
+	}
+	if c.X+c.Width > 1.000001 || c.Y+c.Height > 1.000001 {
+		return errors.New("rectangle must stay inside the source")
+	}
+	return nil
+}
+
+func validateTransform(t *Transform, duration float64) error {
+	if t == nil {
+		return nil
+	}
+	if err := validateFocus(t.X, "x"); err != nil {
+		return err
+	}
+	if err := validateFocus(t.Y, "y"); err != nil {
+		return err
+	}
+	if t.Scale != 0 && (t.Scale < 1 || t.Scale > 8) {
+		return errors.New("scale must be between 1 and 8")
+	}
+	previous := -1.0
+	for i, k := range t.Keyframes {
+		if k.Time < 0 || k.Time > duration+0.001 {
+			return fmt.Errorf("keyframes[%d].time must be within the clip", i)
+		}
+		if k.Time < previous {
+			return errors.New("keyframes must be ordered by time")
+		}
+		previous = k.Time
+		if err := validateFocus(k.X, fmt.Sprintf("keyframes[%d].x", i)); err != nil {
+			return err
+		}
+		if err := validateFocus(k.Y, fmt.Sprintf("keyframes[%d].y", i)); err != nil {
+			return err
+		}
+		if k.Scale != 0 && (k.Scale < 1 || k.Scale > 8) {
+			return fmt.Errorf("keyframes[%d].scale must be between 1 and 8", i)
+		}
+		switch strings.ToLower(strings.TrimSpace(k.Easing)) {
+		case "", "linear", "ease_in", "ease_out", "ease_in_out":
+		default:
+			return fmt.Errorf("keyframes[%d].easing must be linear|ease_in|ease_out|ease_in_out", i)
+		}
+	}
+	return nil
+}
+
+func validateFocus(value *float64, name string) error {
+	if value != nil && (*value < 0 || *value > 1) {
+		return fmt.Errorf("%s must be between 0 and 1", name)
 	}
 	return nil
 }
@@ -1042,6 +1212,9 @@ func editFromArgs(args map[string]any) (*Edit, error) {
 	}
 	if v, ok := args["background"]; ok {
 		timeline["background"] = v
+	}
+	if v, ok := args["markers"]; ok {
+		timeline["markers"] = v
 	}
 	wrapped := map[string]any{"timeline": timeline}
 	b, err := json.Marshal(wrapped)

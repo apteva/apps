@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -11,38 +12,46 @@ import (
 // consumer (Live Link, Deploy, Backup, future Containers) sees this
 // shape via `instance_get` / `instance_list`.
 type Instance struct {
-	ID            int64  `json:"id"`
-	Name          string `json:"name"`
-	Provider      string `json:"provider"` // 'local' | 'hetzner' | future
-	ProviderID    string `json:"provider_id,omitempty"`
-	PublicIPv4    string `json:"public_ipv4,omitempty"`
-	PublicIPv6    string `json:"public_ipv6,omitempty"`
-	Status        string `json:"status"` // pending|provisioning|upgrading|ready|error|destroyed
-	Region        string `json:"region,omitempty"`
-	Size          string `json:"size,omitempty"`
-	Image         string `json:"image,omitempty"`
-	Platform      string `json:"platform,omitempty"`       // linux | macos | windows
-	ResourceClass string `json:"resource_class,omitempty"` // virtual | bare_metal | container
-	DeletableAt   string `json:"deletable_at,omitempty"`
-	SSHUser       string `json:"ssh_user,omitempty"`
-	SSHHost       string `json:"ssh_host,omitempty"`
-	SSHPort       int    `json:"ssh_port,omitempty"`
+	ID                   int64  `json:"id"`
+	Name                 string `json:"name"`
+	Provider             string `json:"provider"` // 'local' | 'hetzner' | future
+	ProviderConnectionID int64  `json:"provider_connection_id,omitempty"`
+	ProviderID           string `json:"provider_id,omitempty"`
+	PublicIPv4           string `json:"public_ipv4,omitempty"`
+	PublicIPv6           string `json:"public_ipv6,omitempty"`
+	Status               string `json:"status"` // pending|provisioning|upgrading|ready|error|destroyed
+	Region               string `json:"region,omitempty"`
+	Size                 string `json:"size,omitempty"`
+	Image                string `json:"image,omitempty"`
+	Platform             string `json:"platform,omitempty"`       // linux | macos | windows
+	ResourceClass        string `json:"resource_class,omitempty"` // virtual | bare_metal | container
+	DeletableAt          string `json:"deletable_at,omitempty"`
+	SSHUser              string `json:"ssh_user,omitempty"`
+	SSHHost              string `json:"ssh_host,omitempty"`
+	SSHPort              int    `json:"ssh_port,omitempty"`
 	// SSH keys are kept server-side only — never returned to MCP /
 	// REST callers. Cleared in API responses by stripSecrets().
-	SSHPrivateKey        string               `json:"-"`
-	SSHPublicKey         string               `json:"ssh_public_key,omitempty"`
-	SSHHostKey           string               `json:"-"`
-	TagsJSON             string               `json:"tags_json,omitempty"`
-	ResourcesJSON        string               `json:"resources_json,omitempty"`
-	ProviderMetadataJSON string               `json:"-"`
-	PortsJSON            string               `json:"ports_json,omitempty"`
-	MonthlyCostCents     int                  `json:"monthly_cost_cents"`
-	PendingSize          string               `json:"pending_size,omitempty"`
-	Capabilities         InstanceCapabilities `json:"capabilities"`
-	ErrorMessage         string               `json:"error,omitempty"`
-	CreatedAt            string               `json:"created_at,omitempty"`
-	ReadyAt              string               `json:"ready_at,omitempty"`
-	DestroyedAt          string               `json:"destroyed_at,omitempty"`
+	SSHPrivateKey         string               `json:"-"`
+	SSHPublicKey          string               `json:"ssh_public_key,omitempty"`
+	SSHHostKey            string               `json:"-"`
+	TagsJSON              string               `json:"tags_json,omitempty"`
+	ResourcesJSON         string               `json:"resources_json,omitempty"`
+	StorageJSON           string               `json:"storage_json,omitempty"`
+	ProviderMetadataJSON  string               `json:"-"`
+	PortsJSON             string               `json:"ports_json,omitempty"`
+	MonthlyCostCents      int                  `json:"monthly_cost_cents"`
+	PendingSize           string               `json:"pending_size,omitempty"`
+	Capabilities          InstanceCapabilities `json:"capabilities"`
+	ErrorMessage          string               `json:"error,omitempty"`
+	LifecycleStage        string               `json:"lifecycle_stage,omitempty"`
+	PrimaryError          string               `json:"primary_error,omitempty"`
+	CleanupError          string               `json:"cleanup_error,omitempty"`
+	RetainOnFailure       bool                 `json:"retain_for_diagnosis"`
+	ProviderInventoryJSON string               `json:"provider_inventory_json,omitempty"`
+	ProviderCheckedAt     string               `json:"provider_checked_at,omitempty"`
+	CreatedAt             string               `json:"created_at,omitempty"`
+	ReadyAt               string               `json:"ready_at,omitempty"`
+	DestroyedAt           string               `json:"destroyed_at,omitempty"`
 }
 
 type InstanceCapabilities struct {
@@ -76,6 +85,7 @@ func (i *Instance) stripSecrets() *Instance {
 type CreateInstanceInput struct {
 	Name                 string
 	Provider             string
+	ProviderConnectionID int64
 	ProviderID           string
 	PublicIPv4           string
 	PublicIPv6           string
@@ -98,6 +108,14 @@ type CreateInstanceInput struct {
 	PortsJSON            string
 	MonthlyCostCents     int
 	PendingSize          string
+	Storage              InstanceStorageRequest
+	ElasticMetal         *ElasticMetalConfig
+	RetainOnFailure      bool
+	RetainOnFailureSet   bool
+	// scalewayUseImageDefaultBoot is set during live storage validation when
+	// Scaleway's marketplace image can create the requested full-capacity
+	// local root volume more safely than an explicit volumes map.
+	scalewayUseImageDefaultBoot bool
 }
 
 // ─── Errors ────────────────────────────────────────────────────────
@@ -124,16 +142,18 @@ func ensureLocalInstance(db *sql.DB) error {
 
 // ─── DB ops ────────────────────────────────────────────────────────
 
-const instanceCols = `id, name, provider, provider_id, public_ipv4, public_ipv6,
+const instanceCols = `id, name, provider, provider_connection_id, provider_id, public_ipv4, public_ipv6,
 		status, region, size, image, platform, resource_class, deletable_at, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key, ssh_host_key,
-		tags_json, resources_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, error_message,
+		tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, error_message,
+		lifecycle_stage, primary_error, cleanup_error, retain_on_failure, provider_inventory_json, COALESCE(provider_checked_at,''),
 		COALESCE(created_at,''), COALESCE(ready_at,''), COALESCE(destroyed_at,'')`
 
 func scanInstance(s rowScanner) (*Instance, error) {
 	var i Instance
-	if err := s.Scan(&i.ID, &i.Name, &i.Provider, &i.ProviderID, &i.PublicIPv4, &i.PublicIPv6,
+	if err := s.Scan(&i.ID, &i.Name, &i.Provider, &i.ProviderConnectionID, &i.ProviderID, &i.PublicIPv4, &i.PublicIPv6,
 		&i.Status, &i.Region, &i.Size, &i.Image, &i.Platform, &i.ResourceClass, &i.DeletableAt, &i.SSHUser, &i.SSHHost, &i.SSHPort, &i.SSHPrivateKey, &i.SSHPublicKey, &i.SSHHostKey,
-		&i.TagsJSON, &i.ResourcesJSON, &i.ProviderMetadataJSON, &i.PortsJSON, &i.MonthlyCostCents, &i.PendingSize, &i.ErrorMessage,
+		&i.TagsJSON, &i.ResourcesJSON, &i.StorageJSON, &i.ProviderMetadataJSON, &i.PortsJSON, &i.MonthlyCostCents, &i.PendingSize, &i.ErrorMessage,
+		&i.LifecycleStage, &i.PrimaryError, &i.CleanupError, &i.RetainOnFailure, &i.ProviderInventoryJSON, &i.ProviderCheckedAt,
 		&i.CreatedAt, &i.ReadyAt, &i.DestroyedAt,
 	); err != nil {
 		return nil, err
@@ -165,15 +185,24 @@ func dbCreateInstance(db *sql.DB, in CreateInstanceInput) (*Instance, error) {
 	if in.SSHPort == 0 {
 		in.SSHPort = 22
 	}
+	if !in.RetainOnFailureSet {
+		in.RetainOnFailure = true
+	}
+	storageJSON := "{}"
+	if in.Storage.Boot != nil {
+		if encoded, marshalErr := json.Marshal(in.Storage); marshalErr == nil {
+			storageJSON = string(encoded)
+		}
+	}
 	res, err := db.Exec(`
 		INSERT INTO instances (
-			name, provider, provider_id, public_ipv4, public_ipv6, status,
+			name, provider, provider_connection_id, provider_id, public_ipv4, public_ipv6, status,
 				region, size, image, platform, resource_class, deletable_at, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key, ssh_host_key,
-				tags_json, resources_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		in.Name, in.Provider, in.ProviderID, in.PublicIPv4, in.PublicIPv6, in.Status,
+				tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, retain_on_failure, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		in.Name, in.Provider, in.ProviderConnectionID, in.ProviderID, in.PublicIPv4, in.PublicIPv6, in.Status,
 		in.Region, in.Size, in.Image, in.Platform, in.ResourceClass, in.DeletableAt, in.SSHUser, in.SSHHost, in.SSHPort, in.SSHPrivateKey, in.SSHPublicKey, in.SSHHostKey,
-		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), nullStr(in.ProviderMetadataJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, in.PendingSize, nowUTC(),
+		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), storageJSON, nullStr(in.ProviderMetadataJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, in.PendingSize, in.RetainOnFailure, nowUTC(),
 	)
 	if err != nil {
 		return nil, err
@@ -198,10 +227,11 @@ func dbUpdateInstance(db *sql.DB, id int64, fields map[string]any) error {
 	cols := []string{}
 	args := []any{}
 	for _, k := range []string{
-		"status", "provider_id", "public_ipv4", "public_ipv6",
+		"status", "provider_connection_id", "provider_id", "public_ipv4", "public_ipv6",
 		"region", "size", "image", "platform", "resource_class", "deletable_at", "ssh_user", "ssh_host", "ssh_port", "ssh_private_key",
-		"ssh_public_key", "ssh_host_key", "tags_json", "resources_json", "provider_metadata_json", "ports_json", "monthly_cost_cents", "pending_size",
+		"ssh_public_key", "ssh_host_key", "tags_json", "resources_json", "storage_json", "provider_metadata_json", "ports_json", "monthly_cost_cents", "pending_size",
 		"error_message", "ready_at", "destroyed_at",
+		"lifecycle_stage", "primary_error", "cleanup_error", "retain_on_failure", "provider_inventory_json", "provider_checked_at",
 	} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
@@ -227,7 +257,7 @@ func dbTransitionStatus(db *sql.DB, id int64, from []string, to string, fields m
 	fields["status"] = to
 	cols := make([]string, 0, len(fields))
 	args := make([]any, 0, len(fields)+len(from)+1)
-	for _, k := range []string{"status", "size", "pending_size", "error_message", "ready_at", "destroyed_at"} {
+	for _, k := range []string{"status", "size", "pending_size", "error_message", "ready_at", "destroyed_at", "lifecycle_stage", "primary_error", "cleanup_error", "provider_inventory_json", "provider_checked_at"} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
 			args = append(args, v)
@@ -276,8 +306,21 @@ func dbDeleteInstance(db *sql.DB, id int64) error {
 	if id == 0 {
 		return ErrLocalInstanceImmutable
 	}
-	_, err := db.Exec(`DELETE FROM instances WHERE id = ?`, id)
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Provider cleanup removes managed boot volumes and clears instance_id on
+	// retained ones before this transaction. Remove only any remaining attached
+	// boot inventory; retained boot and data volumes have instance_id cleared.
+	if _, err = tx.Exec(`DELETE FROM instance_volumes WHERE instance_id = ? AND role = 'boot'`, id); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM instances WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // dbListInstances returns every row, optionally filtered by

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -60,6 +61,54 @@ func decodeArgs(args map[string]any, out any) error {
 	return json.Unmarshal(b, out)
 }
 
+func decodeStrictArgs(args map[string]any, out any) error {
+	clean := make(map[string]any, len(args))
+	for key, value := range args {
+		if key != "_project_id" {
+			clean[key] = value
+		}
+	}
+	b, err := json.Marshal(clean)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(out)
+}
+
+var pseudoEvaluationFields = []string{"environment_id", "suite_id", "case_id", "prompt", "input", "assertions", "goals", "targets", "repetitions"}
+
+var environmentAssertionTypes = []string{
+	"app_state",
+	"mcp_state",
+	"mcp_tool_call",
+	"edge_call",
+	"telemetry",
+	"web_state",
+	"web_event",
+	"protocol_event",
+}
+
+func assertionTypeCatalog() []string {
+	return append([]string(nil), environmentAssertionTypes...)
+}
+
+func containsPseudoEvaluationArgs(args map[string]any) bool {
+	for _, field := range pseudoEvaluationFields {
+		if _, found := args[field]; found {
+			return true
+		}
+	}
+	spec, _ := args["spec"].(map[string]any)
+	for _, field := range pseudoEvaluationFields {
+		if _, found := spec[field]; found {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "environment_list", Description: "List environment definitions and active runs.", InputSchema: objectSchema, Handler: func(*sdk.AppCtx, map[string]any) (any, error) { return a.svc.listDefinitions() }},
@@ -69,10 +118,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_delete", Description: "Delete a stopped environment definition.", InputSchema: requiredSchema("id"), Handler: a.toolDelete},
 		{Name: "environment_start", Description: "Start a defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolStart},
 		{Name: "environment_stop", Description: "Stop a defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolStop},
-		{Name: "environment_run_create", Description: "Start an inline eval or one-off run from spec.", InputSchema: objectSchema, Handler: a.toolRunCreate},
+		{Name: "environment_run_create", Description: "Start an isolated runtime from an EnvironmentSpec. This does not execute Evals cases or assertions.", InputSchema: environmentRunCreateSchema, Handler: a.toolRunCreate},
 		{Name: "environment_run_get", Description: "Get a run and live runtime.", InputSchema: requiredSchema("id"), Handler: a.toolRunGet},
 		{Name: "environment_run_stop", Description: "Stop a run.", InputSchema: requiredSchema("id"), Handler: a.toolRunStop},
-		{Name: "environment_catalog", Description: "List selectable apps, managed MCP servers, connections, integrations, web and protocol fixtures, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
+		{Name: "environment_catalog", Description: "List selectable apps, managed MCP servers, connections, integrations, assertion types, web and protocol fixtures, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
 		{Name: "environment_seed", Description: "Call a tool on a runtime app to seed data.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
 		{Name: "environment_call", Description: "Call a tool on a runtime app.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
 		{Name: "environment_mcp_call", Description: "Call a tool on a managed MCP cloned into a runtime.", InputSchema: requiredSchema("run_id", "mcp", "tool"), Handler: a.toolMCPCall},
@@ -140,17 +189,23 @@ func (a *App) toolStop(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]bool{"ok": true}, a.svc.stopDefinition(str(args, "id"))
 }
 func (a *App) toolRunCreate(_ *sdk.AppCtx, args map[string]any) (any, error) {
-	var in struct {
-		Kind string          `json:"kind"`
-		Spec EnvironmentSpec `json:"spec"`
+	if containsPseudoEvaluationArgs(args) {
+		return nil, errors.New("environment_run_create creates runtime infrastructure only; prompts, cases, suites and assertions must be executed through Evals")
 	}
-	if err := decodeArgs(args, &in); err != nil {
+	var in struct {
+		Kind string           `json:"kind"`
+		Spec *EnvironmentSpec `json:"spec"`
+	}
+	if err := decodeStrictArgs(args, &in); err != nil {
 		return nil, err
+	}
+	if in.Spec == nil {
+		return nil, errors.New("spec required")
 	}
 	if in.Kind == "" {
 		in.Kind = "eval"
 	}
-	return a.svc.start("", in.Kind, in.Spec)
+	return a.svc.start("", in.Kind, *in.Spec)
 }
 func (a *App) toolRunGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	r, err := a.runFor(args)
@@ -190,7 +245,7 @@ func (a *App) toolCatalog(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	snapshots, err := a.svc.runtime().ListRuntimeSnapshots()
 	realtimeProviders, _ := a.svc.runtime().ListRuntimeRealtimeProviders(a.svc.ctx.CurrentProject())
-	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "managed_mcps": managedMCPs, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog(), "protocol_fixtures": protocolFixtureCatalog(), "realtime_providers": realtimeProviders}, err
+	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "managed_mcps": managedMCPs, "agents": agents, "snapshots": snapshots, "assertion_types": assertionTypeCatalog(), "web_fixtures": webFixtureCatalog(), "protocol_fixtures": protocolFixtureCatalog(), "realtime_providers": realtimeProviders}, err
 }
 func (a *App) toolCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	r, err := a.runFor(args)

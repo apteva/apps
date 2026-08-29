@@ -1,0 +1,87 @@
+schema: apteva-app/v1
+
+name: builder
+display_name: Builder
+version: 0.2.2
+description: Goal-driven orchestration for Apteva Helper. Turns an outcome into a durable plan, optionally validates the resulting workflow with Evals and isolated Environments using canonical judge models, tracks managed resources and decisions, and keeps execution grounded in explicit success criteria.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/builder
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [agents, orchestration, goals, planning, approvals, evals, simulation]
+
+scopes: [global]
+min_apteva_version: "0.40.1"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.mcp.attach
+  apps:
+    - name: conversations
+      reason: Builder uses Conversations as Helper's operator-facing stream and approval surface.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: goal_start,      description: "Create or idempotently recover one durable project goal from the operator's desired outcome." }
+    - { name: goal_list,       description: "List Builder goals for the current Helper and project." }
+    - { name: goal_get,        description: "Read a complete goal with its plan, checks, resources, events, and completion readiness." }
+    - { name: validation_set,  description: "Set optional build-only, simulated, or continuous validation policy for an active goal." }
+    - { name: plan_set,        description: "Set the initial ordered execution plan and success checks before substantive platform changes." }
+    - { name: step_update,     description: "Move one plan step through active, approval, blocked, failed, skipped, or completed state." }
+    - { name: resource_upsert, description: "Track the desired and observed state of an agent, app, integration, credential, or other managed resource." }
+    - { name: check_record,    description: "Record a success check as pending, passing, failing, or blocked with concrete evidence." }
+    - { name: event_record,    description: "Record a meaningful progress note, decision, risk, approval, or operator input." }
+    - { name: goal_update,     description: "Update goal-level phase, summary, next action, or terminal status. Completion is gated by steps and checks." }
+  ui_panels:
+    - slot: project.page
+      label: Builder
+      icon: wand-sparkles
+      entry: /ui/BuilderPanel.mjs
+      suggested: true
+  ui_components:
+    - name: builder-workspace
+      label: Builder workspace
+      description: Work with Apteva Helper while following the durable goal, plan, checks, resources, and activity it maintains.
+      entry: /ui/BuilderPanel.mjs
+      slots: [dashboard.build]
+      suggested: true
+      visibility: project
+      supported_sizes: [full]
+      default_size: full
+  skills:
+    - name: building-with-helper
+      command: /builder
+      body_file: skills/building-with-helper.md
+      description: |
+        Goal-first operating protocol for Apteva Helper: plan before mutation,
+        use apteva-server tools for platform changes, optionally validate workflows
+        with Evals and isolated Environments, keep Builder state current, stream
+        meaningful progress through Conversations, and request approval before
+        consequential actions.
+      metadata:
+        category: orchestration
+        icon: wand-sparkles
+
+runtime:
+  kind: source
+  source: { repo: github.com/apteva/apps, ref: builder/v0.2.2, entry: mcp/builder }
+  port: 8080
+  health_check: /health
+  resources:
+    cpu: 0.05
+    memory: 64
+    cpu_limit: 1
+    memory_limit: 256
+  storage:
+    - name: data
+      mount_path: /data
+
+db:
+  driver: sqlite
+  path: /data/builder.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

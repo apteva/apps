@@ -118,7 +118,7 @@ func TestBrowserSessionRejectsUnsupportedArgumentsAndUnsafeScale(t *testing.T) {
 		t.Fatalf("unknown argument should return a typed error: %v", err)
 	}
 	if _, err := app.toolBrowserSession(ctx, map[string]any{
-		"action": "open", "environment": map[string]any{"device_scale_factor": float64(0.1)},
+		"action": "open", "environment_override": true, "environment": map[string]any{"device_scale_factor": float64(0.1)},
 	}); err == nil || !strings.Contains(err.Error(), "between 0.5 and 4") {
 		t.Fatalf("unsafe explicit device scale should be rejected: %v", err)
 	}

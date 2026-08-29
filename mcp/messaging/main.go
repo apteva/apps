@@ -65,7 +65,7 @@ const (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.43
+version: 0.13.46
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through Twilio.
 author: Apteva
@@ -151,7 +151,7 @@ provides:
     - { name: template_get,           description: "Fetch a template." }
     - { name: template_list,          description: "List templates." }
     - { name: template_delete,        description: "Delete a template." }
-    - { name: suppression_list,       description: "List suppressed exact addresses and domains." }
+    - { name: suppression_list,       description: "List suppressed exact addresses and domains with stable pagination and a real total." }
     - { name: suppression_add,        description: "Suppress an address or email domain for outbound and inbound." }
     - { name: suppression_remove,     description: "Remove an address or email domain from suppression." }
     - { name: suppression_check,      description: "Suppression lookup for an address; checks exact address plus email domain." }
@@ -336,9 +336,9 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "send_message",
-			Description: "Send a message. Args: channel (email|sms|whatsapp), from, to (string|string[]), body. " +
+			Description: "Send a message. Args: channel (email|sms|whatsapp), from, to (string|string[]), body?. Attachment-only messages are supported. " +
 				"Email-only fields: subject, body_html, cc, bcc, reply_to, in_reply_to, references, headers. " +
-				"Cross-channel attachment fields: attachments, attachment_storage_ids. SMS/WhatsApp-only fields: media_url, content_sid, content_variables. " +
+				"Cross-channel attachment fields: attachments, attachment_storage_ids. SMS/WhatsApp-only fields: media_url, content_sid, content_variables. WhatsApp accepts one media attachment; ContentSid cannot be combined with Body or media. " +
 				"Common: template_id, vars, idempotency_key. " +
 				"Addresses are plain — emails (alice@x.com) and E.164 phone numbers (+15551234567), no scheme prefix. " +
 				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?, attachments:[normalized metadata]}. " +
@@ -493,10 +493,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "suppression_list",
-			Description: "List suppressed exact addresses and domains. Args: channel?, limit?.",
+			Description: "List suppressed exact addresses and domains with stable pagination. Args: channel?, limit?, offset?. Returns {suppressions, count, total, limit, offset, has_more}.",
 			InputSchema: schemaObject(map[string]any{
 				"channel": map[string]any{"type": "string"},
 				"limit":   map[string]any{"type": "integer"},
+				"offset":  map[string]any{"type": "integer", "minimum": 0},
 			}, nil),
 			Handler: a.toolSuppressionList,
 		},
@@ -945,6 +946,9 @@ type providerEvent struct {
 	Metadata          map[string]any
 	Raw               json.RawMessage
 	Permanent         bool
+	BounceType        string
+	BounceSubType     string
+	UnsubscribeAll    bool
 }
 
 // ─── send_message ──────────────────────────────────────────────────
@@ -1006,7 +1010,6 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	body := strArg(args, "body")
 	subject := strArg(args, "subject")
 	bodyHTML := strArg(args, "body_html")
-	mediaURL := strArg(args, "media_url")
 	contentSid := strArg(args, "content_sid")
 	contentVars := strArg(args, "content_variables")
 	templateID := int64Arg(args, "template_id")
@@ -1043,9 +1046,8 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 					contentVars = string(cv)
 				}
 			}
-			// Provider templates render server-side; the local body
-			// stays empty so we don't fail the body-required check.
-			body = "(provider template " + tpl.ProviderTemplateID + ")"
+			// Provider templates render server-side. Keep the local body
+			// empty: Twilio requires ContentSid sends to omit Body.
 		} else {
 			// Local template — {{var}} substitution as before.
 			vars := mapArg(args, "vars")
@@ -1065,7 +1067,11 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if attachmentInputErr != nil {
 		return nil, fmt.Errorf("attachments: %w", attachmentInputErr)
 	}
-	if body == "" && bodyHTML == "" && contentSid == "" && mediaURL == "" && len(attachmentInputs) == 0 {
+	if channel == channelSMS || channel == channelWhatsApp {
+		if err := validatePhoneMessageMode(channel, body, contentSid, contentVars, attachmentInputs); err != nil {
+			return nil, err
+		}
+	} else if body == "" && bodyHTML == "" && contentSid == "" && len(attachmentInputs) == 0 {
 		return nil, errors.New("body, body_html, content_sid, media_url, or at least one attachment required (directly or via template)")
 	}
 
@@ -1122,6 +1128,11 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	attachments, attachIDs, err := prepareMessageAttachments(ctx, pid, channel, args)
 	if err != nil {
 		return nil, fmt.Errorf("attachments: %w", err)
+	}
+	if channel == channelWhatsApp {
+		if err := validateWhatsAppAttachments(body, attachments); err != nil {
+			return nil, err
+		}
 	}
 	attachJSON, _ := json.Marshal(attachIDs)
 
@@ -1183,11 +1194,36 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Subject: subject, BodyText: body, BodyHTML: bodyHTML,
 		ReplyTo: replyTo, InReplyTo: inReplyTo, References: references, Headers: headers,
 		Attachments:      attachments,
-		MediaURL:         mediaURL,
 		ContentSid:       contentSid,
 		ContentVariables: contentVars,
 		MessageID:        id,
 		ProjectID:        pid,
+	}
+
+	// Re-check at the last possible point before the external provider call.
+	// The early pre-flight check gives fast feedback, while this check closes
+	// the preparation/persistence window in which a concurrent bounce,
+	// complaint, or unsubscribe may have added a suppression.
+	suppressed, err = findSuppressedRecipients(ctx.AppDB(), pid, channel, to, cc, bcc)
+	if err != nil {
+		_, _ = ctx.AppDB().Exec(
+			`UPDATE messages SET status='failed', status_reason=?, last_event_at=? WHERE id=?`,
+			truncate("final suppression check: "+err.Error(), 500), time.Now().UTC().Format(time.RFC3339), id,
+		)
+		return nil, fmt.Errorf("final suppression check: %w", err)
+	}
+	if len(suppressed) > 0 {
+		suppressedErr := newRecipientSuppressedError(channel, suppressed)
+		now := time.Now().UTC().Format(time.RFC3339)
+		_, _ = ctx.AppDB().Exec(
+			`UPDATE messages SET status='suppressed', status_reason=?, last_event_at=? WHERE id=?`,
+			truncate(suppressedErr.Error(), 500), now, id,
+		)
+		emitMessagingEvent(ctx, pid, "message.suppressed", map[string]any{
+			"id": id, "channel": channel, "from": from, "to": to,
+			"suppressed_recipients": suppressed,
+		})
+		return nil, suppressedErr
 	}
 	var providerMessageID string
 	var providerErr error
@@ -1286,7 +1322,6 @@ type providerSendInput struct {
 	MessageID     int64
 	ProjectID     string
 	// SMS / WhatsApp only:
-	MediaURL         string
 	ContentSid       string
 	ContentVariables string
 }
@@ -1672,22 +1707,22 @@ func sendViaTwilio(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 	if in.Channel == channelWhatsApp {
 		prefix = "whatsapp:"
 	}
-	// Twilio accepts EITHER a free-form Body OR a ContentSid (Meta-
-	// approved template). At least one must be present.
-	if in.BodyText == "" && in.ContentSid == "" {
-		return "", errors.New("body or content_sid required for sms/whatsapp")
-	}
-
 	var firstSID string
 	var firstErr error
 	mediaURLs := []string{}
-	if in.MediaURL != "" {
-		mediaURLs = append(mediaURLs, in.MediaURL)
-	}
 	for _, att := range in.Attachments {
 		if att.MediaURL != "" {
 			mediaURLs = append(mediaURLs, att.MediaURL)
 		}
+	}
+	if in.ContentSid != "" && (in.BodyText != "" || len(mediaURLs) > 0) {
+		return "", errors.New("content_sid cannot be combined with body or MediaUrl")
+	}
+	if in.BodyText == "" && in.ContentSid == "" && len(mediaURLs) == 0 {
+		return "", errors.New("body, content_sid, or media attachment required for sms/whatsapp")
+	}
+	if in.Channel == channelWhatsApp && len(mediaURLs) > 1 {
+		return "", errors.New("whatsapp supports exactly one media attachment per message")
 	}
 	for _, to := range in.To {
 		payload := map[string]any{
@@ -1705,7 +1740,7 @@ func sendViaTwilio(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 			if in.ContentVariables != "" {
 				payload["ContentVariables"] = in.ContentVariables
 			}
-		} else {
+		} else if in.BodyText != "" {
 			payload["Body"] = in.BodyText
 		}
 		if len(mediaURLs) == 1 {
@@ -2422,11 +2457,22 @@ func (a *App) toolSuppressionList(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	out, err := dbSuppressionList(ctx.AppDB(), pid, strArg(args, "channel"), limit)
+	offset := intArg(args, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+	out, total, err := dbSuppressionListPage(ctx.AppDB(), pid, strArg(args, "channel"), limit, offset)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"suppressions": out, "count": len(out)}, nil
+	return map[string]any{
+		"suppressions": out,
+		"count":        len(out),
+		"total":        total,
+		"limit":        limit,
+		"offset":       offset,
+		"has_more":     offset+len(out) < total,
+	}, nil
 }
 
 func (a *App) toolSuppressionAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2449,10 +2495,14 @@ func (a *App) toolSuppressionAdd(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if source == "" {
 		source = "manual"
 	}
-	if err := dbSuppressionUpsertKind(ctx.AppDB(), pid, channel, kind, value, reason, source); err != nil {
+	row, err := upsertSuppressionAndEmit(ctx, pid, channel, kind, value, reason, source)
+	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "address": value, "channel": channel, "kind": kind, "reason": reason}, nil
+	return map[string]any{
+		"ok": true, "address": value, "channel": channel, "kind": kind,
+		"reason": reason, "source": source, "suppression": row,
+	}, nil
 }
 
 // toolSuppressionCheck answers "is this one address suppressed?"
@@ -2511,14 +2561,60 @@ func (a *App) toolSuppressionRemove(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
-	_, err = ctx.AppDB().Exec(
+	existing, err := dbSuppressionGetExact(ctx.AppDB(), pid, channel, kind, value)
+	if err != nil {
+		return nil, err
+	}
+	res, err := ctx.AppDB().Exec(
 		`DELETE FROM suppressions WHERE project_id = ? AND channel = ? AND kind = ? AND address = ?`,
 		pid, channel, kind, value,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"removed": true, "address": value, "channel": channel, "kind": kind}, nil
+	removed, _ := res.RowsAffected()
+	if removed > 0 && existing != nil {
+		emitSuppressionChanged(ctx, pid, "remove", *existing)
+	}
+	return map[string]any{"removed": removed > 0, "address": value, "channel": channel, "kind": kind}, nil
+}
+
+func upsertSuppressionAndEmit(ctx *sdk.AppCtx, pid, channel, kind, address, reason, source string) (*Suppression, error) {
+	if ctx == nil {
+		return nil, errors.New("messaging context not initialized")
+	}
+	if err := dbSuppressionUpsertKind(ctx.AppDB(), pid, channel, kind, address, reason, source); err != nil {
+		return nil, err
+	}
+	row, err := dbSuppressionGetExact(ctx.AppDB(), pid, channel, kind, address)
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, errors.New("suppression upsert did not return a row")
+	}
+	emitSuppressionChanged(ctx, pid, "add", *row)
+	return row, nil
+}
+
+func emitSuppressionChanged(ctx *sdk.AppCtx, pid, operation string, suppression Suppression) {
+	payload := map[string]any{
+		"operation":  operation,
+		"suppressed": operation != "remove",
+		"channel":    suppression.Channel,
+		"kind":       suppression.Kind,
+		"address":    suppression.Address,
+		"reason":     suppression.Reason,
+		"source":     suppression.Source,
+		"first_seen": suppression.FirstSeen,
+		"last_seen":  suppression.LastSeen,
+	}
+	emitMessagingEvent(ctx, pid, "suppression.changed", payload)
+	if operation == "remove" {
+		emitMessagingEvent(ctx, pid, "suppression.removed", payload)
+		return
+	}
+	emitMessagingEvent(ctx, pid, "suppression.added", payload)
 }
 
 func normaliseSuppressionTarget(channel, kind, raw string) (string, string, string, error) {
@@ -3150,7 +3246,11 @@ func (a *App) handleBounceWebhook(w http.ResponseWriter, r *http.Request) {
 	for i := range events {
 		events[i].ProviderEventID = fmt.Sprintf("sns:%s:%d", env.MessageID, i)
 		ev := events[i]
-		persistAndEmitProviderEvent(globalCtx, msg, ev)
+		if _, err := persistAndEmitProviderEvent(globalCtx, msg, ev); err != nil {
+			globalCtx.Logger().Warn("persist SES provider event failed", "message_id", msg.ID, "err", err)
+			httpErr(w, http.StatusInternalServerError, "persist provider event: "+err.Error())
+			return
+		}
 	}
 	httpJSON(w, map[string]any{
 		"ok": true, "matched": true, "message_id": msg.ID,
@@ -3535,6 +3635,18 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 		httpErr(w, http.StatusInternalServerError, "persist: "+err.Error())
 		return
 	}
+
+	// Mirror provider-side STOP handling locally before acknowledging the
+	// webhook. This also runs for provider retries of an already-persisted
+	// message, so a prior suppression write failure remains recoverable.
+	if isStopKeyword(body) {
+		canonical := canonicalAddrForChannel(channel, from)
+		if _, err := upsertSuppressionAndEmit(globalCtx, pid, channel, "address", canonical, "stop-keyword", "auto"); err != nil {
+			httpErr(w, http.StatusInternalServerError, "persist opt-out suppression: "+err.Error())
+			return
+		}
+		globalCtx.Logger().Info("auto-suppressed on STOP keyword", "channel", channel, "address", canonical)
+	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
 		w.Header().Set("Content-Type", "text/xml")
 		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Response/>`))
@@ -3546,17 +3658,6 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 		if err := dbInsertMessageAttachments(globalCtx.AppDB(), pid, id, attachments); err != nil {
 			globalCtx.Logger().Warn("persist inbound Twilio attachments failed", "message_id", id, "err", err)
 		}
-	}
-
-	// STOP-keyword auto-suppression. SMS/WhatsApp opt-out conventions —
-	// Twilio handles these server-side too, but mirroring locally means
-	// our own send_message blocks it pre-flight.
-	if isStopKeyword(body) {
-		canonical := canonicalAddrForChannel(channel, from)
-		if err := dbSuppressionUpsert(globalCtx.AppDB(), pid, channel, canonical, "stop-keyword", "auto"); err != nil {
-			globalCtx.Logger().Warn("auto-suppress on STOP failed", "err", err)
-		}
-		globalCtx.Logger().Info("auto-suppressed on STOP keyword", "channel", channel, "address", canonical)
 	}
 
 	m, _ := dbMessageGet(globalCtx.AppDB(), pid, id)
@@ -3661,7 +3762,11 @@ func (a *App) handleTwilioStatusWebhook(w http.ResponseWriter, r *http.Request) 
 			"error_message": strings.TrimSpace(form.Get("ErrorMessage")),
 		},
 	}
-	persistAndEmitProviderEvent(globalCtx, msg, ev)
+	if _, err := persistAndEmitProviderEvent(globalCtx, msg, ev); err != nil {
+		globalCtx.Logger().Warn("persist Twilio provider event failed", "message_id", msg.ID, "err", err)
+		httpErr(w, http.StatusInternalServerError, "persist provider event: "+err.Error())
+		return
+	}
 	httpJSON(w, map[string]any{"ok": true, "matched": true, "message_id": msg.ID, "kind": kind})
 }
 
@@ -4192,9 +4297,11 @@ type sesNotification struct {
 }
 
 type sesRecipient struct {
-	Address   string
-	Reason    string
-	Permanent bool
+	Address       string
+	Reason        string
+	Permanent     bool
+	BounceType    string
+	BounceSubType string
 }
 
 func parseSESNotification(message string) (*sesNotification, error) {
@@ -4205,6 +4312,7 @@ func parseSESNotification(message string) (*sesNotification, error) {
 		} `json:"mail"`
 		Bounce struct {
 			BounceType        string `json:"bounceType"`
+			BounceSubType     string `json:"bounceSubType"`
 			BouncedRecipients []struct {
 				EmailAddress   string `json:"emailAddress"`
 				DiagnosticCode string `json:"diagnosticCode"`
@@ -4233,9 +4341,11 @@ func parseSESNotification(message string) (*sesNotification, error) {
 		permanent := strings.EqualFold(inner.Bounce.BounceType, "Permanent")
 		for _, r := range inner.Bounce.BouncedRecipients {
 			out.Recipients = append(out.Recipients, sesRecipient{
-				Address:   r.EmailAddress,
-				Reason:    r.DiagnosticCode,
-				Permanent: permanent,
+				Address:       r.EmailAddress,
+				Reason:        r.DiagnosticCode,
+				Permanent:     permanent,
+				BounceType:    inner.Bounce.BounceType,
+				BounceSubType: inner.Bounce.BounceSubType,
 			})
 		}
 	case "complaint":
@@ -4289,6 +4399,7 @@ func parseSESProviderEvents(message string) ([]providerEvent, error) {
 			Provider: "aws-ses", ProviderMessageID: notif.MessageID,
 			Kind: notif.Kind, Recipient: r.Address, Reason: r.Reason,
 			Raw: notif.Raw, Permanent: r.Permanent,
+			BounceType: r.BounceType, BounceSubType: r.BounceSubType,
 		})
 	}
 	return out, nil
@@ -4316,8 +4427,10 @@ func parseSESEventPublishing(message string) ([]providerEvent, error) {
 	}
 	occurred := eventTimestamp(raw, strings.ToLower(env.EventType), env.Mail.Timestamp)
 	recipients := eventRecipients(raw, strings.ToLower(env.EventType), env.Mail.Destination)
-	reason := eventReason(raw, strings.ToLower(env.EventType))
-	metadata := eventMetadata(raw, strings.ToLower(env.EventType), env.Mail.Tags)
+	section := strings.ToLower(env.EventType)
+	metadata := eventMetadata(raw, section, env.Mail.Tags)
+	bounceType, bounceSubType := eventBounceClassification(raw)
+	unsubscribeAll := eventUnsubscribeAll(raw)
 	if len(recipients) == 0 {
 		recipients = []string{""}
 	}
@@ -4325,9 +4438,11 @@ func parseSESEventPublishing(message string) ([]providerEvent, error) {
 	for _, recip := range recipients {
 		out = append(out, providerEvent{
 			Provider: "aws-ses", ProviderMessageID: env.Mail.MessageID,
-			Kind: kind, Recipient: recip, Reason: reason, OccurredAt: occurred,
+			Kind: kind, Recipient: recip, Reason: eventReasonForRecipient(raw, section, recip), OccurredAt: occurred,
 			Metadata: metadata, Raw: rawEvent,
-			Permanent: kind == "complained" || (kind == "bounced" && isPermanentBounce(raw)),
+			Permanent:  kind == "complained" || (kind == "bounced" && isPermanentBounce(raw)),
+			BounceType: bounceType, BounceSubType: bounceSubType,
+			UnsubscribeAll: unsubscribeAll,
 		})
 	}
 	return out, nil
@@ -4406,6 +4521,57 @@ func eventRecipients(raw map[string]json.RawMessage, section string, fallback []
 	return append([]string{}, fallback...)
 }
 
+func eventBounceClassification(raw map[string]json.RawMessage) (string, string) {
+	body, ok := raw["bounce"]
+	if !ok {
+		return "", ""
+	}
+	var bounce struct {
+		Type    string `json:"bounceType"`
+		SubType string `json:"bounceSubType"`
+	}
+	_ = json.Unmarshal(body, &bounce)
+	return bounce.Type, bounce.SubType
+}
+
+func eventUnsubscribeAll(raw map[string]json.RawMessage) bool {
+	body, ok := raw["subscription"]
+	if !ok {
+		return false
+	}
+	var subscription struct {
+		NewTopicPreferences struct {
+			UnsubscribeAll bool `json:"unsubscribeAll"`
+		} `json:"newTopicPreferences"`
+	}
+	_ = json.Unmarshal(body, &subscription)
+	return subscription.NewTopicPreferences.UnsubscribeAll
+}
+
+func eventReasonForRecipient(raw map[string]json.RawMessage, section, recipient string) string {
+	if section == "bounce" {
+		if body, ok := raw[section]; ok {
+			var bounce struct {
+				BouncedRecipients []struct {
+					EmailAddress   string `json:"emailAddress"`
+					DiagnosticCode string `json:"diagnosticCode"`
+					Status         string `json:"status"`
+				} `json:"bouncedRecipients"`
+			}
+			_ = json.Unmarshal(body, &bounce)
+			for _, item := range bounce.BouncedRecipients {
+				if strings.EqualFold(strings.TrimSpace(item.EmailAddress), strings.TrimSpace(recipient)) {
+					if reason := firstNonEmpty(item.DiagnosticCode, item.Status); reason != "" {
+						return reason
+					}
+					break
+				}
+			}
+		}
+	}
+	return eventReason(raw, section)
+}
+
 func eventReason(raw map[string]json.RawMessage, section string) string {
 	if body, ok := raw[section]; ok {
 		var x struct {
@@ -4446,7 +4612,7 @@ func eventMetadata(raw map[string]json.RawMessage, section string, tags map[stri
 	if body, ok := raw[section]; ok {
 		var x map[string]any
 		_ = json.Unmarshal(body, &x)
-		for _, k := range []string{"ipAddress", "userAgent", "link", "url", "timestamp", "delayType", "expirationTime", "subscriptionTopic"} {
+		for _, k := range []string{"ipAddress", "userAgent", "link", "url", "timestamp", "delayType", "expirationTime", "subscriptionTopic", "contactList", "source", "newTopicPreferences", "oldTopicPreferences"} {
 			if v, ok := x[k]; ok {
 				out[k] = v
 			}
@@ -4466,9 +4632,9 @@ func isPermanentBounce(raw map[string]json.RawMessage) bool {
 	return false
 }
 
-func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent) bool {
+func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent) (bool, error) {
 	if ctx == nil || msg == nil {
-		return false
+		return false, errors.New("messaging context and message are required")
 	}
 	raw := ev.Raw
 	if len(ev.Metadata) > 0 {
@@ -4481,52 +4647,120 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 	if occurred == "" {
 		occurred = time.Now().UTC().Format(time.RFC3339)
 	}
-	res, err := ctx.AppDB().Exec(
-		`INSERT OR IGNORE INTO delivery_events (message_id, provider_event_id, kind, recipient, reason, raw, occurred_at)
-		 VALUES (?, NULLIF(?, ''), ?, ?, ?, ?, ?)`,
-		msg.ID, ev.ProviderEventID, ev.Kind, ev.Recipient, ev.Reason, string(raw), occurred,
-	)
-	if err != nil {
-		ctx.Logger().Warn("persist provider event failed", "message_id", msg.ID, "err", err)
-		return false
-	}
-	if affected, _ := res.RowsAffected(); affected == 0 {
-		return false
-	}
-	if (ev.Kind == "bounced" && ev.Permanent) || ev.Kind == "complained" {
-		suppressionReason := "hard-bounce"
-		if ev.Kind == "complained" {
-			suppressionReason = "complaint"
+	eventID := stableProviderEventID(msg, ev)
+
+	var suppression *Suppression
+	if (ev.Kind == "bounced" && ev.Permanent) || ev.Kind == "complained" || (ev.Kind == "subscription_changed" && ev.UnsubscribeAll) {
+		reason := "hard-bounce"
+		switch {
+		case ev.Kind == "complained":
+			reason = "complaint"
+		case ev.Kind == "subscription_changed" && ev.UnsubscribeAll:
+			reason = "unsubscribe-all"
 		}
 		canonical := canonicalAddrForChannel(msg.Channel, ev.Recipient)
 		if canonical != "" {
-			_ = dbSuppressionUpsert(ctx.AppDB(), msg.ProjectID, msg.Channel, canonical, suppressionReason, "auto")
+			suppression = &Suppression{
+				ProjectID: msg.ProjectID, Channel: msg.Channel, Kind: "address",
+				Address: canonical, Reason: reason, Source: "auto",
+			}
 		}
 	}
-	if status := mapSESKindToStatus(ev.Kind); status != "" && shouldPromoteMessageStatus(msg.Status, status) {
-		_, _ = ctx.AppDB().Exec(
+
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return false, fmt.Errorf("begin provider event: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
+		`INSERT OR IGNORE INTO delivery_events (message_id, provider_event_id, kind, recipient, reason, raw, occurred_at)
+		 VALUES (?, NULLIF(?, ''), ?, ?, ?, ?, ?)`,
+		msg.ID, eventID, ev.Kind, ev.Recipient, ev.Reason, string(raw), occurred,
+	)
+	if err != nil {
+		return false, fmt.Errorf("persist provider event: %w", err)
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return false, nil
+	}
+	if suppression != nil {
+		if err := dbSuppressionUpsertExec(tx, suppression.ProjectID, suppression.Channel, suppression.Kind, suppression.Address, suppression.Reason, suppression.Source); err != nil {
+			return false, fmt.Errorf("persist automatic suppression: %w", err)
+		}
+	}
+	status := mapSESKindToStatus(ev.Kind)
+	promote := status != "" && shouldPromoteMessageStatus(msg.Status, status)
+	if promote {
+		if _, err := tx.Exec(
 			`UPDATE messages SET status = ?, last_event_at = ? WHERE id = ?`,
 			status, occurred, msg.ID,
-		)
-		msg.Status = status
+		); err != nil {
+			return false, fmt.Errorf("update message status: %w", err)
+		}
 	} else {
-		_, _ = ctx.AppDB().Exec(`UPDATE messages SET last_event_at = ? WHERE id = ?`, occurred, msg.ID)
+		if _, err := tx.Exec(`UPDATE messages SET last_event_at = ? WHERE id = ?`, occurred, msg.ID); err != nil {
+			return false, fmt.Errorf("update message event time: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit provider event: %w", err)
+	}
+	if promote {
+		msg.Status = status
+	}
+	if suppression != nil {
+		if stored, lookupErr := dbSuppressionGetExact(ctx.AppDB(), suppression.ProjectID, suppression.Channel, suppression.Kind, suppression.Address); lookupErr == nil && stored != nil {
+			suppression = stored
+		}
+		emitSuppressionChanged(ctx, msg.ProjectID, "add", *suppression)
 	}
 	payload := map[string]any{
+		"event_id":            eventID,
+		"provider_event_id":   eventID,
 		"message_id":          msg.ID,
+		"channel":             msg.Channel,
 		"provider":            ev.Provider,
 		"provider_message_id": ev.ProviderMessageID,
 		"kind":                ev.Kind,
 		"recipient":           ev.Recipient,
 		"occurred_at":         occurred,
 		"metadata":            ev.Metadata,
+		"permanent":           ev.Permanent,
 	}
-	if ev.Reason != "" {
+	if ev.Kind == "bounced" {
+		payload["bounce_type"] = ev.BounceType
+		payload["bounce_subtype"] = ev.BounceSubType
+		payload["reason"] = ev.Reason
+	} else if ev.Reason != "" {
 		payload["reason"] = ev.Reason
 	}
 	emitMessagingEvent(ctx, msg.ProjectID, "message."+ev.Kind, payload)
 	emitMessagingEvent(ctx, msg.ProjectID, "message.event", payload)
-	return true
+	return true, nil
+}
+
+// stableProviderEventID preserves a provider-supplied identity when available.
+// The deterministic fallback makes provider events safe to replay even when an
+// upstream integration omitted its own event ID. It intentionally excludes the
+// generated occurred_at value, which would change between retries.
+func stableProviderEventID(msg *Message, ev providerEvent) string {
+	if id := strings.TrimSpace(ev.ProviderEventID); id != "" {
+		return id
+	}
+	metadata, _ := json.Marshal(ev.Metadata)
+	parts := []string{
+		strconv.FormatInt(msg.ID, 10),
+		ev.Provider,
+		ev.ProviderMessageID,
+		ev.Kind,
+		ev.Recipient,
+		ev.Reason,
+		ev.OccurredAt,
+		string(metadata),
+		string(ev.Raw),
+	}
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return "generated:" + hex.EncodeToString(digest[:16])
 }
 
 // ─── SES inbound parsing ───────────────────────────────────────────
@@ -5295,12 +5529,37 @@ func (a *App) handleSuppressionsList(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	out, err := dbSuppressionList(globalCtx.AppDB(), pid, r.URL.Query().Get("channel"), 500)
+	limit := 500
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, parseErr := strconv.Atoi(raw); parseErr != nil || parsed <= 0 || parsed > 1000 {
+			httpErr(w, http.StatusBadRequest, "limit must be between 1 and 1000")
+			return
+		} else {
+			limit = parsed
+		}
+	}
+	offset := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		if parsed, parseErr := strconv.Atoi(raw); parseErr != nil || parsed < 0 {
+			httpErr(w, http.StatusBadRequest, "offset must be a non-negative integer")
+			return
+		} else {
+			offset = parsed
+		}
+	}
+	out, total, err := dbSuppressionListPage(globalCtx.AppDB(), pid, r.URL.Query().Get("channel"), limit, offset)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"suppressions": out})
+	httpJSON(w, map[string]any{
+		"suppressions": out,
+		"count":        len(out),
+		"total":        total,
+		"limit":        limit,
+		"offset":       offset,
+		"has_more":     offset+len(out) < total,
+	})
 }
 
 // /senders proxies senders_list — straight pass-through to the tool.
@@ -6807,7 +7066,15 @@ func dbSuppressionUpsert(db *sql.DB, pid, channel, addr, reason, source string) 
 }
 
 func dbSuppressionUpsertKind(db *sql.DB, pid, channel, kind, addr, reason, source string) error {
-	_, err := db.Exec(
+	return dbSuppressionUpsertExec(db, pid, channel, kind, addr, reason, source)
+}
+
+type suppressionExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func dbSuppressionUpsertExec(exec suppressionExecer, pid, channel, kind, addr, reason, source string) error {
+	_, err := exec.Exec(
 		`INSERT INTO suppressions (project_id, channel, kind, address, reason, source, first_seen, last_seen)
 		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		 ON CONFLICT(project_id, channel, address) DO UPDATE SET
@@ -6820,31 +7087,64 @@ func dbSuppressionUpsertKind(db *sql.DB, pid, channel, kind, addr, reason, sourc
 	return err
 }
 
+func dbSuppressionGetExact(db *sql.DB, pid, channel, kind, address string) (*Suppression, error) {
+	row := db.QueryRow(
+		`SELECT project_id, channel, COALESCE(kind,'address'), address, reason, source,
+		        COALESCE(first_seen,''), COALESCE(last_seen,'')
+		 FROM suppressions
+		 WHERE project_id = ? AND channel = ? AND kind = ? AND address = ?`,
+		pid, channel, kind, address,
+	)
+	out := &Suppression{}
+	if err := row.Scan(&out.ProjectID, &out.Channel, &out.Kind, &out.Address, &out.Reason, &out.Source, &out.FirstSeen, &out.LastSeen); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
 func dbSuppressionList(db *sql.DB, pid, channel string, limit int) ([]Suppression, error) {
+	out, _, err := dbSuppressionListPage(db, pid, channel, limit, 0)
+	return out, err
+}
+
+func dbSuppressionListPage(db *sql.DB, pid, channel string, limit, offset int) ([]Suppression, int, error) {
 	where := []string{"project_id = ?"}
 	args := []any{pid}
 	if channel != "" {
 		where = append(where, "channel = ?")
 		args = append(args, channel)
 	}
-	args = append(args, limit)
+	whereSQL := strings.Join(where, " AND ")
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM suppressions WHERE `+whereSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	args = append(args, limit, offset)
 	rows, err := db.Query(
 		`SELECT project_id, channel, COALESCE(kind,'address'), address, reason, source,
 		        COALESCE(first_seen,''), COALESCE(last_seen,'')
-		 FROM suppressions WHERE `+strings.Join(where, " AND ")+
-			` ORDER BY last_seen DESC LIMIT ?`, args...)
+		 FROM suppressions WHERE `+whereSQL+
+			` ORDER BY last_seen DESC, channel ASC, COALESCE(kind,'address') ASC, address ASC
+			  LIMIT ? OFFSET ?`, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := []Suppression{}
 	for rows.Next() {
 		s := Suppression{}
-		if err := rows.Scan(&s.ProjectID, &s.Channel, &s.Kind, &s.Address, &s.Reason, &s.Source, &s.FirstSeen, &s.LastSeen); err == nil {
-			out = append(out, s)
+		if err := rows.Scan(&s.ProjectID, &s.Channel, &s.Kind, &s.Address, &s.Reason, &s.Source, &s.FirstSeen, &s.LastSeen); err != nil {
+			return nil, 0, err
 		}
+		out = append(out, s)
 	}
-	return out, nil
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
 }
 
 func dbSuppressionMatch(db *sql.DB, pid, channel, addr string) (*Suppression, error) {

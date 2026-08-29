@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: campaigns
 display_name: Campaigns
-version: 0.2.15
+version: 0.2.17
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment or
   list, schedule it; jobs drives the materialise → tick loop, messaging
@@ -49,9 +49,15 @@ requires:
     - platform.apps.call
   apps:
     - name: messaging
+      version: ">=0.13.46"
       reason: Sends campaign recipients and receives message.event delivery/open/bounce updates.
       events:
         - message.event
+    - name: crm
+      version: ">=0.9.1"
+      reason: Resolves channel-specific eligible segment/list recipients and deliverability exclusions.
+      events:
+        - contact.channel.deliverability.changed
   integrations:
     - role: crm
       kind: app
@@ -146,6 +152,8 @@ provides:
         updated: integer
         failed: integer
         stats: object
+    - name: campaign.audience_changed
+      description: CRM reported a channel deliverability change; draft and scheduled audience eligibility counts should be refreshed.
     - name: campaign.unsubscribed
       description: A recipient used a campaign unsubscribe link and was added to Messaging suppression.
       payload:
@@ -218,7 +226,18 @@ func (a *App) Workers() []sdk.Worker          { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{
 		{Topic: "message.event", Handler: a.handleMessageEvent},
+		{Topic: "contact.channel.deliverability.changed", Handler: a.handleCRMDeliverabilityChanged},
 	}
+}
+
+func (a *App) handleCRMDeliverabilityChanged(ctx *sdk.AppCtx, ev sdk.Event) error {
+	ctx.Emit("campaign.audience_changed", map[string]any{
+		"contact_id":  ev.Data["contact_id"],
+		"channel_id":  ev.Data["channel_id"],
+		"transport":   ev.Data["transport"],
+		"messageable": ev.Data["messageable"],
+	})
+	return nil
 }
 
 // ─── HTTP routes ──────────────────────────────────────────────────
@@ -228,11 +247,50 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Dashboard / agent-callable.
 		{Pattern: "/campaigns", Handler: a.handleHTTPCampaigns},
 		{Pattern: "/campaigns/", Handler: a.handleHTTPCampaignItem},
+		{Pattern: "/audience", Handler: a.handleHTTPAudiencePreview},
 		// Public (no auth, token-validated). Mounted at the same root
 		// so the platform's reverse proxy serves them under
 		// /api/apps/campaigns/unsubscribe.
 		{Pattern: "/unsubscribe", Handler: a.handleHTTPUnsubscribe},
 	}
+}
+
+func (a *App) handleHTTPAudiencePreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	channel := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("channel")))
+	if channel != ChannelEmail && channel != ChannelSMS && channel != ChannelWhatsApp {
+		httpErr(w, http.StatusBadRequest, "channel must be email, sms, or whatsapp")
+		return
+	}
+	campaign := &Campaign{Channel: channel}
+	if id, _ := strconv.ParseInt(r.URL.Query().Get("segment_id"), 10, 64); id > 0 {
+		campaign.SegmentID = &id
+	}
+	if id, _ := strconv.ParseInt(r.URL.Query().Get("list_id"), 10, 64); id > 0 {
+		if campaign.SegmentID != nil {
+			httpErr(w, http.StatusBadRequest, "choose segment_id or list_id")
+			return
+		}
+		campaign.ListID = &id
+	}
+	if campaign.SegmentID == nil && campaign.ListID == nil {
+		httpErr(w, http.StatusBadRequest, "segment_id or list_id required")
+		return
+	}
+	info := campaignAudienceInfo(globalCtx, pid, campaign, 8)
+	if info.Error != "" {
+		httpErr(w, http.StatusBadGateway, info.Error)
+		return
+	}
+	httpJSON(w, map[string]any{"audience": info})
 }
 
 // handleHTTPCampaigns dispatches GET / POST on /campaigns.
@@ -586,11 +644,37 @@ type Campaign struct {
 }
 
 type AudienceInfo struct {
-	Kind       string  `json:"kind,omitempty"`
-	ID         int64   `json:"id,omitempty"`
-	Count      int64   `json:"count"`
-	ContactIDs []int64 `json:"contact_ids,omitempty"`
-	Error      string  `json:"error,omitempty"`
+	Kind             string                      `json:"kind,omitempty"`
+	ID               int64                       `json:"id,omitempty"`
+	Count            int64                       `json:"count"`
+	RawCount         int64                       `json:"raw_count"`
+	EligibleCount    int64                       `json:"eligible_count"`
+	ExcludedCount    int64                       `json:"excluded_count"`
+	ExcludedByReason map[string]int64            `json:"excluded_by_reason,omitempty"`
+	ContactIDs       []int64                     `json:"contact_ids,omitempty"`
+	Recipients       []CampaignAudienceRecipient `json:"recipients,omitempty"`
+	Error            string                      `json:"error,omitempty"`
+}
+
+type CampaignAudienceRecipient struct {
+	ContactID int64  `json:"contact_id"`
+	Address   string `json:"address"`
+}
+
+type campaignAudienceExclusion struct {
+	ContactID int64  `json:"contact_id"`
+	Reason    string `json:"reason"`
+}
+
+type campaignAudiencePage struct {
+	RawCount           int64                       `json:"raw_count"`
+	EligibleCount      int64                       `json:"eligible_count"`
+	ExcludedCount      int64                       `json:"excluded_count"`
+	ExcludedByReason   map[string]int64            `json:"excluded_by_reason"`
+	Recipients         []CampaignAudienceRecipient `json:"recipients"`
+	Exclusions         []campaignAudienceExclusion `json:"exclusions"`
+	NextAfterContactID int64                       `json:"next_after_contact_id"`
+	HasMore            bool                        `json:"has_more"`
 }
 
 type Recipient struct {

@@ -34,13 +34,16 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.5.25
+version: 0.6.1
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
   imports repositories from GitHub when a github connection is bound,
   imports ZIP archives through the UI,
   renders live repository, source-file, and issue chat cards,
+  synchronizes standard HTTPS Git repositories using optional bound
+  GitHub, GitLab, or Bitbucket connections,
+  renders source with theme-aware syntax highlighting and line numbers,
   manages native repo issues for bugs, feature requests, and tasks,
   makes grep/read/patch tools more compact for agents with reusable
   patch previews, targeted rejected-hunk context, and stale-hunk recovery,
@@ -64,9 +67,24 @@ requires:
   permissions:
     - db.write.app
     - platform.connections.execute
+    - platform.connections.read_credentials
     - platform.apps.call
     - platform.ingress.write
+  binaries:
+    - name: git
+      executables: [git]
+      required: true
+      hint: Git 2.23 or newer is required for provider-neutral repository synchronization.
+      sources: {}
   integrations:
+    - role: git
+      kind: integration
+      mode: multiple
+      required: false
+      compatible_slugs: [github, gitlab, bitbucket]
+      label: Git provider
+      hint: Connect a Git provider to clone and synchronize private repositories. Public HTTPS remotes work without one.
+      capabilities: [git.clone, git.fetch, git.push]
     - role: github
       kind: integration
       required: false
@@ -112,6 +130,18 @@ provides:
     - { name: templates_list,         description: "List user templates visible to this project + embedded ones." }
     - { name: repos_fork,             description: "Create a new repo by snapshot-copying a template or another repo." }
     - { name: repos_import_github,    description: "Import a GitHub repo as a local repository (gzip tarball snapshot)." }
+    - { name: repos_git_import,       description: "Clone a standard HTTPS Git remote with history and upstream tracking." }
+    - { name: repos_git_connect,      description: "Safely connect an existing Code repository to a Git remote." }
+    - { name: repos_git_status,       description: "Get branch, upstream, ahead/behind, and working-tree changes." }
+    - { name: repos_git_fetch,        description: "Fetch origin refs without changing checked-out files." }
+    - { name: repos_git_pull,         description: "Fetch and fast-forward the current clean branch." }
+    - { name: repos_git_commit,       description: "Commit selected or all visible Code changes." }
+    - { name: repos_git_push,         description: "Push the current branch without force." }
+    - { name: repos_git_diff,         description: "Return a bounded unified diff." }
+    - { name: repos_git_log,          description: "List recent Git commits." }
+    - { name: repos_git_branches,     description: "List local and origin-tracking branches." }
+    - { name: repos_git_branch_create, description: "Create a local branch without switching to it." }
+    - { name: repos_git_switch,       description: "Switch to an existing clean local branch." }
     - { name: repos_dev_start,        description: "Start a long-running dev preview server for a repo." }
     - { name: repos_run_command,      description: "Run a finite repo command such as build, test, lint, typecheck, or generator and return exit-code semantics." }
     - { name: repos_dev_stop,         description: "Stop the dev process for a repo." }
@@ -183,6 +213,8 @@ type App struct {
 	dataDir  string
 	dev      *devSupervisor
 	commands commandCoordinator
+	git      *gitService
+	locks    *repoLockSet
 }
 
 var globalCtx *sdk.AppCtx
@@ -223,7 +255,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := migrateLegacyRepoStorage(ctx.AppDB(), localStore); err != nil {
 		return fmt.Errorf("migrate repository storage: %w", err)
 	}
-	a.store = localStore
+	a.locks = newRepoLockSet()
+	a.store = &lockedFileStore{inner: localStore, locks: a.locks}
 
 	// Dev runtime — live "Run" surface for repos. Lives inside this
 	// sidecar process; one supervised child per (project, repo). The
@@ -235,6 +268,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		dataDir = filepath.Dir(root)
 	}
 	a.dataDir = dataDir
+	gitService, err := newGitService(dataDir, localStore, a.locks)
+	if err != nil {
+		return fmt.Errorf("initialize Git service: %w", err)
+	}
+	a.git = gitService
 	portStart := atoiOr(os.Getenv("CODE_DEV_PORT_RANGE_START"), 6100)
 	portEnd := atoiOr(os.Getenv("CODE_DEV_PORT_RANGE_END"), 6199)
 	a.dev = newDevSupervisor(dataDir, a.store, a, portStart, portEnd)
@@ -308,6 +346,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/templates", Handler: a.handleTemplatesList},
 		{Pattern: "/api/github/import", Handler: a.handleGithubImport},
 		{Pattern: "/api/github/repos", Handler: a.handleGithubReposList},
+		{Pattern: "/api/git/import", Handler: a.handleGitImport},
+		{Pattern: "/api/git/connections", Handler: a.handleGitConnections},
 	}
 }
 
@@ -364,7 +404,7 @@ func zipRepo(w io.Writer, store FileStore, slug string) error {
 // well-known dev artifact dir.
 func shouldSkipForExport(rel string) bool {
 	for _, seg := range strings.Split(rel, "/") {
-		switch seg {
+		switch strings.ToLower(seg) {
 		case "node_modules", ".next", ".git", "dist", "build", ".cache":
 			return true
 		}

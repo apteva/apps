@@ -158,7 +158,7 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	_ = json.Unmarshal([]byte(outputJSON), &output)
 
 	// Apply patch — only the fields the validator knows.
-	if _, ok := patch["tracks"]; ok || patch["soundtrack"] != nil || patch["background"] != nil {
+	if _, ok := patch["tracks"]; ok || patch["soundtrack"] != nil || patch["background"] != nil || patch["markers"] != nil {
 		// Compose a new edit from the supplied subset, falling back to
 		// the current values for missing fields.
 		next := map[string]any{}
@@ -176,6 +176,11 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 			next["background"] = v
 		} else if edit.Timeline.Background != "" {
 			next["background"] = edit.Timeline.Background
+		}
+		if v, ok := patch["markers"]; ok {
+			next["markers"] = v
+		} else if len(edit.Timeline.Markers) > 0 {
+			next["markers"] = edit.Timeline.Markers
 		}
 		newEdit, err := editFromArgs(next)
 		if err != nil {
@@ -894,7 +899,7 @@ func (a *App) toolAssetInspect(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if src == "" {
 		return nil, errors.New("src required")
 	}
-	url, err := resolveAssetURL(ctx, src)
+	url, err := resolveAssetLocal(ctx, src)
 	if err != nil {
 		return nil, fmt.Errorf("resolve: %w", err)
 	}

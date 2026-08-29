@@ -117,6 +117,26 @@ func TestTwilioInboundAttachmentsIngestsEveryMediaItem(t *testing.T) {
 	}
 }
 
+func TestTwilioInboundVoiceNotePreservesAudioMetadata(t *testing.T) {
+	originalFetcher := twilioMediaFetcher
+	t.Cleanup(func() { twilioMediaFetcher = originalFetcher })
+	twilioMediaFetcher = func(_ context.Context, rawURL, accountSID, authToken string) ([]byte, string, string, error) {
+		return []byte("ogg-opus-bytes"), "audio/ogg", "voice-note.ogg", nil
+	}
+	attachments := twilioInboundAttachments(url.Values{
+		"NumMedia":          {"1"},
+		"MediaUrl0":         {"https://api.twilio.com/media/voice"},
+		"MediaContentType0": {"audio/ogg; codecs=opus"},
+	}, "SMvoice", "AC123", "secret")
+	if len(attachments) != 1 {
+		t.Fatalf("attachments=%+v", attachments)
+	}
+	att := attachments[0]
+	if att.ContentType != "audio/ogg; codecs=opus" || att.Filename != "voice-note.ogg" || att.SizeBytes != int64(len("ogg-opus-bytes")) || !bytes.Equal(att.Data, []byte("ogg-opus-bytes")) {
+		t.Fatalf("voice attachment=%+v data=%q", att.MessageAttachment, att.Data)
+	}
+}
+
 func TestInboundAttachmentInsertIsIdempotentByProviderRef(t *testing.T) {
 	ctx := newTestCtx(t, nil)
 	res, err := ctx.AppDB().Exec(`INSERT INTO messages

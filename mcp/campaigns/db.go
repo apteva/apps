@@ -381,12 +381,30 @@ func dbRecipientMarkFailed(db *sql.DB, pid string, recipID int64, msg string) er
 	return err
 }
 
+func dbRecipientReturnPending(db *sql.DB, pid string, recipID int64, msg string) error {
+	_, err := db.Exec(
+		`UPDATE campaign_recipients
+		 SET status = 'pending', error = ?
+		 WHERE id = ? AND project_id = ?`,
+		truncate(msg, 500), recipID, pid,
+	)
+	return err
+}
+
 func dbRecipientMarkSkipped(db *sql.DB, pid string, recipID int64, reason string) error {
 	_, err := db.Exec(
 		`UPDATE campaign_recipients
 		 SET status = 'skipped', error = ?
 		 WHERE id = ? AND project_id = ?`,
 		truncate(reason, 500), recipID, pid,
+	)
+	return err
+}
+
+func dbRecipientUpdateAddress(db *sql.DB, pid string, recipID int64, address string) error {
+	_, err := db.Exec(
+		`UPDATE campaign_recipients SET address = ? WHERE id = ? AND project_id = ?`,
+		address, recipID, pid,
 	)
 	return err
 }

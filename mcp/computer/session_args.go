@@ -42,7 +42,7 @@ var browserSessionSupportedArguments = map[string]struct{}{
 	"url": {}, "context_id": {}, "context_name": {}, "provider_context_id": {},
 	"auto_create_context": {}, "persist": {}, "timeout": {}, "proxy_mode": {},
 	"proxy_profile": {}, "proxy_country": {}, "proxy_sticky": {}, "environment": {},
-	"viewport": {},
+	"environment_override": {}, "viewport": {},
 
 	// Accepted compatibility aliases are intentionally not advertised in the
 	// public schema, but remain supported for existing programmatic clients.
@@ -269,7 +269,7 @@ func filterBrowserSessionArgumentsForAction(args map[string]any, diagnostics *se
 	for _, key := range []string{
 		"backend", "presentation_mode", "url", "context_id", "context_name", "provider_context_id", "provider_context",
 		"auto_create_context", "persist", "timeout", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky",
-		"environment", "viewport", "user_agent", "backend_session_id", "provider_session_id", "region", "backend_url", "initial_url", "proxy_url",
+		"environment", "environment_override", "viewport", "user_agent", "backend_session_id", "provider_session_id", "region", "backend_url", "initial_url", "proxy_url",
 		"solve_captchas", "use_proxy", "block_ads", "solve_captcha", "proxy_enabled", "browser_project_id",
 	} {
 		if _, ok := args[key]; ok {

@@ -3,8 +3,8 @@
 // Pipeline summary:
 //   schedule         — write campaigns.scheduled_at + jobs once-job
 //                      targeting the app-only campaigns_materialise tool
-//   materialise      — call crm.segments_eval (or list materialise),
-//                      bulk-insert recipients, transition to 'sending',
+//   materialise      — ask CRM for channel-eligible audience pages,
+//                      audit exclusions, transition to 'sending',
 //                      schedule jobs every-job targeting campaigns_tick
 //   tick             — claim batch, send each via messaging.send_message,
 //                      mark sent/failed; when zero pending, cancel tick
@@ -578,9 +578,9 @@ func (a *App) toolCampaignsReconcile(ctx *sdk.AppCtx, args map[string]any) (any,
 // rows and transitions the campaign to 'sending'. Idempotent on
 // re-run (INSERT OR IGNORE on the unique campaign_id+contact_id).
 //
-// Pre-flight suppression: each address is checked via
-// messaging.suppression_check. Suppressed addresses land as 'skipped'
-// rather than 'pending', so the tick loop never tries to send them.
+// CRM resolves channel-specific messageability in bulk. Excluded contacts are
+// retained as skipped rows for an auditable raw → eligible count, while
+// Messaging remains the final suppression backstop.
 func materialiseCampaign(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 	if c == nil {
 		return errors.New("nil campaign")
@@ -589,42 +589,41 @@ func materialiseCampaign(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 		return err
 	}
 
-	// Resolve audience: prefer segment, fall back to list.
-	var contactIDs []int64
-	var err error
-	if c.SegmentID != nil && *c.SegmentID != 0 {
-		contactIDs, err = evalSegment(ctx, pid, *c.SegmentID)
-	} else if c.ListID != nil && *c.ListID != 0 {
-		contactIDs, err = listMembers(ctx, pid, *c.ListID)
-	} else {
-		err = errors.New("no audience source")
+	var rows []Recipient
+	var rawCount int64
+	afterID := int64(0)
+	includeCounts := true
+	for {
+		page, err := resolveCampaignAudiencePage(ctx, pid, c, afterID, 5000, includeCounts)
+		if err != nil {
+			_, _ = dbCampaignSetStatus(ctx.AppDB(), pid, c.ID, StatusFailed, fmtError("audience: %s", err.Error()), false, true)
+			return err
+		}
+		if includeCounts {
+			rawCount = page.RawCount
+			includeCounts = false
+		}
+		for _, excluded := range page.Exclusions {
+			rows = append(rows, Recipient{ContactID: excluded.ContactID, Status: RecipSkipped, Error: "crm: " + excluded.Reason})
+		}
+		for _, recipient := range page.Recipients {
+			if suppressed, reason := suppressionCheck(ctx, c.Channel, recipient.Address); suppressed {
+				rows = append(rows, Recipient{ContactID: recipient.ContactID, Address: recipient.Address, Status: RecipSkipped, Error: "messaging suppression: " + reason})
+				continue
+			}
+			rows = append(rows, Recipient{ContactID: recipient.ContactID, Address: recipient.Address, Status: RecipPending})
+		}
+		if !page.HasMore {
+			break
+		}
+		if page.NextAfterContactID <= afterID {
+			return errors.New("CRM audience pagination did not advance")
+		}
+		afterID = page.NextAfterContactID
 	}
-	if err != nil {
-		_, _ = dbCampaignSetStatus(ctx.AppDB(), pid, c.ID, StatusFailed, fmtError("audience: %s", err.Error()), false, true)
-		return err
-	}
-	if len(contactIDs) == 0 {
+	if rawCount == 0 {
 		_, _ = dbCampaignSetStatus(ctx.AppDB(), pid, c.ID, StatusSent, "no recipients", false, true)
 		return nil
-	}
-
-	// Resolve each contact's address by calling crm.contacts_get for
-	// each. Cheap enough for v0.1 audiences (≤ a few thousand). v0.2
-	// can add a bulk crm.contacts_addresses_for_channel tool to do
-	// this in one round-trip.
-	var rows []Recipient
-	for _, cid := range contactIDs {
-		addr, ok := contactAddressForChannel(ctx, pid, cid, c.Channel)
-		if !ok {
-			rows = append(rows, Recipient{ContactID: cid, Address: "", Status: RecipSkipped, Error: "no " + c.Channel + " address"})
-			continue
-		}
-		// Pre-flight suppression check via messaging.
-		if suppressed, reason := suppressionCheck(ctx, c.Channel, addr); suppressed {
-			rows = append(rows, Recipient{ContactID: cid, Address: addr, Status: RecipSkipped, Error: "suppressed: " + reason})
-			continue
-		}
-		rows = append(rows, Recipient{ContactID: cid, Address: addr, Status: RecipPending})
 	}
 	if _, err := runRecipientBulk(ctx, pid, c.ID, rows); err != nil {
 		_, _ = dbCampaignSetStatus(ctx.AppDB(), pid, c.ID, StatusFailed, fmtError("insert recipients: %s", err.Error()), false, true)
@@ -639,7 +638,7 @@ func materialiseCampaign(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 	if _, err := dbCampaignSetStatus(ctx.AppDB(), pid, c.ID, StatusSending, "", false, false); err != nil {
 		return err
 	}
-	ctx.Emit("campaign.sending", campaignEventPayload(c, 0, StatusSending, map[string]any{"audience_size": len(contactIDs)}))
+	ctx.Emit("campaign.sending", campaignEventPayload(c, 0, StatusSending, map[string]any{"audience_size": rawCount}))
 	return nil
 }
 
@@ -702,6 +701,31 @@ func tickCampaign(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 		return err
 	}
 	for _, r := range claimed {
+		resolved, exclusion, err := resolveCampaignContact(ctx, pid, c.Channel, r.ContactID)
+		if err != nil {
+			_ = dbRecipientReturnPending(ctx.AppDB(), pid, r.ID, "CRM messageability recheck deferred: "+err.Error())
+			ctx.Logger().Warn("campaign tick: CRM messageability recheck failed",
+				"campaign_id", c.ID, "recipient_id", r.ID, "err", err.Error())
+			continue
+		}
+		if exclusion != "" || resolved.Address == "" {
+			if exclusion == "" {
+				exclusion = "unmessageable"
+			}
+			_ = dbRecipientMarkSkipped(ctx.AppDB(), pid, r.ID, "crm: "+exclusion)
+			continue
+		}
+		if resolved.Address != r.Address {
+			r.Address = resolved.Address
+			if err := dbRecipientUpdateAddress(ctx.AppDB(), pid, r.ID, r.Address); err != nil {
+				_ = dbRecipientReturnPending(ctx.AppDB(), pid, r.ID, "address refresh deferred: "+err.Error())
+				continue
+			}
+		}
+		if suppressed, reason := suppressionCheck(ctx, c.Channel, r.Address); suppressed {
+			_ = dbRecipientMarkSkipped(ctx.AppDB(), pid, r.ID, "messaging suppression: "+reason)
+			continue
+		}
 		bodyText := renderRecipientBody(c.BodyText, c, r)
 		bodyHTML := renderRecipientBody(c.BodyHTML, c, r)
 		if c.Channel == ChannelEmail {
@@ -792,37 +816,6 @@ func appendHTMLUnsubscribe(body, unsubURL string) string {
 
 // ─── Cross-app helpers (CRM / messaging / jobs) ───────────────────
 
-// evalSegment calls crm.segments_eval and returns the contact ids.
-// For static segments this reads the snapshot; for dynamic it
-// re-evaluates. Caller decides whether to materialise first.
-func evalSegment(ctx *sdk.AppCtx, pid string, segID int64) ([]int64, error) {
-	var out struct {
-		ContactIDs []int64 `json:"contact_ids"`
-		Count      int64   `json:"count"`
-	}
-	if err := ctx.PlatformAPI().CallAppResult("crm", "segments_eval",
-		map[string]any{"_project_id": pid, "id": segID, "limit": 50000}, &out); err != nil {
-		return nil, err
-	}
-	return out.ContactIDs, nil
-}
-
-// listMembers fetches the contact_ids of every active member of a
-// list via crm.lists_eval. Mirrors evalSegment so materialise can
-// branch on which audience source the campaign was given without
-// reshaping its result.
-func listMembers(ctx *sdk.AppCtx, pid string, listID int64) ([]int64, error) {
-	var out struct {
-		ContactIDs []int64 `json:"contact_ids"`
-		Count      int64   `json:"count"`
-	}
-	if err := ctx.PlatformAPI().CallAppResult("crm", "lists_eval",
-		map[string]any{"_project_id": pid, "id": listID, "limit": 50000}, &out); err != nil {
-		return nil, fmt.Errorf("crm.lists_eval: %w", err)
-	}
-	return out.ContactIDs, nil
-}
-
 func campaignAudienceInfo(ctx *sdk.AppCtx, pid string, c *Campaign, limit int) *AudienceInfo {
 	if c == nil {
 		return nil
@@ -830,72 +823,71 @@ func campaignAudienceInfo(ctx *sdk.AppCtx, pid string, c *Campaign, limit int) *
 	if limit <= 0 {
 		limit = 10
 	}
-	var (
-		kind string
-		id   int64
-		tool string
-	)
+	var kind string
+	var id int64
 	if c.SegmentID != nil && *c.SegmentID != 0 {
-		kind, id, tool = "segment", *c.SegmentID, "segments_eval"
+		kind, id = "segment", *c.SegmentID
 	} else if c.ListID != nil && *c.ListID != 0 {
-		kind, id, tool = "list", *c.ListID, "lists_eval"
+		kind, id = "list", *c.ListID
 	} else {
 		return nil
 	}
 	info := &AudienceInfo{Kind: kind, ID: id}
-	var out struct {
-		ContactIDs []int64 `json:"contact_ids"`
-		Count      int64   `json:"count"`
-	}
-	if err := ctx.PlatformAPI().CallAppResult("crm", tool,
-		map[string]any{"_project_id": pid, "id": id, "limit": limit}, &out); err != nil {
+	page, err := resolveCampaignAudiencePage(ctx, pid, c, 0, limit, true)
+	if err != nil {
 		info.Error = err.Error()
 		return info
 	}
-	info.Count = out.Count
-	info.ContactIDs = out.ContactIDs
+	info.Count = page.EligibleCount
+	info.RawCount = page.RawCount
+	info.EligibleCount = page.EligibleCount
+	info.ExcludedCount = page.ExcludedCount
+	info.ExcludedByReason = page.ExcludedByReason
+	info.Recipients = page.Recipients
+	for _, recipient := range page.Recipients {
+		info.ContactIDs = append(info.ContactIDs, recipient.ContactID)
+	}
 	return info
 }
 
-// contactAddressForChannel asks CRM for one contact's address on the
-// given channel. Returns ("", false) if the contact has no usable
-// address — caller marks the recipient 'skipped'.
-func contactAddressForChannel(ctx *sdk.AppCtx, pid string, contactID int64, channel string) (string, bool) {
-	var out struct {
-		Contact struct {
-			PrimaryEmail string `json:"primary_email"`
-			PrimaryPhone string `json:"primary_phone"`
-			Channels     []struct {
-				Kind  string `json:"kind"`
-				Value string `json:"value"`
-			} `json:"channels"`
-		} `json:"contact"`
+func resolveCampaignAudiencePage(ctx *sdk.AppCtx, pid string, c *Campaign, afterID int64, limit int, includeCounts bool) (*campaignAudiencePage, error) {
+	if c == nil {
+		return nil, errors.New("campaign required")
 	}
-	if err := ctx.PlatformAPI().CallAppResult("crm", "contacts_get",
-		map[string]any{"_project_id": pid, "id": contactID}, &out); err != nil {
-		return "", false
+	args := map[string]any{
+		"_project_id": pid, "channel": c.Channel, "limit": limit,
+		"after_contact_id": afterID, "include_counts": includeCounts,
 	}
-	switch channel {
-	case ChannelEmail:
-		if out.Contact.PrimaryEmail != "" {
-			return out.Contact.PrimaryEmail, true
-		}
-		for _, ch := range out.Contact.Channels {
-			if ch.Kind == "email" && ch.Value != "" {
-				return ch.Value, true
-			}
-		}
-	case ChannelSMS, ChannelWhatsApp:
-		if out.Contact.PrimaryPhone != "" {
-			return out.Contact.PrimaryPhone, true
-		}
-		for _, ch := range out.Contact.Channels {
-			if ch.Kind == "phone" && ch.Value != "" {
-				return ch.Value, true
-			}
-		}
+	if c.SegmentID != nil && *c.SegmentID != 0 {
+		args["segment_id"] = *c.SegmentID
+	} else if c.ListID != nil && *c.ListID != 0 {
+		args["list_id"] = *c.ListID
+	} else {
+		return nil, errors.New("no audience source")
 	}
-	return "", false
+	var out campaignAudiencePage
+	if err := ctx.PlatformAPI().CallAppResult("crm", "contacts_resolve_audience", args, &out); err != nil {
+		return nil, fmt.Errorf("crm.contacts_resolve_audience: %w", err)
+	}
+	return &out, nil
+}
+
+func resolveCampaignContact(ctx *sdk.AppCtx, pid, channel string, contactID int64) (CampaignAudienceRecipient, string, error) {
+	var out campaignAudiencePage
+	err := ctx.PlatformAPI().CallAppResult("crm", "contacts_resolve_audience", map[string]any{
+		"_project_id": pid, "channel": channel, "contact_id": contactID,
+		"limit": 1, "include_counts": false, "include_automated": false,
+	}, &out)
+	if err != nil {
+		return CampaignAudienceRecipient{}, "", err
+	}
+	if len(out.Recipients) > 0 {
+		return out.Recipients[0], "", nil
+	}
+	if len(out.Exclusions) > 0 {
+		return CampaignAudienceRecipient{}, out.Exclusions[0].Reason, nil
+	}
+	return CampaignAudienceRecipient{}, "not_found", nil
 }
 
 // callMessagingSend invokes messaging.send_message and returns the

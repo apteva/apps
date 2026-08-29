@@ -89,10 +89,52 @@ interface NativePanelProps {
   instanceId?: number;
 }
 interface Channel {
+  id?: number;
   kind: string;
   value: string;
   label?: string;
   is_primary?: boolean;
+  verification_verdict?: string;
+  verification_confidence?: string;
+  verification_reason?: string;
+  verification_recommendation?: string;
+  verification_source?: string;
+  verification_suggested_value?: string;
+  verification_checked_at?: string;
+  verification_details?: {
+    disposable?: boolean;
+    role?: boolean;
+    domain_status?: string;
+    retryable?: boolean;
+    smtp?: {
+      checked?: boolean;
+      rcpt_status?: string;
+      catch_all?: boolean;
+      retryable?: boolean;
+      note?: string;
+    };
+  };
+  deliverability?: ChannelDeliverability[];
+}
+interface ChannelDeliverability {
+  transport: "email" | "sms" | "whatsapp";
+  status: "active" | "soft_bounced" | "hard_bounced" | "complained" | "unsubscribed";
+  consecutive_soft_bounces: number;
+  last_bounce_at?: string;
+  last_delivered_at?: string;
+  status_reason?: string;
+  status_updated_at?: string;
+  quarantined: boolean;
+  quarantined_at?: string;
+  suppressed: boolean;
+  suppression_kind?: string;
+  suppression_match?: string;
+  suppression_reason?: string;
+  suppression_source?: string;
+  suppressed_at?: string;
+  suppression_checked_at?: string;
+  messageable: boolean;
+  messageability_reason?: string;
 }
 interface Attribute {
   key: string;
@@ -719,6 +761,15 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     ) {
       loadList(query.trim());
     }
+    if (ev.topic === "contact.channel.deliverability.changed") {
+      const data = (ev.data || {}) as { contact_id?: number };
+      loadList(query.trim());
+      if (detail && String(data.contact_id) === String(detail.id)) {
+        api<{ contact: Contact }>("GET", `/contacts/${detail.id}`)
+          .then((result) => setDetail(result.contact))
+          .catch(() => {});
+      }
+    }
     if (ev.topic === "contact.activity.added" && detail) {
       const data = (ev.data || {}) as { contact_id?: number };
       if (String(data.contact_id) === String(detail.id)) {
@@ -1204,6 +1255,19 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     if (!detail) return;
     await saveChannels((detail.channels || []).filter((_, i) => i !== idx));
   }, [detail, saveChannels]);
+  const handleVerifyEmail = useCallback(async (channel: Channel, smtp: boolean) => {
+    if (!detail || !channel.id) return;
+    try {
+      const r = await api<{ contact: Contact }>(
+        "POST",
+        `/contacts/${detail.id}/channels/${channel.id}/verify`,
+        { smtp },
+      );
+      setDetail(r.contact);
+    } catch (e) {
+      setErrorToast("Email verification failed: " + (e as Error).message);
+    }
+  }, [api, detail]);
 
   // Group activities by conversation. Within a conversation, order
   // chronologically (oldest first) so the agent reads the thread top-
@@ -1373,6 +1437,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                     channels={detail.channels || []}
                     onAdd={() => setAddChannelOpen(true)}
                     onRemove={handleRemoveChannel}
+                    onVerify={handleVerifyEmail}
                   />
 
                   {detail.tags && detail.tags.length > 0 && (
@@ -1630,11 +1695,66 @@ function ContactField({ label, value, onChange }: { label: string; value: string
   );
 }
 
-function ChannelsList({ channels, onAdd, onRemove }: {
+function EmailVerificationBadge({ channel }: { channel: Channel }) {
+  if (channel.kind !== "email") return null;
+  const verdict = channel.verification_verdict || "unchecked";
+  const styles: Record<string, string> = {
+    deliverable: "bg-green-500/15 text-green-400",
+    risky: "bg-amber-500/15 text-amber-400",
+    undeliverable: "bg-red-500/15 text-red-400",
+    unknown: "bg-border text-text-muted",
+    unchecked: "bg-border/60 text-text-dim",
+  };
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded ${styles[verdict] || styles.unknown}`}>
+      {verdict}
+    </span>
+  );
+}
+
+function DeliveryBadge({ state }: { state: ChannelDeliverability }) {
+  const healthy = state.messageable && state.status === "active";
+  const warning = state.messageable && state.status === "soft_bounced";
+  const cls = healthy
+    ? "bg-green-500/15 text-green-400"
+    : warning
+      ? "bg-amber-500/15 text-amber-400"
+      : "bg-red-500/15 text-red-400";
+  const label = state.suppressed
+    ? "suppressed"
+    : state.quarantined
+      ? "quarantined"
+      : state.status.replaceAll("_", " ");
+  const title = [
+    `${state.transport}: ${label}`,
+    state.messageability_reason,
+    state.status_reason,
+    state.suppression_match ? `matched ${state.suppression_kind || "suppression"}: ${state.suppression_match}` : "",
+    state.suppression_source ? `source: ${state.suppression_source}` : "",
+  ].filter(Boolean).join("\n");
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded ${cls}`} title={title}>
+      {state.transport} · {label}
+    </span>
+  );
+}
+
+function ChannelsList({ channels, onAdd, onRemove, onVerify }: {
   channels: Channel[];
   onAdd: () => void;
   onRemove: (idx: number) => void | Promise<void>;
+  onVerify: (channel: Channel, smtp: boolean) => void | Promise<void>;
 }) {
+  const [verifying, setVerifying] = useState("");
+  const verify = async (channel: Channel, smtp: boolean) => {
+    const key = `${channel.id}-${smtp ? "smtp" : "local"}`;
+    setVerifying(key);
+    try {
+      await onVerify(channel, smtp);
+    } finally {
+      setVerifying("");
+    }
+  };
   return (
     <section>
       <div className="flex items-center gap-2 mb-2">
@@ -1646,19 +1766,60 @@ function ChannelsList({ channels, onAdd, onRemove }: {
         >Add channel</button>
       </div>
       {channels.length > 0 ? (
-        <ul className="space-y-1">
+        <ul className="space-y-2">
           {channels.map((ch, i) => (
-            <li key={`${ch.kind}-${ch.value}-${i}`} className="text-sm flex items-center gap-2">
-              <span className="text-[10px] uppercase text-text-dim w-16">{ch.kind}</span>
-              <span className="text-text flex-1 truncate">{ch.value}</span>
-              {ch.label && <span className="text-[10px] px-1 rounded bg-border text-text-muted">{ch.label}</span>}
-              {ch.is_primary && <span className="text-[10px] px-1 rounded bg-accent/15 text-accent">primary</span>}
-              <button
-                type="button"
-                onClick={() => onRemove(i)}
-                className="text-[11px] px-1.5 py-0.5 border border-border rounded hover:bg-bg-input"
-                title="Remove channel"
-              >Remove</button>
+            <li key={ch.id || `${ch.kind}-${ch.value}-${i}`} className="text-sm rounded border border-border/70 p-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] uppercase text-text-dim w-16">{ch.kind}</span>
+                <span className="text-text flex-1 truncate">{ch.value}</span>
+                {ch.label && <span className="text-[10px] px-1 rounded bg-border text-text-muted">{ch.label}</span>}
+                {ch.is_primary && <span className="text-[10px] px-1 rounded bg-accent/15 text-accent">primary</span>}
+                <EmailVerificationBadge channel={ch} />
+                {(ch.deliverability || []).map((state) => <DeliveryBadge key={state.transport} state={state} />)}
+                <button
+                  type="button"
+                  onClick={() => onRemove(i)}
+                  className="text-[11px] px-1.5 py-0.5 border border-border rounded hover:bg-bg-input"
+                  title="Remove channel"
+                >Remove</button>
+              </div>
+              {ch.kind === "email" && (
+                <div className="mt-2 ml-[4.5rem] flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-text-muted">
+                  {ch.verification_confidence && <span>Confidence: {ch.verification_confidence}</span>}
+                  {ch.verification_reason && <span>Reason: {ch.verification_reason.replaceAll("_", " ")}</span>}
+                  {ch.verification_recommendation && <span>Recommendation: {ch.verification_recommendation}</span>}
+                  {ch.verification_source && <span>Source: {ch.verification_source}</span>}
+                  {ch.verification_details?.smtp?.catch_all && <span>Catch-all domain</span>}
+                  {(ch.verification_details?.retryable || ch.verification_details?.smtp?.retryable) && <span>Retry recommended</span>}
+                  {ch.verification_suggested_value && <span>Suggestion: {ch.verification_suggested_value}</span>}
+                  {ch.verification_checked_at && <span>Checked {formatTime(ch.verification_checked_at)}</span>}
+                  <span className="flex-1" />
+                  <button
+                    type="button"
+                    disabled={!ch.id || Boolean(verifying)}
+                    onClick={() => verify(ch, false)}
+                    className="px-1.5 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-50"
+                  >{verifying === `${ch.id}-local` ? "Checking…" : "Verify again"}</button>
+                  <button
+                    type="button"
+                    disabled={!ch.id || Boolean(verifying)}
+                    onClick={() => verify(ch, true)}
+                    className="px-1.5 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-50"
+                    title="Ask Email Checker to probe the recipient mail server"
+                  >{verifying === `${ch.id}-smtp` ? "Probing…" : "Run SMTP probe"}</button>
+                </div>
+              )}
+              {(ch.deliverability || []).some((state) => state.status !== "active" || state.suppressed || state.quarantined) && (
+                <div className="mt-2 ml-[4.5rem] flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-text-muted">
+                  {(ch.deliverability || []).map((state) => (
+                    <Fragment key={state.transport}>
+                      {state.consecutive_soft_bounces > 0 && <span>{state.transport}: {state.consecutive_soft_bounces} consecutive transient bounce{state.consecutive_soft_bounces === 1 ? "" : "s"}</span>}
+                      {state.messageability_reason && <span>{state.transport}: {state.messageability_reason}</span>}
+                      {state.last_bounce_at && <span>Last bounce {formatTime(state.last_bounce_at)}</span>}
+                    </Fragment>
+                  ))}
+                </div>
+              )}
             </li>
           ))}
         </ul>
@@ -2044,9 +2205,10 @@ type WhatsAppSessionState =
   | { state: "error"; error?: string };
 
 function preferredChannel(c: Contact, senders: SenderOption[] = []): string {
-  if (c.primary_email) return "email";
-  if (c.primary_phone) return senders.some((s) => s.channel === "whatsapp") ? "whatsapp" : "sms";
-  return "email";
+  const channels = availableChannels(c);
+  if (channels.includes("email")) return "email";
+  if (channels.includes("whatsapp") && senders.some((s) => s.channel === "whatsapp")) return "whatsapp";
+  return channels[0] || "email";
 }
 
 function preferredSenderForChannel(senders: SenderOption[], channel: string): SenderOption | undefined {
@@ -2434,19 +2596,27 @@ function ComposerModal({
 
 function availableChannels(c: Contact): string[] {
   const out: string[] = [];
-  if (c.primary_email) out.push("email");
-  if (c.primary_phone) out.push("whatsapp", "sms");
-  // Fall back to any contact_channels entries.
   if (c.channels) {
     for (const ch of c.channels) {
-      if (ch.kind === "email" && !out.includes("email")) out.push("email");
+      if (ch.kind === "email" && channelIsMessageable(ch, "email") && !out.includes("email")) out.push("email");
       if (ch.kind === "phone") {
-        if (!out.includes("whatsapp")) out.push("whatsapp");
-        if (!out.includes("sms")) out.push("sms");
+        if (channelIsMessageable(ch, "whatsapp") && !out.includes("whatsapp")) out.push("whatsapp");
+        if (channelIsMessageable(ch, "sms") && !out.includes("sms")) out.push("sms");
       }
     }
   }
-  return out.length > 0 ? out : ["email"];
+  // Older CRM responses have no per-route state. Preserve their previous
+  // behavior until the contact is refreshed against the upgraded backend.
+  if (!c.channels || c.channels.length === 0) {
+    if (c.primary_email) out.push("email");
+    if (c.primary_phone) out.push("whatsapp", "sms");
+  }
+  return out;
+}
+
+function channelIsMessageable(channel: Channel, transport: string): boolean {
+  const state = channel.deliverability?.find((item) => item.transport === transport);
+  return state ? state.messageable : true;
 }
 
 async function fileToComposeAttachment(file: File): Promise<ComposeAttachment> {
@@ -2482,8 +2652,12 @@ function formatBytes(value?: number): string {
 }
 
 function addressForChannel(c: Contact, channel: string): string {
-  if (channel === "email") return c.primary_email || c.channels?.find((ch) => ch.kind === "email")?.value || "(no email)";
-  if (channel === "sms" || channel === "whatsapp") return c.primary_phone || c.channels?.find((ch) => ch.kind === "phone")?.value || "(no phone)";
+  if (channel === "email") {
+    return c.channels?.find((ch) => ch.kind === "email" && channelIsMessageable(ch, "email"))?.value || "(no messageable email)";
+  }
+  if (channel === "sms" || channel === "whatsapp") {
+    return c.channels?.find((ch) => ch.kind === "phone" && channelIsMessageable(ch, channel))?.value || `(no messageable ${channel} phone)`;
+  }
   return "—";
 }
 
@@ -3251,6 +3425,7 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
       ev.topic === "conversation.message.received" ||
       ev.topic === "conversation.status.changed" ||
       ev.topic === "contact.activity.added" ||
+      ev.topic === "contact.channel.deliverability.changed" ||
       ev.topic === "contact.merged"
     ) {
       load();
@@ -3503,7 +3678,11 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
                   <ul className="space-y-1">
                     {threadContact.channels.map((ch, i) => (
                       <li key={`${ch.kind}-${ch.value}-${i}`} className="text-xs">
-                        <div className="text-[10px] uppercase text-text-dim">{ch.kind}{ch.is_primary ? " · primary" : ""}</div>
+                        <div className="text-[10px] uppercase text-text-dim flex items-center gap-1">
+                          <span>{ch.kind}{ch.is_primary ? " · primary" : ""}</span>
+                          <EmailVerificationBadge channel={ch} />
+                          {(ch.deliverability || []).map((state) => <DeliveryBadge key={state.transport} state={state} />)}
+                        </div>
                         <div className="text-text truncate">{ch.value}</div>
                       </li>
                     ))}

@@ -167,17 +167,20 @@ func (a *App) MCPTools() []sdk.Tool {
 			"read_path": strSchema(), "quantity_path": strSchema(), "call_args": objSchema(), "metadata": objSchema(),
 		}, []string{"plan_key", "app_name", "tool_name"}), Handler: a.toolPlanUsageSourceAdd},
 		{Name: "saas_plan_action_add", Description: "Register a generic fulfillment action for a SaaS plan lifecycle event.", InputSchema: schemaObject(map[string]any{
-			"plan_key": strSchema(), "event": strSchema(), "app_name": strSchema(), "tool_name": strSchema(),
+			"plan_key": strSchema(), "event": strSchema(), "execution_kind": strSchema(), "app_name": strSchema(), "tool_name": strSchema(),
 			"args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "execution_policy": strSchema(),
 			"persist_input": strSchema(), "persist_output": strSchema(), "sensitive_input_paths": strArraySchema(), "sensitive_output_paths": strArraySchema(),
 			"enabled": boolSchema(), "metadata": objSchema(),
-		}, []string{"plan_key", "event", "app_name", "tool_name"}), Handler: a.toolPlanActionAdd},
+		}, []string{"plan_key", "event", "tool_name"}), Handler: a.toolPlanActionAdd},
 		{Name: "saas_plan_action_update", Description: "Update a generic fulfillment action by id.", InputSchema: schemaObject(map[string]any{
-			"id": intSchema(), "args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "execution_policy": strSchema(),
+			"id": intSchema(), "execution_kind": strSchema(), "args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "execution_policy": strSchema(),
 			"persist_input": strSchema(), "persist_output": strSchema(), "sensitive_input_paths": strArraySchema(), "sensitive_output_paths": strArraySchema(),
 			"enabled": boolSchema(), "metadata": objSchema(),
 		}, []string{"id"}), Handler: a.toolPlanActionUpdate},
 		{Name: "saas_plan_action_list", Description: "List generic fulfillment actions for a SaaS plan.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "event": strSchema()}, []string{"plan_key"}), Handler: a.toolPlanActionList},
+		{Name: "saas_connection_ensure", Description: "Securely create or rotate an app-owned integration connection, optionally attaching its reference to a SaaS account.", InputSchema: schemaObject(map[string]any{
+			"account_id": strSchema(), "key": strSchema(), "app_slug": strSchema(), "name": strSchema(), "auth_type": strSchema(), "fields": objSchema(), "metadata_key": strSchema(),
+		}, []string{"key", "app_slug", "fields"}), Handler: a.toolConnectionEnsure},
 		{Name: "saas_customer_create", Description: "Find or create a SaaS customer by email.", InputSchema: schemaObject(map[string]any{"email": strSchema(), "name": strSchema(), "billing_customer_id": intSchema(), "auth_user_id": intSchema(), "metadata": objSchema()}, []string{"email"}), Handler: a.toolCustomerCreate},
 		{Name: "saas_checkout_create", Description: "Create a SaaS checkout: free activation, no-card trials, or paid Billing/Subscription checkout.", InputSchema: schemaObject(map[string]any{
 			"owner_email": strSchema(), "customer_name": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
@@ -304,6 +307,7 @@ type PlanAction struct {
 	ProjectID            string          `json:"project_id"`
 	PlanKey              string          `json:"plan_key"`
 	Event                string          `json:"event"`
+	ExecutionKind        string          `json:"execution_kind"`
 	AppName              string          `json:"app_name"`
 	ToolName             string          `json:"tool_name"`
 	Args                 json.RawMessage `json:"args,omitempty"`
@@ -2346,7 +2350,8 @@ func (a *App) runFulfillmentForPlan(ctx *sdk.AppCtx, pid string, acct *Account, 
 		if phase == "store" {
 			out = mapFromAny(run.Output)
 		} else {
-			callErr := ctx.PlatformAPI().CallAppResult(action.AppName, action.ToolName, args, &out)
+			var callErr error
+			out, callErr = a.executeFulfillmentAction(ctx, pid, acct, action, run, args)
 			if callErr != nil {
 				errText := redactFulfillmentError(callErr.Error(), args, out, action.SensitiveInputPaths, action.SensitiveOutputPaths)
 				run, _ = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, &action, "failed", out, errText)
@@ -3882,9 +3887,13 @@ func dbPlanActionInsert(db *sql.DB, pid string, args map[string]any) (*PlanActio
 	if event == "" {
 		return nil, errors.New("event required")
 	}
+	executionKind := firstNonEmpty(strArg(args, "execution_kind"), "app")
+	if executionKind != "app" && executionKind != "integration_execute" {
+		return nil, fmt.Errorf("unsupported execution_kind %q", executionKind)
+	}
 	app, tool := strArg(args, "app_name"), strArg(args, "tool_name")
-	if app == "" || tool == "" {
-		return nil, errors.New("app_name and tool_name required")
+	if tool == "" || (executionKind == "app" && app == "") {
+		return nil, errors.New("tool_name is required; app_name is also required for app execution")
 	}
 	failureMode := firstNonEmpty(strArg(args, "failure_mode"), "fail_account")
 	switch failureMode {
@@ -3922,10 +3931,10 @@ func dbPlanActionInsert(db *sql.DB, pid string, args map[string]any) (*PlanActio
 	}
 	res, err := db.Exec(`
 		INSERT INTO saas_plan_actions
-			(project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, execution_policy,
+			(project_id, plan_key, event, execution_kind, app_name, tool_name, args_json, store_json, failure_mode, execution_policy,
 			 persist_input, persist_output, sensitive_input_paths_json, sensitive_output_paths_json, enabled, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, planKey, event, app, tool, jsonOrEmpty(args["args"], "{}"), jsonOrEmpty(args["store"], "{}"), failureMode, executionPolicy,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, planKey, event, executionKind, app, tool, jsonOrEmpty(args["args"], "{}"), jsonOrEmpty(args["store"], "{}"), failureMode, executionPolicy,
 		persistInput, persistOutput, jsonOrEmpty(sensitiveInputPaths, "[]"), jsonOrEmpty(sensitiveOutputPaths, "[]"), enabled, jsonOrEmpty(args["metadata"], "{}"))
 	if err != nil {
 		return nil, err
@@ -3948,6 +3957,17 @@ func dbPlanActionUpdate(db *sql.DB, pid string, args map[string]any) (*PlanActio
 
 	sets := []string{}
 	vals := []any{}
+	if _, ok := args["execution_kind"]; ok {
+		executionKind := firstNonEmpty(strArg(args, "execution_kind"), "app")
+		if executionKind != "app" && executionKind != "integration_execute" {
+			return nil, fmt.Errorf("unsupported execution_kind %q", executionKind)
+		}
+		if executionKind == "app" && existing.AppName == "" {
+			return nil, errors.New("cannot change to app execution without an app_name")
+		}
+		sets = append(sets, "execution_kind=?")
+		vals = append(vals, executionKind)
+	}
 	if _, ok := args["args"]; ok {
 		sets = append(sets, "args_json=?")
 		vals = append(vals, jsonOrEmpty(args["args"], "{}"))
@@ -4036,7 +4056,7 @@ func dbPlanActionUpdate(db *sql.DB, pid string, args map[string]any) (*PlanActio
 
 func dbPlanActionGet(db *sql.DB, pid string, id int64) (*PlanAction, error) {
 	rows, err := db.Query(`
-		SELECT id, project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, execution_policy,
+		SELECT id, project_id, plan_key, event, execution_kind, app_name, tool_name, args_json, store_json, failure_mode, execution_policy,
 		       persist_input, persist_output, sensitive_input_paths_json, sensitive_output_paths_json, enabled, metadata_json, created_at, updated_at
 		FROM saas_plan_actions WHERE project_id=? AND id=?`, pid, id)
 	if err != nil {
@@ -4064,7 +4084,7 @@ func dbPlanActions(db *sql.DB, pid, planKey, event string, enabledOnly bool) ([]
 		where = append(where, "enabled=1")
 	}
 	rows, err := db.Query(`
-		SELECT id, project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, execution_policy,
+		SELECT id, project_id, plan_key, event, execution_kind, app_name, tool_name, args_json, store_json, failure_mode, execution_policy,
 		       persist_input, persist_output, sensitive_input_paths_json, sensitive_output_paths_json, enabled, metadata_json, created_at, updated_at
 		FROM saas_plan_actions WHERE `+strings.Join(where, " AND ")+` ORDER BY plan_key,id`, vals...)
 	if err != nil {
@@ -4086,7 +4106,7 @@ func scanPlanAction(row rowScanner) (*PlanAction, error) {
 	var a PlanAction
 	var enabled int
 	var args, store, sensitiveInputPaths, sensitiveOutputPaths, meta string
-	if err := row.Scan(&a.ID, &a.ProjectID, &a.PlanKey, &a.Event, &a.AppName, &a.ToolName, &args, &store, &a.FailureMode, &a.ExecutionPolicy,
+	if err := row.Scan(&a.ID, &a.ProjectID, &a.PlanKey, &a.Event, &a.ExecutionKind, &a.AppName, &a.ToolName, &args, &store, &a.FailureMode, &a.ExecutionPolicy,
 		&a.PersistInput, &a.PersistOutput, &sensitiveInputPaths, &sensitiveOutputPaths, &enabled, &meta, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}

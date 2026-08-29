@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.6.3
+version: 0.7.3
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — layered visual tracks, timed audio tracks, optional
@@ -10,6 +10,35 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.7.3 makes asset_inspect local-first for Storage assets, matching the
+  renderer. Private disk-backed blobs are now probed directly instead of
+  requiring a signed public URL and healthy tunnel; inspection still falls
+  back to fetchable URLs when no local blob is available. Regression coverage
+  verifies the private local path uses files_get without calling files_get_url.
+
+  v0.7.2 removes visible stepping from subtle camera moves by applying
+  pan/zoom at an adaptive 2x or 4x working resolution before a Lanczos
+  downscale. Video and audio clips now support playback_rate from 0.25x to
+  16x; retained source audio follows the same time remapping with pitch-safe,
+  chained atempo filters. The Composer panel can edit and preview playback
+  rates, and render regressions cover monotonic subpixel camera motion,
+  synchronized source audio, and accelerated or slowed audio-only clips.
+
+  v0.7.1 fixes local Storage asset resolution. Composer now decodes the
+  wrapped files_get response, validates found/file before reading storage_key,
+  and resolves disk-backed Storage assets directly instead of falling through
+  to a signed public URL when the local blob is available. Regression coverage
+  exercises the real wrapped response shape and a native ranged, cropped, and
+  keyframed ffmpeg render from the resolved sibling Storage blob.
+
+  v0.7.0 adds screen-recording editing primitives to stable V1. Video and
+  audio clips can reuse a source with source_start/source_end ranges; visual
+  clips can crop normalized source regions and animate source-space focus and
+  zoom with eased keyframes. Recorder and browser events can be stored as
+  editable timeline markers with optional active-region metadata. The shared
+  local/remote ffmpeg graph, live preview, timeline, JSON editor, clip drawers,
+  and inspector all preserve and expose these fields.
 
   v0.6.3 adds deterministic V1 typography. Composer bundles Inter Regular,
   Medium, Semibold, and Bold plus Go Mono Regular and Bold, resolves every

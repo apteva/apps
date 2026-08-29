@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.5.25
+version: 0.6.1
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,11 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.6.1 adds theme-aware syntax highlighting, sticky line numbers,
+  language and line metadata, copy feedback, and clearer editor typography.
+  v0.6.0 adds provider-neutral Git clone, connect, status, fetch,
+  fast-forward pull, commit, diff, history, branches, and push using
+  credentials from bound GitHub, GitLab, or Bitbucket connections.
   v0.5.24 adds live repository, source-file, and issue cards that
   agents can attach to chat messages and deep-link back into Code.
   v0.5.23 isolates global repository storage by repository id,
@@ -60,9 +65,24 @@ requires:
   permissions:
     - db.write.app
     - platform.connections.execute
+    - platform.connections.read_credentials
     - platform.apps.call
     - platform.ingress.write
+  binaries:
+    - name: git
+      executables: [git]
+      required: true
+      hint: Git 2.23 or newer is required for provider-neutral repository synchronization.
+      sources: {}
   integrations:
+    - role: git
+      kind: integration
+      mode: multiple
+      required: false
+      compatible_slugs: [github, gitlab, bitbucket]
+      label: Git provider
+      hint: Connect a Git provider to clone and synchronize private repositories. Public HTTPS remotes work without one.
+      capabilities: [git.clone, git.fetch, git.push]
     - role: github
       kind: integration
       required: false
@@ -100,6 +120,30 @@ provides:
       description: Export a repo as a zip archive — base64-encoded bytes for cross-app calls (used by deploy).
     - name: repos_import_github
       description: Import a GitHub repository as a local repo (gzip tarball snapshot via the bound github connection).
+    - name: repos_git_import
+      description: Clone a standard HTTPS Git remote into a new Code repository with history and upstream tracking.
+    - name: repos_git_connect
+      description: Safely connect an existing Code repository to a Git remote without overwriting differing local files.
+    - name: repos_git_status
+      description: Get branch, HEAD, upstream, ahead/behind, and working-tree changes.
+    - name: repos_git_fetch
+      description: Fetch and prune origin tracking refs without changing checked-out files.
+    - name: repos_git_pull
+      description: Fetch and fast-forward the current clean branch.
+    - name: repos_git_commit
+      description: Commit selected or all visible Code changes locally.
+    - name: repos_git_push
+      description: Push the current branch without force.
+    - name: repos_git_diff
+      description: Return a bounded unified diff.
+    - name: repos_git_log
+      description: List recent Git commits.
+    - name: repos_git_branches
+      description: List local and origin-tracking branches.
+    - name: repos_git_branch_create
+      description: Create a local branch without switching to it.
+    - name: repos_git_switch
+      description: Switch to an existing clean local branch.
     - name: repos_dev_start
       description: Start a dev/test preview process for a repo; production deploys belong in the Deploy app. Auto-installs JS dependencies when needed, auto-detects nextjs / node / go / static, and accepts run_cmd override.
     - name: repos_run_command

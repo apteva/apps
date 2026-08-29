@@ -782,6 +782,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			fmt.Fprintf(os.Stderr, "[BROWSER] presentation cursor unavailable, continuing click: %v\n", err)
 		}
 		guardOptions := clickguard.Options{
+			TargetID:     action.TargetID,
 			ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
 			EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
 		}
@@ -845,6 +846,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			fmt.Fprintf(os.Stderr, "[BROWSER] presentation cursor unavailable, continuing double click: %v\n", err)
 		}
 		guardOptions := clickguard.Options{
+			TargetID:     action.TargetID,
 			ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
 			EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
 		}
@@ -1084,7 +1086,7 @@ func (c *Computer) selectOption(action computer.Action) (selectinput.Result, err
 
 func (c *Computer) setChecked(action computer.Action) (checkedinput.Result, error) {
 	c.setLastCheckedResult(nil)
-	target := checkedinput.Target{Selector: action.Selector}
+	target := checkedinput.Target{ID: action.TargetID, Selector: action.Selector, ExpectedName: action.ExpectedName, ExpectedRole: action.ExpectedRole}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -1705,7 +1707,9 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
 			Placeholder: e.Placeholder, CurrentValue: e.CurrentValue, Pattern: e.Pattern,
 			FormatHint: e.FormatHint, DateLike: e.DateLike, Validity: e.Validity,
-			Disabled: e.Disabled, Loading: e.Loading, Dangerous: e.Dangerous, DestructiveEffect: e.DestructiveEffect,
+			Disabled: e.Disabled, Loading: e.Loading, TargetLoading: e.TargetLoading,
+			ContainerLoading: e.ContainerLoading, PageLoadingCount: e.PageLoadingCount,
+			Dangerous: e.Dangerous, Effect: e.Effect, DestructiveEffect: e.DestructiveEffect,
 		})
 	}
 	return out
@@ -1764,6 +1768,10 @@ func (c *Computer) scaleToDisplay(data []byte) ([]byte, error) {
 }
 
 func (c *Computer) DisplaySize() computer.DisplaySize { return c.display }
+
+func (c *Computer) EffectiveEnvironment() (computer.EffectiveEnvironment, error) {
+	return environment.Probe(c.ctx)
+}
 
 // SessionInfo implementation
 func (c *Computer) SessionType() string { return "local" }

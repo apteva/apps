@@ -15,9 +15,10 @@ import (
 
 type campaignsPlatform struct {
 	tk.BasePlatformClient
-	calls      []campaignsPlatformCall
-	callErrors map[string]error
-	beforeCall func(appName, tool string, input map[string]any)
+	calls        []campaignsPlatformCall
+	callErrors   map[string]error
+	beforeCall   func(appName, tool string, input map[string]any)
+	replyForCall func(appName, tool string, input map[string]any) (any, bool)
 }
 
 type campaignsPlatformCall struct {
@@ -35,25 +36,48 @@ func (p *campaignsPlatform) CallAppResult(appName, tool string, input map[string
 		return err
 	}
 	var reply any = map[string]any{}
-	switch tool {
-	case "segments_eval":
-		reply = map[string]any{"contact_ids": []int64{101, 102}, "count": 2}
-	case "lists_eval":
-		reply = map[string]any{"contact_ids": []int64{201, 202, 203}, "count": 3}
-	case "send_message":
-		reply = map[string]any{"id": 777, "status": "sent", "provider_message_id": "provider-777"}
-	case "suppression_check":
-		reply = map[string]any{"suppressed": false}
-	case "jobs_schedule":
-		reply = map[string]any{"job": map[string]any{"id": 123}}
-	case "message_get":
-		reply = map[string]any{
-			"found":   true,
-			"message": map[string]any{"id": input["id"], "status": "opened"},
-			"events": []map[string]any{
-				{"message_id": input["id"], "kind": "delivered", "occurred_at": "2026-07-02T12:00:00Z"},
-				{"message_id": input["id"], "kind": "opened", "occurred_at": "2026-07-02T12:01:00Z"},
-			},
+	handled := false
+	if p.replyForCall != nil {
+		reply, handled = p.replyForCall(appName, tool, input)
+	}
+	if !handled {
+		switch tool {
+		case "contacts_resolve_audience":
+			contactIDs := []int64{101, 102}
+			if _, ok := input["list_id"]; ok {
+				contactIDs = []int64{201, 202, 203}
+			}
+			if contactID, ok := input["contact_id"]; ok {
+				contactIDs = []int64{int64Value(contactID)}
+			}
+			recipients := make([]map[string]any, 0, len(contactIDs))
+			for _, id := range contactIDs {
+				recipients = append(recipients, map[string]any{"contact_id": id, "address": "contact@example.test"})
+			}
+			reply = map[string]any{
+				"raw_count": len(contactIDs), "eligible_count": len(contactIDs), "excluded_count": 0,
+				"excluded_by_reason": map[string]int64{}, "recipients": recipients,
+				"exclusions": []map[string]any{}, "has_more": false,
+			}
+		case "segments_eval":
+			reply = map[string]any{"contact_ids": []int64{101, 102}, "count": 2}
+		case "lists_eval":
+			reply = map[string]any{"contact_ids": []int64{201, 202, 203}, "count": 3}
+		case "send_message":
+			reply = map[string]any{"id": 777, "status": "sent", "provider_message_id": "provider-777"}
+		case "suppression_check":
+			reply = map[string]any{"suppressed": false}
+		case "jobs_schedule":
+			reply = map[string]any{"job": map[string]any{"id": 123}}
+		case "message_get":
+			reply = map[string]any{
+				"found":   true,
+				"message": map[string]any{"id": input["id"], "status": "opened"},
+				"events": []map[string]any{
+					{"message_id": input["id"], "kind": "delivered", "occurred_at": "2026-07-02T12:00:00Z"},
+					{"message_id": input["id"], "kind": "opened", "occurred_at": "2026-07-02T12:01:00Z"},
+				},
+			}
 		}
 	}
 	if out == nil {
@@ -593,12 +617,111 @@ func TestCampaignsGetIncludesAudiencePreview(t *testing.T) {
 	if len(got.Audience.ContactIDs) != 2 || got.Audience.ContactIDs[0] != 101 || got.Audience.ContactIDs[1] != 102 {
 		t.Fatalf("audience contact ids = %+v, want [101 102]", got.Audience.ContactIDs)
 	}
-	calls := platform.callsTo("crm", "segments_eval")
+	calls := platform.callsTo("crm", "contacts_resolve_audience")
 	if len(calls) != 1 {
-		t.Fatalf("segments_eval calls=%d, want 1", len(calls))
+		t.Fatalf("contacts_resolve_audience calls=%d, want 1", len(calls))
 	}
 	if calls[0].Input["limit"] != 10 {
-		t.Fatalf("segments_eval limit=%v, want 10", calls[0].Input["limit"])
+		t.Fatalf("contacts_resolve_audience limit=%v, want 10", calls[0].Input["limit"])
+	}
+	if calls[0].Input["channel"] != "email" || calls[0].Input["segment_id"] != int64(42) {
+		t.Fatalf("audience call=%#v", calls[0].Input)
+	}
+}
+
+func TestMaterialiseUsesCRMAudienceEligibilityAndPersistsExclusions(t *testing.T) {
+	platform := &campaignsPlatform{}
+	platform.replyForCall = func(_ string, tool string, input map[string]any) (any, bool) {
+		if tool != "contacts_resolve_audience" || input["contact_id"] != nil {
+			return nil, false
+		}
+		return map[string]any{
+			"raw_count": 3, "eligible_count": 1, "excluded_count": 2,
+			"excluded_by_reason": map[string]int64{"unsubscribed": 1, "hard_bounced": 1},
+			"recipients":         []map[string]any{{"contact_id": 101, "address": "healthy@example.test"}},
+			"exclusions": []map[string]any{
+				{"contact_id": 102, "reason": "unsubscribed"},
+				{"contact_id": 103, "reason": "hard_bounced"},
+			},
+			"has_more": false,
+		}, true
+	}
+	ctx := newCampaignsTestCtx(t, platform)
+	campaign, err := dbCampaignCreate(ctx.AppDB(), "test-proj", &Campaign{
+		Name: "Eligibility", Channel: ChannelEmail, Subject: "Hello", BodyText: "Body",
+		SegmentID: ptrInt64(42), ScheduleKind: "immediate",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := materialiseCampaign(ctx, "test-proj", campaign); err != nil {
+		t.Fatal(err)
+	}
+	recipients, err := dbRecipientsList(ctx.AppDB(), "test-proj", campaign.ID, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recipients) != 3 {
+		t.Fatalf("recipients=%d, want 3", len(recipients))
+	}
+	statuses := map[int64]string{}
+	errorsByContact := map[int64]string{}
+	for _, recipient := range recipients {
+		statuses[recipient.ContactID] = recipient.Status
+		errorsByContact[recipient.ContactID] = recipient.Error
+	}
+	if statuses[101] != RecipPending || statuses[102] != RecipSkipped || statuses[103] != RecipSkipped {
+		t.Fatalf("statuses=%v", statuses)
+	}
+	if errorsByContact[102] != "crm: unsubscribed" || errorsByContact[103] != "crm: hard_bounced" {
+		t.Fatalf("errors=%v", errorsByContact)
+	}
+	if got := len(platform.callsTo("crm", "contacts_get")); got != 0 {
+		t.Fatalf("contacts_get calls=%d, want 0", got)
+	}
+}
+
+func TestTickRechecksCRMAndSkipsNewlyUnsubscribedRecipient(t *testing.T) {
+	platform := &campaignsPlatform{}
+	platform.replyForCall = func(_ string, tool string, input map[string]any) (any, bool) {
+		if tool == "contacts_resolve_audience" && input["contact_id"] != nil {
+			return map[string]any{
+				"recipients": []map[string]any{},
+				"exclusions": []map[string]any{{"contact_id": 101, "reason": "unsubscribed"}},
+				"has_more":   false,
+			}, true
+		}
+		return nil, false
+	}
+	ctx := newCampaignsTestCtx(t, platform)
+	campaign, err := dbCampaignCreate(ctx.AppDB(), "test-proj", &Campaign{
+		Name: "Recheck", Channel: ChannelEmail, Subject: "Hello", BodyText: "Body",
+		SegmentID: ptrInt64(42), ScheduleKind: "immediate",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbCampaignSetStatus(ctx.AppDB(), "test-proj", campaign.ID, StatusSending, "", true, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runRecipientBulk(ctx, "test-proj", campaign.ID, []Recipient{{
+		ContactID: 101, Address: "old@example.test", Status: RecipPending,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	campaign.Status = StatusSending
+	if err := tickCampaign(ctx, "test-proj", campaign); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(platform.callsTo("messaging", "send_message")); got != 0 {
+		t.Fatalf("send_message calls=%d, want 0", got)
+	}
+	recipients, err := dbRecipientsList(ctx.AppDB(), "test-proj", campaign.ID, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recipients) != 1 || recipients[0].Status != RecipSkipped || recipients[0].Error != "crm: unsubscribed" {
+		t.Fatalf("recipient=%+v", recipients)
 	}
 }
 

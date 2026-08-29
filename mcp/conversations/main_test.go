@@ -715,6 +715,20 @@ func postUserMessage(t *testing.T, app *App, conv *Conversation, content string)
 	}
 }
 
+func TestConversationThreadFailsClosedWithoutProject(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	conv.ProjectID = "  "
+
+	if _, _, err := app.ensureConversationThreadForAgent(ctx, conv, 41, nil); err == nil ||
+		!strings.Contains(err.Error(), "conversation project id required") {
+		t.Fatalf("missing-project error=%v", err)
+	}
+	if len(platform.ensures) != 0 || len(platform.spawns) != 0 {
+		t.Fatalf("missing-project request escaped: ensures=%d spawns=%d", len(platform.ensures), len(platform.spawns))
+	}
+}
+
 func TestFirstMessageAtomicallyEnsuresConversationThread(t *testing.T) {
 	app, ctx, platform := newTestEnv(t)
 	mountedCtx = ctx
@@ -730,6 +744,9 @@ func TestFirstMessageAtomicallyEnsuresConversationThread(t *testing.T) {
 	// eventual data migration.
 	if ensure.ThreadID != "chat-"+conv.ID || ensure.AgentID != 41 {
 		t.Fatalf("ensured %s on agent %d, want chat-%s on 41", ensure.ThreadID, ensure.AgentID, conv.ID)
+	}
+	if ensure.ProjectID != conv.ProjectID {
+		t.Fatalf("ensure project_id=%q, want %q", ensure.ProjectID, conv.ProjectID)
 	}
 	// The suffix must carry the reply contract and the conversation id;
 	// composition with main's directive happens core-side.
@@ -1011,6 +1028,9 @@ func TestUnsupportedEnsureFallsBackToLegacySpawnOnly(t *testing.T) {
 			len(platform.ensures), len(platform.spawns))
 	}
 	for i, spawn := range platform.spawns {
+		if spawn.ProjectID != conv.ProjectID {
+			t.Fatalf("legacy spawn %d project_id=%q, want %q", i, spawn.ProjectID, conv.ProjectID)
+		}
 		if len(spawn.Events) != 1 {
 			t.Fatalf("spawn %d events=%+v", i, spawn.Events)
 		}

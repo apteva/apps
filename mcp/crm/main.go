@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.30
+version: 0.9.1
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -48,13 +48,20 @@ requires:
     - platform.apps.call
   apps:
     - name: messaging
-      version: ">=0.13.43"
+      version: ">=0.13.46"
       optional: true
-      reason: "Delivers outbound attachments and supplies normalized attachment metadata for CRM activities."
+      reason: "Delivers messages and attachments, and supplies delivery and suppression events for per-channel messageability."
+      events:
+        - message.event
+        - suppression.changed
     - name: storage
       version: ">=0.10.0"
       optional: true
       reason: "Lets operators choose project files in the CRM composer and open persisted attachment content."
+    - name: email-checker
+      version: ">=0.5.0"
+      optional: true
+      reason: "Adds optional deliverability checks for newly stored email channels and operator-requested SMTP probes."
   integrations:
     - role: messaging
       kind: app
@@ -62,7 +69,16 @@ requires:
       capabilities: [message.send]
       required: false
       label: "Messaging (optional)"
-      hint: "When bound, CRM gains Send/Reply tools with attachments and accepts inbound mail/SMS/WhatsApp media at /inbound, auto-attaching it to contact activity. Messaging v0.13.43 or newer is required for attachment metadata. Without it, CRM is a standalone contact store."
+      hint: "When bound, CRM gains Send/Reply tools with attachments, accepts inbound mail/SMS/WhatsApp media, and tracks per-channel delivery and suppression state. Messaging v0.13.46 or newer is required. Without it, CRM is a standalone contact store."
+    - role: email_verification
+      kind: app
+      compatible_app_names: [email-checker]
+      capabilities: [email.verify]
+      tools:
+        email.verify: email_check
+      required: false
+      label: "Email verification (optional)"
+      hint: "When bound, CRM annotates new email channels with Email Checker deliverability results. CRM remains fully functional when it is absent or temporarily unavailable."
 provides:
   skills:
     - name: crm
@@ -77,7 +93,7 @@ provides:
     - name: contacts_search
       description: Filtered contact search.
     - name: contacts_get
-      description: Authoritative current-state read with core fields, channels, tags, custom attributes, and active list memberships; excludes history and opportunities.
+      description: Authoritative current-state read with core fields, channels, per-transport deliverability/messageability, tags, custom attributes, and active list memberships; excludes history and opportunities.
     - name: contacts_get_context
       description: Authoritative pre-flight read with complete current state plus bounded recent activities, conversations, and opportunities with truncation metadata.
     - name: contacts_create
@@ -86,6 +102,8 @@ provides:
       description: Partial-patch a contact, including channel replacement.
     - name: contacts_upsert_by_channel
       description: Find-or-create by email or phone.
+    - name: contacts_verify_email
+      description: Re-check one stored email channel, optionally including a direct SMTP probe, and persist its deliverability metadata.
     - name: contacts_merge
       description: Merge one contact into another.
     - name: contacts_log_activity
@@ -109,7 +127,9 @@ provides:
     - name: messaging_inbound_receive
       description: Receive an inbound message and normalized attachment metadata dispatched by Messaging and attach it to CRM contact activity.
     - name: contacts_list_messageable
-      description: List contacts reachable on a channel.
+      description: List contacts with at least one non-suppressed, non-quarantined route for the requested email, SMS, or WhatsApp transport.
+    - name: contacts_resolve_audience
+      description: Resolve a segment, list, or single contact into channel-eligible recipients, exclusions, and exact raw/eligible counts with cursor pagination.
     - name: contacts_list_conversations
       description: List a contact's recent conversations (with status + priority).
     - name: contacts_get_conversation
@@ -199,6 +219,17 @@ provides:
         first_name: string
         last_name: string
         archived: boolean
+    - name: contact.channel.deliverability.changed
+      description: A contact email, SMS, or WhatsApp route changed delivery, quarantine, suppression, or effective messageability state.
+      payload:
+        contact_id: integer
+        channel_id: integer
+        transport: string
+        status: string
+        suppressed: boolean
+        quarantined: boolean
+        messageable: boolean
+        messageability_reason: string
     - name: contact.deleted
       description: A contact was archived/soft-deleted.
       payload:
@@ -394,6 +425,29 @@ db:
   driver: sqlite
   path: /data/crm.db
   migrations: migrations/
+config_schema:
+  - name: email_verification_mode
+    type: select
+    default: local
+    label: Automatic email verification
+    options: [off, local, smtp]
+    description: Check only new or changed email channels. Local avoids direct SMTP probing; SMTP enables it. Has no effect unless Email Checker is bound.
+  - name: email_verification_policy
+    type: select
+    default: annotate
+    label: Email verification policy
+    options: [annotate, reject_definitive]
+    description: Annotate always saves contacts. Reject definitive blocks only conclusive invalid email signals; verifier errors and uncertain results remain fail-open.
+  - name: email_verification_timeout_seconds
+    type: number
+    default: 5
+    label: Email verification timeout (seconds)
+    description: Per-email timeout for automatic and manual checks, from 1 to 60 seconds.
+  - name: email_verification_block_disposable
+    type: bool
+    default: false
+    label: Reject disposable emails in strict mode
+    description: When enabled with reject_definitive, disposable-provider signals reject the write. Off by default.
 upgrade_policy: auto-patch
 `
 
@@ -421,10 +475,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker          { return a.deliverabilityWorkers() }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{
+		{Event: "message.event", Handler: a.handleMessagingDeliveryEvent},
+		{Event: "suppression.changed", Handler: a.handleMessagingSuppressionEvent},
+	}
+}
 
 // ─── HTTP routes (REST surface for the dashboard panel) ────────────
 //
@@ -521,6 +580,9 @@ func (a *App) handleHTTPContactItem(w http.ResponseWriter, r *http.Request) {
 			return
 		case "attributes":
 			a.handleHTTPSetAttribute(w, r)
+			return
+		case "channels":
+			a.handleHTTPVerifyEmail(w, r)
 			return
 		case "lists":
 			a.handleHTTPContactLists(w, r)
@@ -723,6 +785,16 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolUpsertByChannel,
 		},
 		{
+			Name:        "contacts_verify_email",
+			Description: "Explicitly recheck one CRM email channel through the optional Email Checker app. Always uses provider=local; smtp defaults false and can be enabled for a deeper mailbox probe. Args: contact_id, channel_id, smtp?. Updates the channel's deliverability annotation without changing verified_at.",
+			InputSchema: schemaObject(map[string]any{
+				"contact_id": map[string]any{"type": "integer"},
+				"channel_id": map[string]any{"type": "integer"},
+				"smtp":       map[string]any{"type": "boolean", "default": false},
+			}, []string{"contact_id", "channel_id"}),
+			Handler: a.toolVerifyEmail,
+		},
+		{
 			Name:        "contacts_merge",
 			Description: "Merge loser_id into winner_id. Channels and attributes are reassigned, loser is marked status=merged. Args: loser_id, winner_id, notes.",
 			InputSchema: schemaObject(map[string]any{
@@ -899,6 +971,21 @@ func (a *App) MCPTools() []sdk.Tool {
 				"limit":             map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolListMessageable,
+		},
+		{
+			Name:        "contacts_resolve_audience",
+			Description: "Resolve exactly one segment, list, or contact into currently messageable recipients for a channel. Returns exact raw/eligible/excluded counts, exclusion reasons, healthy addresses, and cursor pagination. Args: channel (email|sms|whatsapp), exactly one of segment_id/list_id/contact_id, limit? (default 1000, max 5000), after_contact_id?, include_automated? (default false).",
+			InputSchema: schemaObject(map[string]any{
+				"channel":           map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
+				"segment_id":        map[string]any{"type": "integer"},
+				"list_id":           map[string]any{"type": "integer"},
+				"contact_id":        map[string]any{"type": "integer"},
+				"limit":             map[string]any{"type": "integer", "minimum": 1, "maximum": 5000},
+				"after_contact_id":  map[string]any{"type": "integer"},
+				"include_automated": map[string]any{"type": "boolean"},
+				"include_counts":    map[string]any{"type": "boolean"},
+			}, []string{"channel"}),
+			Handler: a.toolResolveAudience,
 		},
 		{
 			Name:        "contacts_list_conversations",
@@ -1326,13 +1413,22 @@ type Contact struct {
 }
 
 type Channel struct {
-	ID         int64  `json:"id,omitempty"`
-	Kind       string `json:"kind"`
-	Value      string `json:"value"`
-	Label      string `json:"label,omitempty"`
-	IsPrimary  bool   `json:"is_primary,omitempty"`
-	VerifiedAt string `json:"verified_at,omitempty"`
-	Source     string `json:"source,omitempty"`
+	ID                         int64                   `json:"id,omitempty"`
+	Kind                       string                  `json:"kind"`
+	Value                      string                  `json:"value"`
+	Label                      string                  `json:"label,omitempty"`
+	IsPrimary                  bool                    `json:"is_primary,omitempty"`
+	VerifiedAt                 string                  `json:"verified_at,omitempty"`
+	Source                     string                  `json:"source,omitempty"`
+	VerificationVerdict        string                  `json:"verification_verdict,omitempty"`
+	VerificationConfidence     string                  `json:"verification_confidence,omitempty"`
+	VerificationReason         string                  `json:"verification_reason,omitempty"`
+	VerificationRecommendation string                  `json:"verification_recommendation,omitempty"`
+	VerificationSource         string                  `json:"verification_source,omitempty"`
+	VerificationSuggestedValue string                  `json:"verification_suggested_value,omitempty"`
+	VerificationCheckedAt      string                  `json:"verification_checked_at,omitempty"`
+	VerificationDetails        map[string]any          `json:"verification_details,omitempty"`
+	Deliverability             []ChannelDeliverability `json:"deliverability,omitempty"`
 }
 
 type Attribute struct {
@@ -1452,6 +1548,7 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if c == nil {
 		return contactCurrentStateResponse(nil, nil, false), nil
 	}
+	syncUncheckedContactSuppressions(ctx, pid, c.ID)
 	lists, err := loadContactCurrentState(ctx.AppDB(), pid, c)
 	if err != nil {
 		return nil, err
@@ -1477,6 +1574,7 @@ func (a *App) toolGetContext(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			activityLimit, 0, conversationLimit, 0, opportunityLimit, 0,
 		), nil
 	}
+	syncUncheckedContactSuppressions(ctx, pid, c.ID)
 	lists, err := loadContactCurrentState(ctx.AppDB(), pid, c)
 	if err != nil {
 		return nil, err
@@ -1626,16 +1724,13 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	c, err := dbCreate(ctx.AppDB(), pid, args)
+	c, verifications, err := createContactWithEmailVerification(ctx, pid, args, true)
 	if err != nil {
-		return nil, err
-	}
-	if err := loadChannels(ctx.AppDB(), c); err != nil {
 		return nil, err
 	}
 	emitListMembershipsAdded(ctx, c.ID, listIDs)
 	emitContact(ctx, pid, "contact.added", c)
-	out := map[string]any{"contact": c}
+	out := map[string]any{"contact": c, "email_verifications": verifications}
 	if len(listIDs) > 0 {
 		out["lists_added"] = listIDs
 	}
@@ -1653,7 +1748,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("id and patch required")
 	}
 	source, _ := args["source"].(string)
-	c, err := dbUpdate(ctx.AppDB(), pid, id, patch, source)
+	c, verifications, err := updateContactWithEmailVerification(ctx, pid, id, patch, source)
 	if err != nil {
 		return nil, err
 	}
@@ -1661,7 +1756,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	emitContact(ctx, pid, "contact.updated", c)
-	return map[string]any{"contact": c}, nil
+	return map[string]any{"contact": c, "email_verifications": verifications}, nil
 }
 
 func (a *App) toolUpsertByChannel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1676,11 +1771,8 @@ func (a *App) toolUpsertByChannel(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	defaults, _ := args["defaults"].(map[string]any)
 	source, _ := args["source"].(string)
-	c, created, err := dbUpsertByChannel(ctx.AppDB(), pid, kind, value, defaults, source)
+	c, created, verifications, err := upsertContactWithEmailVerification(ctx, pid, kind, value, defaults, source, true)
 	if err != nil {
-		return nil, err
-	}
-	if err := loadChannels(ctx.AppDB(), c); err != nil {
 		return nil, err
 	}
 	// Ensure list membership regardless of created/found — "upsert into
@@ -1691,11 +1783,29 @@ func (a *App) toolUpsertByChannel(ctx *sdk.AppCtx, args map[string]any) (any, er
 	} else {
 		emitContact(ctx, pid, "contact.updated", c)
 	}
-	out := map[string]any{"contact": c, "was_created": created}
+	out := map[string]any{"contact": c, "was_created": created, "email_verifications": verifications}
 	if len(listsAdded) > 0 {
 		out["lists_added"] = listsAdded
 	}
 	return out, nil
+}
+
+func (a *App) toolVerifyEmail(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	contactID := int64Arg(args, "contact_id")
+	channelID := int64Arg(args, "channel_id")
+	if contactID == 0 || channelID == 0 {
+		return nil, errors.New("contact_id and channel_id required")
+	}
+	smtp, _ := args["smtp"].(bool)
+	contact, result, err := a.verifyContactEmail(ctx, pid, contactID, channelID, smtp)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"contact": contact, "email_verification": result}, nil
 }
 
 func (a *App) toolMerge(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2032,18 +2142,14 @@ func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	c, err := dbCreate(ctx.AppDB(), pid, body)
+	c, verifications, err := createContactWithEmailVerification(ctx, pid, body, true)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if err := loadChannels(ctx.AppDB(), c); err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		writeContactVerificationHTTPError(w, err)
 		return
 	}
 	emitListMembershipsAdded(ctx, c.ID, listIDs)
 	emitContact(ctx, pid, "contact.added", c)
-	out := map[string]any{"contact": c}
+	out := map[string]any{"contact": c, "email_verifications": verifications}
 	if len(listIDs) > 0 {
 		out["lists_added"] = listIDs
 	}
@@ -2083,6 +2189,7 @@ func (a *App) handleHTTPGetOrChild(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "not found")
 		return
 	}
+	syncUncheckedContactSuppressions(ctx, pid, c.ID)
 	_ = loadChannels(ctx.AppDB(), c)
 	_ = loadTags(ctx.AppDB(), c)
 	_ = loadAttributes(ctx.AppDB(), c)
@@ -2108,13 +2215,74 @@ func (a *App) handleHTTPUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	source, _ := patch["source"].(string)
 	delete(patch, "source")
-	c, err := dbUpdate(ctx.AppDB(), pid, id, patch, source)
+	c, verifications, err := updateContactWithEmailVerification(ctx, pid, id, patch, source)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		writeContactVerificationHTTPError(w, err)
 		return
 	}
 	emitContact(ctx, pid, "contact.updated", c)
-	httpJSON(w, map[string]any{"contact": c})
+	httpJSON(w, map[string]any{"contact": c, "email_verifications": verifications})
+}
+
+func writeContactVerificationHTTPError(w http.ResponseWriter, err error) {
+	var policyErr *EmailVerificationPolicyError
+	if errors.As(err, &policyErr) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":               err.Error(),
+			"email_verifications": policyErr.Results,
+		})
+		return
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		httpErr(w, http.StatusNotFound, "contact not found")
+		return
+	}
+	httpErr(w, http.StatusInternalServerError, err.Error())
+}
+
+func (a *App) handleHTTPVerifyEmail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	ctx := getAppCtx(r)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	parts := contactsPathParts(r)
+	if len(parts) != 4 || parts[1] != "channels" || parts[3] != "verify" {
+		httpErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	contactID, _ := strconv.ParseInt(parts[0], 10, 64)
+	channelID, _ := strconv.ParseInt(parts[2], 10, 64)
+	if contactID == 0 || channelID == 0 {
+		httpErr(w, http.StatusBadRequest, "contact_id and channel_id required")
+		return
+	}
+	var body struct {
+		SMTP bool `json:"smtp"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := decodeJSONBody(w, r, &body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+	}
+	contact, result, err := a.verifyContactEmail(ctx, pid, contactID, channelID, body.SMTP)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			httpErr(w, http.StatusNotFound, "email channel not found")
+		} else {
+			httpErr(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	httpJSON(w, map[string]any{"contact": contact, "email_verification": result})
 }
 
 func (a *App) handleHTTPArchive(w http.ResponseWriter, r *http.Request) {
@@ -2227,6 +2395,10 @@ func parseContactTags(args map[string]any) ([]string, error) {
 }
 
 func dbCreate(db *sql.DB, pid string, args map[string]any) (*Contact, error) {
+	return dbCreateWithChannelVerifications(db, pid, args, nil)
+}
+
+func dbCreateWithChannelVerifications(db *sql.DB, pid string, args map[string]any, verifications map[string]channelVerificationRecord) (*Contact, error) {
 	c := &Contact{
 		ProjectID:   pid,
 		FirstName:   strArg(args, "first_name"),
@@ -2285,7 +2457,7 @@ func dbCreate(db *sql.DB, pid string, args map[string]any) (*Contact, error) {
 
 	// Channels.
 	if rawChannels, ok := args["channels"]; ok {
-		if err := applyChannelsPatchTx(tx, pid, c.ID, rawChannels, c.Source); err != nil {
+		if err := applyChannelsPatchTx(tx, pid, c.ID, rawChannels, c.Source, verifications); err != nil {
 			return nil, err
 		}
 	}
@@ -2655,6 +2827,10 @@ func dateFilterField(field string) bool {
 }
 
 func dbUpdate(db *sql.DB, pid string, id int64, patch map[string]any, source string) (*Contact, error) {
+	return dbUpdateWithChannelVerifications(db, pid, id, patch, source, nil)
+}
+
+func dbUpdateWithChannelVerifications(db *sql.DB, pid string, id int64, patch map[string]any, source string, verifications map[string]channelVerificationRecord) (*Contact, error) {
 	allowed := map[string]bool{
 		"first_name": true, "last_name": true, "display_name": true, "pronouns": true,
 		"company": true, "job_title": true, "owner_user_id": true,
@@ -2676,6 +2852,25 @@ func dbUpdate(db *sql.DB, pid string, id int64, patch map[string]any, source str
 		}
 	}
 
+	var channels []channelInput
+	if rawChannels, ok := patch["channels"]; ok {
+		parsed, err := parseChannelInputs(rawChannels)
+		if err != nil {
+			return nil, err
+		}
+		channels = parsed
+	}
+	attributeWrites, err := prepareAttributeWrites(db, pid, patch["attributes"], source)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
 	sets := []string{}
 	args := []any{}
 	for k, v := range patch {
@@ -2693,7 +2888,7 @@ func dbUpdate(db *sql.DB, pid string, id int64, patch map[string]any, source str
 			args = append(args, source)
 		}
 		args = append(args, id, pid)
-		if _, err := db.Exec(
+		if _, err := tx.Exec(
 			`UPDATE contacts SET `+strings.Join(sets, ", ")+` WHERE id = ? AND project_id = ?`,
 			args...); err != nil {
 			return nil, err
@@ -2704,15 +2899,16 @@ func dbUpdate(db *sql.DB, pid string, id int64, patch map[string]any, source str
 	// item. Same shape as contacts_set_attribute MCP tool — each item
 	// is {key, value, source?}. Per-key source overrides the patch-
 	// level source when present.
-	if rawAttrs, ok := patch["attributes"]; ok {
-		if err := applyAttributesPatch(db, pid, id, rawAttrs, source); err != nil {
+	if err := applyPreparedAttributeWrites(tx, pid, id, attributeWrites); err != nil {
+		return nil, err
+	}
+	if _, ok := patch["channels"]; ok {
+		if err := applyParsedChannelsPatchTx(tx, pid, id, channels, source, verifications); err != nil {
 			return nil, err
 		}
 	}
-	if rawChannels, ok := patch["channels"]; ok {
-		if err := applyChannelsPatch(db, pid, id, rawChannels, source); err != nil {
-			return nil, err
-		}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	c, err := dbGetByID(db, pid, id)
 	if err != nil || c == nil {
@@ -2729,7 +2925,7 @@ func applyChannelsPatch(db *sql.DB, pid string, contactID int64, raw any, source
 		return err
 	}
 	defer tx.Rollback()
-	if err := applyChannelsPatchTx(tx, pid, contactID, raw, source); err != nil {
+	if err := applyChannelsPatchTx(tx, pid, contactID, raw, source, nil); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -2789,27 +2985,79 @@ func parseChannelInputs(raw any) ([]channelInput, error) {
 	return channels, nil
 }
 
-func applyChannelsPatchTx(tx *sql.Tx, pid string, contactID int64, raw any, source string) error {
+func applyChannelsPatchTx(tx *sql.Tx, pid string, contactID int64, raw any, source string, verifications map[string]channelVerificationRecord) error {
 	channels, err := parseChannelInputs(raw)
 	if err != nil {
 		return err
 	}
+	return applyParsedChannelsPatchTx(tx, pid, contactID, channels, source, verifications)
+}
+
+func applyParsedChannelsPatchTx(tx *sql.Tx, pid string, contactID int64, channels []channelInput, source string, verifications map[string]channelVerificationRecord) error {
 	seenKind := map[string]bool{}
+	wanted := map[string]bool{}
 	for _, ch := range channels {
 		seenKind[ch.Kind] = true
+		wanted[ch.Kind+"\x00"+ch.Value] = true
 	}
-	if _, err := tx.Exec(`DELETE FROM contact_channels WHERE project_id = ? AND contact_id = ?`, pid, contactID); err != nil {
+	rows, err := tx.Query(
+		`SELECT id, kind, value FROM contact_channels WHERE project_id = ? AND contact_id = ?`,
+		pid, contactID,
+	)
+	if err != nil {
 		return err
+	}
+	existing := map[string]int64{}
+	for rows.Next() {
+		var id int64
+		var kind, value string
+		if err := rows.Scan(&id, &kind, &value); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[kind+"\x00"+value] = id
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for key, id := range existing {
+		if wanted[key] {
+			continue
+		}
+		if _, err := tx.Exec(`DELETE FROM contact_channels WHERE id = ? AND project_id = ? AND contact_id = ?`, id, pid, contactID); err != nil {
+			return err
+		}
 	}
 	var primaryEmail, primaryPhone string
 	for _, ch := range channels {
-		if _, err := tx.Exec(
-			`INSERT INTO contact_channels
-				(project_id, contact_id, kind, value, label, is_primary, source)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			pid, contactID, ch.Kind, ch.Value, nullStr(ch.Label), boolToInt(ch.IsPrimary), source,
-		); err != nil {
-			return err
+		key := ch.Kind + "\x00" + ch.Value
+		if id := existing[key]; id > 0 {
+			if _, err := tx.Exec(
+				`UPDATE contact_channels SET label = ?, is_primary = ?, source = COALESCE(NULLIF(?, ''), source)
+				 WHERE id = ? AND project_id = ? AND contact_id = ?`,
+				nullStr(ch.Label), boolToInt(ch.IsPrimary), source, id, pid, contactID,
+			); err != nil {
+				return err
+			}
+		} else {
+			verification := channelVerificationRecord{}
+			if ch.Kind == "email" {
+				verification = verifications[ch.Value]
+			}
+			if _, err := tx.Exec(
+				`INSERT INTO contact_channels
+					(project_id, contact_id, kind, value, label, is_primary, source,
+					 verification_verdict, verification_confidence, verification_reason,
+					 verification_recommendation, verification_source, verification_suggested_value,
+					 verification_checked_at, verification_details)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				pid, contactID, ch.Kind, ch.Value, nullStr(ch.Label), boolToInt(ch.IsPrimary), source,
+				nullStr(verification.Verdict), nullStr(verification.Confidence), nullStr(verification.Reason),
+				nullStr(verification.Recommendation), nullStr(verification.Source), nullStr(verification.SuggestedValue),
+				nullStr(verification.CheckedAt), nullStr(verification.DetailsJSON),
+			); err != nil {
+				return err
+			}
 		}
 		if ch.IsPrimary {
 			switch ch.Kind {
@@ -3438,7 +3686,11 @@ func dbListAttrDefs(db *sql.DB, pid string) ([]map[string]any, error) {
 
 func loadChannels(db *sql.DB, c *Contact) error {
 	rows, err := db.Query(
-		`SELECT id, kind, value, COALESCE(label,''), is_primary, COALESCE(verified_at,''), COALESCE(source,'')
+		`SELECT id, kind, value, COALESCE(label,''), is_primary, COALESCE(verified_at,''), COALESCE(source,''),
+			COALESCE(verification_verdict,''), COALESCE(verification_confidence,''),
+			COALESCE(verification_reason,''), COALESCE(verification_recommendation,''),
+			COALESCE(verification_source,''), COALESCE(verification_suggested_value,''),
+			COALESCE(verification_checked_at,''), COALESCE(verification_details,'')
 		 FROM contact_channels
 		 WHERE contact_id = ? AND project_id = ?
 		 ORDER BY is_primary DESC, kind, id`,
@@ -3446,15 +3698,35 @@ func loadChannels(db *sql.DB, c *Contact) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	c.Channels = []Channel{}
 	for rows.Next() {
 		ch := Channel{}
 		var primary int
-		if err := rows.Scan(&ch.ID, &ch.Kind, &ch.Value, &ch.Label, &primary, &ch.VerifiedAt, &ch.Source); err == nil {
+		var verificationDetails string
+		if err := rows.Scan(&ch.ID, &ch.Kind, &ch.Value, &ch.Label, &primary, &ch.VerifiedAt, &ch.Source,
+			&ch.VerificationVerdict, &ch.VerificationConfidence, &ch.VerificationReason,
+			&ch.VerificationRecommendation, &ch.VerificationSource, &ch.VerificationSuggestedValue,
+			&ch.VerificationCheckedAt, &verificationDetails); err == nil {
 			ch.IsPrimary = primary != 0
+			if verificationDetails != "" {
+				_ = json.Unmarshal([]byte(verificationDetails), &ch.VerificationDetails)
+			}
 			c.Channels = append(c.Channels, ch)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for i := range c.Channels {
+		states, err := loadChannelDeliverability(db, c.ProjectID, c.Channels[i].ID)
+		if err != nil {
+			return err
+		}
+		c.Channels[i].Deliverability = states
 	}
 	return nil
 }

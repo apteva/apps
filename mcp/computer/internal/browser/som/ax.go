@@ -43,6 +43,9 @@ func ShouldAugmentAX(elements []Element) bool {
 		if tag == "button" || tag == "input" || tag == "textarea" || tag == "select" ||
 			role == "button" || role == "checkbox" || role == "radio" || role == "switch" || role == "combobox" {
 			hasActionControl = true
+			if strings.TrimSpace(element.AccessibleName) == "" && strings.TrimSpace(element.Text) == "" {
+				return true
+			}
 		}
 		text := strings.ToLower(element.Text)
 		for _, signal := range []string{"cookie", "consent", "customise", "customize", "reject", "decline"} {
@@ -117,17 +120,23 @@ func EnumerateViaAX(ctx context.Context, viewportWidth, viewportHeight int) []El
 		if w < 4 || h < 4 || x+w < 0 || y+h < 0 || x > viewportWidth || y > viewportHeight {
 			continue
 		}
-		if len(name) > 40 {
-			name = name[:40]
+		fullName := strings.TrimSpace(name)
+		displayName := fullName
+		if len(displayName) > 40 {
+			displayName = displayName[:40]
 		}
 		disabled := axPropertyBool(node, accessibility.PropertyNameDisabled)
 		loading := axPropertyBool(node, accessibility.PropertyNameBusy)
 		effect := destructiveEffectForText(name, role)
+		semanticEffect := effect
+		if semanticEffect == "" {
+			semanticEffect = safeEffectForText(name, role)
+		}
 		out = append(out, Element{
 			ID: fmt.Sprintf("ax_%d", node.BackendDOMNodeID),
 			X:  x, Y: y, W: w, H: h,
-			Tag: role, Role: role, Text: strings.TrimSpace(name), AccessibleName: strings.TrimSpace(name),
-			Disabled: disabled, Loading: loading, Dangerous: effect != "", DestructiveEffect: effect,
+			Tag: role, Role: role, Text: displayName, AccessibleName: fullName,
+			Disabled: disabled, Loading: loading, TargetLoading: loading, Dangerous: effect != "", Effect: semanticEffect, DestructiveEffect: effect,
 		})
 	}
 	out = filterAXByOcclusion(ctx, out)
@@ -412,8 +421,8 @@ func destructiveEffectForText(value, role string) string {
 		return ""
 	}
 	value = strings.ToLower(strings.Join(strings.Fields(value), " "))
-	for _, configuration := range []string{"set publish date", "choose publish date", "select publish date", "change publish date", "edit publish date"} {
-		if strings.Contains(value, configuration) {
+	for _, configuration := range []string{"create post", "new post", "edit post", "view post", "open post", "publish date", "schedule date", "publish time", "schedule time", "set publish date", "choose publish date", "select publish date", "change publish date", "edit publish date"} {
+		if value == configuration || strings.HasPrefix(value, configuration+" ") {
 			return ""
 		}
 	}
@@ -421,23 +430,37 @@ func destructiveEffectForText(value, role string) string {
 		words  []string
 		effect string
 	}{
-		{[]string{"schedule post", "schedule publication", "schedule publish", "confirm schedule", "publish later"}, "schedule_publish"},
-		{[]string{"publish"}, "immediate_publish"},
+		{[]string{"schedule", "schedule post", "schedule publication", "schedule publish", "confirm schedule", "publish later"}, "schedule_publish"},
+		{[]string{"publish", "publish now", "post now"}, "immediate_publish"},
 		{[]string{"delete", "destroy", "erase"}, "destructive_delete"},
-		{[]string{"send", "post"}, "immediate_send"},
+		{[]string{"send", "send now"}, "immediate_send"},
 		{[]string{"pay", "payout", "purchase", "buy", "checkout", "place order"}, "financial_action"},
 		{[]string{"withdraw", "withdrawal"}, "financial_action"},
 		{[]string{"grant access", "revoke access", "change permissions", "make admin", "remove admin"}, "permission_change"},
 		{[]string{"deactivate account", "close account", "transfer account"}, "account_change"},
 	} {
 		for _, word := range item.words {
-			if value == word || strings.HasPrefix(value, word+" ") || strings.HasSuffix(value, " "+word) || strings.Contains(value, " "+word+" ") {
+			if value == word || strings.HasPrefix(value, word+" ") {
 				return item.effect
 			}
 		}
 	}
-	if value == "schedule" {
-		return "schedule_publish"
+	return ""
+}
+
+func safeEffectForText(value, role string) string {
+	value = strings.ToLower(strings.Join(strings.Fields(value), " "))
+	role = strings.ToLower(strings.TrimSpace(role))
+	if role == "textbox" || role == "searchbox" {
+		return "edit_draft"
+	}
+	for _, prefix := range []string{"free access", "paid access", "more options", "action menu"} {
+		if value == prefix || strings.HasPrefix(value, prefix+" ") {
+			return "open_configuration"
+		}
+	}
+	if role == "button" || role == "menuitem" || role == "link" {
+		return "navigation_only"
 	}
 	return ""
 }
@@ -453,8 +476,8 @@ func MergeAX(jsElements, axElements []Element) []Element {
 	merged := append([]Element(nil), jsElements...)
 	for _, element := range axElements {
 		cx, cy := element.X+element.W/2, element.Y+element.H/2
-		duplicate := false
-		for _, center := range centers {
+		duplicateIndex := -1
+		for index, center := range centers {
 			dx, dy := cx-center[0], cy-center[1]
 			if dx < 0 {
 				dx = -dx
@@ -463,11 +486,20 @@ func MergeAX(jsElements, axElements []Element) []Element {
 				dy = -dy
 			}
 			if dx <= dedupRadius && dy <= dedupRadius {
-				duplicate = true
+				duplicateIndex = index
 				break
 			}
 		}
-		if duplicate {
+		if duplicateIndex >= 0 {
+			if duplicateIndex < len(merged) && strings.TrimSpace(merged[duplicateIndex].AccessibleName) == "" && strings.TrimSpace(element.AccessibleName) != "" {
+				merged[duplicateIndex].AccessibleName = element.AccessibleName
+				if merged[duplicateIndex].Text == "" {
+					merged[duplicateIndex].Text = element.Text
+				}
+				if merged[duplicateIndex].Role == "" {
+					merged[duplicateIndex].Role = element.Role
+				}
+			}
 			continue
 		}
 		merged = append(merged, element)

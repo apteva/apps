@@ -94,23 +94,26 @@ type Options struct {
 }
 
 type Computer struct {
-	apiKey          string
-	projectID       string
-	opts            Options
-	sessionID       string
-	contextID       string
-	contextPersist  bool
-	debugURL        string
-	display         computer.DisplaySize
-	allocCtx        context.Context
-	ctx             context.Context
-	cancel          context.CancelFunc
-	allocCancel     context.CancelFunc
-	http            *http.Client
-	environment     computer.EnvironmentOptions
-	usageMu         sync.Mutex
-	closedSessionID string
-	lastUsage       *computer.SessionUsage
+	apiKey           string
+	projectID        string
+	opts             Options
+	sessionID        string
+	contextID        string
+	contextPersist   bool
+	debugURL         string
+	display          computer.DisplaySize
+	allocCtx         context.Context
+	ctx              context.Context
+	cancel           context.CancelFunc
+	allocCancel      context.CancelFunc
+	http             *http.Client
+	environment      computer.EnvironmentOptions
+	usageMu          sync.Mutex
+	closedSessionID  string
+	lastUsage        *computer.SessionUsage
+	sessionStartedAt time.Time
+	sessionExpiresAt time.Time
+	sessionStatus    string
 
 	// SoM: same wiring as local.Computer. See local.go for rationale.
 	labelMu          sync.RWMutex
@@ -180,6 +183,9 @@ type sessionCreateResponse struct {
 	ID         string `json:"id"`
 	Status     string `json:"status"`
 	ConnectURL string `json:"connectUrl"`
+	StartedAt  string `json:"startedAt"`
+	CreatedAt  string `json:"createdAt"`
+	ExpiresAt  string `json:"expiresAt"`
 	// The API also returns projectId, createdAt, region, etc.; we only
 	// read the fields we use.
 }
@@ -298,6 +304,15 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	c.sessionID = result.ID
+	c.sessionStatus = result.Status
+	c.sessionStartedAt = parseProviderTime(firstNonEmpty(result.StartedAt, result.CreatedAt))
+	if c.sessionStartedAt.IsZero() {
+		c.sessionStartedAt = time.Now()
+	}
+	c.sessionExpiresAt = parseProviderTime(result.ExpiresAt)
+	if c.sessionExpiresAt.IsZero() && timeout > 0 {
+		c.sessionExpiresAt = c.sessionStartedAt.Add(time.Duration(timeout) * time.Second)
+	}
 
 	// Browserbase returns status=RUNNING on success. Anything else means
 	// the session failed to start (quota exceeded, invalid region, …).
@@ -308,6 +323,70 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 		return "", fmt.Errorf("no connectUrl in session response (id=%s status=%s)", result.ID, result.Status)
 	}
 	return result.ConnectURL, nil
+}
+
+func parseProviderTime(value string) time.Time {
+	parsed, _ := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
+	return parsed
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// ProviderSessionState refreshes Browserbase's authoritative lifecycle state.
+// Callers use it only for status/diagnostics; it never reconnects or replays.
+func (c *Computer) ProviderSessionState(ctx context.Context) (computer.ProviderSessionState, error) {
+	state := computer.ProviderSessionState{Status: c.sessionStatus}
+	if !c.sessionStartedAt.IsZero() {
+		state.StartedAt = c.sessionStartedAt.UTC().Format(time.RFC3339)
+	}
+	if !c.sessionExpiresAt.IsZero() {
+		state.ExpiresAt = c.sessionExpiresAt.UTC().Format(time.RFC3339)
+	}
+	if c.sessionID == "" {
+		return state, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/sessions/%s", apiBase, c.sessionID), nil)
+	if err != nil {
+		return state, err
+	}
+	req.Header.Set("X-BB-API-Key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return state, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return state, fmt.Errorf("browserbase session status HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var result struct {
+		Status    string `json:"status"`
+		StartedAt string `json:"startedAt"`
+		CreatedAt string `json:"createdAt"`
+		ExpiresAt string `json:"expiresAt"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return state, err
+	}
+	state.Status = result.Status
+	state.StartedAt = firstNonEmpty(result.StartedAt, result.CreatedAt, state.StartedAt)
+	state.ExpiresAt = firstNonEmpty(result.ExpiresAt, state.ExpiresAt)
+	switch strings.ToUpper(result.Status) {
+	case "TIMED_OUT":
+		state.CloseReason = "provider_session_expired"
+	case "ERROR":
+		state.CloseReason = "provider_error"
+	case "COMPLETED":
+		state.CloseReason = "provider_completed"
+	}
+	return state, nil
 }
 
 // fetchDebugURL calls GET /v1/sessions/{id}/debug and returns the
@@ -656,6 +735,7 @@ func (c *Computer) executeClick(ctx context.Context, action computer.Action, cli
 		fmt.Fprintf(os.Stderr, "[BROWSERBASE] presentation cursor unavailable, continuing click: %v\n", err)
 	}
 	guardOptions := clickguard.Options{
+		TargetID:     action.TargetID,
 		ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
 		EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
 	}
@@ -713,7 +793,7 @@ func (c *Computer) selectOption(ctx context.Context, action computer.Action) (se
 
 func (c *Computer) setChecked(ctx context.Context, action computer.Action) (checkedinput.Result, error) {
 	c.setLastCheckedResult(nil)
-	target := checkedinput.Target{Selector: action.Selector}
+	target := checkedinput.Target{ID: action.TargetID, Selector: action.Selector, ExpectedName: action.ExpectedName, ExpectedRole: action.ExpectedRole}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -1268,13 +1348,19 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
 			Placeholder: e.Placeholder, CurrentValue: e.CurrentValue, Pattern: e.Pattern,
 			FormatHint: e.FormatHint, DateLike: e.DateLike, Validity: e.Validity,
-			Disabled: e.Disabled, Loading: e.Loading, Dangerous: e.Dangerous, DestructiveEffect: e.DestructiveEffect,
+			Disabled: e.Disabled, Loading: e.Loading, TargetLoading: e.TargetLoading,
+			ContainerLoading: e.ContainerLoading, PageLoadingCount: e.PageLoadingCount,
+			Dangerous: e.Dangerous, Effect: e.Effect, DestructiveEffect: e.DestructiveEffect,
 		})
 	}
 	return out
 }
 
 func (c *Computer) DisplaySize() computer.DisplaySize { return c.display }
+
+func (c *Computer) EffectiveEnvironment() (computer.EffectiveEnvironment, error) {
+	return environment.Probe(c.ctx)
+}
 
 // SessionInfo implementation
 func (c *Computer) SessionType() string { return "browserbase" }

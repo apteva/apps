@@ -23,6 +23,9 @@ const (
 	maxAttachmentCount       = 20
 	maxAttachmentInlineBytes = int64(25 << 20)
 	maxAttachmentTotalBytes  = int64(25 << 20)
+	whatsAppImageMaxBytes    = int64(5 << 20)
+	whatsAppMediaMaxBytes    = int64(16 << 20)
+	whatsAppStickerMaxBytes  = int64(100 << 10)
 )
 
 type MessageAttachment struct {
@@ -73,7 +76,7 @@ func prepareMessageAttachments(ctx *sdk.AppCtx, pid, channel string, args map[st
 		return nil, nil, fmt.Errorf("at most %d attachments are allowed", maxAttachmentCount)
 	}
 	out := make([]providerAttachment, 0, len(inputs))
-	storageIDs := int64ArrayArg(args, "attachment_storage_ids")
+	storageIDs := []int64{}
 	var totalBytes int64
 	for _, in := range inputs {
 		att, err := resolveAttachment(ctx, pid, channel, in)
@@ -96,7 +99,10 @@ func prepareMessageAttachments(ctx *sdk.AppCtx, pid, channel string, args map[st
 
 func attachmentInputsFromArgs(args map[string]any) ([]attachmentInput, error) {
 	out := []attachmentInput{}
+	seenStorage := map[int64]bool{}
+	seenURL := map[string]bool{}
 	add := func(in attachmentInput) error {
+		in.URL = strings.TrimSpace(in.URL)
 		in.Filename = safeAttachmentFilename(in.Filename)
 		in.ContentType = strings.TrimSpace(in.ContentType)
 		in.ContentID = strings.Trim(strings.TrimSpace(in.ContentID), "<>")
@@ -127,6 +133,18 @@ func attachmentInputsFromArgs(args map[string]any) ([]attachmentInput, error) {
 		if sourceCount > 1 {
 			return errors.New("attachment must use exactly one of storage_id, url, or content_base64")
 		}
+		if in.StorageID > 0 {
+			if seenStorage[in.StorageID] {
+				return nil
+			}
+			seenStorage[in.StorageID] = true
+		}
+		if in.URL != "" {
+			if seenURL[in.URL] {
+				return nil
+			}
+			seenURL[in.URL] = true
+		}
 		if in.Filename == "" {
 			switch {
 			case in.StorageID > 0:
@@ -147,6 +165,11 @@ func attachmentInputsFromArgs(args map[string]any) ([]attachmentInput, error) {
 			}
 		}
 	}
+	if mediaURL := strings.TrimSpace(strArg(args, "media_url")); mediaURL != "" {
+		if err := add(attachmentInput{URL: mediaURL, Source: "external_url"}); err != nil {
+			return nil, err
+		}
+	}
 	raw, ok := args["attachments"]
 	if !ok || raw == nil {
 		return out, nil
@@ -154,12 +177,6 @@ func attachmentInputsFromArgs(args map[string]any) ([]attachmentInput, error) {
 	arr, ok := raw.([]any)
 	if !ok {
 		return nil, errors.New("attachments must be an array")
-	}
-	seenStorage := map[int64]bool{}
-	for _, existing := range out {
-		if existing.StorageID > 0 {
-			seenStorage[existing.StorageID] = true
-		}
 	}
 	for i, item := range arr {
 		m, ok := item.(map[string]any)
@@ -177,17 +194,100 @@ func attachmentInputsFromArgs(args map[string]any) ([]attachmentInput, error) {
 			Source:        strArg(m, "source"),
 			ContentBase64: strArg(m, "content_base64"),
 		}
-		if in.StorageID > 0 && seenStorage[in.StorageID] {
-			continue
-		}
 		if err := add(in); err != nil {
 			return nil, err
 		}
-		if in.StorageID > 0 {
-			seenStorage[in.StorageID] = true
-		}
 	}
 	return out, nil
+}
+
+func validatePhoneMessageMode(channel, body, contentSID, contentVariables string, inputs []attachmentInput) error {
+	hasMedia := len(inputs) > 0
+	if contentSID != "" {
+		if body != "" || hasMedia {
+			return errors.New("content_sid cannot be combined with body, media_url, or attachments; template text and media must come from ContentVariables")
+		}
+		return nil
+	}
+	if contentVariables != "" {
+		return errors.New("content_variables requires content_sid")
+	}
+	if body == "" && !hasMedia {
+		return errors.New("body, media_url, or at least one attachment required")
+	}
+	if channel == channelWhatsApp && len(inputs) > 1 {
+		return errors.New("whatsapp supports exactly one media attachment per message; send additional files as separate messages")
+	}
+	return nil
+}
+
+func validateWhatsAppAttachments(body string, attachments []providerAttachment) error {
+	if len(attachments) > 1 {
+		return errors.New("whatsapp supports exactly one media attachment per message; send additional files as separate messages")
+	}
+	if len(attachments) == 0 {
+		return nil
+	}
+	att := attachments[0]
+	if strings.TrimSpace(att.MediaURL) == "" {
+		return errors.New("whatsapp attachment did not resolve to a provider-reachable media URL")
+	}
+	contentType := normaliseAttachmentMediaType(att.ContentType)
+	kind, supported, captionCompatible := whatsAppMediaTypePolicy(contentType)
+	if contentType != "" && contentType != "application/octet-stream" && !supported {
+		return fmt.Errorf("whatsapp does not support attachment content_type %q", contentType)
+	}
+	if body != "" && supported && !captionCompatible {
+		return fmt.Errorf("whatsapp cannot deliver body text with %s media (%s); send the text as a separate message", kind, contentType)
+	}
+	if att.SizeBytes <= 0 || !supported {
+		return nil
+	}
+	limit := whatsAppMediaMaxBytes
+	switch kind {
+	case "image":
+		limit = whatsAppImageMaxBytes
+	case "sticker":
+		limit = whatsAppStickerMaxBytes
+	}
+	if att.SizeBytes > limit {
+		return fmt.Errorf("whatsapp %s attachment exceeds %d-byte limit (got %d bytes)", kind, limit, att.SizeBytes)
+	}
+	return nil
+}
+
+func normaliseAttachmentMediaType(contentType string) string {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil {
+		return strings.ToLower(mediaType)
+	}
+	return contentType
+}
+
+func whatsAppMediaTypePolicy(contentType string) (kind string, supported, captionCompatible bool) {
+	switch contentType {
+	case "", "application/octet-stream":
+		return "unknown", false, false
+	case "image/jpeg", "image/jpg", "image/png":
+		return "image", true, true
+	case "image/heic":
+		return "image", true, false
+	case "image/webp":
+		return "sticker", true, false
+	case "audio/ogg", "audio/mpeg", "audio/mp3", "audio/3gpp", "audio/aac", "audio/ac3", "audio/amr", "audio/amr-nb":
+		return "audio", true, false
+	case "video/mp4", "video/mpeg4":
+		return "video", true, false
+	case "application/pdf", "application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return "document", true, false
+	case "application/vcard", "text/vcard", "text/x-vcard":
+		return "contact", true, false
+	default:
+		return "unknown", false, false
+	}
 }
 
 func resolveAttachment(ctx *sdk.AppCtx, pid, channel string, in attachmentInput) (providerAttachment, error) {
@@ -255,11 +355,20 @@ func resolveAttachment(ctx *sdk.AppCtx, pid, channel string, in attachmentInput)
 		// Inline/base64 bytes were already uploaded above and remain in
 		// memory for this provider send; no need to download them again.
 	case att.StorageID > 0:
-		u, err := getAttachmentURL(ctx, pid, att.StorageID)
+		stored, err := getAttachmentURL(ctx, pid, att.StorageID)
 		if err != nil {
 			return att, err
 		}
-		att.MediaURL = u
+		att.MediaURL = stored.URL
+		if att.Filename == "" || strings.HasPrefix(att.Filename, "attachment-") {
+			att.Filename = firstNonEmpty(stored.Filename, att.Filename)
+		}
+		if att.ContentType == "" {
+			att.ContentType = stored.ContentType
+		}
+		if att.SizeBytes == 0 {
+			att.SizeBytes = stored.SizeBytes
+		}
 	case att.URL != "" && channel == channelEmail:
 		data, contentType, size, err := fetchURLAttachment(att.URL)
 		if err != nil {
@@ -324,7 +433,31 @@ func getAttachmentContent(ctx *sdk.AppCtx, pid string, storageID int64) (attachm
 	}, nil
 }
 
-func getAttachmentURL(ctx *sdk.AppCtx, pid string, storageID int64) (string, error) {
+type attachmentURL struct {
+	URL         string
+	Filename    string
+	ContentType string
+	SizeBytes   int64
+}
+
+func getAttachmentURL(ctx *sdk.AppCtx, pid string, storageID int64) (attachmentURL, error) {
+	var metadata struct {
+		Found bool `json:"found"`
+		File  *struct {
+			Name        string `json:"name"`
+			ContentType string `json:"content_type"`
+			SizeBytes   int64  `json:"size_bytes"`
+		} `json:"file"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{
+		"_project_id": pid,
+		"id":          storageID,
+	}, &metadata); err != nil {
+		return attachmentURL{}, fmt.Errorf("storage files_get %d: %w", storageID, err)
+	}
+	if !metadata.Found || metadata.File == nil {
+		return attachmentURL{}, fmt.Errorf("storage file %d not found", storageID)
+	}
 	var out struct {
 		URL string `json:"url"`
 	}
@@ -333,12 +466,24 @@ func getAttachmentURL(ctx *sdk.AppCtx, pid string, storageID int64) (string, err
 		"id":          storageID,
 		"ttl_seconds": 86400,
 	}, &out); err != nil {
-		return "", fmt.Errorf("storage files_get_url %d: %w", storageID, err)
+		return attachmentURL{}, fmt.Errorf("storage files_get_url %d: %w", storageID, err)
 	}
 	if strings.TrimSpace(out.URL) == "" {
-		return "", fmt.Errorf("storage files_get_url %d returned empty url", storageID)
+		return attachmentURL{}, fmt.Errorf("storage files_get_url %d returned empty url", storageID)
 	}
-	return out.URL, nil
+	u, err := url.Parse(strings.TrimSpace(out.URL))
+	if err != nil {
+		return attachmentURL{}, fmt.Errorf("storage files_get_url %d returned invalid url", storageID)
+	}
+	if err := validatePublicHTTPURL(u); err != nil {
+		return attachmentURL{}, fmt.Errorf("storage files_get_url %d: %w", storageID, err)
+	}
+	return attachmentURL{
+		URL:         out.URL,
+		Filename:    safeAttachmentFilename(metadata.File.Name),
+		ContentType: normaliseAttachmentMediaType(metadata.File.ContentType),
+		SizeBytes:   metadata.File.SizeBytes,
+	}, nil
 }
 
 func uploadAttachmentToStorage(ctx *sdk.AppCtx, pid string, att providerAttachment) (MessageAttachment, error) {

@@ -24,6 +24,9 @@ func TestCreateRemote_AllowsMultipleRowsBeforeProviderID(t *testing.T) {
 	if _, err := dbCreateInstance(db, CreateInstanceInput{Name: "duplicate", Provider: "hetzner", ProviderID: "42"}); err == nil {
 		t.Fatal("duplicate non-empty provider id was accepted")
 	}
+	if _, err := dbCreateInstance(db, CreateInstanceInput{Name: "other-account", Provider: "hetzner", ProviderConnectionID: 8, ProviderID: "42"}); err != nil {
+		t.Fatalf("same provider id in another connection should be allowed: %v", err)
+	}
 }
 
 func TestTransitionStatus_IsCompareAndSwap(t *testing.T) {
@@ -87,6 +90,22 @@ func TestLifecycleMigration_PreservesExistingRows(t *testing.T) {
 	}
 	if _, err := db.Exec(string(body)); err != nil {
 		t.Fatal(err)
+	}
+	body, err = os.ReadFile(filepath.Join("migrations", "005_storage.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(body)); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"006_object_storage.sql", "007_operations_and_inventory.sql"} {
+		body, err = os.ReadFile(filepath.Join("migrations", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	inst, err := dbGetInstance(db, 7)
 	if err != nil {

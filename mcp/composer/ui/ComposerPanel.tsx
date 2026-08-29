@@ -170,6 +170,39 @@ interface ClipLayout {
   z_index?: number;
 }
 
+interface SourceCrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface TransformKeyframe {
+  time: number;
+  x?: number;
+  y?: number;
+  scale?: number;
+  easing?: "linear" | "ease_in" | "ease_out" | "ease_in_out";
+}
+
+interface SourceTransform {
+  x?: number;
+  y?: number;
+  scale?: number;
+  keyframes?: TransformKeyframe[];
+}
+
+interface TimelineMarker {
+  id?: string;
+  time: number;
+  type: string;
+  label?: string;
+  value?: unknown;
+  duration?: number;
+  region?: SourceCrop;
+  meta?: Record<string, unknown>;
+}
+
 interface ClipDraft {
   id: string;
   track_id?: string;
@@ -178,6 +211,11 @@ interface ClipDraft {
   asset: { type: AssetType; src: string };
   start: number;
   length: number;
+  source_start?: number;
+  source_end?: number;
+  playback_rate?: number;
+  crop?: SourceCrop;
+  transform?: SourceTransform;
   source_audio?: "auto" | "keep" | "mute";
   duration_mode?: DurationMode;
   estimated_length?: number;
@@ -205,6 +243,9 @@ interface AudioClipDraft {
   asset: { type: "audio" | "silence"; src: string };
   start: number;
   length: number;
+  source_start?: number;
+  source_end?: number;
+  playback_rate?: number;
   duration_mode?: DurationMode;
   estimated_length?: number;
   actual_length?: number;
@@ -250,6 +291,7 @@ interface DraftState {
   audioClips: AudioClipDraft[];
   textClips: TextClipDraft[];
   soundtrack: { src: string; volume: number; timing?: Timing; ai?: AIAsset } | null;
+  markers: TimelineMarker[];
   background: string;
   output: OutputDraft;
 }
@@ -304,6 +346,7 @@ const DEFAULT_DRAFT: DraftState = {
   visualTrackOrder: ["visual-1"],
   audioClips: [],
   textClips: [],
+  markers: [],
   soundtrack: null,
   output: { format: "mp4", resolution: "hd", aspect: "16:9", fps: 30 },
 };
@@ -549,6 +592,18 @@ function parseComposition(c: Composition | null): DraftState {
     const edit = JSON.parse(c.edit_json || "{}");
     const timeline = edit.timeline || {};
     draft.background = timeline.background || draft.background;
+    draft.markers = Array.isArray(timeline.markers)
+      ? timeline.markers.map((marker: any, index: number) => ({
+          id: String(marker.id || `marker-${index + 1}`),
+          time: Math.max(0, Number(marker.time) || 0),
+          type: String(marker.type || "event"),
+          label: String(marker.label || "") || undefined,
+          value: marker.value,
+          duration: Math.max(0, Number(marker.duration) || 0) || undefined,
+          region: marker.region,
+          meta: marker.meta,
+        }))
+      : [];
     const visuals = visualTracks(timeline.tracks || []);
     draft.visualTrackOrder = visuals.map((track: any, i: number) => String(track?.id || `visual-${i + 1}`));
     const clips = visuals.flatMap((track: any, trackIndex: number) => {
@@ -567,6 +622,11 @@ function parseComposition(c: Composition | null): DraftState {
         },
         start: Number(clip.start) || 0,
         length: Number(clip.length) || 1,
+        source_start: Number(clip.source_start || 0) || undefined,
+        source_end: Number(clip.source_end || 0) || undefined,
+        playback_rate: Number(clip.playback_rate || 0) || undefined,
+        crop: clip.crop,
+        transform: clip.transform,
         source_audio: clip.source_audio,
         duration_mode: clip.duration_mode || defaultDurationMode(clip.ai?.media_kind),
         estimated_length: Number(clip.estimated_length || clip.ai?.estimated_duration_seconds || 0) || undefined,
@@ -604,6 +664,9 @@ function parseComposition(c: Composition | null): DraftState {
         asset: { type: clip.asset?.type === "silence" ? "silence" : "audio", src: String(clip.asset?.src || "") },
         start: Number(clip.start) || 0,
         length: Number(clip.length ?? clip.duration) || 1,
+        source_start: Number(clip.source_start || 0) || undefined,
+        source_end: Number(clip.source_end || 0) || undefined,
+        playback_rate: Number(clip.playback_rate || 0) || undefined,
         duration_mode: clip.duration_mode || defaultDurationMode(clip.ai?.media_kind),
         estimated_length: Number(clip.estimated_length || clip.ai?.estimated_duration_seconds || 0) || undefined,
         actual_length: Number(clip.actual_length || clip.ai?.actual_duration_seconds || 0) || undefined,
@@ -677,6 +740,11 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
     if (clip.section_id) out.section_id = clip.section_id;
     if (clip.group_id) out.group_id = clip.group_id;
     if (clip.source_audio) out.source_audio = clip.source_audio;
+    if (clip.source_start) out.source_start = clip.source_start;
+    if (clip.source_end) out.source_end = clip.source_end;
+    if (clip.playback_rate && clip.playback_rate !== 1) out.playback_rate = clip.playback_rate;
+    if (clip.crop) out.crop = clip.crop;
+    if (clip.transform) out.transform = clip.transform;
     if (clip.ai) out.ai = clip.ai;
     if (clip.duration_mode) out.duration_mode = clip.duration_mode;
     if (clip.estimated_length) out.estimated_length = clip.estimated_length;
@@ -720,6 +788,9 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
     if (clip.section_id) out.section_id = clip.section_id;
     if (clip.group_id) out.group_id = clip.group_id;
     if (clip.ai) out.ai = clip.ai;
+    if (clip.source_start) out.source_start = clip.source_start;
+    if (clip.source_end) out.source_end = clip.source_end;
+    if (clip.playback_rate && clip.playback_rate !== 1) out.playback_rate = clip.playback_rate;
     if (clip.duration_mode) out.duration_mode = clip.duration_mode;
     if (clip.estimated_length) out.estimated_length = clip.estimated_length;
     if (clip.actual_length) out.actual_length = clip.actual_length;
@@ -756,6 +827,7 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
     name: draft.name,
     tracks,
     background: draft.background || "#000000",
+    markers: draft.markers,
     output: draft.output,
   };
   if (draft.soundtrack?.src?.trim() || draft.soundtrack?.ai) {
@@ -781,6 +853,7 @@ function bodyFromEditorJSON(name: string, editText: string, outputText: string):
     tracks: Array.isArray(timeline.tracks) ? timeline.tracks : [],
     soundtrack: timeline.soundtrack,
     background: timeline.background,
+    markers: timeline.markers,
     output,
   };
 }
@@ -792,6 +865,7 @@ function editJSONFromDraft(draft: DraftState): string {
       tracks: body.tracks,
       soundtrack: body.soundtrack,
       background: body.background,
+      markers: body.markers,
     },
   }, null, 2);
 }
@@ -2117,6 +2191,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
                   audioClips={audioClips}
                   textClips={textClips}
                   soundtrack={draft.soundtrack}
+                  markers={draft.markers}
                   selectedClipId={selectedClipId}
                   playhead={playhead}
                   duration={totalDuration}
@@ -2543,7 +2618,7 @@ function PreviewStage({
           ))}
           {!muted && activeAudio.map((clip) => {
             const url = resolved[clip.asset.src]?.url;
-            return url ? <SyncedAudio key={clip.id} src={url} playing={playing} playhead={playhead} start={clip.start} volume={clip.volume} /> : null;
+            return url ? <SyncedAudio key={clip.id} src={url} playing={playing} playhead={playhead} start={clip.start} volume={clip.volume} sourceStart={clip.source_start} sourceEnd={clip.source_end} playbackRate={clip.playback_rate} /> : null;
           })}
           {!muted && soundtrack?.src && resolved[soundtrack.src]?.url && (
             <SyncedAudio src={resolved[soundtrack.src].url} playing={playing} playhead={playhead} start={0} volume={soundtrack.volume} loop />
@@ -2588,15 +2663,30 @@ function previewLayerStyle(clip: ClipDraft, base: boolean): React.CSSProperties 
 function PreviewVisualLayer({ clip, asset, playing, playhead, muted, base }: { clip: ClipDraft; asset?: ResolvedAsset; playing: boolean; playhead: number; muted: boolean; base: boolean }) {
   const mediaRef = useRef<HTMLVideoElement | null>(null);
   const url = asset?.url || "";
+  const localTime = Math.max(0, playhead - clip.start);
   useEffect(() => {
     const media = mediaRef.current;
     if (!media) return;
-    const localTime = Math.max(0, playhead - clip.start);
-    if (Number.isFinite(media.duration) && Math.abs(media.currentTime - localTime) > 0.35) media.currentTime = Math.min(localTime, Math.max(0, media.duration - 0.05));
+    const playbackRate = clip.playback_rate || 1;
+    const sourceTime = (clip.source_start || 0) + localTime * playbackRate;
+    const cappedTime = clip.source_end ? Math.min(sourceTime, Math.max(0, clip.source_end - 0.01)) : sourceTime;
+    if (Number.isFinite(media.duration) && Math.abs(media.currentTime - cappedTime) > 0.35) media.currentTime = Math.min(cappedTime, Math.max(0, media.duration - 0.05));
+    media.playbackRate = playbackRate;
     if (playing) media.play().catch(() => {}); else media.pause();
-  }, [playing, playhead, clip.start, url]);
+  }, [playing, playhead, clip.start, clip.source_start, clip.source_end, clip.playback_rate, localTime, url]);
   const fit = clip.layout?.fit || clip.fit || "cover";
-  const mediaStyle: React.CSSProperties = { width: "100%", height: "100%", objectFit: fit === "stretch" ? "fill" : fit === "contain" || fit === "none" ? "contain" : "cover" };
+  const camera = previewCameraAt(clip.transform, localTime);
+  const crop = clip.crop;
+  const mediaStyle: React.CSSProperties = {
+    position: "absolute",
+    width: crop ? `${100 / crop.width}%` : "100%",
+    height: crop ? `${100 / crop.height}%` : "100%",
+    left: crop ? `${-100 * crop.x / crop.width}%` : 0,
+    top: crop ? `${-100 * crop.y / crop.height}%` : 0,
+    objectFit: fit === "stretch" ? "fill" : fit === "contain" || fit === "none" ? "contain" : "cover",
+    transform: `scale(${camera.scale})`,
+    transformOrigin: `${camera.x * 100}% ${camera.y * 100}%`,
+  };
   return (
     <div className="absolute" style={previewLayerStyle(clip, base)}>
       {!url ? <div className="w-full h-full border border-dashed border-border bg-bg-card flex items-center justify-center text-xs text-text-dim">{clip.ai?.status === "generating" ? "Generating..." : "Source missing"}</div>
@@ -2606,17 +2696,56 @@ function PreviewVisualLayer({ clip, asset, playing, playhead, muted, base }: { c
   );
 }
 
-function SyncedAudio({ src, playing, playhead, start, volume, loop }: { src: string; playing: boolean; playhead: number; start: number; volume: number; loop?: boolean }) {
+function previewCameraAt(transform: SourceTransform | undefined, time: number): { x: number; y: number; scale: number } {
+  let current = { time: 0, x: transform?.x ?? 0.5, y: transform?.y ?? 0.5, scale: transform?.scale || 1, easing: "linear" as TransformKeyframe["easing"] };
+  const points = [current];
+  for (const keyframe of transform?.keyframes || []) {
+    current = {
+      time: keyframe.time,
+      x: keyframe.x ?? current.x,
+      y: keyframe.y ?? current.y,
+      scale: keyframe.scale || current.scale,
+      easing: keyframe.easing || "linear",
+    };
+    if (current.time === 0) points[0] = current;
+    else points.push(current);
+  }
+  if (points.length === 1 || time <= points[0].time) return points[0];
+  for (let index = 1; index < points.length; index++) {
+    const next = points[index];
+    const previous = points[index - 1];
+    if (time > next.time) continue;
+    const raw = Math.max(0, Math.min(1, (time - previous.time) / Math.max(0.001, next.time - previous.time)));
+    const progress = previewEase(raw, next.easing);
+    return {
+      x: previous.x + (next.x - previous.x) * progress,
+      y: previous.y + (next.y - previous.y) * progress,
+      scale: previous.scale + (next.scale - previous.scale) * progress,
+    };
+  }
+  return points[points.length - 1];
+}
+
+function previewEase(progress: number, easing: TransformKeyframe["easing"]): number {
+  if (easing === "ease_in") return progress * progress;
+  if (easing === "ease_out") return 1 - (1 - progress) * (1 - progress);
+  if (easing === "ease_in_out") return progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+  return progress;
+}
+
+function SyncedAudio({ src, playing, playhead, start, volume, loop, sourceStart = 0, sourceEnd, playbackRate = 1 }: { src: string; playing: boolean; playhead: number; start: number; volume: number; loop?: boolean; sourceStart?: number; sourceEnd?: number; playbackRate?: number }) {
   const ref = useRef<HTMLAudioElement | null>(null);
   useEffect(() => {
     const audio = ref.current;
     if (!audio) return;
-    const raw = Math.max(0, playhead - start);
+    const raw = sourceStart + Math.max(0, playhead - start) * playbackRate;
     const local = loop && Number.isFinite(audio.duration) && audio.duration > 0 ? raw % audio.duration : raw;
-    if (Math.abs(audio.currentTime - local) > 0.35) audio.currentTime = Math.min(local, Math.max(0, (audio.duration || local + 1) - 0.05));
+    const capped = sourceEnd ? Math.min(local, Math.max(0, sourceEnd - 0.01)) : local;
+    if (Math.abs(audio.currentTime - capped) > 0.35) audio.currentTime = Math.min(capped, Math.max(0, (audio.duration || capped + 1) - 0.05));
     audio.volume = Math.max(0, Math.min(1, volume || 1));
+    audio.playbackRate = playbackRate;
     if (playing) audio.play().catch(() => {}); else audio.pause();
-  }, [playing, playhead, start, src, volume, loop]);
+  }, [playing, playhead, start, src, volume, loop, sourceStart, sourceEnd, playbackRate]);
   return <audio ref={ref} src={src} preload="metadata" />;
 }
 
@@ -2688,6 +2817,7 @@ function Timeline({
   audioClips,
   textClips,
   soundtrack,
+  markers,
   selectedClipId,
   playhead,
   duration,
@@ -2715,6 +2845,7 @@ function Timeline({
   audioClips: AudioClipDraft[];
   textClips: TextClipDraft[];
   soundtrack: DraftState["soundtrack"];
+  markers: TimelineMarker[];
   selectedClipId: string;
   playhead: number;
   duration: number;
@@ -2749,7 +2880,7 @@ function Timeline({
   const laneHeight = 72;
   const laneCount = trackIDs.length + (textClips.length ? 1 : 0) + 1 + (hasSoundtrack ? 1 : 0);
   const timelineHeight = rulerHeight + laneCount * laneHeight;
-  const snapPoints = [0, playhead, ...clips.flatMap((clip) => [clip.start, clip.start + clip.length]), ...audioClips.flatMap((clip) => [clip.start, clip.start + clip.length]), ...textClips.flatMap((clip) => [clip.start, clip.start + clip.length])];
+  const snapPoints = [0, playhead, ...markers.map((marker) => marker.time), ...clips.flatMap((clip) => [clip.start, clip.start + clip.length]), ...audioClips.flatMap((clip) => [clip.start, clip.start + clip.length]), ...textClips.flatMap((clip) => [clip.start, clip.start + clip.length])];
   const sortedAudio = [...audioClips].sort((a, b) => a.start - b.start);
   const gaps: { start: number; length: number }[] = [];
   let audioCursor = 0;
@@ -2813,6 +2944,19 @@ function Timeline({
               <div className="absolute top-0 left-0 h-7 bg-bg-card border-r border-b border-border z-30" style={{ width: laneInset }} />
               <div className="absolute top-0 h-7 border-b border-border bg-bg-card" style={{ left: laneInset, width: laneWidth }}>
                 {ticks.map((tick) => <div key={tick} className="absolute top-0 bottom-0 border-l border-border/80 text-[9px] text-text-dim pt-1 pl-1" style={{ left: tick * pxPerSecond }}>{formatTime(tick)}</div>)}
+                {markers.map((marker, index) => (
+                  <button
+                    key={marker.id || `${marker.type}-${marker.time}-${index}`}
+                    type="button"
+                    className="absolute top-0 h-7 w-3 -ml-1.5 z-20 group"
+                    style={{ left: Math.max(0, marker.time) * pxPerSecond }}
+                    title={`${marker.label || marker.type} · ${formatTime(marker.time)}`}
+                    onClick={(event) => { event.stopPropagation(); onSeek(marker.time); }}
+                  >
+                    <span className="block mx-auto w-0 h-0 border-l-[5px] border-r-[5px] border-t-[7px] border-l-transparent border-r-transparent border-t-amber-400" />
+                    <span className="block mx-auto h-5 w-px bg-amber-400/80" />
+                  </button>
+                ))}
               </div>
               <div
                 className="bg-accent z-40 pointer-events-none"
@@ -2931,6 +3075,59 @@ function VisualLayoutEditor({ clip, onChange }: { clip: ClipDraft; onChange: (pa
       <Field label="Corner radius"><input type="number" min={0} step={1} value={layout.border_radius ?? 0} onChange={(e) => update({ border_radius: Number(e.target.value) || undefined })} className={field} /></Field>
     </div>
     <label className="flex items-center gap-2 text-xs text-text-muted"><input type="checkbox" checked={!!layout.shadow} onChange={(e) => update({ shadow: e.target.checked || undefined })} />Drop shadow</label>
+  </div>;
+}
+
+function SourceFramingEditor({ clip, onChange }: { clip: ClipDraft; onChange: (patch: Partial<ClipDraft>) => void }) {
+  const field = "bg-bg-input border border-border rounded px-2 py-1.5 text-sm w-full";
+  const transform = clip.transform;
+  const keyframes = transform?.keyframes || [];
+  const updateTransform = (patch: Partial<SourceTransform>) => onChange({ transform: { x: 0.5, y: 0.5, scale: 1, ...transform, ...patch } });
+  const updateKeyframe = (index: number, patch: Partial<TransformKeyframe>) => {
+    const next = keyframes.map((keyframe, current) => current === index ? { ...keyframe, ...patch } : keyframe);
+    updateTransform({ keyframes: next.sort((a, b) => a.time - b.time) });
+  };
+  const addKeyframe = () => {
+    const last = keyframes[keyframes.length - 1];
+    const time = last ? Math.min(clip.length, last.time + Math.max(0.1, clip.length / 4)) : Math.max(0.1, clip.length / 2);
+    updateTransform({ keyframes: [...keyframes, { time, x: last?.x ?? transform?.x ?? 0.5, y: last?.y ?? transform?.y ?? 0.5, scale: last?.scale || transform?.scale || 1, easing: "ease_in_out" }] });
+  };
+  return <div className="border-t border-border pt-3 space-y-3">
+    <div className="flex items-center gap-2">
+      <div className="text-[10px] uppercase tracking-wide text-text-dim flex-1">Source framing</div>
+      {(clip.source_start || clip.source_end || (clip.playback_rate && clip.playback_rate !== 1) || clip.crop || clip.transform) && <button type="button" onClick={() => onChange({ source_start: undefined, source_end: undefined, playback_rate: undefined, crop: undefined, transform: undefined })} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Reset</button>}
+    </div>
+    {clip.asset.type === "video" && <div className="grid grid-cols-3 gap-2">
+      <Field label="Source in (seconds)"><input type="number" min={0} step={0.1} value={clip.source_start ?? 0} onChange={(e) => onChange({ source_start: Math.max(0, Number(e.target.value)) || undefined })} className={field} /></Field>
+      <Field label="Source out (seconds)"><input type="number" min={0} step={0.1} value={clip.source_end ?? 0} onChange={(e) => onChange({ source_end: Math.max(0, Number(e.target.value)) || undefined })} className={field} /></Field>
+      <Field label="Playback rate"><input type="number" min={0.25} max={16} step={0.25} value={clip.playback_rate ?? 1} onChange={(e) => { const rate = Number(e.target.value); onChange({ playback_rate: rate === 1 ? undefined : rate }); }} className={field} /></Field>
+    </div>}
+    <div className="flex items-center gap-2">
+      <label className="flex items-center gap-2 text-xs text-text-muted flex-1"><input type="checkbox" checked={!!clip.crop} onChange={(e) => onChange({ crop: e.target.checked ? { x: 0, y: 0, width: 1, height: 1 } : undefined })} />Crop source</label>
+      <label className="flex items-center gap-2 text-xs text-text-muted"><input type="checkbox" checked={!!transform} onChange={(e) => onChange({ transform: e.target.checked ? { x: 0.5, y: 0.5, scale: 1, keyframes: [] } : undefined })} />Pan and zoom</label>
+    </div>
+    {clip.crop && <div className="grid grid-cols-4 gap-2">
+      <Field label="Crop X"><input type="number" min={0} max={1} step={0.01} value={clip.crop.x} onChange={(e) => onChange({ crop: { ...clip.crop!, x: Number(e.target.value) } })} className={field} /></Field>
+      <Field label="Crop Y"><input type="number" min={0} max={1} step={0.01} value={clip.crop.y} onChange={(e) => onChange({ crop: { ...clip.crop!, y: Number(e.target.value) } })} className={field} /></Field>
+      <Field label="Width"><input type="number" min={0.01} max={1} step={0.01} value={clip.crop.width} onChange={(e) => onChange({ crop: { ...clip.crop!, width: Number(e.target.value) } })} className={field} /></Field>
+      <Field label="Height"><input type="number" min={0.01} max={1} step={0.01} value={clip.crop.height} onChange={(e) => onChange({ crop: { ...clip.crop!, height: Number(e.target.value) } })} className={field} /></Field>
+    </div>}
+    {transform && <div className="space-y-2">
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="Focus X"><input type="number" min={0} max={1} step={0.01} value={transform.x ?? 0.5} onChange={(e) => updateTransform({ x: Number(e.target.value) })} className={field} /></Field>
+        <Field label="Focus Y"><input type="number" min={0} max={1} step={0.01} value={transform.y ?? 0.5} onChange={(e) => updateTransform({ y: Number(e.target.value) })} className={field} /></Field>
+        <Field label="Zoom"><input type="number" min={1} max={8} step={0.1} value={transform.scale || 1} onChange={(e) => updateTransform({ scale: Number(e.target.value) })} className={field} /></Field>
+      </div>
+      {keyframes.map((keyframe, index) => <div key={`${index}-${keyframe.time}`} className="grid grid-cols-6 gap-1.5 items-end border border-border rounded p-2">
+        <Field label="Time"><input type="number" min={0} max={clip.length} step={0.1} value={keyframe.time} onChange={(e) => updateKeyframe(index, { time: Number(e.target.value) })} className={field} /></Field>
+        <Field label="X"><input type="number" min={0} max={1} step={0.01} value={keyframe.x ?? transform.x ?? 0.5} onChange={(e) => updateKeyframe(index, { x: Number(e.target.value) })} className={field} /></Field>
+        <Field label="Y"><input type="number" min={0} max={1} step={0.01} value={keyframe.y ?? transform.y ?? 0.5} onChange={(e) => updateKeyframe(index, { y: Number(e.target.value) })} className={field} /></Field>
+        <Field label="Zoom"><input type="number" min={1} max={8} step={0.1} value={keyframe.scale || transform.scale || 1} onChange={(e) => updateKeyframe(index, { scale: Number(e.target.value) })} className={field} /></Field>
+        <Field label="Easing"><select value={keyframe.easing || "linear"} onChange={(e) => updateKeyframe(index, { easing: e.target.value as TransformKeyframe["easing"] })} className={field}><option value="linear">Linear</option><option value="ease_in">Ease in</option><option value="ease_out">Ease out</option><option value="ease_in_out">Ease in/out</option></select></Field>
+        <button type="button" onClick={() => updateTransform({ keyframes: keyframes.filter((_, current) => current !== index) })} className="h-9 text-xs border border-red/50 text-red rounded hover:bg-red/10">Remove</button>
+      </div>)}
+      <button type="button" onClick={addKeyframe} className="w-full text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Add pan/zoom keyframe</button>
+    </div>}
   </div>;
 }
 
@@ -3124,6 +3321,7 @@ function ClipEditorModal({
               onChange={(timing) => onVisualClip(visualClip.id, { timing })}
             />
             <VisualLayoutEditor clip={visualClip} onChange={(patch) => onVisualClip(visualClip.id, patch)} />
+            <SourceFramingEditor clip={visualClip} onChange={(patch) => onVisualClip(visualClip.id, patch)} />
             {!visualClip.ai && (
               <div className="grid grid-cols-3 gap-2">
                 <button type="button" onClick={() => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, type: "image" }, duration_mode: defaultDurationMode("image"), ai: defaultAI("image", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate image</button>
@@ -3278,6 +3476,9 @@ function ClipEditorModal({
               <Field label="Volume">
                 <input type="number" min={0} max={1} step={0.05} value={audioClip.volume} onChange={(e) => onAudioClip(audioClip.id, { volume: Number(e.target.value) })} className={field} />
               </Field>
+              {audioClip.asset.type !== "silence" && <Field label="Source in"><input type="number" min={0} step={0.1} value={audioClip.source_start ?? 0} onChange={(e) => onAudioClip(audioClip.id, { source_start: Math.max(0, Number(e.target.value)) || undefined })} className={field} /></Field>}
+              {audioClip.asset.type !== "silence" && <Field label="Source out"><input type="number" min={0} step={0.1} value={audioClip.source_end ?? 0} onChange={(e) => onAudioClip(audioClip.id, { source_end: Math.max(0, Number(e.target.value)) || undefined })} className={field} /></Field>}
+              {audioClip.asset.type !== "silence" && <Field label="Playback rate"><input type="number" min={0.25} max={16} step={0.25} value={audioClip.playback_rate ?? 1} onChange={(e) => { const rate = Number(e.target.value); onAudioClip(audioClip.id, { playback_rate: rate === 1 ? undefined : rate }); }} className={field} /></Field>}
               {audioClip.ai && (
                 <Field label="Duration mode">
                   <select value={audioClip.duration_mode || defaultDurationMode(audioClip.ai.media_kind)} onChange={(e) => onAudioClip(audioClip.id, { duration_mode: e.target.value as DurationMode })} className={field}>
@@ -3334,6 +3535,33 @@ function ClipEditorModal({
       </div>
     </div>
   );
+}
+
+function MarkerEditor({ markers, onChange }: { markers: TimelineMarker[]; onChange: (markers: TimelineMarker[]) => void }) {
+  const field = "bg-bg-input border border-border rounded px-2 py-1.5 text-xs w-full";
+  const update = (index: number, patch: Partial<TimelineMarker>) => onChange(markers.map((marker, current) => current === index ? { ...marker, ...patch } : marker));
+  const add = () => {
+    const lastTime = markers.reduce((latest, marker) => Math.max(latest, marker.time), 0);
+    onChange([...markers, { id: `marker-${Date.now()}`, time: lastTime, type: "event", label: "Event" }]);
+  };
+  return <div className="border-t border-border pt-3 space-y-2">
+    <div className="flex items-center gap-2">
+      <div className="text-[10px] uppercase tracking-wide text-text-dim flex-1">Event markers</div>
+      <button type="button" onClick={add} className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg">Add</button>
+    </div>
+    {markers.length === 0 ? <div className="text-xs text-text-muted border border-dashed border-border rounded p-2">Paste or generate markers through the API, or add one here.</div> : markers.map((marker, index) => <div key={marker.id || index} className="border border-border rounded p-2 bg-bg space-y-1.5">
+      <div className="grid grid-cols-2 gap-1.5">
+        <Field label="Time"><input type="number" min={0} step={0.1} value={marker.time} onChange={(e) => update(index, { time: Math.max(0, Number(e.target.value)) })} className={field} /></Field>
+        <Field label="Type"><input value={marker.type} onChange={(e) => update(index, { type: e.target.value })} placeholder="click" className={field} /></Field>
+      </div>
+      <Field label="Label"><input value={marker.label || ""} onChange={(e) => update(index, { label: e.target.value || undefined })} placeholder="Send" className={field} /></Field>
+      <Field label="Value"><input value={typeof marker.value === "string" || typeof marker.value === "number" ? String(marker.value) : ""} onChange={(e) => update(index, { value: e.target.value || undefined })} placeholder="thinking" className={field} /></Field>
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] text-text-dim flex-1">{marker.region ? "Includes active-region coordinates" : "Timeline event"}</span>
+        <button type="button" onClick={() => onChange(markers.filter((_, current) => current !== index))} className="text-xs px-2 py-1 border border-red/50 text-red rounded hover:bg-red/10">Remove</button>
+      </div>
+    </div>)}
+  </div>;
 }
 
 function Inspector({
@@ -3520,6 +3748,7 @@ function Inspector({
               Silence
             </button>
           </div>
+          <MarkerEditor markers={draft.markers} onChange={(markers) => onDraft((cur) => ({ ...cur, markers }))} />
         </section>
 
         <section className="space-y-2">
@@ -3619,6 +3848,9 @@ function Inspector({
                     <Field label="Volume">
                       <input type="number" min={0} max={1} step={0.05} value={audio.volume} onChange={(e) => onAudioClip(audio.id, { volume: Number(e.target.value) })} className={field} />
                     </Field>
+                    {audio.asset.type !== "silence" && <Field label="Source in"><input type="number" min={0} step={0.1} value={audio.source_start ?? 0} onChange={(e) => onAudioClip(audio.id, { source_start: Math.max(0, Number(e.target.value)) || undefined })} className={field} /></Field>}
+                    {audio.asset.type !== "silence" && <Field label="Source out"><input type="number" min={0} step={0.1} value={audio.source_end ?? 0} onChange={(e) => onAudioClip(audio.id, { source_end: Math.max(0, Number(e.target.value)) || undefined })} className={field} /></Field>}
+                    {audio.asset.type !== "silence" && <Field label="Playback rate"><input type="number" min={0.25} max={16} step={0.25} value={audio.playback_rate ?? 1} onChange={(e) => { const rate = Number(e.target.value); onAudioClip(audio.id, { playback_rate: rate === 1 ? undefined : rate }); }} className={field} /></Field>}
                     {audio.ai && (
                       <Field label="Duration mode">
                         <select value={audio.duration_mode || defaultDurationMode(audio.ai.media_kind)} onChange={(e) => onAudioClip(audio.id, { duration_mode: e.target.value as DurationMode })} className={field}>
@@ -3770,6 +4002,7 @@ function Inspector({
               </Field>
             </div>
             <VisualLayoutEditor clip={clip} onChange={(patch) => onClip(clip.id, patch)} />
+            <SourceFramingEditor clip={clip} onChange={(patch) => onClip(clip.id, patch)} />
             <Field label="Text overlay">
               <textarea
                 value={clip.text?.body || ""}

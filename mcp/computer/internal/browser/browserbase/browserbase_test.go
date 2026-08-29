@@ -60,6 +60,28 @@ func TestCreateSessionMapsProxyCountryToBrowserbaseGeolocation(t *testing.T) {
 	}
 }
 
+func TestProviderSessionStateMapsTimedOutLifecycle(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sessions/bb_expired" || r.Header.Get("X-BB-API-Key") != "bb_key" {
+			t.Fatalf("unexpected lifecycle request: %s key=%q", r.URL.Path, r.Header.Get("X-BB-API-Key"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"bb_expired","status":"TIMED_OUT","startedAt":"2026-08-28T10:00:00Z","expiresAt":"2026-08-28T10:05:00Z"}`)
+	}))
+	defer srv.Close()
+	previousAPIBase := apiBase
+	apiBase = srv.URL
+	t.Cleanup(func() { apiBase = previousAPIBase })
+	c := &Computer{apiKey: "bb_key", sessionID: "bb_expired", http: srv.Client()}
+	state, err := c.ProviderSessionState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != "TIMED_OUT" || state.CloseReason != "provider_session_expired" || state.ExpiresAt == "" {
+		t.Fatalf("timed-out lifecycle was not preserved: %+v", state)
+	}
+}
+
 func TestResolveProxiesRejectsContradictoryOrInvalidCountry(t *testing.T) {
 	tests := []struct {
 		name string

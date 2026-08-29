@@ -42,6 +42,10 @@ const (
 type OpenOptions = api.OpenOptions
 type ExternalProxy = api.ExternalProxy
 type EnvironmentOptions = api.EnvironmentOptions
+type EffectiveEnvironment = api.EffectiveEnvironment
+type EnvironmentReporter = api.EnvironmentReporter
+type ProviderSessionState = api.ProviderSessionState
+type ProviderSessionStateReporter = api.ProviderSessionStateReporter
 type GeolocationOptions = api.GeolocationOptions
 type SessionOpener = api.SessionOpener
 type SessionInfo = api.SessionInfo

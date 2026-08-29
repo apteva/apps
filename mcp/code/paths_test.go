@@ -23,6 +23,9 @@ func TestNormalisePath(t *testing.T) {
 		{"app/../../../etc/passwd", "", true},
 		{"app/page\x00", "", true},
 		{"app\\page.tsx", "", true},
+		{".git", "", true},
+		{".git/config", "", true},
+		{"src/.GIT/hooks/post-checkout", "", true},
 	}
 	for _, c := range cases {
 		got, err := normalisePath(c.in)

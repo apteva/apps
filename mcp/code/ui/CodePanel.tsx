@@ -4,9 +4,37 @@
 // uses host React via importmap; talks to the code sidecar through
 // /api/apps/code/api/* with same-origin cookies.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import hljs from "highlight.js/lib/core";
+import bash from "highlight.js/lib/languages/bash";
+import css from "highlight.js/lib/languages/css";
+import diff from "highlight.js/lib/languages/diff";
+import dockerfile from "highlight.js/lib/languages/dockerfile";
+import go from "highlight.js/lib/languages/go";
+import javascript from "highlight.js/lib/languages/javascript";
+import json from "highlight.js/lib/languages/json";
+import markdown from "highlight.js/lib/languages/markdown";
+import python from "highlight.js/lib/languages/python";
+import sql from "highlight.js/lib/languages/sql";
+import typescript from "highlight.js/lib/languages/typescript";
+import xml from "highlight.js/lib/languages/xml";
+import yaml from "highlight.js/lib/languages/yaml";
 import { DeviceFrame } from "./components/DeviceFrame";
 import { parseCodePanelLink } from "./components/codeLinks";
+
+hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("css", css);
+hljs.registerLanguage("diff", diff);
+hljs.registerLanguage("dockerfile", dockerfile);
+hljs.registerLanguage("go", go);
+hljs.registerLanguage("javascript", javascript);
+hljs.registerLanguage("json", json);
+hljs.registerLanguage("markdown", markdown);
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("sql", sql);
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("xml", xml);
+hljs.registerLanguage("yaml", yaml);
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps install independently.
@@ -108,6 +136,29 @@ interface Repo {
   template_scope?: "private" | "project" | "global";
   template_tagline?: string;
   template_icon?: string;
+}
+
+interface GitRemote {
+  fetch_url: string;
+  provider_slug?: string;
+  default_branch?: string;
+  last_fetch_at?: string;
+  last_push_at?: string;
+  last_error?: string;
+}
+
+interface GitStatus {
+  git_backed: boolean;
+  branch?: string;
+  detached?: boolean;
+  head_sha?: string;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  conflicted: boolean;
+  changes?: Array<{ path: string; original_path?: string; index: string; worktree: string }>;
+  remote?: GitRemote;
 }
 
 interface TemplateEntry {
@@ -367,6 +418,128 @@ function isLikelyText(path: string): boolean {
   return true;
 }
 
+interface SyntaxLanguage {
+  id: string | null;
+  label: string;
+}
+
+// Keep language selection deterministic. Auto-detection looks clever on tiny
+// files but produces distracting false positives (README as CSS, env as SQL).
+function syntaxLanguageForPath(path: string): SyntaxLanguage {
+  const name = path.split("/").pop()?.toLowerCase() || "";
+  const ext = name.includes(".") ? name.split(".").pop() || "" : "";
+  if (name === "dockerfile" || name.startsWith("dockerfile.")) return { id: "dockerfile", label: "Dockerfile" };
+  if (name === "makefile") return { id: null, label: "Makefile" };
+  switch (ext) {
+    case "js": case "jsx": case "mjs": case "cjs":
+      return { id: "javascript", label: ext === "jsx" ? "JSX" : "JavaScript" };
+    case "ts": case "tsx": case "mts": case "cts":
+      return { id: "typescript", label: ext === "tsx" ? "TSX" : "TypeScript" };
+    case "json": case "jsonc":
+      return { id: "json", label: ext.toUpperCase() };
+    case "css": case "scss": case "sass": case "less":
+      return { id: "css", label: ext.toUpperCase() };
+    case "html": case "htm": case "xml": case "svg":
+      return { id: "xml", label: ext === "svg" ? "SVG" : ext.toUpperCase() };
+    case "md": case "mdx":
+      return { id: "markdown", label: ext.toUpperCase() };
+    case "sh": case "bash": case "zsh":
+      return { id: "bash", label: "Shell" };
+    case "go":
+      return { id: "go", label: "Go" };
+    case "py": case "pyw":
+      return { id: "python", label: "Python" };
+    case "yaml": case "yml":
+      return { id: "yaml", label: "YAML" };
+    case "sql":
+      return { id: "sql", label: "SQL" };
+    case "diff": case "patch":
+      return { id: "diff", label: "Diff" };
+    default:
+      return { id: null, label: ext ? ext.toUpperCase() : "Plain text" };
+  }
+}
+
+function escapeHTML(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+const CODE_SYNTAX_THEME = `
+  .code-syntax .hljs-comment,
+  .code-syntax .hljs-quote { color: var(--text-dim); font-style: italic; }
+  .code-syntax .hljs-keyword,
+  .code-syntax .hljs-selector-tag,
+  .code-syntax .hljs-doctag { color: var(--accent); font-weight: 600; }
+  .code-syntax .hljs-string,
+  .code-syntax .hljs-regexp,
+  .code-syntax .hljs-attr,
+  .code-syntax .hljs-template-tag { color: var(--success); }
+  .code-syntax .hljs-number,
+  .code-syntax .hljs-literal,
+  .code-syntax .hljs-symbol,
+  .code-syntax .hljs-bullet { color: var(--warn); }
+  .code-syntax .hljs-title,
+  .code-syntax .hljs-section,
+  .code-syntax .hljs-function .hljs-title { color: var(--info); }
+  .code-syntax .hljs-built_in,
+  .code-syntax .hljs-type,
+  .code-syntax .hljs-class .hljs-title { color: color-mix(in srgb, var(--warn), var(--text) 22%); }
+  .code-syntax .hljs-variable,
+  .code-syntax .hljs-template-variable,
+  .code-syntax .hljs-params,
+  .code-syntax .hljs-attribute { color: color-mix(in srgb, var(--accent), var(--text) 38%); }
+  .code-syntax .hljs-meta,
+  .code-syntax .hljs-tag,
+  .code-syntax .hljs-name { color: color-mix(in srgb, var(--info), var(--text) 25%); }
+  .code-syntax .hljs-property { color: color-mix(in srgb, var(--info), var(--text) 42%); }
+  .code-syntax .hljs-addition { color: var(--success); background: color-mix(in srgb, var(--success), transparent 88%); }
+  .code-syntax .hljs-deletion { color: var(--error); background: color-mix(in srgb, var(--error), transparent 88%); }
+  .code-syntax .hljs-emphasis { font-style: italic; }
+  .code-syntax .hljs-strong { font-weight: 700; }
+`;
+
+function CodeViewer({
+  path,
+  content,
+  viewerRef,
+}: {
+  path: string;
+  content: string;
+  viewerRef?: RefObject<HTMLDivElement | null>;
+}) {
+  const language = syntaxLanguageForPath(path);
+  const highlighted = useMemo(() => {
+    if (!language.id) return escapeHTML(content);
+    try {
+      return hljs.highlight(content, { language: language.id, ignoreIllegals: true }).value;
+    } catch {
+      return escapeHTML(content);
+    }
+  }, [content, language.id]);
+  const lineNumbers = useMemo(
+    () => Array.from({ length: Math.max(1, content.split("\n").length) }, (_, i) => String(i + 1)).join("\n"),
+    [content],
+  );
+
+  return (
+    <div ref={viewerRef} className="code-syntax min-w-full flex items-start bg-bg">
+      <style>{CODE_SYNTAX_THEME}</style>
+      <pre
+        aria-hidden="true"
+        className="sticky left-0 z-10 shrink-0 select-none border-r border-border/70 bg-bg-subtle px-3 py-4 text-right font-mono text-[11px] leading-5 text-text-dim"
+      >{lineNumbers}</pre>
+      <pre className="min-w-max flex-1 bg-bg px-4 py-4 font-mono text-[12px] leading-5 text-text" style={{ tabSize: 2 }}>
+        <code className={language.id ? `hljs language-${language.id}` : "hljs"} dangerouslySetInnerHTML={{ __html: highlighted }} />
+      </pre>
+    </div>
+  );
+}
+
 // Strip leading slashes / collapse "./" — the backend normalises too
 // but matching here keeps optimistic UI in sync with the eventual path.
 function cleanRel(p: string): string {
@@ -389,6 +562,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [error, setError] = useState("");
   const [loadingTree, setLoadingTree] = useState(false);
   const [loadingFile, setLoadingFile] = useState(false);
+  const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
+  const [gitBusy, setGitBusy] = useState(false);
+  const [copiedPath, setCopiedPath] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showImportGithub, setShowImportGithub] = useState(false);
   const [zipImportTarget, setZipImportTarget] = useState<"new" | string | null>(null);
@@ -406,7 +582,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [forkSlug, setForkSlug] = useState<string | null>(null);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const uploadRef = useRef<HTMLInputElement | null>(null);
-  const fileViewRef = useRef<HTMLPreElement | null>(null);
+  const fileViewRef = useRef<HTMLDivElement | null>(null);
 
   const selectedRepo = repos.find((r) => r.slug === selectedSlug);
 
@@ -509,6 +685,17 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     [api],
   );
 
+  const loadGitStatus = useCallback(
+    async (slug: string) => {
+      try {
+        setGitStatus(await api<GitStatus>("GET", `/repos/${slug}/git/status`));
+      } catch {
+        setGitStatus(null);
+      }
+    },
+    [api],
+  );
+
   const [confirmState, setConfirmState] = useState<ConfirmRequest | null>(null);
   const [markTemplateFor, setMarkTemplateFor] = useState<string | null>(null);
 
@@ -520,6 +707,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     setActiveView("code");
     setExpandedDirs(new Set()); // reset; loadTree seeds top-level dirs.
     loadTree(slug);
+    loadGitStatus(slug);
   };
   const selectRepo = (slug: string) => {
     if (dirty) {
@@ -568,8 +756,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     if (initialLinkApplied.current || initialLink.view !== "repositories" || !initialLink.repo) return;
     initialLinkApplied.current = true;
     loadTree(initialLink.repo);
+    loadGitStatus(initialLink.repo);
     if (initialLink.path) openPath(initialLink.repo, initialLink.path);
-  }, [initialLink, loadTree, openPath]);
+  }, [initialLink, loadGitStatus, loadTree, openPath]);
 
   const initialLineApplied = useRef(false);
   useEffect(() => {
@@ -628,8 +817,72 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
           }
         }
         break;
+      case "repo.git.connected":
+      case "repo.git.fetched":
+      case "repo.git.pulled":
+      case "repo.git.committed":
+      case "repo.git.pushed":
+      case "repo.git.switched":
+        if (selectedSlug && ev.data?.slug === selectedSlug) {
+          loadGitStatus(selectedSlug);
+          loadTree(selectedSlug);
+        }
+        break;
     }
   });
+
+  const runGitAction = async (action: "fetch" | "pull" | "push") => {
+    if (!selectedSlug) return;
+    setGitBusy(true);
+    setError("");
+    try {
+      setGitStatus(await api<GitStatus>("POST", `/repos/${selectedSlug}/git/${action}`, {}));
+      if (action === "pull") {
+        await loadTree(selectedSlug);
+        if (openFile && !dirty) await openPath(selectedSlug, openFile.path);
+      }
+    } catch (e) {
+      setError(`Git ${action} failed: ${(e as Error).message}`);
+    } finally {
+      setGitBusy(false);
+    }
+  };
+
+  const commitGitChanges = async () => {
+    if (!selectedSlug) return;
+    const message = window.prompt("Commit message");
+    if (!message?.trim()) return;
+    setGitBusy(true);
+    setError("");
+    try {
+      setGitStatus(await api<GitStatus>("POST", `/repos/${selectedSlug}/git/commit`, { message: message.trim() }));
+    } catch (e) {
+      setError(`Git commit failed: ${(e as Error).message}`);
+    } finally {
+      setGitBusy(false);
+    }
+  };
+
+  const connectGitRemote = async () => {
+    if (!selectedSlug) return;
+    const remoteUrl = window.prompt("HTTPS Git remote URL");
+    if (!remoteUrl?.trim()) return;
+    setGitBusy(true);
+    setError("");
+    try {
+      const result = await api<{ status: GitStatus; reconciliation_required: boolean; safety_branch?: string }>(
+        "POST", `/repos/${selectedSlug}/git/connect`, { remote_url: remoteUrl.trim() },
+      );
+      setGitStatus(result.status);
+      if (result.reconciliation_required) {
+        setError(`Remote connected without overwriting local files. Reconciliation is required; local work is preserved on ${result.safety_branch || "a safety branch"}.`);
+      }
+    } catch (e) {
+      setError(`Connect failed: ${(e as Error).message}`);
+    } finally {
+      setGitBusy(false);
+    }
+  };
 
   const selectFile = (path: string) => {
     if (!selectedSlug) return;
@@ -726,6 +979,19 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     }
     setDraft(openFile.content);
     setEditing(false);
+  };
+
+  const copyOpenFile = async () => {
+    if (!openFile) return;
+    try {
+      await navigator.clipboard.writeText(openFile.content);
+      setCopiedPath(openFile.path);
+      window.setTimeout(() => {
+        setCopiedPath((current) => current === openFile.path ? null : current);
+      }, 1600);
+    } catch (e) {
+      setError("Copy failed: " + (e as Error).message);
+    }
   };
 
   const handleCreateFile = async (rawPath: string, content: string) => {
@@ -859,9 +1125,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             <button
               type="button"
               onClick={() => setShowImportGithub(true)}
-              title="Import a repository from GitHub"
+              title="Clone a Git repository"
               className="px-2 py-0.5 text-xs border border-border text-text-muted rounded hover:text-text hover:border-text"
-            >GitHub</button>
+            >Git</button>
             <button
               type="button"
               onClick={() => setZipImportTarget("new")}
@@ -982,6 +1248,29 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             >Archive</button>
           </header>
 
+          <div className="px-4 py-1.5 border-b border-border flex items-center gap-3 text-[11px] text-text-muted min-h-8">
+            {gitStatus?.git_backed ? (
+              <>
+                <span
+                  className={`font-mono truncate ${gitStatus.conflicted ? "text-red" : gitStatus.dirty ? "text-yellow" : "text-green"}`}
+                  title={gitStatus.remote?.fetch_url || "Git repository"}
+                >
+                  {gitStatus.detached ? "detached" : gitStatus.branch || "git"}{gitStatus.dirty ? "*" : ""}
+                </span>
+                {gitStatus.upstream && <span className="font-mono text-text-dim truncate">{gitStatus.upstream}</span>}
+                {gitStatus.ahead > 0 && <span title="Commits ahead">↑{gitStatus.ahead}</span>}
+                {gitStatus.behind > 0 && <span title="Commits behind">↓{gitStatus.behind}</span>}
+                <span className="flex-1" />
+                <button type="button" disabled={gitBusy} onClick={() => runGitAction("fetch")} className="hover:text-text disabled:opacity-40">Fetch</button>
+                <button type="button" disabled={gitBusy || gitStatus.dirty || gitStatus.conflicted} onClick={() => runGitAction("pull")} className="hover:text-text disabled:opacity-40" title="Fast-forward pull">Pull</button>
+                <button type="button" disabled={gitBusy || !gitStatus.dirty || gitStatus.conflicted} onClick={commitGitChanges} className="hover:text-text disabled:opacity-40">Commit</button>
+                <button type="button" disabled={gitBusy || gitStatus.conflicted} onClick={() => runGitAction("push")} className="hover:text-text disabled:opacity-40">Push</button>
+              </>
+            ) : (
+              <button type="button" disabled={gitBusy} onClick={connectGitRemote} className="text-accent hover:underline disabled:opacity-40">Connect Git remote</button>
+            )}
+          </div>
+
           <div className="flex-1 min-h-0 flex">
               <aside className="w-72 border-r border-border flex flex-col">
                 <div className="p-3 border-b border-border flex items-center gap-1">
@@ -1083,6 +1372,21 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                         {initialLink.path === openFile.path && initialLink.line ? `:${initialLink.line}` : ""}
                         {dirty ? " •" : ""}
                       </span>
+                      {isLikelyText(openFile.path) && !editing && (
+                        <>
+                          <span className="hidden sm:inline rounded border border-border bg-bg-subtle px-1.5 py-0.5 text-[10px] font-medium text-text-muted">
+                            {syntaxLanguageForPath(openFile.path).label}
+                          </span>
+                          <span className="hidden md:inline text-[10px] tabular-nums text-text-dim">
+                            {Math.max(1, openFile.content.split("\n").length)} lines
+                          </span>
+                          <button
+                            type="button"
+                            onClick={copyOpenFile}
+                            className="px-2 py-0.5 text-xs text-text-muted hover:text-text"
+                          >{copiedPath === openFile.path ? "Copied" : "Copy"}</button>
+                        </>
+                      )}
                       {isLikelyText(openFile.path) && (
                         editing ? (
                           <>
@@ -1116,7 +1420,8 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                           value={draft}
                           onChange={(e) => setDraft(e.target.value)}
                           spellCheck={false}
-                          className="w-full h-full bg-bg text-text font-mono text-[11px] p-4 border-0 outline-none resize-none whitespace-pre"
+                          className="w-full h-full bg-bg text-text font-mono text-[12px] leading-5 p-4 border-0 outline-none resize-none whitespace-pre caret-accent"
+                          style={{ tabSize: 2 }}
                           onKeyDown={(e) => {
                             if ((e.metaKey || e.ctrlKey) && e.key === "s") {
                               e.preventDefault();
@@ -1125,9 +1430,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                           }}
                         />
                       ) : (
-                        <pre ref={fileViewRef} className="text-[11px] leading-5 font-mono p-4 text-text whitespace-pre overflow-auto">
-                          {openFile.content}
-                        </pre>
+                        <CodeViewer path={openFile.path} content={openFile.content} viewerRef={fileViewRef} />
                       )}
                     </div>
                   </>
@@ -1831,14 +2134,13 @@ function MarkTemplateDialog({
 
 // ─── ImportGithubDialog ────────────────────────────────────────────
 //
-// Two-mode picker for importing a repository from GitHub. Mode A
-// renders a typeahead populated by `list_repos` (the bound github
-// integration's tool); mode B is free-text "owner/repo" for repos the
-// user has read access to but doesn't own.
+// Provider-neutral Git clone dialog. GitHub is used only as an optional
+// discovery picker; both picker and URL modes clone through the generic Git
+// service and retain history/upstream tracking.
 //
 // Wires through:
 //   GET  /api/github/repos        → integration → list_repos
-//   POST /api/github/import       → repos_import_github
+//   POST /api/git/import          → repos_git_import
 //
 // When the github connection isn't bound, the GET returns 424 (Failed
 // Dependency) and the dialog renders a "Connect GitHub" CTA pointing
@@ -1877,6 +2179,7 @@ function ImportGithubDialog({
 
   const [owner, setOwner] = useState("");
   const [repo, setRepo] = useState("");
+  const [remoteUrl, setRemoteUrl] = useState("");
   const [ref, setRef] = useState("");
   const [slug, setSlug] = useState("");
   const [framework, setFramework] = useState<(typeof FRAMEWORKS_IMPORT)[number]>("");
@@ -1921,24 +2224,28 @@ function ImportGithubDialog({
   const pickRepo = (r: GithubRepo) => {
     setOwner(r.owner?.login || r.full_name.split("/")[0] || "");
     setRepo(r.name);
+    setRemoteUrl(`https://github.com/${r.full_name}.git`);
     setRef(r.default_branch || "");
     if (!slug) setSlug(r.name);
   };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!owner.trim() || !repo.trim()) {
-      setErr("owner and repo are required");
+    const cloneURL = mode === "picker"
+      ? remoteUrl || (owner.trim() && repo.trim() ? `https://github.com/${owner.trim()}/${repo.trim()}.git` : "")
+      : remoteUrl.trim();
+    if (!cloneURL) {
+      setErr(mode === "picker" ? "choose a repository" : "Git remote URL is required");
       return;
     }
     setBusy(true);
     setErr("");
     try {
-      const r = await api<{ repository: { slug: string } }>("POST", "/github/import", {
-        owner: owner.trim(),
-        repo: repo.trim(),
+      const r = await api<{ repository: { slug: string } }>("POST", "/git/import", {
+        remote_url: cloneURL,
         ref: ref.trim(),
         slug: slug.trim(),
+        name: mode === "picker" && owner && repo ? `${owner}/${repo}` : undefined,
         framework,
       });
       onImported(r.repository.slug);
@@ -1957,7 +2264,7 @@ function ImportGithubDialog({
         className="w-[560px] bg-bg border border-border rounded p-5 space-y-4 max-h-[80vh] overflow-auto"
       >
         <div className="flex items-baseline justify-between">
-          <h2 className="text-text font-semibold">Import from GitHub</h2>
+          <h2 className="text-text font-semibold">Clone Git repository</h2>
           <div className="flex gap-1 text-[11px]">
             <button
               type="button"
@@ -1968,7 +2275,7 @@ function ImportGithubDialog({
               type="button"
               onClick={() => setMode("url")}
               className={`px-2 py-0.5 rounded border ${mode === "url" ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"}`}
-            >owner/repo</button>
+            >Git URL</button>
           </div>
         </div>
 
@@ -1977,13 +2284,13 @@ function ImportGithubDialog({
             <div className="text-xs text-text-muted">Loading repositories…</div>
           ) : reposErr === "github_not_connected" ? (
             <div className="text-xs text-text-muted space-y-2">
-              <div>GitHub isn't connected on this install.</div>
-              <div>Open Settings → Integrations in the dashboard, connect GitHub, then bind it to this install's "GitHub" role.</div>
+              <div>GitHub discovery isn't connected on this install.</div>
+              <div>Public repositories can still be cloned by URL. For private repositories, bind the matching GitHub, GitLab, or Bitbucket connection to this install's Git provider role.</div>
               <button
                 type="button"
                 onClick={() => setMode("url")}
                 className="text-accent hover:underline"
-              >Switch to owner/repo entry instead →</button>
+              >Switch to Git URL entry instead →</button>
             </div>
           ) : repos.length === 0 ? (
             <div className="text-xs text-text-muted">{reposErr || "No repositories accessible to this connection."}</div>
@@ -2027,27 +2334,16 @@ function ImportGithubDialog({
             </div>
           )
         ) : (
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="text-xs text-text-muted block mb-1">Owner</label>
-              <input
-                type="text"
-                value={owner}
-                onChange={(e) => setOwner(e.target.value)}
-                placeholder="apteva"
-                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-text-muted block mb-1">Repo</label>
-              <input
-                type="text"
-                value={repo}
-                onChange={(e) => setRepo(e.target.value)}
-                placeholder="apps"
-                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
-              />
-            </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">HTTPS Git remote</label>
+            <input
+              type="url"
+              value={remoteUrl}
+              onChange={(e) => setRemoteUrl(e.target.value)}
+              placeholder="https://git.example.com/team/repository.git"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+            />
+            <div className="text-[10px] text-text-dim mt-1">Public remotes work directly. Private remotes automatically use a matching bound provider connection.</div>
           </div>
         )}
 
@@ -2097,9 +2393,9 @@ function ImportGithubDialog({
           >Cancel</button>
           <button
             type="submit"
-            disabled={busy || !owner.trim() || !repo.trim()}
+            disabled={busy || (mode === "picker" ? !remoteUrl : !remoteUrl.trim())}
             className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
-          >{busy ? "Importing…" : "Import"}</button>
+          >{busy ? "Cloning…" : "Clone"}</button>
         </div>
       </form>
     </div>

@@ -56,11 +56,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.80
+version: 0.7.81
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.80 adds semantic
-  scroll identities and atomic consequence confirmation while preserving all
-  previous browser, proxy, extraction, session, and input safeguards.
+  Watch, steer, and replay hosted browser sessions. v0.7.81 hardens long-lived
+  Patreon workflows with scoped loading, stable live targets, named switches,
+  verified environment/lifecycle diagnostics, and target-specific waits.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -297,23 +297,47 @@ var sourceURLPublicDNSHTTPClient = &http.Client{Transport: publicDNSTransport()}
 
 // session is one open browser, owned by this sidecar.
 type session struct {
-	actionMu         sync.Mutex
-	comp             backends.Computer
-	backend          string
-	presentation     backends.PresentationOptions
-	backendSessionID string
-	appContextID     string
-	contextName      string
-	initialURL       string
-	persist          bool
-	timeout          int
-	proxy            SessionProxyState
-	environment      backends.EnvironmentOptions
-	openedAt         time.Time
-	lastUsed         time.Time
-	somRevision      int
-	somPrevious      map[string]backends.SetOfMarkTarget
-	somDirty         bool
+	actionMu             sync.Mutex
+	comp                 backends.Computer
+	backend              string
+	presentation         backends.PresentationOptions
+	backendSessionID     string
+	appContextID         string
+	contextName          string
+	initialURL           string
+	persist              bool
+	timeout              int
+	proxy                SessionProxyState
+	environment          backends.EnvironmentOptions
+	providerState        backends.ProviderSessionState
+	effectiveEnvironment *backends.EffectiveEnvironment
+	openedAt             time.Time
+	lastUsed             time.Time
+	somRevision          int
+	somPrevious          map[string]backends.SetOfMarkTarget
+	somDirty             bool
+}
+
+const (
+	defaultCloudSessionTimeoutSeconds = 30 * 60
+	minimumCloudSessionTimeoutSeconds = 60
+	maximumCloudSessionTimeoutSeconds = 6 * 60 * 60
+)
+
+func effectiveSessionTimeout(backend string, requested int) int {
+	if backend == "local" || backend == "service" {
+		return 0
+	}
+	if requested == 0 {
+		return defaultCloudSessionTimeoutSeconds
+	}
+	if requested < minimumCloudSessionTimeoutSeconds {
+		return minimumCloudSessionTimeoutSeconds
+	}
+	if requested > maximumCloudSessionTimeoutSeconds {
+		return maximumCloudSessionTimeoutSeconds
+	}
+	return requested
 }
 
 type reapedSession struct {
@@ -538,7 +562,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Session lifecycle and tab control for app-owned browsers. Actions: open, status, close, tabs, switch_tab, close_tab. " +
 				"Ordinary open: pass only action=open plus url? or context_id?/context_name?. Generic example: {\"action\":\"open\",\"url\":\"https://example.com\"}. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. " +
 				"Advanced open overrides are backend?, persist?, auto_create_context?, timeout?, proxy_mode?/proxy_profile?/proxy_country?/proxy_sticky?, viewport?, environment?, and presentation_mode?. " +
-				"environment is advanced, opt-in QA/device emulation for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. " +
+				"environment is advanced, opt-in QA/device emulation and requires environment_override=true. Never send environment for normal navigation, read-only audits, or saved-login contexts; omit environment_override there too. " +
 				"Proxy overrides are opt-in; omit proxy_mode and every proxy_* selector to use Computer's configured routing. " +
 				"Use presentation_mode=demo for visible cursor/click feedback, human-paced typing, non-interactive structured-control cues, and longer holds in user-facing walkthroughs. " +
 				"Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
@@ -546,7 +570,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. " +
 				"For tab control, call action=tabs first, then action=switch_tab with tab_id or action=close_tab with tab_id. " +
 				"Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. " +
-				"Browserbase honors timeout as max session lifetime. " +
+				"Cloud sessions default to an explicit 1800-second lifetime; timeout accepts 60-21600 seconds. Results expose effective timeout, session started/expires/age, provider status, and browser-observed locale/timezone. " +
 				"Prefer context_id returned by computer_context_list to reopen saved browser state; context_name works across providers when unique. " +
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). " +
@@ -565,14 +589,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"provider_context_id": map[string]any{
 					"type": "string",
 				},
-				"auto_create_context": map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
-				"persist":             map[string]any{"type": "boolean"},
-				"timeout":             map[string]any{"type": "integer", "description": "Provider session max lifetime in seconds for cloud backends. Browserbase max is provider/plan bounded."},
-				"proxy_mode":          map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}, "description": "Advanced routing override only. Omit this and all proxy_* fields for normal browsing. profile uses a configured profile; managed uses the browser backend's proxy; direct disables proxies."},
-				"proxy_profile":       map[string]any{"type": "string", "description": "Only for proxy_mode=profile. Configured profile id or unique name from computer_proxy_profile_list. Never guess or synthesize this value."},
-				"proxy_country":       map[string]any{"type": "string", "description": "Only for an explicitly requested managed/profile country override. Two-letter ISO code such as DE. Omit otherwise."},
-				"proxy_sticky":        map[string]any{"type": "string", "enum": []string{"rotating", "session", "context"}, "description": "Only for proxy_mode=profile when a sticky lifetime was explicitly requested. Omit otherwise; context requires an app-managed browser context."},
-				"environment":         sessionEnvironmentSchema(),
+				"auto_create_context":  map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
+				"persist":              map[string]any{"type": "boolean"},
+				"timeout":              map[string]any{"type": "integer", "minimum": minimumCloudSessionTimeoutSeconds, "maximum": maximumCloudSessionTimeoutSeconds, "description": "Cloud session max lifetime in seconds. Defaults to 1800 (30 minutes); accepted range is 60 through 21600 (6 hours)."},
+				"proxy_mode":           map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}, "description": "Advanced routing override only. Omit this and all proxy_* fields for normal browsing. profile uses a configured profile; managed uses the browser backend's proxy; direct disables proxies."},
+				"proxy_profile":        map[string]any{"type": "string", "description": "Only for proxy_mode=profile. Configured profile id or unique name from computer_proxy_profile_list. Never guess or synthesize this value."},
+				"proxy_country":        map[string]any{"type": "string", "description": "Only for an explicitly requested managed/profile country override. Two-letter ISO code such as DE. Omit otherwise."},
+				"proxy_sticky":         map[string]any{"type": "string", "enum": []string{"rotating", "session", "context"}, "description": "Only for proxy_mode=profile when a sticky lifetime was explicitly requested. Omit otherwise; context requires an app-managed browser context."},
+				"environment_override": map[string]any{"type": "boolean", "description": "Required true acknowledgement when environment is supplied. Omit both fields for ordinary browsing and saved-login contexts."},
+				"environment":          sessionEnvironmentSchema(),
 				"viewport": map[string]any{
 					"type":        "object",
 					"description": "Optional. Usually omit to use Computer's default desktop viewport, 1600x800. Pass width/height when a specific resolution is needed.",
@@ -588,7 +613,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "computer_use",
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
 				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. Pass expected_text for target identity. When dangerous=true, also pass expected_effect and repeat that exact generic effect in confirm_consequence; Computer rejects missing or contradictory consequence intent before mouse dispatch. Omit both consequence fields for ordinary clicks. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates receive the same consequence guard. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
-				"For an operation outcome, prefer action=wait_for with declarative URL, text, selector, or semantic-target conditions; it ignores unrelated background requests and embedded frames. To verify navigation away from a known current URL, use type=url_changed and value=<the URL before the action>; use url_equals only when value is the desired destination. Use action=wait_for_stable only when the whole page must become quiet. A wait timeout returns timed_out=true and observed signals; it never means an earlier click or edit failed. " +
+				"For an operation outcome, prefer action=wait_for with declarative URL, text, selector, or semantic-target conditions; target_state=ready|loading|enabled|disabled|checked|unchecked ignores unrelated page activity. Use action=wait_for_stable only when the whole page must become quiet. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
 				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. Custom button comboboxes are opened and inspected automatically. An unavailable option returns error_code, control_kind, menu_open, current_value, visible_options, recoverable=false, and a refreshed som_revision instead of a generic backend error. " +
 				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native or masked date/time fields, use action=set_temporal with a current target_id (preferred), label, or selector plus an ISO value such as 2026-07-01 or a time such as 11:00 AM. Computer converts ISO dates when placeholder/pattern/locale makes the displayed format clear and reports requested, actual, format_hint, and validity. A detected text mask gets one trusted-key fallback after setter reversion. If direct entry is still rejected, use returned recovery_targets or choose the desired visible role=gridcell by target_id and expected_name; never guess an aria-label CSS selector from the accessible name. Calendar-grid clicks return changed rendered values with the compact semantic observation. If the UI shows separate date and time fields, call set_temporal separately on each field. " +
@@ -636,10 +661,11 @@ func (a *App) MCPTools() []sdk.Tool {
 				"amount":              map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
 				"duration":            map[string]any{"type": "integer"},
 				"conditions": map[string]any{"type": "array", "minItems": 1, "maxItems": 8, "description": "For wait_for. Declarative browser outcomes. match defaults to any.", "items": map[string]any{"type": "object", "properties": map[string]any{
-					"type":           map[string]any{"type": "string", "enum": []string{"url_changed", "url_equals", "url_contains", "text_present", "text_absent", "selector_present", "selector_absent", "target_present", "target_absent"}, "description": "Outcome predicate. For navigation away from a known current URL, choose url_changed. Choose url_equals only when the destination URL is known."},
+					"type":           map[string]any{"type": "string", "enum": []string{"url_changed", "url_equals", "url_contains", "text_present", "text_absent", "selector_present", "selector_absent", "target_present", "target_absent", "target_state"}, "description": "Outcome predicate. target_state waits on one control without requiring page-wide quiet."},
 					"value":          map[string]any{"type": "string", "description": "Required for URL/text conditions. For url_changed, pass the URL before the action (success means current URL differs). For url_equals/url_contains, pass the desired destination URL/value. For text conditions, pass visible text."},
 					"selector":       map[string]any{"type": "string", "description": "CSS selector required for selector conditions."},
 					"target_id":      map[string]any{"type": "string", "description": "Current semantic target id required for target conditions."},
+					"state":          map[string]any{"type": "string", "enum": []string{"ready", "loading", "enabled", "disabled", "checked", "unchecked"}, "description": "Required for target_state."},
 					"case_sensitive": map[string]any{"type": "boolean"},
 				}, "required": []string{"type"}}},
 				"match":       map[string]any{"type": "string", "enum": []string{"any", "all"}, "description": "For wait_for with multiple conditions. Defaults any."},
@@ -728,14 +754,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"provider_context_id": map[string]any{
 					"type": "string",
 				},
-				"auto_create_context": map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
-				"persist":             map[string]any{"type": "boolean"},
-				"timeout":             map[string]any{"type": "integer", "description": "Provider session max lifetime in seconds for cloud backends. Browserbase max is provider/plan bounded."},
-				"proxy_mode":          map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}, "description": "Advanced routing override only. Omit this and all proxy_* fields for normal browsing."},
-				"proxy_profile":       map[string]any{"type": "string", "description": "Only for proxy_mode=profile. Never guess or synthesize this value."},
-				"proxy_country":       map[string]any{"type": "string", "description": "Only for an explicitly requested managed/profile country override. Omit otherwise."},
-				"proxy_sticky":        map[string]any{"type": "string", "enum": []string{"rotating", "session", "context"}, "description": "Only for proxy_mode=profile when explicitly requested. Omit otherwise."},
-				"environment":         sessionEnvironmentSchema(),
+				"auto_create_context":  map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
+				"persist":              map[string]any{"type": "boolean"},
+				"timeout":              map[string]any{"type": "integer", "minimum": minimumCloudSessionTimeoutSeconds, "maximum": maximumCloudSessionTimeoutSeconds, "description": "Cloud session max lifetime in seconds. Defaults to 1800 (30 minutes)."},
+				"proxy_mode":           map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}, "description": "Advanced routing override only. Omit this and all proxy_* fields for normal browsing."},
+				"proxy_profile":        map[string]any{"type": "string", "description": "Only for proxy_mode=profile. Never guess or synthesize this value."},
+				"proxy_country":        map[string]any{"type": "string", "description": "Only for an explicitly requested managed/profile country override. Omit otherwise."},
+				"proxy_sticky":         map[string]any{"type": "string", "enum": []string{"rotating", "session", "context"}, "description": "Only for proxy_mode=profile when explicitly requested. Omit otherwise."},
+				"environment_override": map[string]any{"type": "boolean", "description": "Required true acknowledgement when environment is supplied."},
+				"environment":          sessionEnvironmentSchema(),
 				"viewport": map[string]any{
 					"type":        "object",
 					"description": "Optional. Usually omit to use Computer's default desktop viewport, 1600x800. Pass width/height when a specific resolution is needed.",
@@ -1340,6 +1367,9 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	if err != nil {
 		return nil, err
 	}
+	if args["environment"] != nil && !boolArgDefault(args, "environment_override", false) {
+		return nil, fmt.Errorf("environment_override_required: pass environment_override=true to apply an explicit QA/device-emulation environment")
+	}
 	environmentOptions, err := browserenvironment.Parse(args["environment"], stringArg(args, "user_agent"))
 	if err != nil {
 		return nil, err
@@ -1358,6 +1388,7 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	if rc.Backend != "" {
 		backend = rc.Backend
 	}
+	effectiveTimeout := effectiveSessionTimeout(backend, intArg(args, "timeout"))
 	proxyPolicy, err := a.resolveSessionProxy(ctx, args, backend, rc.AppContextID)
 	if err != nil {
 		return nil, err
@@ -1397,7 +1428,7 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		CreateContext: rc.CreateProviderOnOpen,
 		Persist:       rc.Persist,
 		SessionID:     requestedBackendSessionID,
-		Timeout:       intArg(args, "timeout"),
+		Timeout:       effectiveTimeout,
 		Proxy:         proxyPolicy.Managed,
 		ProxyCountry:  proxyPolicy.ManagedCountry,
 		ExternalProxy: proxyPolicy.External,
@@ -1440,11 +1471,28 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		contextName:      rc.ContextName,
 		initialURL:       openOpts.URL,
 		persist:          rc.Persist,
-		timeout:          intArg(args, "timeout"),
+		timeout:          effectiveTimeout,
 		proxy:            proxyPolicy.State,
 		environment:      environmentOptions,
 		openedAt:         now,
 		lastUsed:         now,
+	}
+	if reporter, ok := comp.(backends.ProviderSessionStateReporter); ok {
+		stateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		state, stateErr := reporter.ProviderSessionState(stateCtx)
+		cancel()
+		if stateErr == nil {
+			sess.providerState = state
+		} else if ctx != nil {
+			ctx.Logger().Warn("provider session lifecycle unavailable", "session_id", id, "backend", backend, "err", stateErr.Error())
+		}
+	}
+	if reporter, ok := comp.(backends.EnvironmentReporter); ok {
+		if effective, probeErr := reporter.EffectiveEnvironment(); probeErr == nil {
+			sess.effectiveEnvironment = &effective
+		} else if ctx != nil {
+			ctx.Logger().Warn("effective browser environment unavailable", "session_id", id, "backend", backend, "err", probeErr.Error())
+		}
 	}
 	if recordingSupported(backend) && sess.backendSessionID == "" && usingProductionBackendFactory() {
 		_ = comp.Close()
@@ -1516,34 +1564,37 @@ func (a *App) resolveBackend(ctx *sdk.AppCtx, args map[string]any) (string, erro
 // reports. Kept tight: session_id + provenance + the URLs the
 // operator needs to identify or open the session.
 type sessionInfo struct {
-	SessionID          string                       `json:"session_id"`
-	BackendSessionID   string                       `json:"backend_session_id,omitempty"`
-	Backend            string                       `json:"backend"`
-	PresentationMode   string                       `json:"presentation_mode,omitempty"`
-	Status             string                       `json:"status"`
-	RecordingSupported bool                         `json:"recording_supported"`
-	RecordingStatus    string                       `json:"recording_status"`
-	ContextID          string                       `json:"context_id,omitempty"`
-	AppContextID       string                       `json:"app_context_id,omitempty"`
-	ContextName        string                       `json:"context_name,omitempty"`
-	Persist            bool                         `json:"persist"`
-	TimeoutSeconds     int                          `json:"timeout_seconds,omitempty"`
-	ProviderExpiresAt  string                       `json:"provider_expires_at,omitempty"`
-	CurrentURL         string                       `json:"current_url"`
-	DebugURL           string                       `json:"debug_url,omitempty"`
-	StreamURL          string                       `json:"stream_url,omitempty"`
-	ActiveTabID        string                       `json:"active_tab_id,omitempty"`
-	Tabs               []backends.TabInfo           `json:"tabs,omitempty"`
-	TabCount           int                          `json:"tab_count,omitempty"`
-	Width              int                          `json:"width"`
-	Height             int                          `json:"height"`
-	OpenedAt           string                       `json:"opened_at"`
-	LastUsedAt         string                       `json:"last_used_at"`
-	ClosedAt           string                       `json:"closed_at,omitempty"`
-	CloseReason        string                       `json:"close_reason,omitempty"`
-	Proxy              SessionProxyState            `json:"proxy"`
-	Environment        *backends.EnvironmentOptions `json:"environment,omitempty"`
-	Usage              *sessionUsageInfo            `json:"usage,omitempty"`
+	SessionID            string                         `json:"session_id"`
+	BackendSessionID     string                         `json:"backend_session_id,omitempty"`
+	Backend              string                         `json:"backend"`
+	PresentationMode     string                         `json:"presentation_mode,omitempty"`
+	Status               string                         `json:"status"`
+	RecordingSupported   bool                           `json:"recording_supported"`
+	RecordingStatus      string                         `json:"recording_status"`
+	ContextID            string                         `json:"context_id,omitempty"`
+	AppContextID         string                         `json:"app_context_id,omitempty"`
+	ContextName          string                         `json:"context_name,omitempty"`
+	Persist              bool                           `json:"persist"`
+	TimeoutSeconds       int                            `json:"timeout_seconds,omitempty"`
+	SessionAgeSeconds    int                            `json:"session_age_seconds,omitempty"`
+	ProviderExpiresAt    string                         `json:"provider_expires_at,omitempty"`
+	ProviderStatus       string                         `json:"provider_status,omitempty"`
+	CurrentURL           string                         `json:"current_url"`
+	DebugURL             string                         `json:"debug_url,omitempty"`
+	StreamURL            string                         `json:"stream_url,omitempty"`
+	ActiveTabID          string                         `json:"active_tab_id,omitempty"`
+	Tabs                 []backends.TabInfo             `json:"tabs,omitempty"`
+	TabCount             int                            `json:"tab_count,omitempty"`
+	Width                int                            `json:"width"`
+	Height               int                            `json:"height"`
+	OpenedAt             string                         `json:"opened_at"`
+	LastUsedAt           string                         `json:"last_used_at"`
+	ClosedAt             string                         `json:"closed_at,omitempty"`
+	CloseReason          string                         `json:"close_reason,omitempty"`
+	Proxy                SessionProxyState              `json:"proxy"`
+	Environment          *backends.EnvironmentOptions   `json:"environment,omitempty"`
+	EffectiveEnvironment *backends.EffectiveEnvironment `json:"effective_environment,omitempty"`
+	Usage                *sessionUsageInfo              `json:"usage,omitempty"`
 }
 
 type sessionUsageInfo struct {
@@ -1563,28 +1614,30 @@ func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 // on a slow getter.
 func (a *App) listSessions() []sessionInfo {
 	type frozen struct {
-		id           string
-		comp         backends.Computer
-		backend      string
-		presentation backends.PresentationOptions
-		appContextID string
-		contextName  string
-		persist      bool
-		timeout      int
-		proxy        SessionProxyState
-		opened       time.Time
-		used         time.Time
+		id                   string
+		comp                 backends.Computer
+		backend              string
+		presentation         backends.PresentationOptions
+		appContextID         string
+		contextName          string
+		persist              bool
+		timeout              int
+		providerState        backends.ProviderSessionState
+		effectiveEnvironment *backends.EffectiveEnvironment
+		proxy                SessionProxyState
+		opened               time.Time
+		used                 time.Time
 	}
 	a.reg.mu.Lock()
 	rows := make([]frozen, 0, len(a.reg.m))
 	for id, s := range a.reg.m {
-		rows = append(rows, frozen{id: id, comp: s.comp, backend: s.backend, presentation: s.presentation, appContextID: s.appContextID, contextName: s.contextName, persist: s.persist, timeout: s.timeout, proxy: s.proxy, opened: s.openedAt, used: s.lastUsed})
+		rows = append(rows, frozen{id: id, comp: s.comp, backend: s.backend, presentation: s.presentation, appContextID: s.appContextID, contextName: s.contextName, persist: s.persist, timeout: s.timeout, providerState: s.providerState, effectiveEnvironment: s.effectiveEnvironment, proxy: s.proxy, opened: s.openedAt, used: s.lastUsed})
 	}
 	a.reg.mu.Unlock()
 
 	out := make([]sessionInfo, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, presentation: r.presentation, appContextID: r.appContextID, contextName: r.contextName, persist: r.persist, timeout: r.timeout, proxy: r.proxy, openedAt: r.opened, lastUsed: r.used}))
+		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, presentation: r.presentation, appContextID: r.appContextID, contextName: r.contextName, persist: r.persist, timeout: r.timeout, providerState: r.providerState, effectiveEnvironment: r.effectiveEnvironment, proxy: r.proxy, openedAt: r.opened, lastUsed: r.used}))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].OpenedAt > out[j].OpenedAt })
 	return out
@@ -1654,37 +1707,46 @@ func historicalSessionInfo(row *ComputerSession) sessionInfo {
 
 func (a *App) sessionInfo(id string, s *session) sessionInfo {
 	disp := s.comp.DisplaySize()
-	providerExpiresAt := ""
+	providerExpiresAt := s.providerState.ExpiresAt
 	if s.timeout > 0 {
-		providerExpiresAt = s.openedAt.Add(time.Duration(s.timeout) * time.Second).UTC().Format(time.RFC3339)
+		if providerExpiresAt == "" {
+			providerExpiresAt = s.openedAt.Add(time.Duration(s.timeout) * time.Second).UTC().Format(time.RFC3339)
+		}
+	}
+	startedAt := s.openedAt
+	if providerStarted, err := time.Parse(time.RFC3339Nano, s.providerState.StartedAt); err == nil {
+		startedAt = providerStarted
 	}
 	tabs := tabsFor(s.comp)
 	return sessionInfo{
-		SessionID:          id,
-		BackendSessionID:   sessionBackendID(s),
-		Backend:            s.backend,
-		PresentationMode:   firstNonEmpty(s.presentation.Mode, "fast"),
-		Status:             "active",
-		RecordingSupported: recordingSupported(s.backend),
-		RecordingStatus:    activeRecordingStatus(s.backend),
-		ContextID:          contextID(s.comp),
-		AppContextID:       s.appContextID,
-		ContextName:        s.contextName,
-		Persist:            s.persist,
-		TimeoutSeconds:     s.timeout,
-		ProviderExpiresAt:  providerExpiresAt,
-		CurrentURL:         currentURL(s.comp),
-		DebugURL:           debugURL(s.comp),
-		StreamURL:          streamURL(s.comp),
-		ActiveTabID:        activeTabID(s.comp),
-		Tabs:               tabs,
-		TabCount:           len(tabs),
-		Width:              disp.Width,
-		Height:             disp.Height,
-		OpenedAt:           s.openedAt.UTC().Format(time.RFC3339),
-		LastUsedAt:         s.lastUsed.UTC().Format(time.RFC3339),
-		Proxy:              s.proxy,
-		Environment:        environmentPointer(s.environment),
+		SessionID:            id,
+		BackendSessionID:     sessionBackendID(s),
+		Backend:              s.backend,
+		PresentationMode:     firstNonEmpty(s.presentation.Mode, "fast"),
+		Status:               "active",
+		RecordingSupported:   recordingSupported(s.backend),
+		RecordingStatus:      activeRecordingStatus(s.backend),
+		ContextID:            contextID(s.comp),
+		AppContextID:         s.appContextID,
+		ContextName:          s.contextName,
+		Persist:              s.persist,
+		TimeoutSeconds:       s.timeout,
+		SessionAgeSeconds:    max(0, int(time.Since(s.openedAt).Seconds())),
+		ProviderExpiresAt:    providerExpiresAt,
+		ProviderStatus:       s.providerState.Status,
+		CurrentURL:           currentURL(s.comp),
+		DebugURL:             debugURL(s.comp),
+		StreamURL:            streamURL(s.comp),
+		ActiveTabID:          activeTabID(s.comp),
+		Tabs:                 tabs,
+		TabCount:             len(tabs),
+		Width:                disp.Width,
+		Height:               disp.Height,
+		OpenedAt:             startedAt.UTC().Format(time.RFC3339),
+		LastUsedAt:           s.lastUsed.UTC().Format(time.RFC3339),
+		Proxy:                s.proxy,
+		Environment:          environmentPointer(s.environment),
+		EffectiveEnvironment: s.effectiveEnvironment,
 	}
 }
 
@@ -1719,7 +1781,11 @@ func sessionInfoOutput(info sessionInfo) map[string]any {
 		"context_name":                  info.ContextName,
 		"persist":                       info.Persist,
 		"timeout_seconds":               info.TimeoutSeconds,
+		"effective_timeout_seconds":     info.TimeoutSeconds,
+		"session_age_seconds":           info.SessionAgeSeconds,
 		"provider_expires_at":           info.ProviderExpiresAt,
+		"provider_status":               info.ProviderStatus,
+		"expires_at":                    info.ProviderExpiresAt,
 		"current_url":                   info.CurrentURL,
 		"debug_url":                     info.DebugURL,
 		"stream_url":                    info.StreamURL,
@@ -1729,9 +1795,11 @@ func sessionInfoOutput(info sessionInfo) map[string]any {
 		"width":                         info.Width,
 		"height":                        info.Height,
 		"opened_at":                     info.OpenedAt,
+		"session_started_at":            info.OpenedAt,
 		"last_used_at":                  info.LastUsedAt,
 		"proxy":                         info.Proxy,
 		"environment_applied":           info.Environment != nil,
+		"environment_verified":          info.EffectiveEnvironment != nil && info.EffectiveEnvironment.Verified,
 		"view":                          browserViewReference(info.SessionID),
 	}
 	if info.Status != "active" {
@@ -1742,9 +1810,15 @@ func sessionInfoOutput(info sessionInfo) map[string]any {
 	}
 	if info.CloseReason != "" {
 		out["close_reason"] = info.CloseReason
+		out["provider_close_reason"] = info.CloseReason
 	}
 	if info.Environment != nil {
 		out["environment"] = info.Environment
+	}
+	if info.EffectiveEnvironment != nil {
+		out["effective_environment"] = info.EffectiveEnvironment
+		out["effective_locale"] = info.EffectiveEnvironment.Locale
+		out["effective_timezone"] = info.EffectiveEnvironment.Timezone
 	}
 	if info.Usage != nil {
 		out["usage"] = info.Usage
@@ -2656,13 +2730,36 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 func (a *App) closeUnhealthySession(ctx *sdk.AppCtx, id string, sess *session, action string, cause error) error {
 	a.reg.remove(id)
 	extra := map[string]any{"action": action}
+	closeReason, errorCode := "session_unhealthy", "session_unhealthy"
+	if sess != nil {
+		if reporter, ok := sess.comp.(backends.ProviderSessionStateReporter); ok {
+			stateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			state, stateErr := reporter.ProviderSessionState(stateCtx)
+			cancel()
+			if stateErr == nil {
+				sess.providerState = state
+				extra["provider_status"] = state.Status
+				extra["provider_started_at"] = state.StartedAt
+				extra["provider_expires_at"] = state.ExpiresAt
+				if state.CloseReason != "" {
+					closeReason = state.CloseReason
+				}
+			}
+		}
+		if closeReason == "session_unhealthy" && sess.timeout > 0 && !sess.openedAt.IsZero() && !time.Now().Before(sess.openedAt.Add(time.Duration(sess.timeout)*time.Second)) {
+			closeReason = "provider_session_expired"
+		}
+	}
+	if closeReason == "provider_session_expired" {
+		errorCode = closeReason
+	}
 	if cause != nil {
 		extra["error"] = cause.Error()
 	}
-	if _, err := a.finalizeSession(ctx, id, sess, "failed", "session_unhealthy", "session.closed", extra); err != nil && ctx != nil {
+	if _, err := a.finalizeSession(ctx, id, sess, "failed", closeReason, "session.closed", extra); err != nil && ctx != nil {
 		ctx.Logger().Warn("persist unhealthy browser session", "session_id", id, "err", err.Error())
 	}
-	return computerUseFailure("session_unhealthy", id, sess, action,
+	return computerUseFailure(errorCode, id, sess, action,
 		"browser session is no longer usable",
 		reopenSessionRecoverHint(sess),
 		cause)
@@ -3231,6 +3328,11 @@ func mergeCheckedResultPayload(payload map[string]any, result *checkedinput.Resu
 	payload["checked"] = result.Checked
 	payload["checked_previous"] = result.PreviousChecked
 	payload["checked_changed"] = result.Changed
+	payload["target_id"] = result.TargetID
+	payload["accessible_name"] = result.AccessibleName
+	payload["verified"] = result.Verified
+	payload["action_dispatched"] = result.ActionDispatched
+	payload["do_not_repeat_action"] = result.ActionDispatched
 	if result.Selector != "" {
 		payload["checked_selector"] = result.Selector
 	}
@@ -3520,7 +3622,17 @@ func resolveStableActionTarget(sess *session, action *backends.Action) error {
 	action.Label = target.Label
 	if action.Type == "scroll" {
 		action.TargetID = ""
-	} // scroll the target's nearest semantic ancestor
+	} else {
+		// Preserve the exact live element reference registered by the semantic
+		// snapshot. The backend rejects it if a framework replaces the node.
+		if strings.HasPrefix(target.ID, "som_") {
+			action.TargetID = target.ID
+		} else {
+			// AX-only and cross-frame targets cannot expose a page-world element
+			// reference; they retain the established label/coordinate guard.
+			action.TargetID = ""
+		}
+	}
 	return nil
 }
 
@@ -3655,7 +3767,7 @@ func hydrateWaitTargetConditions(sess *session, conditions []backends.WaitCondit
 	targets := setOfMarkFor(sess.comp)
 	for index := range conditions {
 		condition := &conditions[index]
-		if condition.Type != "target_present" && condition.Type != "target_absent" {
+		if condition.Type != "target_present" && condition.Type != "target_absent" && condition.Type != "target_state" {
 			continue
 		}
 		for _, target := range targets {
@@ -4318,7 +4430,7 @@ func deleteBrowserbaseContext(ctx *sdk.AppCtx, providerID string) error {
 }
 
 func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, height int, environmentOptions backends.EnvironmentOptions) backends.Config {
-	cfg := backends.Config{Type: backend, Width: width, Height: height}
+	cfg := backends.Config{Type: backend, Width: width, Height: height, Timeout: effectiveSessionTimeout(backend, intArg(args, "timeout"))}
 	switch backend {
 	case "browserbase":
 		fields := integrationFields(ctx, "browserbase")
@@ -4326,7 +4438,6 @@ func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, 
 		cfg.ProjectID = firstNonEmpty(fields["project_id"], fields["BROWSERBASE_PROJECT_ID"], os.Getenv("BROWSERBASE_PROJECT_ID"))
 		cfg.KeepAlive = false
 		cfg.Region = stringArg(args, "region")
-		cfg.Timeout = intArg(args, "timeout")
 		if boolArgDefault(args, "solve_captchas", false) {
 			cfg.SolveCaptchas = true
 		}
@@ -4338,7 +4449,6 @@ func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, 
 		cfg.BlockAds = boolArgDefault(args, "block_ads", false)
 		cfg.SolveCaptcha = boolArgDefault(args, "solve_captcha", false)
 		cfg.Region = stringArg(args, "region")
-		cfg.Timeout = intArg(args, "timeout")
 		cfg.UserAgent = environmentOptions.UserAgent
 	case "browser-engine":
 		fields := integrationFields(ctx, "browser-engine")
@@ -4346,7 +4456,6 @@ func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, 
 		cfg.URL = firstNonEmpty(stringArg(args, "backend_url"), fields["BROWSER_API_URL"], fields["base_url"], os.Getenv("BROWSER_API_URL"))
 		cfg.InitialURL = stringArg(args, "initial_url")
 		cfg.UserAgent = environmentOptions.UserAgent
-		cfg.Timeout = intArg(args, "timeout")
 		cfg.ProxyEnabled = boolArgDefault(args, "proxy_enabled", false)
 		cfg.ProxyCountry = stringArg(args, "proxy_country")
 		cfg.BrowserProjectID = intArg(args, "browser_project_id")
@@ -4779,6 +4888,7 @@ func waitConditionsArg(raw any) ([]backends.WaitCondition, error) {
 		condition := backends.WaitCondition{
 			Type: strings.ToLower(strings.TrimSpace(stringArg(mapped, "type"))), Value: strings.TrimSpace(stringArg(mapped, "value")),
 			Selector: strings.TrimSpace(stringArg(mapped, "selector")), TargetID: strings.TrimSpace(stringArg(mapped, "target_id")),
+			State: strings.ToLower(strings.TrimSpace(stringArg(mapped, "state"))),
 		}
 		condition.CaseSensitive, _ = boolArg(mapped, "case_sensitive")
 		switch condition.Type {
@@ -4793,6 +4903,15 @@ func waitConditionsArg(raw any) ([]backends.WaitCondition, error) {
 		case "target_present", "target_absent":
 			if condition.TargetID == "" {
 				return nil, fmt.Errorf("condition %d type %s requires target_id", index+1, condition.Type)
+			}
+		case "target_state":
+			if condition.TargetID == "" {
+				return nil, fmt.Errorf("condition %d type target_state requires target_id", index+1)
+			}
+			switch condition.State {
+			case "ready", "loading", "enabled", "disabled", "checked", "unchecked":
+			default:
+				return nil, fmt.Errorf("condition %d type target_state requires state=ready|loading|enabled|disabled|checked|unchecked", index+1)
 			}
 		default:
 			return nil, fmt.Errorf("condition %d has unsupported type %q", index+1, condition.Type)

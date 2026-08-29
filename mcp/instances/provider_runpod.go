@@ -56,14 +56,7 @@ type runPodPod struct {
 }
 
 func runPodBound(ctx *sdk.AppCtx) (*sdk.BoundIntegration, error) {
-	bound := ctx.IntegrationFor("provider")
-	if bound == nil || bound.ConnectionID == 0 {
-		return nil, errors.New("no VPS provider bound — bind a RunPod connection on the Instances install")
-	}
-	if bound.AppSlug != "" && bound.AppSlug != "runpod" {
-		return nil, fmt.Errorf("runpod adapter requires provider=runpod; bound slug is %q", bound.AppSlug)
-	}
-	return bound, nil
+	return instanceProviderBinding(ctx, "runpod")
 }
 
 func runPodListServerTypes(ctx *sdk.AppCtx) ([]ServerType, error) {
@@ -133,7 +126,7 @@ func runPodListImages(ctx *sdk.AppCtx) ([]Image, error) {
 }
 
 func runPodProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error) {
-	bound, err := runPodBound(ctx)
+	bound, err := storageBinding(ctx, "runpod", in.ProviderConnectionID)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +144,11 @@ func runPodProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error)
 		in.Region = "EU-RO-1"
 	}
 	computeType, gpuType, gpuCount, vcpuCount := parseRunPodSize(in.Size)
-	resourcesJSON := runPodResourcesJSON(computeType, gpuType, gpuCount, vcpuCount, 50, 20)
+	containerDiskGB := 50
+	if in.Storage.Boot != nil {
+		containerDiskGB = in.Storage.Boot.SizeGB
+	}
+	resourcesJSON := runPodResourcesJSON(computeType, gpuType, gpuCount, vcpuCount, containerDiskGB, 20)
 
 	in.Provider = "runpod"
 	in.Status = "provisioning"
@@ -183,7 +180,7 @@ func runPodProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error)
 		},
 		"dockerEntrypoint":  []string{"/bin/bash", "-lc"},
 		"dockerStartCmd":    []string{runPodSSHBootstrapScript()},
-		"containerDiskInGb": 50,
+		"containerDiskInGb": containerDiskGB,
 		"volumeInGb":        20,
 		"volumeMountPath":   "/workspace",
 	}
@@ -237,7 +234,7 @@ func runPodProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error)
 }
 
 func runPodDestroy(ctx *sdk.AppCtx, inst *Instance) error {
-	bound, err := runPodBound(ctx)
+	bound, err := storageBinding(ctx, "runpod", inst.ProviderConnectionID)
 	if err != nil {
 		return err
 	}
@@ -291,7 +288,7 @@ func kickRunPodReadinessProbe(ctx *sdk.AppCtx, id int64) {
 }
 
 func waitRunPodNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Duration) (*Instance, error) {
-	bound, err := runPodBound(ctx)
+	bound, err := storageBinding(ctx, "runpod", inst.ProviderConnectionID)
 	if err != nil {
 		return nil, err
 	}

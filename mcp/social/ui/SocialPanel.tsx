@@ -58,6 +58,12 @@ const STORAGE_API = "/api/apps/storage";
 const MEDIA_API = "/api/apps/media";
 const IMPORTABLE_PLATFORMS = new Set(["facebook", "instagram", "tiktok", "twitter", "youtube"]);
 
+type ProviderImportMode = "off" | "managed_only" | "full_history";
+
+function historyImportSupported(account: SocialAccount): boolean {
+  return account.provider_slug === "zernio" || IMPORTABLE_PLATFORMS.has(account.platform);
+}
+
 function appURL(path: string, projectId?: string | null): string {
   return scopedAppURL(API, path, projectId);
 }
@@ -100,6 +106,7 @@ interface SocialAccount {
   provider_slug?: string;
   provider_account_id?: string;
   provider_profile_id?: string;
+  provider_import_mode?: ProviderImportMode;
   capabilities?: Record<string, unknown> | null;
   display_name: string;
   avatar_url: string;
@@ -1183,7 +1190,7 @@ function ImportHistoryDialog({
   onImported: () => void;
   setStatus: (s: string) => void;
 }) {
-  const importableAccounts = accounts.filter((a) => IMPORTABLE_PLATFORMS.has(a.platform));
+  const importableAccounts = accounts.filter(historyImportSupported);
   const allPlatforms = Array.from(new Set(accounts.map((a) => a.platform))).sort();
   const [selectedPlatforms, setSelectedPlatforms] = useState<Set<string>>(
     () => new Set(importableAccounts.map((a) => a.platform))
@@ -1211,7 +1218,7 @@ function ImportHistoryDialog({
         const accountNext = new Set(accountPrev);
         for (const account of accounts) {
           if (account.platform !== platform) continue;
-          if (next.has(platform) && IMPORTABLE_PLATFORMS.has(platform)) accountNext.add(account.id);
+          if (next.has(platform) && historyImportSupported(account)) accountNext.add(account.id);
           else accountNext.delete(account.id);
         }
         return accountNext;
@@ -1297,7 +1304,7 @@ function ImportHistoryDialog({
               <label className="text-xs uppercase tracking-wide text-text-dim">Networks</label>
               <div className="flex flex-wrap gap-2">
                 {allPlatforms.map((platform) => {
-                  const supported = IMPORTABLE_PLATFORMS.has(platform);
+                  const supported = accounts.some((account) => account.platform === platform && historyImportSupported(account));
                   return (
                     <button
                       key={platform}
@@ -1329,7 +1336,7 @@ function ImportHistoryDialog({
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {accounts.map((account) => {
-                  const supported = IMPORTABLE_PLATFORMS.has(account.platform);
+                  const supported = historyImportSupported(account);
                   const checked = selectedAccounts.has(account.id);
                   return (
                     <label
@@ -2319,6 +2326,7 @@ function AccountCard({
   const [hardDelete, setHardDelete] = useState(false);
   const [importing, setImporting] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [syncingProvider, setSyncingProvider] = useState(false);
   const doRemove = async (hard = false) => {
     try {
       const query = hard ? "?hard_delete=true&delete_posts=true" : "";
@@ -2331,7 +2339,34 @@ function AccountCard({
     }
   };
   const provider = account.provider_slug || "native";
-  const importSupported = provider === "zernio" || IMPORTABLE_PLATFORMS.has(account.platform);
+  const importSupported = historyImportSupported(account);
+  const providerImportMode = account.provider_import_mode || "managed_only";
+
+  const setProviderImportMode = async (mode: ProviderImportMode) => {
+    setSyncingProvider(true);
+    setStatus(`Updating provider synchronization for ${account.display_name}…`);
+    try {
+      const res = await fetch(appURL(`/accounts/${account.id}/provider-sync`, projectId), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setStatus(
+        mode === "full_history"
+          ? `${account.display_name} will automatically import provider history.`
+          : mode === "off"
+            ? `Automatic provider synchronization is off for ${account.display_name}; publishing is unchanged.`
+            : `${account.display_name} now reconciles Social-managed posts only.`
+      );
+      onChange();
+    } catch (e) {
+      setStatus("Provider synchronization update failed: " + (e as Error).message);
+    } finally {
+      setSyncingProvider(false);
+    }
+  };
   const doImport = async () => {
     setImporting(true);
     setStatus(`Importing recent posts from ${account.display_name}…`);
@@ -2406,6 +2441,19 @@ function AccountCard({
             <HealthPill account={account} />
           </div>
         </div>
+        {provider !== "native" && (
+          <select
+            value={providerImportMode}
+            disabled={syncingProvider}
+            onChange={(event) => setProviderImportMode(event.target.value as ProviderImportMode)}
+            className="max-w-[145px] bg-bg-input border border-border rounded px-2 py-1 text-xs text-text disabled:opacity-50"
+            title="Automatic provider synchronization. This does not change publishing or direct scheduling access."
+          >
+            <option value="managed_only">Managed only</option>
+            <option value="off">Sync off</option>
+            <option value="full_history">Full history</option>
+          </select>
+        )}
         <button
           onClick={doCheck}
           disabled={checking}
@@ -4481,6 +4529,7 @@ function PostListRow({
         </button>
         <div className="flex-shrink-0 flex flex-col items-end gap-2 py-1" style={{ width: 104 }}>
           <StatusPill status={post.status} />
+          {post.source === "provider" && <ProviderImportPill />}
           {(post.status === "failed" || post.status === "partial") && (
             <button
               type="button"
@@ -4685,6 +4734,7 @@ function CalendarPostEvent({ post, projectId, onOpen, mobile = false }: {
         <div className="flex items-center gap-1 text-[10px]">
           <span className="text-text">{date?.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>
           <StatusPill status={post.status} />
+          {post.source === "provider" && <ProviderImportPill compact />}
         </div>
         <div className={`${mobile ? "text-xs" : "text-[10px]"} text-text truncate`}>{post.body || "No caption"}</div>
         {mobile && (
@@ -4831,6 +4881,7 @@ function PostDetailPanel({
             <div className="text-text-dim text-xs">{postLifecycleDate(post)?.toLocaleString()}</div>
           </div>
           <StatusPill status={post.status} />
+          {post.source === "provider" && <ProviderImportPill />}
           <button type="button" onClick={onClose} className="w-8 h-8 text-text-muted hover:text-text" aria-label="Close">×</button>
         </div>
         <div className="flex-1 overflow-y-auto">
@@ -6406,6 +6457,17 @@ function StatusPill({ status }: { status: string }) {
     status === "rejected" ? "text-error" :
     "text-text-dim";
   return <span className={"text-xs uppercase " + tone}>{status}</span>;
+}
+
+function ProviderImportPill({ compact = false }: { compact?: boolean }) {
+  return (
+    <span
+      className="inline-flex items-center rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[9px] uppercase text-accent"
+      title="Imported from a connected social provider; not created by this Social agent"
+    >
+      {compact ? "imported" : "provider import"}
+    </span>
+  );
 }
 
 function TargetChip({ target }: { target: PostTarget }) {

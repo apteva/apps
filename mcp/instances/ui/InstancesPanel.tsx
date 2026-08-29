@@ -35,9 +35,14 @@ interface Instance {
   ssh_user?: string;
   ssh_public_key?: string;
   resources_json?: string;
+  storage_json?: string;
   ports_json?: string;
   monthly_cost_cents: number;
   error?: string;
+	lifecycle_stage?: string;
+	primary_error?: string;
+	cleanup_error?: string;
+	provider_checked_at?: string;
   created_at?: string;
   ready_at?: string;
   capabilities?: {
@@ -49,6 +54,72 @@ interface Instance {
     destroy: boolean;
     upgrade: boolean;
   };
+}
+
+interface InstanceVolumeWire {
+  id: number;
+  instance_id?: number;
+  provider: string;
+  provider_volume_id: string;
+  name: string;
+  role: "boot" | "data";
+  storage_class: "local" | "block" | "network" | "ephemeral";
+  tier: string;
+  provider_type?: string;
+  size_gb: number;
+  region?: string;
+  status: string;
+  filesystem?: string;
+  mount_path?: string;
+  device_path?: string;
+  guest_ready?: boolean;
+  delete_policy: "retain" | "with_instance";
+  error?: string;
+}
+
+interface ObjectStorageWire {
+  id: number;
+  name: string;
+  provider: string;
+  provider_connection_id: number;
+  provider_id: string;
+  status: string;
+  region?: string;
+  plan?: string;
+  endpoint?: string;
+  bucket?: string;
+  access_key_id?: string;
+  error?: string;
+  created_at?: string;
+}
+
+interface ObjectStorageCredentialsWire {
+  endpoint: string;
+  region?: string;
+  bucket?: string;
+  access_key_id: string;
+  secret_access_key: string;
+  expires_at?: string;
+  shown_once: boolean;
+}
+
+interface ObjectStorageProviderWire {
+  provider: string;
+  connection_id: number;
+  default: boolean;
+}
+
+interface StorageCapabilitiesWire {
+  provider: string;
+  boot_size_configurable: boolean;
+  data_volumes: boolean;
+  dynamic_attach: boolean;
+  resize: boolean;
+  guest_prepare?: boolean;
+  guest_filesystems?: string[];
+  notes?: string;
+  storage_classes?: Array<"local" | "block" | "network" | "ephemeral">;
+  tiers: Array<{ name: string; storage_class?: string; provider_type?: string; description?: string }>;
 }
 
 interface MetricsWire {
@@ -346,12 +417,15 @@ function MultiLineChart({
 }
 
 export default function InstancesPanel({ projectId, installId }: NativePanelProps) {
+  const [view, setView] = useState<"compute" | "object-storage">("compute");
+  const [objectStorageRefresh, setObjectStorageRefresh] = useState(0);
   const [instances, setInstances] = useState<Instance[] | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [pendingDestroy, setPendingDestroy] = useState<Instance | null>(null);
   const [pendingUpgrade, setPendingUpgrade] = useState<Instance | null>(null);
+  const [volumeInstance, setVolumeInstance] = useState<Instance | null>(null);
 
   const withParams = useCallback(
     () =>
@@ -384,10 +458,12 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
     return () => clearInterval(t);
   }, [load]);
 
-  const destroy = async (inst: Instance) => {
+  const destroy = async (inst: Instance, options?: { force: boolean; retainVolumes?: boolean; retainFlexibleIPs: boolean }) => {
     setBusy(true);
     try {
-      const r = await fetch(`${API}/instances/${inst.id}?${withParams()}`, {
+	  const params = new URLSearchParams(withParams());
+	  if (options) { params.set("force", String(options.force)); if (options.retainVolumes !== undefined) params.set("retain_volumes", String(options.retainVolumes)); params.set("retain_flexible_ips", String(options.retainFlexibleIPs)); }
+      const r = await fetch(`${API}/instances/${inst.id}?${params.toString()}`, {
         method: "DELETE",
         credentials: "same-origin",
       });
@@ -432,10 +508,20 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
       <header className="px-4 py-3 border-b border-border flex flex-wrap items-baseline gap-3">
         <h1 className="text-text font-semibold">Instances</h1>
         <span className="hidden md:inline text-xs text-text-muted">
-          Host inventory — local + remote through a bound VPS provider.
+          Provision compute, block volumes, and object storage across bound cloud providers.
         </span>
+        <div className="flex items-center gap-1 ml-2">
+          <button type="button" onClick={() => setView("compute")}
+            className={`px-2 py-1 text-xs rounded ${view === "compute" ? "bg-bg-input text-text" : "text-text-muted hover:text-text"}`}>
+            Compute
+          </button>
+          <button type="button" onClick={() => setView("object-storage")}
+            className={`px-2 py-1 text-xs rounded ${view === "object-storage" ? "bg-bg-input text-text" : "text-text-muted hover:text-text"}`}>
+            Object storage
+          </button>
+        </div>
         <span className="flex-1" />
-        {remoteCount > 0 && (
+        {view === "compute" && remoteCount > 0 && (
           <span
             className="text-xs text-text-muted px-2 py-0.5 rounded bg-bg-input/40 border border-border/40"
             title="Sum of monthly cost across non-local instances (0 when the catalog hasn't priced them yet)"
@@ -450,14 +536,14 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
             <span className="text-text-dim">{remoteCount} remote</span>
           </span>
         )}
-        <button
+        {view === "compute" && <button
           type="button"
           onClick={() => setShowCreate(true)}
           className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
-        >+ Provision</button>
+        >+ Provision</button>}
         <button
           type="button"
-          onClick={load}
+          onClick={() => view === "object-storage" ? setObjectStorageRefresh((value) => value + 1) : load()}
           disabled={busy}
           className="px-2 py-0.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
         >Refresh</button>
@@ -466,7 +552,9 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
       {error && <div className="px-4 py-2 text-red text-xs border-b border-border">{error}</div>}
 
       <main className="flex-1 overflow-auto p-3 space-y-2">
-        {instances === null ? (
+        {view === "object-storage" ? (
+          <ObjectStorageSection withParams={withParams} setError={setError} refresh={objectStorageRefresh} />
+        ) : instances === null ? (
           <div className="p-6 text-text-muted text-sm">Loading…</div>
         ) : instances.length === 0 ? (
           <div className="p-6 text-text-muted text-sm">No instances. Local should auto-seed at app boot.</div>
@@ -478,6 +566,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
               withParams={withParams}
               busy={busy}
               onUpgrade={() => setPendingUpgrade(inst)}
+              onVolumes={() => setVolumeInstance(inst)}
               onDestroy={() => setPendingDestroy(inst)}
             />
           ))
@@ -489,7 +578,16 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
           inst={pendingDestroy}
           busy={busy}
           onCancel={() => setPendingDestroy(null)}
-          onConfirm={() => destroy(pendingDestroy)}
+		  onConfirm={(options) => destroy(pendingDestroy, options)}
+        />
+      )}
+
+      {volumeInstance && (
+        <VolumesDialog
+          inst={volumeInstance}
+          withParams={withParams}
+          onClose={() => setVolumeInstance(null)}
+          setError={setError}
         />
       )}
 
@@ -515,15 +613,349 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
   );
 }
 
+function ObjectStorageSection({ withParams, setError, refresh }: {
+  withParams: () => string;
+  setError: (value: string) => void;
+  refresh: number;
+}) {
+  const [items, setItems] = useState<ObjectStorageWire[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [credentialResult, setCredentialResult] = useState<{
+    object_storage: ObjectStorageWire;
+    credentials: ObjectStorageCredentialsWire;
+    warning?: string;
+    warnings?: string[];
+  } | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch(`${API}/object-storage?${withParams()}`, { credentials: "same-origin" });
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+      const body = await response.json();
+      setItems(body.object_storages || []);
+      setError("");
+    } catch (error) {
+      setItems([]);
+      setError("Object storage failed: " + (error as Error).message);
+    }
+  }, [setError, withParams]);
+
+  useEffect(() => { load(); }, [load, refresh]);
+
+  const rotate = async (item: ObjectStorageWire) => {
+    if (!window.confirm(`Rotate credentials for ${item.name}? The previous key will stop working.`)) return;
+    setBusy(true);
+    try {
+      const response = await fetch(`${API}/object-storage/${item.id}/rotate-credentials?${withParams()}`, {
+        method: "POST", credentials: "same-origin",
+      });
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+      setCredentialResult(await response.json());
+      await load();
+    } catch (error) {
+      setError("Credential rotation failed: " + (error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const destroy = async (item: ObjectStorageWire) => {
+    const scope = item.bucket ? `bucket ${item.bucket}` : `subscription ${item.name}`;
+    if (!window.confirm(`Permanently delete ${scope}? Scaleway buckets must be empty. This cannot be undone.`)) return;
+	setCredentialResult(null);
+    setBusy(true);
+    try {
+      const response = await fetch(`${API}/object-storage/${item.id}?confirm=true&${withParams()}`, {
+        method: "DELETE", credentials: "same-origin",
+      });
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+      await load();
+    } catch (error) {
+      setError("Object storage destroy failed: " + (error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 px-1 pb-1">
+        <div>
+          <div className="text-sm text-text font-medium">Object storage</div>
+          <div className="text-[11px] text-text-muted">Instances provisions the resource and displays S3 credentials once. It does not store objects or create a Connection.</div>
+        </div>
+        <span className="flex-1" />
+        <button type="button" onClick={() => setShowCreate(true)}
+          className="px-2 py-1 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg">
+          + Provision object storage
+        </button>
+      </div>
+
+      {items === null ? (
+        <div className="p-6 text-sm text-text-muted">Loading object storage…</div>
+      ) : items.length === 0 ? (
+        <div className="rounded p-6 text-sm text-text-muted" style={{ border: `1px solid ${SUBTLE_BORDER}` }}>
+          No object-storage resources are tracked yet.
+        </div>
+      ) : items.map((item) => (
+        <article key={item.id} className="rounded overflow-hidden" style={{ border: `1px solid ${SUBTLE_BORDER}` }}>
+          <div className="px-3 py-2 flex flex-wrap items-center gap-2" style={{ backgroundColor: HEADER_STRIP_BG }}>
+            <span className={statusColor(item.status) + " text-sm"}>●</span>
+            <div className="min-w-0">
+              <div className="text-sm text-text font-semibold truncate">{item.name}</div>
+              <div className="text-[10px] text-text-dim">{[item.provider, item.region, item.plan].filter(Boolean).join(" · ")}</div>
+            </div>
+            <span className="flex-1" />
+            <span className={statusColor(item.status) + " text-[10px] uppercase tracking-wider"}>{item.status}</span>
+            <button type="button" disabled={busy} onClick={() => rotate(item)}
+              className="px-2 py-0.5 text-[10px] border border-blue/60 text-blue rounded disabled:opacity-50">
+              Rotate credentials
+            </button>
+            <button type="button" disabled={busy} onClick={() => destroy(item)}
+              className="px-2 py-0.5 text-[10px] border border-red/60 text-red rounded disabled:opacity-50">
+              Destroy
+            </button>
+          </div>
+          <div className="p-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-[11px]">
+            <div><span className="text-text-dim block uppercase tracking-wider text-[9px]">Endpoint</span><span className="text-text font-mono break-all">{item.endpoint || "—"}</span></div>
+            <div><span className="text-text-dim block uppercase tracking-wider text-[9px]">Bucket / resource</span><span className="text-text font-mono break-all">{item.bucket || item.provider_id}</span></div>
+            <div><span className="text-text-dim block uppercase tracking-wider text-[9px]">Access key ID</span><span className="text-text font-mono break-all">{item.access_key_id || "—"}</span></div>
+          </div>
+          {item.error && <div className="px-3 pb-3 text-[11px] text-red">{item.error}</div>}
+        </article>
+      ))}
+
+      {showCreate && (
+        <CreateObjectStorageDialog
+          withParams={withParams}
+          onClose={() => setShowCreate(false)}
+          onCreated={(result) => { setShowCreate(false); setCredentialResult(result); load(); }}
+          setError={setError}
+        />
+      )}
+      {credentialResult && (
+        <ObjectStorageCredentialsDialog result={credentialResult} onClose={() => setCredentialResult(null)} />
+      )}
+    </section>
+  );
+}
+
+function CreateObjectStorageDialog({ withParams, onClose, onCreated, setError }: {
+  withParams: () => string;
+  onClose: () => void;
+  onCreated: (result: { object_storage: ObjectStorageWire; credentials: ObjectStorageCredentialsWire; warning?: string }) => void;
+  setError: (value: string) => void;
+}) {
+  const [providers, setProviders] = useState<ObjectStorageProviderWire[]>([]);
+  const [connectionID, setConnectionID] = useState(0);
+  const [locations, setLocations] = useState<any[]>([]);
+  const [plans, setPlans] = useState<any[]>([]);
+  const [name, setName] = useState("");
+  const [region, setRegion] = useState("");
+  const [plan, setPlan] = useState("");
+  const [bucket, setBucket] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [localError, setLocalError] = useState("");
+
+  const selectedProvider = providers.find((provider) => provider.connection_id === connectionID);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const response = await fetch(`${API}/object-storage-providers?${withParams()}`, { credentials: "same-origin" });
+        if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+        const body = await response.json();
+        const available = (body.providers || []) as ObjectStorageProviderWire[];
+        setProviders(available);
+        setConnectionID((available.find((provider) => provider.default) || available[0])?.connection_id || 0);
+      } catch (error) {
+        setLocalError((error as Error).message);
+        setLoading(false);
+      }
+    })();
+  }, [withParams]);
+
+  useEffect(() => {
+    if (!selectedProvider) {
+      if (providers.length === 0) setLoading(false);
+      return;
+    }
+    (async () => {
+      setLoading(true);
+      setLocalError("");
+      try {
+        const params = new URLSearchParams(withParams());
+        params.set("provider", selectedProvider.provider);
+        params.set("provider_connection_id", String(selectedProvider.connection_id));
+        const response = await fetch(`${API}/object-storage-plans?${params}`, { credentials: "same-origin" });
+        if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+        const body = await response.json();
+        const nextLocations = body.locations || [];
+        const nextPlans = body.plans || [];
+        setLocations(nextLocations);
+        setPlans(nextPlans);
+        setRegion(String(nextLocations[0]?.id ?? nextLocations[0]?.cluster_id ?? ""));
+        setPlan(String(nextPlans[0]?.id ?? nextPlans[0]?.tier_id ?? ""));
+      } catch (error) {
+        setLocalError((error as Error).message);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [providers, selectedProvider, withParams]);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!selectedProvider) return;
+    setBusy(true);
+    setLocalError("");
+    try {
+      const response = await fetch(`${API}/object-storage?${withParams()}`, {
+        method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim(), provider: selectedProvider.provider, provider_connection_id: selectedProvider.connection_id,
+          region, plan, bucket: selectedProvider.provider === "scaleway" ? bucket.trim() : "",
+        }),
+      });
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+      onCreated(await response.json());
+    } catch (error) {
+      const message = (error as Error).message;
+      setLocalError(message);
+      setError("Object storage provisioning failed: " + message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const locationLabel = (location: any) => [location.name, location.location, location.region, location.country].filter(Boolean).join(" · ") || String(location.id);
+  const planLabel = (candidate: any) => [candidate.name, candidate.label, candidate.description].filter(Boolean).join(" · ") || String(candidate.id);
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" style={{ padding: 24 }} onClick={() => !busy && onClose()} role="presentation">
+      <form onSubmit={submit} onClick={(event) => event.stopPropagation()} className="bg-bg border border-border rounded shadow-xl overflow-hidden" style={{ width: "min(560px, 100%)" }}>
+        <div className="px-5 py-4 space-y-1" style={{ borderBottom: `1px solid ${SUBTLE_BORDER}` }}>
+          <h2 className="text-text font-semibold">Provision object storage</h2>
+          <p className="text-xs text-text-muted">Creates provider infrastructure and returns S3 credentials. No Connection is created.</p>
+        </div>
+        <div className="p-5 space-y-4">
+          {localError && <div className="text-xs text-red">{localError}</div>}
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Provider account</label>
+            <select value={connectionID} onChange={(event) => setConnectionID(Number(event.target.value))} disabled={busy || providers.length === 0}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50">
+              {providers.length === 0 && <option value={0}>No compatible provider bound</option>}
+              {providers.map((provider) => <option key={provider.connection_id} value={provider.connection_id}>{provider.provider} · connection {provider.connection_id}{provider.default ? " (default)" : ""}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-text-muted block mb-1">Name</label>
+            <input value={name} onChange={(event) => setName(event.target.value)} required className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm" placeholder="media-production" />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Region / cluster</label>
+              <select value={region} onChange={(event) => setRegion(event.target.value)} disabled={loading || !locations.length}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50">
+                {locations.map((location) => {
+                  const value = String(location.id ?? location.cluster_id ?? "");
+                  return <option key={value} value={value}>{locationLabel(location)}</option>;
+                })}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Plan / tier</label>
+              <select value={plan} onChange={(event) => setPlan(event.target.value)} disabled={loading || !plans.length}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50">
+                {plans.map((candidate) => {
+                  const value = String(candidate.id ?? candidate.tier_id ?? "");
+                  return <option key={value} value={value}>{planLabel(candidate)}</option>;
+                })}
+              </select>
+            </div>
+          </div>
+          {selectedProvider?.provider === "scaleway" && (
+            <div>
+              <label className="text-xs text-text-muted block mb-1">Bucket name <span className="text-text-dim">(optional)</span></label>
+              <input value={bucket} onChange={(event) => setBucket(event.target.value.toLowerCase())}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono" placeholder="Generated automatically when blank" />
+            </div>
+          )}
+          <div className="rounded p-3 text-[11px] text-amber" style={{ backgroundColor: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.18)" }}>
+            The secret key will be displayed once after provisioning. Instances does not save it, so copy it before closing the next screen.
+          </div>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={onClose} disabled={busy} className="px-3 py-1.5 text-sm border border-border rounded disabled:opacity-50">Cancel</button>
+            <button type="submit" disabled={busy || loading || !name.trim() || !selectedProvider || !region || (selectedProvider?.provider === "vultr" && !plan)}
+              className="px-3 py-1.5 text-sm bg-blue text-white rounded disabled:opacity-50">{busy ? "Provisioning…" : "Provision"}</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ObjectStorageCredentialsDialog({ result, onClose }: {
+  result: { object_storage: ObjectStorageWire; credentials: ObjectStorageCredentialsWire; warning?: string; warnings?: string[] };
+  onClose: () => void;
+}) {
+  const credentials = result.credentials;
+  const copy = (value: string) => navigator.clipboard.writeText(value);
+  const copyAll = () => copy([
+    `S3_ENDPOINT=${credentials.endpoint}`,
+    credentials.region ? `S3_REGION=${credentials.region}` : "",
+    credentials.bucket ? `S3_BUCKET=${credentials.bucket}` : "",
+    `S3_ACCESS_KEY_ID=${credentials.access_key_id}`,
+    `S3_SECRET_ACCESS_KEY=${credentials.secret_access_key}`,
+    credentials.expires_at ? `S3_CREDENTIALS_EXPIRES_AT=${credentials.expires_at}` : "",
+  ].filter(Boolean).join("\n"));
+  const rows = [
+    ["Endpoint", credentials.endpoint], ["Region", credentials.region || ""], ["Bucket", credentials.bucket || ""],
+    ["Access key ID", credentials.access_key_id], ["Secret access key", credentials.secret_access_key],
+    ["Credentials expire", credentials.expires_at || ""],
+  ].filter((row) => row[1]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" style={{ padding: 24 }} role="presentation">
+      <div role="dialog" aria-modal="true" className="bg-bg border border-amber/40 rounded shadow-xl overflow-hidden" style={{ width: "min(680px, 100%)" }}>
+        <div className="px-5 py-4 space-y-1" style={{ borderBottom: `1px solid ${SUBTLE_BORDER}` }}>
+          <h2 className="text-text font-semibold">Save object-storage credentials</h2>
+          <p className="text-xs text-amber">Shown once. Closing this dialog permanently removes the secret from the Instances UI.</p>
+        </div>
+        <div className="p-5 space-y-3">
+          {rows.map(([label, value]) => (
+            <div key={label}>
+              <span className="text-[10px] text-text-dim uppercase tracking-wider block mb-1">{label}</span>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 min-w-0 bg-bg-input border border-border rounded px-2 py-2 text-xs text-text break-all select-all">{value}</code>
+                <button type="button" onClick={() => copy(value)} className="px-2 py-1 text-xs border border-border rounded">Copy</button>
+              </div>
+            </div>
+          ))}
+          {(result.warnings || []).map((warning) => <div key={warning} className="text-xs text-amber">{warning}</div>)}
+          <div className="flex justify-between items-center pt-2">
+            <button type="button" onClick={copyAll} className="px-3 py-1.5 text-sm border border-blue/60 text-blue rounded">Copy all as environment variables</button>
+            <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm bg-blue text-white rounded">I saved them</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DestroyConfirmDialog({
   inst, busy, onCancel, onConfirm,
 }: {
   inst: Instance;
   busy: boolean;
   onCancel: () => void;
-  onConfirm: () => void;
+	 onConfirm: (options: { force: boolean; retainVolumes?: boolean; retainFlexibleIPs: boolean }) => void;
 }) {
   const ip = inst.public_ipv4 || inst.public_ipv6 || "—";
+	const [force, setForce] = useState(false);
+	const [volumePolicy, setVolumePolicy] = useState<"existing" | "retain" | "delete">("existing");
+	const [retainFlexibleIPs, setRetainFlexibleIPs] = useState(false);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -578,6 +1010,11 @@ function DestroyConfirmDialog({
               {inst.size && <span>Size: <span className="text-text font-mono">{inst.size}</span></span>}
             </div>
           </div>
+		  <div className="space-y-2 text-xs text-text-muted">
+			<label className="flex items-center gap-2">Managed volumes <select value={volumePolicy} onChange={(event) => setVolumePolicy(event.target.value as "existing" | "retain" | "delete")} className="bg-bg-input border border-border rounded px-2 py-1"><option value="existing">Use each volume policy</option><option value="retain">Retain all</option><option value="delete">Delete all managed volumes</option></select></label>
+			{inst.size?.startsWith("elastic-metal/") && <label className="flex items-center gap-2"><input type="checkbox" checked={retainFlexibleIPs} onChange={(event) => setRetainFlexibleIPs(event.target.checked)} /> Retain Elastic Metal Flexible IPs</label>}
+			<label className="flex items-center gap-2"><input type="checkbox" checked={force} onChange={(event) => setForce(event.target.checked)} /> Continue provider deletion if guest unmount over SSH fails</label>
+		  </div>
 
           <div className="flex justify-end gap-2">
             <button
@@ -590,7 +1027,7 @@ function DestroyConfirmDialog({
             </button>
             <button
               type="button"
-              onClick={onConfirm}
+			  onClick={() => onConfirm({ force, retainVolumes: volumePolicy === "existing" ? undefined : volumePolicy === "retain", retainFlexibleIPs })}
               disabled={busy}
               className="px-3 py-1.5 text-sm rounded bg-red text-white hover:bg-red/90 disabled:opacity-50"
             >
@@ -791,18 +1228,23 @@ const HISTORY_MAX = 360;          // 10s polling × 360 = 1 hour
 const STALE_THRESHOLD_MS = 30000; // 30s without a successful poll → "stale"
 
 function InstanceCard({
-  inst, withParams, busy, onUpgrade, onDestroy,
+  inst, withParams, busy, onUpgrade, onVolumes, onDestroy,
 }: {
   inst: Instance;
   withParams: () => string;
   busy: boolean;
   onUpgrade: () => void;
+  onVolumes: () => void;
   onDestroy: () => void;
 }) {
   const [metrics, setMetrics] = useState<MetricsWire | null>(null);
   const [metricsError, setMetricsError] = useState("");
   const [lastPollAt, setLastPollAt] = useState(0);
   const [expanded, setExpanded] = useState(false);
+	const [comparison, setComparison] = useState<{ differences?: string[]; provider_state?: string; checked_at?: string } | null>(null);
+	const [diagnosticBusy, setDiagnosticBusy] = useState(false);
+	const [benchmark, setBenchmark] = useState<{ output?: string; elapsed_seconds?: number; measured_at?: string } | null>(null);
+	const [benchmarkBusy, setBenchmarkBusy] = useState(false);
   const [, setNowTick] = useState(0);
 
   useEffect(() => {
@@ -855,6 +1297,24 @@ function InstanceCard({
   const staleAge = lastPollAt ? Math.floor((Date.now() - lastPollAt) / 1000) : 0;
   const stale = staleAge > STALE_THRESHOLD_MS / 1000;
   const meta = [inst.provider, inst.size, inst.region, resources].filter(Boolean).join(" · ");
+	const compare = async () => {
+		setDiagnosticBusy(true);
+		try {
+			const response = await fetch(`${API}/instances/${inst.id}/compare?${withParams()}`, { method: "POST", credentials: "same-origin" });
+			if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`);
+			setComparison((await response.json()).comparison);
+		} catch (error) { setComparison({ differences: [(error as Error).message] }); }
+		finally { setDiagnosticBusy(false); }
+	};
+	const runBenchmark = async () => {
+		setBenchmarkBusy(true);
+		try {
+			const response = await fetch(`${API}/instances/${inst.id}/storage-benchmark?${withParams()}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target_path: "/" }) });
+			if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`);
+			setBenchmark((await response.json()).result);
+		} catch (error) { setBenchmark({ output: (error as Error).message }); }
+		finally { setBenchmarkBusy(false); }
+	};
 
   return (
     <article
@@ -885,6 +1345,18 @@ function InstanceCard({
             Upgrade
           </button>
         )}
+        {!isLocal && (
+          <button type="button" onClick={onVolumes} disabled={busy}
+            className="px-2 py-0.5 text-[10px] border border-border text-text-muted rounded hover:text-text disabled:opacity-50">
+            Volumes
+          </button>
+        )}
+		{!isLocal && inst.provider !== "external" && (
+			<button type="button" onClick={compare} disabled={diagnosticBusy}
+				className="px-2 py-0.5 text-[10px] border border-border text-text-muted rounded hover:text-text disabled:opacity-50">
+				{diagnosticBusy ? "Comparing…" : "Compare provider"}
+			</button>
+		)}
         {canDestroy && (
           <button type="button" onClick={onDestroy} disabled={busy}
             className="px-2 py-0.5 text-[10px] border border-red/60 text-red rounded hover:bg-red hover:text-white disabled:opacity-50">
@@ -902,7 +1374,8 @@ function InstanceCard({
         </button>
       </div>
 
-      {inst.error && <div className="px-3 py-1.5 text-[10px] text-red border-t border-red/20">{inst.error}</div>}
+      {inst.error && <div className="px-3 py-1.5 text-[10px] text-red border-t border-red/20">{inst.lifecycle_stage ? `${inst.lifecycle_stage}: ` : ""}{inst.error}{inst.cleanup_error ? ` · cleanup: ${inst.cleanup_error}` : ""}</div>}
+	  {comparison && <div className={`px-3 py-1.5 text-[10px] border-t ${comparison.differences?.length ? "text-amber border-amber/20" : "text-green border-green/20"}`}>Provider {comparison.provider_state || "state"}: {comparison.differences?.length ? comparison.differences.join(" · ") : "matches tracked state"}</div>}
 
       {metrics ? (
         <div
@@ -910,7 +1383,7 @@ function InstanceCard({
           style={{ borderTop: `1px solid ${FAINT_DIVIDER}`, opacity: stale ? 0.6 : 1, columnGap: 24, rowGap: 10 }}
         >
           <CompactMetric label="CPU" value={formatCPUDetail(metrics.cpu)} pct={metrics.cpu.total_pct} />
-          <CompactMetric label="Memory" value={`${memPct.toFixed(0)}% · ${formatBytes(metrics.mem.used_bytes)}`} pct={memPct} />
+          <CompactMetric label="Memory" value={`${formatBytes(metrics.mem.used_bytes)} / ${formatBytes(metrics.mem.total_bytes)} used (${memPct.toFixed(0)}%)`} pct={memPct} />
           <CompactMetric label="Root disk" value={rootDisk ? `${rootDisk.used_pct.toFixed(0)}% · ${formatBytes(rootDisk.used_bytes)}` : "—"} pct={rootDisk?.used_pct} />
           <CompactMetric label="Load" value={metrics.cpu.cores ? `${metrics.load.l1.toFixed(2)} · ${loadPct.toFixed(0)}% cap` : metrics.load.l1.toFixed(2)} pct={loadPct} />
           <CompactMetric label="Uptime" value={`${formatUptime(metrics.uptime_s)} · ${metrics.process_count} proc`} />
@@ -941,6 +1414,14 @@ function InstanceCard({
             {inst.provider_id && <span>Provider ID <span className="text-text font-mono">{inst.provider_id}</span></span>}
             {metrics && <span>Load 1/5/15 <span className="text-text font-mono">{metrics.load.l1.toFixed(2)} / {metrics.load.l5.toFixed(2)} / {metrics.load.l15.toFixed(2)}</span></span>}
           </div>
+		  {inst.status === "ready" && (
+			<div className="space-y-1">
+			  <button type="button" onClick={runBenchmark} disabled={benchmarkBusy} className="px-2 py-0.5 text-[10px] border border-border text-text-muted rounded hover:text-text disabled:opacity-50">
+				{benchmarkBusy ? "Benchmarking…" : "Benchmark root disk (256 MiB)"}
+			  </button>
+			  {benchmark?.output && <pre className="text-[10px] text-text-dim whitespace-pre-wrap break-all">{benchmark.output}</pre>}
+			</div>
+		  )}
         </div>
       )}
     </article>
@@ -1293,6 +1774,188 @@ function SectionHeader({ title, right }: { title: string; right?: string }) {
   );
 }
 
+function VolumesDialog({ inst, withParams, onClose, setError }: {
+  inst: Instance;
+  withParams: () => string;
+  onClose: () => void;
+  setError: (message: string) => void;
+}) {
+  const [volumes, setVolumes] = useState<InstanceVolumeWire[]>([]);
+  const [capabilities, setCapabilities] = useState<StorageCapabilitiesWire | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [name, setName] = useState(`${inst.name}-data`);
+  const [sizeGB, setSizeGB] = useState(80);
+  const [tier, setTier] = useState("");
+  const [deletePolicy, setDeletePolicy] = useState<"retain" | "with_instance">("retain");
+  const [prepareGuest, setPrepareGuest] = useState(true);
+  const [filesystem, setFilesystem] = useState<"ext4" | "xfs">("ext4");
+  const [mountPath, setMountPath] = useState(`/srv/${inst.name.replace(/[^A-Za-z0-9._-]+/g, "-")}-data`);
+  const [mountOwner, setMountOwner] = useState("root:root");
+  const params = useCallback(() => {
+    const value = new URLSearchParams(withParams());
+    value.set("instance_id", String(inst.id));
+    return value.toString();
+  }, [inst.id, withParams]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const capParams = new URLSearchParams(withParams());
+      capParams.set("provider", inst.provider);
+      const [volumesResponse, capabilitiesResponse] = await Promise.all([
+        fetch(`${API}/instance-volumes?${params()}`, { credentials: "same-origin" }),
+        fetch(`${API}/instances-storage-capabilities?${capParams}`, { credentials: "same-origin" }),
+      ]);
+      if (!volumesResponse.ok) throw new Error(`${volumesResponse.status}: ${await volumesResponse.text()}`);
+      if (!capabilitiesResponse.ok) throw new Error(`${capabilitiesResponse.status}: ${await capabilitiesResponse.text()}`);
+      const volumeBody = await volumesResponse.json();
+      const capabilitiesBody = await capabilitiesResponse.json();
+      const nextCapabilities = capabilitiesBody.capabilities as StorageCapabilitiesWire;
+      setVolumes(volumeBody.volumes || []);
+      setCapabilities(nextCapabilities);
+      if (!tier) setTier(nextCapabilities.tiers?.[0]?.name || "provider-default");
+    } catch (error) {
+      setError("Volumes failed: " + (error as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [inst.provider, params, setError, tier, withParams]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const mutate = async (path: string, method: string, body?: Record<string, unknown>) => {
+    setBusy(true);
+    try {
+      const response = await fetch(`${API}${path}${path.includes("?") ? "&" : "?"}${withParams()}`, {
+        method,
+        credentials: "same-origin",
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+      await load();
+    } catch (error) {
+      setError("Volume operation failed: " + (error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!name.trim() || sizeGB <= 0) return;
+    await mutate("/instance-volumes", "POST", {
+      instance_id: inst.id,
+      name: name.trim(),
+      size_gb: sizeGB,
+      tier,
+      delete_policy: deletePolicy,
+      prepare: prepareGuest && capabilities?.guest_prepare ? {
+        filesystem,
+        mount_path: mountPath.trim(),
+        owner: mountOwner.trim() || "root:root",
+        mode: "0755",
+        mount_options: "defaults,nofail",
+        format_if_blank: true,
+      } : undefined,
+    });
+  };
+
+  let requestedBoot: { size_gb?: number; storage_class?: string; tier?: string; provider_type?: string } | null = null;
+  try { requestedBoot = JSON.parse(inst.storage_json || "{}").boot || null; } catch { requestedBoot = null; }
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" style={{ padding: 24 }} onClick={onClose}>
+      <div className="bg-bg border border-border rounded shadow-xl overflow-hidden" style={{ width: "min(680px, 100%)" }} onClick={(event) => event.stopPropagation()}>
+        <div className="px-5 py-4 flex items-start gap-3" style={{ borderBottom: `1px solid ${SUBTLE_BORDER}` }}>
+          <div>
+            <h2 className="text-text font-semibold">Volumes · {inst.name}</h2>
+            <p className="text-xs text-text-muted">Boot storage and attached data storage are tracked separately. New data volumes default to retain.</p>
+          </div>
+          <span className="flex-1" />
+          <button type="button" onClick={onClose} className="text-text-muted hover:text-text">×</button>
+        </div>
+        <div className="p-5 space-y-4 max-h-[70vh] overflow-auto">
+          <div className="rounded p-3 flex items-center gap-2" style={{ border: `1px solid ${SUBTLE_BORDER}`, backgroundColor: SUB_CARD_BG }}>
+            <div>
+              <div className="text-sm text-text font-medium">Boot volume</div>
+              <div className="text-[10px] text-text-dim">
+                boot · {requestedBoot?.size_gb ? `${requestedBoot.storage_class || "provider-default"} · ${requestedBoot.size_gb} GB · ${requestedBoot.provider_type || requestedBoot.tier || "provider-default"}` : "provider/image default"} · lifecycle tied to instance
+              </div>
+            </div>
+            <span className="flex-1" />
+            <span className="text-[10px] uppercase text-text-dim">boot</span>
+          </div>
+          {loading ? <div className="text-xs text-text-muted">Loading volumes…</div> : volumes.length === 0 ? (
+            <div className="text-xs text-text-dim">No managed data volumes are attached.</div>
+          ) : (
+            <div className="space-y-2">
+              {volumes.map((volume) => (
+                <div key={volume.id} className="rounded p-3 flex flex-wrap items-center gap-2" style={{ border: `1px solid ${SUBTLE_BORDER}`, backgroundColor: SUB_CARD_BG }}>
+                  <div className="min-w-0">
+                    <div className="text-sm text-text font-medium">{volume.name}</div>
+                    <div className="text-[10px] text-text-dim">{volume.role} · {volume.storage_class} · {volume.size_gb} GB · {volume.tier} · {volume.status} · {volume.delete_policy}</div>
+                    {volume.mount_path && <div className="text-[10px] text-green font-mono">mounted {volume.mount_path} · {volume.filesystem} · {volume.device_path}</div>}
+                    {!volume.mount_path && volume.role === "data" && <div className="text-[10px] text-amber">Attached block device is not mounted in the guest.</div>}
+                  </div>
+                  <span className="flex-1" />
+                  {capabilities?.resize && <button type="button" disabled={busy} className="px-2 py-1 text-[10px] border border-border rounded" onClick={() => {
+                    const value = window.prompt("New size in GB (must be larger)", String(volume.size_gb));
+                    if (value) mutate(`/instance-volumes/${volume.id}/resize`, "POST", { size_gb: Number(value) });
+                  }}>Resize</button>}
+                  {volume.role === "data" && !volume.mount_path && capabilities?.guest_prepare && <button type="button" disabled={busy} className="px-2 py-1 text-[10px] border border-blue/60 text-blue rounded" onClick={() => {
+                    const value = window.prompt("Mount path. A blank device will be formatted ext4; existing signatures are never overwritten.", `/srv/${volume.name.replace(/[^A-Za-z0-9._-]+/g, "-")}`);
+                    if (value) mutate(`/instance-volumes/${volume.id}/prepare`, "POST", { filesystem: "ext4", mount_path: value, owner: "root:root", mode: "0755", mount_options: "defaults,nofail", format_if_blank: true });
+                  }}>Prepare & mount</button>}
+                  {volume.role === "data" && capabilities?.detach && <button type="button" disabled={busy} className="px-2 py-1 text-[10px] border border-border rounded" onClick={() => mutate(`/instance-volumes/${volume.id}/detach`, "POST")}>Detach</button>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {capabilities?.data_volumes ? (
+            <form className="space-y-3 rounded p-3" style={{ border: `1px solid ${SUBTLE_BORDER}` }} onSubmit={create}>
+              <div className="text-xs text-text font-medium">Add data volume</div>
+              <div className="grid grid-cols-2 gap-2">
+                <input value={name} onChange={(event) => setName(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono" placeholder="volume name" />
+                <input type="number" min={1} value={sizeGB} onChange={(event) => setSizeGB(Number(event.target.value))} className="bg-bg-input border border-border rounded px-2 py-1 text-sm" />
+                <select value={tier} onChange={(event) => setTier(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm">
+                  {(capabilities.tiers || []).map((candidate) => <option key={candidate.name} value={candidate.name}>{candidate.name}{candidate.provider_type ? ` (${candidate.provider_type})` : ""}</option>)}
+                </select>
+                <select value={deletePolicy} onChange={(event) => setDeletePolicy(event.target.value as "retain" | "with_instance")} className="bg-bg-input border border-border rounded px-2 py-1 text-sm">
+                  <option value="retain">Retain when instance is destroyed</option>
+                  <option value="with_instance">Delete with instance</option>
+                </select>
+              </div>
+              {capabilities.guest_prepare && <label className="flex items-center gap-2 text-xs text-text">
+                <input type="checkbox" checked={prepareGuest} onChange={(event) => setPrepareGuest(event.target.checked)} />
+                Format if blank and mount automatically over SSH
+              </label>}
+              {prepareGuest && capabilities.guest_prepare && <div className="grid grid-cols-2 gap-2">
+                <input value={mountPath} onChange={(event) => setMountPath(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono" placeholder="/srv/media" />
+                <select value={filesystem} onChange={(event) => setFilesystem(event.target.value as "ext4" | "xfs")} className="bg-bg-input border border-border rounded px-2 py-1 text-sm">
+                  <option value="ext4">ext4</option>
+                  <option value="xfs">xfs</option>
+                </select>
+                <input value={mountOwner} onChange={(event) => setMountOwner(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono" placeholder="owner, e.g. 1000:1000" />
+                <span className="text-[10px] text-text-dim self-center">Persistent UUID mount · defaults,nofail · mode 0755</span>
+              </div>}
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-text-dim">Device discovery must be unambiguous. Existing filesystems are preserved; unknown signatures are refused.</span>
+                <span className="flex-1" />
+                <button type="submit" disabled={busy || !name.trim() || sizeGB <= 0 || (prepareGuest && !!capabilities.guest_prepare && !mountPath.trim())} className="px-3 py-1.5 text-xs rounded bg-blue text-white disabled:opacity-50">{busy ? "Working…" : prepareGuest && capabilities.guest_prepare ? "Create, attach & mount" : "Create & attach"}</button>
+              </div>
+            </form>
+          ) : (
+            <div className="text-xs text-amber">{capabilities?.notes || `${inst.provider} does not expose attachable data volumes.`}</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface ServerTypeWire {
   name: string;
   description?: string;
@@ -1310,6 +1973,8 @@ interface ServerTypeWire {
   monthly_price_usd?: number;
   hourly_price_usd?: number;
   available_in?: string[];
+  boot_storage?: Array<{ storage_class: "local" | "block" | "network" | "ephemeral"; provider_type?: string; min_size_gb?: number; max_size_gb?: number }>;
+	incompatible_images?: string[];
 }
 
 interface LocationWire {
@@ -1330,6 +1995,13 @@ interface ImageWire {
   resource_class?: string;
   available_in?: string[];
   compatible_types?: string[];
+  provider_type?: string;
+}
+
+interface ProviderBindingWire {
+  provider: string;
+  connection_id: number;
+  default: boolean;
 }
 
 function catalogMonthlyPrice(t?: ServerTypeWire): number {
@@ -1356,8 +2028,11 @@ function CreateDialog({
   const [region, setRegion] = useState("");
   const [image, setImage] = useState("");
   const [busy, setBusy] = useState(false);
-  // Live catalog from the bound provider — populated on mount via
-  // the new /api/instances-server-types|locations|images routes.
+  const [providers, setProviders] = useState<ProviderBindingWire[]>([]);
+  const [provider, setProvider] = useState("");
+  const [providerConnectionID, setProviderConnectionID] = useState(0);
+  const [providersLoading, setProvidersLoading] = useState(true);
+  // Live catalog from the selected bound provider.
   // Empty arrays mean either still-loading or the provider isn't
   // bound; catalogError carries the failure message in the latter
   // case so the operator sees what to fix instead of an empty form.
@@ -1367,8 +2042,22 @@ function CreateDialog({
   const [catalogProvider, setCatalogProvider] = useState("");
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [storageCapabilities, setStorageCapabilities] = useState<StorageCapabilitiesWire | null>(null);
+  const [customBootStorage, setCustomBootStorage] = useState(false);
+  const [bootSizeGB, setBootSizeGB] = useState(80);
+  const [bootStorageClass, setBootStorageClass] = useState("block");
+  const [bootTier, setBootTier] = useState("balanced");
+	const [elasticRAID, setElasticRAID] = useState("");
 
   const selectedType = serverTypes.find((candidate) => candidate.name === size);
+
+  const bootStorageOptions = selectedType?.boot_storage?.length
+    ? selectedType.boot_storage
+    : (storageCapabilities?.storage_classes || []).map((storageClass) => ({ storage_class: storageClass }));
+  const selectedBootConstraint = bootStorageOptions.find((candidate) => candidate.storage_class === bootStorageClass);
+  const compatibleBootTiers = (storageCapabilities?.tiers || []).filter((candidate) =>
+    !candidate.storage_class || candidate.storage_class === bootStorageClass
+  );
   const compatibleLocations = locations.filter((candidate) =>
     !selectedType?.available_in?.length || selectedType.available_in.includes(candidate.name)
   );
@@ -1377,8 +2066,29 @@ function CreateDialog({
     if (selectedType?.platform && candidate.platform && candidate.platform !== selectedType.platform) return false;
     if (candidate.available_in?.length && region && !candidate.available_in.includes(region)) return false;
     if (candidate.compatible_types?.length && size && !candidate.compatible_types.includes(size)) return false;
+	if (selectedType?.incompatible_images?.includes(candidate.name)) return false;
+    if (provider === "scaleway" && customBootStorage && candidate.provider_type) {
+      const expectedType = bootStorageClass === "local" ? "l_ssd" : "sbs_volume";
+      if (candidate.provider_type !== expectedType) return false;
+    }
     return true;
   });
+
+  useEffect(() => {
+    if (!customBootStorage || bootStorageOptions.length === 0) return;
+    const nextClass = bootStorageOptions.some((candidate) => candidate.storage_class === bootStorageClass)
+      ? bootStorageClass
+      : bootStorageOptions[0].storage_class;
+    if (nextClass !== bootStorageClass) {
+      setBootStorageClass(nextClass);
+      return;
+    }
+    const constraint = bootStorageOptions.find((candidate) => candidate.storage_class === nextClass);
+    if (constraint?.max_size_gb && bootSizeGB > constraint.max_size_gb) setBootSizeGB(constraint.max_size_gb);
+    if (constraint?.min_size_gb && bootSizeGB < constraint.min_size_gb) setBootSizeGB(constraint.min_size_gb);
+    const tiers = (storageCapabilities?.tiers || []).filter((candidate) => !candidate.storage_class || candidate.storage_class === nextClass);
+    if (tiers.length && !tiers.some((candidate) => candidate.name === bootTier)) setBootTier(tiers[0].name);
+  }, [customBootStorage, size, bootStorageClass, bootSizeGB, bootTier, storageCapabilities]);
 
   useEffect(() => {
     if (!selectedType) return;
@@ -1400,21 +2110,68 @@ function CreateDialog({
 
   useEffect(() => {
     (async () => {
+      try {
+        const r = await fetch(`${API}/instances-providers?${withParams()}`, { credentials: "same-origin" });
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
+        const body = await r.json();
+        const available = ((body.providers || []) as ProviderBindingWire[]).sort((a, b) => a.provider.localeCompare(b.provider) || a.connection_id - b.connection_id);
+        const selected = available.find((binding) => binding.default) || available[0];
+        setProviders(available);
+        setProvider(selected?.provider || body.default || "");
+        setProviderConnectionID(selected?.connection_id || 0);
+      } catch (e) {
+        setCatalogError((e as Error).message);
+        setCatalogLoading(false);
+      } finally {
+        setProvidersLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!provider) {
+      if (!providersLoading) {
+        setCatalogError("No VPS provider is bound to this Instances install.");
+        setCatalogLoading(false);
+      }
+      return;
+    }
+    (async () => {
       setCatalogLoading(true);
       setCatalogError(null);
-      const qs = withParams();
+      setServerTypes([]);
+      setLocations([]);
+      setImages([]);
+      setStorageCapabilities(null);
+      setCustomBootStorage(false);
+      setSize("");
+      setRegion("");
+      setImage("");
+      const params = new URLSearchParams(withParams());
+      params.set("provider", provider);
+      if (providerConnectionID) params.set("provider_connection_id", String(providerConnectionID));
+      const qs = params.toString();
       try {
-        const [stRes, locRes, imgRes] = await Promise.all([
+        const [stRes, locRes, imgRes, storageRes] = await Promise.all([
           fetch(`${API}/instances-server-types?${qs}`, { credentials: "same-origin" }),
           fetch(`${API}/instances-locations?${qs}`, { credentials: "same-origin" }),
           fetch(`${API}/instances-images?${qs}`, { credentials: "same-origin" }),
+          fetch(`${API}/instances-storage-capabilities?${qs}`, { credentials: "same-origin" }),
         ]);
         if (!stRes.ok) throw new Error(`server_types: ${stRes.status} ${await stRes.text().catch(() => "")}`);
         if (!locRes.ok) throw new Error(`locations: ${locRes.status} ${await locRes.text().catch(() => "")}`);
         if (!imgRes.ok) throw new Error(`images: ${imgRes.status} ${await imgRes.text().catch(() => "")}`);
+        if (!storageRes.ok) throw new Error(`storage: ${storageRes.status} ${await storageRes.text().catch(() => "")}`);
         const stJson = await stRes.json();
         const locJson = await locRes.json();
         const imgJson = await imgRes.json();
+        const storageJson = await storageRes.json();
+        const nextStorageCapabilities = storageJson.capabilities as StorageCapabilitiesWire;
+        setStorageCapabilities(nextStorageCapabilities);
+        const firstClass = nextStorageCapabilities.storage_classes?.[0] || "block";
+        setBootStorageClass(firstClass);
+        setBootTier(nextStorageCapabilities.tiers?.find((candidate) => !candidate.storage_class || candidate.storage_class === firstClass)?.name || "balanced");
         setCatalogProvider(stJson.provider || locJson.provider || imgJson.provider || "");
         // Hide deprecated server types from the default view —
         // they still come back in the API for completeness but
@@ -1438,8 +2195,8 @@ function CreateDialog({
         setImages(imgs);
         // Sensible defaults: cheapest size, first location
         // alphabetically, ubuntu LTS if present otherwise first image.
-        if (types.length && !size) setSize(types[0].name);
-        if (locs.length && !region) setRegion(locs[0].name);
+        if (types.length) setSize(types[0].name);
+        if (locs.length) setRegion(locs[0].name);
       } catch (e) {
         setCatalogError((e as Error).message);
       } finally {
@@ -1447,7 +2204,7 @@ function CreateDialog({
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [provider, providerConnectionID, providersLoading]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1458,7 +2215,11 @@ function CreateDialog({
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), size, region, image }),
+        body: JSON.stringify({
+          name: name.trim(), provider, provider_connection_id: providerConnectionID, size, region, image,
+          storage: customBootStorage ? { boot: { size_gb: bootSizeGB, storage_class: bootStorageClass, tier: bootTier, delete_policy: "with_instance" } } : undefined,
+		  elastic_metal: size.startsWith("elastic-metal/") && elasticRAID ? { raid_level: elasticRAID } : undefined,
+        }),
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       onCreated();
@@ -1479,8 +2240,16 @@ function CreateDialog({
     if (t.architecture && t.architecture !== "x86") parts.push(t.architecture.toUpperCase());
     const specs = parts.join(", ");
     const price = formatCatalogMonthlyPrice(t);
-    const displayName = t.name.replace(/^apple-silicon\//, "");
-    const hostKind = t.resource_class === "bare_metal" ? "Mac mini bare metal" : "";
+    const displayName = t.name.startsWith("dedibox/")
+      ? (t.description?.split(" — ")[0] || t.name.replace(/^dedibox\//, "Dedibox "))
+	  : t.name.startsWith("elastic-metal/")
+		? (t.description?.split(" — ")[0] || t.name.replace(/^elastic-metal\//, "Elastic Metal "))
+      : t.name.replace(/^apple-silicon\//, "");
+    const hostKind = t.name.startsWith("elastic-metal/")
+	  ? "on-demand dedicated server"
+	  : t.name.startsWith("dedibox/")
+      ? "dedicated physical server"
+      : t.resource_class === "bare_metal" ? "Mac mini bare metal" : "";
     return [displayName, hostKind && `· ${hostKind}`, price && `(${price}`, specs && (price ? `, ${specs})` : `(${specs})`)]
       .filter(Boolean)
       .join(" ");
@@ -1495,7 +2264,7 @@ function CreateDialog({
     const label = i.description && i.description !== i.name
       ? `${i.description} (${i.name})`
       : i.name;
-    const details = [i.architecture, i.os_flavor && i.os_version ? `${i.os_flavor} ${i.os_version}` : ""]
+    const details = [i.architecture, i.os_flavor && i.os_version ? `${i.os_flavor} ${i.os_version}` : "", i.provider_type]
       .filter(Boolean)
       .join(", ");
     return details ? `${label} — ${details}` : label;
@@ -1516,16 +2285,37 @@ function CreateDialog({
         <h2 className="text-text font-semibold">Provision a new instance</h2>
         {catalogError ? (
           <p className="text-xs text-amber">
-            Couldn't load the bound provider catalog: {catalogError}. Enter provider-specific
-            size, region, and image values manually; the backend will use the provider bound to this install.
+            Couldn't load the selected provider catalog: {catalogError}. Enter provider-specific
+            size, region, and image values manually.
           </p>
         ) : catalogLoading ? (
-          <p className="text-xs text-text-muted">Loading server types, regions, and images from the bound provider…</p>
+          <p className="text-xs text-text-muted">Loading server types, regions, and images from the selected provider…</p>
         ) : (
           <p className="text-xs text-text-muted">
-            Live from {catalogProvider || "bound provider"}: {serverTypes.length} types · {locations.length} regions · {images.length} images.
+            Live from {catalogProvider || provider}: {serverTypes.length} types · {locations.length} regions · {images.length} images.
           </p>
         )}
+        <div>
+          <label className="text-xs text-text-muted block mb-1">Provider</label>
+          <select
+            value={providerConnectionID || ""}
+            onChange={(e) => {
+              const connectionID = Number(e.target.value);
+              const binding = providers.find((candidate) => candidate.connection_id === connectionID);
+              setProviderConnectionID(connectionID);
+              setProvider(binding?.provider || "");
+            }}
+            disabled={providersLoading || providers.length === 0}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
+          >
+            {providers.length === 0 && <option value="">No provider bound</option>}
+            {providers.map((binding) => (
+              <option key={binding.connection_id} value={binding.connection_id}>
+                {binding.provider} · connection {binding.connection_id}{binding.default ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
         <div>
           <label className="text-xs text-text-muted block mb-1">Name</label>
           <input
@@ -1613,6 +2403,37 @@ function CreateDialog({
             </div>
           </div>
         </div>
+        {storageCapabilities?.boot_size_configurable && !size.startsWith("elastic-metal/") && (
+          <div className="rounded p-3 space-y-2" style={{ border: `1px solid ${SUBTLE_BORDER}` }}>
+            <label className="flex items-center gap-2 text-xs text-text-muted">
+              <input type="checkbox" checked={customBootStorage} onChange={(event) => setCustomBootStorage(event.target.checked)} />
+              <span className="text-text">Custom boot volume</span>
+              <span>— otherwise the provider/image default is used</span>
+            </label>
+            {customBootStorage && (
+              <div className="grid grid-cols-2 gap-2">
+                <select value={bootStorageClass} onChange={(event) => setBootStorageClass(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm" aria-label="Boot storage class">
+                  {bootStorageOptions.map((candidate) => <option key={candidate.storage_class} value={candidate.storage_class}>{candidate.storage_class}{candidate.max_size_gb ? ` (up to ${candidate.max_size_gb} GB)` : ""}</option>)}
+                </select>
+                <input type="number" min={selectedBootConstraint?.min_size_gb || 1} max={selectedBootConstraint?.max_size_gb || undefined} value={bootSizeGB} onChange={(event) => setBootSizeGB(Number(event.target.value))} className="bg-bg-input border border-border rounded px-2 py-1 text-sm" aria-label="Boot volume size in GB" />
+                <select value={bootTier} onChange={(event) => setBootTier(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm">
+                  {compatibleBootTiers.map((candidate) => <option key={candidate.name} value={candidate.name}>{candidate.name}{candidate.provider_type ? ` (${candidate.provider_type})` : ""}</option>)}
+                </select>
+                <span className="text-[10px] text-text-dim self-center">Boot · {bootStorageClass} · {bootSizeGB} GB · deleted with the instance</span>
+              </div>
+            )}
+          </div>
+        )}
+		{size.startsWith("elastic-metal/") && (
+		  <div className="rounded p-3 space-y-2" style={{ border: `1px solid ${SUBTLE_BORDER}` }}>
+			<div className="text-xs text-text">Elastic Metal local disks</div>
+			<p className="text-[10px] text-text-dim">The selected offer's disks are included. Optionally apply RAID to Scaleway's default partitioning schema; the provider validates it before creation.</p>
+			<select value={elasticRAID} onChange={(event) => setElasticRAID(event.target.value)} className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm">
+			  <option value="">Provider default partitioning</option>
+			  <option value="raid_level_0">RAID 0</option><option value="raid_level_1">RAID 1</option><option value="raid_level_5">RAID 5</option><option value="raid_level_6">RAID 6</option><option value="raid_level_10">RAID 10</option>
+			</select>
+		  </div>
+		)}
         <div className="flex justify-end gap-2 pt-1">
           {selectedType?.resource_class === "bare_metal" && selectedType.platform === "macos" && (
             <span className="mr-auto text-[11px] text-amber">24-hour minimum allocation</span>
@@ -1625,7 +2446,7 @@ function CreateDialog({
           >Cancel</button>
           <button
             type="submit"
-            disabled={busy || !name.trim() || catalogLoading || !size || !region || !image}
+            disabled={busy || !name.trim() || !provider || catalogLoading || !size || !region || !image}
             className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
           >{busy ? "Provisioning…" : "Provision"}</button>
         </div>

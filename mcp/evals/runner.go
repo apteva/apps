@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"time"
 
@@ -48,7 +49,11 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		}
 		spec = cloneMap(definition.Spec)
 	}
-	delete(spec, "agents")
+	var collaborators []EnvironmentAgentSpec
+	spec, collaborators, err = prepareEnvironmentSpec(spec, run.TargetSnapshot)
+	if err != nil {
+		return fmt.Errorf("prepare environment agents: %w", err)
+	}
 	var created EnvironmentRun
 	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_run_create", map[string]any{"kind": "eval", "spec": spec}, &created); err != nil {
 		return fmt.Errorf("start environment: %w", err)
@@ -128,15 +133,30 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			return fmt.Errorf("agent execution %s: %s", execution.Status, execution.Reason)
 		}
 	}
+	collaboratorErrors := []string{}
+	if len(collaborators) > 0 {
+		if err = s.setRunStage(run, "capturing_collaborators"); err != nil {
+			return err
+		}
+		run.Collaborators, collaboratorErrors = s.captureCollaboratorExecutions(created.ID, collaborators, run.CaseSnapshot.TimeoutSeconds, run.CaseSnapshot.MaxTurns)
+	}
 
 	if err = s.setRunStage(run, "checking_results"); err != nil {
 		return err
 	}
+	assertionErrors := []string{}
 	for _, assertion := range run.CaseSnapshot.Assertions {
-		input := map[string]any{"run_id": created.ID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "mcp": assertion.MCP, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType, "fixture": assertion.Fixture}
 		var result AssertionResult
-		if callErr := s.ctx.PlatformAPI().CallAppResult("environments", "environment_assert", input, &result); callErr != nil {
-			result = AssertionResult{Name: assertion.Name, Passed: false, Message: callErr.Error()}
+		var assertionErr error
+		if assertion.Type == outputEqualsAssertionType {
+			result, assertionErr = evaluateOutputEquals(assertion, run.Execution)
+		} else {
+			input := map[string]any{"run_id": created.ID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "mcp": assertion.MCP, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType, "fixture": assertion.Fixture}
+			assertionErr = s.ctx.PlatformAPI().CallAppResult("environments", "environment_assert", input, &result)
+		}
+		if assertionErr != nil {
+			result = AssertionResult{Name: assertion.Name, Error: assertionErr.Error()}
+			assertionErrors = append(assertionErrors, fmt.Sprintf("%s: %v", assertion.Name, assertionErr))
 		}
 		if result.Name == "" {
 			result.Name = assertion.Name
@@ -157,10 +177,30 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			return fmt.Errorf("judge: %w", judgeErr)
 		}
 		run.Judge = verdict
-		if verdict.DirectiveSuggestion != nil && strings.TrimSpace(verdict.DirectiveSuggestion.Directive) != "" {
+		if len(assertionErrors) == 0 && len(collaboratorErrors) == 0 && verdict.DirectiveSuggestion != nil && strings.TrimSpace(verdict.DirectiveSuggestion.Directive) != "" {
 			suggestion := &Suggestion{ID: "suggest_" + token(10), RunID: run.ID, AgentID: run.TargetSnapshot.AgentID, Directive: verdict.DirectiveSuggestion.Directive, ExpectedETag: run.TargetSnapshot.DirectiveETag, Reason: verdict.DirectiveSuggestion.Reason, Status: "proposed", CreatedAt: time.Now().UTC()}
 			_ = s.db.saveSuggestion(suggestion)
 		}
+	}
+	evaluationErrors := append(collaboratorErrors, assertionErrors...)
+	if len(evaluationErrors) > 0 {
+		run.Status, run.Stage = "error", "failed"
+		run.CorrectnessScore, run.OverallScore = nil, nil
+		if run.Judge != nil {
+			value := run.Judge.Score
+			run.JudgeScore = &value
+		} else {
+			run.JudgeScore = nil
+		}
+		run.Error = "evaluation execution failed; the result is invalid, does not indicate agent failure, and is not an agent-quality score: " + strings.Join(evaluationErrors, "; ")
+		finished := time.Now().UTC()
+		run.FinishedAt = &finished
+		if err = s.db.finishRun(run); err != nil {
+			return err
+		}
+		s.ctx.Emit("eval.run.failed", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": run.Stage, "error": run.Error})
+		s.emitExperimentCompleted(run.ExperimentID)
+		return nil
 	}
 
 	status, correctness, judgeScore, overall := scoreRun(run.Assertions, run.Judge)
@@ -233,7 +273,13 @@ func (s *service) judge(ctx context.Context, model string, run *Run) (*JudgeVerd
 	if run.Execution != nil {
 		trace = run.Execution.Trace
 	}
-	payload := map[string]any{"task": run.CaseSnapshot.Prompt, "goals": run.CaseSnapshot.Goals, "agent_directive": run.TargetSnapshot.Directive, "trace": trace, "voice_call": run.VoiceCall, "deterministic_assertions": run.Assertions}
+	deterministicAssertions := make([]AssertionResult, 0, len(run.Assertions))
+	for _, result := range run.Assertions {
+		if result.Error == "" {
+			deterministicAssertions = append(deterministicAssertions, result)
+		}
+	}
+	payload := map[string]any{"task": run.CaseSnapshot.Prompt, "goals": run.CaseSnapshot.Goals, "agent_directive": run.TargetSnapshot.Directive, "trace": trace, "collaborator_executions": run.Collaborators, "voice_call": run.VoiceCall, "deterministic_assertions": deterministicAssertions}
 	request := judgeRequest(model, payload)
 	var response struct {
 		Model   string `json:"model"`
@@ -257,6 +303,127 @@ func (s *service) judge(ctx context.Context, model string, run *Run) (*JudgeVerd
 	alignJudgeGoals(verdict, run.CaseSnapshot.Goals)
 	verdict.Model, verdict.Usage = response.Model, response.Usage
 	return verdict, nil
+}
+
+func prepareEnvironmentSpec(spec map[string]any, target Target) (map[string]any, []EnvironmentAgentSpec, error) {
+	spec = cloneMap(spec)
+	rawAgents, found := spec["agents"]
+	if !found || rawAgents == nil {
+		delete(spec, "agents")
+		return spec, nil, nil
+	}
+	raw, err := json.Marshal(rawAgents)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode agents: %w", err)
+	}
+	var agents []EnvironmentAgentSpec
+	if err := json.Unmarshal(raw, &agents); err != nil {
+		return nil, nil, fmt.Errorf("decode agents: %w", err)
+	}
+	if len(agents) == 0 {
+		delete(spec, "agents")
+		return spec, nil, nil
+	}
+
+	aliases := map[string]int{}
+	matches := []int{}
+	for i := range agents {
+		agents[i].Alias = strings.TrimSpace(agents[i].Alias)
+		effectiveAlias := agents[i].Alias
+		if effectiveAlias == "" {
+			effectiveAlias = "main"
+		}
+		if previous, duplicate := aliases[effectiveAlias]; duplicate {
+			return nil, nil, fmt.Errorf("duplicate environment agent alias %q at indexes %d and %d", effectiveAlias, previous, i)
+		}
+		aliases[effectiveAlias] = i
+		if agents[i].SourceAgentID == target.AgentID {
+			matches = append(matches, i)
+		}
+	}
+	if len(matches) == 0 {
+		return nil, nil, fmt.Errorf("environment agents do not declare evaluation target agent_id %d by source_agent_id", target.AgentID)
+	}
+	if len(matches) > 1 {
+		return nil, nil, fmt.Errorf("environment agents contain %d mappings for evaluation target agent_id %d", len(matches), target.AgentID)
+	}
+
+	matched := matches[0]
+	collaborators := make([]EnvironmentAgentSpec, 0, len(agents)-1)
+	for i, agent := range agents {
+		if i == matched {
+			continue
+		}
+		if agent.Alias == "" || agent.Alias == "main" {
+			return nil, nil, fmt.Errorf("collaborator at index %d uses reserved evaluation alias %q", i, "main")
+		}
+		collaborators = append(collaborators, agent)
+	}
+	if len(collaborators) == 0 {
+		delete(spec, "agents")
+	} else {
+		spec["agents"] = collaborators
+	}
+	return spec, collaborators, nil
+}
+
+func (s *service) captureCollaboratorExecutions(environmentRunID string, collaborators []EnvironmentAgentSpec, timeoutSeconds, maxTurns int) ([]CollaboratorExecution, []string) {
+	results := make([]CollaboratorExecution, 0, len(collaborators))
+	failures := []string{}
+	for _, collaborator := range collaborators {
+		result := CollaboratorExecution{Alias: collaborator.Alias, SourceAgentID: collaborator.SourceAgentID}
+		var execution sdk.RuntimeAgentExecution
+		wait := map[string]any{"timeout_seconds": 5, "idle_seconds": 1, "post_tool_idle_seconds": 2, "max_turns": maxTurns}
+		err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_wait", map[string]any{"run_id": environmentRunID, "agent": collaborator.Alias, "wait": wait}, &execution)
+		participated := execution.Turns > 0 || len(execution.Trace) > 0
+		// An unused collaborator should only cost the short probe. If it was still
+		// active at the probe deadline, wait again with the case timeout so its
+		// complete trace is captured rather than treating a slow response as done.
+		if err == nil && execution.Status == "timeout" && participated && timeoutSeconds > 5 {
+			wait["timeout_seconds"] = timeoutSeconds
+			err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_wait", map[string]any{"run_id": environmentRunID, "agent": collaborator.Alias, "wait": wait}, &execution)
+			participated = execution.Turns > 0 || len(execution.Trace) > 0
+		}
+		if err != nil {
+			result.Error = err.Error()
+			failures = append(failures, fmt.Sprintf("collaborator %s: %v", collaborator.Alias, err))
+			results = append(results, result)
+			continue
+		}
+		result.Execution = &execution
+		result.Participated = participated
+		if execution.Status == "failed" || execution.Status == "timeout" && result.Participated {
+			result.Error = fmt.Sprintf("execution %s: %s", execution.Status, execution.Reason)
+			failures = append(failures, fmt.Sprintf("collaborator %s %s", collaborator.Alias, result.Error))
+		}
+		results = append(results, result)
+	}
+	return results, failures
+}
+
+func evaluateOutputEquals(assertion Assertion, execution *sdk.RuntimeAgentExecution) (AssertionResult, error) {
+	if execution == nil {
+		return AssertionResult{}, errors.New("output_equals requires a preserved agent execution")
+	}
+	actual, found := finalAssistantMessage(execution)
+	if !found {
+		actual = ""
+	}
+	return AssertionResult{Name: assertion.Name, Passed: reflect.DeepEqual(actual, assertion.Equals), Actual: actual}, nil
+}
+
+func finalAssistantMessage(execution *sdk.RuntimeAgentExecution) (string, bool) {
+	for i := len(execution.Trace) - 1; i >= 0; i-- {
+		event := execution.Trace[i]
+		if !strings.EqualFold(event.Role, "agent") && !strings.EqualFold(event.Role, "assistant") {
+			continue
+		}
+		if execution.ThreadID != "" && event.ThreadID != "" && event.ThreadID != execution.ThreadID {
+			continue
+		}
+		return event.Content, true
+	}
+	return "", false
 }
 
 func voiceAssertionResults(spec *VoiceCase, call *EnvironmentVoiceCall) []AssertionResult {
@@ -410,7 +577,7 @@ func judgeRequest(model string, payload map[string]any) map[string]any {
 	return map[string]any{"model": model, "max_tokens": 2000, "messages": []map[string]string{{"role": "system", "content": judgePrompt}, {"role": "user", "content": encodeJSON(payload)}}, "subject_type": "app", "subject_id": "evals"}
 }
 
-const judgePrompt = `You grade an autonomous agent execution. Use only evidence in the supplied trace and deterministic assertion results. Grade every supplied goal independently in one response and preserve the supplied goal order. Return one JSON object with: passed (boolean), score (0-100), reasoning (concise string), per_goal ([{goal,score,passed,why}]), and directive_suggestion (null or {directive,reason}). For each goal, score 0-49 when it was missed, 50-79 when it was partially met, and 80-100 when it was met; passed must be true exactly when its score is at least 80. The top-level score and passed value will be verified from the per-goal results. The judge verdict passes only when every goal passes; deterministic assertions are gated separately by the server. Suggest a complete replacement directive only when a durable instruction would prevent this failure; otherwise return null. Return JSON only.`
+const judgePrompt = `You grade an autonomous agent execution. Use only evidence in the supplied target trace, collaborator executions, and deterministic assertion results. Grade every supplied goal independently in one response and preserve the supplied goal order. Return one JSON object with: passed (boolean), score (0-100), reasoning (concise string), per_goal ([{goal,score,passed,why}]), and directive_suggestion (null or {directive,reason}). For each goal, score 0-49 when it was missed, 50-79 when it was partially met, and 80-100 when it was met; passed must be true exactly when its score is at least 80. The top-level score and passed value will be verified from the per-goal results. The judge verdict passes only when every goal passes; deterministic assertions are gated separately by the server. Suggest a complete replacement directive only when a durable instruction would prevent this failure; otherwise return null. Return JSON only.`
 
 func parseJudge(raw string) (*JudgeVerdict, error) {
 	raw = strings.TrimSpace(raw)
@@ -504,6 +671,9 @@ func scoreRun(assertions []AssertionResult, judge *JudgeVerdict) (string, *float
 	if len(assertions) > 0 {
 		count, total := 0, 0
 		for _, result := range assertions {
+			if result.Error != "" {
+				continue
+			}
 			if !result.Passed {
 				passed = false
 			}

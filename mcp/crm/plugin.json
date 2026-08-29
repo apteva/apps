@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "crm",
-  "version": "0.8.30",
+  "version": "0.9.1",
   "description": "CRM tools and operating guidance for contacts, customer conversations, lists, segments, leads, opportunities, pipelines, and messaging workflows.",
   "author": {
     "name": "Apteva",
