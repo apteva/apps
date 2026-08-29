@@ -56,11 +56,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.81
+version: 0.7.82
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.81 hardens long-lived
-  Patreon workflows with scoped loading, stable live targets, named switches,
-  verified environment/lifecycle diagnostics, and target-specific waits.
+  Watch, steer, and replay hosted browser sessions. v0.7.82 preserves saved
+  browser-context environments when callers omit overrides or serializers add
+  generated defaults, while retaining explicit environment safety checks.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -1359,6 +1359,10 @@ func generatedContextName(backend, rawURL string) string {
 }
 
 func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bool) (any, error) {
+	// Defense in depth for callers that reach this adapter without going
+	// through toolBrowserSession. In particular, preserve a saved context's
+	// provider-owned environment when a serializer injected default values.
+	args = normalizeBrowserSessionArgs(args)
 	backend, err := a.resolveBackend(ctx, args)
 	if err != nil {
 		return nil, err
@@ -1367,12 +1371,12 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	if err != nil {
 		return nil, err
 	}
-	if args["environment"] != nil && !boolArgDefault(args, "environment_override", false) {
-		return nil, fmt.Errorf("environment_override_required: pass environment_override=true to apply an explicit QA/device-emulation environment")
-	}
 	environmentOptions, err := browserenvironment.Parse(args["environment"], stringArg(args, "user_agent"))
 	if err != nil {
 		return nil, err
+	}
+	if !environmentOptions.IsEmpty() && !boolArgDefault(args, "environment_override", false) {
+		return nil, fmt.Errorf("environment_override_required: pass environment_override=true to apply an explicit QA/device-emulation environment")
 	}
 
 	width, height := 0, 0

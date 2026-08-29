@@ -148,9 +148,18 @@ func normalizeBrowserSessionArgsWithDiagnostics(args map[string]any) (map[string
 	}
 
 	if environment, ok := out["environment"].(map[string]any); ok {
-		if normalized := normalizeSessionEnvironmentArgs(environment, &diagnostics); len(normalized) == 0 {
+		normalized := normalizeSessionEnvironmentArgs(environment, &diagnostics)
+		if len(normalized) == 0 {
 			delete(out, "environment")
 			diagnostics.ignore("environment")
+		} else if savedContextOpen(out) && !boolArgDefault(out, "environment_override", false) && looksLikeGeneratedEnvironmentDefaults(normalized) {
+			// Saved provider contexts own their existing browser environment.
+			// Some schema serializers materialize an environment object even
+			// when the caller omitted it. Known generator-only values must not
+			// turn an ordinary saved-context open into an override request.
+			delete(out, "environment")
+			diagnostics.ignore("environment")
+			diagnostics.warn("Ignored generated browser-environment defaults while reopening the saved context")
 		} else {
 			out["environment"] = normalized
 		}
@@ -330,6 +339,93 @@ func looksLikeSynthesizedEnvironmentTemplate(environment map[string]any) bool {
 		mobileOK && !mobile && touchOK && !touch &&
 		sessionArgString(environment["user_agent"]) == "" && sessionArgString(environment["locale"]) == "" &&
 		sessionArgString(environment["timezone"]) == "" && emptySliceValue(environment["languages"])
+}
+
+func savedContextOpen(args map[string]any) bool {
+	if stringArg(args, "action") != "open" {
+		return false
+	}
+	return firstNonEmpty(
+		stringArg(args, "context_id"),
+		stringArg(args, "context_name"),
+		stringArg(args, "provider_context_id"),
+		stringArg(args, "provider_context"),
+	) != ""
+}
+
+// looksLikeGeneratedEnvironmentDefaults recognizes only values commonly
+// materialized from the public schema. It intentionally runs only for a saved-
+// context open without environment_override. Any non-default locale, timezone,
+// location, device setting, or user agent remains material and fails closed.
+func looksLikeGeneratedEnvironmentDefaults(environment map[string]any) bool {
+	if len(environment) == 0 {
+		return true
+	}
+	for key, value := range environment {
+		switch key {
+		case "user_agent", "locale":
+			if sessionArgString(value) != "" {
+				return false
+			}
+		case "timezone":
+			timezone := strings.ToUpper(sessionArgString(value))
+			if timezone != "" && timezone != "UTC" {
+				return false
+			}
+		case "languages":
+			if !emptySliceValue(value) {
+				return false
+			}
+		case "device_scale_factor":
+			number, ok := numericArg(value)
+			if !ok || (number != 0 && number != 0.1 && number != 0.5 && number != 1) {
+				return false
+			}
+		case "mobile", "touch":
+			flag, ok := value.(bool)
+			if !ok || flag {
+				return false
+			}
+		case "max_touch_points":
+			number, ok := numericArg(value)
+			if !ok || (number != 0 && number != 1) {
+				return false
+			}
+		case "geolocation":
+			geo, ok := value.(map[string]any)
+			if !ok || !looksLikeGeneratedGeolocationDefaults(geo) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func looksLikeGeneratedGeolocationDefaults(geolocation map[string]any) bool {
+	for key, value := range geolocation {
+		switch key {
+		case "latitude", "longitude":
+			number, ok := numericArg(value)
+			if !ok || number != 0 {
+				return false
+			}
+		case "accuracy":
+			number, ok := numericArg(value)
+			if !ok || (number != 0 && number != 100) {
+				return false
+			}
+		case "permission":
+			permission := strings.ToLower(sessionArgString(value))
+			if permission != "" && permission != "prompt" && permission != "grant" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func emptySliceValue(value any) bool {

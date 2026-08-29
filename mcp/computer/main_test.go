@@ -2749,6 +2749,67 @@ func TestContextCatalogResolvesBrowserSessionContextName(t *testing.T) {
 	}
 }
 
+func TestBrowserSessionSavedContextOpenPreservesProviderEnvironment(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://www.patreon.com/c/alexaentranced"}
+	newBackend = func(backends.Config) (backends.Computer, error) { return fake, nil }
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	created, err := app.toolContextCreate(ctx, map[string]any{
+		"name": "Alexa Patreon", "backend": "local", "persist_default": true,
+	})
+	if err != nil {
+		t.Fatalf("create saved context: %v", err)
+	}
+	contextRow := created.(map[string]any)["context"].(*ComputerContext)
+
+	// Exact production acceptance request: environment is truly omitted.
+	out, err := app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "context_name": "Alexa Patreon", "url": "https://www.patreon.com/c/alexaentranced",
+	})
+	if err != nil {
+		t.Fatalf("saved-context open with omitted environment: %v", err)
+	}
+	opened := out.(map[string]any)
+	if opened["app_context_id"] != contextRow.ID || fake.openContextID != contextRow.ProviderContextID {
+		t.Fatalf("saved context was not reused: result=%#v provider_context=%q", opened, fake.openContextID)
+	}
+	if !fake.openEnvironment.IsEmpty() || opened["environment_applied"] != false {
+		t.Fatalf("omitted environment became an override: result=%#v backend=%+v", opened, fake.openEnvironment)
+	}
+	_, _ = app.toolBrowserClose(ctx, map[string]any{"session_id": opened["session_id"]})
+
+	// Reproduce the defect shape after schema serialization. These values are
+	// generated defaults, so the provider context must remain authoritative.
+	fake = &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://www.patreon.com/c/alexaentranced"}
+	out, err = app.openBrowserSession(ctx, map[string]any{
+		"action": "open", "context_name": "Alexa Patreon", "url": "https://www.patreon.com/c/alexaentranced",
+		"environment": map[string]any{
+			"timezone": "UTC", "device_scale_factor": 0.5, "mobile": false, "touch": false,
+			"geolocation": map[string]any{"latitude": 0.0, "longitude": 0.0, "accuracy": 0.0, "permission": "prompt"},
+		},
+	}, false)
+	if err != nil {
+		t.Fatalf("saved-context open with generated environment defaults: %v", err)
+	}
+	opened = out.(map[string]any)
+	if !fake.openEnvironment.IsEmpty() || opened["environment_applied"] != false {
+		t.Fatalf("generated defaults replaced saved environment: result=%#v backend=%+v", opened, fake.openEnvironment)
+	}
+	_, _ = app.toolBrowserClose(ctx, map[string]any{"session_id": opened["session_id"]})
+
+	// A genuinely different requested environment remains fail-closed without
+	// the explicit authorization bit.
+	if _, err := app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "context_name": "Alexa Patreon", "url": "https://www.patreon.com/c/alexaentranced",
+		"environment": map[string]any{"timezone": "Europe/Paris"},
+	}); err == nil || !strings.Contains(err.Error(), "environment_override_required") {
+		t.Fatalf("material environment without override authorization should fail: %v", err)
+	}
+}
+
 func TestContextListDefaultsAllAndReportsOtherBackends(t *testing.T) {
 	app := &App{reg: &registry{m: map[string]*session{}}}
 	ctx := tk.NewAppCtx(t, "apteva.yaml")

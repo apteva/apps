@@ -60,6 +60,51 @@ func TestNormalizeSessionEnvironmentPreservesIntentionalZeroCoordinates(t *testi
 	}
 }
 
+func TestNormalizeSavedContextOpenDropsOnlyGeneratedEnvironmentDefaults(t *testing.T) {
+	tests := map[string]any{
+		"null":  nil,
+		"empty": map[string]any{},
+		"generated schema values": map[string]any{
+			"user_agent": "", "locale": "", "languages": []any{}, "timezone": "UTC",
+			"geolocation":         map[string]any{"latitude": 0.0, "longitude": 0.0, "accuracy": 0.0, "permission": "prompt"},
+			"device_scale_factor": 0.5, "mobile": false, "touch": false, "max_touch_points": 1.0,
+		},
+	}
+	for name, environment := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, diagnostics := normalizeBrowserSessionArgsWithDiagnostics(map[string]any{
+				"action": "open", "context_name": "Alexa Patreon", "url": "https://www.patreon.com/c/alexaentranced",
+				"environment": environment,
+			})
+			if _, exists := got["environment"]; exists {
+				t.Fatalf("generated environment was not removed from saved-context open: %#v", got)
+			}
+			if got["context_name"] != "Alexa Patreon" || got["url"] != "https://www.patreon.com/c/alexaentranced" {
+				t.Fatalf("saved-context identity changed: %#v", got)
+			}
+			if environment != nil && !slices.Contains(diagnostics.IgnoredArguments, "environment") {
+				t.Fatalf("environment omission was not diagnosed: %+v", diagnostics)
+			}
+		})
+	}
+
+	material := normalizeBrowserSessionArgs(map[string]any{
+		"action": "open", "context_name": "Alexa Patreon",
+		"environment": map[string]any{"timezone": "Europe/Paris"},
+	})
+	if got := material["environment"].(map[string]any)["timezone"]; got != "Europe/Paris" {
+		t.Fatalf("materially different environment was discarded: %#v", material)
+	}
+
+	authorizedDefaults := normalizeBrowserSessionArgs(map[string]any{
+		"action": "open", "context_name": "Alexa Patreon", "environment_override": true,
+		"environment": map[string]any{"timezone": "UTC", "geolocation": map[string]any{"latitude": 0.0, "longitude": 0.0}},
+	})
+	if _, exists := authorizedDefaults["environment"]; !exists {
+		t.Fatalf("explicitly authorized environment was discarded: %#v", authorizedDefaults)
+	}
+}
+
 func TestBrowserSessionFiltersProductionStyleSynthesizedTemplate(t *testing.T) {
 	previous := newBackend
 	t.Cleanup(func() { newBackend = previous })
