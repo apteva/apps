@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 
 	sdk "github.com/apteva/app-sdk"
@@ -172,6 +173,46 @@ func (a *App) bumpFailures(app *sdk.AppCtx, t *Tenant) {
 	}
 }
 
+func healthVersion(body []byte) string {
+	var parsed struct {
+		Version string `json:"version"`
+		Apteva  string `json:"apteva"`
+	}
+	_ = json.Unmarshal(body, &parsed)
+	if parsed.Apteva != "" {
+		return strings.TrimPrefix(strings.TrimSpace(parsed.Apteva), "v")
+	}
+	return strings.TrimPrefix(strings.TrimSpace(parsed.Version), "v")
+}
+
+func requireRuntimeHealthVersion(ctx context.Context, baseURL, requested string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(baseURL, "/")+"/api/health", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return body, fmt.Errorf("runtime health returned HTTP %d", resp.StatusCode)
+	}
+	actual := healthVersion(body)
+	requested = strings.TrimPrefix(strings.TrimSpace(requested), "v")
+	if actual != requested {
+		if actual == "" {
+			actual = "unknown"
+		}
+		return body, fmt.Errorf("requested Apteva %s, but launched runtime reports %s", requested, actual)
+	}
+	return body, nil
+}
+
 // probeHealth GETs <base>/api/health with Bearer auth. Returns
 // (ok, version, raw body, err). The version field of the response is
 // not strictly required to exist — empty string is fine.
@@ -196,14 +237,5 @@ func probeHealth(ctx context.Context, baseURL, apiKey string) (bool, string, []b
 	// Either field absent → empty string → store keeps the prior value
 	// (COALESCE NULLIF in store.updateHealth), so we never overwrite
 	// good data with "".
-	var parsed struct {
-		Version string `json:"version"`
-		Apteva  string `json:"apteva"`
-	}
-	_ = json.Unmarshal(body, &parsed)
-	v := parsed.Apteva
-	if v == "" {
-		v = parsed.Version
-	}
-	return true, v, body, nil
+	return true, healthVersion(body), body, nil
 }

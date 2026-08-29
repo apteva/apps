@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.10.2
+version: 0.10.3
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 icon: /ui/icon.svg
@@ -138,7 +138,7 @@ provides:
     - name: tenant_migrate_finalize
       description: Permanently remove a source retained by tenant_migrate after explicit confirmation.
     - name: tenant_update
-      description: Update a tenant's apteva version. Installs the requested version into a fleet-owned npm prefix, then respawns.
+      description: Update a tenant's apteva version with exact runtime validation while preserving stopped state.
     - name: tenant_check_updates
       description: Report npm's apteva latest version + which tenants are behind. Read-only.
     - name: tenant_set_target_version
@@ -823,7 +823,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_update",
-			Description: "Update a tenant's apteva version. Resolves the version (npm latest if omitted), installs into a fleet-owned npm prefix at ~/.apteva-fleet/versions/<v>/, records target_version, stops the running tenant, respawns with the new binary. Other tenants are unaffected. Local-only. Args: tenant_id, version?.",
+			Description: "Update a tenant's apteva version. Resolves the version (npm latest if omitted), installs and validates the exact versioned CLI/server/core binaries, and records target_version. Active tenants restart and must report the requested health version; stopped tenants remain stopped until tenant_start. Other tenants are unaffected. Args: tenant_id, version?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

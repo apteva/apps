@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.10.2
+version: 0.10.3
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -35,6 +35,9 @@ description: |
   clones stay domainless and stopped until a quarantine rehearsal succeeds.
 
   v0.10.2 fixes SQLite replica relative-path expansion in hosted clone scripts.
+
+  v0.10.3 launches the exact versioned CLI/server/core binaries, validates the
+  running health version, and preserves stopped tenants during updates.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -162,7 +165,7 @@ provides:
     - name: tenant_migrate_finalize
       description: "Inspect or permanently remove a stopped source retained by tenant_migrate. Omit confirm for a read-only preview; confirm=true deletes only the recorded old host/path after verifying it is not current. Args: tenant_id, confirm?."
     - name: tenant_update
-      description: "Per-tenant apteva version update. Installs the requested version into a fleet-owned npm prefix at ~/.apteva-fleet/versions/<v>/, records target_version, stops the running tenant, respawns with the new binary. Other tenants are unaffected. Local-only. Args: tenant_id, version? (empty → npm latest)."
+      description: "Per-tenant apteva version update. Installs and validates the requested CLI/server/core binaries in Fleet's version cache and records target_version. Active tenants restart and must report the exact requested health version; stopped tenants remain stopped until tenant_start. Other tenants are unaffected. Args: tenant_id, version? (empty → npm latest)."
     - name: tenant_check_updates
       description: "Read-only: return npm's apteva@latest plus every local tenant whose current_version is behind. Args: (none)."
     - name: tenant_set_target_version
@@ -192,7 +195,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.10.2
+    ref: fleet/v0.10.3
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

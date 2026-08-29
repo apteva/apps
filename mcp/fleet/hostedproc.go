@@ -10,7 +10,7 @@ package main
 // Disk layout on the remote VPS:
 //
 //	/var/lib/apteva-fleet/
-//	  versions/<v>/node_modules/.bin/apteva    # per-version cache
+//	  versions/<v>/node_modules/apteva/*       # pinned CLI/server/core binaries
 //	  <slug>/                                  # tenant data dir
 //	    apteva.db, apps/, fleet-child.log, ...
 //
@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -176,6 +177,78 @@ func hostedProcessEnv(spec hostedSpawnSpec) string {
 	)
 }
 
+func hostedVersionInstallScript(versionDir, version string) string {
+	runtime := versionedRuntimePaths(versionDir)
+	return fmt.Sprintf(`set -eu
+VERSION=%s
+	VERSION_DIR=%s
+	CLI=%s
+	SERVER=%s
+	CORE=%s
+	PACKAGE_JSON="$VERSION_DIR/node_modules/apteva/package.json"
+	mkdir -p "$VERSION_DIR"
+	if [ ! -x "$CLI" ] || [ ! -x "$SERVER" ] || [ ! -x "$CORE" ]; then
+  INSTALL_HOME="$VERSION_DIR/.npm-apteva-home"
+  rm -rf -- "$INSTALL_HOME"
+  mkdir -p "$INSTALL_HOME"
+  trap 'rm -rf -- "$INSTALL_HOME"' EXIT
+  env APTEVA_HOME="$INSTALL_HOME" npm install --prefix "$VERSION_DIR" --no-audit --no-fund --silent "apteva@$VERSION"
+fi
+	[ -f "$PACKAGE_JSON" ] || { echo "versioned package manifest missing: $PACKAGE_JSON" >&2; exit 65; }
+	package_version=$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(p.version||""))' "$PACKAGE_JSON")
+	package_version=${package_version#v}
+	expected="$VERSION"
+	[ "$expected" = latest ] && expected="$package_version"
+	expected=${expected#v}
+	[ -n "$package_version" ] && [ "$package_version" = "$expected" ] || { echo "Requested Apteva $expected, but package manifest reports ${package_version:-unknown}" >&2; exit 65; }
+	for item in "apteva:$CLI" "apteva-server:$SERVER" "apteva-core:$CORE"; do
+	  label=${item%%%%:*}
+	  bin=${item#*:}
+	  [ -x "$bin" ] || { echo "versioned $label binary missing: $bin" >&2; exit 65; }
+	done
+	# apteva-core has no side-effect-free --version command. Its package
+	# manifest and executable path are validated above; do not boot it while
+	# preparing a stopped tenant.
+	for item in "apteva:$CLI" "apteva-server:$SERVER"; do
+	  label=${item%%%%:*}
+	  bin=${item#*:}
+	  actual=$("$bin" --version 2>&1 | awk 'NF >= 2 { print $2; exit }')
+	  actual=${actual#v}
+	  [ "$actual" = "$expected" ] || { echo "Requested Apteva $expected, but $label reports ${actual:-unknown}" >&2; exit 65; }
+done
+printf 'FLEET_VERSION_READY %%s\n' "$expected"`, sh(version), sh(versionDir), sh(runtime.CLI), sh(runtime.Server), sh(runtime.Core))
+}
+
+func (a *App) ensureHostedVersionInstalled(ctx *sdk.AppCtx, instanceID int64, version string) (aptevaRuntimePaths, string, error) {
+	version, err := validateAptevaVersion(version, false)
+	if err != nil || version == "" {
+		if err == nil {
+			err = errors.New("version required")
+		}
+		return aptevaRuntimePaths{}, "", err
+	}
+	if err := a.ensureHostedRuntime(ctx, instanceID); err != nil {
+		return aptevaRuntimePaths{}, "", err
+	}
+	versionDir := remoteFleetRoot + "/versions/" + version
+	runtime := versionedRuntimePaths(versionDir)
+	out, code, err := instanceRunCommand(ctx, instanceID, hostedVersionInstallScript(versionDir, version), 240)
+	if err != nil || code != 0 {
+		return aptevaRuntimePaths{}, "", fmt.Errorf("prepare apteva@%s runtime: %w (exit %d): %s", version, err, code, strings.TrimSpace(out))
+	}
+	const marker = "FLEET_VERSION_READY "
+	actual := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), marker) {
+			actual = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), marker))
+		}
+	}
+	if actual == "" {
+		return aptevaRuntimePaths{}, "", errors.New("hosted version preparation returned no readiness marker")
+	}
+	return runtime, actual, nil
+}
+
 // spawnHostedTenant boots a fresh apteva-server on the remote VPS.
 // Steps:
 //
@@ -224,32 +297,21 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 	}
 
 	dataDir := remoteFleetRoot + "/" + spec.Slug
-	versionDir := remoteFleetRoot + "/versions/" + spec.AptevaVer
-	binPath := versionDir + "/node_modules/.bin/apteva"
 	logPath := dataDir + "/fleet-child.log"
 	pidPath := dataDir + "/fleet.pid"
 
-	// 1) mkdir + 2) npm install (idempotent — npm install is a no-op
-	//    if already present and we want the same version).
+	// 1) Create the tenant data directory.
 	if _, code, err := instanceRunCommand(ctx, spec.InstanceID,
-		fmt.Sprintf(`mkdir -p %s %s`, sh(dataDir), sh(versionDir)),
+		fmt.Sprintf(`mkdir -p %s`, sh(dataDir)),
 		30,
 	); err != nil || code != 0 {
 		return "", "", fmt.Errorf("mkdir remote dirs: %w (exit %d)", err, code)
 	}
-	// Test for the binary first to skip a 30s+ npm install on cache hit.
-	if _, code, _ := instanceRunCommand(ctx, spec.InstanceID,
-		fmt.Sprintf(`test -x %s`, sh(binPath)), 5,
-	); code != 0 {
-		ctx.Logger().Info("hosted: installing apteva on instance",
-			"instance_id", spec.InstanceID, "version", spec.AptevaVer)
-		if _, code, err := instanceRunCommand(ctx, spec.InstanceID,
-			fmt.Sprintf(`npm install --prefix %s --no-audit --no-fund --silent apteva@%s`,
-				sh(versionDir), sh(spec.AptevaVer)),
-			180, // npm install on a cold VPS can take a while
-		); err != nil || code != 0 {
-			return "", "", fmt.Errorf("npm install apteva@%s: %w (exit %d)", spec.AptevaVer, err, code)
-		}
+	// 2) Prepare and validate the exact package binaries. npm's .bin/apteva
+	// launcher is deliberately bypassed because it prefers ~/.apteva/bin.
+	runtime, expectedVersion, err := a.ensureHostedVersionInstalled(ctx, spec.InstanceID, spec.AptevaVer)
+	if err != nil {
+		return "", "", err
 	}
 
 	// 3) Spawn under setsid so the process survives the SSH session drop.
@@ -260,9 +322,10 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 	if spec.Quarantine {
 		quarantineEnv = "APTEVA_CLONE_QUARANTINE=1"
 	}
+	runtimeEnv := fmt.Sprintf("APTEVA_HOME=%s APTEVA_SERVER_BIN=%s APTEVA_CORE_BIN=%s", sh(dataDir), sh(runtime.Server), sh(runtime.Core))
 	inner := fmt.Sprintf(
-		`exec env %s %s %s --data-dir %s --port %d --no-browser >>%s 2>&1`,
-		envArgs, quarantineEnv, sh(binPath), sh(dataDir), spec.Port, sh(logPath),
+		`exec env %s %s %s %s --data-dir %s --port %d --no-browser >>%s 2>&1`,
+		envArgs, quarantineEnv, runtimeEnv, sh(runtime.CLI), sh(dataDir), spec.Port, sh(logPath),
 	)
 	spawnCmd := fmt.Sprintf(`
 set -eu
@@ -294,7 +357,8 @@ echo "$PID" > "$PID_FILE"
 	baseURL = fmt.Sprintf("http://%s:%d", spec.InstanceIP, spec.Port)
 
 	// 4) Wait for /api/health to respond.
-	if err := a.waitForHostedReady(ctx, spec.InstanceID, spec.Port, 60*time.Second); err != nil {
+	if err := a.waitForHostedReadyVersion(ctx, spec.InstanceID, spec.Port, expectedVersion, 60*time.Second); err != nil {
+		_ = stopHostedTenant(ctx, spec.InstanceID, spec.Slug, spec.Port, 10*time.Second)
 		// Capture log tail to make the failure useful.
 		tail, _, _ := instanceRunCommand(ctx, spec.InstanceID,
 			fmt.Sprintf(`tail -50 %s 2>/dev/null || true`, sh(logPath)), 5)
@@ -429,7 +493,7 @@ func destroyHostedTenant(ctx *sdk.AppCtx, instanceID int64, slug string) error {
 
 // waitForRemoteReady polls http://base/api/health until 200 or
 // timeout. Uses fleet's existing httpClient (10s per-request).
-func waitForRemoteReady(_ *sdk.AppCtx, baseURL string, timeout time.Duration) error {
+func waitForRemoteReadyVersion(_ *sdk.AppCtx, baseURL, expectedVersion string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	url := baseURL + "/api/health"
 	for {
@@ -439,8 +503,16 @@ func waitForRemoteReady(_ *sdk.AppCtx, baseURL string, timeout time.Duration) er
 		req, _ := http.NewRequest(http.MethodGet, url, nil)
 		resp, err := httpClient.Do(req)
 		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			if resp.StatusCode == 200 {
+				actual := healthVersion(body)
+				if expectedVersion != "" && actual != strings.TrimPrefix(expectedVersion, "v") {
+					if actual == "" {
+						actual = "unknown"
+					}
+					return fmt.Errorf("requested Apteva %s, but launched runtime reports %s", expectedVersion, actual)
+				}
 				return nil
 			}
 		}
@@ -448,12 +520,20 @@ func waitForRemoteReady(_ *sdk.AppCtx, baseURL string, timeout time.Duration) er
 	}
 }
 
+func waitForRemoteReady(ctx *sdk.AppCtx, baseURL string, timeout time.Duration) error {
+	return waitForRemoteReadyVersion(ctx, baseURL, "", timeout)
+}
+
 func (a *App) waitForHostedReady(ctx *sdk.AppCtx, instanceID int64, port int, timeout time.Duration) error {
+	return a.waitForHostedReadyVersion(ctx, instanceID, port, "", timeout)
+}
+
+func (a *App) waitForHostedReadyVersion(ctx *sdk.AppCtx, instanceID int64, port int, expectedVersion string, timeout time.Duration) error {
 	baseURL, err := a.hostedTunnelBaseURL(ctx, instanceID, port)
 	if err != nil {
 		return fmt.Errorf("open hosted readiness tunnel: %w", err)
 	}
-	return waitForRemoteReady(ctx, baseURL, timeout)
+	return waitForRemoteReadyVersion(ctx, baseURL, expectedVersion, timeout)
 }
 
 func hostedPortListening(ctx *sdk.AppCtx, instanceID int64, port int) (bool, error) {

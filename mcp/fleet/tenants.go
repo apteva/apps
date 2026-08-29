@@ -486,6 +486,14 @@ func (s *store) setTargetVersion(id, version string) error {
 	return err
 }
 
+func (s *store) setCurrentVersion(id, version string) error {
+	_, err := s.db.Exec(
+		`UPDATE fleet_tenants SET current_version = ?, updated_at = ? WHERE id = ?`,
+		nullStr(version), time.Now().UTC(), id,
+	)
+	return err
+}
+
 // setLocation moves a tenant between hosts: updates instance_id (0 =
 // local parent, >0 = a row in the Instances app), base_url, and
 // config_dir atomically. Used by tenant_migrate after the data dir has

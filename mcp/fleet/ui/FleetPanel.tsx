@@ -2876,10 +2876,9 @@ function UpdateVersionDialog({
   return (
     <DialogFrame title={`Update ${tenant.slug}`} onClose={onClose}>
       <p className="text-xs text-text-dim mb-3">
-        Installs the requested apteva version into a fleet-owned npm prefix
-        at <code className="font-mono">~/.apteva-fleet/versions/&lt;v&gt;/</code>,
-        stops the tenant, and respawns it. Other tenants are unaffected.
-        Leave empty to track npm latest.
+        Installs and validates the requested Apteva binaries in Fleet&apos;s
+        version cache. Running tenants restart; stopped tenants remain stopped.
+        Other tenants are unaffected. Leave empty to track npm latest.
       </p>
       <div className="text-xs text-text-dim font-mono mb-2 space-y-0.5">
         <div>
@@ -2907,7 +2906,7 @@ function UpdateVersionDialog({
         />
       </Label>
       <div className="text-[11px] text-text-dim font-mono">
-        Will install + respawn at: <span className="text-text">{resolved}</span>
+        Will install and validate: <span className="text-text">{resolved}</span>
       </div>
       {err && <p className="text-xs text-error mt-2">{err}</p>}
       <DialogActions>

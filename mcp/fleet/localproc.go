@@ -68,9 +68,18 @@ func (a *App) spawnTenantWithMode(ctx context.Context, tenantID, slug, configDir
 	if err != nil {
 		return "", nil, err
 	}
+	expectedVersion := ""
+	spawnEnv := tenantSpawnEnvForMode(configDir, port, tenantID, quarantine)
+	if runtime, ok := versionedRuntimeFromCLI(bin); ok {
+		expectedVersion, err = verifyVersionedRuntime(ctx, runtime, "")
+		if err != nil {
+			return "", nil, fmt.Errorf("validate versioned runtime: %w", err)
+		}
+		spawnEnv = applyVersionedRuntimeEnv(spawnEnv, runtime)
+	}
 	cmd := buildSpawnCmd(slug, bin,
 		[]string{"--data-dir", configDir, "--port", strconv.Itoa(port), "--no-browser"})
-	cmd.Env = tenantSpawnEnvForMode(configDir, port, tenantID, quarantine)
+	cmd.Env = spawnEnv
 	// New process group: child survives if fleet itself restarts.
 	// (Setpgid is also set redundantly inside buildSpawnCmd; harmless.)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -109,6 +118,12 @@ func (a *App) spawnTenantWithMode(ctx context.Context, tenantID, slug, configDir
 		_ = stopProcess(proc, 2*time.Second)
 		return "", nil, fmt.Errorf("tenant did not become ready: %w", err)
 	}
+	if expectedVersion != "" {
+		if _, err := requireRuntimeHealthVersion(ctx, fmt.Sprintf("http://127.0.0.1:%d", port), expectedVersion); err != nil {
+			_ = stopProcess(proc, 2*time.Second)
+			return "", nil, err
+		}
+	}
 
 	if freshSetup {
 		// Scrape the setup token from the CLI's first-boot banner.
@@ -125,6 +140,12 @@ func (a *App) spawnTenantWithMode(ctx context.Context, tenantID, slug, configDir
 	return "", proc, nil
 }
 
+func applyVersionedRuntimeEnv(env []string, runtime aptevaRuntimePaths) []string {
+	env = setEnv(env, "APTEVA_SERVER_BIN", runtime.Server)
+	env = setEnv(env, "APTEVA_CORE_BIN", runtime.Core)
+	return env
+}
+
 func tenantSpawnEnv(configDir string, port int, tenantID string) []string {
 	deployStart, deployEnd, codeStart, codeEnd := tenantAppPortRanges(port)
 	env := append([]string{}, os.Environ()...)
@@ -137,6 +158,7 @@ func tenantSpawnEnv(configDir string, port int, tenantID string) []string {
 		"APTEVA_APP_TOKEN", "APTEVA_OUTBOUND_TOKEN", "APTEVA_INSTALL_ID",
 		"APTEVA_PROJECT_ID", "APTEVA_APP_CONFIG", "APTEVA_APP_PORT",
 		"APTEVA_GATEWAY_URL", "APTEVA_PUBLIC_URL", "DB_PATH",
+		"APTEVA_SERVER_BIN", "APTEVA_CORE_BIN",
 	} {
 		env = unsetEnv(env, key)
 	}

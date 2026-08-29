@@ -20,13 +20,13 @@ import (
 //
 // Each tenant runs an apteva child process; we pick which binary to
 // spawn by checking Tenant.TargetVersion. When set, the versioned
-// binary at <fleetRoot>/versions/<v>/node_modules/.bin/apteva is used;
+// binary at <fleetRoot>/versions/<v>/node_modules/apteva/apteva is used;
 // when empty, fall back to the host-wide `apteva` (resolveAptevaBin).
 //
 // `tenant_update` installs the requested version into a fleet-owned
 // npm prefix (NOT the global one — we don't touch host `npm i -g
-// apteva`), records target_version, and respawns the tenant. Other
-// tenants are unaffected.
+// apteva`), records target_version, and restarts the tenant only when
+// it was already running. Other tenants are unaffected.
 //
 // Scope of v0.3.0: manual update only. Auto-update (4c in the
 // proposal) — comparing latest vs. policy — is deferred; the
@@ -64,7 +64,98 @@ func tenantAptevaBin(targetVersion string) string {
 	if v == "" {
 		return ""
 	}
-	return filepath.Join(versionsRoot(), v, "node_modules", ".bin", "apteva")
+	return versionedRuntimePaths(filepath.Join(versionsRoot(), v)).CLI
+}
+
+type aptevaRuntimePaths struct {
+	CLI    string
+	Server string
+	Core   string
+}
+
+func versionedRuntimePaths(versionDir string) aptevaRuntimePaths {
+	packageDir := filepath.Join(versionDir, "node_modules", "apteva")
+	return aptevaRuntimePaths{
+		CLI:    filepath.Join(packageDir, "apteva"),
+		Server: filepath.Join(packageDir, "apteva-server"),
+		Core:   filepath.Join(packageDir, "apteva-core"),
+	}
+}
+
+func versionedRuntimeFromCLI(cli string) (aptevaRuntimePaths, bool) {
+	cli = filepath.Clean(strings.TrimSpace(cli))
+	packageDir := filepath.Dir(cli)
+	if filepath.Base(cli) != "apteva" || filepath.Base(packageDir) != "apteva" || filepath.Base(filepath.Dir(packageDir)) != "node_modules" {
+		return aptevaRuntimePaths{}, false
+	}
+	return aptevaRuntimePaths{
+		CLI:    cli,
+		Server: filepath.Join(packageDir, "apteva-server"),
+		Core:   filepath.Join(packageDir, "apteva-core"),
+	}, true
+}
+
+func binaryReportedVersion(ctx context.Context, bin string) (string, error) {
+	out, err := exec.CommandContext(ctx, bin, "--version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s --version: %w: %s", bin, err, strings.TrimSpace(string(out)))
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 2 {
+		return "", fmt.Errorf("%s --version returned no version", bin)
+	}
+	return strings.TrimPrefix(fields[1], "v"), nil
+}
+
+func verifyVersionedRuntime(ctx context.Context, runtime aptevaRuntimePaths, requested string) (string, error) {
+	packageJSON := filepath.Join(filepath.Dir(runtime.CLI), "package.json")
+	payload, err := os.ReadFile(packageJSON)
+	if err != nil {
+		return "", fmt.Errorf("read versioned package manifest %s: %w", packageJSON, err)
+	}
+	var manifest struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(payload, &manifest); err != nil {
+		return "", fmt.Errorf("parse versioned package manifest %s: %w", packageJSON, err)
+	}
+	actual := strings.TrimPrefix(strings.TrimSpace(requested), "v")
+	packageVersion := strings.TrimPrefix(strings.TrimSpace(manifest.Version), "v")
+	if actual == "" {
+		actual = packageVersion
+	}
+	if packageVersion == "" || packageVersion != actual {
+		if packageVersion == "" {
+			packageVersion = "unknown"
+		}
+		return "", fmt.Errorf("requested Apteva %s, but package manifest reports %s", actual, packageVersion)
+	}
+
+	files := []struct {
+		name string
+		bin  string
+	}{{"apteva", runtime.CLI}, {"apteva-server", runtime.Server}, {"apteva-core", runtime.Core}}
+	for _, check := range files {
+		info, err := os.Stat(check.bin)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			return "", fmt.Errorf("versioned %s binary is missing or not executable: %s", check.name, check.bin)
+		}
+	}
+
+	// apteva-core does not expose a fast-exit --version command; invoking it
+	// here would boot Core while preparing an intentionally stopped tenant.
+	// Its executable and package version are validated above. The CLI and
+	// server both have side-effect-free version commands, so check those too.
+	for _, check := range files[:2] {
+		reported, err := binaryReportedVersion(ctx, check.bin)
+		if err != nil {
+			return "", err
+		}
+		if reported != actual {
+			return "", fmt.Errorf("requested Apteva %s, but %s reports %s", actual, check.name, reported)
+		}
+	}
+	return actual, nil
 }
 
 // resolveSpawnBin picks the apteva binary for a FRESH tenant_create.
@@ -173,9 +264,10 @@ func npmLatestVersion(ctx context.Context) (string, error) {
 // the cache and the binary is executable, return its path; otherwise
 // run `npm install --prefix <dir> apteva@<version>` and return.
 //
-// This uses npm's local-install model (target dir gets a node_modules/
-// and .bin/), so the host's global node_modules is untouched. Each
-// version is fully isolated.
+// This uses npm's local-install model (target dir gets a node_modules/).
+// The npm postinstall receives an isolated APTEVA_HOME so it cannot move the
+// host user's ~/.apteva/bin symlinks. Fleet executes the package's real Go
+// binaries and never the npm .bin launcher.
 func ensureVersionInstalled(ctx context.Context, version string) (binPath string, err error) {
 	version, err = validateAptevaVersion(version, false)
 	if err != nil || version == "" {
@@ -188,9 +280,9 @@ func ensureVersionInstalled(ctx context.Context, version string) (binPath string
 	defer versionInstallMu.Unlock()
 
 	dir := filepath.Join(versionsRoot(), version)
-	bin := filepath.Join(dir, "node_modules", ".bin", "apteva")
-	if fi, statErr := os.Stat(bin); statErr == nil && fi.Mode()&0o111 != 0 {
-		return bin, nil
+	runtime := versionedRuntimePaths(dir)
+	if _, verifyErr := verifyVersionedRuntime(ctx, runtime, version); verifyErr == nil {
+		return runtime.CLI, nil
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir versions dir: %w", err)
@@ -205,6 +297,13 @@ func ensureVersionInstalled(ctx context.Context, version string) (binPath string
 		"--no-audit", "--no-fund", "--no-save", "--silent",
 		"apteva@"+version,
 	)
+	installHome := filepath.Join(dir, ".npm-apteva-home")
+	_ = os.RemoveAll(installHome)
+	if err := os.MkdirAll(installHome, 0o700); err != nil {
+		return "", fmt.Errorf("mkdir isolated npm APTEVA_HOME: %w", err)
+	}
+	defer os.RemoveAll(installHome)
+	cmd.Env = setEnv(os.Environ(), "APTEVA_HOME", installHome)
 	// Capture combined output so a failed install surfaces in the
 	// returned error — npm's exit-code-only failure mode is useless
 	// for operators.
@@ -212,10 +311,10 @@ func ensureVersionInstalled(ctx context.Context, version string) (binPath string
 	if runErr != nil {
 		return "", fmt.Errorf("npm install apteva@%s: %v: %s", version, runErr, truncate(string(out), 600))
 	}
-	if fi, statErr := os.Stat(bin); statErr != nil || fi.Mode()&0o111 == 0 {
-		return "", fmt.Errorf("npm install completed but %s is missing/non-exec", bin)
+	if _, err := verifyVersionedRuntime(ctx, runtime, version); err != nil {
+		return "", fmt.Errorf("npm install completed but runtime validation failed: %w", err)
 	}
-	return bin, nil
+	return runtime.CLI, nil
 }
 
 func truncate(s string, n int) string {
@@ -236,9 +335,9 @@ func truncate(s string, n int) string {
 //   - if version already matches current_version, no-op + return
 //   - install the version into the fleet-owned cache
 //   - persist target_version
-//   - stop the running process, respawn with the versioned binary
-//   - return updated tenant + new current_version once health probe
-//     observes it
+//   - preserve operational state: stopped tenants remain stopped
+//   - restart active/setup-pending tenants with the versioned binary
+//   - require /api/health to report the requested version before success
 func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := strings.TrimSpace(getStr(args, "tenant_id"))
 	if id == "" {
@@ -294,6 +393,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	oldTarget := t.TargetVersion
 	oldVersion := tenantVersion(t)
+	wasRunning := t.Status == StatusActive || t.Status == StatusSetupPending
 	restoreTarget := func() { _ = a.store.setTargetVersion(t.ID, oldTarget) }
 
 	port, _ := portFromBaseURL(t.BaseURL)
@@ -301,17 +401,31 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("tenant missing port or config_dir — cannot respawn")
 	}
 
-	// Hosted: install the new version on the VPS (via npm-install
-	// inside spawnHostedTenant), stop the running process by port
-	// over SSH, respawn. Same shape as local but every step is
-	// dispatched via instance_run_command.
+	// Hosted: prepare and validate the exact versioned binaries first. A
+	// stopped tenant remains stopped; only a tenant that was already running
+	// is stopped and restarted.
 	if t.IsHosted() {
 		info, ierr := a.getInstanceInfo(ctx, t.InstanceID)
 		if ierr != nil {
 			return nil, ierr
 		}
+		if _, _, err := a.ensureHostedVersionInstalled(ctx, t.InstanceID, requested); err != nil {
+			_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
+				map[string]any{"version": requested, "stage": "install", "error": err.Error()})
+			return nil, err
+		}
 		if err := a.store.setTargetVersion(t.ID, requested); err != nil {
 			return nil, err
+		}
+		if !wasRunning {
+			_ = a.store.recordEvent(t.ID, "update_prepared", "tool:tenant_update",
+				map[string]any{"version": requested, "instance_id": t.InstanceID, "preserved_status": t.Status})
+			updated, _, _ := a.store.get(t.ID)
+			return map[string]any{
+				"tenant": a.publicTenantView(updated), "updated": true, "version": requested,
+				"started": false, "status": t.Status,
+				"note": "version prepared; tenant remained stopped",
+			}, nil
 		}
 		if err := stopHostedTenant(ctx, t.InstanceID, t.Slug, port, 10*time.Second); err != nil {
 			restoreTarget()
@@ -335,6 +449,9 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			}
 			return nil, fmt.Errorf("respawn hosted with apteva@%s: %w (previous version restored)", requested, sErr)
 		}
+		if err := a.store.setCurrentVersion(t.ID, requested); err != nil {
+			return nil, err
+		}
 		_ = a.store.recordEvent(t.ID, "updated", "tool:tenant_update",
 			map[string]any{"version": requested, "instance_id": t.InstanceID})
 		updated, _, _ := a.store.get(t.ID)
@@ -342,7 +459,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"tenant":  a.publicTenantView(updated),
 			"updated": true,
 			"version": requested,
-			"note":    "remote process respawned; current_version will reflect once the next health poll runs",
+			"note":    "remote process restarted and health reported the requested version",
 		}, nil
 	}
 
@@ -351,6 +468,19 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
 			map[string]any{"version": requested, "stage": "install", "error": err.Error()})
 		return nil, err
+	}
+	if !wasRunning {
+		if err := a.store.setTargetVersion(t.ID, requested); err != nil {
+			return nil, err
+		}
+		_ = a.store.recordEvent(t.ID, "update_prepared", "tool:tenant_update",
+			map[string]any{"version": requested, "preserved_status": t.Status})
+		updated, _, _ := a.store.get(t.ID)
+		return map[string]any{
+			"tenant": a.publicTenantView(updated), "updated": true, "version": requested,
+			"started": false, "status": t.Status,
+			"note": "version prepared; tenant remained stopped",
+		}, nil
 	}
 	oldBin := tenantAptevaBin(oldVersion)
 	if oldVersion != requested {
@@ -397,6 +527,9 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	a.procMu.Lock()
 	a.procs[t.Slug] = proc
 	a.procMu.Unlock()
+	if err := a.store.setCurrentVersion(t.ID, requested); err != nil {
+		return nil, err
+	}
 	_ = a.store.recordEvent(t.ID, "updated", "tool:tenant_update",
 		map[string]any{"version": requested, "bin": bin})
 
@@ -405,7 +538,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"tenant":  a.publicTenantView(updated),
 		"updated": true,
 		"version": requested,
-		"note":    "process respawned; current_version will reflect once the next health poll runs",
+		"note":    "process restarted and health reported the requested version",
 	}, nil
 }
 
