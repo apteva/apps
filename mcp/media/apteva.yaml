@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.1
+version: 0.14.3
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -19,9 +19,10 @@ description: |
   by default, Cloudinary when bound. A wedged encode releases its
   slot without disturbing the indexer.
 
-  v0.14.1 routes read-only media analysis through the configured remote
-  instance when `render_host_id` is set, fails closed when that executor is
-  unavailable, and reports the effective executor and host in its result.
+  v0.14.3 keeps external-provider publishing data in arbitrary media metadata
+  and removes provider-specific URL resolution from Media itself. Read-only
+  media analysis continues to follow the configured remote instance and fail
+  closed when that executor is unavailable.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media
@@ -500,7 +501,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.1
+    ref: media/v0.14.3
     entry: mcp/media
   port: 8080
   health_check: /health

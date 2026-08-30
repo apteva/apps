@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.1
+version: 0.14.3
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,9 +31,10 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.14.1 routes read-only media analysis through the
-  configured remote instance when render_host_id is set, fails closed when
-  that executor is unavailable, and reports the effective executor and host.
+  through storage. v0.14.3 keeps external-provider publishing data in
+  arbitrary media metadata and removes provider-specific URL resolution
+  from Media itself. Read-only media analysis continues to follow the
+  configured remote instance and fail closed when it is unavailable.
 author: Apteva
 scopes: [project, global]
 min_apteva_version: "0.25.9"
@@ -284,7 +285,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.1
+    ref: media/v0.14.3
     entry: mcp/media
   port: 8080
   health_check: /health
