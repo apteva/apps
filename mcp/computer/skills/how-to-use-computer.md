@@ -40,6 +40,17 @@ emulation. Computer filters mechanically populated defaults and reports them in
 `ignored_arguments` and `argument_warnings`. Unknown arguments are rejected
 instead of being silently honored.
 
+### Session lifetime is not an action timeout
+
+For cloud browsers, omit `timeout` unless the user explicitly requests a
+maximum provider-session lifetime. Omission uses 1,800 seconds (30 minutes).
+`timeout` is a wall-clock limit for the entire browser session: the provider
+terminates the browser when it expires even if the agent is actively browsing.
+Never set `timeout=60` to bound a page load, click, wait, or task. Use the
+relevant `computer_use` action's `timeout_ms` for short operation waits.
+Even when the whole task is expected to take about one minute, omit `timeout`;
+estimated task duration is not authorization to shorten the browser lifetime.
+
 ## SoM badge colors
 
 Every interactive element on a screenshot has a colored numeric badge:

@@ -155,6 +155,52 @@ func TestBrowserSessionFiltersProductionStyleSynthesizedTemplate(t *testing.T) {
 	}
 }
 
+func agents0412GeneratedAlexaOpenArgs() map[string]any {
+	return map[string]any{
+		"action": "open", "auto_create_context": false, "backend": "local",
+		"context_id": "", "context_name": "Alexa Patreon", "persist": false,
+		"environment_override": false,
+		"presentation_mode":    "fast", "provider_context_id": "", "proxy_country": "",
+		"proxy_mode": "auto", "proxy_profile": "", "proxy_sticky": "rotating",
+		"session_id": "", "tab_id": "", "timeout": float64(60),
+		"url":      "https://www.patreon.com/c/alexaentranced",
+		"viewport": map[string]any{"width": float64(1600), "height": float64(800)},
+		"environment": map[string]any{
+			"device_scale_factor": float64(1),
+			"geolocation": map[string]any{
+				"accuracy": float64(100), "latitude": float64(0), "longitude": float64(0), "permission": "prompt",
+			},
+			"languages": []any{}, "locale": "", "max_touch_points": float64(1),
+			"mobile": false, "timezone": "", "touch": false, "user_agent": "",
+		},
+	}
+}
+
+func TestNormalizeAgents0412GeneratedSessionBundleDropsMinimumTimeout(t *testing.T) {
+	got, diagnostics := normalizeBrowserSessionArgsWithDiagnostics(agents0412GeneratedAlexaOpenArgs())
+	for _, key := range []string{"backend", "environment", "environment_override", "persist", "presentation_mode", "proxy_mode", "proxy_sticky", "timeout", "viewport"} {
+		if _, exists := got[key]; exists {
+			t.Errorf("generated %q survived normalization: %#v", key, got)
+		}
+		if !slices.Contains(diagnostics.IgnoredArguments, key) {
+			t.Errorf("generated %q missing from diagnostics: %+v", key, diagnostics)
+		}
+	}
+	if got["context_name"] != "Alexa Patreon" || got["url"] != "https://www.patreon.com/c/alexaentranced" {
+		t.Fatalf("request identity changed: %#v", got)
+	}
+	if len(diagnostics.Warnings) != 1 || !strings.Contains(diagnostics.Warnings[0], "session-lifetime") {
+		t.Fatalf("lifetime warning missing: %+v", diagnostics)
+	}
+
+	explicit := normalizeBrowserSessionArgs(map[string]any{
+		"action": "open", "backend": "browserbase", "timeout": float64(60),
+	})
+	if got := intArg(explicit, "timeout"); got != 60 {
+		t.Fatalf("independent explicit timeout changed: got %d, args=%#v", got, explicit)
+	}
+}
+
 func TestBrowserSessionRejectsUnsupportedArgumentsAndUnsafeScale(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
 	app := &App{reg: &registry{m: map[string]*session{}}}

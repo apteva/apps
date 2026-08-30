@@ -86,17 +86,22 @@ func normalizeBrowserSessionArgsWithDiagnostics(args map[string]any) (map[string
 	var diagnostics sessionArgumentDiagnostics
 
 	// Some models mechanically fill every optional schema property with an
-	// empty, false, or boundary-looking value. This exact shape is not a real
-	// device profile. Discard its default-looking overrides as one unit so a
-	// schema minimum such as device_scale_factor=0.1 cannot distort the page.
+	// empty, false, or boundary/default-looking value. This exact shape is not a
+	// real device profile. Discard its generated overrides as one unit so schema
+	// values such as device_scale_factor=1 or timeout=60 cannot distort the page
+	// or terminate an active cloud session after one minute.
 	if looksLikeSynthesizedSessionTemplate(out) {
-		for _, key := range []string{"environment", "backend", "presentation_mode", "proxy_mode", "proxy_sticky", "persist", "auto_create_context", "timeout", "viewport"} {
+		for _, key := range []string{"environment", "environment_override", "backend", "presentation_mode", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky", "persist", "auto_create_context", "viewport"} {
 			if _, ok := out[key]; ok {
 				delete(out, key)
 				diagnostics.ignore(key)
 			}
 		}
-		diagnostics.warn("Ignored mechanically populated browser-session defaults; no browser emulation was applied")
+		if looksLikeSynthesizedSessionTimeout(out) {
+			delete(out, "timeout")
+			diagnostics.ignore("timeout")
+		}
+		diagnostics.warn("Ignored mechanically populated browser-session defaults; no browser emulation or generated session-lifetime override was applied")
 	}
 
 	for _, key := range []string{
@@ -318,7 +323,7 @@ func looksLikeSynthesizedSessionTemplate(args map[string]any) bool {
 	if value, ok := args["auto_create_context"].(bool); ok && !value {
 		signals++
 	}
-	if value, ok := numericArg(args["timeout"]); ok && value == 0 {
+	if looksLikeSynthesizedSessionTimeout(args) {
 		signals++
 	}
 	if viewport, ok := args["viewport"].(map[string]any); ok && intArg(viewport, "width") == 1600 && intArg(viewport, "height") == 800 {
@@ -328,6 +333,10 @@ func looksLikeSynthesizedSessionTemplate(args map[string]any) bool {
 }
 
 func looksLikeSynthesizedEnvironmentTemplate(environment map[string]any) bool {
+	return looksLikeLegacySynthesizedEnvironmentTemplate(environment) || looksLikeCurrentSynthesizedEnvironmentTemplate(environment)
+}
+
+func looksLikeLegacySynthesizedEnvironmentTemplate(environment map[string]any) bool {
 	if len(environment) < 7 {
 		return false
 	}
@@ -339,6 +348,41 @@ func looksLikeSynthesizedEnvironmentTemplate(environment map[string]any) bool {
 		mobileOK && !mobile && touchOK && !touch &&
 		sessionArgString(environment["user_agent"]) == "" && sessionArgString(environment["locale"]) == "" &&
 		sessionArgString(environment["timezone"]) == "" && emptySliceValue(environment["languages"])
+}
+
+// Agents 0.41.2 materialized the normal browser values and schema defaults as
+// though they were requested overrides. These values are recognized only as
+// part of a broader generated session bundle; the environment object alone is
+// still handled by the stricter saved-context logic below.
+func looksLikeCurrentSynthesizedEnvironmentTemplate(environment map[string]any) bool {
+	if len(environment) < 7 {
+		return false
+	}
+	dsf, dsfOK := numericArg(environment["device_scale_factor"])
+	maxTouch, maxTouchOK := numericArg(environment["max_touch_points"])
+	mobile, mobileOK := environment["mobile"].(bool)
+	touch, touchOK := environment["touch"].(bool)
+	geo, geoOK := environment["geolocation"].(map[string]any)
+	return dsfOK && dsf == 1 && maxTouchOK && maxTouch == 1 &&
+		mobileOK && !mobile && touchOK && !touch && geoOK &&
+		looksLikeCurrentSynthesizedGeolocation(geo) &&
+		sessionArgString(environment["user_agent"]) == "" && sessionArgString(environment["locale"]) == "" &&
+		(sessionArgString(environment["timezone"]) == "" || strings.EqualFold(sessionArgString(environment["timezone"]), "UTC")) &&
+		emptySliceValue(environment["languages"])
+}
+
+func looksLikeCurrentSynthesizedGeolocation(geolocation map[string]any) bool {
+	latitude, latOK := numericArg(geolocation["latitude"])
+	longitude, longOK := numericArg(geolocation["longitude"])
+	accuracy, accuracyOK := numericArg(geolocation["accuracy"])
+	permission := strings.ToLower(sessionArgString(geolocation["permission"]))
+	return latOK && latitude == 0 && longOK && longitude == 0 &&
+		accuracyOK && accuracy == 100 && (permission == "grant" || permission == "prompt")
+}
+
+func looksLikeSynthesizedSessionTimeout(args map[string]any) bool {
+	timeout, ok := numericArg(args["timeout"])
+	return ok && (timeout == 0 || timeout == minimumCloudSessionTimeoutSeconds)
 }
 
 func savedContextOpen(args map[string]any) bool {

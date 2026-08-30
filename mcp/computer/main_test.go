@@ -1271,6 +1271,8 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	if !strings.Contains(tool.Description, "Ordinary open: pass only") ||
 		!strings.Contains(tool.Description, "never populate optional fields") ||
 		!strings.Contains(tool.Description, "Never send environment for normal navigation") ||
+		!strings.Contains(tool.Description, "not a page-load, action, or task timeout") ||
+		!strings.Contains(tool.Description, "Omit timeout unless") ||
 		!strings.Contains(tool.Description, "https://example.com") {
 		t.Fatalf("browser_session must teach agents the minimal default call:\n%s", tool.Description)
 	}
@@ -1300,6 +1302,14 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	maximum, maxOK := numericArg(scale["maximum"])
 	if !ok || !minOK || !maxOK || minimum != 0.5 || maximum != 4 {
 		t.Fatalf("browser_session device scale bounds are unsafe: %#v", scale)
+	}
+	timeoutSchema, ok := props["timeout"].(map[string]any)
+	defaultTimeout, defaultOK := numericArg(timeoutSchema["default"])
+	if !ok || !defaultOK || defaultTimeout != defaultCloudSessionTimeoutSeconds {
+		t.Fatalf("browser_session timeout schema must declare the 1800-second default: %#v", timeoutSchema)
+	}
+	if description, _ := timeoutSchema["description"].(string); !strings.Contains(strings.ToLower(description), "entire cloud browser session") || !strings.Contains(description, "not a page-load") {
+		t.Fatalf("browser_session timeout schema must distinguish lifetime from waits: %q", description)
 	}
 	presentationMode, ok := props["presentation_mode"].(map[string]any)
 	if !ok {
@@ -3256,6 +3266,64 @@ func TestCloudSessionDefaultLifetimeAndDiagnostics(t *testing.T) {
 	for _, key := range []string{"session_started_at", "expires_at", "session_age_seconds"} {
 		if _, ok := result[key]; !ok {
 			t.Fatalf("missing lifetime diagnostic %q: %v", key, result)
+		}
+	}
+}
+
+func TestAgents0412GeneratedAlexaOpenUsesDefaultCloudLifetime(t *testing.T) {
+	previous := newBackend
+	t.Cleanup(func() { newBackend = previous })
+
+	fake := &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://www.patreon.com/c/alexaentranced"}
+	var gotCfg backends.Config
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		gotCfg = cfg
+		return fake, nil
+	}
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	if _, err := app.toolSettingsUpdate(ctx, map[string]any{"default_backend": "browserbase"}); err != nil {
+		t.Fatalf("settings update: %v", err)
+	}
+
+	out, err := app.toolBrowserSession(ctx, agents0412GeneratedAlexaOpenArgs())
+	if err != nil {
+		t.Fatalf("generated Alexa open: %v", err)
+	}
+	result := out.(map[string]any)
+	if gotCfg.Timeout != defaultCloudSessionTimeoutSeconds || fake.openTimeout != defaultCloudSessionTimeoutSeconds || result["effective_timeout_seconds"] != defaultCloudSessionTimeoutSeconds {
+		t.Fatalf("generated timeout did not fall back to 1800: cfg=%d open=%d result=%#v", gotCfg.Timeout, fake.openTimeout, result)
+	}
+	ignored, _ := result["ignored_arguments"].([]string)
+	for _, key := range []string{"backend", "environment", "environment_override", "proxy_mode", "timeout", "viewport"} {
+		if !slices.Contains(ignored, key) {
+			t.Errorf("ignored arguments %v missing %q", ignored, key)
+		}
+	}
+	_, _ = app.toolBrowserClose(ctx, map[string]any{"session_id": result["session_id"]})
+
+	fake = &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://example.com"}
+	out, err = app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "backend": "browserbase", "timeout": 60, "url": "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("explicit one-minute session: %v", err)
+	}
+	result = out.(map[string]any)
+	if gotCfg.Timeout != 60 || fake.openTimeout != 60 || result["effective_timeout_seconds"] != 60 {
+		t.Fatalf("independent explicit timeout was not preserved: cfg=%d open=%d result=%#v", gotCfg.Timeout, fake.openTimeout, result)
+	}
+}
+
+func TestComputerSkillDistinguishesSessionLifetimeFromActionWaits(t *testing.T) {
+	raw, err := os.ReadFile("skills/how-to-use-computer.md")
+	if err != nil {
+		t.Fatalf("read Computer skill: %v", err)
+	}
+	guide := string(raw)
+	for _, want := range []string{"Session lifetime is not an action timeout", "omit `timeout`", "1,800 seconds", "even if the agent is actively browsing", "timeout_ms"} {
+		if !strings.Contains(guide, want) {
+			t.Errorf("Computer skill missing %q", want)
 		}
 	}
 }
