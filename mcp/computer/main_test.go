@@ -823,6 +823,44 @@ func TestComputerUseOutcomeWaitAndStabilityTimeoutAreStructured(t *testing.T) {
 	}
 }
 
+func TestComputerUseMediaWaitReportsLoadedEmbedWhenTextDoesNotMatch(t *testing.T) {
+	bunnyURL := "https://iframe.mediadelivery.net/play/374587/dfea9276-4b32-44e2-be3a-87d137752dc6"
+	media := &backends.MediaObservation{
+		EmbedStatus: "loaded", PlayerVisible: true, IframeVisible: true,
+		ThumbnailVisible: true, DurationText: "03:21", ConfigurationPresent: true,
+		IframeSrc: bunnyURL, Provider: "mediadelivery.net", DraftSaveState: "saved", DraftSaveText: "Draft saved",
+	}
+	fake := &fakeComp{
+		png: []byte{0x89, 0x50, 0x4e, 0x47}, url: "https://www.patreon.com/posts/new",
+		waitResult: backends.WaitResult{
+			TimedOut: true, WaitedMS: 1000, Match: "any", CurrentURL: "https://www.patreon.com/posts/new", Media: media,
+			Conditions: []backends.WaitConditionResult{{Index: 0, Type: "text_present", Matched: false}},
+		},
+	}
+	app := appWithSession("br_media", fake, "browserbase")
+	out, err := app.toolComputerUse(tk.NewAppCtx(t, "apteva.yaml"), map[string]any{
+		"session_id": "br_media", "action": "wait_for", "timeout_ms": 1000,
+		"conditions": []any{map[string]any{"type": "text_present", "value": "This URL doesn't look like a video or audio file"}},
+	})
+	if err != nil {
+		t.Fatalf("media wait: %v", err)
+	}
+	result := out.(map[string]any)
+	if result["media_embed_status"] != "loaded" || result["media_provider"] != "mediadelivery.net" || result["media_iframe_src"] != bunnyURL {
+		t.Fatalf("media evidence missing: %#v", result)
+	}
+	if result["draft_save_state"] != "saved" || result["media_detected_despite_unmatched_text"] != true {
+		t.Fatalf("draft/mismatch evidence missing: %#v", result)
+	}
+	if !strings.Contains(stringValue(result["text"]), "rendered media block") || !strings.Contains(stringValue(result["next_step"]), "do not retry") {
+		t.Fatalf("media mismatch guidance missing: %#v", result)
+	}
+
+	if _, err := waitConditionsArg([]any{map[string]any{"type": "media_present"}, map[string]any{"type": "media_error"}}); err != nil {
+		t.Fatalf("media terminal conditions should require no selector/value: %v", err)
+	}
+}
+
 func TestComputerUseInvalidatesSemanticSnapshotAfterPageChange(t *testing.T) {
 	fake := &fakeComp{
 		png: []byte{0x89, 0x50, 0x4e, 0x47}, url: "https://example.com/editor",

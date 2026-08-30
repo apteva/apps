@@ -1550,6 +1550,10 @@ func (c *Computer) WaitForOutcome(conditions []computer.WaitCondition, match str
 	return stability.WaitForOutcome(c.ctx, conditions, match, quietMS, timeoutMS)
 }
 
+func (c *Computer) ObserveMedia() (computer.MediaObservation, error) {
+	return stability.ObserveMedia(c.ctx)
+}
+
 func pickInitialPageTarget(infos []*target.Info) target.ID {
 	var first, firstNonInternal target.ID
 	for _, info := range infos {

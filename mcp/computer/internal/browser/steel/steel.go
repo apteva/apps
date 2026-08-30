@@ -606,6 +606,10 @@ func (c *Computer) WaitForOutcome(conditions []computer.WaitCondition, match str
 	return stability.WaitForOutcome(c.ctx, conditions, match, quietMS, timeoutMS)
 }
 
+func (c *Computer) ObserveMedia() (computer.MediaObservation, error) {
+	return stability.ObserveMedia(c.ctx)
+}
+
 func (c *Computer) selectOption(action computer.Action) (selectinput.Result, error) {
 	c.setLastSelectResult(nil)
 	target := selectinput.Target{Selector: action.Selector}

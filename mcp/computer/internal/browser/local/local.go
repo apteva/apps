@@ -1010,6 +1010,10 @@ func (c *Computer) WaitForOutcome(conditions []computer.WaitCondition, match str
 	return stability.WaitForOutcome(c.ctx, conditions, match, quietMS, timeoutMS)
 }
 
+func (c *Computer) ObserveMedia() (computer.MediaObservation, error) {
+	return stability.ObserveMedia(c.ctx)
+}
+
 func (c *Computer) LastSelectResult() *selectinput.Result {
 	c.selectMu.Lock()
 	defer c.selectMu.Unlock()

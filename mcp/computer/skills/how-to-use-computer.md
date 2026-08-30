@@ -85,6 +85,29 @@ again at dispatch time. For the rare raw-coordinate click, pass
 Send, Delete, or Pay. Computer rejects a loading/disabled target, a changed
 accessible name, or a consequential coordinate without that confirmation.
 
+### Wait for media terminal state, not one guessed message
+
+After submitting a video/audio/embed URL, wait for either a rendered media
+block or an explicit rejection:
+
+```json
+{"action":"wait_for","session_id":"br_...","conditions":[{"type":"media_present"},{"type":"media_error"}],"match":"any","timeout_ms":30000}
+```
+
+`media_present` matches browser-visible rendered-player evidence;
+`media_error` matches an explicit rejected-media banner. Screenshot and wait
+observations report `media_embed_status` (`loading`, `loaded`, `rejected`, or
+`unknown`), visible player/iframe, thumbnail and duration evidence,
+media-configuration controls, error text, iframe source or normalized provider
+when available, and `draft_save_state`.
+
+These signals prove what the browser rendered, not that it is the correct
+asset. When status is `loaded`, inspect the screenshot plus `media_provider`,
+`media_iframe_src`, thumbnail, and duration before continuing. When an expected
+error string is absent but Computer reports a rendered media block, do not
+submit the URL again automatically; verify the player first. This avoids
+duplicate embeds caused by treating “no error text” as “nothing happened.”
+
 ## Chat attachments are agent-selected
 
 Opening or driving a browser does not create an attachment automatically. You

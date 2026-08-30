@@ -102,6 +102,26 @@ type WaitConditionResult struct {
 	TargetID string `json:"target_id,omitempty"`
 }
 
+// MediaObservation is a provider-neutral projection of the media/embed and
+// draft-save state visible in the active document. It reports browser evidence
+// only; callers remain responsible for deciding whether the rendered media is
+// the intended asset.
+type MediaObservation struct {
+	EmbedStatus          string  `json:"media_embed_status"`
+	PlayerVisible        bool    `json:"media_player_visible"`
+	IframeVisible        bool    `json:"media_iframe_visible"`
+	ThumbnailVisible     bool    `json:"media_thumbnail_visible"`
+	ThumbnailURL         string  `json:"media_thumbnail_url,omitempty"`
+	DurationText         string  `json:"media_duration_text,omitempty"`
+	DurationSeconds      float64 `json:"media_duration_seconds,omitempty"`
+	ConfigurationPresent bool    `json:"media_configuration_present"`
+	ErrorText            string  `json:"media_error_text,omitempty"`
+	IframeSrc            string  `json:"media_iframe_src,omitempty"`
+	Provider             string  `json:"media_provider,omitempty"`
+	DraftSaveState       string  `json:"draft_save_state"`
+	DraftSaveText        string  `json:"draft_save_text,omitempty"`
+}
+
 // WaitResult separates what was observed from whether the wait exhausted its
 // deadline. A timed-out wait does not imply that an earlier click or edit
 // failed; MCP callers can inspect these fields and choose another observation.
@@ -116,6 +136,7 @@ type WaitResult struct {
 	LoadingIndicators int                   `json:"loading_indicators,omitempty"`
 	InflightRequests  int                   `json:"inflight_requests,omitempty"`
 	LoadingFrames     int                   `json:"loading_frames,omitempty"`
+	Media             *MediaObservation     `json:"media,omitempty"`
 }
 
 // PresentationOptions makes browser actions legible in live views and hosted
@@ -390,6 +411,12 @@ type ActionOnlyExecutor interface {
 type StabilityWaiter interface {
 	WaitForStable(quietMS, timeoutMS int) (WaitResult, error)
 	WaitForOutcome(conditions []WaitCondition, match string, quietMS, timeoutMS int) (WaitResult, error)
+}
+
+// MediaObserver is implemented by CDP-backed providers that can inspect the
+// active document for rendered media and draft-save state.
+type MediaObserver interface {
+	ObserveMedia() (MediaObservation, error)
 }
 
 // TabInfo describes one browser page target inside a provider session.

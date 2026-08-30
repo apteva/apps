@@ -14,6 +14,234 @@ import (
 	"time"
 )
 
+const patreonMediaPublishFixtureURL = "https://iframe.mediadelivery.net/play/374587/dfea9276-4b32-44e2-be3a-87d137752dc6"
+
+// TestComputerPatreonRealMediaPublish is an opt-in destructive release gate
+// for the complete real-site media path. The Bunny URL is fixture data only:
+// Computer's media observer remains provider-neutral and the assertions use
+// browser-visible provider/source evidence rather than Bunny-specific logic.
+// The test creates and publishes one post on the explicitly authorized test
+// creator page; it never reuses /posts/new after the draft URL is allocated.
+//
+// Required:
+//
+//	RUN_COMPUTER_PATREON_MEDIA_PUBLISH_LIVE=1
+//	COMPUTER_PATREON_CONTEXT_ID=ctx_...
+//	COMPUTER_PATREON_CREATOR_URL=https://www.patreon.com/c/...
+//	COMPUTER_PATREON_ALLOW_PUBLISH=I_ACKNOWLEDGE_LIVE_PUBLISH
+func TestComputerPatreonRealMediaPublish(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_PATREON_MEDIA_PUBLISH_LIVE") != "1" {
+		t.Skip("set RUN_COMPUTER_PATREON_MEDIA_PUBLISH_LIVE=1 to create and publish the real Patreon media post")
+	}
+	if os.Getenv("COMPUTER_PATREON_ALLOW_PUBLISH") != "I_ACKNOWLEDGE_LIVE_PUBLISH" {
+		t.Fatal("COMPUTER_PATREON_ALLOW_PUBLISH=I_ACKNOWLEDGE_LIVE_PUBLISH is required because this test publishes a real post")
+	}
+	contextID := requireLiveEnv(t, "COMPUTER_PATREON_CONTEXT_ID")
+	creatorURL := requireLiveEnv(t, "COMPUTER_PATREON_CREATOR_URL")
+	if parsed, err := url.Parse(creatorURL); err != nil || !strings.HasSuffix(strings.ToLower(parsed.Hostname()), "patreon.com") {
+		t.Fatalf("COMPUTER_PATREON_CREATOR_URL must be a patreon.com creator page, got %q", creatorURL)
+	}
+
+	client := newLocalComputerMCPClient(t)
+	opened := client.call(t, "browser_session", map[string]any{
+		"action": "open", "context_id": contextID, "url": creatorURL,
+	})
+	sessionID := stringValue(opened["session_id"])
+	if sessionID == "" {
+		t.Fatalf("open returned no session id: %v", opened)
+	}
+	defer client.call(t, "browser_session", map[string]any{"action": "close", "session_id": sessionID})
+	if intFromAny(opened["effective_timeout_seconds"]) < 1800 {
+		t.Fatalf("media publish session received a short provider lifetime: %v", opened)
+	}
+
+	shot := liveScreenshot(t, client, sessionID)
+	create := findLiveTargetWithText(t, mapsFromAny(shot["som"]), "Create post", "Create post")
+	clickLiveTarget(t, client, sessionID, shot, create, "", "")
+	shot = liveScreenshot(t, client, sessionID)
+	post := findLiveTarget(t, mapsFromAny(shot["som"]), "Post", true)
+	clickLiveTarget(t, client, sessionID, shot, post, "", "")
+
+	openedDraft := client.call(t, "computer_use", map[string]any{
+		"session_id": sessionID, "action": "wait_for", "timeout_ms": 30000,
+		"conditions": []any{map[string]any{"type": "url_contains", "value": "/posts/"}},
+	})
+	draftURL := stringValue(openedDraft["current_url"])
+	if !boolFromAny(openedDraft["matched"]) || !strings.Contains(draftURL, "/posts/") || !strings.HasSuffix(strings.TrimRight(draftURL, "/"), "/edit") {
+		t.Fatalf("Patreon did not allocate one editable draft: %v", openedDraft)
+	}
+
+	shot = liveScreenshot(t, client, sessionID)
+	video := findLiveTarget(t, mapsFromAny(shot["som"]), "Video", true)
+	clickLiveTarget(t, client, sessionID, shot, video, "", "")
+	shot = liveScreenshot(t, client, sessionID)
+	embedURL := findLiveTarget(t, mapsFromAny(shot["som"]), "embed URL", false)
+	clickLiveTarget(t, client, sessionID, shot, embedURL, "", "")
+	shot = liveScreenshot(t, client, sessionID)
+	urlInput := findLiveTarget(t, mapsFromAny(shot["som"]), "Type or paste URL", true)
+	setURL := client.call(t, "computer_use", map[string]any{
+		"session_id": sessionID, "action": "set_text", "target_id": stringValue(urlInput["id"]),
+		"som_revision": shot["som_revision"], "expected_name": stringValue(urlInput["accessible_name"]),
+		"text": patreonMediaPublishFixtureURL, "mode": "replace", "observation": "som_delta",
+	})
+	if !boolFromAny(setURL["text_verified"]) || stringValue(setURL["text_rendered"]) != patreonMediaPublishFixtureURL {
+		t.Fatalf("Patreon embed URL entry was not verified: %v", setURL)
+	}
+
+	media := client.call(t, "computer_use", map[string]any{
+		"session_id": sessionID, "action": "wait_for", "match": "any", "quiet_ms": 500, "timeout_ms": 30000,
+		"conditions":  []any{map[string]any{"type": "media_present"}, map[string]any{"type": "media_error"}},
+		"observation": "screenshot", "include_som": true,
+	})
+	assertRealMediaLoaded(t, media, true)
+	conditions := mapsFromAny(media["conditions"])
+	if len(conditions) != 2 || !boolFromAny(conditions[0]["matched"]) || boolFromAny(conditions[1]["matched"]) {
+		t.Fatalf("media terminal-state wait did not choose rendered media over rejection: %v", media)
+	}
+
+	// Reproduce the production failure: an agent waits only for an error
+	// string even though Patreon already rendered the media. Computer must
+	// surface the media and tell the caller not to insert it again.
+	wrongTextWait := client.call(t, "computer_use", map[string]any{
+		"session_id": sessionID, "action": "wait_for", "timeout_ms": 500,
+		"conditions": []any{map[string]any{"type": "text_present", "value": "This URL doesn't look like a video or audio file"}},
+	})
+	if !boolFromAny(wrongTextWait["timed_out"]) || !boolFromAny(wrongTextWait["media_detected_despite_unmatched_text"]) || stringValue(wrongTextWait["media_embed_status"]) != "loaded" {
+		t.Fatalf("Computer did not highlight rendered media after the wrong text wait: %v", wrongTextWait)
+	}
+
+	title := "Computer media publish regression " + time.Now().UTC().Format("20060102-150405")
+	shot = liveScreenshot(t, client, sessionID)
+	titleTarget := findLiveTarget(t, mapsFromAny(shot["som"]), "Title", true)
+	titleResult := client.call(t, "computer_use", map[string]any{
+		"session_id": sessionID, "action": "set_text", "target_id": stringValue(titleTarget["id"]),
+		"som_revision": shot["som_revision"], "expected_name": stringValue(titleTarget["accessible_name"]),
+		"text": title, "mode": "replace", "observation": "som_delta",
+	})
+	if !boolFromAny(titleResult["text_verified"]) || stringValue(titleResult["text_rendered"]) != title {
+		t.Fatalf("Patreon title was not verified before publish: %v", titleResult)
+	}
+
+	var saved map[string]any
+	for attempt := 0; attempt < 20; attempt++ {
+		saved = liveScreenshot(t, client, sessionID)
+		if stringValue(saved["draft_save_state"]) == "saved" {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if stringValue(saved["draft_save_state"]) != "saved" {
+		t.Fatalf("Patreon draft did not reach saved state before publish: %v", saved)
+	}
+	assertRealMediaLoaded(t, saved, true)
+
+	publish := findLiveTarget(t, mapsFromAny(saved["som"]), "Publish", true)
+	publishResult := publishLivePatreonTarget(t, client, sessionID, saved, publish, draftURL)
+	publishedURL := stringValue(publishResult["current_url"])
+	if strings.HasSuffix(strings.TrimRight(publishedURL, "/"), "/edit") {
+		// Patreon can present a distinct confirmation-stage Publish control.
+		// This is not a retry of the first dispatched control: require a fresh
+		// target id from the new semantic snapshot before the final commit.
+		confirmShot := liveScreenshot(t, client, sessionID)
+		confirm := findLiveTarget(t, mapsFromAny(confirmShot["som"]), "Publish", true)
+		if stringValue(confirm["id"]) == stringValue(publish["id"]) {
+			t.Fatalf("publish did not navigate and Patreon did not expose a distinct confirmation control: first=%v current=%v", publish, confirm)
+		}
+		publishResult = publishLivePatreonTarget(t, client, sessionID, confirmShot, confirm, draftURL)
+		publishedURL = stringValue(publishResult["current_url"])
+	}
+	if publishedURL == "" || strings.HasSuffix(strings.TrimRight(publishedURL, "/"), "/edit") || !strings.Contains(publishedURL, "/posts/") {
+		t.Fatalf("Patreon publish did not reach a public post URL: %v", publishResult)
+	}
+
+	published := client.call(t, "computer_use", map[string]any{
+		"session_id": sessionID, "action": "wait_for", "match": "all", "timeout_ms": 30000,
+		"conditions": []any{
+			map[string]any{"type": "url_changed", "value": draftURL},
+			map[string]any{"type": "text_present", "value": title},
+			map[string]any{"type": "media_present"},
+		},
+		"observation": "screenshot",
+	})
+	if !boolFromAny(published["matched"]) || boolFromAny(published["timed_out"]) {
+		t.Fatalf("published post URL/title/media outcome was not jointly verified: %v", published)
+	}
+	assertRealMediaLoaded(t, published, false)
+	t.Logf("Patreon media post published successfully: title=%q url=%s provider=%s", title, stringValue(published["current_url"]), stringValue(published["media_provider"]))
+}
+
+func findLiveTargetWithText(t *testing.T, targets []map[string]any, name, text string) map[string]any {
+	t.Helper()
+	for _, target := range targets {
+		if strings.EqualFold(strings.TrimSpace(stringValue(target["accessible_name"])), strings.TrimSpace(name)) &&
+			strings.EqualFold(strings.TrimSpace(stringValue(target["text"])), strings.TrimSpace(text)) {
+			return target
+		}
+	}
+	t.Fatalf("Patreon target name=%q text=%q not found in %v", name, text, targets)
+	return nil
+}
+
+func clickLiveTarget(t *testing.T, client *localComputerMCPClient, sessionID string, shot, target map[string]any, expectedEffect, confirmation string) map[string]any {
+	t.Helper()
+	args := map[string]any{
+		"session_id": sessionID, "action": "click", "target_id": stringValue(target["id"]),
+		"som_revision": shot["som_revision"], "expected_text": stringValue(target["accessible_name"]),
+		"expected_name": stringValue(target["accessible_name"]), "observation": "som_delta",
+	}
+	if role := stringValue(target["role"]); role != "" {
+		args["expected_role"] = role
+	}
+	if expectedEffect != "" {
+		args["expected_effect"] = expectedEffect
+	}
+	if confirmation != "" {
+		args["confirm_consequence"] = confirmation
+	}
+	result := client.call(t, "computer_use", args)
+	if boolFromAny(result["failed"]) || stringValue(result["status"]) == "rejected" {
+		t.Fatalf("click target %v failed: %v", target, result)
+	}
+	return result
+}
+
+func publishLivePatreonTarget(t *testing.T, client *localComputerMCPClient, sessionID string, shot, target map[string]any, draftURL string) map[string]any {
+	t.Helper()
+	result := client.call(t, "computer_use", map[string]any{
+		"session_id": sessionID, "action": "batch", "observation": "som_delta",
+		"steps": []any{
+			map[string]any{
+				"action": "click", "target_id": stringValue(target["id"]), "som_revision": shot["som_revision"],
+				"expected_text": stringValue(target["accessible_name"]), "expected_name": stringValue(target["accessible_name"]),
+				"expected_effect": "immediate_external_commit", "confirm_consequence": "immediate_external_commit",
+			},
+			map[string]any{"action": "wait_for", "conditions": []any{map[string]any{"type": "url_changed", "value": draftURL}}, "timeout_ms": 10000},
+		},
+	})
+	steps := mapsFromAny(result["steps"])
+	if len(steps) == 0 || !boolFromAny(steps[0]["action_dispatched"]) {
+		t.Fatalf("publish control was not dispatched exactly once: %v", result)
+	}
+	return result
+}
+
+func assertRealMediaLoaded(t *testing.T, result map[string]any, requireConfiguration bool) {
+	t.Helper()
+	if stringValue(result["media_embed_status"]) != "loaded" || !boolFromAny(result["media_player_visible"]) || !boolFromAny(result["media_iframe_visible"]) {
+		t.Fatalf("rendered media player evidence is incomplete: %v", result)
+	}
+	provider, source := stringValue(result["media_provider"]), stringValue(result["media_iframe_src"])
+	if provider == "" || provider == "unknown" || source == "" || !strings.Contains(source, "dfea9276-4b32-44e2-be3a-87d137752dc6") {
+		t.Fatalf("provider-neutral media identity does not trace back to the submitted fixture: %v", result)
+	}
+	if requireConfiguration && !boolFromAny(result["media_configuration_present"]) {
+		t.Fatalf("media configuration evidence is missing from the Patreon editor: %v", result)
+	}
+	if stringValue(result["media_error_text"]) != "" {
+		t.Fatalf("media configuration/error evidence is wrong: %v", result)
+	}
+}
+
 // TestComputerPatreonRealContenteditableWithLLM is an opt-in regression for
 // the real Patreon ProseMirror/Remirror post editor. A real authenticated LLM
 // chooses the post-body target from Computer's screenshot and SoM. The test

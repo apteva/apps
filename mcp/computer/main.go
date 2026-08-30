@@ -56,11 +56,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.85
+version: 0.7.86
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.85 distinguishes cloud
-  session lifetime from action waits and filters generated one-minute timeout,
-  environment, provider, proxy, and viewport defaults as a single bundle.
+  Watch, steer, and replay hosted browser sessions. v0.7.86 adds
+  provider-neutral media embed state, terminal media waits, draft-save
+  diagnostics, and rendered-media guidance after unmatched text waits.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -615,7 +615,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "computer_use",
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
 				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. Pass expected_text for target identity. When dangerous=true, also pass expected_effect and repeat that exact generic effect in confirm_consequence; Computer rejects missing or contradictory consequence intent before mouse dispatch. Omit both consequence fields for ordinary clicks. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates receive the same consequence guard. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
-				"For an operation outcome, prefer action=wait_for with declarative URL, text, selector, or semantic-target conditions; target_state=ready|loading|enabled|disabled|checked|unchecked ignores unrelated page activity. Use action=wait_for_stable only when the whole page must become quiet. " +
+				"For an operation outcome, prefer action=wait_for with declarative URL, text, selector, semantic-target, or media conditions; target_state=ready|loading|enabled|disabled|checked|unchecked ignores unrelated page activity. For an embed, use media_present and media_error together with match=any to wait for a terminal rendered-player-or-error outcome. Computer reports the visible provider/source and player state but does not decide whether the media is the intended asset. Use action=wait_for_stable only when the whole page must become quiet. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
 				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. Custom button comboboxes are opened and inspected automatically. An unavailable option returns error_code, control_kind, menu_open, current_value, visible_options, recoverable=false, and a refreshed som_revision instead of a generic backend error. " +
 				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native or masked date/time fields, use action=set_temporal with a current target_id (preferred), label, or selector plus an ISO value such as 2026-07-01 or a time such as 11:00 AM. Computer converts ISO dates when placeholder/pattern/locale makes the displayed format clear and reports requested, actual, format_hint, and validity. A detected text mask gets one trusted-key fallback after setter reversion. If direct entry is still rejected, use returned recovery_targets or choose the desired visible role=gridcell by target_id and expected_name; never guess an aria-label CSS selector from the accessible name. Calendar-grid clicks return changed rendered values with the compact semantic observation. If the UI shows separate date and time fields, call set_temporal separately on each field. " +
@@ -625,7 +625,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Use action=navigate with url for direct navigation, action=back for browser history, and action=reload to refresh the current page. Do not emulate these with Control+L, Alt+ArrowLeft, or F5. " +
 				"Use action=batch for a consequential click followed by wait_for so the declared external outcome is verified without risking a duplicate retry. Consequential clicks always return a lightweight SoM delta and action_dispatched/outcome_verified fields; outcome_verified remains false until an explicit wait condition proves the result. Set observation=som_delta for other compact refreshes; batch keeps observation=screenshot as its compatibility default. Semantic labels and target ids become stale after page-changing actions and must be refreshed before reuse. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
 				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), target_id? (stable SoM target or scroll region), som_revision? (stale-target guard), selector? (CSS selector), expected_text? (click identity guard), expected_effect?, confirm_consequence?, expected_name?, expected_role?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, conditions?, match?, quiet_ms?, timeout_ms?, observation?, annotate? (screenshot only, default true). " +
-				"Screenshot responses include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
+				"Screenshot and wait responses include media_embed_status=loading|loaded|rejected|unknown, visible player/iframe, thumbnail/duration/configuration evidence, explicit media error text, normalized provider/source when available, and draft_save_state. They highlight a visible media block even when a requested text condition did not match. Screenshot responses also include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
 				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
@@ -663,7 +663,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"amount":              map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
 				"duration":            map[string]any{"type": "integer"},
 				"conditions": map[string]any{"type": "array", "minItems": 1, "maxItems": 8, "description": "For wait_for. Declarative browser outcomes. match defaults to any.", "items": map[string]any{"type": "object", "properties": map[string]any{
-					"type":           map[string]any{"type": "string", "enum": []string{"url_changed", "url_equals", "url_contains", "text_present", "text_absent", "selector_present", "selector_absent", "target_present", "target_absent", "target_state"}, "description": "Outcome predicate. target_state waits on one control without requiring page-wide quiet."},
+					"type":           map[string]any{"type": "string", "enum": []string{"url_changed", "url_equals", "url_contains", "text_present", "text_absent", "selector_present", "selector_absent", "target_present", "target_absent", "target_state", "media_present", "media_error"}, "description": "Outcome predicate. target_state waits on one control without requiring page-wide quiet. media_present matches a rendered player/media block; media_error matches an explicit rejected-media error. Combine both conditions with match=any for a terminal media outcome."},
 					"value":          map[string]any{"type": "string", "description": "Required for URL/text conditions. For url_changed, pass the URL before the action (success means current URL differs). For url_equals/url_contains, pass the desired destination URL/value. For text conditions, pass visible text."},
 					"selector":       map[string]any{"type": "string", "description": "CSS selector required for selector conditions."},
 					"target_id":      map[string]any{"type": "string", "description": "Current semantic target id required for target conditions."},
@@ -1872,6 +1872,15 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if som, ok := m["som"]; ok {
 		res["som"] = som
 	}
+	for _, key := range []string{
+		"media_embed_status", "media_player_visible", "media_iframe_visible", "media_thumbnail_visible",
+		"media_thumbnail_url", "media_duration_text", "media_duration_seconds", "media_configuration_present",
+		"media_error_text", "media_iframe_src", "media_provider", "draft_save_state", "draft_save_text",
+	} {
+		if value, ok := m[key]; ok {
+			res[key] = value
+		}
+	}
 	return res, nil
 }
 
@@ -2587,6 +2596,13 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			screenshotSkipped = false
 		}
 	}
+	var mediaObservation *backends.MediaObservation
+	var mediaObservationErr error
+	if waitResult != nil && waitResult.Media != nil {
+		mediaObservation = waitResult.Media
+	} else if action == "screenshot" || observation != "none" {
+		mediaObservation, mediaObservationErr = mediaObservationFor(sess.comp)
+	}
 	afterURL := currentURL(sess.comp)
 	if action == "back" && !navigationURLChanged(beforeURL, afterURL) {
 		return nil, computerUseFailure("navigation_ineffective", id, sess, action,
@@ -2649,9 +2665,14 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	mergeNavigationDelta(payload, action, beforeURL, afterURL, act.URL)
 	if waitResult != nil {
 		mergeWaitResultPayload(payload, *waitResult)
+		highlightMediaDespiteUnmatchedText(payload, act, waitResult)
 		if action == "wait_for_stable" {
 			payload["quiet_ms"] = stableQuietMS
 		}
+	}
+	mergeMediaObservationPayload(payload, mediaObservation)
+	if mediaObservationErr != nil {
+		payload["media_observation_error"] = mediaObservationErr.Error()
 	}
 	emitEvent(ctx, "session.action", payload)
 	out := map[string]any{
@@ -2669,9 +2690,14 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	mergeNavigationDelta(out, action, beforeURL, afterURL, act.URL)
 	if waitResult != nil {
 		mergeWaitResultPayload(out, *waitResult)
+		highlightMediaDespiteUnmatchedText(out, act, waitResult)
 		if action == "wait_for_stable" {
 			out["quiet_ms"] = stableQuietMS
 		}
+	}
+	mergeMediaObservationPayload(out, mediaObservation)
+	if mediaObservationErr != nil {
+		out["media_observation_error"] = mediaObservationErr.Error()
 	}
 	if screenshotSkipped {
 		out["text"] = fmt.Sprintf("Success: %s action completed. Latest visual state is available at screenshot_url.", action)
@@ -2686,6 +2712,10 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		out["text"] = fmt.Sprintf("Success: %s action completed. Screenshot attached.", action)
 		out["screenshot"] = binaryEnvelope(shot, mime)
 		out["mime_type"] = mime
+	}
+	if highlighted, _ := out["media_detected_despite_unmatched_text"].(bool); highlighted {
+		out["text"] = "The requested text condition did not match, but a rendered media block is visible. Inspect media provider/source and the screenshot before deciding whether the embed is correct."
+		out["next_step"] = "Verify media_provider, media_iframe_src, thumbnail/duration, and the visual player; do not retry the embed automatically."
 	}
 	if action == "scroll" && scrollResult != nil {
 		if !scrollResult.Moved {
@@ -2812,6 +2842,7 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 	batchTimedOut := false
 	batchHadConsequence := false
 	lastConsequenceStep := -1
+	var mediaObservation *backends.MediaObservation
 	for index, step := range steps {
 		action := strings.TrimSpace(stringArg(step, "action"))
 		switch action {
@@ -2921,6 +2952,10 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 		stepResult := map[string]any{"index": index + 1, "action": action, "status": "completed"}
 		if waitResult != nil {
 			mergeWaitResultPayload(stepResult, *waitResult)
+			highlightMediaDespiteUnmatchedText(stepResult, act, waitResult)
+			if waitResult.Media != nil {
+				mediaObservation = waitResult.Media
+			}
 			if waitResult.TimedOut {
 				stepResult["status"] = "timed_out"
 				batchTimedOut = true
@@ -2970,6 +3005,9 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 		if observeAnnotate {
 			delta = setOfMarkDelta(sess)
 		}
+		if observedMedia, observeMediaErr := mediaObservationFor(sess.comp); observeMediaErr == nil && observedMedia != nil {
+			mediaObservation = observedMedia
+		}
 	}
 	a.recordSessionNavigation(ctx, id, sess)
 	afterURL := currentURL(sess.comp)
@@ -3004,6 +3042,7 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 		}
 	}
 	mergeNavigationDelta(out, "batch", beforeURL, afterURL, "")
+	mergeMediaObservationPayload(out, mediaObservation)
 	mergeTabFollowPayload(out, tabEvent)
 	emitEvent(ctx, "session.action", map[string]any{"session_id": id, "action": "batch", "completed_steps": completedCount, "timed_out": batchTimedOut, "current_url": afterURL})
 	return out, nil
@@ -3756,6 +3795,75 @@ func mergeWaitResultPayload(payload map[string]any, result backends.WaitResult) 
 	payload["loading_indicators"] = result.LoadingIndicators
 	payload["inflight_requests"] = result.InflightRequests
 	payload["loading_frames"] = result.LoadingFrames
+	mergeMediaObservationPayload(payload, result.Media)
+}
+
+func mediaObservationFor(comp backends.Computer) (*backends.MediaObservation, error) {
+	observer, ok := comp.(backends.MediaObserver)
+	if !ok {
+		return nil, nil
+	}
+	observation, err := observer.ObserveMedia()
+	if err != nil {
+		return nil, err
+	}
+	return &observation, nil
+}
+
+func mergeMediaObservationPayload(payload map[string]any, observation *backends.MediaObservation) {
+	if observation == nil {
+		return
+	}
+	payload["media_embed_status"] = firstNonEmpty(observation.EmbedStatus, "unknown")
+	payload["media_player_visible"] = observation.PlayerVisible
+	payload["media_iframe_visible"] = observation.IframeVisible
+	payload["media_thumbnail_visible"] = observation.ThumbnailVisible
+	payload["media_configuration_present"] = observation.ConfigurationPresent
+	payload["draft_save_state"] = firstNonEmpty(observation.DraftSaveState, "unknown")
+	if observation.ThumbnailURL != "" {
+		payload["media_thumbnail_url"] = observation.ThumbnailURL
+	}
+	if observation.DurationText != "" {
+		payload["media_duration_text"] = observation.DurationText
+	}
+	if observation.DurationSeconds > 0 {
+		payload["media_duration_seconds"] = observation.DurationSeconds
+	}
+	if observation.ErrorText != "" {
+		payload["media_error_text"] = observation.ErrorText
+	}
+	if observation.IframeSrc != "" {
+		payload["media_iframe_src"] = observation.IframeSrc
+	}
+	if observation.Provider != "" {
+		payload["media_provider"] = observation.Provider
+	}
+	if observation.DraftSaveText != "" {
+		payload["draft_save_text"] = observation.DraftSaveText
+	}
+}
+
+func highlightMediaDespiteUnmatchedText(payload map[string]any, action backends.Action, result *backends.WaitResult) {
+	if result == nil || result.Media == nil || result.Media.EmbedStatus != "loaded" {
+		return
+	}
+	for index, condition := range action.Conditions {
+		if condition.Type != "text_present" {
+			continue
+		}
+		matched := false
+		for _, observed := range result.Conditions {
+			if observed.Index == index {
+				matched = observed.Matched
+				break
+			}
+		}
+		if !matched {
+			payload["media_detected_despite_unmatched_text"] = true
+			payload["observation_note"] = "The requested text was not observed, but a rendered media block is visible. Inspect media provider/source and screenshot before deciding whether the embed is correct."
+			return
+		}
+	}
 }
 
 func observationArg(args map[string]any, action string) string {
@@ -4926,6 +5034,9 @@ func waitConditionsArg(raw any) ([]backends.WaitCondition, error) {
 			default:
 				return nil, fmt.Errorf("condition %d type target_state requires state=ready|loading|enabled|disabled|checked|unchecked", index+1)
 			}
+		case "media_present", "media_error":
+			// Media conditions intentionally carry no caller-provided selector or
+			// provider assertion. They describe visible terminal evidence only.
 		default:
 			return nil, fmt.Errorf("condition %d has unsupported type %q", index+1, condition.Type)
 		}

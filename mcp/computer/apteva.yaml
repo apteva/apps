@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.85
+version: 0.7.86
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.85 distinguishes cloud
-  session lifetime from action waits and filters generated one-minute timeout,
-  environment, provider, proxy, and viewport defaults as a single bundle.
+  Watch, steer, and replay hosted browser sessions. v0.7.86 adds
+  provider-neutral media embed state, terminal media waits, draft-save
+  diagnostics, and rendered-media guidance after unmatched text waits.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -125,9 +125,13 @@ provides:
         rejected before mouse dispatch. Omit both consequence fields for
         ordinary clicks. Coordinates receive the same consequence guard. For an
         operation outcome, prefer action=wait_for with declarative URL, text,
-        selector, or semantic-target conditions. target_state can wait for
+        selector, semantic-target, or media conditions. target_state can wait for
         ready/loading/enabled/disabled/checked/unchecked while ignoring unrelated
-        background requests and embedded frames. To verify navigation away
+        background requests and embedded frames. For a video/audio embed, wait
+        on conditions=[{"type":"media_present"},{"type":"media_error"}]
+        with match="any" instead of waiting only for an error string. Computer
+        reports browser-visible media state and provider/source evidence, but
+        does not decide whether the rendered asset is the intended one. To verify navigation away
         from a known current URL, use type=url_changed with that pre-action
         URL; use url_equals only when the destination URL is known. Use
         action=wait_for_stable only when the whole page must become quiet.
@@ -187,6 +191,12 @@ provides:
         duration?, steps? (batch only), annotate? (screenshot/batch, default true), include_som?
         (screenshot/batch, default false). Ordinary actions return a compact
         summary and screenshot_url without embedding duplicate image bytes.
+        Screenshot and wait observations include media_embed_status
+        (loading/loaded/rejected/unknown), visible player/iframe, thumbnail,
+        duration, media-configuration controls, explicit error text, normalized
+        provider/source when available, and draft_save_state. If requested text
+        is absent but a media block rendered, Computer highlights that evidence
+        so the agent verifies the player rather than blindly retrying.
         They also include compact safety_targets for loading, disabled, or
         consequential controls; full structured som is returned with include_som=true.
     - name: computer_context_create

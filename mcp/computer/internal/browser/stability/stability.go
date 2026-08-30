@@ -146,9 +146,10 @@ func (t *Tracker) Wait(quietMS, timeoutMS int) (Result, error) {
 }
 
 type outcomeState struct {
-	URL     string `json:"url"`
-	Matches []bool `json:"matches"`
-	Error   string `json:"error,omitempty"`
+	URL     string                     `json:"url"`
+	Matches []bool                     `json:"matches"`
+	Error   string                     `json:"error,omitempty"`
+	Media   *computer.MediaObservation `json:"media,omitempty"`
 }
 
 // WaitForOutcome waits for explicit browser-visible evidence rather than
@@ -201,7 +202,7 @@ func (t *Tracker) WaitForOutcome(conditions []computer.WaitCondition, match stri
 		}
 		result := Result{
 			Matched: matched, WaitedMS: int(time.Since(started) / time.Millisecond), Match: match,
-			CurrentURL: state.URL, Conditions: results,
+			CurrentURL: state.URL, Conditions: results, Media: state.Media,
 		}
 		if matched {
 			if matchedSince.IsZero() {
@@ -295,6 +296,8 @@ const outcomeScript = `(function(conditions){
   function targetLoading(el){if(loadingMarker(el))return true;var query='[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i],[data-loading="true"]',nodes=el.querySelectorAll?el.querySelectorAll(query):[];for(var i=0;i<nodes.length;i++)if(visible(nodes[i]))return true;var selector='button,input,select,textarea,[role="button"],[role="checkbox"],[role="radio"],[role="switch"],[aria-checked]';for(var row=el.parentElement,depth=0;row&&depth<3;row=row.parentElement,depth++){var rect=row.getBoundingClientRect();if(rect.height>140||rect.width>Math.min(window.innerWidth,1200))break;var controls=row.querySelectorAll(selector);if(controls.length!==1||controls[0]!==el)continue;if(loadingMarker(row))return true;var rowNodes=row.querySelectorAll(query);for(var j=0;j<rowNodes.length;j++)if(visible(rowNodes[j]))return true;break;}return false;}
   function disabled(el){return !!(el.disabled||(el.matches&&el.matches(':disabled'))||el.getAttribute('aria-disabled')==='true'||(el.closest&&el.closest('[inert]')));}
   function checked(el){if(el.matches&&el.matches('input[type="checkbox"],input[type="radio"]'))return !!el.checked;var value=String(el.getAttribute('aria-checked')||'').toLowerCase();return value==='true'?true:(value==='false'?false:null);}
+  var observeMedia=` + mediaObservationFunction + `;
+  var media=observeMedia();
   var bodyText=(document.body&&document.body.innerText)||(document.documentElement&&document.documentElement.innerText)||'';
   var current=location.href;
   var matches=[];
@@ -313,11 +316,12 @@ const outcomeScript = `(function(conditions){
       } else if(type==='target_state'){
         var target=semanticTarget(c),state=String(c.state||'').toLowerCase();
         if(target){var busy=targetLoading(target),off=disabled(target),on=checked(target);matched=state==='ready'?!busy&&!off:state==='loading'?busy:state==='enabled'?!off:state==='disabled'?off:state==='checked'?on===true:state==='unchecked'?on===false:false;}
-      }
+      } else if(type==='media_present')matched=media.media_embed_status==='loaded';
+      else if(type==='media_error')matched=media.media_embed_status==='rejected';
       matches.push(matched);
     }
-    return {url:current,matches:matches};
-  }catch(error){return {url:current,matches:matches,error:String(error&&error.message||error)};}
+    return {url:current,matches:matches,media:media};
+  }catch(error){return {url:current,matches:matches,media:media,error:String(error&&error.message||error)};}
 })`
 
 const installScript = `(function(){
