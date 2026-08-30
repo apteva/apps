@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.1
+version: 0.14.2
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -19,9 +19,9 @@ description: |
   by default, Cloudinary when bound. A wedged encode releases its
   slot without disturbing the indexer.
 
-  v0.14.1 routes read-only media analysis through the configured remote
-  instance when `render_host_id` is set, fails closed when that executor is
-  unavailable, and reports the effective executor and host in its result.
+  v0.14.2 adds a fail-closed Bunny Stream embed resolver that derives the
+  player URL from canonical media metadata, validates source identity, and
+  remotely verifies the player before external publishing.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media
@@ -110,6 +110,8 @@ provides:
     # Catalog (existing)
     - name: media_get
       description: Fetch one media record by storage file_id, including arbitrary metadata + metadata_version, probe fields, and derivation pointers. External ingestion URL delivery defaults to apteva/inline; callers can explicitly request delivery=proxy, delivery=direct, or disposition=attachment. Returned delivery, disposition, and expires_at are Storage-confirmed effective values.
+    - name: media_resolve_bunny_embed
+      description: Resolve the canonical Bunny Stream player URL for an exact media file and site immediately before external publishing. Requires exactly one ready bunny_stream destination, validates source identity, remotely rejects unavailable or soft-404 players, and returns the exact embed_url. Read-only and fail-closed. Args — file_id, site_id.
     - name: media_analyze
       description: Analyze an existing image, video, or audio source without modifying it. Returns encoding metadata, decode integrity, visual measurements and black/frozen segments, plus LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback and reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. Creates no render, derivation, or Storage object. Args — file_id, depth? (standard|full), start_ms?, end_ms?, silence_threshold_db?, silence_min_ms?.
     - name: media_ask
@@ -500,7 +502,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.1
+    ref: media/v0.14.2
     entry: mcp/media
   port: 8080
   health_check: /health

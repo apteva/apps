@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.1
+version: 0.14.2
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,9 +31,9 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.14.1 routes read-only media analysis through the
-  configured remote instance when render_host_id is set, fails closed when
-  that executor is unavailable, and reports the effective executor and host.
+  through storage. v0.14.2 adds a fail-closed Bunny Stream embed resolver
+  that derives the player URL from canonical media metadata and remotely
+  verifies it before external publishing.
 author: Apteva
 scopes: [project, global]
 min_apteva_version: "0.25.9"
@@ -108,6 +108,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_get,             description: "Fetch one media record by storage file_id, including arbitrary metadata and metadata_version. External ingestion URL delivery defaults to apteva/inline; callers can explicitly request proxy, direct, or attachment disposition. Returned delivery, disposition, and expires_at are Storage-confirmed." }
+    - { name: media_resolve_bunny_embed, description: "Resolve one canonical ready Bunny Stream destination for a media file and site, verify its source identity and remote player, and return the exact embed URL. Read-only and fail-closed." }
     - { name: media_analyze,         description: "Read-only technical and quality analysis for an image, video, or audio file. Follows render_host_id when configured, reports the effective executor, and never silently falls back to local execution. Returns encoding metadata, decode integrity, visual measurements and timeline anomalies, and audio loudness/peak/silence measurements where applicable. Creates no artifacts." }
     - { name: media_ask,             description: "Ask a grounded question using only existing source images, cached thumbnails/keyframes, and completed transcripts. Never runs ffmpeg, creates derivations, or writes files." }
     - { name: media_search,          description: "Compact catalog discovery with q/filename/title, folder_scope exact|subtree, type, aspect, duration, rating, dimensions, codec, and arbitrary metadata equality filters. Empty exact searches diagnose matching descendants; call media_get for full details." }
@@ -284,7 +285,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.1
+    ref: media/v0.14.2
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -462,6 +463,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"disposition":       map[string]any{"type": "string", "enum": []string{"inline", "attachment"}, "default": "inline", "description": "Requested Content-Disposition. Storage reports the effective value."},
 			}, []string{"file_id"}),
 			Handler: a.toolGet,
+		},
+		{
+			Name:        "media_resolve_bunny_embed",
+			Description: "Resolve the canonical Bunny Stream player URL immediately before external publishing. Requires exactly one ready bunny_stream destination matching the supplied site_id, validates the media source identity, and remotely verifies that the Bunny player resolves. Proceed only when valid=true and remote_verified=true; use the returned embed_url exactly and never construct it manually. Read-only.",
+			InputSchema: schemaObject(map[string]any{
+				"file_id": map[string]any{"type": "string", "description": "Exact Media/Storage master file ID selected for publishing."},
+				"site_id": map[string]any{"type": "string", "description": "Literal Patreon site ID from the agent directive."},
+			}, []string{"file_id", "site_id"}),
+			Handler: a.toolResolveBunnyEmbed,
 		},
 		{
 			Name:        "media_analyze",
