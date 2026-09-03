@@ -5,6 +5,10 @@ import {
   fixedAgentConversationInput,
   scopedConversationListPath,
 } from "./agentConversations";
+import {
+  isSoftBreakMetadata,
+  softBreakMessageInput,
+} from "./softBreak";
 
 describe("AgentConversationsWidget scope", () => {
   test("always filters active and archived lists by the required participant", () => {
@@ -47,5 +51,28 @@ describe("AgentConversationsWidget scope", () => {
     expect(widget).not.toContain("new EventSource");
     expect(widget).not.toContain("/messages?chat_id");
     expect(view).toContain("Message the agent…");
+  });
+
+  test("soft break targets the responding agent and remains an advisory message", () => {
+    expect(softBreakMessageInput(41, { callId: "call-7", agentId: 43 }, "break-1")).toEqual({
+      content: "Pause here and reconsider before continuing.",
+      intent: "soft_break",
+      client_message_id: "break-1",
+      target_agent_ids: [43],
+      target_call_id: "call-7",
+    });
+    expect(softBreakMessageInput(41, { callId: "ack-1" }, "break-2").target_agent_ids).toEqual([41]);
+    expect(isSoftBreakMetadata({ intent: "soft_break" })).toBe(true);
+    expect(isSoftBreakMetadata({ intent: "hard_stop" })).toBe(false);
+  });
+
+  test("shared chat UI describes a soft request rather than a hard stop", () => {
+    const panel = readFileSync(new URL("./ConversationsPanel.tsx", import.meta.url), "utf8");
+    const view = readFileSync(new URL("./ConversationChatView.tsx", import.meta.url), "utf8");
+    expect(panel).toContain("softBreakMessageInput");
+    expect(panel).toContain("Break requested");
+    expect(view).toContain("Ask the agent to pause and reconsider");
+    expect(view).toContain("it does not stop the agent or cancel running work");
+    expect(view).not.toContain("Stop generating");
   });
 });

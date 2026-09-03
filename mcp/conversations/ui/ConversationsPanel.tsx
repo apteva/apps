@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import createDOMPurify from "dompurify";
 import { marked } from "marked";
 import ConversationChatView from "./ConversationChatView";
+import { isSoftBreakMetadata, softBreakMessageInput } from "./softBreak";
 
 const API = "/api/apps/conversations";
 
@@ -100,11 +101,14 @@ export interface Message {
   severity?: string;
   components: CardComponent[];
   client_message_id?: string;
+  metadata?: Record<string, unknown>;
   created_at: string;
 }
 
 interface StreamFrame {
   chat_id: string;
+  agent_id?: number;
+  thread_id?: string;
   call_id: string;
   text: string;
   phase?: string;
@@ -1160,6 +1164,19 @@ function MessageRow({
       </div>
     );
   }
+  if (message.role === "user" && isSoftBreakMetadata(message.metadata)) {
+    return (
+      <div
+        className="flex shrink-0 items-center gap-2 py-1 text-xs text-text-muted"
+        role="status"
+        title={`${message.content} · ${relTime(message.created_at)}`}
+      >
+        <span className="h-px flex-1 bg-border" />
+        <span>Break requested</span>
+        <span className="h-px flex-1 bg-border" />
+      </div>
+    );
+  }
   if (message.role === "user") {
     return (
       <div className="flex justify-end min-w-0 shrink-0">
@@ -1186,6 +1203,7 @@ function MessageRow({
 
 interface StreamBubbleState {
   callId: string;
+  agentId?: number;
   text: string;
   phase?: string;
 }
@@ -1327,7 +1345,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
         return;
       }
       cancelStreamClear();
-      setBubble({ callId: frame.call_id, text: frame.text, phase: frame.phase });
+      setBubble({ callId: frame.call_id, agentId: frame.agent_id, text: frame.text, phase: frame.phase });
     },
     [cancelStreamClear, pruneSettled, rememberSettled, setBubble],
   );
@@ -1437,6 +1455,9 @@ export function ConversationChat({
   const { messages, bubble, connected, mergeMessages } = useConversationTransport(conversation.id, conversation.project_id);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [breakBusy, setBreakBusy] = useState(false);
+  const [breakRequested, setBreakRequested] = useState(false);
+  const breakRequestRef = useRef<{ callId: string; agentId?: number; clientId: string } | null>(null);
   const [sendError, setSendError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [archiveBusy, setArchiveBusy] = useState(false);
@@ -1445,7 +1466,17 @@ export function ConversationChat({
 
   useEffect(() => {
     setConfirmDelete(false);
+    breakRequestRef.current = null;
+    setBreakBusy(false);
+    setBreakRequested(false);
   }, [conversation.id]);
+
+  useEffect(() => {
+    if (bubble) return;
+    breakRequestRef.current = null;
+    setBreakBusy(false);
+    setBreakRequested(false);
+  }, [bubble]);
 
   const setArchived = async (next: boolean) => {
     if (archiveBusy) return;
@@ -1504,6 +1535,37 @@ export function ConversationChat({
     }
   };
 
+  const requestSoftBreak = async () => {
+    if (!bubble || breakBusy || breakRequested) return;
+    // Keep the complete first request stable across a lost HTTP response.
+    // The visible stream may move from the synthetic ack id to a provider
+    // call id while the retry is pending; changing the idempotency key or
+    // target_call_id at that point could queue a duplicate break.
+    const request = breakRequestRef.current ?? {
+      callId: bubble.callId,
+      agentId: bubble.agentId,
+      clientId: newClientMessageId(),
+    };
+    breakRequestRef.current = request;
+    setBreakBusy(true);
+    setSendError("");
+    try {
+      const row = await apiPost<Message>(`/messages?chat_id=${encodeURIComponent(conversation.id)}`,
+        softBreakMessageInput(conversation.lead_agent_id, {
+          callId: request.callId,
+          agentId: request.agentId,
+        }, request.clientId),
+        conversation.project_id,
+      );
+      mergeMessages([row]);
+      setBreakRequested(true);
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBreakBusy(false);
+    }
+  };
+
   const onAction = async (messageId: number, actionId: string, note: string) => {
     const result = await apiPost<{ message: Message }>(`/message-action`, {
       message_id: messageId,
@@ -1530,6 +1592,9 @@ export function ConversationChat({
       inputRef={inputRef}
       draft={draft}
       sending={sending}
+      responseActive={Boolean(bubble)}
+      breakBusy={breakBusy}
+      breakRequested={breakRequested}
       sendError={sendError}
       archiveBusy={archiveBusy}
       confirmDelete={confirmDelete}
@@ -1545,6 +1610,7 @@ export function ConversationChat({
         }
       }}
       onSend={send}
+      onSoftBreak={requestSoftBreak}
       onOpenDetails={onOpenDetails}
       onUnarchive={() => setArchived(false)}
       onRequestDelete={() => setConfirmDelete(true)}

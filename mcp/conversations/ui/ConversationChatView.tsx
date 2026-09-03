@@ -13,12 +13,16 @@ export interface ConversationChatViewProps {
   inputRef: RefObject<HTMLTextAreaElement | null>;
   draft: string;
   sending: boolean;
+  responseActive: boolean;
+  breakBusy: boolean;
+  breakRequested: boolean;
   sendError: string;
   archiveBusy: boolean;
   confirmDelete: boolean;
   onDraftChange: (value: string, element: HTMLTextAreaElement) => void;
   onComposerKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onSend: () => void;
+  onSoftBreak: () => void;
   onOpenDetails?: () => void;
   onUnarchive: () => void;
   onRequestDelete: () => void;
@@ -50,6 +54,7 @@ const GLYPH_MORE = "M12 12h.01 M19 12h.01 M5 12h.01";
 const GLYPH_RESTORE = "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5";
 const GLYPH_TRASH =
   "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2";
+const GLYPH_PAUSE = "M9 5v14 M15 5v14";
 
 /**
  * Shared durable-chat surface used by the full Conversations panel and every
@@ -154,6 +159,21 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
       ) : (
         <footer className="chat-composer-safe shrink-0 px-2 pt-2 pb-2 sm:px-5">
           {props.sendError && <p className="mx-1 mb-1 text-xs text-error">{props.sendError}</p>}
+          {props.responseActive && (
+            <div className="mb-2 flex justify-center">
+              <button
+                type="button"
+                onClick={props.onSoftBreak}
+                disabled={props.breakBusy || props.breakRequested}
+                className="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg-card px-3 py-1.5 text-xs text-text-muted transition-colors enabled:hover:border-accent/50 enabled:hover:text-text disabled:cursor-default disabled:opacity-60"
+                aria-label="Ask the agent to pause and reconsider"
+                title="Sends a new request; it does not stop the agent or cancel running work"
+              >
+                <Glyph d={GLYPH_PAUSE} size={13} />
+                {props.breakRequested ? "Break requested" : props.breakBusy ? "Requesting break…" : "Break"}
+              </button>
+            </div>
+          )}
           <form
             onSubmit={(event) => {
               event.preventDefault();

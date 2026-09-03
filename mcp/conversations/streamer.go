@@ -38,6 +38,7 @@ import (
 type StreamFrame struct {
 	Type           string    `json:"type"` // always "stream"
 	ConversationID string    `json:"chat_id"`
+	AgentID        int64     `json:"agent_id,omitempty"`
 	ThreadID       string    `json:"thread_id"`
 	CallID         string    `json:"call_id"`
 	Text           string    `json:"text"`
@@ -180,7 +181,7 @@ func (s *streamer) onChunk(agentID int64, threadID, conversationID, dataJSON str
 		return
 	}
 	s.publish(StreamFrame{
-		Type: "stream", ConversationID: conversationID, ThreadID: threadID,
+		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
 		CallID: callID, Text: text, CreatedAt: ts,
 	})
 }
@@ -222,7 +223,7 @@ func (s *streamer) onFinalArgs(agentID int64, threadID, conversationID, dataJSON
 		return
 	}
 	s.publish(StreamFrame{
-		Type: "stream", ConversationID: conversationID, ThreadID: threadID,
+		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
 		CallID: callID, Text: text, CreatedAt: ts,
 	})
 }
@@ -251,7 +252,7 @@ func (s *streamer) onToolEnd(agentID int64, threadID, conversationID, dataJSON s
 	delete(s.lastEmit, key)
 	s.mu.Unlock()
 	s.publish(StreamFrame{
-		Type: "stream", ConversationID: conversationID, ThreadID: threadID,
+		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
 		CallID: callID, Done: true, CreatedAt: ts,
 	})
 }
@@ -261,14 +262,14 @@ func (s *streamer) onToolEnd(agentID int64, threadID, conversationID, dataJSON s
 // emitAck publishes the acknowledgement bubble shown between "user
 // message forwarded" and "agent reply landed". Each emission mints a
 // fresh call id and records it as the conversation's pending ack.
-func (s *streamer) emitAck(conversationID, threadID string) {
+func (s *streamer) emitAck(conversationID, threadID string, agentID int64) {
 	s.mu.Lock()
 	s.ackSeq++
 	id := "ack-" + conversationID + "-" + strconv.FormatUint(s.ackSeq, 10)
 	s.pendingAcks[conversationID] = id
 	s.mu.Unlock()
 	s.publish(StreamFrame{
-		Type: "stream", ConversationID: conversationID, ThreadID: threadID,
+		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
 		CallID: id, Phase: "acknowledgement",
 		CreatedAt: time.Now(),
 	})

@@ -513,6 +513,8 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		ChatID         string       `json:"chat_id"`
 		Content        string       `json:"content"`
 		ClientID       string       `json:"client_message_id"`
+		Intent         string       `json:"intent"`
+		TargetCallID   string       `json:"target_call_id"`
 		Attachments    []Attachment `json:"attachments"`
 		TargetAgentIDs []int64      `json:"target_agent_ids"`
 	}
@@ -527,8 +529,27 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "chat_id required", http.StatusBadRequest)
 		return
 	}
+	body.Intent = strings.TrimSpace(body.Intent)
+	switch body.Intent {
+	case "", messageIntentSoftBreak:
+	default:
+		http.Error(w, "unsupported message intent", http.StatusBadRequest)
+		return
+	}
+	if len(body.TargetCallID) > 256 || strings.ContainsAny(body.TargetCallID, "\r\n\x00") {
+		http.Error(w, "invalid target_call_id", http.StatusBadRequest)
+		return
+	}
+	if body.Intent != messageIntentSoftBreak && body.TargetCallID != "" {
+		http.Error(w, "target_call_id requires soft_break intent", http.StatusBadRequest)
+		return
+	}
 	if strings.TrimSpace(body.Content) == "" && len(body.Attachments) == 0 {
 		http.Error(w, "content or attachments required", http.StatusBadRequest)
+		return
+	}
+	if body.Intent == messageIntentSoftBreak && len(body.Attachments) != 0 {
+		http.Error(w, "soft_break does not support attachments", http.StatusBadRequest)
 		return
 	}
 	conv, err := a.authorizeConversation(r, conversationID)
@@ -552,10 +573,17 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	metadata := map[string]any{"target_agent_ids": targets}
+	if body.Intent != "" {
+		metadata["intent"] = body.Intent
+	}
+	if body.TargetCallID != "" {
+		metadata["target_call_id"] = body.TargetCallID
+	}
 	msg, inserted, err := a.appendAndDeliver(a.appCtx(r), conv, &Message{
 		ConversationID: conv.ID, Role: "user", Content: body.Content,
 		UserID: requestUser(r), ClientID: body.ClientID, Attachments: body.Attachments,
-		Metadata: map[string]any{"target_agent_ids": targets},
+		Metadata: metadata,
 	})
 	if err != nil {
 		http.Error(w, "insert failed", http.StatusInternalServerError)
@@ -664,6 +692,12 @@ func isRouteWordByte(b byte) bool {
 
 func (a *App) agentEventPayload(conv *Conversation, msg *Message, agentID int64, targets []int64) any {
 	text := "[chat] " + msg.Content
+	if messageIntent(msg) == messageIntentSoftBreak {
+		text = "[chat soft break] The user requested a conversational break while work may still be in progress. " +
+			"This is a new advisory event: no model call, tool, or thread was canceled. " +
+			"At the next decision boundary, reconsider the current work and decide whether to finish a safety-critical action, pause future work, redirect, or ask for clarification. " +
+			"User request: " + msg.Content
+	}
 	if conv.Kind == "room" {
 		text += fmt.Sprintf("\nConversation: %s (%s). Addressed agent: %d. Other addressed agent ids: %v. Reply with conversations_send to this conversation.",
 			conv.Title, conv.ID, agentID, targets)

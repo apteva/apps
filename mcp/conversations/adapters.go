@@ -17,6 +17,8 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+const messageIntentSoftBreak = "soft_break"
+
 type adapter interface {
 	// ID is the target prefix this adapter owns (for example "web").
 	ID() string
@@ -140,7 +142,13 @@ func (d *agentInboundAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conv
 	if !delivered {
 		return fmt.Errorf("platform did not confirm inbound event %q", event.ID)
 	}
-	d.app.streamer.emitAck(conv.ID, threadID)
+	// A soft break is sent only while an existing response is active. Keep that
+	// response's acknowledgement/stream bubble authoritative instead of
+	// replacing it with a second synthetic ack that could settle out of order.
+	// The durable "Break requested" transcript row is the immediate feedback.
+	if messageIntent(msg) != messageIntentSoftBreak {
+		d.app.streamer.emitAck(conv.ID, threadID, agentID)
+	}
 	return nil
 }
 
@@ -244,7 +252,7 @@ func (a *App) deliveryTargets(conv *Conversation, msg *Message) ([]string, error
 	// Do not echo a Telegram user's inbound update back into Telegram. Every
 	// other durable message fans out to each chat explicitly bound to this
 	// conversation.
-	if !strings.HasPrefix(msg.ExternalSender, "telegram:") {
+	if messageIntent(msg) != messageIntentSoftBreak && !strings.HasPrefix(msg.ExternalSender, "telegram:") {
 		bindings, err := a.store.TelegramBindingsForConversation(conv.ID)
 		if err != nil {
 			return targets, err
@@ -290,6 +298,14 @@ func messageTargetAgentIDs(msg *Message) []int64 {
 		}
 	}
 	return out
+}
+
+func messageIntent(msg *Message) string {
+	if msg == nil || msg.Metadata == nil {
+		return ""
+	}
+	intent, _ := msg.Metadata["intent"].(string)
+	return strings.TrimSpace(intent)
 }
 
 func (a *App) attemptDelivery(app *sdk.AppCtx, target string, conv *Conversation, msg *Message) {

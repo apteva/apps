@@ -27,7 +27,9 @@ package main
 //	APTEVA_API_KEY=sk-... go test -tags live -v -run TestLive_ ./...
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -173,6 +175,139 @@ func TestLive_CodexChatRoundTrip(t *testing.T) {
 		time.Sleep(4 * time.Second)
 	}
 	t.Fatal("no agent reply within 120s")
+}
+
+// TestLive_CodexSoftBreak opens the real streaming channel, waits for the
+// acknowledgement that makes the UI's Break control visible, then submits a
+// durable advisory event against that exact active response. The model may
+// finish an already-running provider call; it must nevertheless consume the
+// later event and acknowledge the user's changed intent on its next turn.
+func TestLive_CodexSoftBreak(t *testing.T) {
+	c := newLiveClient(t)
+	agentID, cleanupAgent := c.ensureAgent()
+	defer cleanupAgent()
+
+	var conv struct {
+		ID string `json:"id"`
+	}
+	status := c.do("POST", "/api/apps/conversations/chats", map[string]any{
+		"agent_id": agentID, "title": "Live soft break (codex)",
+	}, &conv)
+	if status != http.StatusOK || conv.ID == "" {
+		t.Fatalf("create conversation: status=%d conv=%+v", status, conv)
+	}
+	defer c.do("DELETE", "/api/apps/conversations/chats?id="+conv.ID, nil, nil)
+
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+	defer cancelStream()
+	streamURL := c.base + "/api/apps/conversations/stream?chat_id=" + conv.ID +
+		"&project_id=" + os.Getenv("APTEVA_LIVE_PROJECT_ID")
+	streamReq, err := http.NewRequestWithContext(streamCtx, http.MethodGet, streamURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamReq.Header.Set("Authorization", "Bearer "+c.key)
+	streamResp, err := http.DefaultClient.Do(streamReq)
+	if err != nil {
+		t.Fatalf("open conversation stream: %v", err)
+	}
+	defer streamResp.Body.Close()
+	if streamResp.StatusCode != http.StatusOK {
+		t.Fatalf("open conversation stream: status=%d", streamResp.StatusCode)
+	}
+	frames := make(chan StreamFrame, 8)
+	go func() {
+		scanner := bufio.NewScanner(streamResp.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			var frame StreamFrame
+			if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &frame) == nil && frame.CallID != "" {
+				select {
+				case frames <- frame:
+				case <-streamCtx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	status = c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
+		"content":           "Begin preparing a detailed answer about resilient job queues.",
+		"client_message_id": "live-soft-break-start",
+	}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("post initial message: status=%d", status)
+	}
+
+	var active StreamFrame
+	deadline := time.After(15 * time.Second)
+	for active.CallID == "" {
+		select {
+		case frame := <-frames:
+			if !frame.Done && frame.ConversationID == conv.ID {
+				active = frame
+			}
+		case <-deadline:
+			t.Fatal("no active response frame within 15s")
+		}
+	}
+	if active.AgentID != agentID {
+		t.Fatalf("active response agent=%d, want %d", active.AgentID, agentID)
+	}
+	t.Logf("active response call=%s agent=%d phase=%s", active.CallID, active.AgentID, active.Phase)
+
+	breakBody := map[string]any{
+		"content":           "Pause here and reconsider before continuing. Reply exactly SOFT_BREAK_ACKNOWLEDGED.",
+		"intent":            messageIntentSoftBreak,
+		"target_call_id":    active.CallID,
+		"target_agent_ids":  []int64{active.AgentID},
+		"client_message_id": "live-soft-break-1",
+	}
+	var breakMessage Message
+	for attempt := 1; attempt <= 2; attempt++ {
+		var responseTarget any
+		if attempt == 1 {
+			responseTarget = &breakMessage
+		}
+		status = c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, breakBody, responseTarget)
+		if status != http.StatusOK {
+			t.Fatalf("post soft break attempt %d: status=%d", attempt, status)
+		}
+	}
+	if breakMessage.ID == 0 || messageIntent(&breakMessage) != messageIntentSoftBreak {
+		t.Fatalf("soft break was not persisted correctly: %+v", breakMessage)
+	}
+
+	responseDeadline := time.Now().Add(150 * time.Second)
+	for time.Now().Before(responseDeadline) {
+		var transcript []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript)
+		breakRows := 0
+		acknowledged := false
+		for _, message := range transcript {
+			if messageIntent(&message) == messageIntentSoftBreak {
+				breakRows++
+				if message.Metadata["target_call_id"] != active.CallID {
+					t.Fatalf("soft break target_call_id=%v, want %s", message.Metadata["target_call_id"], active.CallID)
+				}
+			}
+			if message.Role == "agent" && message.ID > breakMessage.ID && strings.Contains(message.Content, "SOFT_BREAK_ACKNOWLEDGED") {
+				acknowledged = true
+			}
+		}
+		if breakRows > 1 {
+			t.Fatalf("idempotent retry created %d soft-break rows", breakRows)
+		}
+		if breakRows == 1 && acknowledged {
+			t.Log("live soft break was durable, idempotent, agent-scoped, and consumed by Codex")
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatal("Codex did not acknowledge the soft-break event within 150s")
 }
 
 // TestLive_CodexTwoConversationIsolation proves that one agent can hold two

@@ -39,6 +39,7 @@ type recordingPlatform struct {
 	omitEnsureReceipt      bool
 	duplicateSpawnReceipt  bool
 	omitSpawnReceipt       bool
+	killed                 []sdk.ThreadRef
 }
 
 type capturedEvent struct {
@@ -146,7 +147,10 @@ func (p *recordingPlatform) EnsureThread(req sdk.ThreadEnsureRequest) (*sdk.Thre
 	return result, nil
 }
 
-func (p *recordingPlatform) KillThread(agentID int64, threadID string) error { return nil }
+func (p *recordingPlatform) KillThread(agentID int64, threadID string) error {
+	p.killed = append(p.killed, sdk.ThreadRef{AgentID: agentID, ThreadID: threadID})
+	return nil
+}
 
 func (p *recordingPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
 	p.appCalls = append(p.appCalls, capturedAppCall{App: app, Tool: tool, Input: input})
@@ -701,6 +705,142 @@ func TestUserMessageForwardFailureIsDurablyQueued(t *testing.T) {
 	}
 }
 
+func TestSoftBreakIsDurableIdempotentAndDoesNotStopTheAgent(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+	var streamFrames []StreamFrame
+	app.streamer.onFrame = func(frame StreamFrame) { streamFrames = append(streamFrames, frame) }
+	if err := app.store.AddAgentParticipant(conv.ID, 43); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"content":"Pause here and reconsider before continuing.","intent":"soft_break","target_call_id":"call-active-7","target_agent_ids":[43],"client_message_id":"break-1"}`
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/messages?chat_id="+conv.ID, strings.NewReader(body))
+		authorizeTestRequest(req)
+		rec := httptest.NewRecorder()
+		app.handleMessages(rec, req)
+		return rec
+	}
+
+	rec := post()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("soft break status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response Message
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if messageIntent(&response) != messageIntentSoftBreak || response.Metadata["target_call_id"] != "call-active-7" {
+		t.Fatalf("soft break metadata=%v", response.Metadata)
+	}
+	if got := messageTargetAgentIDs(&response); !reflect.DeepEqual(got, []int64{43}) {
+		t.Fatalf("soft break targets=%v, want [43]", got)
+	}
+	if len(platform.ensures) != 1 || platform.ensures[0].AgentID != 43 {
+		t.Fatalf("ensures=%+v, want one event for responding agent 43", platform.ensures)
+	}
+	ensure := platform.ensures[0]
+	if ensure.ThreadID != conversationThreadID(conv.ID) || len(ensure.Events) != 1 {
+		t.Fatalf("soft break ensure=%+v", ensure)
+	}
+	eventText, _ := ensure.Events[0].Message.(string)
+	for _, required := range []string{"[chat soft break]", "new advisory event", "no model call, tool, or thread was canceled", "User request: Pause here"} {
+		if !strings.Contains(eventText, required) {
+			t.Fatalf("soft break event missing %q: %s", required, eventText)
+		}
+	}
+	if len(platform.killed) != 0 || len(platform.events) != 0 || len(platform.threadEvents) != 0 {
+		t.Fatalf("soft break used a stop/non-atomic path: killed=%v events=%v thread_events=%v", platform.killed, platform.events, platform.threadEvents)
+	}
+	if len(streamFrames) != 0 {
+		t.Fatalf("soft break replaced the active response with a synthetic ack: %+v", streamFrames)
+	}
+
+	// A transport retry reuses the durable row and must not queue another turn.
+	retry := post()
+	if retry.Code != http.StatusOK {
+		t.Fatalf("soft break retry status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	transcript, err := app.store.Transcript(conv.ID, 0, 10)
+	if err != nil || len(transcript) != 1 || transcript[0].ID != response.ID {
+		t.Fatalf("soft break transcript=%+v err=%v", transcript, err)
+	}
+	if len(platform.ensures) != 1 {
+		t.Fatalf("soft break retry queued %d events, want one", len(platform.ensures))
+	}
+}
+
+func TestSoftBreakInputValidationFailsBeforeDelivery(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+
+	for name, body := range map[string]string{
+		"unknown intent":        `{"content":"hello","intent":"hard_stop"}`,
+		"call id without break": `{"content":"hello","target_call_id":"call-1"}`,
+		"attachment":            `{"content":"pause","intent":"soft_break","attachments":[{"type":"image","data_url":"data:image/png;base64,AA=="}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/messages?chat_id="+conv.ID, strings.NewReader(body))
+			authorizeTestRequest(req)
+			rec := httptest.NewRecorder()
+			app.handleMessages(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	transcript, err := app.store.Transcript(conv.ID, 0, 10)
+	if err != nil || len(transcript) != 0 || len(platform.ensures) != 0 || len(platform.killed) != 0 {
+		t.Fatalf("invalid soft break escaped: transcript=%v ensures=%v killed=%v err=%v", transcript, platform.ensures, platform.killed, err)
+	}
+}
+
+func TestSoftBreakDoesNotLeakToBoundExternalTransport(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	if err := app.store.UpsertTelegramConnection(TelegramConnectionConfig{
+		ConnectionID: 9, WebhookKey: "soft-break-key", WebhookSecret: "soft-break-secret",
+		BotID: "99", BotUsername: "soft_break_bot", ResponseFeedback: "typing",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.CreateTelegramBinding(TelegramBinding{
+		ID: "tgb-soft-break", ConnectionID: 9, ProjectID: conv.ProjectID,
+		ConversationID: conv.ID, ChatID: "777", ChatType: "private",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	softTargets, err := app.deliveryTargets(conv, &Message{
+		ConversationID: conv.ID, Role: "user",
+		Metadata: map[string]any{"intent": messageIntentSoftBreak, "target_agent_ids": []int64{41}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range softTargets {
+		if strings.HasPrefix(target, "telegram:") {
+			t.Fatalf("soft break leaked to Telegram target %q", target)
+		}
+	}
+	if !slices.Contains(softTargets, "web:conv") || !slices.Contains(softTargets, "agent-inbound:41") {
+		t.Fatalf("soft break targets=%v, want durable web+agent delivery", softTargets)
+	}
+
+	normalTargets, err := app.deliveryTargets(conv, &Message{
+		ConversationID: conv.ID, Role: "user",
+		Metadata: map[string]any{"target_agent_ids": []int64{41}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(normalTargets, "telegram:tgb-soft-break") {
+		t.Fatalf("ordinary message lost Telegram delivery: %v", normalTargets)
+	}
+}
+
 // ─── thread-per-conversation (channel-chat parity) ───────────────────
 
 func postUserMessage(t *testing.T, app *App, conv *Conversation, content string) {
@@ -769,7 +909,7 @@ func TestFirstMessageAtomicallyEnsuresConversationThread(t *testing.T) {
 			t.Fatalf("conversation preload contains global/app-only tool %q: %v", forbidden, ensure.Tools)
 		}
 	}
-	for _, required := range []string{"bound only to conversation " + conv.ID, "never send, read, approve, or alert against another conversation id", "do not grant the child Conversations tools"} {
+	for _, required := range []string{"bound only to conversation " + conv.ID, "never send, read, approve, or alert against another conversation id", "do not grant the child Conversations tools", "A [chat soft break] is an advisory user event"} {
 		if !strings.Contains(ensure.DirectiveSuffix, required) {
 			t.Fatalf("conversation directive missing %q: %s", required, ensure.DirectiveSuffix)
 		}
