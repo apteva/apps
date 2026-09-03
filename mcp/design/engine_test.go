@@ -117,7 +117,7 @@ func TestServiceBuildAndManufacturingPackage(t *testing.T) {
 	for _, file := range archive.File {
 		found[file.Name] = true
 	}
-	for _, name := range []string{"manifest.json", "design.json", "parameters.json", "validation/report.json", "validation/checks.json"} {
+	for _, name := range []string{"manifest.json", "design.json", "parameters.json", "dependencies.json", "validation/report.json", "validation/checks.json"} {
 		if !found[name] {
 			t.Errorf("manufacturing package missing %s", name)
 		}

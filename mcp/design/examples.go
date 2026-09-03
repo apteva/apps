@@ -10,9 +10,28 @@ func designExamples() map[string]any {
 		},
 		"operations": []string{
 			"box", "cylinder", "sphere", "extrude_rectangle", "extrude_circle", "extrude_polygon",
-			"fuse", "cut", "intersect", "compound", "translate", "rotate", "scale", "fillet", "chamfer",
+			"revolve_profile", "sweep_circle", "fuse", "cut", "intersect", "compound", "translate", "rotate", "scale", "mirror",
+			"linear_pattern", "circular_pattern", "fillet", "chamfer",
 		},
 		"formats": []string{"mesh-json", "glb", "step", "stl", "3mf", "manufacturing-package.zip"},
+		"linked_components": map[string]any{
+			"source_contract": map[string]any{"design_id": 12, "revision_id": 34, "source_sha256": "64 lowercase hex characters", "part_id": "optional_named_part"},
+			"create_tool":     "assembly_create", "refresh_tool": "assembly_sources_refresh",
+			"semantics": "Revision and hash pins are immutable; refresh creates a new assembly revision.",
+		},
+		"pcb_enclosures": map[string]any{
+			"source_schema": pcbMechanicalEnvelopeSchema,
+			"binding_role":  "pcb_source",
+			"create_tool":   "design_enclosure_from_pcb",
+			"refresh_tool":  "design_enclosure_refresh_from_pcb",
+		},
+		"featured": map[string]any{
+			"open_rover": map[string]any{
+				"name":        "Apteva Open Rover",
+				"description": "Printable open-hardware rover with a named-parts assembly, materials, joints, interfaces, BOM, print profiles, and release documentation.",
+				"definition":  openRoverExample(),
+			},
+		},
 		"examples": []map[string]any{
 			{
 				"name": "Parametric mounting plate",

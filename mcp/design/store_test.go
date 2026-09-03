@@ -2,8 +2,11 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
+	"sort"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -16,12 +19,19 @@ func testStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	db.SetMaxOpenConns(1)
-	migration, err := os.ReadFile("migrations/001_init.sql")
+	migrations, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(string(migration)); err != nil {
-		t.Fatal(err)
+	sort.Strings(migrations)
+	for _, path := range migrations {
+		migration, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(migration)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Cleanup(func() { db.Close() })
 	return NewStore(db)
@@ -59,5 +69,34 @@ func TestStoreRevisionLifecycleAndProjectIsolation(t *testing.T) {
 	}
 	if _, err := store.CreateRevision("project-a", CreateRevisionInput{DesignID: design.ID, ExpectedParent: design.CurrentRevisionID, Definition: canonical, Parameters: parameters}); !errors.Is(err, errRevisionConflict) {
 		t.Fatalf("expected optimistic concurrency conflict, got %v", err)
+	}
+}
+
+func TestSaveArtifactReturnsTheExistingDuplicateInsteadOfLastInsertedRow(t *testing.T) {
+	store := testStore(t)
+	canonical, definition, err := normalizeDefinition(testDefinition(), 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parameters, _ := normalizeParameters(nil, definition)
+	design, err := store.CreateDesign("project-a", CreateDesignInput{Name: "Artifact design", Definition: canonical, Parameters: parameters})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.SaveArtifact(Artifact{DesignID: design.ID, RevisionID: design.CurrentRevisionID, Format: "mesh-json", SHA256: "first", Name: "first.mesh.json", ContentType: "application/json", Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInput := Artifact{DesignID: design.ID, RevisionID: design.CurrentRevisionID, Format: "glb", SHA256: "second", Name: "second.glb", ContentType: "model/gltf-binary", Metadata: json.RawMessage(`{}`)}
+	second, err := store.SaveArtifact(secondInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := store.SaveArtifact(secondInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.ID != second.ID || duplicate.ID == first.ID || duplicate.Format != "glb" {
+		t.Fatalf("duplicate resolved to wrong artifact: first=%#v second=%#v duplicate=%#v", first, second, duplicate)
 	}
 }
