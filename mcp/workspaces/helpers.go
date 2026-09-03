@@ -125,7 +125,7 @@ func normalizeOriginHref(value string) (string, error) {
 func normalizeWorkingDirectory(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "/workspace", nil
+		return "", nil
 	}
 	if !strings.HasPrefix(value, "/") || strings.IndexByte(value, 0) >= 0 {
 		return "", errors.New("working_directory must be an absolute path under /workspace")

@@ -14,6 +14,8 @@ func TestLocalDockerExecutionPersistsInsideWorkspaceContainer(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+	persistentShells.CloseAll()
+	t.Cleanup(persistentShells.CloseAll)
 	name := "containers-persistent-test-" + strings.ToLower(newExecutionID()[4:12])
 	if _, err := docker(ctx, "run", "-d", "--name", name, "oven/bun:1-debian", "/bin/sh", "-c", "while :; do sleep 3600; done"); err != nil {
 		t.Fatalf("start test workspace: %v", err)
@@ -29,7 +31,7 @@ func TestLocalDockerExecutionPersistsInsideWorkspaceContainer(t *testing.T) {
 		t.Helper()
 		execution := &Execution{ID: id, RuntimeContainerName: name}
 		runtimeID, err := backend.StartExecution(ctx, executionRuntimeSpec{
-			ExecutionID: id, ContainerName: name, Argv: argv,
+			ExecutionID: id, ContainerName: name, SessionKey: "workspace", Argv: argv,
 		})
 		if err != nil {
 			t.Fatalf("start execution %s: %v", id, err)
@@ -58,7 +60,9 @@ func TestLocalDockerExecutionPersistsInsideWorkspaceContainer(t *testing.T) {
 	}
 
 	_, firstLogs := run("exe_persist_prepare", "/bin/sh", "-c",
-		`printf '#!/bin/sh\necho system-state-ok\n' > /usr/local/bin/workspace-proof
+		`cd /tmp
+export WORKSPACE_SESSION_VALUE=shell-state-ok
+printf '#!/bin/sh\necho system-state-ok\n' > /usr/local/bin/workspace-proof
 chmod +x /usr/local/bin/workspace-proof
 nohup /bin/sh -c 'while :; do sleep 60; done' >/tmp/workspace-bg.log 2>&1 &
 echo $! >/tmp/workspace-bg.pid
@@ -67,14 +71,15 @@ echo prepared`)
 		t.Fatalf("prepare logs = %q", firstLogs)
 	}
 	_, secondLogs := run("exe_persist_verify", "/bin/sh", "-c",
-		`workspace-proof; kill -0 "$(cat /tmp/workspace-bg.pid)" && echo process-state-ok`)
-	if !strings.Contains(secondLogs, "system-state-ok") || !strings.Contains(secondLogs, "process-state-ok") {
+		`pwd; echo "$WORKSPACE_SESSION_VALUE"; workspace-proof; kill -0 "$(cat /tmp/workspace-bg.pid)" && echo process-state-ok`)
+	if !strings.Contains(secondLogs, "/tmp") || !strings.Contains(secondLogs, "shell-state-ok") ||
+		!strings.Contains(secondLogs, "system-state-ok") || !strings.Contains(secondLogs, "process-state-ok") {
 		t.Fatalf("workspace state did not persist: %q", secondLogs)
 	}
 
 	cancelled := &Execution{ID: "exe_persist_cancel", RuntimeContainerName: name}
 	runtimeID, err := backend.StartExecution(ctx, executionRuntimeSpec{
-		ExecutionID: cancelled.ID, ContainerName: name,
+		ExecutionID: cancelled.ID, ContainerName: name, SessionKey: "workspace",
 		Argv: []string{"/bin/sh", "-c", "echo cancellation-started; sleep 60; echo cancellation-failed"},
 	})
 	if err != nil {
@@ -98,6 +103,10 @@ echo prepared`)
 	}
 	if !strings.Contains(cancelledLogs, "cancellation-started") || strings.Contains(cancelledLogs, "cancellation-failed") {
 		t.Fatalf("unexpected cancelled execution logs: %q", cancelledLogs)
+	}
+	_, afterCancelLogs := run("exe_persist_after_cancel", "/bin/sh", "-c", `pwd; echo "$WORKSPACE_SESSION_VALUE"`)
+	if !strings.Contains(afterCancelLogs, "/tmp") || !strings.Contains(afterCancelLogs, "shell-state-ok") {
+		t.Fatalf("persistent shell did not survive command cancellation: %q", afterCancelLogs)
 	}
 
 	if err := backend.Stop(ctx, name); err != nil {

@@ -2,16 +2,15 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.2.0
+version: 0.3.0
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
   UI while the required Containers app owns Docker workloads, volumes,
-  command execution, and bounded logs. v0.2.0 makes each workspace a persistent
-  mini-computer: commands execute inside its durable container, so installed
-  packages and system files survive between commands and stop/resume cycles,
-  while background services remain available between commands while it runs.
-  The command console is non-interactive; a PTY remains a later addition.
+  command execution, and bounded logs. v0.3.0 gives each workspace a persistent
+  PTY shell session inside its durable container, so current directory, exported
+  variables, installed tools, writable files, and background services remain
+  available to later commands.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/workspaces
@@ -28,9 +27,9 @@ requires:
     - platform.apps.call
   apps:
     - name: containers
-      version: ">=0.3.0"
+      version: ">=0.4.0"
       optional: false
-      reason: Owns each persistent Docker workspace, named volumes, in-container asynchronous execution, cancellation, and bounded logs used by Workspaces.
+      reason: Owns each persistent Docker workspace, named volumes, stateful PTY shell execution, cancellation, and bounded logs used by Workspaces.
 
 provides:
   permissions:
@@ -51,7 +50,7 @@ provides:
       description: "Fetch one workspace with its commands and recent activity. Args: workspace_id."
       requires: workspaces.read
     - name: workspace_command_start
-      description: "Start one asynchronous process inside the persistent workspace container. Installed packages, system files, volumes, and background processes persist across commands. Prefer argv over shell_command. Args: workspace_id, argv? or shell_command?, working_directory?, timeout_s?."
+      description: "Run one asynchronous command through the workspace's persistent PTY shell. Current directory, exported variables, installed packages, system files, volumes, and background processes persist across commands. Prefer argv for standalone programs and shell_command for shell state or syntax. Args: workspace_id, argv? or shell_command?, working_directory?, timeout_s?."
       requires: workspaces.write
     - name: workspace_command_get
       description: "Refresh and fetch one command. Args: workspace_id, command_id."

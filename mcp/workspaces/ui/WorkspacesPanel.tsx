@@ -294,7 +294,7 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
     try {
       await request(projectId, installId, `/workspaces/${encodeURIComponent(selected.id)}/commands`, {
         method: "POST",
-        body: JSON.stringify({ shell_command: commandText.trim(), working_directory: "/workspace" }),
+        body: JSON.stringify({ shell_command: commandText.trim() }),
       });
       setCommandText("");
       await Promise.all([loadDetail(selected.id), loadList()]);
@@ -398,7 +398,7 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
             {tab === "overview" && <Overview workspace={selected} runtime={detail?.runtime} runtimeError={detail?.runtime_error} />}
             {tab === "commands" && (
               <section className="ws-card ws-command-card">
-                <div className="ws-card-head"><div><h2>Commands</h2><p>Commands run inside this persistent container. Installed packages, system files, and background services remain available to later commands. This is not yet an interactive PTY.</p></div></div>
+                <div className="ws-card-head"><div><h2>Terminal</h2><p>Commands share one persistent PTY shell. The current directory, exported variables, installed tools, files, and services carry into later commands.</p></div></div>
                 <div className="ws-command-compose">
                   <span className="ws-prompt">$</span>
                   <input value={commandText} onChange={(event) => setCommandText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") startCommand(); }} placeholder="go test ./..." disabled={selected.lifecycle_status !== "running" || !!activeCommand} />

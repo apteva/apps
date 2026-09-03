@@ -75,7 +75,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	persistentShells.CloseAll()
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
@@ -121,7 +124,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "containers_health", Description: "Probe workload health.", InputSchema: idSchema(), HandlerCtx: a.toolHealthCtx},
 		{Name: "containers_usage_get", Description: "Measure generic workload usage metrics such as container volume storage bytes.", InputSchema: idSchema(), HandlerCtx: a.toolUsageGetCtx},
 		{Name: "containers_blueprints_list", Description: "List blueprints.", InputSchema: schemaObject(nil, nil), Handler: a.toolBlueprints},
-		{Name: "containers_exec_start", Description: "Start an asynchronous command inside an owned workload container so system and process state persist across commands.", InputSchema: executionStartSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionStart},
+		{Name: "containers_exec_start", Description: "Start an asynchronous command inside an owned workload container. Set session_key to reuse a stateful PTY shell across commands.", InputSchema: executionStartSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionStart},
 		{Name: "containers_exec_get", Description: "Fetch one owned execution.", InputSchema: executionIDSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionGet},
 		{Name: "containers_exec_logs", Description: "Tail bounded logs for one owned execution.", InputSchema: executionLogsSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionLogs},
 		{Name: "containers_exec_cancel", Description: "Cancel one owned queued or running execution.", InputSchema: executionIDSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionCancel},
@@ -1175,6 +1178,7 @@ func executionStartSchema() map[string]any {
 		"env":               map[string]any{"type": "object"},
 		"timeout_s":         map[string]any{"type": "integer", "minimum": 1, "maximum": 86400},
 		"idempotency_key":   map[string]any{"type": "string"},
+		"session_key":       map[string]any{"type": "string", "maxLength": 64},
 	}, []string{"workload_id"})
 }
 

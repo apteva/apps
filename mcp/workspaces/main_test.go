@@ -147,17 +147,17 @@ func agentContext(project string, agentID int64, threadID, toolCallID string) co
 func TestManifestAndToolsAgree(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "workspaces" || manifest.Version != "0.2.0" {
+	if manifest.Name != "workspaces" || manifest.Version != "0.3.0" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	requiredContainers := false
 	for _, dependency := range manifest.Requires.Apps {
-		if dependency.Name == "containers" && !dependency.Optional && dependency.Version == ">=0.3.0" {
+		if dependency.Name == "containers" && !dependency.Optional && dependency.Version == ">=0.4.0" {
 			requiredContainers = true
 		}
 	}
 	if !requiredContainers {
-		t.Fatal("Containers >=0.3.0 must be the required app dependency")
+		t.Fatal("Containers >=0.4.0 must be the required app dependency")
 	}
 	if len(manifest.Scopes) != 1 || string(manifest.Scopes[0]) != "project" {
 		t.Fatalf("Workspaces must remain project-scoped: %+v", manifest.Scopes)
@@ -236,6 +236,10 @@ func TestCommandLifecycleAndStopCancelsBeforeContainer(t *testing.T) {
 	command := started.(map[string]any)["command"].(*Command)
 	if command.ExecutionID != "exe_test" || command.Status != "running" {
 		t.Fatalf("unexpected command: %+v", command)
+	}
+	commandCall := platform.calls[len(platform.calls)-1]
+	if commandCall.Tool != "containers_exec_start" || commandCall.Input["session_key"] != "workspace" || commandCall.Input["working_directory"] != "" {
+		t.Fatalf("workspace command did not use the persistent shell session: %+v", commandCall)
 	}
 	if _, err := app.toolCommandStart(agentContext("project-a", 7, "worker", "command-2"), ctx, map[string]any{
 		"workspace_id": w.ID, "argv": []any{"go", "vet", "./..."},

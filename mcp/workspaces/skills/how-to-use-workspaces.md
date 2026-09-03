@@ -2,7 +2,7 @@
 
 Workspaces answers where work runs, who owns it, what command is active, and
 when the environment will disappear. Each workspace is one persistent Docker
-container. It is not a code editor, Git client, or interactive terminal.
+container with a persistent PTY shell. It is not a code editor or Git client.
 
 ## Start a workspace
 
@@ -24,20 +24,20 @@ be active at a time.
 Prefer an `argv` array:
 
 ```json
-{"workspace_id":"wsp_…","argv":["go","test","./..."],"working_directory":"/workspace"}
+{"workspace_id":"wsp_…","argv":["go","test","./..."]}
 ```
 
 Use `shell_command` only when shell syntax such as pipes or redirection is
 actually required. Never place secrets in commands. Workspaces intentionally
 does not accept arbitrary environment values.
 
-Every command starts as a process inside the same workspace container.
-Installed packages, writable-layer files, `/workspace`, and `/cache` persist
-across commands and stop/resume. Background services persist between commands
-while the container runs; stopping the workspace terminates processes. A
-discrete command still gets a fresh shell process, so `cd` and exported shell
-variables do not carry to the next command. Set `working_directory` on each
-call; it must remain under `/workspace`.
+Commands run through one persistent PTY shell inside the workspace container.
+Current directory, exported shell variables, functions, aliases, installed
+packages, writable-layer files, `/workspace`, and `/cache` persist across
+commands. Omit `working_directory` to continue from the shell's current
+directory; when supplied, it must remain under `/workspace`. Background services
+also persist while the container runs. Stopping the workspace terminates its
+processes and shell; resume starts a fresh shell in the preserved filesystem.
 
 Use `workspace_command_get` for status and `workspace_command_logs` for bounded
 output. Do not poll in a tight loop. Terminal states are `succeeded`, `failed`,

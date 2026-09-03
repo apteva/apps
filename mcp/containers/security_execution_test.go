@@ -183,7 +183,7 @@ func TestExecutionRunsInsideOwnedWorkloadContainerAndRetainsLogs(t *testing.T) {
 	w, _ = getWorkload(db, w.ID)
 	execution, err := app.startExecution(context.Background(), appCtx, w,
 		ownerIdentity{InstallID: 41, AppName: "code", ProjectID: "project-a"},
-		executionInput{Argv: []string{"bun", "test"}, WorkingDirectory: "/workspace", Env: map[string]string{"CI": "true"}, TimeoutSeconds: 30})
+		executionInput{Argv: []string{"bun", "test"}, WorkingDirectory: "/workspace", Env: map[string]string{"CI": "true"}, TimeoutSeconds: 30, SessionKey: "workspace"})
 	if err != nil {
 		t.Fatalf("start execution: %v", err)
 	}
@@ -211,6 +211,9 @@ func TestExecutionRunsInsideOwnedWorkloadContainerAndRetainsLogs(t *testing.T) {
 	started := backend.startedSpec()
 	if started.ContainerName != w.ContainerName {
 		t.Fatalf("execution targeted %q, want persistent workload container %q", started.ContainerName, w.ContainerName)
+	}
+	if started.SessionKey != "workspace" || execution.SessionKey != "workspace" {
+		t.Fatalf("persistent session key was not retained: started=%q execution=%q", started.SessionKey, execution.SessionKey)
 	}
 	if len(started.Env) != 1 || started.Env["CI"] != "true" {
 		t.Fatalf("execution environment was not isolated: %+v", started.Env)

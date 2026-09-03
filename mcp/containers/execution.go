@@ -34,6 +34,7 @@ type Execution struct {
 	Env                  map[string]string `json:"-"`
 	EnvKeys              []string          `json:"env_keys,omitempty"`
 	TimeoutSeconds       int               `json:"timeout_s"`
+	SessionKey           string            `json:"session_key,omitempty"`
 	Status               string            `json:"status"`
 	ExitCode             *int              `json:"exit_code,omitempty"`
 	ErrorCode            string            `json:"error_code,omitempty"`
@@ -56,6 +57,7 @@ type executionInput struct {
 	Env              map[string]string `json:"env"`
 	TimeoutSeconds   int               `json:"timeout_s"`
 	IdempotencyKey   string            `json:"idempotency_key"`
+	SessionKey       string            `json:"session_key"`
 }
 
 type executionRuntimeSpec struct {
@@ -65,6 +67,7 @@ type executionRuntimeSpec struct {
 	Argv             []string
 	WorkingDirectory string
 	User             string
+	SessionKey       string
 }
 
 type executionBackend interface {
@@ -76,6 +79,15 @@ type executionBackend interface {
 }
 
 func normalizeExecutionInput(in executionInput, workload *Workload, defaultTimeout int) (executionInput, error) {
+	in.SessionKey = strings.TrimSpace(in.SessionKey)
+	if len(in.SessionKey) > 64 {
+		return in, errors.New("session_key exceeds 64 bytes")
+	}
+	for _, r := range in.SessionKey {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' && r != '.' {
+			return in, errors.New("session_key may contain only letters, numbers, '.', '-', and '_'")
+		}
+	}
 	in.ShellCommand = strings.TrimSpace(in.ShellCommand)
 	if len(in.Argv) > 0 && in.ShellCommand != "" {
 		return in, errors.New("set either argv or shell_command, not both")
@@ -100,7 +112,7 @@ func normalizeExecutionInput(in executionInput, workload *Workload, defaultTimeo
 			return in, fmt.Errorf("argv[%d] is invalid", i)
 		}
 	}
-	if in.WorkingDirectory == "" {
+	if in.WorkingDirectory == "" && in.SessionKey == "" {
 		in.WorkingDirectory = workload.WorkingDirectory
 	}
 	if in.WorkingDirectory != "" {
@@ -170,7 +182,8 @@ func (a *App) startExecution(callCtx context.Context, app *sdk.AppCtx, workload 
 		OwnerAppInstallID: owner.InstallID, OwnerAppName: owner.AppName,
 		Argv: append([]string(nil), in.Argv...), WorkingDirectory: in.WorkingDirectory,
 		Env: in.Env, EnvKeys: envKeys(in.Env), TimeoutSeconds: in.TimeoutSeconds,
-		Status: executionQueued, IdempotencyKey: in.IdempotencyKey,
+		SessionKey: in.SessionKey,
+		Status:     executionQueued, IdempotencyKey: in.IdempotencyKey,
 		RuntimeContainerName: workload.ContainerName,
 	}
 	created, duplicate, err := insertExecution(app.AppDB(), execution)
@@ -208,6 +221,7 @@ func (a *App) launchExecution(app *sdk.AppCtx, execution *Execution, workload *W
 		ExecutionID: execution.ID, ContainerName: workload.ContainerName,
 		Env: env, Argv: execution.Argv,
 		WorkingDirectory: execution.WorkingDirectory, User: workload.User,
+		SessionKey: execution.SessionKey,
 	})
 	cancel()
 	if err != nil {
@@ -441,12 +455,12 @@ func insertExecution(db *sql.DB, execution *Execution) (*Execution, bool, error)
 	envJSON, _ := json.Marshal(execution.Env)
 	_, err := db.Exec(`INSERT INTO containers_executions (
 		id, workload_id, project_id, owner_app_install_id, owner_app_name,
-		argv_json, working_directory, env_json, timeout_s, status,
+		argv_json, working_directory, env_json, timeout_s, session_key, status,
 		runtime_container_name, idempotency_key, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		execution.ID, execution.WorkloadID, execution.ProjectID, execution.OwnerAppInstallID,
 		execution.OwnerAppName, string(argvJSON), execution.WorkingDirectory, string(envJSON),
-		execution.TimeoutSeconds, execution.Status, execution.RuntimeContainerName,
+		execution.TimeoutSeconds, execution.SessionKey, execution.Status, execution.RuntimeContainerName,
 		execution.IdempotencyKey, now, now)
 	if err != nil {
 		if execution.IdempotencyKey != "" && strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -460,7 +474,7 @@ func insertExecution(db *sql.DB, execution *Execution) (*Execution, bool, error)
 }
 
 const executionColumns = `id, workload_id, project_id, owner_app_install_id, owner_app_name,
-	argv_json, working_directory, env_json, timeout_s, status, exit_code,
+	argv_json, working_directory, env_json, timeout_s, session_key, status, exit_code,
 	error_code, error, runtime_container_id, runtime_container_name,
 	output_bytes, output_truncated, idempotency_key,
 	created_at, COALESCE(started_at,''), COALESCE(finished_at,''), updated_at`
@@ -474,7 +488,7 @@ func scanExecution(scanner interface{ Scan(...any) error }) (*Execution, error) 
 		&execution.ID, &execution.WorkloadID, &execution.ProjectID,
 		&execution.OwnerAppInstallID, &execution.OwnerAppName,
 		&argvJSON, &execution.WorkingDirectory, &envJSON, &execution.TimeoutSeconds,
-		&execution.Status, &exitCode, &execution.ErrorCode, &execution.Error,
+		&execution.SessionKey, &execution.Status, &exitCode, &execution.ErrorCode, &execution.Error,
 		&execution.RuntimeContainerID, &execution.RuntimeContainerName,
 		&execution.OutputBytes, &truncated, &execution.IdempotencyKey,
 		&execution.CreatedAt, &execution.StartedAt, &execution.FinishedAt, &execution.UpdatedAt,

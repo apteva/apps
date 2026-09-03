@@ -87,6 +87,9 @@ func (d LocalDocker) StartExecution(ctx context.Context, spec executionRuntimeSp
 	if spec.ContainerName == "" || spec.ExecutionID == "" || len(spec.Argv) == 0 {
 		return "", errors.New("persistent execution requires a container, execution id, and command")
 	}
+	if spec.SessionKey != "" {
+		return persistentShells.Start(ctx, spec)
+	}
 	cmd := []string{"/bin/sh", "-c", persistentExecutionScript, "apteva-exec", executionControlDir(spec.ExecutionID)}
 	cmd = append(cmd, spec.Argv...)
 	env := make([]string, 0, len(spec.Env))
@@ -130,6 +133,9 @@ func (d LocalDocker) InspectExecution(ctx context.Context, execution *Execution)
 	if legacyExecutionContainer(execution) {
 		return d.Inspect(ctx, execution.RuntimeContainerName)
 	}
+	if execution != nil && persistentShellRuntime(execution.RuntimeContainerID) {
+		return persistentShells.Inspect(execution), nil
+	}
 	if execution == nil || execution.RuntimeContainerID == "" {
 		return nil, errors.New("persistent execution has no Docker exec id")
 	}
@@ -156,6 +162,9 @@ func (d LocalDocker) StopExecution(ctx context.Context, execution *Execution) er
 		_, err := docker(ctx, "kill", execution.RuntimeContainerName)
 		return err
 	}
+	if persistentShellRuntime(execution.RuntimeContainerID) {
+		return persistentShells.Interrupt(ctx, execution)
+	}
 	_, err := docker(ctx, "exec", execution.RuntimeContainerName, "/bin/sh", "-c", stopPersistentExecutionScript,
 		"apteva-exec", executionControlDir(execution.ID))
 	if dockerExecUnavailable(err) {
@@ -170,6 +179,9 @@ func (d LocalDocker) ExecutionLogs(ctx context.Context, execution *Execution, ta
 	}
 	if legacyExecutionContainer(execution) {
 		return d.Logs(ctx, execution.RuntimeContainerName, tail)
+	}
+	if persistentShellRuntime(execution.RuntimeContainerID) {
+		return persistentShells.Logs(execution, tail), nil
 	}
 	if tail <= 0 || tail > 2000 {
 		tail = 200
@@ -186,6 +198,10 @@ func (d LocalDocker) RemoveExecution(ctx context.Context, execution *Execution) 
 	if legacyExecutionContainer(execution) {
 		_, err := docker(ctx, "rm", "-f", execution.RuntimeContainerName)
 		return err
+	}
+	if persistentShellRuntime(execution.RuntimeContainerID) {
+		persistentShells.Remove(execution)
+		return nil
 	}
 	_, err := docker(ctx, "exec", execution.RuntimeContainerName, "rm", "-rf", executionControlDir(execution.ID))
 	if dockerExecUnavailable(err) {

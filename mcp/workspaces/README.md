@@ -1,5 +1,12 @@
 # Workspaces
 
+## v0.3.0
+
+- Give every workspace a named, long-lived PTY shell session. `cd`, exported
+  variables, shell functions, and aliases now carry into later commands.
+- Keep command history, bounded live logs, timeouts, and targeted interruption
+  while running commands through the same shell.
+
 ## v0.2.0
 
 - Run every command inside the workspace's persistent container. Installed OS
@@ -31,22 +38,20 @@ The product boundary is deliberate:
 - Workspace list with derived running/busy/suspended/failed state and TTL.
 - Workspace detail with ownership, origin, approved image, resource limits,
   runtime health, durable volumes, storage usage, and activity.
-- Non-interactive asynchronous command history with bounded logs, exit status,
-  duration, actor attribution, and cancellation.
+- Stateful PTY-backed asynchronous command history with bounded logs, exit
+  status, duration, actor attribution, and cancellation.
 - Stop/resume, TTL extension, and confirmed permanent destruction.
 - Automatic expiration: stop at `expires_at`, preserve the container and volumes for the
   configured recovery window, then delete them at `delete_at`.
 - App-only creation with a bounded source archive and app-only source export.
 - App-only origin/Git-safety context updates without taking ownership of Git.
 
-Only one tracked command may execute in a workspace at a time. Each command is
-a new process inside the workspace's persistent container. `/workspace`,
-`/cache`, installed packages, and writable-layer files remain available to later
-commands and survive stop/resume. Background services remain available between
-commands while the container is running, but stopping it terminates processes.
-This is a command console, not a PTY: per-shell state such as `cd` and exported
-variables does not carry into the next command unless it is represented in the
-filesystem or a running service.
+Only one tracked command may execute in a workspace at a time. Commands share a
+long-lived PTY shell inside the persistent container, so `cd`, exported
+variables, shell functions, and aliases carry into later commands. `/workspace`,
+`/cache`, installed packages, and writable-layer files survive stop/resume.
+Stopping the workspace terminates its processes and PTY; resume starts a fresh
+shell in the same preserved container filesystem.
 
 ## Runtime profiles
 

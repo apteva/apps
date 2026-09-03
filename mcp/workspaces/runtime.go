@@ -198,7 +198,7 @@ func (a *App) startCommand(callCtx context.Context, app *sdk.AppCtx, args map[st
 	var out executionResponse
 	err = app.PlatformAPI().CallAppResult("containers", "containers_exec_start", map[string]any{
 		"workload_id": w.WorkloadID, "argv": argv, "working_directory": workingDirectory,
-		"timeout_s": timeout, "idempotency_key": c.ID,
+		"timeout_s": timeout, "idempotency_key": c.ID, "session_key": "workspace",
 	}, &out)
 	if err != nil {
 		_ = updateCommand(app.AppDB(), c.ID, map[string]any{
