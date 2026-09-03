@@ -1187,6 +1187,7 @@ func TestAdSetCreate_RequiresTargeting(t *testing.T) {
 
 func TestAdSetCreate_MapsOptimizationGoal(t *testing.T) {
 	pf := newRecordingPlatform()
+	pf.executeResponses["campaign_list"] = executeJSON(`{"data":[{"id":"120000","objective":"OUTCOME_SALES"}]}`)
 	ctx := newAdsCtx(t, pf)
 	app := &App{}
 
@@ -1206,7 +1207,7 @@ func TestAdSetCreate_MapsOptimizationGoal(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	call := pf.executeCalls[0]
+	call := findExecuteCall(t, pf, "adset_create")
 	if call.Tool != "adset_create" || call.Input["optimization_goal"] != "OFFSITE_CONVERSIONS" {
 		t.Fatalf("optimization_goal not mapped: tool=%s og=%v", call.Tool, call.Input["optimization_goal"])
 	}
@@ -1251,6 +1252,7 @@ func TestAdSetCreate_RejectsAccountRestrictedThruplayBilling(t *testing.T) {
 
 func TestAdSetCreate_UsesImpressionsBillingForThruplayOptimization(t *testing.T) {
 	pf := newRecordingPlatform()
+	pf.executeResponses["campaign_list"] = executeJSON(`{"data":[{"id":"120000","objective":"OUTCOME_ENGAGEMENT"}]}`)
 	ctx := newAdsCtx(t, pf)
 	app := &App{}
 
@@ -1269,12 +1271,74 @@ func TestAdSetCreate_UsesImpressionsBillingForThruplayOptimization(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(pf.executeCalls) != 1 {
-		t.Fatalf("expected one Meta call, got %#v", pf.executeCalls)
+	if len(pf.executeCalls) != 2 {
+		t.Fatalf("expected campaign preflight and one Meta create call, got %#v", pf.executeCalls)
 	}
-	call := pf.executeCalls[0]
+	call := findExecuteCall(t, pf, "adset_create")
 	if call.Input["optimization_goal"] != "THRUPLAY" || call.Input["billing_event"] != "IMPRESSIONS" {
 		t.Fatalf("wrong video delivery combination: %#v", call.Input)
+	}
+}
+
+func TestAdSetCreate_RejectsGoalIncompatibleWithCampaignObjective(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["campaign_list"] = executeJSON(`{"data":[{"id":"120000","objective":"OUTCOME_APP_PROMOTION"}]}`)
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	out, err := app.toolAdSetCreate(ctx, map[string]any{
+		"ad_account_id":     acctID,
+		"campaign_id":       "120000",
+		"name":              "Video views",
+		"optimization_goal": "thruplay",
+		"targeting":         map[string]any{"geo_locations": map[string]any{"countries": []any{"AU"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := asMap(out)
+	if result["code"] != "incompatible_campaign_optimization" || result["campaign_objective"] != "OUTCOME_APP_PROMOTION" {
+		t.Fatalf("expected objective compatibility error, got %#v", result)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "campaign_list" {
+		t.Fatalf("incompatible create reached Meta: %#v", pf.executeCalls)
+	}
+}
+
+func TestAdSetCreate_ProtectsValidatedDeliveryFieldsFromNativeOverrides(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["campaign_list"] = executeJSON(`{"data":[{"id":"120000","objective":"OUTCOME_ENGAGEMENT"}]}`)
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolAdSetCreate(ctx, map[string]any{
+		"ad_account_id":     acctID,
+		"campaign_id":       "120000",
+		"name":              "Video views",
+		"optimization_goal": "thruplay",
+		"targeting":         map[string]any{"geo_locations": map[string]any{"countries": []any{"AU"}}},
+		"platform_options": map[string]any{
+			"optimization_goal": "POST_ENGAGEMENT",
+			"billing_event":     "THRUPLAY",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := findExecuteCall(t, pf, "adset_create")
+	if call.Input["optimization_goal"] != "THRUPLAY" || call.Input["billing_event"] != "IMPRESSIONS" {
+		t.Fatalf("native options bypassed normalized delivery fields: %#v", call.Input)
 	}
 }
 

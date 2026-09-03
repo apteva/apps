@@ -157,6 +157,57 @@ func TestMetaBillingFailurePreservesActionableDetails(t *testing.T) {
 	}
 }
 
+func TestMetaOptimizationFailureIncludesSafeRequestContext(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponder = func(_ int64, tool string, _ map[string]any) (*sdk.ExecuteResult, error) {
+		if tool != "adset_create" {
+			t.Fatalf("unexpected tool %s", tool)
+		}
+		return &sdk.ExecuteResult{
+			Success: false,
+			Status:  400,
+			Data: json.RawMessage(`{
+				"error": {
+					"code": 100,
+					"error_subcode": 2490408,
+					"type": "OAuthException",
+					"message": "Invalid parameter",
+					"error_user_title": "Performance goal isn't available",
+					"error_user_msg": "You can't use the selected performance goal with your campaign objective.",
+					"error_data": {"blame_field_specs": [["optimization_goal"]]}
+				}
+			}`),
+		}, nil
+	}
+	ctx := newAdsCtx(t, pf)
+	input := map[string]any{
+		"campaign_id":       "campaign_1",
+		"optimization_goal": "THRUPLAY",
+		"billing_event":     "IMPRESSIONS",
+		"status":            "PAUSED",
+		"targeting": map[string]any{
+			"geo_locations": map[string]any{"countries": []any{"AU"}},
+			"age_min":       30,
+		},
+		"dsa_beneficiary": "private value",
+	}
+
+	_, result := (&App{}).execIntegrationToolOnce(ctx, &adAccount{Platform: "meta", ConnectionID: 7}, "adset_create", input)
+	if result["code"] != "provider_optimization_goal_unavailable" || result["provider_subcode"] != 2490408 {
+		t.Fatalf("optimization failure was not classified: %#v", result)
+	}
+	requestContext := asMap(result["request_context"])
+	if requestContext["campaign_id"] != "campaign_1" || requestContext["optimization_goal"] != "THRUPLAY" || requestContext["billing_event"] != "IMPRESSIONS" {
+		t.Fatalf("safe request context is incomplete: %#v", requestContext)
+	}
+	if _, leaked := requestContext["targeting"]; leaked {
+		t.Fatalf("full targeting leaked into request context: %#v", requestContext)
+	}
+	if _, leaked := requestContext["dsa_beneficiary"]; leaked {
+		t.Fatalf("DSA identity leaked into request context: %#v", requestContext)
+	}
+}
+
 func TestMetaCreateOperationDoesNotRetryTransientFailure(t *testing.T) {
 	pf := newRecordingPlatform()
 	var createAttempts int

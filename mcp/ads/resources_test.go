@@ -65,6 +65,8 @@ func TestMetaResourcesDriveCreativeAndConversionSetup(t *testing.T) {
 	platform := newRecordingPlatform()
 	platform.executeResponder = func(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 		switch tool {
+		case "campaign_list":
+			return executeJSON(`{"data":[{"id":"campaign_1","objective":"OUTCOME_SALES"}]}`), nil
 		case "page_list":
 			if strings.Contains(toString(input["fields"]), "instagram_business_account") {
 				return executeJSON(`{"data":[{"id":"page_1","name":"Main Page","tasks":["ADVERTISE"],"instagram_business_account":{"id":"ig_1","username":"main"}}]}`), nil
