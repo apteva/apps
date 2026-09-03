@@ -41,8 +41,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.6.3
-description: Live trading workstation with canonical reference data, corporate actions, simulation, broker execution, strategies, and reproducible backtests.
+version: 0.7.0
+description: Live trading workstation with canonical market data, portfolio risk controls, objectives, broker execution, strategies, and reproducible backtests.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -119,6 +119,18 @@ provides:
       description: "List portfolios visible to this agent."
     - name: portfolio_get
       description: "Snapshot of one portfolio."
+    - name: risk_profiles_list
+      description: "List built-in portfolio risk presets and enforced percentage limits."
+    - name: portfolio_risk_get
+      description: "Get a portfolio's resolved risk policy and current drawdown state."
+    - name: portfolio_risk_update
+      description: "Set an enforceable risk preset or custom percentage limits."
+    - name: portfolio_objective_create
+      description: "Create a native Trading percentage objective."
+    - name: portfolio_objectives_list
+      description: "List portfolio objectives with live progress."
+    - name: portfolio_objective_update
+      description: "Update or archive a Trading objective."
     - name: account_summary
       description: "Equity, cash, day and open P&L."
     - name: positions_list
@@ -333,6 +345,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/history/", Handler: a.handleHTTPHistory},
 		{Pattern: "/universe", Handler: a.handleHTTPUniverse},
 		{Pattern: "/reference/", Handler: a.handleHTTPReferenceData},
+		{Pattern: "/risk-profiles", Handler: a.handleHTTPRiskProfiles},
 		{Pattern: "/brokers", Handler: a.handleHTTPBrokers},
 		{Pattern: "/strategies", Handler: a.handleHTTPStrategies},
 		{Pattern: "/strategies/", Handler: a.handleHTTPStrategies},
@@ -463,6 +476,71 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 	case sub == "backtests":
 		snap, _ := snapshotPortfolio(globalCtx.AppDB(), pf)
 		a.handleHTTPPortfolioBacktests(w, r, snap, pid)
+
+	case sub == "risk" && r.Method == http.MethodGet:
+		out, err := a.toolPortfolioRiskGet(globalCtx, map[string]any{"_project_id": pid, "portfolio_id": pf.ID})
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+
+	case sub == "risk" && r.Method == http.MethodPut:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["portfolio_id"] = pid, pf.ID
+		out, err := a.toolPortfolioRiskUpdate(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+
+	case sub == "objectives" && subID == "" && r.Method == http.MethodGet:
+		out, err := a.toolPortfolioObjectivesList(globalCtx, map[string]any{
+			"_project_id": pid, "portfolio_id": pf.ID, "include_archived": r.URL.Query().Get("include_archived") == "true",
+		})
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+
+	case sub == "objectives" && subID == "" && r.Method == http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["portfolio_id"] = pid, pf.ID
+		out, err := a.toolPortfolioObjectiveCreate(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 201, out)
+
+	case sub == "objectives" && subID != "" && r.Method == http.MethodPatch:
+		objectiveID, parseErr := strconv.ParseInt(subID, 10, 64)
+		if parseErr != nil {
+			httpErr(w, 400, "objective id must be integer")
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["portfolio_id"], body["objective_id"] = pid, pf.ID, objectiveID
+		out, err := a.toolPortfolioObjectiveUpdate(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
 
 	case sub == "positions" && r.Method == http.MethodGet:
 		pos, _ := dbListPositions(globalCtx.AppDB(), pf.ID)
@@ -595,6 +673,15 @@ func (a *App) handleHTTPBrokers(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 500, err.Error())
 		return
 	}
+	httpJSON(w, 200, out)
+}
+
+func (a *App) handleHTTPRiskProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
+	out, _ := a.toolRiskProfilesList(globalCtx, map[string]any{})
 	httpJSON(w, 200, out)
 }
 

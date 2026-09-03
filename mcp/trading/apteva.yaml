@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.6.3
+version: 0.7.0
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -18,8 +18,9 @@ description: |
             Bind a broker via Settings → Integrations to enable
             mode=live. Without any binding, every portfolio stays paper.
 
-  Each portfolio has its own mandate, allowed asset classes, and
-  daily-loss halt. Approval flow lives in the agent's directive (via
+  Each portfolio has its own mandate, allowed asset classes, enforceable
+  risk profile, high-water drawdown and daily-loss halts, and percentage
+  performance objectives. Approval flow lives in the agent's directive (via
   channel-chat), not in this sidecar — keeps the trading surface
   focused on state, execution, market data, and audit log.
 
@@ -120,6 +121,18 @@ provides:
       description: "List portfolios visible to this agent."
     - name: portfolio_get
       description: "Snapshot of one portfolio (mandate, equity, cash, status, watchlist)."
+    - name: risk_profiles_list
+      description: "List built-in portfolio risk presets and enforced percentage limits."
+    - name: portfolio_risk_get
+      description: "Get a portfolio's resolved risk policy and current drawdown state."
+    - name: portfolio_risk_update
+      description: "Set an enforceable risk preset or custom percentage limits."
+    - name: portfolio_objective_create
+      description: "Create a native Trading percentage objective."
+    - name: portfolio_objectives_list
+      description: "List portfolio objectives with live progress."
+    - name: portfolio_objective_update
+      description: "Update or archive a Trading objective."
     - name: account_summary
       description: "Equity, cash, buying power, day and open P&L for one portfolio."
     - name: positions_list
@@ -192,9 +205,9 @@ provides:
       label: Trading
       icon: trending-up
       entry: /ui/TradingPanel.mjs
-  # No prompt_fragments. Trading policy (approval gates, position-sizing
-  # opinions) belongs in the operator's per-instance directive, not
-  # baked into every install. The MCP tool descriptions carry the
+  # No prompt_fragments. Approval policy belongs in the operator's
+  # per-instance directive; objective and numeric portfolio risk state are
+  # native Trading domains. The MCP tool descriptions carry the
   # platform contract (rationale length, rejection codes, status
   # semantics); the agent learns the rest from structured rejections.
 

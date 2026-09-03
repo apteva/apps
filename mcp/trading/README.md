@@ -6,6 +6,8 @@ and broker-backed live execution, deterministic strategies, and backtests.
 Version 0.6 adds a provider-neutral security master, revisioned corporate-action
 ledger, authoritative exchange sessions, forward point-in-time universe
 snapshots, auditable portfolio postings, and an event-driven data-quality desk.
+Version 0.7 adds native portfolio risk profiles, enforceable percentage limits,
+high-water drawdown halts, and percentage objectives with live progress.
 
 Same canonical layout as `apps/mcp/crm` and `apps/mcp/storage`: a Go
 sidecar serving MCP tools + REST routes, with two UI surfaces under
@@ -15,7 +17,7 @@ sidecar serving MCP tools + REST routes, with two UI surfaces under
 
 ```
 apps/mcp/trading/
-├── apteva.yaml             # manifest — kind: source, declares 34 mcp_tools
+├── apteva.yaml             # manifest — kind: source, declares 40 mcp_tools
 ├── go.mod / go.sum
 ├── main.go                 # App impl, HTTP routes, Workers wiring
 ├── tools.go                # MCP tools (the agent's surface)
@@ -85,6 +87,10 @@ by apteva-server. Bare paths shown here.
 | `GET`  | `/portfolios/{id}` | Snapshot |
 | `PATCH`| `/portfolios/{id}` | Status only — `{ "status": "active\|paused\|halted" }` |
 | `GET`  | `/portfolios/{id}/positions` | Open positions, mark-decorated |
+| `GET/PUT` | `/portfolios/{id}/risk` | Resolved policy and state / set preset or custom limits |
+| `GET/POST` | `/portfolios/{id}/objectives` | List live objective progress / create objective |
+| `PATCH` | `/portfolios/{id}/objectives/{objective_id}` | Update, pause, or archive objective |
+| `GET` | `/risk-profiles` | Conservative, balanced, and aggressive defaults |
 | `GET`  | `/portfolios/{id}/orders?status=…&limit=…` | Working / filled / cancelled / rejected / all |
 | `POST` | `/portfolios/{id}/orders` | Place order — same body as MCP `order_place` |
 | `GET`  | `/portfolios/{id}/journal?kind=…&limit=…` | Read journal |
@@ -114,7 +120,7 @@ visible for broker reconciliation instead of being guessed from incomplete
 terms. Broker-backed portfolios treat broker positions and activities as the
 accounting source of truth.
 
-## MCP tools (34)
+## MCP tools (40)
 
 **Portfolio and execution (13):** `portfolio_create`, `brokers_list`,
 `portfolio_list`, `portfolio_get`, `account_summary`, `positions_list`,
@@ -132,10 +138,22 @@ accounting source of truth.
 
 **Alerts and journal (3):** `alert_create`, `journal_write`, `journal_read`.
 
+**Risk and objectives (6):** `risk_profiles_list`, `portfolio_risk_get`,
+`portfolio_risk_update`, `portfolio_objective_create`,
+`portfolio_objectives_list`, `portfolio_objective_update`.
+
 `order_place` always takes a `rationale` (≥ 30 chars). On reject, the
 status field is `"rejected"` with a structured `code` + `detail` —
 **not** an MCP error. The agent reads it on its next loop and
 adjusts.
+
+Risk limits are enforced by the common order path for human and agent orders,
+automated strategies, simulation, broker paper, and armed broker-live execution.
+Open buy orders count toward projected position and gross exposure so a client
+cannot evade limits by stacking working orders. Daily loss and high-water
+drawdown breaches halt the portfolio; live portfolios first attempt to cancel
+all working broker orders. Existing portfolios retain the legacy daily-loss
+setting and otherwise permissive 100% limits until a risk profile is selected.
 
 ## Test pyramid
 

@@ -15,11 +15,13 @@ import { useAppEvents } from "./hooks/useAppEvents.ts";
 import { setLiveArmed } from "./api/portfolios.ts";
 import { useReferenceData } from "./hooks/useReferenceData.ts";
 import { DataIntelligence } from "./components/DataIntelligence.tsx";
+import { useRisk } from "./hooks/useRisk.ts";
+import { RiskObjectives } from "./components/RiskObjectives.tsx";
 
 export function App() {
   const [dark, setDark] = useState(true);
   const [portfolioId, setPortfolioId] = useState<number | null>(null);
-  const [bottomTab, setBottomTab] = useState<"positions" | "orders" | "feed" | "data">("positions");
+  const [bottomTab, setBottomTab] = useState<"positions" | "orders" | "feed" | "data" | "risk">("positions");
   const [symbol, setSymbol] = useState<string>("");
 
   useEffect(() => { document.body.classList.toggle("dark", dark); }, [dark]);
@@ -32,6 +34,7 @@ export function App() {
   const journal = useJournal(portfolioId);
   const health = useHealth();
   const reference = useReferenceData(symbol);
+  const risk = useRisk(portfolioId);
 
   // Event-driven cache invalidation. Each app-event from the sidecar
   // (order.placed, fill, journal.appended, tick, etc.) bumps the
@@ -85,6 +88,13 @@ export function App() {
       case "portfolio.live_armed.changed":
         portfolios.refresh();
         if (matchesSelected) portfolio.refresh();
+        return;
+      case "risk.policy.changed":
+      case "risk.limit.breached":
+      case "portfolio.objective.changed":
+      case "portfolio.performance.updated":
+        if (!matchesSelected) return;
+        risk.risk.refresh(); risk.objectives.refresh(); portfolio.refresh();
         return;
       case "order.placed":
       case "order.filled":
@@ -213,6 +223,7 @@ export function App() {
                     { k: "orders",    label: "Orders",    count: orders.data?.length ?? 0 },
                     { k: "feed",      label: "Agent",     count: journal.data?.length ?? 0 },
                     { k: "data",      label: "Data",      count: reference.actions.data?.length ?? 0 },
+                    { k: "risk",      label: "Risk & goals", count: risk.objectives.data?.length ?? 0 },
                   ] as const
                 ).map((t) => (
                   <button
@@ -224,7 +235,7 @@ export function App() {
                     <span className="text-[10px] t-tertiary mono">{t.count}</span>
                   </button>
                 ))}
-                <span className="ml-auto pr-2 text-[10px] t-tertiary mono">v0.6.3 · event driven</span>
+                <span className="ml-auto pr-2 text-[10px] t-tertiary mono">v0.7.0 · event driven</span>
               </div>
 
               <div className="flex-1 min-h-0 mt-1.5">
@@ -234,6 +245,7 @@ export function App() {
                   <AgentFeed portfolio={portfolio.data} entries={journal.data ?? []} />
                 )}
                 {bottomTab === "data" && <DataIntelligence status={reference.status.data} actions={reference.actions.data ?? []} issues={reference.issues.data ?? []} sessions={reference.sessions.data ?? []} symbol={symbol} />}
+                {bottomTab === "risk" && portfolio.data && <RiskObjectives portfolioId={portfolio.data.id} policy={risk.risk.data?.policy} state={risk.risk.data?.state} objectives={risk.objectives.data ?? []} onRefresh={() => { risk.risk.refresh(); risk.objectives.refresh(); }} />}
               </div>
             </section>
           </div>
