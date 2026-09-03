@@ -152,7 +152,7 @@ func dbDefaultOrgID(db *sql.DB, projectID string) int64 {
 func dbGetUserByID(db *sql.DB, projectID string, orgID, id int64) (*User, error) {
 	row := db.QueryRow(`
 		SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''),
-		       COALESCE(metadata_json, '{}'), status, password_hash IS NOT NULL,
+		       COALESCE(metadata_json, '{}'), status, IFNULL(kind,'account'), password_hash IS NOT NULL,
 		       authorization_version,
 		       IFNULL(last_login_at,''), IFNULL(locked_until,''),
 		       IFNULL(created_at,''), IFNULL(updated_at,'')
@@ -164,7 +164,7 @@ func dbGetUserByID(db *sql.DB, projectID string, orgID, id int64) (*User, error)
 func dbGetUserByEmail(db *sql.DB, projectID string, orgID int64, email string) (*User, error) {
 	row := db.QueryRow(`
 		SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''),
-		       COALESCE(metadata_json, '{}'), status, password_hash IS NOT NULL,
+		       COALESCE(metadata_json, '{}'), status, IFNULL(kind,'account'), password_hash IS NOT NULL,
 		       authorization_version,
 		       IFNULL(last_login_at,''), IFNULL(locked_until,''),
 		       IFNULL(created_at,''), IFNULL(updated_at,'')
@@ -178,7 +178,7 @@ func scanUser(db *sql.DB, projectID string, row *sql.Row) (*User, error) {
 	var hasPw int
 	var metadata string
 	if err := row.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.EmailVerifiedAt, &u.DisplayName, &u.AvatarURL,
-		&metadata, &u.Status, &hasPw, &u.AuthorizationVersion,
+		&metadata, &u.Status, &u.Kind, &hasPw, &u.AuthorizationVersion,
 		&u.LastLoginAt, &u.LockedUntil, &u.CreatedAt, &u.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -187,6 +187,7 @@ func scanUser(db *sql.DB, projectID string, row *sql.Row) (*User, error) {
 	}
 	u.Metadata = json.RawMessage(metadata)
 	u.HasPassword = hasPw == 1
+	normalizeUserKind(&u)
 	u.ProjectID = projectID
 	mfa, err := dbUserHasConfirmedMFA(db, u.ID)
 	if err != nil {
@@ -332,7 +333,7 @@ func dbSearchUsers(db *sql.DB, projectID string, orgID int64, q, status, created
 		args = append(args, createdAfter)
 	}
 	args = append(args, limit)
-	q1 := "SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''), COALESCE(metadata_json, '{}'), status, password_hash IS NOT NULL, authorization_version, IFNULL(last_login_at,''), IFNULL(locked_until,''), IFNULL(created_at,''), IFNULL(updated_at,'') FROM users WHERE " + strings.Join(conds, " AND ") + " ORDER BY created_at DESC LIMIT ?"
+	q1 := "SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''), COALESCE(metadata_json, '{}'), status, IFNULL(kind,'account'), password_hash IS NOT NULL, authorization_version, IFNULL(last_login_at,''), IFNULL(locked_until,''), IFNULL(created_at,''), IFNULL(updated_at,'') FROM users WHERE " + strings.Join(conds, " AND ") + " ORDER BY created_at DESC LIMIT ?"
 	rows, err := db.Query(q1, args...)
 	if err != nil {
 		return nil, err
@@ -347,7 +348,7 @@ func dbSearchUsers(db *sql.DB, projectID string, orgID int64, q, status, created
 		var hasPw int
 		var metadata string
 		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.EmailVerifiedAt, &u.DisplayName, &u.AvatarURL,
-			&metadata, &u.Status, &hasPw, &u.AuthorizationVersion,
+			&metadata, &u.Status, &u.Kind, &hasPw, &u.AuthorizationVersion,
 			&u.LastLoginAt, &u.LockedUntil, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			rows.Close()
 			return nil, err
@@ -357,6 +358,7 @@ func dbSearchUsers(db *sql.DB, projectID string, orgID int64, q, status, created
 		}
 		u.Metadata = json.RawMessage(metadata)
 		u.HasPassword = hasPw == 1
+		normalizeUserKind(&u)
 		u.ProjectID = projectID
 		out = append(out, u)
 	}

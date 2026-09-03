@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.9.4
+version: 0.10.0
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
@@ -53,6 +53,7 @@ description: |
   password reset, magic links, TOTP MFA. Optional delegated authorization
   is resolved independently by the Apteva server per OAuth client. OAuth
   client origins are reconciled with platform-managed CORS.
+  v0.10.0 adds guest and external-identity accounts: sibling apps log players in by device, custom, or verified provider identity, link and unlink identities, upgrade guests to full accounts, and fetch JWKS by tool.
 author: Apteva
 scopes: [project]
 min_apteva_version: "0.14.1"
@@ -171,6 +172,19 @@ provides:
       description: Rotate a client secret (org derived from client).
     - name: auth_clients_disable
       description: Disable a client (org derived from client).
+    - name: auth_public_login_identity
+      description: APP-TO-APP ONLY. Log a player or visitor in by an external identity the calling app has already verified (device possession, Steam ticket, Apple identity token) and mint a session. Unknown identities create a guest user unless create_if_missing=false; creation is rate-limited per client. Returns {user, created, access_token, refresh_token, expires_in, authorization}.
+      exposure: app_only
+    - name: auth_identities_link
+      description: Bind a verified external identity (provider + provider_user_id) to an existing user (requires org). Idempotent for the same user; errors when the subject belongs to another user.
+    - name: auth_identities_unlink
+      description: Remove an external identity from a user (requires org). Refuses to strand a guest's last identity unless force=true.
+    - name: auth_identities_list
+      description: List a user's external identities, or resolve one provider subject to its user (requires org). Read-only.
+    - name: auth_guest_upgrade
+      description: Convert a guest user into a full account with an email and password (requires org). Keeps linked identities; sends a verification email when required.
+    - name: auth_jwks_get
+      description: Return the organization's public signing keys (JWKS) and issuer so sibling apps can verify auth-issued JWTs locally.
   ui_panels:
     - slot: project.page
       label: Auth
@@ -237,6 +251,11 @@ config_schema:
     default: "true"
     label: Enable magic-link login
     description: Allows /magic-link/request — passwordless login by emailed token. true | false.
+  - name: identity_signups_per_client_per_hour
+    type: text
+    default: "600"
+    label: Identity signups per client per hour
+    description: Maximum new guest or external-identity users one OAuth client may create per hour through auth_public_login_identity. Returning logins are not counted. 0 disables the limit.
 upgrade_policy: auto-patch
 `
 
@@ -378,7 +397,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		}
 		return out
 	}
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		// ─── Organizations ─────────────────────────────────────────
 		{
 			Name:        "auth_orgs_list",
@@ -684,6 +703,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolClientsDisable,
 		},
 	}
+	tools = append(tools, a.identityTools()...)
+	return tools
 }
 
 func main() { sdk.Run(&App{}) }

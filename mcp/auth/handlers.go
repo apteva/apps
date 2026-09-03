@@ -771,6 +771,7 @@ func mintSession(ctx *sdk.AppCtx, projectID string, org *Organization, user *Use
 		EVer:  user.EmailVerifiedAt != "",
 		Extra: map[string]any{
 			"org":                   org.Slug, // legacy claim
+			"kind":                  userKindOrDefault(user.Kind),
 			"user_id":               authorization.UserID,
 			"organization_id":       authorization.OrganizationID,
 			"organization_slug":     authorization.OrganizationSlug,
