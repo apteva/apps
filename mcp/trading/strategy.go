@@ -1072,7 +1072,11 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 	if err != nil {
 		return nil, err
 	}
-	marketBars, steps, marketSource, err := captureBacktestMarketBars(context.Background(), def.Universe, interval, startAt, endAt)
+	adjustmentMode, err := normalizeBacktestAdjustmentMode(strArg(args, "adjustment_mode"))
+	if err != nil {
+		return nil, err
+	}
+	marketBars, steps, marketSource, err := captureBacktestMarketBarsAdjusted(context.Background(), def.Universe, interval, startAt, endAt, adjustmentMode)
 	if err != nil {
 		return nil, err
 	}
@@ -1088,21 +1092,23 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 		name = fmt.Sprintf("%s strategy backtest", strategy.Name)
 	}
 	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
-		ProjectID:       pid,
-		PortfolioID:     portfolioID,
-		StrategyID:      strategyID,
-		RunKind:         "strategy",
-		StrategyVersion: strategy.Version,
-		Name:            name,
-		Status:          "queued",
-		Symbols:         def.Universe,
-		StartAt:         startAt.Format("2006-01-02"),
-		EndAt:           endAt.Format("2006-01-02"),
-		Interval:        interval,
-		StartingCash:    startingCash,
-		FeeBps:          floatArg(args, "fee_bps", 0),
-		SlippageBps:     floatArg(args, "slippage_bps", defaultSlippageBps),
-		TotalSteps:      steps,
+		ProjectID:         pid,
+		PortfolioID:       portfolioID,
+		StrategyID:        strategyID,
+		RunKind:           "strategy",
+		StrategyVersion:   strategy.Version,
+		Name:              name,
+		Status:            "queued",
+		Symbols:           def.Universe,
+		StartAt:           startAt.Format("2006-01-02"),
+		EndAt:             endAt.Format("2006-01-02"),
+		Interval:          interval,
+		StartingCash:      startingCash,
+		FeeBps:            floatArg(args, "fee_bps", 0),
+		SlippageBps:       floatArg(args, "slippage_bps", defaultSlippageBps),
+		AdjustmentMode:    adjustmentMode,
+		ReferenceManifest: referenceManifest(ctx.AppDB(), def.Universe, startAt.Format("2006-01-02"), endAt.Format("2006-01-02"), adjustmentMode),
+		TotalSteps:        steps,
 		Summary: map[string]any{
 			"portfolio_name": pf.Name,
 			"strategy_name":  strategy.Name,
@@ -1161,7 +1167,11 @@ func (a *App) createStrategyValidation(ctx *sdk.AppCtx, args map[string]any) (*S
 	if err != nil {
 		return nil, err
 	}
-	marketBars, steps, marketSource, err := captureBacktestMarketBars(context.Background(), def.Universe, interval, startAt, endAt)
+	adjustmentMode, err := normalizeBacktestAdjustmentMode(strArg(args, "adjustment_mode"))
+	if err != nil {
+		return nil, err
+	}
+	marketBars, steps, marketSource, err := captureBacktestMarketBarsAdjusted(context.Background(), def.Universe, interval, startAt, endAt, adjustmentMode)
 	if err != nil {
 		return nil, err
 	}
@@ -1188,27 +1198,29 @@ func (a *App) createStrategyValidation(ctx *sdk.AppCtx, args map[string]any) (*S
 	feeBps := floatArg(args, "fee_bps", 0)
 	slippageBps := floatArg(args, "slippage_bps", defaultSlippageBps)
 	train, err := a.createCompletedStrategyValidationRun(ctx, pf, strategy, def, strategyValidationRunSpec{
-		Label:        "in_sample",
-		Name:         name + " · in sample",
-		Interval:     interval,
-		StartingCash: startingCash,
-		FeeBps:       feeBps,
-		SlippageBps:  slippageBps,
-		MarketSource: marketSource,
-		Bars:         reindexBacktestMarketBars(marketBars, 1, trainSteps),
+		Label:          "in_sample",
+		Name:           name + " · in sample",
+		Interval:       interval,
+		StartingCash:   startingCash,
+		FeeBps:         feeBps,
+		SlippageBps:    slippageBps,
+		MarketSource:   marketSource,
+		AdjustmentMode: adjustmentMode,
+		Bars:           reindexBacktestMarketBars(marketBars, 1, trainSteps),
 	})
 	if err != nil {
 		return nil, err
 	}
 	test, err := a.createCompletedStrategyValidationRun(ctx, pf, strategy, def, strategyValidationRunSpec{
-		Label:        "out_of_sample",
-		Name:         name + " · out of sample",
-		Interval:     interval,
-		StartingCash: startingCash,
-		FeeBps:       feeBps,
-		SlippageBps:  slippageBps,
-		MarketSource: marketSource,
-		Bars:         reindexValidationMarketBars(marketBars, trainSteps+1, steps, strategyRequiredBars(def)-1),
+		Label:          "out_of_sample",
+		Name:           name + " · out of sample",
+		Interval:       interval,
+		StartingCash:   startingCash,
+		FeeBps:         feeBps,
+		SlippageBps:    slippageBps,
+		MarketSource:   marketSource,
+		AdjustmentMode: adjustmentMode,
+		Bars:           reindexValidationMarketBars(marketBars, trainSteps+1, steps, strategyRequiredBars(def)-1),
 	})
 	if err != nil {
 		return nil, err
@@ -1226,14 +1238,15 @@ func (a *App) createStrategyValidation(ctx *sdk.AppCtx, args map[string]any) (*S
 }
 
 type strategyValidationRunSpec struct {
-	Label        string
-	Name         string
-	Interval     string
-	StartingCash float64
-	FeeBps       float64
-	SlippageBps  float64
-	MarketSource string
-	Bars         []*BacktestMarketBar
+	Label          string
+	Name           string
+	Interval       string
+	StartingCash   float64
+	FeeBps         float64
+	SlippageBps    float64
+	MarketSource   string
+	AdjustmentMode string
+	Bars           []*BacktestMarketBar
 }
 
 func (a *App) createCompletedStrategyValidationRun(ctx *sdk.AppCtx, pf *Portfolio, strategy *Strategy, def *StrategyDefinition, spec strategyValidationRunSpec) (*StrategyValidationPeriod, error) {
@@ -1243,21 +1256,23 @@ func (a *App) createCompletedStrategyValidationRun(ctx *sdk.AppCtx, pf *Portfoli
 	startAt, endAt := marketBarDateRange(spec.Bars)
 	steps := maxBacktestMarketStep(spec.Bars)
 	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
-		ProjectID:       pf.ProjectID,
-		PortfolioID:     pf.ID,
-		StrategyID:      strategy.ID,
-		RunKind:         "strategy",
-		StrategyVersion: strategy.Version,
-		Name:            spec.Name,
-		Status:          "queued",
-		Symbols:         def.Universe,
-		StartAt:         startAt,
-		EndAt:           endAt,
-		Interval:        spec.Interval,
-		StartingCash:    spec.StartingCash,
-		FeeBps:          spec.FeeBps,
-		SlippageBps:     spec.SlippageBps,
-		TotalSteps:      steps,
+		ProjectID:         pf.ProjectID,
+		PortfolioID:       pf.ID,
+		StrategyID:        strategy.ID,
+		RunKind:           "strategy",
+		StrategyVersion:   strategy.Version,
+		Name:              spec.Name,
+		Status:            "queued",
+		Symbols:           def.Universe,
+		StartAt:           startAt,
+		EndAt:             endAt,
+		Interval:          spec.Interval,
+		StartingCash:      spec.StartingCash,
+		FeeBps:            spec.FeeBps,
+		SlippageBps:       spec.SlippageBps,
+		AdjustmentMode:    spec.AdjustmentMode,
+		ReferenceManifest: referenceManifest(ctx.AppDB(), def.Universe, startAt, endAt, spec.AdjustmentMode),
+		TotalSteps:        steps,
 		Summary: map[string]any{
 			"portfolio_name":    pf.Name,
 			"strategy_name":     strategy.Name,

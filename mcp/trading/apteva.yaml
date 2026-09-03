@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.5.2
+version: 0.6.3
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -88,6 +88,25 @@ requires:
         latest_quotes.equity: stock_latest_quotes
       label: "Market Data — Equity (optional — real prices for live equity portfolios)"
       hint: "Bind alpaca-market-data for paid-tier real-time. yahoo-finance works without auth as a free fallback — the trading sidecar already uses Yahoo automatically when nothing's bound here."
+    - role: reference_actions
+      kind: integration
+      required: false
+      compatible_slugs: [alpaca-market-data]
+      capabilities: [reference.corporate_actions]
+      tools:
+        reference.corporate_actions: corporate_actions
+      label: "Reference Data — Corporate Actions"
+      hint: "Uses Alpaca's revisioned corporate-actions dataset for splits, dividends, mergers, spinoffs, symbol changes, removals, rights, and distributions."
+    - role: reference_broker
+      kind: integration
+      required: false
+      compatible_slugs: [alpaca-trading]
+      capabilities: [reference.assets, reference.calendar, reference.account_activities]
+      tools:
+        reference.assets: list_assets
+        reference.calendar: get_calendar
+        reference.account_activities: list_activities
+      label: "Reference Data — Assets, Sessions, and Account Effects"
 
 provides:
   http_routes:
@@ -119,6 +138,14 @@ provides:
       description: "Report the live data source per asset class — provider name, errors_60s, staleness."
     - name: market_calendar
       description: "Return normalized exchange-calendar state and instrument metadata for a symbol."
+    - name: reference_data_status
+      description: "Report canonical reference-data coverage, checkpoints, and quality state."
+    - name: security_resolve
+      description: "Resolve symbols and names to stable security/listing identities at a point in time."
+    - name: corporate_actions_list
+      description: "List normalized latest-revision corporate actions."
+    - name: exchange_sessions_list
+      description: "List authoritative normalized exchange sessions."
     - name: watchlist_add
       description: "Track a symbol on a portfolio."
     - name: watchlist_remove
@@ -219,6 +246,11 @@ config_schema:
       Maximum captured OHLCV rows across all symbols in one backtest. The default supports
       a full year of 5-minute crypto data for four symbols, or decades of hourly data.
       Raise this only when the app has enough memory and disk for larger immutable replays.
+  - name: reference_history_start
+    type: text
+    default: "2000-01-01"
+    label: Reference-data history start
+    description: Earliest process/session date requested during the Alpaca reference-data backfill.
   - name: pricing_provider
     type: text
     default: "live"

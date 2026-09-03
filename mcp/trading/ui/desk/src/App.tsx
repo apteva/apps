@@ -13,11 +13,14 @@ import { useUniverse } from "./hooks/useUniverse.ts";
 import { useHealth } from "./hooks/useHealth.ts";
 import { useAppEvents } from "./hooks/useAppEvents.ts";
 import { setLiveArmed } from "./api/portfolios.ts";
+import { useReferenceData } from "./hooks/useReferenceData.ts";
+import { DataIntelligence } from "./components/DataIntelligence.tsx";
 
 export function App() {
   const [dark, setDark] = useState(true);
   const [portfolioId, setPortfolioId] = useState<number | null>(null);
-  const [bottomTab, setBottomTab] = useState<"positions" | "orders" | "feed">("positions");
+  const [bottomTab, setBottomTab] = useState<"positions" | "orders" | "feed" | "data">("positions");
+  const [symbol, setSymbol] = useState<string>("");
 
   useEffect(() => { document.body.classList.toggle("dark", dark); }, [dark]);
 
@@ -28,6 +31,7 @@ export function App() {
   const orders = useOrders(portfolioId);
   const journal = useJournal(portfolioId);
   const health = useHealth();
+  const reference = useReferenceData(symbol);
 
   // Event-driven cache invalidation. Each app-event from the sidecar
   // (order.placed, fill, journal.appended, tick, etc.) bumps the
@@ -43,6 +47,18 @@ export function App() {
       case "market.heartbeat":
       case "provider.health.changed":
         health.refresh();
+        return;
+      case "reference.sync.completed":
+      case "reference.security.changed":
+      case "corporate_action.received":
+      case "corporate_action.corrected":
+      case "calendar.session.changed":
+      case "data_quality.issue.changed":
+        reference.status.refresh(); reference.actions.refresh(); reference.issues.refresh(); reference.sessions.refresh(); health.refresh();
+        return;
+      case "corporate_action.applied":
+        reference.actions.refresh();
+        if (matchesSelected) { portfolio.refresh(); positions.refresh(); journal.refresh(); }
         return;
       case "market.quotes.updated": {
         const marks = Array.isArray(ev.data?.marks) ? ev.data.marks : [];
@@ -109,7 +125,6 @@ export function App() {
   }, [portfolios.data, portfolioId]);
 
   // Default symbol = first watched symbol on the selected portfolio.
-  const [symbol, setSymbol] = useState<string>("");
   useEffect(() => {
     if (portfolio.data && portfolio.data.watchlist && portfolio.data.watchlist.length > 0) {
       setSymbol(portfolio.data.watchlist[0]!);
@@ -197,6 +212,7 @@ export function App() {
                     { k: "positions", label: "Positions", count: positions.data?.length ?? 0 },
                     { k: "orders",    label: "Orders",    count: orders.data?.length ?? 0 },
                     { k: "feed",      label: "Agent",     count: journal.data?.length ?? 0 },
+                    { k: "data",      label: "Data",      count: reference.actions.data?.length ?? 0 },
                   ] as const
                 ).map((t) => (
                   <button
@@ -208,7 +224,7 @@ export function App() {
                     <span className="text-[10px] t-tertiary mono">{t.count}</span>
                   </button>
                 ))}
-                <span className="ml-auto pr-2 text-[10px] t-tertiary mono">v0.5 · event driven</span>
+                <span className="ml-auto pr-2 text-[10px] t-tertiary mono">v0.6.3 · event driven</span>
               </div>
 
               <div className="flex-1 min-h-0 mt-1.5">
@@ -217,6 +233,7 @@ export function App() {
                 {bottomTab === "feed"      && portfolio.data && (
                   <AgentFeed portfolio={portfolio.data} entries={journal.data ?? []} />
                 )}
+                {bottomTab === "data" && <DataIntelligence status={reference.status.data} actions={reference.actions.data ?? []} issues={reference.issues.data ?? []} sessions={reference.sessions.data ?? []} symbol={symbol} />}
               </div>
             </section>
           </div>

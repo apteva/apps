@@ -27,6 +27,7 @@ export type Portfolio = {
 
 export type Position = {
   symbol: string;
+  security_id?: string;
   asset_class: AssetClass;
   outcome?: "YES" | "NO";
   qty: number;
@@ -45,6 +46,7 @@ export type Order = {
   id: string;
   portfolio_id: number;
   symbol: string;
+  security_id?: string;
   asset_class: AssetClass;
   side: "buy" | "sell" | "yes" | "no";
   outcome?: "YES" | "NO";
@@ -67,7 +69,7 @@ export type Order = {
 export type JournalEntry = {
   id: number;
   portfolio_id: number;
-  kind: "thesis" | "alert" | "fill" | "rationale" | "rejection" | "note";
+  kind: "thesis" | "alert" | "fill" | "rationale" | "rejection" | "note" | "corporate_action";
   body: string;
   metadata?: Record<string, unknown>;
   created_at: string;

@@ -39,6 +39,13 @@ export async function getQuote(symbol: string): Promise<Sym> {
   return decorate(r);
 }
 
+export type HistoryBar = { t: number; o: number; h: number; l: number; c: number; v: number };
+export type MarketHistory = { symbol: string; range: string; bars: HistoryBar[]; source: string; adjustment_mode: string; volume_unit?: string };
+
+export async function getHistory(symbol: string, range: string): Promise<MarketHistory> {
+  return apiGet<MarketHistory>(`/history/${encodeURIComponent(symbol)}`, { range });
+}
+
 function decorate(s: RawSym): Sym {
   const prev = s.prev_close ?? s.price;
   const change_abs = s.price - prev;

@@ -3,6 +3,9 @@
 Multi-portfolio, multi-asset trading desk for Apteva agents, covering
 equity, ETF, crypto, and Polymarket prediction markets. It supports paper
 and broker-backed live execution, deterministic strategies, and backtests.
+Version 0.6 adds a provider-neutral security master, revisioned corporate-action
+ledger, authoritative exchange sessions, forward point-in-time universe
+snapshots, auditable portfolio postings, and an event-driven data-quality desk.
 
 Same canonical layout as `apps/mcp/crm` and `apps/mcp/storage`: a Go
 sidecar serving MCP tools + REST routes, with two UI surfaces under
@@ -12,7 +15,7 @@ sidecar serving MCP tools + REST routes, with two UI surfaces under
 
 ```
 apps/mcp/trading/
-├── apteva.yaml             # manifest — kind: source, declares 15 mcp_tools
+├── apteva.yaml             # manifest — kind: source, declares 34 mcp_tools
 ├── go.mod / go.sum
 ├── main.go                 # App impl, HTTP routes, Workers wiring
 ├── tools.go                # MCP tools (the agent's surface)
@@ -87,19 +90,47 @@ by apteva-server. Bare paths shown here.
 | `GET`  | `/portfolios/{id}/journal?kind=…&limit=…` | Read journal |
 | `GET`  | `/quotes/{symbol}` | Latest mark |
 | `GET`  | `/universe` | All currently-known marks |
-| `GET`  | `/healthz/details` | Engine debug — last_tick_at, fills_this_run |
+| `GET`  | `/healthz/details` | Engine, stream, provider, and reference-data health |
+| `GET`  | `/reference/status` | Coverage counts, checkpoints, and survivorship status |
+| `GET`  | `/reference/securities?q=…&as_of=…` | Stable security and dated listing identities |
+| `GET`  | `/reference/corporate-actions` | Latest normalized corporate-action revisions |
+| `GET`  | `/reference/sessions` | Authoritative normalized exchange sessions |
+| `GET`  | `/reference/quality` | Open ingestion, identity, and accounting issues |
+| `GET`  | `/reference/postings?portfolio_id=…` | Auditable broker-observed and simulated action effects |
+| `POST` | `/reference/sync` | Trigger an immediate idempotent reference-data reconciliation |
 
-## MCP tools (15)
+## Reference-data behavior
 
-**Reads (8):** `portfolio_list`, `portfolio_get`, `account_summary`,
-`positions_list`, `orders_list`, `market_quote`, `market_history`,
-`journal_read`.
+Alpaca Market Data supplies the broad corporate-action feed and live SSE
+mutations. Alpaca Trading supplies assets, sessions, and account activities.
+Unbound integrations degrade visibly through `reference_data_status`; they do
+not fabricate reference data. Current Alpaca asset snapshots establish
+survivorship coverage from the first successful sync forward. Historical runs
+before that watermark are explicitly marked `survivorship_safe: false`.
 
-**Writes (5):** `order_place`, `order_cancel`, `journal_write`,
-`watchlist_add`, `watchlist_remove`.
+Paper portfolios automatically apply deterministic splits, cash distributions,
+symbol changes, and worthless removals exactly once. Multi-leg actions remain
+visible for broker reconciliation instead of being guessed from incomplete
+terms. Broker-backed portfolios treat broker positions and activities as the
+accounting source of truth.
 
-**Governance (3):** `alert_create`, `portfolio_pause`,
-`portfolio_arm_live`.
+## MCP tools (34)
+
+**Portfolio and execution (13):** `portfolio_create`, `brokers_list`,
+`portfolio_list`, `portfolio_get`, `account_summary`, `positions_list`,
+`orders_list`, `order_place`, `order_cancel`, `watchlist_add`,
+`watchlist_remove`, `portfolio_pause`, `portfolio_arm_live`.
+
+**Market and reference data (8):** `market_quote`, `market_history`,
+`market_source`, `market_calendar`, `reference_data_status`,
+`security_resolve`, `corporate_actions_list`, `exchange_sessions_list`.
+
+**Strategy and backtesting (10):** `strategy_create`, `strategy_update`,
+`strategy_get`, `strategy_list`, `strategy_validate`, `strategy_evaluate`,
+`strategy_assign`, `strategy_backtest_create`, `strategy_validate_backtest`,
+`backtest_market_step`.
+
+**Alerts and journal (3):** `alert_create`, `journal_write`, `journal_read`.
 
 `order_place` always takes a `rationale` (≥ 30 chars). On reject, the
 status field is `"rejected"` with a structured `code` + `detail` —

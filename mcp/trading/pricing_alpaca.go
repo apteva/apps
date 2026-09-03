@@ -316,6 +316,10 @@ func alpacaTimeframe(interval string) (string, bool, error) {
 }
 
 func (a *alpacaMarketData) BacktestBarsContext(ctx context.Context, symbol, interval string, start, end time.Time, limit int) ([]Bar, error) {
+	return a.BacktestBarsContextAdjustment(ctx, symbol, interval, start, end, limit, "provider_adjusted")
+}
+
+func (a *alpacaMarketData) BacktestBarsContextAdjustment(ctx context.Context, symbol, interval string, start, end time.Time, limit int, adjustmentMode string) ([]Bar, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -342,10 +346,21 @@ func (a *alpacaMarketData) BacktestBarsContext(ctx context.Context, symbol, inte
 			return nil, err
 		}
 		pageLimit := min(10000, rawLimit-len(out))
+		adjustment := "all"
+		switch strings.ToLower(strings.TrimSpace(adjustmentMode)) {
+		case "raw":
+			adjustment = "raw"
+		case "split_adjusted", "price_return":
+			adjustment = "split"
+		case "total_return", "provider_adjusted", "":
+			adjustment = "all"
+		default:
+			return nil, fmt.Errorf("alpaca: unsupported adjustment mode %q", adjustmentMode)
+		}
 		args := map[string]any{
 			"symbols": canonical, "timeframe": timeframe,
 			"start": start.UTC().Format(time.RFC3339), "end": end.UTC().Format(time.RFC3339),
-			"limit": pageLimit, "adjustment": "all", "sort": "asc",
+			"limit": pageLimit, "adjustment": adjustment, "sort": "asc",
 		}
 		if a.feed != "auto" {
 			args["feed"] = a.feed

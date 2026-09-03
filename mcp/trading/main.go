@@ -41,8 +41,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.5.2
-description: Live trading workstation for Apteva agents (simulation, broker paper, broker live, strategies, and backtests).
+version: 0.6.3
+description: Live trading workstation with canonical reference data, corporate actions, simulation, broker execution, strategies, and reproducible backtests.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -89,6 +89,24 @@ requires:
         bars.equity: stock_bars
         latest_quotes.equity: stock_latest_quotes
       label: "Market Data — Equity (optional — real prices for live equity portfolios)"
+    - role: reference_actions
+      kind: integration
+      required: false
+      compatible_slugs: [alpaca-market-data]
+      capabilities: [reference.corporate_actions]
+      tools:
+        reference.corporate_actions: corporate_actions
+      label: "Reference Data — Corporate Actions"
+    - role: reference_broker
+      kind: integration
+      required: false
+      compatible_slugs: [alpaca-trading]
+      capabilities: [reference.assets, reference.calendar, reference.account_activities]
+      tools:
+        reference.assets: list_assets
+        reference.calendar: get_calendar
+        reference.account_activities: list_activities
+      label: "Reference Data — Assets, Sessions, and Account Effects"
 provides:
   http_routes:
     - prefix: /
@@ -119,6 +137,14 @@ provides:
       description: "Report the live data source per asset class."
     - name: market_calendar
       description: "Return normalized exchange-calendar state and instrument metadata."
+    - name: reference_data_status
+      description: "Report canonical reference-data coverage, checkpoints, and quality state."
+    - name: security_resolve
+      description: "Resolve a symbol or name to stable security/listing identities."
+    - name: corporate_actions_list
+      description: "List normalized latest-revision corporate actions."
+    - name: exchange_sessions_list
+      description: "List authoritative normalized exchange sessions."
     - name: watchlist_add
       description: "Track a symbol on a portfolio."
     - name: watchlist_remove
@@ -264,6 +290,10 @@ func (a *App) Workers() []sdk.Worker {
 	}
 	return []sdk.Worker{
 		{Name: "alpaca_streams", Run: startAlpacaStreams},
+		{Name: "reference_data_bootstrap", Run: syncReferenceData},
+		{Name: "reference_data_sync", Schedule: "@every 6h", Run: syncReferenceData},
+		{Name: "reference_activity_sync", Schedule: "@every 5m", Run: syncReferenceActivities},
+		{Name: "corporate_action_projector", Schedule: "@every 5m", Run: applyDueCorporateActions},
 		{Name: "mark_tick", Schedule: tickEvery, Run: markTick},
 		{Name: "alert_tick", Schedule: "@every 60s", Run: alertTick},
 	}
@@ -302,6 +332,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/quotes/", Handler: a.handleHTTPQuote},
 		{Pattern: "/history/", Handler: a.handleHTTPHistory},
 		{Pattern: "/universe", Handler: a.handleHTTPUniverse},
+		{Pattern: "/reference/", Handler: a.handleHTTPReferenceData},
 		{Pattern: "/brokers", Handler: a.handleHTTPBrokers},
 		{Pattern: "/strategies", Handler: a.handleHTTPStrategies},
 		{Pattern: "/strategies/", Handler: a.handleHTTPStrategies},
@@ -699,6 +730,7 @@ func (a *App) handleHTTPHealthDetails(w http.ResponseWriter, r *http.Request) {
 	out["providers"] = providerHealthSnapshot()
 	pid, _ := resolveProjectFromRequest(r)
 	out["streams"] = alpacaStreamHealthSnapshot(pid)
+	out["reference_data"] = referenceDataStatus(globalCtx.AppDB())
 	httpJSON(w, 200, out)
 }
 

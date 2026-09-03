@@ -1,18 +1,18 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Sym } from "../api/types.ts";
 import { money, pctSigned, bigNum } from "../lib/format.ts";
+import { getHistory, type MarketHistory } from "../api/markets.ts";
 
 const RANGES = ["1D", "5D", "1M", "3M", "1Y", "ALL"] as const;
 type Range = typeof RANGES[number];
 
 export function PriceChart({ sym }: { sym: Sym }) {
   const [range, setRange] = useState<Range>("1D");
-
-  // Synthesize a longer series from the spark, scaled by range.
-  const series = useMemo(() => {
-    const n = range === "1D" ? 78 : range === "5D" ? 130 : range === "1M" ? 220 : range === "3M" ? 320 : 540;
-    return extendWalk(sym.spark, n, sym.price, sym.change_pct);
-  }, [sym.symbol, range, sym.price, sym.change_pct]);
+  const [history,setHistory]=useState<MarketHistory|null>(null);
+  const [historyError,setHistoryError]=useState("");
+  useEffect(()=>{let cancelled=false;setHistoryError("");getHistory(sym.symbol,range).then(value=>{if(!cancelled)setHistory(value)}).catch(error=>{if(!cancelled){setHistory(null);setHistoryError(error?.message??String(error))}});return()=>{cancelled=true}},[sym.symbol,range]);
+  const series=useMemo(()=>history?.bars?.map(bar=>bar.c).filter(value=>Number.isFinite(value)&&value>0)??[],[history]);
+  const lastBar=history?.bars?.[history.bars.length-1];
 
   const up = sym.change_pct >= 0;
 
@@ -44,20 +44,20 @@ export function PriceChart({ sym }: { sym: Sym }) {
             ))}
           </div>
           <div className="text-[11px] t-tertiary mono">
-            {sym.volume_24h ? `Vol ${bigNum(sym.volume_24h)}` : ""}
+            {history?.source ?? "loading"} · {history?.adjustment_mode?.replaceAll("_"," ") ?? "verified history"}
           </div>
         </div>
       </header>
 
-      <div className="mt-4 flex-1 min-h-[280px]">
-        <Chart points={series} up={up} />
+      <div className="mt-4 flex-1 min-h-[280px] grid place-items-stretch">
+        {series.length>1?<Chart points={series} up={up} />:<div className="grid place-items-center text-[11px] t-tertiary">{historyError?`History unavailable · ${historyError}`:"Loading exchange history…"}</div>}
       </div>
 
       <footer className="grid grid-cols-4 gap-3 pt-4 mt-2 border-t border-[var(--border)]">
-        <Mini label="Open"  value={money(sym.price - sym.change_abs * 0.6)} />
-        <Mini label="High"  value={money(sym.price * 1.012)} />
-        <Mini label="Low"   value={money(sym.price * 0.987)} />
-        <Mini label="Prev"  value={money(sym.price - sym.change_abs)} />
+        <Mini label="Open"  value={money(lastBar?.o ?? sym.price)} />
+        <Mini label="High"  value={money(lastBar?.h ?? sym.price)} />
+        <Mini label="Low"   value={money(lastBar?.l ?? sym.price)} />
+        <Mini label="Volume"  value={lastBar?.v ? bigNum(lastBar.v) : "—"} />
       </footer>
     </section>
   );
@@ -122,25 +122,4 @@ function Mini({ label, value }: { label: string; value: string }) {
       <span className="mono text-[13px] t-primary tabular">{value}</span>
     </div>
   );
-}
-
-// Extend a 30-point seed walk to N points so the chart looks like
-// progressively more history.
-function extendWalk(seed: number[], n: number, anchor: number, biasPct: number): number[] {
-  const out: number[] = [];
-  let v = anchor / (1 + biasPct / 100); // start of period
-  // deterministic pseudo-random from seed
-  let s = seed.reduce((a, b, i) => (a * 1664525 + b * 31 * (i + 1) + 1013904223) | 0, 7);
-  const rng = () => {
-    s = (s * 1664525 + 1013904223) | 0;
-    return ((s >>> 0) / 0xffffffff);
-  };
-  const step = (anchor - v) / n;
-  const vol = anchor * 0.0035;
-  for (let i = 0; i < n; i++) {
-    v += step + (rng() - 0.5) * vol;
-    out.push(v);
-  }
-  out[out.length - 1] = anchor; // pin the close
-  return out;
 }

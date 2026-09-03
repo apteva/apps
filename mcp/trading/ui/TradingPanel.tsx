@@ -1151,7 +1151,7 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
   useEffect(() => { loadPortfolios(); }, [loadPortfolios]);
 
   useAppEvents("trading", projectId, (ev) => {
-    if (["portfolio.created", "portfolio.status.changed", "portfolio.live_armed.changed", "portfolio.agent.changed", "order.filled", "position.changed"].includes(ev.topic)) {
+    if (["portfolio.created", "portfolio.status.changed", "portfolio.live_armed.changed", "portfolio.agent.changed", "order.filled", "position.changed", "corporate_action.applied"].includes(ev.topic)) {
       loadPortfolios();
     }
   });
@@ -1539,7 +1539,7 @@ function TradeTab({ portfolio, api, setBusy, setError, projectId }: {
 
   useEffect(() => { reload(); }, [reload]);
   useAppEvents("trading", projectId, (ev) => {
-    if (["order.placed", "order.filled", "order.cancelled", "order.rejected"].includes(ev.topic)) reload();
+    if (["order.placed", "order.filled", "order.cancelled", "order.rejected", "corporate_action.applied"].includes(ev.topic)) reload();
   });
 
   if (!portfolio) return <EmptyState title="Pick a portfolio" hint="Use the dropdown above or the Portfolios tab." />;

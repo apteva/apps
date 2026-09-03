@@ -15,7 +15,7 @@ export type HealthDetails = {
   last_tick_at?: string;
   last_marks_refreshed: number;
   providers: Partial<Record<ProviderClass, ProviderHealth>>;
-  streams?: Partial<Record<"market_data" | "trade_updates", {
+  streams?: Partial<Record<"market_data" | "trade_updates" | "corporate_actions", {
     status: string;
     feed?: string;
     connected_at?: string;

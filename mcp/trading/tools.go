@@ -94,6 +94,24 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"symbol"}),
 			Handler: a.toolMarketCalendar},
 
+		{Name: "reference_data_status", Description: "Report security-master, corporate-action, exchange-session, point-in-time universe, checkpoint, and quality coverage.",
+			InputSchema: schemaObject(nil, nil), Handler: a.toolReferenceDataStatus},
+
+		{Name: "security_resolve", Description: "Resolve a symbol or name to canonical security and listing identities at an optional point in time.",
+			InputSchema: schemaObject(map[string]any{
+				"query": map[string]any{"type": "string"}, "as_of": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"},
+			}, []string{"query"}), Handler: a.toolSecurityResolve},
+
+		{Name: "corporate_actions_list", Description: "List normalized, latest-revision corporate actions with optional symbol, type, and date filters.",
+			InputSchema: schemaObject(map[string]any{
+				"symbol": map[string]any{"type": "string"}, "type": map[string]any{"type": "string"}, "since": map[string]any{"type": "string"}, "until": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"},
+			}, nil), Handler: a.toolCorporateActionsList},
+
+		{Name: "exchange_sessions_list", Description: "List authoritative normalized exchange sessions for a venue and date range.",
+			InputSchema: schemaObject(map[string]any{
+				"venue": map[string]any{"type": "string"}, "start": map[string]any{"type": "string"}, "end": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"},
+			}, nil), Handler: a.toolExchangeSessionsList},
+
 		{Name: "journal_read", Description: "Read recent journal entries for a portfolio.",
 			InputSchema: schemaObject(map[string]any{
 				"portfolio_id": map[string]any{"type": "integer"},
@@ -231,30 +249,32 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		{Name: "strategy_backtest_create", Description: "Create a strategy backtest that reuses backtest_runs/events/snapshots with run_kind=strategy.",
 			InputSchema: schemaObject(map[string]any{
-				"portfolio_id":  map[string]any{"type": "integer"},
-				"strategy_id":   map[string]any{"type": "integer"},
-				"name":          map[string]any{"type": "string"},
-				"start_at":      map[string]any{"type": "string"},
-				"end_at":        map[string]any{"type": "string"},
-				"interval":      map[string]any{"type": "string"},
-				"starting_cash": map[string]any{"type": "number"},
-				"fee_bps":       map[string]any{"type": "number"},
-				"slippage_bps":  map[string]any{"type": "number"},
+				"portfolio_id":    map[string]any{"type": "integer"},
+				"strategy_id":     map[string]any{"type": "integer"},
+				"name":            map[string]any{"type": "string"},
+				"start_at":        map[string]any{"type": "string"},
+				"end_at":          map[string]any{"type": "string"},
+				"interval":        map[string]any{"type": "string"},
+				"starting_cash":   map[string]any{"type": "number"},
+				"fee_bps":         map[string]any{"type": "number"},
+				"slippage_bps":    map[string]any{"type": "number"},
+				"adjustment_mode": map[string]any{"type": "string", "enum": []string{"provider_adjusted", "raw", "split_adjusted", "price_return", "total_return"}},
 			}, []string{"portfolio_id", "strategy_id"}),
 			Handler: a.toolStrategyBacktestCreate},
 
 		{Name: "strategy_validate_backtest", Description: "Run fixed-parameter strategy validation with in-sample and out-of-sample backtests.",
 			InputSchema: schemaObject(map[string]any{
-				"portfolio_id":  map[string]any{"type": "integer"},
-				"strategy_id":   map[string]any{"type": "integer"},
-				"name":          map[string]any{"type": "string"},
-				"start_at":      map[string]any{"type": "string"},
-				"end_at":        map[string]any{"type": "string"},
-				"interval":      map[string]any{"type": "string"},
-				"split_pct":     map[string]any{"type": "number"},
-				"starting_cash": map[string]any{"type": "number"},
-				"fee_bps":       map[string]any{"type": "number"},
-				"slippage_bps":  map[string]any{"type": "number"},
+				"portfolio_id":    map[string]any{"type": "integer"},
+				"strategy_id":     map[string]any{"type": "integer"},
+				"name":            map[string]any{"type": "string"},
+				"start_at":        map[string]any{"type": "string"},
+				"end_at":          map[string]any{"type": "string"},
+				"interval":        map[string]any{"type": "string"},
+				"split_pct":       map[string]any{"type": "number"},
+				"starting_cash":   map[string]any{"type": "number"},
+				"fee_bps":         map[string]any{"type": "number"},
+				"slippage_bps":    map[string]any{"type": "number"},
+				"adjustment_mode": map[string]any{"type": "string", "enum": []string{"provider_adjusted", "raw", "split_adjusted", "price_return", "total_return"}},
 			}, []string{"portfolio_id", "strategy_id"}),
 			Handler: a.toolStrategyValidateBacktest},
 
@@ -951,7 +971,10 @@ func (a *App) toolMarketHistory(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	out := map[string]any{
 		"symbol": symbol, "range": rng, "bars": bars, "source": source,
-		"timestamp_format": "unix_seconds_utc",
+		"timestamp_format": "unix_seconds_utc", "adjustment_mode": "provider_adjusted",
+	}
+	if source == alpacaMarketDataSlug {
+		out["adjustment_mode"] = "total_return"
 	}
 	if instrument != nil {
 		out["instrument"] = instrument
@@ -1003,6 +1026,38 @@ func (a *App) toolMarketCalendar(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	return map[string]any{"symbol": symbol, "instrument": instrument, "session": session}, nil
+}
+
+func (a *App) toolReferenceDataStatus(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	return referenceDataStatus(ctx.AppDB()), nil
+}
+
+func (a *App) toolSecurityResolve(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	query := strings.TrimSpace(strArg(args, "query"))
+	if query == "" {
+		return nil, errors.New("query required")
+	}
+	rows, err := dbListSecurities(ctx.AppDB(), query, strArg(args, "as_of"), intArg(args, "limit", 25))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"securities": rows, "count": len(rows), "as_of": strArg(args, "as_of")}, nil
+}
+
+func (a *App) toolCorporateActionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	rows, err := dbListCorporateActions(ctx.AppDB(), strArg(args, "symbol"), strArg(args, "type"), strArg(args, "since"), strArg(args, "until"), intArg(args, "limit", 200))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"corporate_actions": rows, "count": len(rows)}, nil
+}
+
+func (a *App) toolExchangeSessionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	rows, err := dbListExchangeSessions(ctx.AppDB(), strArg(args, "venue"), strArg(args, "start"), strArg(args, "end"), intArg(args, "limit", 500))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"sessions": rows, "count": len(rows)}, nil
 }
 
 func (a *App) toolJournalRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {

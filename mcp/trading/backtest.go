@@ -153,16 +153,17 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 		httpJSON(w, 200, map[string]any{"backtests": runs})
 	case http.MethodPost:
 		var body struct {
-			Name         string   `json:"name"`
-			AgentID      int64    `json:"agent_id"`
-			StrategyID   int64    `json:"strategy_id"`
-			Symbols      []string `json:"symbols"`
-			StartAt      string   `json:"start_at"`
-			EndAt        string   `json:"end_at"`
-			Interval     string   `json:"interval"`
-			StartingCash float64  `json:"starting_cash"`
-			FeeBps       float64  `json:"fee_bps"`
-			SlippageBps  float64  `json:"slippage_bps"`
+			Name           string   `json:"name"`
+			AgentID        int64    `json:"agent_id"`
+			StrategyID     int64    `json:"strategy_id"`
+			Symbols        []string `json:"symbols"`
+			StartAt        string   `json:"start_at"`
+			EndAt          string   `json:"end_at"`
+			Interval       string   `json:"interval"`
+			StartingCash   float64  `json:"starting_cash"`
+			FeeBps         float64  `json:"fee_bps"`
+			SlippageBps    float64  `json:"slippage_bps"`
+			AdjustmentMode string   `json:"adjustment_mode"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpErr(w, 400, err.Error())
@@ -226,7 +227,12 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			httpErr(w, 400, err.Error())
 			return
 		}
-		marketBars, steps, marketSource, err := captureBacktestMarketBars(r.Context(), symbols, interval, startAt, endAt)
+		adjustmentMode, err := normalizeBacktestAdjustmentMode(body.AdjustmentMode)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		marketBars, steps, marketSource, err := captureBacktestMarketBarsAdjusted(r.Context(), symbols, interval, startAt, endAt, adjustmentMode)
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
@@ -248,34 +254,31 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			startingCash = pf.StartingCash
 		}
 		id, err := dbCreateBacktestRun(globalCtx.AppDB(), &BacktestRun{
-			ProjectID:       projectID,
-			PortfolioID:     pf.ID,
-			SourceAgentID:   agentID,
-			StrategyID:      body.StrategyID,
-			RunKind:         runKind,
-			StrategyVersion: strategyVersion,
-			Name:            name,
-			Status:          "queued",
-			Symbols:         symbols,
-			StartAt:         startAt.Format("2006-01-02"),
-			EndAt:           endAt.Format("2006-01-02"),
-			Interval:        interval,
-			StartingCash:    startingCash,
-			FeeBps:          body.FeeBps,
-			SlippageBps:     body.SlippageBps,
-			TotalSteps:      steps,
+			ProjectID:         projectID,
+			PortfolioID:       pf.ID,
+			SourceAgentID:     agentID,
+			StrategyID:        body.StrategyID,
+			RunKind:           runKind,
+			StrategyVersion:   strategyVersion,
+			Name:              name,
+			Status:            "queued",
+			Symbols:           symbols,
+			StartAt:           startAt.Format("2006-01-02"),
+			EndAt:             endAt.Format("2006-01-02"),
+			Interval:          interval,
+			StartingCash:      startingCash,
+			FeeBps:            body.FeeBps,
+			SlippageBps:       body.SlippageBps,
+			AdjustmentMode:    adjustmentMode,
+			ReferenceManifest: referenceManifest(globalCtx.AppDB(), symbols, startAt.Format("2006-01-02"), endAt.Format("2006-01-02"), adjustmentMode),
+			TotalSteps:        steps,
 			Summary: map[string]any{
-				"portfolio_name": pf.Name,
-				"market_source":  marketSource,
-				"market_data":    summarizeBacktestMarketCapture(marketBars, symbols, startAt, endAt),
-				"dataset_sha256": backtestMarketBarsChecksum(marketBars),
-				"dataset_rows":   len(marketBars),
-				"price_adjustment": func() string {
-					if marketSource == alpacaMarketDataSlug {
-						return "all"
-					}
-					return "provider_default"
-				}(),
+				"portfolio_name":   pf.Name,
+				"market_source":    marketSource,
+				"market_data":      summarizeBacktestMarketCapture(marketBars, symbols, startAt, endAt),
+				"dataset_sha256":   backtestMarketBarsChecksum(marketBars),
+				"dataset_rows":     len(marketBars),
+				"price_adjustment": adjustmentMode,
 				"execution_model": map[string]any{
 					"fee_bps": body.FeeBps, "slippage_bps": body.SlippageBps,
 					"fill_model": "next_replay_mark", "lookahead": "disabled",
@@ -1245,6 +1248,10 @@ func backtestMarks(run *BacktestRun, step int) ([]map[string]any, error) {
 }
 
 func captureBacktestMarketBars(parent context.Context, symbols []string, interval string, startAt, endAt time.Time) ([]*BacktestMarketBar, int, string, error) {
+	return captureBacktestMarketBarsAdjusted(parent, symbols, interval, startAt, endAt, "provider_adjusted")
+}
+
+func captureBacktestMarketBarsAdjusted(parent context.Context, symbols []string, interval string, startAt, endAt time.Time, adjustmentMode string) ([]*BacktestMarketBar, int, string, error) {
 	symbols = cleanSymbols(symbols)
 	if len(symbols) == 0 {
 		return nil, 0, "", errors.New("at least one symbol required")
@@ -1255,6 +1262,13 @@ func captureBacktestMarketBars(parent context.Context, symbols []string, interva
 	provider, source, err := backtestBarsProviderForSymbols(symbols)
 	if err != nil {
 		return nil, 0, "", err
+	}
+	adjustmentMode, err = normalizeBacktestAdjustmentMode(adjustmentMode)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	if _, ok := provider.(historicalAdjustedBacktestBarsProvider); !ok && adjustmentMode != "provider_adjusted" {
+		return nil, 0, "", fmt.Errorf("market source %s cannot guarantee adjustment mode %s", source, adjustmentMode)
 	}
 	limit := estimateBacktestBarsLimit(startAt, endAt, interval)
 	if limit <= 0 {
@@ -1292,7 +1306,13 @@ func captureBacktestMarketBars(parent context.Context, symbols []string, interva
 				results <- fetchResult{symbol: symbol, err: ctx.Err()}
 				return
 			}
-			bars, err := provider.BacktestBarsContext(ctx, symbol, interval, startAt, inclusiveBacktestEnd(endAt, interval), limit)
+			var bars []Bar
+			var err error
+			if adjusted, ok := provider.(historicalAdjustedBacktestBarsProvider); ok {
+				bars, err = adjusted.BacktestBarsContextAdjustment(ctx, symbol, interval, startAt, inclusiveBacktestEnd(endAt, interval), limit, adjustmentMode)
+			} else {
+				bars, err = provider.BacktestBarsContext(ctx, symbol, interval, startAt, inclusiveBacktestEnd(endAt, interval), limit)
+			}
 			if err == nil {
 				bars, err = validateBacktestHistory(symbol, source, interval, startAt, endAt, bars, time.Now().UTC())
 			}
@@ -1383,6 +1403,23 @@ func captureBacktestMarketBars(parent context.Context, symbols []string, interva
 	return out, len(times), source, nil
 }
 
+func normalizeBacktestAdjustmentMode(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "provider_adjusted":
+		return "provider_adjusted", nil
+	case "raw":
+		return "raw", nil
+	case "split_adjusted":
+		return "split_adjusted", nil
+	case "price_return":
+		return "price_return", nil
+	case "total_return":
+		return "total_return", nil
+	default:
+		return "", fmt.Errorf("adjustment_mode must be provider_adjusted|raw|split_adjusted|price_return|total_return")
+	}
+}
+
 func backtestMarketBarsChecksum(bars []*BacktestMarketBar) string {
 	h := sha256.New()
 	encoder := json.NewEncoder(h)
@@ -1395,6 +1432,10 @@ func backtestMarketBarsChecksum(bars []*BacktestMarketBar) string {
 
 type historicalBacktestBarsProvider interface {
 	BacktestBarsContext(ctx context.Context, symbol, interval string, start, end time.Time, limit int) ([]Bar, error)
+}
+
+type historicalAdjustedBacktestBarsProvider interface {
+	BacktestBarsContextAdjustment(ctx context.Context, symbol, interval string, start, end time.Time, limit int, adjustmentMode string) ([]Bar, error)
 }
 
 func backtestBarsProviderForSymbols(symbols []string) (historicalBacktestBarsProvider, string, error) {

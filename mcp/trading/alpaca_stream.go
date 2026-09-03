@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -68,6 +70,168 @@ func alpacaStreamHealthSnapshot(projectID string) map[string]streamHealth {
 func startAlpacaStreams(ctx context.Context, app *sdk.AppCtx) error {
 	go superviseAlpacaMarketStream(ctx, app)
 	go superviseAlpacaTradeStream(ctx, app)
+	go superviseAlpacaCorporateActionsStream(ctx, app)
+	return nil
+}
+
+func superviseAlpacaCorporateActionsStream(ctx context.Context, app *sdk.AppCtx) {
+	backoff := alpacaStreamReconnectMin
+	for ctx.Err() == nil {
+		connID := boundConnectionID(app, "reference_actions", alpacaMarketDataSlug)
+		if connID == 0 {
+			connID = boundConnectionID(app, "market_data_equity", alpacaMarketDataSlug)
+		}
+		if connID == 0 {
+			if discovered, ok := findActiveConnection(app.PlatformAPI(), alpacaMarketDataSlug); ok {
+				connID = discovered
+			}
+		}
+		if connID == 0 {
+			setAlpacaStreamHealth(app, "corporate_actions", streamHealth{Status: "unbound"})
+			if !waitContext(ctx, 5*time.Second) {
+				return
+			}
+			continue
+		}
+		err := runAlpacaCorporateActionsStream(ctx, app, connID)
+		if ctx.Err() != nil {
+			return
+		}
+		setAlpacaStreamHealth(app, "corporate_actions", streamHealth{Status: "reconnecting", ConnectionID: connID, LastError: cleanStreamError(err)})
+		if !waitContext(ctx, backoff) {
+			return
+		}
+		backoff = minDuration(backoff*2, alpacaStreamReconnectMax)
+	}
+}
+
+func runAlpacaCorporateActionsStream(ctx context.Context, app *sdk.AppCtx, connID int64) error {
+	key, secret, err := connectionCredentials(app, connID)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://stream.data.alpaca.markets/v1beta1/events/corporate-actions?region=all", nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("APCA-API-KEY-ID", key)
+	request.Header.Set("APCA-API-SECRET-KEY", secret)
+	request.Header.Set("Accept", "text/event-stream")
+	var checkpoint string
+	_ = app.AppDB().QueryRow(`SELECT cursor FROM reference_data_checkpoints WHERE provider=? AND stream='corporate_actions_sse'`, referenceProviderAlpaca).Scan(&checkpoint)
+	if checkpoint != "" {
+		request.Header.Set("Last-Event-ID", checkpoint)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("alpaca corporate-actions stream: %s", response.Status)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	health := streamHealth{Status: "connected", Feed: "global", ConnectionID: connID, ConnectedAt: now, LastEventAt: now}
+	setAlpacaStreamHealth(app, "corporate_actions", health)
+	scanner := bufio.NewScanner(response.Body)
+	scanner.Buffer(make([]byte, 64*1024), 4<<20)
+	eventID := ""
+	data := strings.Builder{}
+	dispatch := func() error {
+		if data.Len() == 0 {
+			return nil
+		}
+		payload := []byte(data.String())
+		if err := applyAlpacaCorporateActionEvent(app, eventID, payload); err != nil {
+			return err
+		}
+		health.LastEventAt = time.Now().UTC().Format(time.RFC3339Nano)
+		setAlpacaStreamHealth(app, "corporate_actions", health)
+		if eventID != "" {
+			_ = dbSetReferenceCheckpoint(app.AppDB(), referenceProviderAlpaca, "corporate_actions_sse", eventID, health.LastEventAt, "", 1)
+		}
+		return nil
+	}
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			if err := dispatch(); err != nil {
+				app.Logger().Warn("alpaca corporate action event rejected", "err", err)
+			}
+			eventID = ""
+			data.Reset()
+			continue
+		}
+		if strings.HasPrefix(line, "id:") {
+			eventID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
+		}
+		if strings.HasPrefix(line, "data:") {
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("alpaca corporate-actions stream ended")
+}
+
+func applyAlpacaCorporateActionEvent(app *sdk.AppCtx, eventID string, payload []byte) error {
+	var envelope map[string]any
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return err
+	}
+	rawCA, ok := envelope["ca"].(map[string]any)
+	if !ok {
+		if nested, ok := envelope["corporate_action"].(map[string]any); ok {
+			rawCA = nested
+		} else {
+			return nil
+		}
+	}
+	typ := strings.ToLower(strings.TrimSuffix(refString(envelope, "event_type", "type"), "_corporateaction_event"))
+	if !supportedCorporateActionTypes[typ] {
+		return fmt.Errorf("unsupported corporate action event type %q", typ)
+	}
+	rawCA["type"] = typ
+	if refString(rawCA, "id") == "" {
+		rawCA["id"] = refString(envelope, "corporate_action_id", "id")
+	}
+	wrapper, _ := json.Marshal(map[string]any{"corporate_actions": map[string]any{"events": []any{rawCA}}})
+	actions, _, err := parseAlpacaCorporateActions(wrapper)
+	if err != nil || len(actions) == 0 {
+		return err
+	}
+	action := actions[0]
+	operation := strings.ToLower(refString(envelope, "action", "event_action", "operation"))
+	if operation == "delete" {
+		action.Status = "deleted"
+	}
+	canonical, _ := json.Marshal(envelope)
+	action.RawJSON = string(canonical)
+	action.PayloadSHA256 = fmt.Sprintf("%x", sha256.Sum256(canonical))
+	securityID, err := resolveSecurityID(app.AppDB(), referenceProviderAlpaca, "", action.ISIN, action.CUSIP, "", action.Symbol)
+	if err != nil {
+		return err
+	}
+	action.SecurityID = securityID
+	if err := ensurePlaceholderSecurity(app.AppDB(), action); err != nil {
+		return err
+	}
+	inserted, corrected, err := dbUpsertCorporateAction(app.AppDB(), action)
+	if err != nil {
+		return err
+	}
+	if inserted {
+		topic := "corporate_action.received"
+		if corrected {
+			topic = "corporate_action.corrected"
+		}
+		app.Emit(topic, map[string]any{"schema_version": 1, "event_id": eventID, "provider": action.Provider, "provider_event_id": action.ProviderEventID, "revision": action.Revision, "action_type": action.ActionType, "symbol": action.Symbol, "operation": operation})
+		_ = applyDueCorporateActions(context.Background(), app)
+	}
 	return nil
 }
 
