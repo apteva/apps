@@ -187,12 +187,20 @@ func TestAssignmentAndExecutorLifecycle(t *testing.T) {
 		t.Fatalf("assignment payload type=%T", platform.events[0].Message)
 	}
 	for key, want := range map[string]any{
-		"type": "task.assigned", "task_id": task.ID, "title": task.Title,
-		"description": authoritativeDescription, "state": task.State,
+		"type": "task.assigned", "origin": "tasks.assignment", "task_id": task.ID,
+		"title": task.Title, "description": authoritativeDescription, "state": task.State,
+		"assigned_thread_id": "thread-exec-91",
 	} {
 		if got := assignment[key]; got != want {
 			t.Fatalf("assignment payload %s=%#v, want %#v; payload=%+v", key, got, want, assignment)
 		}
+	}
+	if _, present := assignment["reply_required"]; present {
+		t.Fatalf("assignment event must not suppress its worker's parent report: %+v", assignment)
+	}
+	firstAction, _ := assignment["required_first_action"].(map[string]any)
+	if firstAction["tool"] != "tasks_get" || firstAction["task_id"] != task.ID {
+		t.Fatalf("assignment first action is not authoritative fetch: %+v", assignment)
 	}
 
 	executor := callerContext(7, "thread-exec-91", "project-a")
@@ -931,6 +939,21 @@ func agentLifecycleDelivery(task *Task, lifecycleType string, sequence uint64, a
 	}
 }
 
+func terminalizationLifecycleDelivery(task *Task, lifecycleType string, sequence uint64, at time.Time) sdk.Event {
+	return sdk.Event{
+		DeliveryID: "terminalization-transition:" + task.ID + ":" + lifecycleType,
+		Event:      sdk.AgentEventLifecycleEvent,
+		InstanceID: task.AgentID,
+		ProjectID:  task.ProjectID,
+		Data: map[string]any{
+			"type": lifecycleType, "source_event_id": taskTerminalizationSourceID(task.ID),
+			"execution_id": "execution:" + taskTerminalizationSourceID(task.ID),
+			"thread_id":    task.AssignedThreadID,
+			"timestamp":    at.UTC().Format(time.RFC3339Nano), "sequence": float64(sequence),
+		},
+	}
+}
+
 func TestTrackedOccurrenceLifecycleAcceptsBeforeAnyTasksMCPCall(t *testing.T) {
 	app, appCtx, platform := newTestApp(t)
 	raw, err := app.toolCreate(callerContext(7, "schedule-owner", "project-a"), appCtx, map[string]any{
@@ -958,8 +981,15 @@ func TestTrackedOccurrenceLifecycleAcceptsBeforeAnyTasksMCPCall(t *testing.T) {
 		t.Fatalf("tracked delivery calls=%+v", platform.events)
 	}
 	payload, _ := platform.events[0].Message.(map[string]any)
-	if payload["type"] != "task.ready" || payload["task_id"] != run.ID {
+	if payload["type"] != "task.ready" || payload["origin"] != "tasks.scheduler" ||
+		payload["task_id"] != run.ID || payload["occurrence_id"] != run.ID ||
+		payload["assigned_thread_id"] != run.AssignedThreadID || payload["reply_required"] != false ||
+		payload["reply_thread_id"] != nil || !strings.Contains(payload["instruction"].(string), "Do not call send") {
 		t.Fatalf("tracked payload=%+v", payload)
+	}
+	firstAction, _ := payload["required_first_action"].(map[string]any)
+	if firstAction["tool"] != "tasks_get" || firstAction["task_id"] != run.ID {
+		t.Fatalf("tracked payload omitted required authoritative fetch: %+v", payload)
 	}
 	if _, present := payload["dispatch_attempt"]; present {
 		t.Fatalf("tracked retry payload must remain immutable: %+v", payload)
@@ -996,13 +1026,18 @@ func TestTrackedOccurrenceLifecycleAcceptsBeforeAnyTasksMCPCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	active, _ := app.store.Get(run.ID)
-	if active.State != stateRunning || active.StartedAt == nil || active.Progress != nil {
-		t.Fatalf("Core activity should start work without inventing MCP progress: %+v", active)
+	if active.State != stateQueued || active.StartedAt != nil || active.Progress != nil ||
+		active.CurrentStep != "" || active.AgentExecutionState != sdk.AgentEventActive {
+		t.Fatalf("Core activity must remain separate from business progress: %+v", active)
+	}
+	executions, err := app.store.AgentExecutions(run.ID)
+	if err != nil || len(executions) != 1 || executions[0].State != sdk.AgentEventActive {
+		t.Fatalf("execution activity was not stored separately: executions=%+v err=%v", executions, err)
 	}
 }
 
-func TestSettledExecutionWithoutTerminalMCPFailsPromptlyAndUnblocksNextOccurrence(t *testing.T) {
-	app, appCtx, _ := newTestApp(t)
+func TestSettledExecutionGetsOneTerminalizationWakeThenFailsAndUnblocksNextOccurrence(t *testing.T) {
+	app, appCtx, platform := newTestApp(t)
 	raw, err := app.toolCreate(callerContext(7, "schedule-owner", "project-a"), appCtx, map[string]any{
 		"title": "Daily Patreon calendar", "schedule": map[string]any{"kind": "interval", "every": "24h"},
 	})
@@ -1047,6 +1082,36 @@ func TestSettledExecutionWithoutTerminalMCPFailsPromptlyAndUnblocksNextOccurrenc
 		t.Fatalf("occurrence failed before settled grace elapsed: %+v", stillRunning)
 	}
 	if err := app.scheduler.Tick(settledAt.Add(agentSettleGrace+time.Second), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	terminalizing, _ := app.store.Get(run.ID)
+	if terminalizing.State != stateRunning || terminalizing.AgentSettleDeadline != nil {
+		t.Fatalf("first settled grace should request reconciliation, not fail or rerun: %+v", terminalizing)
+	}
+	if len(platform.events) != 2 {
+		t.Fatalf("want task.ready plus exactly one terminalization wake, got %+v", platform.events)
+	}
+	terminalPayload, _ := platform.events[1].Message.(map[string]any)
+	if terminalPayload["type"] != "task.terminalization_required" || terminalPayload["reply_required"] != false ||
+		!strings.Contains(terminalPayload["instruction"].(string), "do not repeat an ambiguous external action") {
+		t.Fatalf("unsafe terminalization payload: %+v", terminalPayload)
+	}
+	// Repeated scheduler ticks cannot create or deliver a second wake.
+	if err := app.scheduler.Tick(settledAt.Add(agentSettleGrace+2*time.Second), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.events) != 2 {
+		t.Fatalf("terminalization wake repeated: %+v", platform.events)
+	}
+	terminalBase := settledAt.Add(agentSettleGrace + 3*time.Second)
+	for sequence, lifecycleType := range []string{sdk.AgentEventClaimed, sdk.AgentEventActive, sdk.AgentEventSettled} {
+		terminalizing, _ = app.store.Get(run.ID)
+		if err := app.handleAgentEventLifecycle(appCtx, terminalizationLifecycleDelivery(terminalizing,
+			lifecycleType, uint64(sequence+1), terminalBase.Add(time.Duration(sequence)*time.Second))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := app.scheduler.Tick(terminalBase.Add(2*time.Second+agentSettleGrace+time.Second), "project-a"); err != nil {
 		t.Fatal(err)
 	}
 	failed, _ := app.store.Get(run.ID)
@@ -1131,6 +1196,243 @@ func TestAgentExecutionErrorFailsOccurrenceImmediately(t *testing.T) {
 	}
 }
 
+func TestOneTimeLifecycleErrorUpdatesLatestOccurrenceSummary(t *testing.T) {
+	app, appCtx, _ := newTestApp(t)
+	raw, err := app.toolCreate(callerContext(7, "schedule-owner", "project-a"), appCtx, map[string]any{
+		"title": "One-time publish", "schedule": map[string]any{"kind": "once", "after": "1m"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := raw.(map[string]any)["task"].(*Task)
+	dispatchedAt := task.NextRunAt.Add(time.Second)
+	if err := app.scheduler.Tick(dispatchedAt, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	task, _ = app.store.Get(task.ID)
+	event := agentLifecycleDelivery(task, sdk.AgentEventError, 1, dispatchedAt.Add(time.Second))
+	event.Data["reason"] = "provider_failed"
+	if err := app.handleAgentEventLifecycle(appCtx, event); err != nil {
+		t.Fatal(err)
+	}
+	failed, _ := app.store.Get(task.ID)
+	if failed.LastOccurrenceStatus != stateFailed ||
+		!strings.Contains(failed.LastError, "agent_execution_error: provider_failed") {
+		t.Fatalf("one-time task did not expose latest downstream failure: %+v", failed)
+	}
+}
+
+func TestRecoverOccurrenceCreatesOneLinkedReconciliationAttempt(t *testing.T) {
+	app, appCtx, platform := newTestApp(t)
+	creator := callerContext(7, "schedule-owner", "project-a")
+	raw, err := app.toolCreate(creator, appCtx, map[string]any{
+		"title": "Publish scheduled update", "description": "Exact authoritative publishing body",
+		"operation_key": "publisher:post:stable-42",
+		"schedule":      map[string]any{"kind": "interval", "every": "24h"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := raw.(map[string]any)["task"].(*Task)
+	dispatchedAt := parent.NextRunAt.Add(time.Second)
+	if err := app.scheduler.Tick(dispatchedAt, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	parentID := parent.ID
+	runs, _ := app.store.List(TaskFilter{ProjectID: "project-a", ParentTaskID: &parentID, Limit: 10})
+	original := &runs[0]
+	failed, failure := stateFailed, "provider disconnected after an ambiguous response"
+	if _, _, err := app.store.Update(original.ID, original.AssignedThreadID,
+		UpdateTaskInput{State: &failed, Error: &failure}); err != nil {
+		t.Fatal(err)
+	}
+
+	platform.mu.Lock()
+	platform.events = nil
+	platform.mu.Unlock()
+	firstRaw, err := app.toolRecoverOccurrence(creator, appCtx, map[string]any{
+		"task_id": original.ID, "reason": "Reconcile whether the post was published",
+		"idempotency_key": "operator-recovery-42",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := firstRaw.(map[string]any)
+	recovery := first["task"].(*Task)
+	if first["created"] != true || recovery.RecoveryOfTaskID != original.ID ||
+		recovery.OriginalOccurrenceKey != original.ScheduleOccurrenceKey || recovery.RecoveryAttempt != 1 ||
+		recovery.OperationKey != "publisher:post:stable-42" || recovery.ParentTaskID != original.ParentTaskID ||
+		recovery.State != stateQueued || recovery.DispatchedAt == nil || recovery.AssignedThreadID != "schedule-owner" {
+		t.Fatalf("recovery did not preserve safe occurrence context: %+v", recovery)
+	}
+	if recovery.Description != original.Description || recovery.Title != original.Title {
+		t.Fatalf("recovery rewrote authoritative definition: recovery=%+v original=%+v", recovery, original)
+	}
+	platform.mu.Lock()
+	events := append([]threadEventCall(nil), platform.events...)
+	platform.mu.Unlock()
+	if len(events) != 1 {
+		t.Fatalf("recovery delivery count=%d, want 1: %+v", len(events), events)
+	}
+	payload, _ := events[0].Message.(map[string]any)
+	if payload["type"] != "task.recovery.ready" || payload["origin"] != "tasks.recovery" ||
+		payload["recovery_of_task_id"] != original.ID || payload["recovery_mode"] != "reconcile_only" ||
+		payload["reply_required"] != false || !strings.Contains(payload["instruction"].(string), "do not repeat an ambiguous external action") {
+		t.Fatalf("unsafe recovery event: %+v", payload)
+	}
+
+	secondRaw, err := app.toolRecoverOccurrence(creator, appCtx, map[string]any{
+		"task_id": original.ID, "reason": "Reconcile whether the post was published",
+		"idempotency_key": "operator-recovery-42",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := secondRaw.(map[string]any)
+	if second["created"] != false || second["task"].(*Task).ID != recovery.ID {
+		t.Fatalf("idempotent recovery duplicated attempt: first=%+v second=%+v", first, second)
+	}
+	platform.mu.Lock()
+	eventCount := len(platform.events)
+	platform.mu.Unlock()
+	if eventCount != 1 {
+		t.Fatalf("idempotent recovery redelivered event %d times", eventCount)
+	}
+	executions, err := app.store.AgentExecutions(recovery.ID)
+	if err != nil || len(executions) != 1 || executions[0].Purpose != agentExecutionPurpose {
+		t.Fatalf("recovery execution trace=%+v err=%v", executions, err)
+	}
+}
+
+func TestConcurrentRecoverOccurrenceCreatesOneAttempt(t *testing.T) {
+	app, appCtx, _ := newTestApp(t)
+	creator := callerContext(7, "main", "project-a")
+	now := time.Now().UTC()
+	original, _, err := app.store.Create(CreateTaskInput{AgentID: 7, ProjectID: "project-a",
+		Title: "Ambiguous transfer", Description: "Reconcile transfer TX-42", State: stateFailed,
+		CreatedByThreadID: "main", AssignedThreadID: "main", ScheduledFor: &now,
+		OccurrenceKey: "original-42", IdempotencyKey: "original-42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const workers = 8
+	results := make(chan string, workers)
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, callErr := app.toolRecoverOccurrence(creator, appCtx, map[string]any{
+				"task_id": original.ID, "reason": "Reconcile TX-42", "idempotency_key": "recover-tx-42",
+			})
+			if callErr != nil {
+				errs <- callErr
+				return
+			}
+			results <- result.(map[string]any)["task"].(*Task).ID
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	var onlyID string
+	for id := range results {
+		if onlyID == "" {
+			onlyID = id
+		} else if id != onlyID {
+			t.Fatalf("concurrent recovery created multiple IDs: %s and %s", onlyID, id)
+		}
+	}
+	var count int
+	if err := app.store.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE recovery_of_task_id=?`, original.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("concurrent recovery attempts=%d, want 1", count)
+	}
+}
+
+func TestConcurrentSchedulerTicksEmitOneTerminalizationWake(t *testing.T) {
+	app, appCtx, platform := newTestApp(t)
+	base := time.Now().UTC().Add(time.Hour)
+	run, _, err := app.store.Create(CreateTaskInput{AgentID: 7, ProjectID: "project-a",
+		Title: "Terminalization race", State: stateQueued, CreatedByThreadID: "main",
+		AssignedThreadID: "opaque-default", ScheduledFor: &base, OccurrenceKey: "terminalization-race"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _, err = app.store.MarkDispatched(run.ID, "tasks:scheduler", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.RecordAgentEventExecution(run.ID, run.AgentEventSourceID,
+		"execution:"+run.AgentEventSourceID, run.AssignedThreadID, base); err != nil {
+		t.Fatal(err)
+	}
+	run, _ = app.store.Get(run.ID)
+	for sequence, lifecycleType := range []string{sdk.AgentEventClaimed, sdk.AgentEventActive, sdk.AgentEventSettled} {
+		run, _ = app.store.Get(run.ID)
+		if err := app.handleAgentEventLifecycle(appCtx, agentLifecycleDelivery(run, lifecycleType,
+			uint64(sequence+1), base.Add(time.Duration(sequence+1)*time.Second))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	platform.mu.Lock()
+	platform.events = nil
+	platform.mu.Unlock()
+	tickAt := base.Add(3*time.Second + agentSettleGrace)
+	const workers = 12
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if tickErr := app.scheduler.Tick(tickAt, "project-a"); tickErr != nil {
+				errs <- tickErr
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	platform.mu.Lock()
+	events := append([]threadEventCall(nil), platform.events...)
+	platform.mu.Unlock()
+	if len(events) != 1 {
+		t.Fatalf("concurrent ticks emitted %d terminalization wakes: %+v", len(events), events)
+	}
+	payload, _ := events[0].Message.(map[string]any)
+	if payload["type"] != "task.terminalization_required" {
+		t.Fatalf("unexpected concurrent wake payload: %+v", payload)
+	}
+	executions, err := app.store.AgentExecutions(run.ID)
+	if err != nil || len(executions) != 2 || executions[1].Purpose != agentTerminalizationPurpose {
+		t.Fatalf("execution attempts=%+v err=%v", executions, err)
+	}
+}
+
+func TestRecoverOccurrenceRejectsNonOccurrenceAndNonFailedTask(t *testing.T) {
+	app, appCtx, _ := newTestApp(t)
+	caller := callerContext(7, "main", "project-a")
+	raw, err := app.toolCreate(caller, appCtx, map[string]any{"title": "Immediate work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	immediate := raw.(map[string]any)["task"].(*Task)
+	if _, err := app.toolRecoverOccurrence(caller, appCtx, map[string]any{
+		"task_id": immediate.ID, "reason": "Should reject",
+	}); err == nil || !strings.Contains(err.Error(), "failed scheduled occurrence") {
+		t.Fatalf("immediate task recovery err=%v", err)
+	}
+}
+
 func TestConcurrentSchedulerTicksClaimOneRedispatch(t *testing.T) {
 	app, appCtx, platform := newTestApp(t)
 	raw, err := app.toolCreate(callerContext(7, "schedule-owner", "project-a"), appCtx, map[string]any{
@@ -1182,7 +1484,7 @@ func TestConcurrentSchedulerTicksClaimOneRedispatch(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.3.3" || manifest.MinAptevaVersion != "0.40.6" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.4.0" || manifest.MinAptevaVersion != "0.40.6" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]
@@ -1214,12 +1516,16 @@ func TestManifestAndToolContract(t *testing.T) {
 		"omitted fields are preserved atomically",
 		"update the recurring parent ID rather than an occurrence ID",
 		"Never create a placeholder task",
+		"`reply_required: false`",
+		"Core becoming active does not move the occurrence to `running`",
+		"exactly one reconciliation-only",
+		"Use `tasks_recover_occurrence`, not `tasks_run_now`",
 	} {
 		if !strings.Contains(normalizedManifestSkill, required) {
 			t.Fatalf("embedded Tasks skill missing classification rule %q", required)
 		}
 	}
-	want := map[string]bool{"create": false, "list": false, "get": false, "update": false, "assign": false, "complete": false, "cancel": false, "pause": false, "resume": false, "run_now": false}
+	want := map[string]bool{"create": false, "list": false, "get": false, "update": false, "assign": false, "complete": false, "cancel": false, "pause": false, "resume": false, "run_now": false, "recover_occurrence": false}
 	for _, tool := range app.MCPTools() {
 		if _, ok := want[tool.Name]; !ok {
 			t.Fatalf("unexpected tool %q", tool.Name)
@@ -1283,6 +1589,13 @@ func TestManifestAndToolContract(t *testing.T) {
 				t.Fatalf("update schedule must be a partial patch: %+v", schedule)
 			}
 		}
+		if tool.Name == "recover_occurrence" {
+			for _, required := range []string{"linked reconciliation-only attempt", "must not blindly repeat", "call tasks_get first", "external_outcome_unknown", "instead of run_now"} {
+				if !strings.Contains(tool.Description, required) {
+					t.Fatalf("recover_occurrence missing safety rule %q: %s", required, tool.Description)
+				}
+			}
+		}
 	}
 	for name, found := range want {
 		if !found {
@@ -1314,6 +1627,11 @@ func TestManifestAndToolContract(t *testing.T) {
 		"Keep a task `running` while any executor is actively working",
 		"at least two or three intermediate milestones",
 		"changing threads or entering `waiting` does not by itself increase progress",
+		"`reply_required: false`",
+		"Core becoming active does not move the occurrence to `running`",
+		"exactly one reconciliation-only",
+		"Use `tasks_recover_occurrence`, not `tasks_run_now`",
+		"external_outcome_unknown",
 	} {
 		if !strings.Contains(normalizedSkill, required) {
 			t.Fatalf("Tasks skill missing classification rule %q", required)

@@ -17,7 +17,7 @@ var taskSkillBody string
 const manifestYAML = `schema: apteva-app/v1
 name: tasks
 display_name: Tasks
-version: 3.3.3
+version: 3.4.0
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -46,6 +46,7 @@ provides:
     - { name: pause, description: Pause a scheduled task. }
     - { name: resume, description: Resume a scheduled task. }
     - { name: run_now, description: Run a scheduled task now. }
+    - { name: recover_occurrence, description: Create a linked reconciliation-only recovery attempt for a failed occurrence. }
   ui_panels:
     - slot: project.page
       label: Tasks
@@ -69,7 +70,7 @@ provides:
       supported_sizes: [half, full]
       default_size: half
       visibility: project
-      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap, task.agent_execution_active, task.agent_execution_settled, task.agent_execution_error]
+      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap, task.terminalization_requested, task.terminalization_execution_claimed, task.terminalization_execution_active, task.terminalization_execution_settled, task.agent_execution_active, task.agent_execution_settled, task.agent_execution_error]
       native:
         schema: apteva-native-surface/v1
         entry: /ui/surfaces/task-overview.json
@@ -102,7 +103,7 @@ provides:
       slots: [dashboard.agent_card, dashboard.agent_detail, dashboard.thread_sidebar]
       suggested: true
       visibility: attached
-      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap, task.agent_execution_active, task.agent_execution_settled, task.agent_execution_error]
+      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap, task.terminalization_requested, task.terminalization_execution_claimed, task.terminalization_execution_active, task.terminalization_execution_settled, task.agent_execution_active, task.agent_execution_settled, task.agent_execution_error]
       default_width: 1
     - name: task-card
       entry: /ui/TaskCard.mjs
@@ -156,7 +157,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.EmitWithProject("task."+event.EventType, eventProjectID(a.store, event.TaskID), event)
 	})
 	a.scheduler = &scheduler{store: a.store, app: a}
-	ctx.Logger().Info("tasks app mounted", "version", "3.3.2")
+	ctx.Logger().Info("tasks app mounted", "version", "3.4.0")
 	return nil
 }
 
@@ -208,6 +209,45 @@ func (discardLogger) Info(string, ...any)  {}
 func (discardLogger) Warn(string, ...any)  {}
 func (discardLogger) Error(string, ...any) {}
 
+func taskWakePayload(task *Task, threadID, eventType string) map[string]any {
+	var parentTaskID any
+	if strings.TrimSpace(task.ParentTaskID) != "" {
+		parentTaskID = task.ParentTaskID
+	}
+	if eventType == "task.assigned" {
+		return map[string]any{
+			"type": eventType, "origin": "tasks.assignment", "task_id": task.ID,
+			"title": task.Title, "description": task.Description, "state": task.State,
+			"assigned_thread_id": threadID, "parent_task_id": parentTaskID,
+			"required_first_action": map[string]any{"tool": "tasks_get", "task_id": task.ID},
+			"instruction":           "First call tasks_get with the supplied task_id before any domain action. Report through the parent-thread mechanism required by your directive.",
+		}
+	}
+	origin := "tasks.scheduler"
+	instruction := "This is a scheduler event, not a message from another thread. Do not call send. First call tasks_get for the occurrence before any domain action."
+	if eventType == "task.recovery.ready" {
+		origin = "tasks.recovery"
+		instruction = "This is a reconciliation-only recovery event, not a message from another thread. Do not call send and do not repeat an ambiguous external action. First call tasks_get for the recovery occurrence, reconcile external state, and record a concrete terminal result."
+	}
+	payload := map[string]any{
+		"type": eventType, "origin": origin, "task_id": task.ID,
+		"occurrence_id": task.ID, "parent_task_id": parentTaskID,
+		"assigned_thread_id": threadID, "reply_required": false, "reply_thread_id": nil,
+		"required_first_action": map[string]any{"tool": "tasks_get", "task_id": task.ID},
+		"instruction":           instruction,
+		"scheduled_for":         task.ScheduledFor,
+	}
+	if task.RecoveryOfTaskID != "" {
+		payload["recovery_of_task_id"] = task.RecoveryOfTaskID
+		payload["original_occurrence_key"] = task.OriginalOccurrenceKey
+		payload["recovery_attempt"] = task.RecoveryAttempt
+		payload["recovery_reason"] = task.RecoveryReason
+		payload["operation_key"] = task.OperationKey
+		payload["recovery_mode"] = "reconcile_only"
+	}
+	return payload
+}
+
 // notifyAssigned wakes threadID with an event about task. The wake target is an
 // explicit argument, never re-read from the store: a concurrent reassign landing
 // between the caller's write and a re-read would redirect the event and leave
@@ -216,13 +256,12 @@ func (a *App) notifyAssigned(task *Task, threadID, eventType string) error {
 	if a.ctx == nil {
 		return errors.New("platform API unavailable")
 	}
-	if eventType == "task.ready" && task != nil && task.ScheduledFor != nil {
+	if (eventType == "task.ready" || eventType == "task.recovery.ready") && task != nil && task.ScheduledFor != nil {
 		if client := a.ctx.AgentEventsAPI(); client != nil {
 			sourceEventID := taskAgentEventSourceID(task.ID)
 			// Keep the tracked payload immutable across retries. The complete
 			// authoritative task definition and live attempt count remain in get.
-			payload := map[string]any{"type": eventType, "task_id": task.ID,
-				"scheduled_for": task.ScheduledFor, "parent_task_id": task.ParentTaskID}
+			payload := taskWakePayload(task, threadID, eventType)
 			receipt, err := client.SendTrackedAgentEvent(sdk.AgentEventRequest{
 				AgentID: task.AgentID, ThreadID: threadID, SourceEventID: sourceEventID, Message: payload,
 			})
@@ -232,13 +271,53 @@ func (a *App) notifyAssigned(task *Task, threadID, eventType string) error {
 			if receipt == nil || strings.TrimSpace(receipt.ExecutionID) == "" {
 				return errors.New("tracked task event omitted execution_id")
 			}
-			return a.store.RecordAgentEventExecution(task.ID, sourceEventID, receipt.ExecutionID, nowUTC())
+			return a.store.RecordAgentEventExecution(task.ID, sourceEventID, receipt.ExecutionID, threadID, nowUTC())
 		}
 	}
 	if a.ctx.ThreadAPI() == nil {
 		return errors.New("platform thread API unavailable")
 	}
-	payload := map[string]any{"type": eventType, "task_id": task.ID, "title": task.Title, "description": task.Description, "state": task.State, "scheduled_for": task.ScheduledFor, "parent_task_id": task.ParentTaskID, "dispatch_attempt": task.DispatchAttempts}
+	payload := taskWakePayload(task, threadID, eventType)
+	payload["dispatch_attempt"] = task.DispatchAttempts
+	return a.ctx.ThreadAPI().SendThreadEvent(sdk.ThreadRef{AgentID: task.AgentID, ThreadID: threadID}, payload)
+}
+
+func (a *App) notifyTerminalization(task *Task, at time.Time) error {
+	if task == nil || a.ctx == nil {
+		return errors.New("platform API unavailable")
+	}
+	threadID := strings.TrimSpace(task.AssignedThreadID)
+	if threadID == "" {
+		return errors.New("terminalization target is missing")
+	}
+	sourceEventID := taskTerminalizationSourceID(task.ID)
+	payload := map[string]any{
+		"type": "task.terminalization_required", "origin": "tasks.lifecycle",
+		"task_id": task.ID, "occurrence_id": task.ID,
+		"parent_task_id": func() any {
+			if task.ParentTaskID == "" {
+				return nil
+			}
+			return task.ParentTaskID
+		}(),
+		"assigned_thread_id": threadID, "reply_required": false, "reply_thread_id": nil,
+		"required_first_action": map[string]any{"tool": "tasks_get", "task_id": task.ID},
+		"instruction":           "This is a reconciliation-only terminalization event, not a message from another thread. Do not call send and do not repeat an ambiguous external action. First call tasks_get. Determine from durable evidence whether an external action occurred; complete only when verified, otherwise record failed with a concrete outcome such as external_outcome_unknown.",
+	}
+	if client := a.ctx.AgentEventsAPI(); client != nil {
+		receipt, err := client.SendTrackedAgentEvent(sdk.AgentEventRequest{AgentID: task.AgentID,
+			ThreadID: threadID, SourceEventID: sourceEventID, Message: payload})
+		if err != nil {
+			return err
+		}
+		if receipt == nil || strings.TrimSpace(receipt.ExecutionID) == "" {
+			return errors.New("tracked terminalization event omitted execution_id")
+		}
+		return a.store.RecordTerminalizationExecution(task.ID, sourceEventID, receipt.ExecutionID, threadID, at)
+	}
+	if a.ctx.ThreadAPI() == nil {
+		return errors.New("platform thread API unavailable")
+	}
 	return a.ctx.ThreadAPI().SendThreadEvent(sdk.ThreadRef{AgentID: task.AgentID, ThreadID: threadID}, payload)
 }
 

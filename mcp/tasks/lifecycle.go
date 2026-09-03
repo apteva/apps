@@ -10,20 +10,34 @@ import (
 )
 
 const (
-	agentEventSourcePrefix = "occurrence:"
-	agentSettleGrace       = 10 * time.Minute
+	agentEventSourcePrefix      = "occurrence:"
+	terminalizationSourcePrefix = "terminalization:"
+	agentExecutionPurpose       = "execution"
+	agentTerminalizationPurpose = "terminalization"
+	agentSettleGrace            = 10 * time.Minute
 )
 
 func taskAgentEventSourceID(taskID string) string {
 	return agentEventSourcePrefix + taskID
 }
 
-func taskIDFromAgentEventSource(sourceID string) (string, error) {
-	taskID := strings.TrimSpace(strings.TrimPrefix(sourceID, agentEventSourcePrefix))
-	if taskID == "" || taskAgentEventSourceID(taskID) != sourceID {
-		return "", errors.New("agent lifecycle source_event_id is not a Tasks occurrence")
+func taskTerminalizationSourceID(taskID string) string {
+	return terminalizationSourcePrefix + taskID
+}
+
+func taskAgentEventIdentity(sourceID string) (taskID, purpose string, err error) {
+	for prefix, candidatePurpose := range map[string]string{
+		agentEventSourcePrefix:      agentExecutionPurpose,
+		terminalizationSourcePrefix: agentTerminalizationPurpose,
+	} {
+		if strings.HasPrefix(sourceID, prefix) {
+			taskID = strings.TrimSpace(strings.TrimPrefix(sourceID, prefix))
+			if taskID != "" && prefix+taskID == sourceID {
+				return taskID, candidatePurpose, nil
+			}
+		}
 	}
-	return taskID, nil
+	return "", "", errors.New("agent lifecycle source_event_id is not a Tasks execution")
 }
 
 func (a *App) handleAgentEventLifecycle(ctx *sdk.AppCtx, event sdk.Event) error {
@@ -31,7 +45,7 @@ func (a *App) handleAgentEventLifecycle(ctx *sdk.AppCtx, event sdk.Event) error 
 	if err != nil {
 		return err
 	}
-	taskID, err := taskIDFromAgentEventSource(lifecycle.SourceEventID)
+	taskID, purpose, err := taskAgentEventIdentity(lifecycle.SourceEventID)
 	if err != nil {
 		return err
 	}
@@ -39,13 +53,24 @@ func (a *App) handleAgentEventLifecycle(ctx *sdk.AppCtx, event sdk.Event) error 
 	if ctx != nil && strings.TrimSpace(ctx.CurrentProject()) != "" {
 		projectID = strings.TrimSpace(ctx.CurrentProject())
 	}
-	task, changed, err := a.store.ApplyAgentEventLifecycle(event.DeliveryID, taskID, projectID,
-		event.InstanceID, lifecycle, nowUTC())
+	var task *Task
+	var changed bool
+	if purpose == agentTerminalizationPurpose {
+		task, changed, err = a.store.ApplyTerminalizationLifecycle(event.DeliveryID, taskID, projectID,
+			event.InstanceID, lifecycle, nowUTC())
+	} else {
+		task, changed, err = a.store.ApplyAgentEventLifecycle(event.DeliveryID, taskID, projectID,
+			event.InstanceID, lifecycle, nowUTC())
+	}
 	if err != nil {
 		return err
 	}
 	if changed && task != nil && task.State == stateFailed && lifecycle.Type == sdk.AgentEventError {
-		_ = a.notifyExecutionFailure(task, "agent_execution_error")
+		reason := "agent_execution_error"
+		if purpose == agentTerminalizationPurpose {
+			reason = "terminalization_execution_error"
+		}
+		_ = a.notifyExecutionFailure(task, reason)
 	}
 	return nil
 }
@@ -53,12 +78,17 @@ func (a *App) handleAgentEventLifecycle(ctx *sdk.AppCtx, event sdk.Event) error 
 // RecordAgentEventExecution links the stable Tasks occurrence to the generic
 // Core execution returned by the platform. A lifecycle delivery may win this
 // race; both paths accept the same immutable mapping.
-func (s *taskStore) RecordAgentEventExecution(taskID, sourceID, executionID string, at time.Time) error {
+func (s *taskStore) RecordAgentEventExecution(taskID, sourceID, executionID, threadID string, at time.Time) error {
 	if strings.TrimSpace(taskID) == "" || sourceID != taskAgentEventSourceID(taskID) || strings.TrimSpace(executionID) == "" {
 		return errors.New("invalid tracked agent execution mapping")
 	}
 	at = at.UTC()
-	result, err := s.db.Exec(`UPDATE tasks SET
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE tasks SET
 		agent_event_source_id=CASE WHEN agent_event_source_id='' THEN ? ELSE agent_event_source_id END,
 		agent_execution_id=CASE WHEN agent_execution_id='' THEN ? ELSE agent_execution_id END,
 		agent_execution_updated_at=COALESCE(agent_execution_updated_at, ?), updated_at=?
@@ -75,7 +105,12 @@ func (s *taskStore) RecordAgentEventExecution(taskID, sourceID, executionID stri
 	if rows != 1 {
 		return errors.New("tracked agent execution mapping conflicts with the occurrence")
 	}
-	return nil
+	if err := upsertTaskAgentExecutionTx(tx, TaskAgentExecution{SourceEventID: sourceID, TaskID: taskID,
+		Purpose: agentExecutionPurpose, ExecutionID: executionID, ThreadID: threadID,
+		DispatchedAt: at, UpdatedAt: at}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ApplyAgentEventLifecycle transactionally deduplicates one Server delivery
@@ -142,6 +177,13 @@ func (s *taskStore) ApplyAgentEventLifecycle(deliveryID, taskID, projectID strin
 	if lifecycle.Timestamp.IsZero() {
 		eventAt = processedAt
 	}
+	if err := upsertTaskAgentExecutionTx(tx, TaskAgentExecution{
+		SourceEventID: lifecycle.SourceEventID, TaskID: taskID, Purpose: agentExecutionPurpose,
+		ExecutionID: lifecycle.ExecutionID, ThreadID: lifecycle.ThreadID,
+		DispatchedAt: *current.DispatchedAt, UpdatedAt: eventAt,
+	}); err != nil {
+		return nil, false, err
+	}
 	state := current.State
 	step := current.CurrentStep
 	failure := current.Error
@@ -170,16 +212,6 @@ func (s *taskStore) ApplyAgentEventLifecycle(deliveryID, taskID, projectID strin
 	case sdk.AgentEventActive:
 		if !terminalState(state) {
 			settleDeadline = nil
-			if state == stateQueued {
-				state = stateRunning
-				if startedAt == nil {
-					v := eventAt
-					startedAt = &v
-				}
-				if step == "" || step == "Scheduled work is ready" {
-					step = "Agent processing task"
-				}
-			}
 		}
 	case sdk.AgentEventSettled:
 		if state == stateQueued || state == stateRunning {
@@ -215,6 +247,12 @@ func (s *taskStore) ApplyAgentEventLifecycle(deliveryID, taskID, projectID strin
 	if settleDeadline != nil {
 		settleValue = settleDeadline.UTC().Format(time.RFC3339Nano)
 	}
+	if _, err = tx.Exec(`UPDATE task_agent_executions SET execution_id=?, thread_id=?, state=?, reason=?,
+		sequence=?, updated_at=?, deadline_at=? WHERE source_event_id=?`, lifecycle.ExecutionID,
+		lifecycle.ThreadID, lifecycle.Type, lifecycle.Reason, lifecycle.Sequence,
+		eventAt.Format(time.RFC3339Nano), settleValue, lifecycle.SourceEventID); err != nil {
+		return nil, false, err
+	}
 	_, err = tx.Exec(`UPDATE tasks SET state=?, current_step=?, error=?, accepted_at=?,
 		execution_thread_id=?, telemetry_reference=?, agent_event_source_id=?, agent_execution_id=?,
 		agent_execution_state=?, agent_execution_updated_at=?, agent_execution_reason=?,
@@ -230,6 +268,17 @@ func (s *taskStore) ApplyAgentEventLifecycle(deliveryID, taskID, projectID strin
 		status := occurrenceStatusValues(state, acceptedAt, current.DispatchedAt)
 		if err := rollupOccurrenceTx(tx, current.ParentTaskID, current.ID, status, failure,
 			current.ResultReference, current.DispatchedAt, acceptedAt, processedAt); err != nil {
+			return nil, false, err
+		}
+	} else if current.ScheduledFor != nil && current.DispatchedAt != nil {
+		status := occurrenceStatusValues(state, acceptedAt, current.DispatchedAt)
+		var acceptedValue any
+		if acceptedAt != nil {
+			acceptedValue = acceptedAt.UTC().Format(time.RFC3339Nano)
+		}
+		if _, err := tx.Exec(`UPDATE tasks SET last_occurrence_status=?, last_error=?,
+			last_result_reference=?, last_run_at=COALESCE(?, last_run_at) WHERE id=?`,
+			status, failure, current.ResultReference, acceptedValue, current.ID); err != nil {
 			return nil, false, err
 		}
 	}
@@ -254,92 +303,6 @@ func (s *taskStore) ApplyAgentEventLifecycle(deliveryID, taskID, projectID strin
 		return nil, false, err
 	}
 	task, err := s.Get(taskID)
-	if err == nil {
-		s.emit(event)
-	}
-	return task, true, err
-}
-
-// ReconcileSettledExecutions closes occurrences whose causal Core execution
-// returned idle while queued/running but whose agent omitted the terminal Tasks
-// MCP call. Explicit waiting/blocked states remain durable external waits.
-func (s *taskStore) ReconcileSettledExecutions(now time.Time, projectID string) ([]*Task, error) {
-	now = now.UTC()
-	query := `SELECT id FROM tasks WHERE agent_execution_state=? AND agent_settle_deadline_at IS NOT NULL
-		AND agent_settle_deadline_at<=? AND state IN ('queued','running')`
-	args := []any{sdk.AgentEventSettled, now.Format(time.RFC3339Nano)}
-	if projectID != "" {
-		query += ` AND project_id=?`
-		args = append(args, projectID)
-	}
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	var failed []*Task
-	for _, id := range ids {
-		task, changed, err := s.failSettledExecution(id, now)
-		if err != nil {
-			return nil, err
-		}
-		if changed {
-			failed = append(failed, task)
-		}
-	}
-	return failed, nil
-}
-
-func (s *taskStore) failSettledExecution(id string, now time.Time) (*Task, bool, error) {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return nil, false, err
-	}
-	defer tx.Rollback()
-	current, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
-	if err != nil {
-		return nil, false, err
-	}
-	if terminalState(current.State) || current.AgentExecutionState != sdk.AgentEventSettled ||
-		current.AgentSettleDeadline == nil || current.AgentSettleDeadline.After(now) {
-		return current, false, nil
-	}
-	message := "agent_exited_without_terminal_status: Core returned idle before the agent recorded completion or failure"
-	step := "Agent execution ended without terminal status"
-	_, err = tx.Exec(`UPDATE tasks SET state='failed', error=?, current_step=?,
-		agent_settle_deadline_at=NULL, updated_at=?, completed_at=? WHERE id=?`, message, step,
-		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id)
-	if err != nil {
-		return nil, false, err
-	}
-	if current.ParentTaskID != "" {
-		if err := rollupOccurrenceTx(tx, current.ParentTaskID, current.ID, stateFailed, message,
-			current.ResultReference, current.DispatchedAt, current.AcceptedAt, now); err != nil {
-			return nil, false, err
-		}
-	}
-	event, err := insertEvent(tx, TaskEvent{TaskID: id, AgentID: current.AgentID,
-		EventType: "state_changed", ThreadID: "tasks:lifecycle", FromState: current.State, ToState: stateFailed,
-		Data: map[string]any{"error": message, "agent_execution_id": current.AgentExecutionID,
-			"lifecycle_type": current.AgentExecutionState, "settled_at": current.AgentExecutionUpdated}})
-	if err != nil {
-		return nil, false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, false, err
-	}
-	task, err := s.Get(id)
 	if err == nil {
 		s.emit(event)
 	}

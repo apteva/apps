@@ -20,7 +20,9 @@ directive: |
   below is authoritative: it contains exactly four unread messages, exactly
   one of which (from Clima Confort) needs an attention alert.
 
-  Track the occurrence as exactly one task named "Review simulated inbox".
+  Track the occurrence as exactly one immediate, unscheduled task named
+  "Review simulated inbox". Call tasks_create exactly once, omit the schedule
+  argument entirely, and retain its returned task ID.
   This is deliberately multi-stage work: record each of these meaningful
   milestones on that same task, with the exact state, progress, and current
   step shown:

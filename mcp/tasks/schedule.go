@@ -352,12 +352,25 @@ type scheduler struct {
 func (s *scheduler) Tick(now time.Time, projectID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	settled, err := s.store.ReconcileSettledExecutions(now.UTC(), projectID)
+	expired, err := s.store.FailExpiredTerminalizations(now.UTC(), projectID)
+	if err != nil {
+		return err
+	}
+	for _, task := range expired {
+		reason := strings.TrimSpace(strings.SplitN(task.Error, ":", 2)[0])
+		if reason == "" {
+			reason = "agent_exited_without_terminal_status"
+		}
+		_ = s.app.notifyExecutionFailure(task, reason)
+	}
+	settled, err := s.store.ClaimSettledTerminalizations(now.UTC(), projectID)
 	if err != nil {
 		return err
 	}
 	for _, task := range settled {
-		_ = s.app.notifyExecutionFailure(task, "agent_exited_without_terminal_status")
+		if notifyErr := s.app.notifyTerminalization(task, now.UTC()); notifyErr != nil {
+			s.app.logger().Warn("tasks terminalization wake", "task_id", task.ID, "err", notifyErr.Error())
+		}
 	}
 	if err := s.reconcileUnaccepted(now.UTC(), projectID); err != nil {
 		return err
@@ -434,7 +447,11 @@ func (s *scheduler) reconcileUnaccepted(now time.Time, projectID string) error {
 		}
 		switch action {
 		case dispatchReconcileRetry:
-			if notifyErr := s.app.notifyAssigned(updated, updated.AssignedThreadID, "task.ready"); notifyErr != nil {
+			eventType := "task.ready"
+			if updated.RecoveryOfTaskID != "" {
+				eventType = "task.recovery.ready"
+			}
+			if notifyErr := s.app.notifyAssigned(updated, updated.AssignedThreadID, eventType); notifyErr != nil {
 				s.app.logger().Warn("tasks scheduler redispatch", "task_id", updated.ID,
 					"attempt", updated.DispatchAttempts, "err", notifyErr.Error())
 			}
@@ -555,7 +572,7 @@ func (s *scheduler) materialize(parent *Task, now time.Time) error {
 		return err
 	}
 	key := scheduledFor.Format(time.RFC3339Nano)
-	run, _, err := s.store.Create(CreateTaskInput{AgentID: parent.AgentID, ProjectID: parent.ProjectID, Title: parent.Title, Description: parent.Description, State: stateQueued, CreatedByThreadID: parent.CreatedByThreadID, AssignedThreadID: parent.AssignedThreadID, ParentTaskID: parent.ID, ScheduledFor: &scheduledFor, OccurrenceKey: key, IdempotencyKey: parent.ID + ":" + key})
+	run, _, err := s.store.Create(CreateTaskInput{AgentID: parent.AgentID, ProjectID: parent.ProjectID, Title: parent.Title, Description: parent.Description, State: stateQueued, CreatedByThreadID: parent.CreatedByThreadID, AssignedThreadID: parent.AssignedThreadID, ParentTaskID: parent.ID, ScheduledFor: &scheduledFor, OccurrenceKey: key, IdempotencyKey: parent.ID + ":" + key, OperationKey: parent.OperationKey})
 	if err != nil {
 		return err
 	}

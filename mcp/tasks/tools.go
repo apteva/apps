@@ -34,8 +34,8 @@ func scheduleSchema(requireKind bool) map[string]any {
 func (a *App) tools() []sdk.Tool {
 	wakeAlways := map[string]any{"io.apteva/wakeOnResult": "always"}
 	return []sdk.Tool{
-		{Name: "create", Description: "Create exactly one durable task before substantive work begins when an outcome is multi-step, combines multiple sources or independent checks, is scheduled, delegated, or must survive the current exchange. A multi-area review or synthesis is task work even when calls run in parallel or finish in one turn. A quick lookup means one bounded read or action with no multi-source synthesis. Creating a task does not imply delegation: the current opaque thread may create, execute, update, and complete its own task. The current thread becomes creator; immediate work defaults to that creator, while scheduled work defaults to the agent's configured default thread. assigned_thread_id overrides either default.", InputSchema: objectSchema([]string{"title"}, map[string]any{
-			"title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "assigned_thread_id": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"}, "schedule": scheduleSchema(true),
+		{Name: "create", Description: "Create exactly one durable task before substantive work begins when an outcome is multi-step, combines multiple sources or independent checks, is scheduled, delegated, or must survive the current exchange. A multi-area review or synthesis is task work even when calls run in parallel or finish in one turn. A quick lookup means one bounded read or action with no multi-source synthesis. Creating a task does not imply delegation: the current opaque thread may create, execute, update, and complete its own task. For immediate work, omit schedule entirely; never invent schedule placeholders. For scheduled work, provide exactly one of at, after, every, or cron with its matching kind. The current thread becomes creator; immediate work defaults to that creator, while scheduled work defaults to the agent's configured default thread. assigned_thread_id overrides either default.", InputSchema: objectSchema([]string{"title"}, map[string]any{
+			"title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "assigned_thread_id": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"}, "operation_key": map[string]any{"type": "string", "description": "Stable external-operation idempotency context, when the domain API provides one."}, "schedule": scheduleSchema(true),
 		}), Meta: wakeAlways, HandlerCtx: a.toolCreate},
 		{Name: "list", Description: "List this agent's durable task inventory across all of its threads. Caller, creator, assignee, and executor thread IDs are provenance only and never limit visibility. Use this directly for task and schedule questions instead of asking another thread. The result is authoritative; do not repeat the same list call.", InputSchema: objectSchema(nil, map[string]any{
 			"states": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "include_runs": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer"},
@@ -50,6 +50,9 @@ func (a *App) tools() []sdk.Tool {
 		{Name: "pause", Description: "Pause a scheduled task without deleting it.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolPause},
 		{Name: "resume", Description: "Resume a paused scheduled task and calculate its next occurrence from server time.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolResume},
 		{Name: "run_now", Description: "Make a scheduled task due now without changing its recurrence.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolRunNow},
+		{Name: "recover_occurrence", Description: "Create one linked reconciliation-only attempt for a failed scheduled occurrence. This does not reopen the original occurrence and must not blindly repeat its external action. The recovery executor must call tasks_get first, reconcile durable external state, complete when the original outcome is verified, retry the domain action only when it is proven absent and safe, or record failed with external_outcome_unknown. Use this instead of run_now when recovering a specific occurrence.", InputSchema: objectSchema([]string{"task_id", "reason"}, map[string]any{
+			"task_id": map[string]any{"type": "string"}, "reason": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"},
+		}), Meta: wakeAlways, HandlerCtx: a.toolRecoverOccurrence},
 	}
 }
 
@@ -166,7 +169,7 @@ func (a *App) toolCreate(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if assigned == "" {
 		assigned = caller.ThreadID
 	}
-	task, created, err := a.store.Create(CreateTaskInput{AgentID: caller.AgentID, ProjectID: projectID, Title: title, Description: stringArg(args, "description"), State: stateQueued, CreatedByThreadID: caller.ThreadID, AssignedThreadID: assigned, IdempotencyKey: stringArg(args, "idempotency_key"), Schedule: schedule})
+	task, created, err := a.store.Create(CreateTaskInput{AgentID: caller.AgentID, ProjectID: projectID, Title: title, Description: stringArg(args, "description"), State: stateQueued, CreatedByThreadID: caller.ThreadID, AssignedThreadID: assigned, IdempotencyKey: stringArg(args, "idempotency_key"), OperationKey: stringArg(args, "operation_key"), Schedule: schedule})
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +213,11 @@ func (a *App) toolGet(ctx context.Context, app *sdk.AppCtx, args map[string]any)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"task": task, "events": events}, nil
+	executions, err := a.store.AgentExecutions(task.ID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"task": task, "events": events, "agent_executions": executions}, nil
 }
 
 func (a *App) toolUpdate(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
@@ -373,6 +380,28 @@ func (a *App) toolRunNow(ctx context.Context, app *sdk.AppCtx, args map[string]a
 		return nil, err
 	}
 	return a.store.RunNow(task.ID, caller.ThreadID)
+}
+
+func (a *App) toolRecoverOccurrence(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	caller, task, err := a.taskForCaller(ctx, app, args)
+	if err != nil {
+		return nil, err
+	}
+	recovery, created, err := a.store.RecoverOccurrence(task.ID, caller.ThreadID, caller.ThreadID,
+		stringArg(args, "reason"), stringArg(args, "idempotency_key"), nowUTC())
+	if err != nil {
+		return nil, err
+	}
+	if created {
+		recovery, _, err = a.store.MarkDispatched(recovery.ID, "tasks:recovery", nowUTC())
+		if err != nil {
+			return nil, err
+		}
+		if err := a.notifyAssigned(recovery, recovery.AssignedThreadID, "task.recovery.ready"); err != nil {
+			return nil, fmt.Errorf("recovery created and queued for durable redispatch: %w", err)
+		}
+	}
+	return map[string]any{"task": recovery, "created": created, "recovery_of_task_id": recovery.RecoveryOfTaskID}, nil
 }
 
 func stringArg(args map[string]any, key string) string { v, _ := args[key].(string); return v }

@@ -27,9 +27,10 @@ setup:
 
 directive: |
   You execute due Tasks work assigned to main. Ignore setup requests owned by
-  other threads. When task.ready arrives, call tasks_get, record one running
-  milestone with current_step "Readiness check started", and complete that
-  task exactly once with the result "READINESS CHECK PASSED". Then wait.
+  other threads. Follow the machine-readable task event contract exactly.
+  For a readiness-check occurrence, record one running milestone with
+  current_step "Readiness check started", complete it exactly once with the
+  result "READINESS CHECK PASSED", and then wait.
 
 prompt: |
   In one minute, run a readiness check. Track it as one task named "Scheduled readiness check" and report its terminal result back to this requesting thread.
@@ -42,7 +43,8 @@ assert:
   - tool_called_with:
       tool: tasks_get
       thread_id: main
-      min_count: 1
+      count: 1
+      before: tasks_update
   - tool_called_with:
       tool: tasks_update
       thread_id: main
@@ -63,6 +65,9 @@ assert:
   - tool_not_called_with:
       tool: tasks_update | tasks_complete
       thread_id: request-scheduled
+  - tool_not_called_with:
+      tool: send
+      thread_id: main
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_status: 200
     expect_count_at: tasks

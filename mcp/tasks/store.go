@@ -10,12 +10,14 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 type taskStore struct {
-	db      *sql.DB
-	onEvent func(TaskEvent)
+	db         *sql.DB
+	onEvent    func(TaskEvent)
+	recoveryMu sync.Mutex
 }
 
 func newTaskStore(db *sql.DB, onEvent func(TaskEvent)) *taskStore {
@@ -24,7 +26,8 @@ func newTaskStore(db *sql.DB, onEvent func(TaskEvent)) *taskStore {
 
 const taskColumns = `id, agent_id, project_id, title, description, state,
 	progress, current_step, created_by_thread_id, assigned_thread_id,
-	execution_thread_id, parent_task_id, idempotency_key, schedule_kind,
+	execution_thread_id, parent_task_id, idempotency_key, recovery_of_task_id,
+	original_occurrence_key, recovery_attempt, recovery_reason, operation_key, schedule_kind,
 	schedule_expression, schedule_timezone, schedule_enabled,
 	schedule_overlap_policy, schedule_catchup_policy, next_run_at, last_run_at,
 	last_dispatched_at, last_occurrence_id, last_occurrence_status, last_error,
@@ -45,7 +48,8 @@ func scanTask(row rowScanner) (*Task, error) {
 	var created, updated string
 	err := row.Scan(&t.ID, &t.AgentID, &t.ProjectID, &t.Title, &t.Description, &t.State,
 		&progress, &t.CurrentStep, &t.CreatedByThreadID, &t.AssignedThreadID,
-		&t.ExecutionThreadID, &t.ParentTaskID, &t.IdempotencyKey, &t.ScheduleKind,
+		&t.ExecutionThreadID, &t.ParentTaskID, &t.IdempotencyKey, &t.RecoveryOfTaskID,
+		&t.OriginalOccurrenceKey, &t.RecoveryAttempt, &t.RecoveryReason, &t.OperationKey, &t.ScheduleKind,
 		&t.ScheduleExpression, &t.ScheduleTimezone, &scheduleEnabled,
 		&t.ScheduleOverlapPolicy, &t.ScheduleCatchupPolicy, &next, &last, &lastDispatched,
 		&t.LastOccurrenceID, &t.LastOccurrenceStatus, &t.LastError, &t.LastResultReference,
@@ -193,10 +197,12 @@ func (s *taskStore) Create(input CreateTaskInput) (*Task, bool, error) {
 	if input.ScheduledFor != nil {
 		scheduledFor = input.ScheduledFor.UTC().Format(time.RFC3339Nano)
 	}
-	_, err = tx.Exec(`INSERT INTO tasks (`+taskColumns+`) VALUES (`+strings.TrimSuffix(strings.Repeat("?,", 47), ",")+`)`,
+	_, err = tx.Exec(`INSERT INTO tasks (`+taskColumns+`) VALUES (`+strings.TrimSuffix(strings.Repeat("?,", strings.Count(taskColumns, ",")+1), ",")+`)`,
 		id, input.AgentID, input.ProjectID, input.Title, strings.TrimSpace(input.Description), input.State,
 		progress, strings.TrimSpace(input.CurrentStep), input.CreatedByThreadID, input.AssignedThreadID,
-		"", strings.TrimSpace(input.ParentTaskID), strings.TrimSpace(input.IdempotencyKey), scheduleKind,
+		"", strings.TrimSpace(input.ParentTaskID), strings.TrimSpace(input.IdempotencyKey),
+		strings.TrimSpace(input.RecoveryOfTaskID), strings.TrimSpace(input.OriginalOccurrenceKey), input.RecoveryAttempt,
+		strings.TrimSpace(input.RecoveryReason), strings.TrimSpace(input.OperationKey), scheduleKind,
 		expression, timezone, enabled, overlap, catchup, nextRun, nil, nil, "", "", "", "",
 		scheduledFor, strings.TrimSpace(input.OccurrenceKey), nil, 0, nil, nil, "",
 		"", "", "", nil, "", nil, 0,

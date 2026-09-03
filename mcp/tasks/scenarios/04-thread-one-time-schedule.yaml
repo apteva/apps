@@ -18,7 +18,10 @@ setup:
       Convert the request into exactly one durable one-time task. Call
       tasks_create directly from this thread. Do not delegate creation and do
       not update or complete future work before it is due. After creation,
-      confirm the saved title in your response and stop.
+      confirm the saved title in your response and stop. In the single
+      tasks_create call, set assigned_thread_id exactly to "main" so future
+      execution belongs to the durable default executor rather than this
+      request thread.
   app:
     path: ./
 

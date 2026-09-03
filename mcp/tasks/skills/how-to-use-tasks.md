@@ -68,6 +68,13 @@ task with `tasks_get` before acting. A terminal receipt sent to the creator is
 context for that thread; the thread decides whether a user-facing message,
 report, alert, or no publication is appropriate.
 
+A `task.ready`, `task.recovery.ready`, or `task.terminalization_required` event
+is an app-owned execution event, not a message from another thread. It carries
+`reply_required: false`: do not call `send` because of that event. Follow its
+`required_first_action` and call `tasks_get` before any domain action. Ordinary
+`task.assigned` worker events are different: workers still report to their
+parent exactly as their directive requires.
+
 ## Progress
 
 Progress is task-level, not thread-level. Keep a task `running` while any
@@ -133,18 +140,47 @@ ask another thread merely to inspect the schedule inventory.
 Every due schedule has an occurrence lifecycle. Scheduler dispatch is not
 workflow success. On platforms with tracked agent events, Tasks records
 acceptance automatically when Core claims the occurrence and records execution
-activity separately from business progress. The assigned thread must still
-read the authoritative record with `tasks_get` before any domain action; on
-older platforms that read also accepts the occurrence. The agent—not Core—then
-records meaningful running milestones and exactly one terminal outcome through
-the Tasks MCP tools. Always include a durable `result_reference` when the work
-creates an output ID or URL.
+activity separately from business progress. Core becoming active does not move
+the occurrence to `running`, set `started_at`, invent a progress percentage, or
+replace `current_step`. The assigned thread must still read the authoritative
+record with `tasks_get` before any domain action; on older platforms that read
+also accepts the occurrence. The agent—not Core—starts business work with an
+explicit `tasks_update(state="running", ...)`, records meaningful milestones,
+and writes exactly one terminal outcome through the Tasks MCP tools. Always
+include a durable `result_reference` when the work creates an output ID or URL.
 
 When Core reports that the complete causal execution, including its workers,
 has settled, Tasks does not infer success. It allows a short terminal grace
-period. If the agent omitted completion or failure, Tasks fails the occurrence
-with `agent_exited_without_terminal_status` so an abandoned run cannot block
-the next schedule. A dispatched occurrence that is never accepted is failed
-automatically; do not recreate it merely because the parent schedule is still
-active. The recurring parent reports scheduler state separately from its latest
-occurrence status and error.
+period and emits exactly one reconciliation-only
+`task.terminalization_required` wake if the agent omitted completion or
+failure. That wake must inspect the existing occurrence and durable external
+state. Never repeat an ambiguous financial, publishing, messaging, or other
+external action. Complete only when its outcome is verified; otherwise record
+`failed` with a concrete outcome such as `external_outcome_unknown`. If the
+reconciliation execution also ends without a terminal Tasks write, Tasks fails
+the occurrence with `agent_exited_without_terminal_status` so it cannot block
+the next schedule. `blocked` is nonterminal and is appropriate only for a real
+external dependency that will resume later, not for an unknown outcome.
+
+A dispatched occurrence that Core never accepts is a separate delivery
+failure. Tasks safely retries the same tracked `task.ready` event and stable
+source ID before failing it; those idempotent delivery retries are not domain
+execution retries. The recurring parent reports scheduler state separately
+from its latest occurrence status and error.
+
+## Recovering a failed occurrence
+
+Use `tasks_recover_occurrence`, not `tasks_run_now`, when recovering one
+specific failed scheduled occurrence. It creates a new reconciliation-only
+attempt linked by `recovery_of_task_id`, preserves the original occurrence key,
+recurring parent, exact definition, operation key, and attempt number, and
+leaves the failed occurrence immutable. Repeating the call with the same
+idempotency key returns the same recovery attempt.
+
+The recovery event is non-conversational and requires `tasks_get` first. Check
+durable external state before acting. If the original action is verified,
+complete the recovery with that evidence. Repeat the domain action only when it
+is proven absent and its domain safety/idempotency rules allow execution. If
+the outcome remains ambiguous, fail the recovery with
+`external_outcome_unknown`; do not guess, use `blocked` as a false terminal
+state, or make the recurring parent due with `tasks_run_now`.

@@ -41,6 +41,11 @@ type Task struct {
 	ExecutionThreadID      string     `json:"execution_thread_id,omitempty"`
 	ParentTaskID           string     `json:"parent_task_id,omitempty"`
 	IdempotencyKey         string     `json:"idempotency_key,omitempty"`
+	RecoveryOfTaskID       string     `json:"recovery_of_task_id,omitempty"`
+	OriginalOccurrenceKey  string     `json:"original_occurrence_key,omitempty"`
+	RecoveryAttempt        int        `json:"recovery_attempt,omitempty"`
+	RecoveryReason         string     `json:"recovery_reason,omitempty"`
+	OperationKey           string     `json:"operation_key,omitempty"`
 	ScheduleKind           string     `json:"schedule_kind,omitempty"`
 	ScheduleExpression     string     `json:"schedule_expression,omitempty"`
 	ScheduleTimezone       string     `json:"schedule_timezone,omitempty"`
@@ -90,20 +95,39 @@ type TaskEvent struct {
 }
 
 type CreateTaskInput struct {
-	AgentID           int64
-	ProjectID         string
-	Title             string
-	Description       string
-	State             string
-	Progress          *int
-	CurrentStep       string
-	CreatedByThreadID string
-	AssignedThreadID  string
-	ParentTaskID      string
-	IdempotencyKey    string
-	Schedule          *ScheduleInput
-	ScheduledFor      *time.Time
-	OccurrenceKey     string
+	AgentID               int64
+	ProjectID             string
+	Title                 string
+	Description           string
+	State                 string
+	Progress              *int
+	CurrentStep           string
+	CreatedByThreadID     string
+	AssignedThreadID      string
+	ParentTaskID          string
+	IdempotencyKey        string
+	RecoveryOfTaskID      string
+	OriginalOccurrenceKey string
+	RecoveryAttempt       int
+	RecoveryReason        string
+	OperationKey          string
+	Schedule              *ScheduleInput
+	ScheduledFor          *time.Time
+	OccurrenceKey         string
+}
+
+type TaskAgentExecution struct {
+	SourceEventID string     `json:"source_event_id"`
+	TaskID        string     `json:"task_id"`
+	Purpose       string     `json:"purpose"`
+	ExecutionID   string     `json:"execution_id,omitempty"`
+	ThreadID      string     `json:"thread_id,omitempty"`
+	State         string     `json:"state,omitempty"`
+	Reason        string     `json:"reason,omitempty"`
+	Sequence      uint64     `json:"sequence,omitempty"`
+	DispatchedAt  time.Time  `json:"dispatched_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	DeadlineAt    *time.Time `json:"deadline_at,omitempty"`
 }
 
 type UpdateTaskInput struct {

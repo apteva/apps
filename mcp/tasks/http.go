@@ -236,6 +236,7 @@ func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {
 			Description      string         `json:"description"`
 			AssignedThreadID string         `json:"assigned_thread_id"`
 			IdempotencyKey   string         `json:"idempotency_key"`
+			OperationKey     string         `json:"operation_key"`
 			Schedule         *ScheduleInput `json:"schedule"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
@@ -259,7 +260,7 @@ func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "agent has no default thread", http.StatusConflict)
 			return
 		}
-		task, created, err := a.store.Create(CreateTaskInput{AgentID: body.AgentID, ProjectID: projectID, Title: body.Title, Description: body.Description, State: stateQueued, AssignedThreadID: assigned, IdempotencyKey: body.IdempotencyKey, Schedule: body.Schedule})
+		task, created, err := a.store.Create(CreateTaskInput{AgentID: body.AgentID, ProjectID: projectID, Title: body.Title, Description: body.Description, State: stateQueued, AssignedThreadID: assigned, IdempotencyKey: body.IdempotencyKey, OperationKey: body.OperationKey, Schedule: body.Schedule})
 		if err != nil {
 			writeTaskError(w, err)
 			return
@@ -320,6 +321,54 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
 			return
+		case "executions":
+			if r.Method != http.MethodGet {
+				http.Error(w, "GET only", http.StatusMethodNotAllowed)
+				return
+			}
+			executions, err := a.store.AgentExecutions(task.ID)
+			if err != nil {
+				writeTaskError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"agent_executions": executions})
+			return
+		case "recover":
+			if r.Method != http.MethodPost {
+				http.Error(w, "POST only", http.StatusMethodNotAllowed)
+				return
+			}
+			var body struct {
+				Reason           string `json:"reason"`
+				IdempotencyKey   string `json:"idempotency_key"`
+				AssignedThreadID string `json:"assigned_thread_id"`
+			}
+			if err := decodeStrictJSON(w, r, &body); err != nil {
+				http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			assigned := strings.TrimSpace(body.AssignedThreadID)
+			if assigned == "" {
+				assigned = task.AssignedThreadID
+			}
+			recovery, created, err := a.store.RecoverOccurrence(task.ID, "api", assigned,
+				body.Reason, body.IdempotencyKey, nowUTC())
+			if err != nil {
+				writeTaskError(w, err)
+				return
+			}
+			if created {
+				recovery, _, err = a.store.MarkDispatched(recovery.ID, "tasks:recovery", nowUTC())
+				if err == nil {
+					err = a.notifyAssigned(recovery, recovery.AssignedThreadID, "task.recovery.ready")
+				}
+			}
+			if err != nil {
+				writeTaskError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"task": recovery, "created": created})
+			return
 		case "pause", "resume", "run-now":
 			if r.Method != http.MethodPost {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -345,7 +394,8 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		events, _ := a.store.Events(task.ID)
-		writeJSON(w, http.StatusOK, map[string]any{"task": task, "events": events})
+		executions, _ := a.store.AgentExecutions(task.ID)
+		writeJSON(w, http.StatusOK, map[string]any{"task": task, "events": events, "agent_executions": executions})
 	case http.MethodPatch, http.MethodPut:
 		var body struct {
 			Title            *string        `json:"title"`
