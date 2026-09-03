@@ -2,9 +2,11 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -254,6 +256,125 @@ func TestIssues_ProjectScopeAndRepoScope(t *testing.T) {
 	}
 	if len(repoSearch) != 1 || repoSearch[0].RepoSlug != b.Slug || repoSearch[0].Title != "p1 other" {
 		t.Fatalf("repo-scoped search wrong: %+v", repoSearch)
+	}
+}
+
+func TestIssues_ClaimReleaseAndClose(t *testing.T) {
+	db := openTestDB(t)
+	repo, err := dbCreateRepo(db, "p1", CreateRepoInput{Name: "App"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, err := dbCreateIssue(db, "p1", repo, IssueCreateInput{Title: "Claim me"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := dbClaimIssue(db, issue.ID, "agent:7", "Coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Success || !first.Changed || first.Conflict || first.Issue.ClaimOwner != "agent:7" || first.Issue.Status != issueStatusInProgress {
+		t.Fatalf("first claim wrong: %+v", first)
+	}
+
+	again, err := dbClaimIssue(db, issue.ID, "agent:7", "Coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.Success || again.Changed || again.Conflict {
+		t.Fatalf("same-owner claim should be idempotent: %+v", again)
+	}
+
+	conflict, err := dbClaimIssue(db, issue.ID, "agent:8", "Reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflict.Success || !conflict.Conflict || conflict.Issue.ClaimOwner != "agent:7" {
+		t.Fatalf("second owner replaced claim: %+v", conflict)
+	}
+
+	wrongRelease, err := dbReleaseIssueClaim(db, issue.ID, "agent:8", "Reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wrongRelease.Success || !wrongRelease.Conflict || wrongRelease.Issue.ClaimOwner != "agent:7" {
+		t.Fatalf("non-owner released claim: %+v", wrongRelease)
+	}
+
+	released, err := dbReleaseIssueClaim(db, issue.ID, "agent:7", "Coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !released.Success || !released.Changed || released.Issue.ClaimOwner != "" || released.Issue.Status != issueStatusTodo {
+		t.Fatalf("release wrong: %+v", released)
+	}
+
+	reclaimed, err := dbClaimIssue(db, issue.ID, "user:12", "human@example.com")
+	if err != nil || !reclaimed.Success {
+		t.Fatalf("human claim failed: outcome=%+v err=%v", reclaimed, err)
+	}
+	state := issueStateClosed
+	status := issueStatusDone
+	closed, err := dbUpdateIssue(db, reclaimed.Issue, IssuePatch{State: &state, Status: &status, Actor: "human@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.ClaimOwner != "" || closed.ClaimLabel != "" || closed.ClaimedAt != "" {
+		t.Fatalf("closing did not clear claim: %+v", closed)
+	}
+}
+
+func TestIssues_ConcurrentClaimHasSingleWinner(t *testing.T) {
+	db := openTestDB(t)
+	repo, err := dbCreateRepo(db, "p1", CreateRepoInput{Name: "App"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, err := dbCreateIssue(db, "p1", repo, IssueCreateInput{Title: "One winner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const contenders = 8
+	start := make(chan struct{})
+	results := make(chan *IssueClaimOutcome, contenders)
+	errs := make(chan error, contenders)
+	var wg sync.WaitGroup
+	for i := 1; i <= contenders; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			owner := fmt.Sprintf("agent:%d", id)
+			outcome, err := dbClaimIssue(db, issue.ID, owner, owner)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- outcome
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent claim: %v", err)
+		}
+	}
+	winners := 0
+	for outcome := range results {
+		if outcome.Success && outcome.Changed {
+			winners++
+		} else if !outcome.Conflict {
+			t.Fatalf("loser was not reported as conflict: %+v", outcome)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("claim winners = %d, want 1", winners)
 	}
 }
 

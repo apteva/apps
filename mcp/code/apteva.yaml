@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.6.1
+version: 0.6.2
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,8 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.6.2 adds atomic human and agent issue claims so collaborators can
+  reserve work without path locks or workspace coupling.
   v0.6.1 adds theme-aware syntax highlighting, sticky line numbers,
   language and line metadata, copy feedback, and clearer editor typography.
   v0.6.0 adds provider-neutral Git clone, connect, status, fetch,
@@ -155,11 +157,15 @@ provides:
     - name: repos_dev_logs
       description: Tail the dev run's stdout/stderr log file.
     - name: issues_list
-      description: List native Code issues for a repository.
+      description: List native Code issues for a repository, including their current claims. Claim an unclaimed issue before starting work.
     - name: issues_search
-      description: Search native Code issues across all repositories in a project.
+      description: Search native Code issues and their current claims across all repositories in a project.
     - name: issues_get
       description: Get a native Code issue with comments, links, and activity.
+    - name: issues_claim
+      description: Atomically claim an open issue for the authenticated agent or user before starting work.
+    - name: issues_release
+      description: Release the authenticated caller's issue claim; closing an issue releases it automatically.
     - name: issues_create
       description: Create a native Code issue for bugs, feature requests, tasks, or chores.
     - name: issues_update

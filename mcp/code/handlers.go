@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -815,6 +816,34 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 		refreshed, _ := dbGetIssueByID(globalCtx.AppDB(), iss.ID)
 		emitIssueEvent(globalCtx, "issue.commented", repo, refreshed)
 		httpJSON(w, map[string]any{"comment": comment, "issue": refreshed})
+	case "claim", "release":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		owner, label, err := httpIssueClaimant(r)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var outcome *IssueClaimOutcome
+		if action == "claim" {
+			outcome, err = dbClaimIssue(globalCtx.AppDB(), iss.ID, owner, label)
+		} else {
+			outcome, err = dbReleaseIssueClaim(globalCtx.AppDB(), iss.ID, owner, label)
+		}
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if outcome.Changed {
+			topic := "issue.claimed"
+			if action == "release" {
+				topic = "issue.claim_released"
+			}
+			emitIssueEvent(globalCtx, topic, repo, outcome.Issue)
+		}
+		httpJSON(w, outcome)
 	case "close":
 		if r.Method != http.MethodPost {
 			httpErr(w, http.StatusMethodNotAllowed, "POST")
@@ -889,6 +918,28 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 	default:
 		httpErr(w, http.StatusNotFound, "no such issue action: "+action)
 	}
+}
+
+func httpIssueClaimant(r *http.Request) (string, string, error) {
+	if subjectType := strings.TrimSpace(r.Header.Get("X-Apteva-Subject-Type")); subjectType != "" {
+		subjectID := strings.TrimSpace(r.Header.Get("X-Apteva-Subject-ID"))
+		if subjectID == "" {
+			return "", "", errors.New("authenticated subject id missing")
+		}
+		label := strings.TrimSpace(r.Header.Get("X-Apteva-Subject-Email"))
+		return normaliseClaimant("user:"+subjectType+":"+subjectID, label)
+	}
+	var body struct {
+		Label string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		return "", "", errors.New("invalid JSON")
+	}
+	userID, err := strconv.ParseInt(strings.TrimSpace(r.Header.Get("X-User-ID")), 10, 64)
+	if err != nil || userID <= 0 {
+		return "", "", errors.New("authenticated user id required")
+	}
+	return normaliseClaimant(fmt.Sprintf("user:%d", userID), body.Label)
 }
 
 func (a *App) httpIssueRepo(w http.ResponseWriter, r *http.Request, slug string) (string, *Repo, bool) {

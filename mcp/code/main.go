@@ -34,7 +34,7 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.6.1
+version: 0.6.2
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
@@ -45,6 +45,7 @@ description: |
   GitHub, GitLab, or Bitbucket connections,
   renders source with theme-aware syntax highlighting and line numbers,
   manages native repo issues for bugs, feature requests, and tasks,
+  atomically claims issues for human and agent collaborators,
   makes grep/read/patch tools more compact for agents with reusable
   patch previews, targeted rejected-hunk context, and stale-hunk recovery,
   isolates global repository storage and hardens command/import boundaries,
@@ -147,9 +148,11 @@ provides:
     - { name: repos_dev_stop,         description: "Stop the dev process for a repo." }
     - { name: repos_dev_status,       description: "Get the current dev run state (port, pid, status, framework)." }
     - { name: repos_dev_logs,         description: "Tail the dev run's stdout/stderr log file." }
-    - { name: issues_list,            description: "List native Code issues for a repository." }
-    - { name: issues_search,          description: "Search native Code issues across all repositories in a project." }
+    - { name: issues_list,            description: "List native Code issues for a repository, including their current claims. Claim an unclaimed issue before starting work." }
+    - { name: issues_search,          description: "Search native Code issues and their current claims across all repositories in a project." }
     - { name: issues_get,             description: "Get a native Code issue with comments, links, and activity." }
+    - { name: issues_claim,           description: "Atomically claim an open issue for the authenticated agent or user before starting work." }
+    - { name: issues_release,         description: "Release the authenticated caller's issue claim; closing an issue releases it automatically." }
     - { name: issues_create,          description: "Create a native Code issue." }
     - { name: issues_update,          description: "Update native Code issue fields." }
     - { name: issues_comment,         description: "Add a comment to a native Code issue." }

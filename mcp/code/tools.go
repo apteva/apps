@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -320,6 +321,26 @@ func (a *App) MCPTools() []sdk.Tool {
 				"number": map[string]any{"type": "integer"},
 			}, []string{"slug", "number"}),
 			Handler: a.toolIssuesGet,
+		},
+		{
+			Name: "issues_claim",
+			Description: "Atomically claim an open Code issue before starting work. The claimant is derived from the authenticated agent or delegated user; it cannot be supplied in arguments. " +
+				"If another caller already owns the claim, returns success=false with the current claim instead of replacing it. Args: slug, number.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":   map[string]any{"type": "string"},
+				"number": map[string]any{"type": "integer"},
+			}, []string{"slug", "number"}),
+			HandlerCtx: a.toolIssuesClaim,
+		},
+		{
+			Name: "issues_release",
+			Description: "Release the authenticated caller's claim on a Code issue. Does not release another caller's claim. " +
+				"An in-progress issue returns to todo; closing an issue releases its claim automatically. Args: slug, number.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":   map[string]any{"type": "string"},
+				"number": map[string]any{"type": "integer"},
+			}, []string{"slug", "number"}),
+			HandlerCtx: a.toolIssuesRelease,
 		},
 		{
 			Name: "issues_create",
@@ -695,6 +716,68 @@ func (a *App) toolIssuesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return map[string]any{"issue": nil, "found": false}, nil
 	}
 	return map[string]any{"issue": detail.Issue, "comments": detail.Comments, "links": detail.Links, "events": detail.Events, "found": true}, nil
+}
+
+func issueClaimant(callCtx context.Context, app *sdk.AppCtx) (string, string, error) {
+	caller := sdk.CallerFrom(callCtx)
+	if caller == nil {
+		return "", "", errors.New("issue claims require authenticated caller identity")
+	}
+	if caller.AgentID > 0 {
+		owner := fmt.Sprintf("agent:%d", caller.AgentID)
+		label := fmt.Sprintf("Agent %d", caller.AgentID)
+		if agent, err := app.GetAgent(caller.AgentID); err == nil && agent != nil && agent.Name != "" {
+			label = agent.Name
+		}
+		return owner, label, nil
+	}
+	if caller.SubjectType != "" && caller.SubjectID != "" {
+		owner := "user:" + caller.SubjectType + ":" + caller.SubjectID
+		label := caller.SubjectEmail
+		if label == "" {
+			label = caller.SubjectID
+		}
+		return owner, label, nil
+	}
+	return "", "", errors.New("issue claims are available to authenticated agents and users")
+}
+
+func (a *App) toolIssuesClaim(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	_, repo, issue, err := issueFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	owner, label, err := issueClaimant(callCtx, ctx)
+	if err != nil {
+		return nil, err
+	}
+	outcome, err := dbClaimIssue(ctx.AppDB(), issue.ID, owner, label)
+	if err != nil {
+		return nil, err
+	}
+	if outcome.Changed {
+		emitIssueEvent(ctx, "issue.claimed", repo, outcome.Issue)
+	}
+	return outcome, nil
+}
+
+func (a *App) toolIssuesRelease(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	_, repo, issue, err := issueFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	owner, label, err := issueClaimant(callCtx, ctx)
+	if err != nil {
+		return nil, err
+	}
+	outcome, err := dbReleaseIssueClaim(ctx.AppDB(), issue.ID, owner, label)
+	if err != nil {
+		return nil, err
+	}
+	if outcome.Changed {
+		emitIssueEvent(ctx, "issue.claim_released", repo, outcome.Issue)
+	}
+	return outcome, nil
 }
 
 func (a *App) toolIssuesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {

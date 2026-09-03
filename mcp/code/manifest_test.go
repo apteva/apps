@@ -19,8 +19,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 49 {
-		t.Errorf("expected 49 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 51 {
+		t.Errorf("expected 51 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.UIComponents) != 3 {
 		t.Errorf("expected 3 UI components in manifest, got %d", len(m.Provides.UIComponents))
@@ -129,7 +129,7 @@ func TestMCPTools_EditingSurfaceComplete(t *testing.T) {
 		"code_write_file", "code_apply_patch", "code_edit_file", "code_multi_edit",
 		"code_rename_path", "code_delete_file",
 		"issues_list", "issues_search", "issues_get", "issues_create", "issues_update",
-		"issues_comment", "issues_close", "issues_reopen", "issues_link_path",
+		"issues_claim", "issues_release", "issues_comment", "issues_close", "issues_reopen", "issues_link_path",
 		"repos_git_import", "repos_git_connect", "repos_git_status", "repos_git_fetch",
 		"repos_git_pull", "repos_git_commit", "repos_git_push", "repos_git_diff", "repos_git_log",
 		"repos_git_branches", "repos_git_branch_create", "repos_git_switch",
@@ -155,8 +155,8 @@ func TestMCPTools_AllHaveSchemas(t *testing.T) {
 		if !ok || len(props) == 0 {
 			t.Errorf("tool %q has empty/missing properties", tool.Name)
 		}
-		if tool.Handler == nil {
-			t.Errorf("tool %q has nil Handler", tool.Name)
+		if tool.Handler == nil && tool.HandlerCtx == nil {
+			t.Errorf("tool %q has no handler", tool.Name)
 		}
 	}
 }

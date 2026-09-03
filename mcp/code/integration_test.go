@@ -209,6 +209,48 @@ func TestSidecar_FullRepoLifecycle(t *testing.T) {
 	}
 }
 
+func TestSidecar_IssueClaimUsesAuthenticatedAgent(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".",
+		tk.WithProjectID("test-proj"),
+		tk.WithEnv("CODE_REPOS_DIR", t.TempDir()),
+	)
+	sc.MCP("repos_create", map[string]any{"name": "Claims"})
+	created := sc.MCP("issues_create", map[string]any{"slug": "claims", "title": "Claim me"})
+	number := int(created["issue"].(map[string]any)["number"].(float64))
+
+	claimed := sc.MCPAs("issues_claim", map[string]any{"slug": "claims", "number": number}, 7, "thread-7", "test-proj")
+	if claimed["success"] != true || claimed["changed"] != true {
+		t.Fatalf("first claim failed: %+v", claimed)
+	}
+	issue := claimed["issue"].(map[string]any)
+	if issue["claim_owner"] != "agent:7" {
+		t.Fatalf("claim owner = %v, want agent:7", issue["claim_owner"])
+	}
+
+	conflict := sc.MCPAs("issues_claim", map[string]any{"slug": "claims", "number": number}, 8, "thread-8", "test-proj")
+	if conflict["success"] != false || conflict["conflict"] != true {
+		t.Fatalf("second agent did not receive conflict: %+v", conflict)
+	}
+
+	released := sc.MCPAs("issues_release", map[string]any{"slug": "claims", "number": number}, 7, "thread-7", "test-proj")
+	if released["success"] != true || released["changed"] != true {
+		t.Fatalf("owner release failed: %+v", released)
+	}
+
+	var humanClaim map[string]any
+	resp := sc.RequestWithHeaders(http.MethodPost, "/api/repos/claims/issues/1/claim", map[string]any{
+		"user_id": 999, // Ignored: the proxy-authenticated header is authoritative.
+		"label":   "human@example.com",
+	}, &humanClaim, map[string]string{"X-User-ID": "12"})
+	if resp.Status != http.StatusOK || humanClaim["success"] != true {
+		t.Fatalf("human claim failed: status=%d body=%s", resp.Status, string(resp.Body))
+	}
+	humanIssue := humanClaim["issue"].(map[string]any)
+	if humanIssue["claim_owner"] != "user:12" || humanIssue["claim_label"] != "human@example.com" {
+		t.Fatalf("human claim identity wrong: %+v", humanIssue)
+	}
+}
+
 func TestSidecar_PathTraversalRejected(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".",
 		tk.WithProjectID("test-proj"),

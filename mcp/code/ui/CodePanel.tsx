@@ -199,6 +199,9 @@ interface CodeIssue {
   state_reason?: IssueStateReason;
   priority: IssuePriority;
   assignee?: string;
+  claim_owner?: string;
+  claim_label?: string;
+  claimed_at?: string;
   created_by?: string;
   comments_count?: number;
   links_count?: number;
@@ -2445,7 +2448,26 @@ function IssuesView({
   const [showCreate, setShowCreate] = useState(false);
   const [showMetaEdit, setShowMetaEdit] = useState(false);
   const [comment, setComment] = useState("");
+  const [human, setHuman] = useState<{ userId: number; owner: string; label: string } | null>(null);
   const initialIssueApplied = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/me", { credentials: "same-origin" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("current user unavailable");
+        return response.json() as Promise<{ user_id: number; email?: string }>;
+      })
+      .then((me) => {
+        if (!cancelled && me.user_id > 0) {
+          setHuman({ userId: me.user_id, owner: `user:${me.user_id}`, label: me.email || `User ${me.user_id}` });
+        }
+      })
+      .catch(() => {
+        // The rest of Issues remains usable; only Claim stays disabled.
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const loadIssues = useCallback(async () => {
     try {
@@ -2564,6 +2586,30 @@ function IssuesView({
     }
   };
 
+  const changeClaim = async (action: "claim" | "release") => {
+    if (!detail?.issue.repo_slug || !human) return;
+    setBusy(true);
+    try {
+      const outcome = await api<{ success: boolean; changed: boolean; conflict?: boolean; issue: CodeIssue }>(
+        "POST",
+        `/repos/${detail.issue.repo_slug}/issues/${detail.issue.number}/${action}`,
+        { label: human.label },
+      );
+      if (!outcome.success) {
+        setErr(`Already claimed by ${outcome.issue.claim_label || outcome.issue.claim_owner || "another collaborator"}.`);
+        setDetail((cur) => cur ? { ...cur, issue: outcome.issue } : cur);
+        return;
+      }
+      setDetail((cur) => cur ? { ...cur, issue: outcome.issue } : cur);
+      setErr("");
+      await loadIssues();
+    } catch (e) {
+      setErr(`${action === "claim" ? "Claim" : "Release"} failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="flex-1 min-h-0 flex">
       <aside className="w-[34rem] border-r border-border flex flex-col min-h-0">
@@ -2628,6 +2674,7 @@ function IssuesView({
                       <IssuePill label={iss.type} tone={iss.type} />
                       <IssuePill label={iss.status} tone={iss.status} />
                       {iss.state === "closed" ? <IssuePill label="closed" tone="closed" /> : null}
+                      {iss.claim_owner ? <span className="text-blue">claimed by {iss.claim_label || iss.claim_owner}</span> : null}
                       {iss.comments_count ? <span>{iss.comments_count} comments</span> : null}
                     </div>
                   </button>
@@ -2656,6 +2703,31 @@ function IssuesView({
                     />
                     <IssueMetaSummary issue={detail.issue} />
                   </div>
+                  {detail.issue.state === "open" && (
+                    detail.issue.claim_owner === human?.owner ? (
+                      <button
+                        type="button"
+                        onClick={() => changeClaim("release")}
+                        disabled={busy}
+                        className="px-3 py-1 text-xs border border-border rounded text-text-muted hover:text-text disabled:opacity-50"
+                      >Release</button>
+                    ) : detail.issue.claim_owner ? (
+                      <button
+                        type="button"
+                        disabled
+                        title={detail.issue.claimed_at ? `Claimed ${shortDate(detail.issue.claimed_at)}` : undefined}
+                        className="px-3 py-1 text-xs border border-blue/40 rounded text-blue opacity-80"
+                      >Claimed by {detail.issue.claim_label || detail.issue.claim_owner}</button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => changeClaim("claim")}
+                        disabled={busy || !human}
+                        title={human ? "Claim this issue before starting work" : "Current user identity unavailable"}
+                        className="px-3 py-1 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+                      >Claim</button>
+                    )
+                  )}
                   <button
                     type="button"
                     onClick={() => setShowMetaEdit(true)}
@@ -2788,6 +2860,7 @@ function IssueMetaSummary({ issue }: { issue: CodeIssue }) {
       <IssuePill label={issue.state} tone={issue.state} />
       {issue.state === "closed" && issue.state_reason ? <IssuePill label={issue.state_reason} tone={issue.state_reason} /> : null}
       {issue.assignee ? <span>assigned to {issue.assignee}</span> : null}
+      {issue.claim_owner ? <span className="text-blue">claimed by {issue.claim_label || issue.claim_owner}</span> : null}
     </div>
   );
 }
