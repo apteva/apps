@@ -150,10 +150,23 @@ func alpacaConnectionEnvironment(app *sdk.AppCtx, connID int64) (string, bool) {
 		return "", false
 	}
 	public, err := sdk.GetConnectionPublicConfig(app.PlatformAPI(), connID)
-	if err != nil || public == nil {
+	if err == nil && public != nil {
+		if environment, ok := alpacaHostEnvironment(public.Fields["host"]); ok {
+			return environment, true
+		}
+	}
+	// Older servers/catalog snapshots do not expose host as public metadata.
+	// Trading already needs credential access for the WebSockets, so inspect
+	// host server-side as a compatibility fallback without returning secrets.
+	credentials, err := app.PlatformAPI().GetConnectionCredentials(connID)
+	if err != nil {
 		return "", false
 	}
-	switch strings.TrimSpace(public.Fields["host"]) {
+	return alpacaHostEnvironment(credentials.Fields["host"])
+}
+
+func alpacaHostEnvironment(host string) (string, bool) {
+	switch strings.TrimSpace(host) {
 	case "paper-api.alpaca.markets":
 		return "broker_paper", true
 	case "api.alpaca.markets":

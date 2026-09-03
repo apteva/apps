@@ -106,3 +106,15 @@ func TestBrokerLiveArmingRequiresConfirmation(t *testing.T) {
 		t.Fatalf("portfolio live_armed = %v, %v", portfolio.LiveArmed, err)
 	}
 }
+
+func TestAlpacaHostEnvironmentIsExactAndFailClosed(t *testing.T) {
+	if environment, ok := alpacaHostEnvironment("paper-api.alpaca.markets"); !ok || environment != "broker_paper" {
+		t.Fatalf("paper host = %q, %v", environment, ok)
+	}
+	if environment, ok := alpacaHostEnvironment("api.alpaca.markets"); !ok || environment != "broker_live" {
+		t.Fatalf("live host = %q, %v", environment, ok)
+	}
+	if _, ok := alpacaHostEnvironment("https://api.alpaca.markets"); ok {
+		t.Fatal("non-canonical host must not be classified")
+	}
+}

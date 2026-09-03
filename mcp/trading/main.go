@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.5.1
+version: 0.5.2
 description: Live trading workstation for Apteva agents (simulation, broker paper, broker live, strategies, and backtests).
 author: Apteva
 icon: /ui/icon.svg
