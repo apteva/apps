@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ type DockerBackend interface {
 	Probe(ctx context.Context) error
 	CreateNetwork(ctx context.Context, name string) error
 	CreateVolume(ctx context.Context, name string) error
+	WriteVolumeFile(ctx context.Context, volumeName, relPath string, content []byte, mode string) error
 	Run(ctx context.Context, spec RunSpec, containerName, networkName string) (string, error)
 	Start(ctx context.Context, containerName string) error
 	Stop(ctx context.Context, containerName string) error
@@ -42,10 +44,11 @@ type RemoteDocker struct {
 }
 
 type ContainerState struct {
-	ID      string `json:"id"`
-	Status  string `json:"status"`
-	Running bool   `json:"running"`
-	Health  string `json:"health"`
+	ID       string `json:"id"`
+	Status   string `json:"status"`
+	Running  bool   `json:"running"`
+	Health   string `json:"health"`
+	ExitCode int    `json:"exit_code"`
 }
 
 func (d LocalDocker) Probe(ctx context.Context) error {
@@ -69,35 +72,25 @@ func (d LocalDocker) CreateVolume(ctx context.Context, name string) error {
 	return err
 }
 
+func (d LocalDocker) WriteVolumeFile(ctx context.Context, volumeName, relPath string, content []byte, mode string) error {
+	target := "/target/" + strings.TrimLeft(relPath, "/")
+	script := `set -eu
+dest="$1"
+mode="$2"
+mkdir -p "$(dirname "$dest")"
+tmp="${dest}.tmp.$$"
+cat > "$tmp"
+chmod "$mode" "$tmp"
+mv "$tmp" "$dest"`
+	_, err := dockerWithInput(ctx, content, "run", "--rm", "-i", "-v", volumeName+":/target", "alpine:3.20", "sh", "-c", script, "sh", target, mode)
+	return err
+}
+
 func (d LocalDocker) Run(ctx context.Context, spec RunSpec, containerName, networkName string) (string, error) {
-	args := []string{"run", "-d", "--name", containerName, "--restart", spec.RestartPolicy, "--network", networkName}
-	for _, p := range spec.Ports {
-		hostPort := p.HostPort
-		if hostPort == 0 {
-			allocated, err := freePort()
-			if err != nil {
-				return "", err
-			}
-			hostPort = allocated
-		}
-		args = append(args, "-p", fmt.Sprintf("%s:%d:%d/%s", p.BindAddr, hostPort, p.ContainerPort, p.Protocol))
+	args, err := dockerRunArgs(spec, containerName, networkName)
+	if err != nil {
+		return "", err
 	}
-	for k, v := range spec.Env {
-		if !validEnvKey(k) {
-			return "", fmt.Errorf("invalid env key %q", k)
-		}
-		args = append(args, "-e", k+"="+v)
-	}
-	for _, v := range spec.Volumes {
-		args = append(args, "-v", fmt.Sprintf("%s:%s", v.DockerVolumeName, v.MountPath))
-	}
-	if spec.Resources.MemoryMB > 0 {
-		args = append(args, "--memory", strconv.Itoa(spec.Resources.MemoryMB)+"m")
-	}
-	if spec.Resources.CPU > 0 {
-		args = append(args, "--cpus", strconv.FormatFloat(spec.Resources.CPU, 'f', -1, 64))
-	}
-	args = append(args, spec.Image)
 	out, err := docker(ctx, args...)
 	if err != nil {
 		return "", err
@@ -160,16 +153,17 @@ func (d LocalDocker) Logs(ctx context.Context, containerName string, tail int) (
 }
 
 func (d LocalDocker) Inspect(ctx context.Context, containerName string) (*ContainerState, error) {
-	raw, err := docker(ctx, "inspect", containerName)
+	raw, err := docker(ctx, "container", "inspect", containerName)
 	if err != nil {
 		return nil, err
 	}
 	var arr []struct {
 		ID    string `json:"Id"`
 		State struct {
-			Status  string `json:"Status"`
-			Running bool   `json:"Running"`
-			Health  *struct {
+			Status   string `json:"Status"`
+			Running  bool   `json:"Running"`
+			ExitCode int    `json:"ExitCode"`
+			Health   *struct {
 				Status string `json:"Status"`
 			} `json:"Health"`
 		} `json:"State"`
@@ -180,7 +174,7 @@ func (d LocalDocker) Inspect(ctx context.Context, containerName string) (*Contai
 	if len(arr) == 0 {
 		return nil, errors.New("container not found")
 	}
-	st := &ContainerState{ID: arr[0].ID, Status: arr[0].State.Status, Running: arr[0].State.Running}
+	st := &ContainerState{ID: arr[0].ID, Status: arr[0].State.Status, Running: arr[0].State.Running, ExitCode: arr[0].State.ExitCode}
 	if arr[0].State.Health != nil {
 		st.Health = arr[0].State.Health.Status
 	}
@@ -204,14 +198,62 @@ func (d RemoteDocker) CreateVolume(ctx context.Context, name string) error {
 	return err
 }
 
+func (d RemoteDocker) WriteVolumeFile(ctx context.Context, volumeName, relPath string, content []byte, mode string) error {
+	if d.app == nil || d.app.PlatformAPI() == nil {
+		return errors.New("platform API unavailable")
+	}
+	hostPath := fmt.Sprintf("/tmp/apteva-containers-files/%d/%d", d.instanceID, time.Now().UnixNano())
+	var uploadOut map[string]any
+	if err := d.app.PlatformAPI().CallAppResult("instances", "instance_upload_file", map[string]any{
+		"id":          d.instanceID,
+		"path":        hostPath,
+		"content_b64": base64.StdEncoding.EncodeToString(content),
+	}, &uploadOut); err != nil {
+		return fmt.Errorf("stage remote volume file: %w", err)
+	}
+	defer func() {
+		_, _, _ = d.runRemote(context.Background(), "rm -f "+shellQuote(hostPath), 15)
+	}()
+	target := "/target/" + strings.TrimLeft(relPath, "/")
+	script := `set -eu
+dest="$1"
+mode="$2"
+mkdir -p "$(dirname "$dest")"
+tmp="${dest}.tmp.$$"
+cat /payload > "$tmp"
+chmod "$mode" "$tmp"
+mv "$tmp" "$dest"`
+	cmd := shellJoin("docker", "run", "--rm", "-v", volumeName+":/target", "-v", hostPath+":/payload:ro", "alpine:3.20", "sh", "-c", script, "sh", target, mode)
+	_, _, err := d.runRemote(ctx, cmd, 120)
+	if err != nil {
+		return formatDockerError([]string{"run", "--rm", "-v", volumeName + ":/target", "-v", "<staged-file>:/payload:ro", "alpine:3.20", "sh", "-c", "<write-file>"}, err.Error())
+	}
+	return nil
+}
+
 func (d RemoteDocker) Run(ctx context.Context, spec RunSpec, containerName, networkName string) (string, error) {
+	args, err := dockerRunArgs(spec, containerName, networkName)
+	if err != nil {
+		return "", err
+	}
+	out, err := d.remoteDocker(ctx, 120, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func dockerRunArgs(spec RunSpec, containerName, networkName string) ([]string, error) {
 	args := []string{"run", "-d", "--name", containerName, "--restart", spec.RestartPolicy, "--network", networkName}
+	if spec.PullPolicy != "" {
+		args = append(args, "--pull", spec.PullPolicy)
+	}
 	for _, p := range spec.Ports {
 		hostPort := p.HostPort
 		if hostPort == 0 {
 			allocated, err := freePort()
 			if err != nil {
-				return "", err
+				return nil, err
 			}
 			hostPort = allocated
 		}
@@ -219,7 +261,7 @@ func (d RemoteDocker) Run(ctx context.Context, spec RunSpec, containerName, netw
 	}
 	for k, v := range spec.Env {
 		if !validEnvKey(k) {
-			return "", fmt.Errorf("invalid env key %q", k)
+			return nil, fmt.Errorf("invalid env key %q", k)
 		}
 		args = append(args, "-e", k+"="+v)
 	}
@@ -232,12 +274,15 @@ func (d RemoteDocker) Run(ctx context.Context, spec RunSpec, containerName, netw
 	if spec.Resources.CPU > 0 {
 		args = append(args, "--cpus", strconv.FormatFloat(spec.Resources.CPU, 'f', -1, 64))
 	}
-	args = append(args, spec.Image)
-	out, err := d.remoteDocker(ctx, 120, args...)
-	if err != nil {
-		return "", err
+	if spec.WorkingDirectory != "" {
+		args = append(args, "--workdir", spec.WorkingDirectory)
 	}
-	return strings.TrimSpace(out), nil
+	if spec.User != "" {
+		args = append(args, "--user", spec.User)
+	}
+	args = append(args, spec.Image)
+	args = append(args, spec.Command...)
+	return args, nil
 }
 
 func (d RemoteDocker) Start(ctx context.Context, containerName string) error {
@@ -295,16 +340,17 @@ func (d RemoteDocker) Logs(ctx context.Context, containerName string, tail int) 
 }
 
 func (d RemoteDocker) Inspect(ctx context.Context, containerName string) (*ContainerState, error) {
-	raw, err := d.remoteDocker(ctx, 30, "inspect", containerName)
+	raw, err := d.remoteDocker(ctx, 30, "container", "inspect", containerName)
 	if err != nil {
 		return nil, err
 	}
 	var arr []struct {
 		ID    string `json:"Id"`
 		State struct {
-			Status  string `json:"Status"`
-			Running bool   `json:"Running"`
-			Health  *struct {
+			Status   string `json:"Status"`
+			Running  bool   `json:"Running"`
+			ExitCode int    `json:"ExitCode"`
+			Health   *struct {
 				Status string `json:"Status"`
 			} `json:"Health"`
 		} `json:"State"`
@@ -315,7 +361,7 @@ func (d RemoteDocker) Inspect(ctx context.Context, containerName string) (*Conta
 	if len(arr) == 0 {
 		return nil, errors.New("container not found")
 	}
-	st := &ContainerState{ID: arr[0].ID, Status: arr[0].State.Status, Running: arr[0].State.Running}
+	st := &ContainerState{ID: arr[0].ID, Status: arr[0].State.Status, Running: arr[0].State.Running, ExitCode: arr[0].State.ExitCode}
 	if arr[0].State.Health != nil {
 		st.Health = arr[0].State.Health.Status
 	}
@@ -370,12 +416,19 @@ func (d RemoteDocker) runRemote(ctx context.Context, cmd string, timeoutS int) (
 }
 
 func docker(ctx context.Context, args ...string) (string, error) {
+	return dockerWithInput(ctx, nil, args...)
+}
+
+func dockerWithInput(ctx context.Context, stdin []byte, args ...string) (string, error) {
 	start := time.Now()
 	log.Printf("[containers] docker start args=%s", redactDockerArgs(args))
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
@@ -408,6 +461,32 @@ func redactDockerArgs(args []string) string {
 				key := strings.SplitN(strings.TrimPrefix(out[i], "--env="), "=", 2)[0]
 				out[i] = "--env=" + key + "=<redacted>"
 			}
+		}
+	}
+	// Commands and arguments after a docker-run image frequently contain
+	// credentials or user data. Keep the runtime operation observable without
+	// persisting that payload in app logs or error strings.
+	if len(out) > 0 && out[0] == "run" {
+		valueFlags := map[string]bool{
+			"--name": true, "--restart": true, "--network": true, "--pull": true,
+			"-p": true, "--publish": true, "-e": true, "--env": true,
+			"-v": true, "--volume": true, "--memory": true, "--cpus": true,
+			"--workdir": true, "-w": true, "--user": true, "-u": true, "--label": true,
+		}
+		for i := 1; i < len(out); {
+			arg := out[i]
+			if strings.HasPrefix(arg, "-") {
+				if valueFlags[arg] && i+1 < len(out) {
+					i += 2
+				} else {
+					i++
+				}
+				continue
+			}
+			if i+1 < len(out) {
+				out = append(out[:i+1], "<command redacted>")
+			}
+			break
 		}
 	}
 	return strings.Join(out, " ")

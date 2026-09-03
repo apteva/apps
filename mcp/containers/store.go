@@ -114,12 +114,14 @@ func insertWorkload(db *sql.DB, w *Workload, ports []PortSpec, volumes []VolumeS
 			id, name, blueprint_slug, host_id, instance_id, kind, image, status,
 			desired_status, container_id, container_name, network_name, public_url,
 			health_status, health_path, health_url, config_json, env_json,
-			resources_json, restart_policy, last_error, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			resources_json, restart_policy, last_error, owner_app_install_id,
+			owner_app_name, project_id, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		w.ID, w.Name, w.BlueprintSlug, w.HostID, w.InstanceID, "container", w.Image, w.Status,
 		w.DesiredStatus, w.ContainerID, w.ContainerName, w.NetworkName, w.PublicURL,
 		w.HealthStatus, w.HealthPath, w.HealthURL, w.ConfigJSON, w.EnvJSON,
-		w.ResourcesJSON, w.RestartPolicy, w.LastError, now, now)
+		w.ResourcesJSON, w.RestartPolicy, w.LastError, w.OwnerAppInstallID,
+		w.OwnerAppName, w.ProjectID, now, now)
 	if err != nil {
 		log.Printf("[containers] db insert workload error workload_id=%s err=%q", w.ID, err.Error())
 		return err
@@ -199,7 +201,8 @@ func getWorkloadBase(db *sql.DB, where string, arg any) (*Workload, error) {
 	q := `SELECT id, name, blueprint_slug, host_id, instance_id, kind, image, status,
 		desired_status, container_id, container_name, network_name, public_url,
 		health_status, health_path, health_url, config_json, env_json, resources_json,
-		restart_policy, COALESCE(last_health_at,''), last_error, created_at, updated_at
+		restart_policy, COALESCE(last_health_at,''), last_error,
+		owner_app_install_id, owner_app_name, project_id, created_at, updated_at
 		FROM containers_workloads ` + where
 	var w Workload
 	var envRaw, resRaw string
@@ -207,7 +210,8 @@ func getWorkloadBase(db *sql.DB, where string, arg any) (*Workload, error) {
 		&w.ID, &w.Name, &w.BlueprintSlug, &w.HostID, &w.InstanceID, &w.Kind, &w.Image, &w.Status,
 		&w.DesiredStatus, &w.ContainerID, &w.ContainerName, &w.NetworkName, &w.PublicURL,
 		&w.HealthStatus, &w.HealthPath, &w.HealthURL, &w.ConfigJSON, &envRaw, &resRaw,
-		&w.RestartPolicy, &w.LastHealthAt, &w.LastError, &w.CreatedAt, &w.UpdatedAt,
+		&w.RestartPolicy, &w.LastHealthAt, &w.LastError,
+		&w.OwnerAppInstallID, &w.OwnerAppName, &w.ProjectID, &w.CreatedAt, &w.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -218,7 +222,13 @@ func getWorkloadBase(db *sql.DB, where string, arg any) (*Workload, error) {
 	w.EnvJSON = envRaw
 	w.ResourcesJSON = resRaw
 	w.Env = decodeMap(envRaw)
+	w.EnvKeys = envKeys(w.Env)
 	w.Resources = decodeResources(resRaw)
+	var storedSpec RunSpec
+	_ = jsonUnmarshal(w.ConfigJSON, &storedSpec)
+	w.Command = storedSpec.Command
+	w.WorkingDirectory = storedSpec.WorkingDirectory
+	w.User = storedSpec.User
 	return &w, nil
 }
 
