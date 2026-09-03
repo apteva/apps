@@ -2,14 +2,15 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.1.0
+version: 0.1.1
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
   UI while the required Containers app owns Docker workloads, volumes,
   command execution, and bounded logs. This first release is local-only
   and intentionally provides a command console rather than an interactive
-  PTY or a second code editor.
+  PTY or a second code editor. v0.1.1 keeps native panel requests pinned to
+  the selected project and install.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/workspaces

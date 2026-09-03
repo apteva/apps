@@ -96,8 +96,10 @@ type Tab = "overview" | "commands" | "runtime" | "activity";
 
 const API = "/api/apps/workspaces/api";
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API}${path}`, {
+async function request<T>(projectId: string, installId: number, path: string, init?: RequestInit): Promise<T> {
+  const separator = path.includes("?") ? "&" : "?";
+  const scope = new URLSearchParams({ project_id: projectId, install_id: String(installId) });
+  const response = await fetch(`${API}${path}${separator}${scope.toString()}`, {
     credentials: "same-origin",
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
@@ -159,7 +161,7 @@ function commandMark(status: string): string {
   return "·";
 }
 
-export default function WorkspacesPanel(_props: NativePanelProps) {
+export default function WorkspacesPanel({ projectId, installId }: NativePanelProps) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [summary, setSummary] = useState<Record<string, number>>({});
   const [selectedId, setSelectedId] = useState("");
@@ -177,29 +179,29 @@ export default function WorkspacesPanel(_props: NativePanelProps) {
 
   const loadList = useCallback(async () => {
     try {
-      const response = await request<{ workspaces: Workspace[]; summary: Record<string, number> }>("/workspaces");
+      const response = await request<{ workspaces: Workspace[]; summary: Record<string, number> }>(projectId, installId, "/workspaces");
       setWorkspaces(response.workspaces || []);
       setSummary(response.summary || {});
       setError("");
     } catch (reason) {
       setError((reason as Error).message);
     }
-  }, []);
+  }, [projectId, installId]);
 
   const loadDetail = useCallback(async (id: string, quiet = false) => {
     if (!id) return;
     try {
-      const response = await request<Detail>(`/workspaces/${encodeURIComponent(id)}`);
+      const response = await request<Detail>(projectId, installId, `/workspaces/${encodeURIComponent(id)}`);
       setDetail(response);
       if (!quiet) setError("");
     } catch (reason) {
       if (!quiet) setError((reason as Error).message);
     }
-  }, []);
+  }, [projectId, installId]);
 
   useEffect(() => {
     loadList();
-    request<{ profiles: Profile[]; default: string }>("/profiles")
+    request<{ profiles: Profile[]; default: string }>(projectId, installId, "/profiles")
       .then((response) => {
         setProfiles(response.profiles || []);
         setDefaultProfile(response.default || "go");
@@ -227,7 +229,7 @@ export default function WorkspacesPanel(_props: NativePanelProps) {
     setBusy("create");
     setError("");
     try {
-      const response = await request<{ workspace: Workspace }>("/workspaces", { method: "POST", body: JSON.stringify(create) });
+      const response = await request<{ workspace: Workspace }>(projectId, installId, "/workspaces", { method: "POST", body: JSON.stringify(create) });
       setShowCreate(false);
       setCreate({ name: "", purpose: "", profile: defaultProfile, ttl_minutes: 120 });
       await loadList();
@@ -245,7 +247,7 @@ export default function WorkspacesPanel(_props: NativePanelProps) {
     setBusy(action);
     setError("");
     try {
-      await request(`/workspaces/${encodeURIComponent(selected.id)}/${action}`, { method: "POST" });
+      await request(projectId, installId, `/workspaces/${encodeURIComponent(selected.id)}/${action}`, { method: "POST" });
       await Promise.all([loadDetail(selected.id), loadList()]);
     } catch (reason) {
       setError((reason as Error).message);
@@ -259,7 +261,7 @@ export default function WorkspacesPanel(_props: NativePanelProps) {
     setBusy("extend");
     setError("");
     try {
-      await request(`/workspaces/${encodeURIComponent(selected.id)}/extend`, { method: "POST", body: JSON.stringify({ ttl_minutes: ttl }) });
+      await request(projectId, installId, `/workspaces/${encodeURIComponent(selected.id)}/extend`, { method: "POST", body: JSON.stringify({ ttl_minutes: ttl }) });
       await Promise.all([loadDetail(selected.id), loadList()]);
     } catch (reason) {
       setError((reason as Error).message);
@@ -273,7 +275,7 @@ export default function WorkspacesPanel(_props: NativePanelProps) {
     setBusy("destroy");
     setError("");
     try {
-      await request(`/workspaces/${encodeURIComponent(selected.id)}?confirm=1`, { method: "DELETE" });
+      await request(projectId, installId, `/workspaces/${encodeURIComponent(selected.id)}?confirm=1`, { method: "DELETE" });
       setShowDestroy(false);
       setSelectedId("");
       setDetail(null);
@@ -290,7 +292,7 @@ export default function WorkspacesPanel(_props: NativePanelProps) {
     setBusy("command");
     setError("");
     try {
-      await request(`/workspaces/${encodeURIComponent(selected.id)}/commands`, {
+      await request(projectId, installId, `/workspaces/${encodeURIComponent(selected.id)}/commands`, {
         method: "POST",
         body: JSON.stringify({ shell_command: commandText.trim(), working_directory: "/workspace" }),
       });
@@ -308,7 +310,7 @@ export default function WorkspacesPanel(_props: NativePanelProps) {
     setBusy(`cancel:${command.id}`);
     setError("");
     try {
-      await request(`/workspaces/${encodeURIComponent(selected.id)}/commands/${encodeURIComponent(command.id)}/cancel`, { method: "POST" });
+      await request(projectId, installId, `/workspaces/${encodeURIComponent(selected.id)}/commands/${encodeURIComponent(command.id)}/cancel`, { method: "POST" });
       await loadDetail(selected.id);
     } catch (reason) {
       setError((reason as Error).message);
@@ -321,7 +323,7 @@ export default function WorkspacesPanel(_props: NativePanelProps) {
     if (!selected) return;
     setBusy(`logs:${command.id}`);
     try {
-      const response = await request<{ logs: string }>(`/workspaces/${encodeURIComponent(selected.id)}/commands/${encodeURIComponent(command.id)}/logs?tail=1000`);
+      const response = await request<{ logs: string }>(projectId, installId, `/workspaces/${encodeURIComponent(selected.id)}/commands/${encodeURIComponent(command.id)}/logs?tail=1000`);
       setLogs({ command, body: response.logs || "" });
     } catch (reason) {
       setError((reason as Error).message);
