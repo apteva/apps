@@ -383,9 +383,9 @@ func (a *App) stopWorkspace(app *sdk.AppCtx, actor Actor, w *Workspace, eventTyp
 		"lifecycle_status": status, "activity_status": activityIdle,
 		"runtime_status": "stopped", "last_error": "", "updated_at": nowUTC(),
 	})
-	summary := "Workspace stopped; volumes preserved"
+	summary := "Workspace stopped; container and volumes preserved"
 	if status == statusExpired {
-		summary = "Workspace TTL expired; stopped with volumes preserved"
+		summary = "Workspace TTL expired; stopped with container and volumes preserved"
 	}
 	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, eventType, actor, summary, nil)
 	app.EmitWithProject(eventType, w.ProjectID, map[string]any{"workspace_id": w.ID})

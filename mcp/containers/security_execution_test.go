@@ -161,7 +161,7 @@ func TestArchiveValidationRejectsTraversalAndEscapingLinks(t *testing.T) {
 	}
 }
 
-func TestExecutionRunsAsIsolatedOwnedContainerAndRetainsLogs(t *testing.T) {
+func TestExecutionRunsInsideOwnedWorkloadContainerAndRetainsLogs(t *testing.T) {
 	db := testDB(t)
 	backend := &executionBackendStub{
 		state: &ContainerState{ID: "cid-exec", Status: "exited", Running: false, ExitCode: 0},
@@ -209,8 +209,8 @@ func TestExecutionRunsAsIsolatedOwnedContainerAndRetainsLogs(t *testing.T) {
 		t.Fatalf("logs=%q err=%v", logs, err)
 	}
 	started := backend.startedSpec()
-	if started.ContainerName == w.ContainerName || started.Image != w.Image || started.NetworkName != w.NetworkName {
-		t.Fatalf("execution did not use isolated workload-derived container: %+v", started)
+	if started.ContainerName != w.ContainerName {
+		t.Fatalf("execution targeted %q, want persistent workload container %q", started.ContainerName, w.ContainerName)
 	}
 	if len(started.Env) != 1 || started.Env["CI"] != "true" {
 		t.Fatalf("execution environment was not isolated: %+v", started.Env)
@@ -238,7 +238,7 @@ func TestExecutionRunsAsIsolatedOwnedContainerAndRetainsLogs(t *testing.T) {
 	}
 }
 
-func TestExecutionCancellationStopsOnlyExecutionContainer(t *testing.T) {
+func TestExecutionCancellationStopsCommandInsideWorkloadContainer(t *testing.T) {
 	db := testDB(t)
 	backend := &executionBackendStub{
 		state: &ContainerState{ID: "cid-exec", Status: "running", Running: true},
@@ -280,8 +280,8 @@ func TestExecutionCancellationStopsOnlyExecutionContainer(t *testing.T) {
 	stopped := backend.stopped
 	startedName := backend.started.ContainerName
 	backend.mu.Unlock()
-	if !stopped || startedName == w.ContainerName {
-		t.Fatalf("cancel did not isolate execution: stopped=%t execution=%q workload=%q", stopped, startedName, w.ContainerName)
+	if !stopped || startedName != w.ContainerName {
+		t.Fatalf("cancel did not target command in workload container: stopped=%t execution=%q workload=%q", stopped, startedName, w.ContainerName)
 	}
 }
 
@@ -326,24 +326,24 @@ func (f *executionBackendStub) StartExecution(_ context.Context, spec executionR
 	return "cid-exec", nil
 }
 
-func (f *executionBackendStub) InspectExecution(context.Context, string) (*ContainerState, error) {
+func (f *executionBackendStub) InspectExecution(context.Context, *Execution) (*ContainerState, error) {
 	return f.state, nil
 }
 
-func (f *executionBackendStub) StopExecution(context.Context, string) error {
+func (f *executionBackendStub) StopExecution(context.Context, *Execution) error {
 	f.mu.Lock()
 	f.stopped = true
 	f.mu.Unlock()
 	return nil
 }
 
-func (f *executionBackendStub) ExecutionLogs(context.Context, string, int) (string, error) {
+func (f *executionBackendStub) ExecutionLogs(context.Context, *Execution, int) (string, error) {
 	return f.logs, nil
 }
 
-func (f *executionBackendStub) RemoveExecution(_ context.Context, name string) error {
+func (f *executionBackendStub) RemoveExecution(_ context.Context, execution *Execution) error {
 	f.mu.Lock()
-	f.removed = append(f.removed, name)
+	f.removed = append(f.removed, execution.RuntimeContainerName)
 	f.mu.Unlock()
 	return nil
 }

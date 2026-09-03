@@ -1,5 +1,13 @@
 # Workspaces
 
+## v0.2.0
+
+- Run every command inside the workspace's persistent container. Installed OS
+  packages and writable-layer files survive between commands and stop/resume;
+  background services remain available to later commands while it is running.
+- Keep asynchronous command logs, cancellation, attribution, and lifecycle
+  auditing without creating disposable command containers.
+
 ## v0.1.1
 
 - Keep every native panel API request pinned to the selected project and app
@@ -8,7 +16,7 @@
 Workspaces is the control room for local development environments. It owns
 workspace identity, assignment, TTL, activity, commands, safety context, and
 the operator UI. The required Containers app owns Docker workloads, named
-volumes, execution containers, cancellation, bounded logs, and storage usage.
+volumes, in-container execution, cancellation, bounded logs, and storage usage.
 
 The product boundary is deliberate:
 
@@ -18,7 +26,7 @@ The product boundary is deliberate:
 - **Containers** is the low-level runtime and remains useful as an operator
   debugger; Workspaces does not expose raw Docker controls.
 
-## v0.1 surfaces
+## Current surfaces
 
 - Workspace list with derived running/busy/suspended/failed state and TTL.
 - Workspace detail with ownership, origin, approved image, resource limits,
@@ -26,15 +34,19 @@ The product boundary is deliberate:
 - Non-interactive asynchronous command history with bounded logs, exit status,
   duration, actor attribution, and cancellation.
 - Stop/resume, TTL extension, and confirmed permanent destruction.
-- Automatic expiration: stop at `expires_at`, preserve volumes for the
+- Automatic expiration: stop at `expires_at`, preserve the container and volumes for the
   configured recovery window, then delete them at `delete_at`.
 - App-only creation with a bounded source archive and app-only source export.
 - App-only origin/Git-safety context updates without taking ownership of Git.
 
-Only one command may execute in a workspace at a time. Each command starts in
-an isolated execution container and shares `/workspace`, `/cache`, the approved
-image, and the workspace network. This is a command console, not a PTY:
-process state, `cd`, and shell variables do not carry between commands.
+Only one tracked command may execute in a workspace at a time. Each command is
+a new process inside the workspace's persistent container. `/workspace`,
+`/cache`, installed packages, and writable-layer files remain available to later
+commands and survive stop/resume. Background services remain available between
+commands while the container is running, but stopping it terminates processes.
+This is a command console, not a PTY: per-shell state such as `cd` and exported
+variables does not carry into the next command unless it is represented in the
+filesystem or a running service.
 
 ## Runtime profiles
 

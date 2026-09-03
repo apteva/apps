@@ -121,7 +121,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "containers_health", Description: "Probe workload health.", InputSchema: idSchema(), HandlerCtx: a.toolHealthCtx},
 		{Name: "containers_usage_get", Description: "Measure generic workload usage metrics such as container volume storage bytes.", InputSchema: idSchema(), HandlerCtx: a.toolUsageGetCtx},
 		{Name: "containers_blueprints_list", Description: "List blueprints.", InputSchema: schemaObject(nil, nil), Handler: a.toolBlueprints},
-		{Name: "containers_exec_start", Description: "Start an asynchronous command in an isolated execution container that shares an owned workload's image, network, and named volumes.", InputSchema: executionStartSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionStart},
+		{Name: "containers_exec_start", Description: "Start an asynchronous command inside an owned workload container so system and process state persist across commands.", InputSchema: executionStartSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionStart},
 		{Name: "containers_exec_get", Description: "Fetch one owned execution.", InputSchema: executionIDSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionGet},
 		{Name: "containers_exec_logs", Description: "Tail bounded logs for one owned execution.", InputSchema: executionLogsSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionLogs},
 		{Name: "containers_exec_cancel", Description: "Cancel one owned queued or running execution.", InputSchema: executionIDSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionCancel},
@@ -479,10 +479,10 @@ func (a *App) destroyWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.D
 		return err
 	}
 	var cleanupErrs []error
+	cleanupErrs = append(cleanupErrs, removeWorkloadExecutionRuntime(ctx, db, backend, w.ID)...)
 	if err := backend.Remove(ctx, w.ContainerName, true); err != nil && !isDockerMissingResourceError(err, "container") {
 		cleanupErrs = append(cleanupErrs, err)
 	}
-	cleanupErrs = append(cleanupErrs, removeWorkloadExecutionContainers(ctx, db, backend, w.ID)...)
 	if err := backend.RemoveNetwork(ctx, w.NetworkName); err != nil && !isDockerMissingResourceError(err, "network") {
 		cleanupErrs = append(cleanupErrs, err)
 	}

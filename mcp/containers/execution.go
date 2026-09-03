@@ -61,11 +61,7 @@ type executionInput struct {
 type executionRuntimeSpec struct {
 	ExecutionID      string
 	ContainerName    string
-	Image            string
-	NetworkName      string
-	Volumes          []VolumeSpec
 	Env              map[string]string
-	Resources        ResourceSpec
 	Argv             []string
 	WorkingDirectory string
 	User             string
@@ -73,10 +69,10 @@ type executionRuntimeSpec struct {
 
 type executionBackend interface {
 	StartExecution(context.Context, executionRuntimeSpec) (string, error)
-	InspectExecution(context.Context, string) (*ContainerState, error)
-	StopExecution(context.Context, string) error
-	ExecutionLogs(context.Context, string, int) (string, error)
-	RemoveExecution(context.Context, string) error
+	InspectExecution(context.Context, *Execution) (*ContainerState, error)
+	StopExecution(context.Context, *Execution) error
+	ExecutionLogs(context.Context, *Execution, int) (string, error)
+	RemoveExecution(context.Context, *Execution) error
 }
 
 func normalizeExecutionInput(in executionInput, workload *Workload, defaultTimeout int) (executionInput, error) {
@@ -152,54 +148,6 @@ func cleanContainerPath(value string) (string, error) {
 	return path.Clean(value), nil
 }
 
-func (d LocalDocker) StartExecution(ctx context.Context, spec executionRuntimeSpec) (string, error) {
-	args := []string{"run", "-d", "--name", spec.ContainerName,
-		"--label", "apteva.containers.execution=" + spec.ExecutionID,
-		"--network", spec.NetworkName,
-	}
-	for _, volume := range spec.Volumes {
-		args = append(args, "-v", volume.DockerVolumeName+":"+volume.MountPath)
-	}
-	keys := envKeys(spec.Env)
-	for _, key := range keys {
-		args = append(args, "-e", key+"="+spec.Env[key])
-	}
-	if spec.Resources.MemoryMB > 0 {
-		args = append(args, "--memory", strconv.Itoa(spec.Resources.MemoryMB)+"m")
-	}
-	if spec.Resources.CPU > 0 {
-		args = append(args, "--cpus", strconv.FormatFloat(spec.Resources.CPU, 'f', -1, 64))
-	}
-	if spec.WorkingDirectory != "" {
-		args = append(args, "--workdir", spec.WorkingDirectory)
-	}
-	if spec.User != "" {
-		args = append(args, "--user", spec.User)
-	}
-	args = append(args, spec.Image)
-	args = append(args, spec.Argv...)
-	out, err := docker(ctx, args...)
-	return strings.TrimSpace(out), err
-}
-
-func (d LocalDocker) InspectExecution(ctx context.Context, name string) (*ContainerState, error) {
-	return d.Inspect(ctx, name)
-}
-
-func (d LocalDocker) StopExecution(ctx context.Context, name string) error {
-	_, err := docker(ctx, "kill", name)
-	return err
-}
-
-func (d LocalDocker) ExecutionLogs(ctx context.Context, name string, tail int) (string, error) {
-	return d.Logs(ctx, name, tail)
-}
-
-func (d LocalDocker) RemoveExecution(ctx context.Context, name string) error {
-	_, err := docker(ctx, "rm", "-f", name)
-	return err
-}
-
 func (a *App) startExecution(callCtx context.Context, app *sdk.AppCtx, workload *Workload, owner ownerIdentity, in executionInput) (*Execution, error) {
 	if workload.HostID != 0 || workload.InstanceID != 0 {
 		return nil, errors.New("container execution currently supports local workloads only")
@@ -223,7 +171,7 @@ func (a *App) startExecution(callCtx context.Context, app *sdk.AppCtx, workload 
 		Argv: append([]string(nil), in.Argv...), WorkingDirectory: in.WorkingDirectory,
 		Env: in.Env, EnvKeys: envKeys(in.Env), TimeoutSeconds: in.TimeoutSeconds,
 		Status: executionQueued, IdempotencyKey: in.IdempotencyKey,
-		RuntimeContainerName: "containers-exec-" + strings.TrimPrefix(executionID, "exe_"),
+		RuntimeContainerName: workload.ContainerName,
 	}
 	created, duplicate, err := insertExecution(app.AppDB(), execution)
 	if err != nil {
@@ -257,9 +205,8 @@ func (a *App) launchExecution(app *sdk.AppCtx, execution *Execution, workload *W
 	}
 	startCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	runtimeID, err := execBackend.StartExecution(startCtx, executionRuntimeSpec{
-		ExecutionID: execution.ID, ContainerName: execution.RuntimeContainerName,
-		Image: workload.Image, NetworkName: workload.NetworkName, Volumes: workload.Volumes,
-		Env: env, Resources: workload.Resources, Argv: execution.Argv,
+		ExecutionID: execution.ID, ContainerName: workload.ContainerName,
+		Env: env, Argv: execution.Argv,
 		WorkingDirectory: execution.WorkingDirectory, User: workload.User,
 	})
 	cancel()
@@ -274,9 +221,11 @@ func (a *App) launchExecution(app *sdk.AppCtx, execution *Execution, workload *W
 	}
 	started, err := markExecutionStarted(app.AppDB(), execution.ID, runtimeID)
 	if err != nil || !started {
+		startedExecution := *execution
+		startedExecution.RuntimeContainerID = runtimeID
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		_ = execBackend.StopExecution(stopCtx, execution.RuntimeContainerName)
-		_ = execBackend.RemoveExecution(stopCtx, execution.RuntimeContainerName)
+		_ = execBackend.StopExecution(stopCtx, &startedExecution)
+		_ = execBackend.RemoveExecution(stopCtx, &startedExecution)
 		stopCancel()
 		current, _ := getExecution(app.AppDB(), execution.ID)
 		if current != nil && !executionTerminal(current.Status) {
@@ -313,7 +262,7 @@ func (a *App) superviseExecution(app *sdk.AppCtx, id string) {
 			return
 		}
 		inspectCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		state, err := backend.InspectExecution(inspectCtx, execution.RuntimeContainerName)
+		state, err := backend.InspectExecution(inspectCtx, execution)
 		cancel()
 		if err != nil {
 			a.failExecution(app, id, "inspect_failed", err)
@@ -336,13 +285,13 @@ func (a *App) finishExecution(app *sdk.AppCtx, execution *Execution, status stri
 	backend, _ := a.executionBackendFor(app, execution)
 	if errorCode == "timeout" && backend != nil {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		_ = backend.StopExecution(stopCtx, execution.RuntimeContainerName)
+		_ = backend.StopExecution(stopCtx, execution)
 		cancel()
 	}
 	output := ""
 	if backend != nil {
 		logsCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		output, _ = backend.ExecutionLogs(logsCtx, execution.RuntimeContainerName, 2000)
+		output, _ = backend.ExecutionLogs(logsCtx, execution, 2000)
 		cancel()
 	}
 	capped, truncated := capExecutionOutput(output, configInt(app, "max_execution_output_bytes", 1048576))
@@ -408,7 +357,7 @@ func (a *App) cancelExecution(app *sdk.AppCtx, execution *Execution) (*Execution
 			return nil, err
 		}
 		stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		err = backend.StopExecution(stopCtx, execution.RuntimeContainerName)
+		err = backend.StopExecution(stopCtx, execution)
 		cancel()
 		if err != nil && !isDockerMissingResourceError(err, "container") {
 			return nil, err
@@ -449,7 +398,7 @@ func reconcileExecutions(ctx context.Context, app *sdk.AppCtx, containerApp *App
 			if execution.RuntimeContainerID == "" {
 				if backend, backendErr := containerApp.executionBackendFor(app, execution); backendErr == nil {
 					stopCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-					_ = backend.StopExecution(stopCtx, execution.RuntimeContainerName)
+					_ = backend.StopExecution(stopCtx, execution)
 					cancel()
 				}
 				containerApp.finishExecution(app, execution, executionCancelled, nil, "cancelled", "")
@@ -477,7 +426,7 @@ func retainExecutionLogs(ctx context.Context, app *sdk.AppCtx, containerApp *App
 		if execution.RuntimeContainerName != "" {
 			if backend, err := containerApp.executionBackendFor(app, execution); err == nil {
 				rmCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-				_ = backend.RemoveExecution(rmCtx, execution.RuntimeContainerName)
+				_ = backend.RemoveExecution(rmCtx, execution)
 				cancel()
 			}
 		}
@@ -665,7 +614,7 @@ func (a *App) cancelWorkloadExecutions(app *sdk.AppCtx, workloadID string) error
 	return nil
 }
 
-func removeWorkloadExecutionContainers(ctx context.Context, db *sql.DB, backend DockerBackend, workloadID string) []error {
+func removeWorkloadExecutionRuntime(ctx context.Context, db *sql.DB, backend DockerBackend, workloadID string) []error {
 	executions, err := listExecutionsForWorkload(db, workloadID)
 	if err != nil {
 		return []error{fmt.Errorf("list workload executions: %w", err)}
@@ -682,7 +631,7 @@ func removeWorkloadExecutionContainers(ctx context.Context, db *sql.DB, backend 
 		if execution.RuntimeContainerName == "" {
 			continue
 		}
-		if err := execBackend.RemoveExecution(ctx, execution.RuntimeContainerName); err != nil && !isDockerMissingResourceError(err, "container") {
+		if err := execBackend.RemoveExecution(ctx, execution); err != nil && !isDockerMissingResourceError(err, "container") {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove execution %s: %w", execution.ID, err))
 		}
 	}

@@ -202,7 +202,7 @@ func (a *App) toolExecutionLogs(callCtx context.Context, app *sdk.AppCtx, args m
 			return nil, backendErr
 		}
 		ctx, cancel := context.WithTimeout(callCtx, 15*time.Second)
-		logs, err = backend.ExecutionLogs(ctx, execution.RuntimeContainerName, intArg(args, "tail", 200))
+		logs, err = backend.ExecutionLogs(ctx, execution, intArg(args, "tail", 200))
 		cancel()
 		outputBytes = len(logs)
 		logs, outputTruncated = capExecutionOutput(logs, configInt(app, "max_execution_output_bytes", 1048576))
