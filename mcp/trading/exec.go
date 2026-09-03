@@ -23,7 +23,6 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
-	"github.com/google/uuid"
 )
 
 // engine bundles everything the tick loops need. Instantiated once
@@ -161,54 +160,81 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 		reconcileLiveAccounts(e)
 	}
 
-	// 3. Daily-loss halt sweep.
+	// 3. Portfolio risk + objective sweep, shared by simulation, broker
+	// paper, and broker live portfolios.
 	pfs, err := dbAllPortfolios(e.db)
 	if err != nil {
 		return nil
 	}
 	for _, p := range pfs {
-		if p.Status == "halted" {
-			continue
-		}
 		eq, err := computeEquity(e.db, p)
 		if err != nil {
 			continue
 		}
-		day := utcDay(time.Now())
+		now := time.Now().UTC()
+		state, _ := dbUpdatePortfolioRiskState(e.db, p, eq)
+		_ = initializeDueObjectiveBaselines(e.db, p, eq, now)
+		policy, policyErr := dbGetPortfolioRiskPolicy(e.db, p)
+		if policyErr != nil {
+			continue
+		}
+		day := utcDay(now)
 		baseline, ok, _ := dbGetDayBaseline(e.db, p.ID, day)
 		if !ok {
 			_ = dbSetDayBaseline(e.db, p.ID, day, eq)
+			baseline = eq
+		}
+		dayPctMove := 0.0
+		if baseline > 0 {
+			dayPctMove = (eq - baseline) / baseline * 100
+		}
+
+		snap, _ := snapshotPortfolio(e.db, p)
+		objectives, _ := dbListPortfolioObjectives(e.db, p, false)
+		for _, objective := range objectives {
+			objectiveProgress(e.db, p, objective, snap)
+		}
+		emit("portfolio.performance.updated", map[string]any{
+			"portfolio_id": p.ID, "project_id": p.ProjectID, "equity": eq,
+			"day_return_pct": dayPctMove, "risk_policy": policy, "risk_state": state,
+			"objectives": objectives,
+		})
+
+		if p.Status == "halted" {
 			continue
 		}
-		if baseline <= 0 {
+		reason, actual, limit := "", 0.0, 0.0
+		if state != nil && state.CurrentDrawdownPct < -policy.MaxDrawdownPct {
+			reason, actual, limit = "max_drawdown_halt", state.CurrentDrawdownPct, -policy.MaxDrawdownPct
+		} else if dayPctMove < -policy.MaxDailyLossPct {
+			reason, actual, limit = "daily_loss_halt", dayPctMove, -policy.MaxDailyLossPct
+		}
+		if reason == "" {
 			continue
 		}
-		dayPctMove := (eq - baseline) / baseline * 100
-		halt := portfolioLossHaltPct(p)
-		if dayPctMove < -halt {
-			// For live portfolios, cancel working broker orders BEFORE
-			// flipping status — turns the halt from a paper concept into
-			// a real circuit-breaker. Best-effort: failures don't stall
-			// the local status flip (the next reconcile tick catches it).
-			if p.Mode == "live" {
-				cancelLiveWorkingOrders(e, p, "daily_loss_halt")
-			}
-			_ = dbSetPortfolioStatus(e.db, p.ID, "halted")
-			emit("portfolio.status.changed", map[string]any{
-				"id": p.ID, "status": "halted", "reason": "daily_loss_halt",
-				"day_pct": dayPctMove, "threshold": -halt, "mode": p.Mode,
+		// Cancel broker working orders before flipping the local status. The
+		// cancellation is best-effort; reconciliation keeps checking it.
+		if p.Mode == "live" {
+			cancelLiveWorkingOrders(e, p, reason)
+		}
+		_ = dbSetPortfolioStatus(e.db, p.ID, "halted")
+		emit("portfolio.status.changed", map[string]any{
+			"id": p.ID, "status": "halted", "reason": reason,
+			"actual_pct": actual, "threshold_pct": limit, "mode": p.Mode,
+		})
+		emit("risk.limit.breached", map[string]any{
+			"portfolio_id": p.ID, "project_id": p.ProjectID, "code": reason,
+			"actual_pct": actual, "limit_pct": limit, "mode": p.Mode,
+		})
+		body := fmt.Sprintf("Risk halt fired (%s) — equity %.2f, actual %.2f%%, boundary %.2f%%.",
+			reason, eq, actual, limit)
+		if entryID, jerr := dbInsertJournal(e.db, p.ProjectID, p.ID, "alert", body,
+			map[string]any{"rule": reason, "actual_pct": actual, "threshold_pct": limit}); jerr == nil {
+			emit("journal.appended", map[string]any{
+				"id": entryID, "portfolio_id": p.ID, "kind": "alert", "body": body,
 			})
-			body := fmt.Sprintf("Daily-loss halt fired — equity %.2f vs baseline %.2f (%.2f%%, threshold -%.1f%%).",
-				eq, baseline, dayPctMove, halt)
-			if entryID, jerr := dbInsertJournal(e.db, p.ProjectID, p.ID, "alert",
-				body,
-				map[string]any{"rule": "daily_loss_halt", "day_pct": dayPctMove, "threshold": -halt}); jerr == nil {
-				emit("journal.appended", map[string]any{
-					"id": entryID, "portfolio_id": p.ID, "kind": "alert", "body": body,
-				})
-			}
-			notifyInstances(e, p, fmt.Sprintf("HALT %s — daily-loss halt fired (%.2f%%).", p.Name, dayPctMove))
 		}
+		notifyInstances(e, p, fmt.Sprintf("HALT %s — %s fired (%.2f%%).", p.Name, reason, actual))
 	}
 
 	// 4. Record tick metrics + emit one-line summary so a sidecar log
@@ -665,70 +691,28 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 			continue
 		}
 		rationale := fmt.Sprintf("Strategy %s assignment #%d rebalance: %s", strategy.Name, assignment.ID, strings.Join(eval.Decisions, "; "))
-		if portfolioBrokerBacked(pf) {
-			out, err := (&App{}).toolOrderPlace(app, map[string]any{
-				"_project_id": pf.ProjectID, "portfolio_id": pf.ID, "symbol": p.symbol,
-				"side": p.side, "type": "market", "qty": p.qty, "tif": "day",
-				"rationale": rationale, "source_override": "strategy",
-			})
-			if err != nil {
-				return created, false, err
-			}
-			result, _ := out.(map[string]any)
-			if fmt.Sprint(result["status"]) == "rejected" {
-				return created, false, fmt.Errorf("strategy order rejected: %s", fmt.Sprint(result["detail"]))
-			}
-			orderID := strings.TrimSpace(fmt.Sprint(result["order_id"]))
-			if orderID == "" {
-				return created, false, errors.New("broker strategy order returned no order_id")
-			}
-			order, err := dbGetOrder(e.db, pf.ProjectID, orderID)
-			if err != nil {
-				return created, false, err
-			}
-			created = append(created, order)
-			continue
+		out, err := (&App{}).toolOrderPlace(app, map[string]any{
+			"_project_id": pf.ProjectID, "portfolio_id": pf.ID, "symbol": p.symbol,
+			"side": p.side, "type": "market", "qty": p.qty, "tif": "day",
+			"rationale": rationale, "source_override": "strategy", "strategy_id": strategy.ID,
+			"assignment_id": assignment.ID, "target_weight": targets[p.symbol],
+		})
+		if err != nil {
+			return created, false, err
 		}
-		order := &Order{
-			ID:          "o-" + uuid.NewString()[:8],
-			PortfolioID: pf.ID,
-			Symbol:      p.symbol,
-			AssetClass:  inferAssetClass(p.symbol),
-			Side:        p.side,
-			Type:        "market",
-			Qty:         p.qty,
-			TIF:         "day",
-			Status:      "working",
-			Rationale:   rationale,
-			Source:      "strategy",
+		result, _ := out.(map[string]any)
+		if fmt.Sprint(result["status"]) == "rejected" {
+			return created, false, fmt.Errorf("strategy order rejected: %s", fmt.Sprint(result["detail"]))
 		}
-		if err := dbInsertOrder(e.db, order, pf.ProjectID); err != nil {
+		orderID := strings.TrimSpace(fmt.Sprint(result["order_id"]))
+		if orderID == "" {
+			return created, false, errors.New("strategy order returned no order_id")
+		}
+		order, err := dbGetOrder(e.db, pf.ProjectID, orderID)
+		if err != nil {
 			return created, false, err
 		}
 		created = append(created, order)
-		emit("order.placed", map[string]any{
-			"order_id":      order.ID,
-			"portfolio_id":  pf.ID,
-			"strategy_id":   strategy.ID,
-			"assignment_id": assignment.ID,
-			"symbol":        order.Symbol,
-			"asset_class":   order.AssetClass,
-			"side":          order.Side,
-			"type":          order.Type,
-			"qty":           order.Qty,
-			"status":        "working",
-			"rationale":     rationale,
-			"mode":          "paper",
-			"source":        "strategy",
-		})
-		if entryID, err := dbInsertJournal(e.db, pf.ProjectID, pf.ID, "rationale", rationale, map[string]any{
-			"order_id": order.ID, "symbol": order.Symbol, "side": order.Side, "qty": order.Qty,
-			"strategy_id": strategy.ID, "assignment_id": assignment.ID, "target_weight": targets[p.symbol],
-		}); err == nil {
-			emit("journal.appended", map[string]any{
-				"id": entryID, "portfolio_id": pf.ID, "kind": "rationale", "body": rationale,
-			})
-		}
 	}
 	return created, false, nil
 }
@@ -795,13 +779,14 @@ func (e *engine) takeFillCounter() int {
 	return int(n)
 }
 
-// portfolioLossHaltPct — pulls per-portfolio override from config_json
-// or falls back to the install-wide default from APTEVA_APP_CONFIG.
-func portfolioLossHaltPct(p *Portfolio) float64 {
-	// Per-portfolio override (config_json column) — TODO when we expose it.
+// configuredDailyLossHaltPct returns the install-wide compatibility default.
+func configuredDailyLossHaltPct() float64 {
+	if globalCtx == nil {
+		return -defaultLossHalt
+	}
 	cfgRaw := globalCtx.Config().Get("daily_loss_halt_pct")
 	if cfgRaw != "" {
-		if v, err := strconv.ParseFloat(cfgRaw, 64); err == nil {
+		if v, err := strconv.ParseFloat(cfgRaw, 64); err == nil && v > 0 {
 			return v
 		}
 	}

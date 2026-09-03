@@ -13,8 +13,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 34 {
-		t.Errorf("expected 34 MCP tools, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 40 {
+		t.Errorf("expected 40 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 }
 

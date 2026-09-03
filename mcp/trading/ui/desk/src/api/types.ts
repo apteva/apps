@@ -75,6 +75,18 @@ export type JournalEntry = {
   created_at: string;
 };
 
+export type RiskPolicy = {
+  portfolio_id: number; risk_level: "conservative" | "balanced" | "aggressive" | "custom";
+  max_daily_loss_pct: number; max_drawdown_pct: number; max_position_pct: number;
+  max_gross_exposure_pct: number; max_order_pct: number;
+};
+export type RiskState = { high_water_equity: number; current_drawdown_pct: number };
+export type PortfolioObjective = {
+  id: number; name: string; metric: string; target_pct: number; direction: "at_least" | "at_most";
+  starts_at: string; deadline_at?: string; status: string; actual_pct?: number; progress_pct?: number;
+  achieved: boolean; period_state: string;
+};
+
 // Symbol — what /universe and /quotes/:s return. Decorated with a
 // client-side `spark` for the watchlist sparkline; that field is
 // derived (not from the server).

@@ -52,3 +52,15 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   }
   return r.json();
 }
+
+export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  const r = await fetch(withProject(path), { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => r.statusText)}`);
+  return r.json();
+}
+
+export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
+  const r = await fetch(withProject(path), { method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => r.statusText)}`);
+  return r.json();
+}

@@ -213,6 +213,17 @@ interface Portfolio {
   buying_power?: number;
   watchlist?: string[];
 }
+interface RiskPolicy {
+  portfolio_id: number; risk_level: "conservative" | "balanced" | "aggressive" | "custom";
+  max_daily_loss_pct: number; max_drawdown_pct: number; max_position_pct: number;
+  max_gross_exposure_pct: number; max_order_pct: number;
+}
+interface RiskState { high_water_equity: number; current_drawdown_pct: number; }
+interface PortfolioObjective {
+  id: number; name: string; metric: string; target_pct: number; direction: "at_least" | "at_most";
+  starts_at: string; deadline_at?: string; status: string; actual_pct?: number; progress_pct?: number;
+  achieved: boolean; period_state: string;
+}
 interface Position {
   symbol: string;
   asset_class: string;
@@ -524,6 +535,8 @@ const TRADING_TOOLS = new Set([
   "journal_read", "portfolio_pause", "strategy_create", "strategy_update",
   "strategy_get", "strategy_list", "strategy_validate", "strategy_evaluate",
   "strategy_assign", "strategy_backtest_create",
+  "risk_profiles_list", "portfolio_risk_get", "portfolio_risk_update",
+  "portfolio_objective_create", "portfolio_objectives_list", "portfolio_objective_update",
 ]);
 
 function compactText(value: unknown, fallback = ""): string {
@@ -600,7 +613,7 @@ function isTradingMCPServer(server: MCPServerConfig): boolean {
 
 function activityKindForTool(tool: string): AgentActivity["kind"] {
   if (tool.startsWith("market_")) return "market";
-  if (tool.includes("position") || tool === "account_summary") return "risk";
+  if (tool.includes("position") || tool.includes("risk") || tool.includes("objective") || tool === "account_summary") return "risk";
   if (tool.includes("order")) return "order";
   if (tool.includes("journal")) return "journal";
   if (tool.includes("alert")) return "alert";
@@ -620,6 +633,8 @@ function labelForTool(tool: string): string {
     case "journal_write": return "writing journal";
     case "alert_create": return "setting alert";
     case "portfolio_pause": return "pausing portfolio";
+    case "portfolio_risk_update": return "updating risk limits";
+    case "portfolio_objective_create": return "setting a trading objective";
     default: return tool.replace(/_/g, " ");
   }
 }
@@ -1110,7 +1125,7 @@ function pnlClass(n: number | undefined): string {
 
 // ─── Main ──────────────────────────────────────────────────────────
 
-type TabId = "portfolios" | "trade" | "positions" | "agents" | "strategies" | "backtests" | "brokers" | "journal";
+type TabId = "portfolios" | "trade" | "positions" | "risk" | "agents" | "strategies" | "backtests" | "brokers" | "journal";
 
 export default function TradingPanel({ projectId, installId }: NativePanelProps) {
   const [tab, setTab] = useState<TabId>("portfolios");
@@ -1118,6 +1133,7 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [riskRefresh, setRiskRefresh] = useState(0);
 
   const withParams = useCallback((extra: Record<string, string> = {}) => {
     const u = new URLSearchParams({ project_id: projectId, install_id: String(installId), ...extra });
@@ -1153,6 +1169,9 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
   useAppEvents("trading", projectId, (ev) => {
     if (["portfolio.created", "portfolio.status.changed", "portfolio.live_armed.changed", "portfolio.agent.changed", "order.filled", "position.changed", "corporate_action.applied"].includes(ev.topic)) {
       loadPortfolios();
+    }
+    if (["risk.policy.changed", "risk.limit.breached", "portfolio.objective.changed", "portfolio.performance.updated"].includes(ev.topic)) {
+      setRiskRefresh((n) => n + 1);
     }
   });
 
@@ -1195,7 +1214,7 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
       </header>
 
       <nav className="flex border-b border-border px-3 text-xs">
-        {(["portfolios","trade","positions","agents","strategies","backtests","brokers","journal"] as TabId[]).map((id) => {
+        {(["portfolios","trade","positions","risk","agents","strategies","backtests","brokers","journal"] as TabId[]).map((id) => {
           const active = id === tab;
           return (
             <button
@@ -1226,6 +1245,9 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
         {tab === "positions" && (
           <PositionsTab portfolio={selected} api={api} setError={setError} />
         )}
+        {tab === "risk" && (
+          <RiskObjectivesTab portfolio={selected} api={api} refreshToken={riskRefresh} setError={setError} />
+        )}
         {tab === "agents" && (
           <AgentsTab portfolio={selected} api={api} projectId={projectId} onChanged={loadPortfolios} setError={setError} />
         )}
@@ -1247,6 +1269,93 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
 }
 
 // ─── Portfolios tab ────────────────────────────────────────────────
+
+function RiskObjectivesTab({ portfolio, api, refreshToken, setError }: {
+  portfolio: Portfolio | null;
+  api: <T>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
+  refreshToken: number;
+  setError: (e: string | null) => void;
+}) {
+  const [policy, setPolicy] = useState<RiskPolicy | null>(null);
+  const [state, setState] = useState<RiskState | null>(null);
+  const [objectives, setObjectives] = useState<PortfolioObjective[]>([]);
+  const [name, setName] = useState("Growth target");
+  const [metric, setMetric] = useState("period_return_pct");
+  const [target, setTarget] = useState(10);
+  const [deadline, setDeadline] = useState("");
+  const load = useCallback(async () => {
+    if (!portfolio) return;
+    try {
+      const [risk, goals] = await Promise.all([
+        api<{ policy: RiskPolicy; state: RiskState }>("GET", `/portfolios/${portfolio.id}/risk`),
+        api<{ objectives: PortfolioObjective[] }>("GET", `/portfolios/${portfolio.id}/objectives`),
+      ]);
+      setPolicy(risk.policy); setState(risk.state); setObjectives(goals.objectives || []); setError(null);
+    } catch (e) { setError((e as Error).message); }
+  }, [portfolio?.id, api]);
+  useEffect(() => { load(); }, [load, refreshToken]);
+  if (!portfolio) return <EmptyState title="Select a portfolio" hint="Risk controls and objectives are portfolio-specific." />;
+  const savePolicy = async (riskLevel: string, custom?: RiskPolicy) => {
+    try {
+      const body = custom ? { ...custom, risk_level: "custom" } : { risk_level: riskLevel };
+      const out = await api<{ policy: RiskPolicy }>("PUT", `/portfolios/${portfolio.id}/risk`, undefined, body);
+      setPolicy(out.policy);
+    } catch (e) { setError((e as Error).message); }
+  };
+  const createObjective = async () => {
+    try {
+      await api("POST", `/portfolios/${portfolio.id}/objectives`, undefined, {
+        name, metric, target_pct: target, direction: metric === "drawdown_pct" ? "at_most" : "at_least",
+        ...(deadline ? { deadline_at: new Date(deadline).toISOString() } : {}),
+      });
+      await load();
+    } catch (e) { setError((e as Error).message); }
+  };
+  return <div className="grid gap-4 lg:grid-cols-2">
+    <Section title="Enforced risk policy">
+      <div className="p-3 border border-border rounded bg-bg-card">
+        <div className="flex gap-2 mb-4">
+          {["conservative", "balanced", "aggressive"].map((level) => <button key={level} onClick={() => savePolicy(level)}
+            className={`px-3 py-1.5 rounded border text-xs capitalize ${policy?.risk_level === level ? "bg-accent text-bg border-accent" : "border-border"}`}>{level}</button>)}
+        </div>
+        {policy && <>
+          <div className="grid grid-cols-2 gap-3">
+            {([["Daily loss", "max_daily_loss_pct"], ["Max drawdown", "max_drawdown_pct"], ["Max position", "max_position_pct"], ["Gross exposure", "max_gross_exposure_pct"], ["Max order", "max_order_pct"]] as const).map(([label, key]) => <label key={key} className="text-xs text-text-muted">{label} %
+              <input type="number" min="0.01" step="0.25" value={policy[key]} onChange={(e) => setPolicy({ ...policy, [key]: Number(e.target.value), risk_level: "custom" })}
+                className="mt-1 w-full px-2 py-1.5 bg-bg-input border border-border rounded text-text" />
+            </label>)}
+          </div>
+          <button onClick={() => savePolicy("custom", policy)} className="mt-3 px-3 py-1.5 rounded bg-accent text-bg text-xs font-semibold">Save custom limits</button>
+          <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
+            <Stat label="High-water equity" value={formatUSD(state?.high_water_equity)} />
+            <Stat label="Current drawdown" value={formatPct(state?.current_drawdown_pct)} colorClass={pnlClass(state?.current_drawdown_pct)} />
+          </div>
+          <p className="mt-3 text-xs text-text-dim">Enforced before manual, agent, strategy, paper, and live orders. Daily loss or drawdown breaches halt the portfolio and cancel live working orders.</p>
+        </>}
+      </div>
+    </Section>
+    <Section title="Percentage objectives">
+      <div className="p-3 border border-border rounded bg-bg-card mb-3 grid gap-2">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Objective name" className="px-2 py-1.5 bg-bg-input border border-border rounded" />
+        <div className="grid grid-cols-2 gap-2">
+          <select value={metric} onChange={(e) => setMetric(e.target.value)} className="px-2 py-1.5 bg-bg-input border border-border rounded"><option value="period_return_pct">Return from start</option><option value="total_return_pct">Total return</option><option value="day_return_pct">Day return</option><option value="drawdown_pct">Drawdown floor</option></select>
+          <input type="number" step="0.25" value={target} onChange={(e) => setTarget(Number(e.target.value))} className="px-2 py-1.5 bg-bg-input border border-border rounded" />
+        </div>
+        <input type="datetime-local" value={deadline} onChange={(e) => setDeadline(e.target.value)} className="px-2 py-1.5 bg-bg-input border border-border rounded" />
+        <button onClick={createObjective} className="px-3 py-1.5 rounded bg-accent text-bg text-xs font-semibold">Create objective</button>
+      </div>
+      <div className="grid gap-2">{objectives.length === 0 ? <EmptyState title="No objectives" hint="Define a measurable percentage target for this portfolio." /> : objectives.map((o) => {
+        const progress = Math.max(0, Math.min(100, o.progress_pct || 0));
+        return <div key={o.id} className="p-3 border border-border rounded bg-bg-card">
+          <div className="flex justify-between"><strong>{o.name}</strong><span className={o.achieved ? "text-green" : "text-text-muted"}>{o.achieved ? "Achieved" : o.period_state}</span></div>
+          <div className="text-xs text-text-muted mt-1">{o.metric.replaceAll("_", " ")} · actual {formatPct(o.actual_pct)} · target {formatPct(o.target_pct)}</div>
+          <div className="h-1.5 bg-bg-input rounded mt-2 overflow-hidden"><div className="h-full bg-accent" style={{ width: `${progress}%` }} /></div>
+          <button onClick={async () => { await api("PATCH", `/portfolios/${portfolio.id}/objectives/${o.id}`, undefined, { status: "archived" }); load(); }} className="mt-2 text-xs text-text-dim hover:text-red">Archive</button>
+        </div>;
+      })}</div>
+    </Section>
+  </div>;
+}
 
 function PortfoliosTab({ portfolios, selectedId, onSelect, api, onChanged, setBusy, setError }: {
   portfolios: Portfolio[];
