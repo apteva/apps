@@ -32,6 +32,8 @@ interface UnreadEntry {
   unread: number;
 }
 
+const EMPTY_CONVERSATION_REFRESH_MS = 8_000;
+
 function relativeTime(iso: string): string {
   const elapsed = Date.now() - new Date(iso).getTime();
   if (!Number.isFinite(elapsed) || elapsed < 60_000) return "now";
@@ -270,12 +272,15 @@ interface AgentInfo {
 function SingleConversation({
   projectId,
   instanceId,
+  eventRevision,
   widgetSettings,
 }: AgentConversationsWidgetProps) {
   const validAgent = Number.isInteger(instanceId) && instanceId > 0;
   const showCreate = showNewConversation(widgetSettings);
   const requestGeneration = useRef(0);
   const historyGeneration = useRef(0);
+  const emptyRefreshInFlight = useRef(false);
+  const previousEventRevision = useRef(eventRevision);
   const [selected, setSelected] = useState<Conversation | null>(null);
   const [agentName, setAgentName] = useState("");
   const [loading, setLoading] = useState(true);
@@ -285,13 +290,15 @@ function SingleConversation({
   const [history, setHistory] = useState<Conversation[]>([]);
   const [error, setError] = useState("");
 
-  const loadLatest = useCallback(async () => {
+  const loadLatest = useCallback(async (quiet = false) => {
     const generation = ++requestGeneration.current;
-    setSelected(null);
-    setLoading(true);
+    if (!quiet) {
+      setSelected(null);
+      setLoading(true);
+    }
     setError("");
     if (!projectId || !validAgent) {
-      setLoading(false);
+      if (!quiet) setLoading(false);
       return;
     }
     try {
@@ -302,7 +309,7 @@ function SingleConversation({
       if (generation !== requestGeneration.current) return;
       setError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
-      if (generation === requestGeneration.current) setLoading(false);
+      if (!quiet && generation === requestGeneration.current) setLoading(false);
     }
   }, [instanceId, projectId, validAgent]);
 
@@ -342,6 +349,42 @@ function SingleConversation({
       cancelled = true;
     };
   }, [instanceId, projectId, selected?.id, validAgent]);
+
+  const refreshEmpty = useCallback(async () => {
+    if (
+      emptyRefreshInFlight.current ||
+      selected ||
+      loading ||
+      !projectId ||
+      !validAgent
+    ) return;
+    emptyRefreshInFlight.current = true;
+    try {
+      await loadLatest(true);
+    } finally {
+      emptyRefreshInFlight.current = false;
+    }
+  }, [loadLatest, loading, projectId, selected, validAgent]);
+
+  // Host contribution events can announce a conversation created elsewhere.
+  // Refresh only the empty state: once a conversation is open, keep it stable
+  // until the user explicitly creates or selects another one.
+  useEffect(() => {
+    const changed = previousEventRevision.current !== eventRevision;
+    previousEventRevision.current = eventRevision;
+    if (changed) void refreshEmpty();
+  }, [eventRevision, refreshEmpty]);
+
+  // Event delivery is best-effort across older hosts. A small fallback poll
+  // runs only while empty and stops immediately when a conversation appears.
+  useEffect(() => {
+    if (selected || loading || !projectId || !validAgent) return;
+    const timer = window.setInterval(
+      () => void refreshEmpty(),
+      EMPTY_CONVERSATION_REFRESH_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [loading, projectId, refreshEmpty, selected, validAgent]);
 
   const create = async () => {
     if (!projectId || !validAgent || !showCreate || creating) return;

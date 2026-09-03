@@ -90,12 +90,16 @@ describe("AgentConversationsWidget scope", () => {
     expect(view).toContain("Message the agent…");
   });
 
-  test("single mode is focused, lazy-loads history, and guards agent switches", () => {
+  test("single mode is focused, refreshes only while empty, lazy-loads history, and guards agent switches", () => {
     const widget = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
     expect(widget).toContain("function SingleConversation");
     expect(widget).toContain("singleConversationListPath(instanceId)");
     expect(widget).toContain("singleConversationListPath(instanceId, 50)");
     expect(widget).toContain("const openHistory = async");
+    expect(widget).toContain("previousEventRevision.current !== eventRevision");
+    expect(widget).toContain("EMPTY_CONVERSATION_REFRESH_MS");
+    expect(widget).toContain("if (selected || loading || !projectId || !validAgent) return");
+    expect(widget).toContain("await loadLatest(true)");
     expect(widget).toContain("generation !== requestGeneration.current");
     expect(widget).toContain('key={`${props.projectId}:${props.instanceId}`}');
     expect(widget).toContain("headerActions={");
