@@ -2,14 +2,15 @@ schema: apteva-app/v1
 
 name: containers
 display_name: Containers
-version: 0.1.27
+version: 0.2.0
 description: |
   Generic Docker workload runtime for Apteva. Runs container images on
   the local host or remote Instances hosts, bootstraps Docker when
   needed, manages isolated networks, Docker volumes, ports, health
   checks, bounded logs, pre-start files and secrets, pull policies,
-  and lifecycle actions with ownership-aware cleanup. Routes, backups,
-  and multi-container blueprints build on the same surface.
+  lifecycle actions, safe volume archive transfer, and owned asynchronous
+  command executions. Routes, backups, and multi-container blueprints
+  build on the same surface.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/containers
@@ -62,7 +63,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: containers_run
-      description: "Run a Docker image as a managed workload on the local Docker host or an Instances host. Args: name, image, host_id?/instance_id?, use_local?, ports?, env?, volumes?, files?, pull_policy?, health_path?, resources?, restart_policy?. files may write up to 32 pre-start files under declared volume mount paths (1 MiB each, 4 MiB total). secret file contents and environment values are not persisted. pull_policy controls Docker image pulls: missing, always, or never."
+      description: "Run a Docker image as a managed workload on the local Docker host or an Instances host. Args: name, image, host_id?/instance_id?, use_local?, ports?, env?, volumes?, files?, pull_policy?, health_path?, resources?, restart_policy?, command?, working_directory?, user?. files may write up to 32 pre-start files under declared volume mount paths (1 MiB each, 4 MiB total). Secret file contents and environment values are not persisted. pull_policy controls Docker image pulls: missing, always, or never. App-created workloads are isolated to their authenticated owner install."
     - name: containers_create
       description: Alias of containers_run.
     - name: containers_get
@@ -85,6 +86,38 @@ provides:
       description: "Measure generic workload usage metrics such as storage bytes for attached volumes. Args: workload_id or id."
     - name: containers_blueprints_list
       description: List built-in and custom container blueprints.
+    - name: containers_exec_start
+      description: "Start an asynchronous command in an isolated local execution container sharing an owned workload's image, network, and named volumes. Args: workload_id, argv? or shell_command?, working_directory?, env?, timeout_s?, idempotency_key?."
+      exposure: app_only
+    - name: containers_exec_get
+      description: "Fetch one caller-owned execution. Args: execution_id."
+      exposure: app_only
+    - name: containers_exec_logs
+      description: "Tail bounded logs for one caller-owned execution. Args: execution_id, tail?."
+      exposure: app_only
+    - name: containers_exec_cancel
+      description: "Cancel one caller-owned queued or running execution. Args: execution_id."
+      exposure: app_only
+    - name: containers_volume_import
+      description: "Import a bounded tar.gz archive into a relative path of an attached named volume on a caller-owned local workload. Args: workload_id, volume, path?, archive_base64."
+      exposure: app_only
+    - name: containers_volume_export
+      description: "Export a bounded tar.gz archive from a relative path of an attached named volume on a caller-owned local workload. Args: workload_id, volume, path?."
+      exposure: app_only
+  publishes:
+    - name: containers.exec.started
+      description: An owned container execution started.
+    - name: containers.exec.completed
+      description: An owned container execution exited successfully.
+    - name: containers.exec.failed
+      description: An owned container execution failed or timed out.
+    - name: containers.exec.cancelled
+      description: An owned container execution was cancelled.
+  workers:
+    - name: health-poll
+      schedule: "@every 30s"
+    - name: execution-retention
+      schedule: "@every 1h"
   ui_panels:
     - slot: project.page
       label: Containers
@@ -123,5 +156,35 @@ config_schema:
       app is installed. Remote hosts come from the Instances app; when
       selected, Containers connects through Instances and bootstraps
       Docker on first use.
+  - name: default_execution_timeout_seconds
+    type: text
+    default: "1800"
+    label: Default execution timeout
+    description: Default timeout in seconds for asynchronous commands.
+  - name: max_execution_output_bytes
+    type: text
+    default: "1048576"
+    label: Maximum retained execution output
+    description: Maximum combined stdout/stderr bytes retained per execution.
+  - name: execution_retention_hours
+    type: text
+    default: "24"
+    label: Execution log retention
+    description: Hours to retain execution containers and captured output after completion.
+  - name: max_archive_bytes
+    type: text
+    default: "8388608"
+    label: Maximum archive size
+    description: Maximum compressed tar.gz bytes accepted or returned by volume transfer.
+  - name: max_archive_expanded_bytes
+    type: text
+    default: "134217728"
+    label: Maximum expanded archive size
+    description: Maximum total regular-file bytes allowed after archive expansion.
+  - name: max_archive_files
+    type: text
+    default: "20000"
+    label: Maximum archive entries
+    description: Maximum files, directories, and safe links allowed in one archive.
 
 upgrade_policy: auto-patch

@@ -10,6 +10,7 @@ import (
 	"net"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -33,34 +34,41 @@ const (
 )
 
 type Workload struct {
-	ID            string            `json:"id"`
-	Name          string            `json:"name"`
-	BlueprintSlug string            `json:"blueprint_slug"`
-	HostID        int64             `json:"host_id"`
-	InstanceID    int64             `json:"instance_id"`
-	Kind          string            `json:"kind"`
-	Image         string            `json:"image"`
-	Status        string            `json:"status"`
-	DesiredStatus string            `json:"desired_status"`
-	ContainerID   string            `json:"container_id"`
-	ContainerName string            `json:"container_name"`
-	NetworkName   string            `json:"network_name"`
-	PublicURL     string            `json:"public_url"`
-	HealthStatus  string            `json:"health_status"`
-	HealthPath    string            `json:"health_path"`
-	HealthURL     string            `json:"health_url"`
-	ConfigJSON    string            `json:"config_json"`
-	Env           map[string]string `json:"env"`
-	EnvJSON       string            `json:"-"`
-	Resources     ResourceSpec      `json:"resources"`
-	ResourcesJSON string            `json:"-"`
-	RestartPolicy string            `json:"restart_policy"`
-	LastHealthAt  string            `json:"last_health_at,omitempty"`
-	LastError     string            `json:"last_error"`
-	CreatedAt     string            `json:"created_at"`
-	UpdatedAt     string            `json:"updated_at"`
-	Ports         []PortSpec        `json:"ports,omitempty"`
-	Volumes       []VolumeSpec      `json:"volumes,omitempty"`
+	ID                string            `json:"id"`
+	Name              string            `json:"name"`
+	BlueprintSlug     string            `json:"blueprint_slug"`
+	HostID            int64             `json:"host_id"`
+	InstanceID        int64             `json:"instance_id"`
+	Kind              string            `json:"kind"`
+	Image             string            `json:"image"`
+	Status            string            `json:"status"`
+	DesiredStatus     string            `json:"desired_status"`
+	ContainerID       string            `json:"container_id"`
+	ContainerName     string            `json:"container_name"`
+	NetworkName       string            `json:"network_name"`
+	PublicURL         string            `json:"public_url"`
+	HealthStatus      string            `json:"health_status"`
+	HealthPath        string            `json:"health_path"`
+	HealthURL         string            `json:"health_url"`
+	ConfigJSON        string            `json:"config_json"`
+	Env               map[string]string `json:"-"`
+	EnvKeys           []string          `json:"env_keys,omitempty"`
+	EnvJSON           string            `json:"-"`
+	Resources         ResourceSpec      `json:"resources"`
+	ResourcesJSON     string            `json:"-"`
+	RestartPolicy     string            `json:"restart_policy"`
+	Command           []string          `json:"command,omitempty"`
+	WorkingDirectory  string            `json:"working_directory,omitempty"`
+	User              string            `json:"user,omitempty"`
+	OwnerAppInstallID int64             `json:"owner_app_install_id,omitempty"`
+	OwnerAppName      string            `json:"owner_app_name,omitempty"`
+	ProjectID         string            `json:"project_id,omitempty"`
+	LastHealthAt      string            `json:"last_health_at,omitempty"`
+	LastError         string            `json:"last_error"`
+	CreatedAt         string            `json:"created_at"`
+	UpdatedAt         string            `json:"updated_at"`
+	Ports             []PortSpec        `json:"ports,omitempty"`
+	Volumes           []VolumeSpec      `json:"volumes,omitempty"`
 }
 
 type PortSpec struct {
@@ -120,6 +128,9 @@ type RunSpec struct {
 	HealthPath        string            `json:"health_path,omitempty"`
 	Resources         ResourceSpec      `json:"resources,omitempty"`
 	RestartPolicy     string            `json:"restart_policy,omitempty"`
+	Command           []string          `json:"command,omitempty"`
+	WorkingDirectory  string            `json:"working_directory,omitempty"`
+	User              string            `json:"user,omitempty"`
 	runtimeWorkloadID string            `json:"-"`
 }
 
@@ -131,6 +142,7 @@ type Blueprint struct {
 }
 
 var workloadNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+var containerUserRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+(?::[A-Za-z0-9_.-]+)?$`)
 
 func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 	in.Name = strings.ToLower(strings.TrimSpace(in.Name))
@@ -199,6 +211,27 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 	}
 	if len(in.HealthPath) > 2048 {
 		return in, errors.New("health_path must be at most 2048 characters")
+	}
+	if len(in.Command) > 256 {
+		return in, errors.New("command may contain at most 256 arguments")
+	}
+	for i, arg := range in.Command {
+		if strings.IndexByte(arg, 0) >= 0 {
+			return in, fmt.Errorf("command[%d] contains a NUL byte", i)
+		}
+		if len(arg) > 64*1024 {
+			return in, fmt.Errorf("command[%d] exceeds 65536 bytes", i)
+		}
+	}
+	if strings.TrimSpace(in.WorkingDirectory) != "" {
+		in.WorkingDirectory = path.Clean(strings.TrimSpace(in.WorkingDirectory))
+		if !strings.HasPrefix(in.WorkingDirectory, "/") {
+			return in, errors.New("working_directory must be absolute")
+		}
+	}
+	in.User = strings.TrimSpace(in.User)
+	if in.User != "" && !containerUserRE.MatchString(in.User) {
+		return in, errors.New("user must be a user, uid, or user:group without whitespace")
 	}
 	if !strings.HasPrefix(in.HealthPath, "/") {
 		in.HealthPath = "/" + in.HealthPath
@@ -435,6 +468,15 @@ func redactEnvironment(env map[string]string) map[string]string {
 		out[key] = redactedValue
 	}
 	return out
+}
+
+func envKeys(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func newWorkloadID() string {
