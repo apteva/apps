@@ -1,5 +1,10 @@
 # Workspaces
 
+## v0.1.1
+
+- Keep every native panel API request pinned to the selected project and app
+  install so project-scoped installations resolve correctly.
+
 Workspaces is the control room for local development environments. It owns
 workspace identity, assignment, TTL, activity, commands, safety context, and
 the operator UI. The required Containers app owns Docker workloads, named
