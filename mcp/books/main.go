@@ -1,8 +1,8 @@
 // Books is a structured manuscript workspace for Apteva.
 //
-// V1 is deliberately simple: books, manuscript nodes, notes, revisions,
-// and markdown export. It does not own AI authoring, entities, ISBNs,
-// royalties, or distribution workflows.
+// Books owns manuscript structure, publication metadata, digital and print
+// assets, validated exports, and store-ready publication packages. Store
+// submission remains an explicit human-controlled step.
 package main
 
 import (
@@ -15,15 +15,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: books
 display_name: Books
-version: 0.1.1
+version: 0.2.0
 description: |
-  Structured long-form manuscript workspace for Apteva. Create books,
-  organize chapters and sections, write in markdown, keep notes, track
-  revisions, and export manuscripts.
+  Publication-ready book workspace for Apteva. Write structured manuscripts,
+  manage covers and images, validate EPUB 3, typeset print PDFs, and build
+  platform-specific publication packages.
 author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/books
 icon: /ui/icon.svg
 icon_style: monochrome
-homepage: https://github.com/apteva/apps/tree/main/mcp/books
 tags: [books, writing, manuscripts, authors]
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -56,7 +56,12 @@ provides:
     - { name: book_notes_delete, description: "Delete a note." }
     - { name: book_revisions_list, description: "List revisions for a manuscript node." }
     - { name: book_revision_restore, description: "Restore a previous node revision." }
-    - { name: books_export, description: "Export a book manuscript as markdown, optionally storing it in Storage." }
+    - { name: book_assets_create, description: "Attach an ebook cover, full-wrap print cover, or interior image." }
+    - { name: book_assets_list, description: "List publication assets for a book." }
+    - { name: book_assets_update, description: "Update image alt text or caption." }
+    - { name: book_assets_delete, description: "Delete a publication asset." }
+    - { name: books_publication_check, description: "Build a store-specific publication readiness checklist and EPUB validation report." }
+    - { name: books_export, description: "Export markdown, EPUB 3, print PDF, or a platform publication ZIP." }
   ui_panels:
     - slot: project.page
       label: Books
@@ -94,7 +99,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("books requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("books mounted", "version", "0.1.0")
+	ctx.Logger().Info("books mounted", "version", "0.2.0")
 	return nil
 }
 
@@ -109,6 +114,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/books/", Handler: a.handleBooksItem},
 		{Pattern: "/nodes/", Handler: a.handleNodesItem},
 		{Pattern: "/notes/", Handler: a.handleNotesItem},
+		{Pattern: "/assets/", Handler: a.handleAssetsItem},
 	}
 }
 
@@ -123,6 +129,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"language":          map[string]any{"type": "string"},
 			"target_word_count": map[string]any{"type": "integer"},
 			"create_starter":    map[string]any{"type": "boolean"},
+			"publication":       map[string]any{"type": "object"},
 		}, []string{"title"}), Handler: a.toolBooksCreate},
 		{Name: "books_list", Description: "List book projects.", InputSchema: schemaObject(map[string]any{
 			"include_archived": map[string]any{"type": "boolean"},
@@ -171,9 +178,24 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "book_revision_restore", Description: "Restore a previous node revision.", InputSchema: schemaObject(map[string]any{
 			"revision_id": map[string]any{"type": "integer"},
 		}, []string{"revision_id"}), Handler: a.toolRevisionRestore},
-		{Name: "books_export", Description: "Export a book manuscript as markdown, optionally storing it in Storage.", InputSchema: schemaObject(map[string]any{
+		{Name: "book_assets_create", Description: "Attach an ebook cover, full-wrap print cover, or interior image.", InputSchema: schemaObject(map[string]any{
+			"book_id": map[string]any{"type": "integer"}, "node_id": map[string]any{"type": "integer"},
+			"kind": map[string]any{"type": "string"}, "filename": map[string]any{"type": "string"},
+			"content_type": map[string]any{"type": "string"}, "content_base64": map[string]any{"type": "string"},
+			"alt_text": map[string]any{"type": "string"}, "caption": map[string]any{"type": "string"},
+		}, []string{"book_id", "filename", "content_base64"}), Handler: a.toolAssetsCreate},
+		{Name: "book_assets_list", Description: "List publication assets for a book.", InputSchema: schemaObject(map[string]any{"book_id": map[string]any{"type": "integer"}}, []string{"book_id"}), Handler: a.toolAssetsList},
+		{Name: "book_assets_update", Description: "Update image alt text or caption.", InputSchema: schemaObject(map[string]any{
+			"id": map[string]any{"type": "integer"}, "alt_text": map[string]any{"type": "string"}, "caption": map[string]any{"type": "string"},
+		}, []string{"id"}), Handler: a.toolAssetsUpdate},
+		{Name: "book_assets_delete", Description: "Delete a publication asset.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolAssetsDelete},
+		{Name: "books_publication_check", Description: "Build a store-specific publication readiness checklist and EPUB validation report.", InputSchema: schemaObject(map[string]any{
+			"book_id": map[string]any{"type": "integer"}, "platform": map[string]any{"type": "string"}, "include_notes": map[string]any{"type": "boolean"},
+		}, []string{"book_id"}), Handler: a.toolPublicationCheck},
+		{Name: "books_export", Description: "Export markdown, EPUB 3, print PDF, or a platform publication ZIP.", InputSchema: schemaObject(map[string]any{
 			"book_id":        map[string]any{"type": "integer"},
 			"format":         map[string]any{"type": "string"},
+			"platform":       map[string]any{"type": "string"},
 			"store":          map[string]any{"type": "boolean"},
 			"output_name":    map[string]any{"type": "string"},
 			"output_folder":  map[string]any{"type": "string"},
@@ -209,6 +231,7 @@ func bookUpdateSchema() map[string]any {
 		"language":          map[string]any{"type": "string"},
 		"target_word_count": map[string]any{"type": "integer"},
 		"status":            map[string]any{"type": "string"},
+		"publication":       map[string]any{"type": "object"},
 	}
 }
 

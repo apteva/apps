@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,14 @@ import (
 
 func (a *App) toolBooksCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	target, _ := intArg(args, "target_word_count")
+	publication := defaultPublication()
+	if raw, ok := args["publication"]; ok {
+		var err error
+		publication, err = publicationFromValue(raw)
+		if err != nil {
+			return nil, err
+		}
+	}
 	book, err := createBook(ctx.AppDB(), ctx.CurrentProject(), &Book{
 		Title:           strArg(args, "title"),
 		Subtitle:        strArg(args, "subtitle"),
@@ -18,6 +27,7 @@ func (a *App) toolBooksCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Kind:            strArg(args, "kind"),
 		Language:        strArg(args, "language"),
 		TargetWordCount: target,
+		Publication:     publication,
 	}, boolArg(args, "create_starter"))
 	if err != nil {
 		return nil, err
@@ -234,6 +244,114 @@ func (a *App) toolRevisionRestore(ctx *sdk.AppCtx, args map[string]any) (any, er
 	return map[string]any{"restored": true, "revision_id": revisionID}, nil
 }
 
+func (a *App) toolAssetsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	bookID, _ := int64Arg(args, "book_id")
+	book, err := getBook(ctx.AppDB(), bookID, ctx.CurrentProject())
+	if err != nil {
+		return nil, err
+	}
+	if book == nil {
+		return map[string]any{"found": false}, nil
+	}
+	content, err := base64.StdEncoding.DecodeString(strArg(args, "content_base64"))
+	if err != nil {
+		return nil, errors.New("content_base64 is invalid")
+	}
+	nodeID, _ := nullableInt64Arg(args, "node_id")
+	asset, err := createAsset(ctx.AppDB(), &BookAsset{
+		BookID: bookID, NodeID: nodeID, Kind: strArg(args, "kind"), Filename: strArg(args, "filename"),
+		ContentType: strArg(args, "content_type"), AltText: strArg(args, "alt_text"), Caption: strArg(args, "caption"), Content: content,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"created": true, "asset": asset}, nil
+}
+
+func (a *App) toolAssetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	bookID, _ := int64Arg(args, "book_id")
+	book, err := getBook(ctx.AppDB(), bookID, ctx.CurrentProject())
+	if err != nil {
+		return nil, err
+	}
+	if book == nil {
+		return map[string]any{"found": false}, nil
+	}
+	assets, err := listAssets(ctx.AppDB(), bookID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"found": true, "assets": assets, "count": len(assets)}, nil
+}
+
+func (a *App) toolAssetsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id, _ := int64Arg(args, "id")
+	asset, err := getAsset(ctx.AppDB(), id, false)
+	if err != nil {
+		return nil, err
+	}
+	if asset == nil {
+		return map[string]any{"found": false}, nil
+	}
+	if book, err := getBook(ctx.AppDB(), asset.BookID, ctx.CurrentProject()); err != nil || book == nil {
+		return map[string]any{"found": false}, err
+	}
+	if err := updateAsset(ctx.AppDB(), id, args); err != nil {
+		return nil, err
+	}
+	return map[string]any{"updated": true, "id": id}, nil
+}
+
+func (a *App) toolAssetsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id, _ := int64Arg(args, "id")
+	asset, err := getAsset(ctx.AppDB(), id, false)
+	if err != nil {
+		return nil, err
+	}
+	if asset == nil {
+		return map[string]any{"found": false}, nil
+	}
+	if book, err := getBook(ctx.AppDB(), asset.BookID, ctx.CurrentProject()); err != nil || book == nil {
+		return map[string]any{"found": false}, err
+	}
+	if err := deleteAsset(ctx.AppDB(), id); err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true, "id": id}, nil
+}
+
+func (a *App) toolPublicationCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	bookID, _ := int64Arg(args, "book_id")
+	book, err := getBook(ctx.AppDB(), bookID, ctx.CurrentProject())
+	if err != nil {
+		return nil, err
+	}
+	if book == nil {
+		return map[string]any{"found": false}, nil
+	}
+	nodes, err := listNodes(ctx.AppDB(), bookID)
+	if err != nil {
+		return nil, err
+	}
+	assets, err := listAssetsWithContent(ctx.AppDB(), bookID)
+	if err != nil {
+		return nil, err
+	}
+	notes := []BookNote{}
+	if boolArg(args, "include_notes") {
+		notes, err = listNotes(ctx.AppDB(), bookID, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	_, report, err := renderEPUB(book, nodes, notes, assets, len(notes) > 0)
+	if err != nil {
+		return nil, err
+	}
+	checklist := buildChecklist(book, nodes, assets, strArg(args, "platform"), report)
+	return map[string]any{"found": true, "validation": report, "checklist": checklist}, nil
+}
+
 func (a *App) toolBooksExport(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return exportBook(ctx, args)
 }
@@ -247,8 +365,12 @@ func exportBook(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if format == "" {
 		format = "markdown"
 	}
-	if format != "markdown" && format != "md" {
-		return nil, fmt.Errorf("unsupported export format %q; v1 supports markdown only", format)
+	format = strings.ToLower(format)
+	if format == "md" {
+		format = "markdown"
+	}
+	if format != "markdown" && format != "epub" && format != "pdf" && format != "package" {
+		return nil, fmt.Errorf("unsupported export format %q; use markdown, epub, pdf, or package", format)
 	}
 	book, err := getBook(ctx.AppDB(), bookID, ctx.CurrentProject())
 	if err != nil {
@@ -261,26 +383,77 @@ func exportBook(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	content := renderMarkdownExport(book, nodes, boolArg(args, "include_status"))
+	assets, err := listAssetsWithContent(ctx.AppDB(), bookID)
+	if err != nil {
+		return nil, err
+	}
+	notes := []BookNote{}
+	if boolArg(args, "include_notes") {
+		notes, err = listNotes(ctx.AppDB(), bookID, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var data []byte
+	var contentType, extension string
+	result := ExportResult{}
+	switch format {
+	case "markdown":
+		content := renderMarkdownExport(book, nodes, boolArg(args, "include_status"))
+		if len(notes) > 0 {
+			content += renderMarkdownNotes(notes)
+		}
+		data = []byte(content)
+		contentType, extension = "text/markdown; charset=utf-8", ".md"
+		result.Content = content
+	case "epub":
+		var report ValidationReport
+		data, report, err = renderEPUB(book, nodes, notes, assets, len(notes) > 0)
+		if err != nil {
+			return nil, err
+		}
+		contentType, extension = "application/epub+zip", ".epub"
+		result.ContentBase64 = base64.StdEncoding.EncodeToString(data)
+		result.Validation = &report
+		checklist := buildChecklist(book, nodes, assets, strArg(args, "platform"), report)
+		result.Checklist = &checklist
+	case "pdf":
+		var report PDFReport
+		data, report, err = renderPrintPDF(book, nodeTree(nodes), notes, assets, len(notes) > 0)
+		if err != nil {
+			return nil, err
+		}
+		contentType, extension = "application/pdf", ".pdf"
+		result.ContentBase64 = base64.StdEncoding.EncodeToString(data)
+		result.PDFValidation = &report
+	case "package":
+		var report PackageReport
+		data, report, err = renderPublicationPackage(book, nodes, notes, assets, strArg(args, "platform"), len(notes) > 0)
+		if err != nil {
+			return nil, err
+		}
+		contentType, extension = "application/zip", ".zip"
+		result.ContentBase64 = base64.StdEncoding.EncodeToString(data)
+		result.Package = &report
+		result.Checklist = &report.Checklist
+	}
 	name := strArg(args, "output_name")
 	if name == "" {
-		name = slugFilename(book.Title) + ".md"
+		name = slugFilename(book.Title) + extension
 	}
-	if !stringsHasSuffixFold(name, ".md") {
-		name += ".md"
+	if !stringsHasSuffixFold(name, extension) {
+		name += extension
 	}
-	result := ExportResult{
-		Content:     content,
-		ContentType: "text/markdown; charset=utf-8",
-		SizeBytes:   len([]byte(content)),
-	}
-	export := BookExport{BookID: bookID, Format: "markdown", Filename: name, Status: "created"}
+	result.ContentType = contentType
+	result.SizeBytes = len(data)
+	export := BookExport{BookID: bookID, Format: format, Filename: name, Status: "created"}
 	if boolArg(args, "store") {
 		folder := strArg(args, "output_folder")
 		if folder == "" {
 			folder = "/books/"
 		}
-		uploaded, err := uploadToStorage(ctx, name, folder, "text/markdown; charset=utf-8", []byte(content))
+		uploaded, err := uploadToStorage(ctx, name, folder, contentType, data)
 		if err != nil {
 			export.Status = "failed"
 			export.Error = err.Error()
@@ -291,6 +464,10 @@ func exportBook(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		export.StorageFileID = fmt.Sprint(uploaded.ID)
 		result.StorageFileID = export.StorageFileID
 		result.URL = uploaded.URL
+		// Avoid returning large binary payloads after a successful Storage upload.
+		if format != "markdown" {
+			result.ContentBase64 = ""
+		}
 	}
 	row, err := createExportRow(ctx.AppDB(), &export)
 	if err != nil {
@@ -298,6 +475,21 @@ func exportBook(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	result.Export = row
 	return result, nil
+}
+
+func renderMarkdownNotes(notes []BookNote) string {
+	var b strings.Builder
+	b.WriteString("\n# Notes\n\n")
+	for _, note := range notes {
+		b.WriteString("## " + note.Title + "\n\n")
+		if strings.TrimSpace(note.Body) != "" {
+			b.WriteString(strings.TrimSpace(note.Body) + "\n\n")
+		}
+		if note.URL != "" {
+			b.WriteString(note.URL + "\n\n")
+		}
+	}
+	return b.String()
 }
 
 func stringsHasSuffixFold(s, suffix string) bool {

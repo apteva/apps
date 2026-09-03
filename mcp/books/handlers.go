@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -163,6 +164,44 @@ func (a *App) handleBooksItem(w http.ResponseWriter, r *http.Request) {
 		default:
 			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
+	case "assets":
+		switch r.Method {
+		case http.MethodGet:
+			assets, err := listAssets(app.AppDB(), id)
+			if err != nil {
+				httpErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			httpJSON(w, map[string]any{"assets": assets})
+		case http.MethodPost:
+			var body struct {
+				NodeID        *int64 `json:"node_id"`
+				Kind          string `json:"kind"`
+				Filename      string `json:"filename"`
+				ContentType   string `json:"content_type"`
+				ContentBase64 string `json:"content_base64"`
+				AltText       string `json:"alt_text"`
+				Caption       string `json:"caption"`
+			}
+			if err := decodeJSON(r, &body); err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			content, err := base64.StdEncoding.DecodeString(body.ContentBase64)
+			if err != nil {
+				httpErr(w, http.StatusBadRequest, "content_base64 is invalid")
+				return
+			}
+			asset, err := createAsset(app.AppDB(), &BookAsset{BookID: id, NodeID: body.NodeID, Kind: body.Kind, Filename: body.Filename, ContentType: body.ContentType, AltText: body.AltText, Caption: body.Caption, Content: content})
+			if err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			httpJSON(w, map[string]any{"asset": asset})
+		default:
+			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
 	case "export":
 		if r.Method != http.MethodPost {
 			httpErr(w, http.StatusMethodNotAllowed, "POST only")
@@ -180,8 +219,82 @@ func (a *App) handleBooksItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpJSON(w, out)
+	case "publication-check":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		var args map[string]any
+		_ = decodeJSON(r, &args)
+		if args == nil {
+			args = map[string]any{}
+		}
+		args["book_id"] = id
+		out, err := a.toolPublicationCheck(app, args)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, out)
 	default:
 		httpErr(w, http.StatusNotFound, "not found")
+	}
+}
+
+func (a *App) handleAssetsItem(w http.ResponseWriter, r *http.Request) {
+	app := ctxForRequest(r)
+	rest := strings.TrimPrefix(r.URL.Path, "/assets/")
+	parts := strings.SplitN(rest, "/", 2)
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid asset id")
+		return
+	}
+	asset, err := getAsset(app.AppDB(), id, true)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if asset == nil {
+		httpErr(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	book, err := getBook(app.AppDB(), asset.BookID, app.CurrentProject())
+	if err != nil || book == nil {
+		httpErr(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	tail := ""
+	if len(parts) == 2 {
+		tail = parts[1]
+	}
+	if r.Method == http.MethodGet && tail == "content" {
+		w.Header().Set("Content-Type", asset.ContentType)
+		w.Header().Set("Content-Disposition", `inline; filename="`+strings.ReplaceAll(asset.Filename, `"`, "")+`"`)
+		w.Header().Set("Cache-Control", "private, max-age=300")
+		_, _ = w.Write(asset.Content)
+		return
+	}
+	switch r.Method {
+	case http.MethodPatch:
+		var fields map[string]any
+		if err := decodeJSON(r, &fields); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := updateAsset(app.AppDB(), id, fields); err != nil {
+			writeStoreErr(w, err, "asset not found")
+			return
+		}
+		httpJSON(w, map[string]any{"updated": true, "id": id})
+	case http.MethodDelete:
+		if err := deleteAsset(app.AppDB(), id); err != nil {
+			writeStoreErr(w, err, "asset not found")
+			return
+		}
+		httpJSON(w, map[string]any{"deleted": true, "id": id})
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 

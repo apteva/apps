@@ -15,21 +15,22 @@ import (
 var errNotFound = sql.ErrNoRows
 
 type Book struct {
-	ID              int64  `json:"id"`
-	ProjectID       string `json:"project_id,omitempty"`
-	Title           string `json:"title"`
-	Subtitle        string `json:"subtitle,omitempty"`
-	AuthorName      string `json:"author_name,omitempty"`
-	Description     string `json:"description,omitempty"`
-	Kind            string `json:"kind"`
-	Language        string `json:"language"`
-	TargetWordCount int    `json:"target_word_count"`
-	Status          string `json:"status"`
-	ActualWordCount int    `json:"actual_word_count"`
-	NodeCount       int    `json:"node_count"`
-	CreatedAt       string `json:"created_at,omitempty"`
-	UpdatedAt       string `json:"updated_at,omitempty"`
-	ArchivedAt      string `json:"archived_at,omitempty"`
+	ID              int64               `json:"id"`
+	ProjectID       string              `json:"project_id,omitempty"`
+	Title           string              `json:"title"`
+	Subtitle        string              `json:"subtitle,omitempty"`
+	AuthorName      string              `json:"author_name,omitempty"`
+	Description     string              `json:"description,omitempty"`
+	Kind            string              `json:"kind"`
+	Language        string              `json:"language"`
+	TargetWordCount int                 `json:"target_word_count"`
+	Status          string              `json:"status"`
+	Publication     PublicationMetadata `json:"publication"`
+	ActualWordCount int                 `json:"actual_word_count"`
+	NodeCount       int                 `json:"node_count"`
+	CreatedAt       string              `json:"created_at,omitempty"`
+	UpdatedAt       string              `json:"updated_at,omitempty"`
+	ArchivedAt      string              `json:"archived_at,omitempty"`
 }
 
 type BookNode struct {
@@ -87,12 +88,17 @@ type BookExport struct {
 }
 
 type ExportResult struct {
-	Export        BookExport `json:"export"`
-	Content       string     `json:"content,omitempty"`
-	ContentType   string     `json:"content_type"`
-	SizeBytes     int        `json:"size_bytes"`
-	StorageFileID string     `json:"storage_file_id,omitempty"`
-	URL           string     `json:"url,omitempty"`
+	Export        BookExport            `json:"export"`
+	Content       string                `json:"content,omitempty"`
+	ContentBase64 string                `json:"content_base64,omitempty"`
+	ContentType   string                `json:"content_type"`
+	SizeBytes     int                   `json:"size_bytes"`
+	Validation    *ValidationReport     `json:"validation,omitempty"`
+	PDFValidation *PDFReport            `json:"pdf_validation,omitempty"`
+	Package       *PackageReport        `json:"package,omitempty"`
+	Checklist     *PublicationChecklist `json:"checklist,omitempty"`
+	StorageFileID string                `json:"storage_file_id,omitempty"`
+	URL           string                `json:"url,omitempty"`
 }
 
 func createBook(db *sql.DB, projectID string, b *Book, createStarter bool) (*Book, error) {
@@ -114,10 +120,14 @@ func createBook(db *sql.DB, projectID string, b *Book, createStarter bool) (*Boo
 	}
 	defer tx.Rollback()
 
+	publication, err := json.Marshal(normalizePublication(b.Publication))
+	if err != nil {
+		return nil, err
+	}
 	res, err := tx.Exec(`
-		INSERT INTO books (project_id, title, subtitle, author_name, description, kind, language, target_word_count, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		projectID, strings.TrimSpace(b.Title), b.Subtitle, b.AuthorName, b.Description, b.Kind, b.Language, b.TargetWordCount, b.Status)
+		INSERT INTO books (project_id, title, subtitle, author_name, description, kind, language, target_word_count, status, publication_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		projectID, strings.TrimSpace(b.Title), b.Subtitle, b.AuthorName, b.Description, b.Kind, b.Language, b.TargetWordCount, b.Status, string(publication))
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +154,7 @@ func listBooks(db *sql.DB, projectID string, includeArchived bool) ([]Book, erro
 	}
 	rows, err := db.Query(`
 		SELECT b.id, b.project_id, b.title, b.subtitle, b.author_name, b.description, b.kind, b.language,
-		       b.target_word_count, b.status, b.created_at, b.updated_at, COALESCE(b.archived_at, ''),
+		       b.target_word_count, b.status, b.publication_json, b.created_at, b.updated_at, COALESCE(b.archived_at, ''),
 		       COALESCE(SUM(CASE WHEN n.deleted_at IS NULL THEN n.actual_word_count ELSE 0 END), 0) AS actual_word_count,
 		       COALESCE(SUM(CASE WHEN n.deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS node_count
 		FROM books b
@@ -159,9 +169,11 @@ func listBooks(db *sql.DB, projectID string, includeArchived bool) ([]Book, erro
 	out := []Book{}
 	for rows.Next() {
 		var b Book
-		if err := rows.Scan(&b.ID, &b.ProjectID, &b.Title, &b.Subtitle, &b.AuthorName, &b.Description, &b.Kind, &b.Language, &b.TargetWordCount, &b.Status, &b.CreatedAt, &b.UpdatedAt, &b.ArchivedAt, &b.ActualWordCount, &b.NodeCount); err != nil {
+		var publicationRaw string
+		if err := rows.Scan(&b.ID, &b.ProjectID, &b.Title, &b.Subtitle, &b.AuthorName, &b.Description, &b.Kind, &b.Language, &b.TargetWordCount, &b.Status, &publicationRaw, &b.CreatedAt, &b.UpdatedAt, &b.ArchivedAt, &b.ActualWordCount, &b.NodeCount); err != nil {
 			return nil, err
 		}
+		decodePublication(publicationRaw, &b.Publication)
 		out = append(out, b)
 	}
 	return out, rows.Err()
@@ -169,9 +181,10 @@ func listBooks(db *sql.DB, projectID string, includeArchived bool) ([]Book, erro
 
 func getBook(db *sql.DB, id int64, projectID string) (*Book, error) {
 	var b Book
+	var publicationRaw string
 	err := db.QueryRow(`
 		SELECT b.id, b.project_id, b.title, b.subtitle, b.author_name, b.description, b.kind, b.language,
-		       b.target_word_count, b.status, b.created_at, b.updated_at, COALESCE(b.archived_at, ''),
+		       b.target_word_count, b.status, b.publication_json, b.created_at, b.updated_at, COALESCE(b.archived_at, ''),
 		       COALESCE(SUM(CASE WHEN n.deleted_at IS NULL THEN n.actual_word_count ELSE 0 END), 0) AS actual_word_count,
 		       COALESCE(SUM(CASE WHEN n.deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS node_count
 		FROM books b
@@ -179,10 +192,13 @@ func getBook(db *sql.DB, id int64, projectID string) (*Book, error) {
 		WHERE b.id = ? AND b.project_id = ?
 		GROUP BY b.id`, id, projectID).Scan(
 		&b.ID, &b.ProjectID, &b.Title, &b.Subtitle, &b.AuthorName, &b.Description, &b.Kind, &b.Language,
-		&b.TargetWordCount, &b.Status, &b.CreatedAt, &b.UpdatedAt, &b.ArchivedAt, &b.ActualWordCount, &b.NodeCount,
+		&b.TargetWordCount, &b.Status, &publicationRaw, &b.CreatedAt, &b.UpdatedAt, &b.ArchivedAt, &b.ActualWordCount, &b.NodeCount,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
+	}
+	if err == nil {
+		decodePublication(publicationRaw, &b.Publication)
 	}
 	return &b, err
 }
@@ -193,6 +209,18 @@ func updateBook(db *sql.DB, id int64, projectID string, fields map[string]any) e
 		"kind": "kind", "language": "language", "status": "status", "target_word_count": "target_word_count",
 	}
 	sets, args := []string{}, []any{}
+	if raw, ok := fields["publication"]; ok {
+		publication, err := publicationFromValue(raw)
+		if err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(normalizePublication(publication))
+		if err != nil {
+			return err
+		}
+		sets = append(sets, "publication_json = ?")
+		args = append(args, string(encoded))
+	}
 	for k, col := range allowed {
 		v, ok := fields[k]
 		if !ok {
