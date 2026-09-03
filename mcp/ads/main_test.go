@@ -1218,6 +1218,66 @@ func TestAdSetCreate_MapsOptimizationGoal(t *testing.T) {
 	}
 }
 
+func TestAdSetCreate_RejectsAccountRestrictedThruplayBilling(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	out, err := app.toolAdSetCreate(ctx, map[string]any{
+		"ad_account_id":     acctID,
+		"campaign_id":       "120000",
+		"name":              "Video views",
+		"optimization_goal": "thruplay",
+		"billing_event":     "thruplay",
+		"targeting":         map[string]any{"geo_locations": map[string]any{"countries": []any{"AU"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := asMap(out)
+	if result["code"] != "invalid_billing_event" || result["suggested_value"] != "impressions" {
+		t.Fatalf("expected actionable local validation error, got %#v", result)
+	}
+	if len(pf.executeCalls) != 0 {
+		t.Fatalf("invalid billing event reached Meta: %#v", pf.executeCalls)
+	}
+}
+
+func TestAdSetCreate_UsesImpressionsBillingForThruplayOptimization(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolAdSetCreate(ctx, map[string]any{
+		"ad_account_id":     acctID,
+		"campaign_id":       "120000",
+		"name":              "Video views",
+		"optimization_goal": "thruplay",
+		"targeting":         map[string]any{"geo_locations": map[string]any{"countries": []any{"AU"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("expected one Meta call, got %#v", pf.executeCalls)
+	}
+	call := pf.executeCalls[0]
+	if call.Input["optimization_goal"] != "THRUPLAY" || call.Input["billing_event"] != "IMPRESSIONS" {
+		t.Fatalf("wrong video delivery combination: %#v", call.Input)
+	}
+}
+
 func TestAdSetList_UsesMetaObjectEdge(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newAdsCtx(t, pf)

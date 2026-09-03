@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.43
+version: 0.1.44
 scopes: [project, global]
 requires:
   permissions:
@@ -806,13 +806,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "adset_create",
 			Description: "Create an ad set under a campaign. " +
-				"Unified args: ad_account_id, campaign_id, name, optimization_goal (link_clicks|conversions|leads|reach|impressions|page_likes|post_engagement), billing_event? (impressions|link_clicks; default impressions), daily_budget_cents?, lifetime_budget_cents?, bid_strategy?, bid_amount_cents?, start_time?, end_time?, status?, targeting? (object — passthrough; Meta requires geo_locations + targeting_automation), promoted_object? (object — passthrough), destination_type?, dsa_beneficiary?, dsa_payor?, platform_options.",
+				"Unified args: ad_account_id, campaign_id, name, optimization_goal (link_clicks|conversions|leads|reach|impressions|page_likes|post_engagement|thruplay), billing_event? (impressions|link_clicks; default impressions), daily_budget_cents?, lifetime_budget_cents?, bid_strategy?, bid_amount_cents?, start_time?, end_time?, status?, targeting? (object — passthrough; Meta requires geo_locations + targeting_automation), promoted_object? (object — passthrough), destination_type?, dsa_beneficiary?, dsa_payor?, platform_options. For Meta video views, use optimization_goal=thruplay with billing_event=impressions; THRUPLAY billing is account-restricted and is not exposed.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id":         map[string]any{"type": "integer"},
 				"campaign_id":           map[string]any{"type": "string"},
 				"name":                  map[string]any{"type": "string"},
 				"optimization_goal":     map[string]any{"type": "string", "enum": []string{"link_clicks", "conversions", "leads", "reach", "impressions", "page_likes", "post_engagement", "thruplay", "app_installs", "value", "landing_page_views"}},
-				"billing_event":         map[string]any{"type": "string", "enum": []string{"impressions", "link_clicks", "thruplay"}, "default": "impressions"},
+				"billing_event":         map[string]any{"type": "string", "enum": []string{"impressions", "link_clicks"}, "default": "impressions", "description": "Meta video-view campaigns should use impressions billing with thruplay optimization. Account-restricted THRUPLAY billing is not accepted by this app."},
 				"daily_budget_cents":    map[string]any{"type": "integer"},
 				"lifetime_budget_cents": map[string]any{"type": "integer"},
 				"bid_strategy":          map[string]any{"type": "string", "enum": []string{"lowest_cost", "lowest_cost_with_bid_cap", "cost_cap"}},
@@ -2298,7 +2298,6 @@ var metaOptimizationGoal = map[string]string{
 var metaBillingEvent = map[string]string{
 	"impressions": "IMPRESSIONS",
 	"link_clicks": "LINK_CLICKS",
-	"thruplay":    "THRUPLAY",
 }
 
 const (
@@ -2539,12 +2538,33 @@ func (metaAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 	if be == "" {
 		be = "impressions"
 	}
+	if be == "thruplay" {
+		out := mcpError("billing_event=thruplay is account-restricted by Meta and cannot be used safely. Use billing_event=impressions; keep optimization_goal=thruplay for ThruPlay video delivery.")
+		out["code"] = "invalid_billing_event"
+		out["field"] = "billing_event"
+		out["suggested_value"] = "impressions"
+		return out, nil
+	}
+	mappedBE, ok := metaBillingEvent[be]
+	if !ok {
+		out := mcpError("unsupported billing_event: " + be + ". Use impressions (recommended) or link_clicks.")
+		out["code"] = "invalid_billing_event"
+		out["field"] = "billing_event"
+		return out, nil
+	}
+	if og == "thruplay" && be != "impressions" {
+		out := mcpError("optimization_goal=thruplay requires billing_event=impressions in the Ads app. This avoids Meta account-level billing eligibility failures.")
+		out["code"] = "incompatible_optimization_and_billing"
+		out["field"] = "billing_event"
+		out["suggested_value"] = "impressions"
+		return out, nil
+	}
 	input := map[string]any{
 		def.AccountIDInputField: acct.NativeAccountID,
 		"campaign_id":           cid,
 		"name":                  name,
 		"optimization_goal":     mappedOG,
-		"billing_event":         metaBillingEvent[be],
+		"billing_event":         mappedBE,
 		"targeting":             targeting,
 	}
 	if v := intArg(args, "daily_budget_cents", 0); v > 0 {

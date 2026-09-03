@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -115,6 +116,44 @@ func TestMetaCode190IsStructuredAndNotRetried(t *testing.T) {
 	}
 	if result["code"] != "provider_auth_error" || result["provider_code"] != 190 || result["retryable"] != false || result["fbtrace_id"] != "trace-190" {
 		t.Fatalf("credential error was not structured: %#v", result)
+	}
+}
+
+func TestMetaBillingFailurePreservesActionableDetails(t *testing.T) {
+	result := classifyProviderFailure(&adAccount{Platform: "meta"}, "adset_create", &sdk.ExecuteResult{
+		Success: false,
+		Status:  400,
+		Data: json.RawMessage(`{
+			"error": {
+				"code": 100,
+				"error_subcode": 2446404,
+				"type": "OAuthException",
+				"message": "Invalid parameter",
+				"error_user_title": "Billing option not available",
+				"error_user_msg": "This business is not yet eligible for that billing option.",
+				"error_data": {"blame_field_specs": [["billing_event"]]},
+				"fbtrace_id": "trace-billing"
+			}
+		}`),
+	})
+
+	if result["code"] != "provider_billing_option_unavailable" || result["provider_subcode"] != 2446404 {
+		t.Fatalf("billing failure was not classified: %#v", result)
+	}
+	if result["provider_user_title"] != "Billing option not available" ||
+		result["provider_user_message"] != "This business is not yet eligible for that billing option." {
+		t.Fatalf("actionable Meta details were lost: %#v", result)
+	}
+	if result["suggestion"] != "Use billing_event=impressions. For Meta video views, keep optimization_goal=thruplay." {
+		t.Fatalf("billing remediation missing: %#v", result)
+	}
+	content := result["content"].([]map[string]any)
+	text := content[0]["text"].(string)
+	if !strings.Contains(text, "Billing option not available") || !strings.Contains(text, "not yet eligible") {
+		t.Fatalf("user-facing error is not actionable: %q", text)
+	}
+	if summary := providerFailureText(result); !strings.Contains(summary, "Billing option not available") || !strings.Contains(summary, "not yet eligible") {
+		t.Fatalf("nested operation summary is not actionable: %q", summary)
 	}
 }
 
