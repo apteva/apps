@@ -482,6 +482,7 @@ func (a *App) destroyWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.D
 	if err := backend.Remove(ctx, w.ContainerName, true); err != nil && !isDockerMissingResourceError(err, "container") {
 		cleanupErrs = append(cleanupErrs, err)
 	}
+	cleanupErrs = append(cleanupErrs, removeWorkloadExecutionContainers(ctx, db, backend, w.ID)...)
 	if err := backend.RemoveNetwork(ctx, w.NetworkName); err != nil && !isDockerMissingResourceError(err, "network") {
 		cleanupErrs = append(cleanupErrs, err)
 	}

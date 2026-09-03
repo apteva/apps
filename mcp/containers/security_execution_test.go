@@ -226,6 +226,16 @@ func TestExecutionRunsAsIsolatedOwnedContainerAndRetainsLogs(t *testing.T) {
 	if _, leaked := payload["argv"]; leaked {
 		t.Fatalf("event leaked argv: %+v", payload)
 	}
+	if removed := backend.removedExecutions(); len(removed) != 0 {
+		t.Fatalf("completed execution was removed before workload destruction: %v", removed)
+	}
+	if err := app.destroyWorkload(context.Background(), appCtx, db, w.ID, true); err != nil {
+		t.Fatalf("destroy workload with retained execution: %v", err)
+	}
+	removed := backend.removedExecutions()
+	if len(removed) != 1 || removed[0] != execution.RuntimeContainerName {
+		t.Fatalf("destroy removed execution containers %v, want %q", removed, execution.RuntimeContainerName)
+	}
 }
 
 func TestExecutionCancellationStopsOnlyExecutionContainer(t *testing.T) {
@@ -306,6 +316,7 @@ type executionBackendStub struct {
 	state   *ContainerState
 	logs    string
 	stopped bool
+	removed []string
 }
 
 func (f *executionBackendStub) StartExecution(_ context.Context, spec executionRuntimeSpec) (string, error) {
@@ -330,7 +341,18 @@ func (f *executionBackendStub) ExecutionLogs(context.Context, string, int) (stri
 	return f.logs, nil
 }
 
-func (f *executionBackendStub) RemoveExecution(context.Context, string) error { return nil }
+func (f *executionBackendStub) RemoveExecution(_ context.Context, name string) error {
+	f.mu.Lock()
+	f.removed = append(f.removed, name)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *executionBackendStub) removedExecutions() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.removed...)
+}
 
 func (f *executionBackendStub) startedSpec() executionRuntimeSpec {
 	f.mu.Lock()

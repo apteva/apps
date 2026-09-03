@@ -2,15 +2,17 @@ schema: apteva-app/v1
 
 name: containers
 display_name: Containers
-version: 0.2.0
+version: 0.2.1
 description: |
   Generic Docker workload runtime for Apteva. Runs container images on
   the local host or remote Instances hosts, bootstraps Docker when
   needed, manages isolated networks, Docker volumes, ports, health
   checks, bounded logs, pre-start files and secrets, pull policies,
   lifecycle actions, safe volume archive transfer, and owned asynchronous
-  command executions. Routes, backups, and multi-container blueprints
-  build on the same surface.
+  command executions.
+  v0.2.1 removes retained command containers before workload volumes are
+  destroyed, so workspace teardown completes without leaked Docker resources.
+  Routes, backups, and multi-container blueprints build on the same surface.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/containers

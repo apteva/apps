@@ -631,6 +631,24 @@ func listActiveExecutionsForWorkload(db *sql.DB, workloadID string) ([]*Executio
 	return executions, rows.Err()
 }
 
+func listExecutionsForWorkload(db *sql.DB, workloadID string) ([]*Execution, error) {
+	rows, err := db.Query(`SELECT `+executionColumns+` FROM containers_executions
+		WHERE workload_id=? AND runtime_container_name != '' ORDER BY created_at`, workloadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var executions []*Execution
+	for rows.Next() {
+		execution, err := scanExecution(rows)
+		if err != nil {
+			return nil, err
+		}
+		executions = append(executions, execution)
+	}
+	return executions, rows.Err()
+}
+
 func (a *App) cancelWorkloadExecutions(app *sdk.AppCtx, workloadID string) error {
 	if app == nil || app.AppDB() == nil {
 		return nil
@@ -645,6 +663,30 @@ func (a *App) cancelWorkloadExecutions(app *sdk.AppCtx, workloadID string) error
 		}
 	}
 	return nil
+}
+
+func removeWorkloadExecutionContainers(ctx context.Context, db *sql.DB, backend DockerBackend, workloadID string) []error {
+	executions, err := listExecutionsForWorkload(db, workloadID)
+	if err != nil {
+		return []error{fmt.Errorf("list workload executions: %w", err)}
+	}
+	if len(executions) == 0 {
+		return nil
+	}
+	execBackend, ok := backend.(executionBackend)
+	if !ok {
+		return []error{errors.New("execution cleanup is not supported by this container backend")}
+	}
+	var cleanupErrs []error
+	for _, execution := range executions {
+		if execution.RuntimeContainerName == "" {
+			continue
+		}
+		if err := execBackend.RemoveExecution(ctx, execution.RuntimeContainerName); err != nil && !isDockerMissingResourceError(err, "container") {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove execution %s: %w", execution.ID, err))
+		}
+	}
+	return cleanupErrs
 }
 
 func listExpiredExecutions(db *sql.DB, before time.Time) ([]*Execution, error) {
