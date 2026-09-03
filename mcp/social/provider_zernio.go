@@ -2035,18 +2035,29 @@ func isZernioMetricMetadata(name string) bool {
 }
 
 func zernioCapabilities(platform string) map[string]any {
-	return map[string]any{
-		"post":                   true,
-		"image":                  true,
-		"video":                  true,
-		"analytics":              true,
-		"inbox":                  true,
-		"inbox_attachment_types": []string{"image", "video", "audio", "file"},
-		"inbox_max_attachments":  1,
-		"comments":               true,
-		"provider":               zernioProviderSlug,
-		"platform":               platform,
+	caps := map[string]any{
+		"post":              true,
+		"image":             true,
+		"video":             true,
+		"analytics":         true,
+		"native_drafts":     true,
+		"native_scheduling": true,
+		"provider":          zernioProviderSlug,
+		"platform":          platform,
 	}
+	// Zernio's account envelope is cross-platform, but inbox support is
+	// not. Pinterest's public organic API exposes publishing/analytics,
+	// not the generic comment and DM lifecycle Social implements.
+	if normalizeZernioPlatform(platform) != "pinterest" {
+		caps["inbox"] = true
+		caps["inbox_attachment_types"] = []string{"image", "video", "audio", "file"}
+		caps["inbox_max_attachments"] = 1
+		caps["comments"] = true
+	} else {
+		caps["inbox"] = false
+		caps["comments"] = false
+	}
+	return caps
 }
 
 func zernioPlatformSpecificData(opts map[string]any) map[string]any {

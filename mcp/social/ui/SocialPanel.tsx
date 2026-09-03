@@ -5570,9 +5570,13 @@ interface TargetMetrics {
   error?: string;
   metrics?: {
     views: number;
+    reach?: number;
     likes: number;
     comments: number;
     shares: number;
+    saves?: number;
+    clicks?: number;
+    available?: string[];
     raw?: any;
   };
 }
@@ -5973,7 +5977,7 @@ function MetricsView({
                         {p.body || <span className="text-text-dim italic">no body</span>}
                       </div>
                       <div className="text-text-dim text-xs mt-0.5">
-                        {new Date(p.created_at).toLocaleString()}
+						{new Date(p.published_at || p.created_at).toLocaleString()}
                         {p.targets && p.targets.length > 0 && (
                           <span className="ml-2">
                             · {p.targets.length} target{p.targets.length !== 1 ? "s" : ""}
@@ -6260,13 +6264,15 @@ function Sparkline({ points, gradientId }: { points: { time?: string; value: num
   );
 }
 
-function MetricsRow({ totals }: { totals: { views: number; likes: number; comments: number; shares: number } }) {
+function MetricsRow({ totals }: { totals: { views: number; likes: number; comments: number; shares: number; saves: number; clicks: number } }) {
   return (
     <div className="flex items-center gap-3 text-xs text-text-dim flex-shrink-0">
       <Stat label="views" value={totals.views} />
       <Stat label="likes" value={totals.likes} />
       <Stat label="comments" value={totals.comments} />
       <Stat label="shares" value={totals.shares} />
+      {totals.saves > 0 && <Stat label="saves" value={totals.saves} />}
+      {totals.clicks > 0 && <Stat label="clicks" value={totals.clicks} />}
     </div>
   );
 }
@@ -6300,17 +6306,16 @@ function TargetMetricsBlock({ target }: { target: TargetMetrics }) {
       </div>
       {target.metrics && (
         <div className="mt-2 flex items-center gap-4 text-xs">
-          <Stat label="views" value={target.metrics.views} />
-          <Stat label="likes" value={target.metrics.likes} />
-          <Stat label="comments" value={target.metrics.comments} />
-          <Stat label="shares" value={target.metrics.shares} />
+          {(target.metrics.available || ["views", "likes", "comments", "shares"]).map((name) => (
+            <Stat key={name} label={name} value={Number(target.metrics?.[name as keyof typeof target.metrics]) || 0} />
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-function aggregateTotals(targets: TargetMetrics[]): { views: number; likes: number; comments: number; shares: number } {
+function aggregateTotals(targets: TargetMetrics[]): { views: number; likes: number; comments: number; shares: number; saves: number; clicks: number } {
   return targets.reduce(
     (acc, t) => {
       if (t.metrics) {
@@ -6318,10 +6323,12 @@ function aggregateTotals(targets: TargetMetrics[]): { views: number; likes: numb
         acc.likes += t.metrics.likes;
         acc.comments += t.metrics.comments;
         acc.shares += t.metrics.shares;
+        acc.saves += t.metrics.saves || 0;
+        acc.clicks += t.metrics.clicks || 0;
       }
       return acc;
     },
-    { views: 0, likes: 0, comments: 0, shares: 0 }
+    { views: 0, likes: 0, comments: 0, shares: 0, saves: 0, clicks: 0 }
   );
 }
 

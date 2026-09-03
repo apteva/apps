@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.15.3
+version: 0.16.0
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -74,8 +74,8 @@ provides:
       schedule: "@every 15m"
   mcp_tools:
     - { name: account_add,                 description: "Begin OAuth for a platform. Returns authorize_url + pending_account_id." }
-    - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable pages/channels (FB pages, IG business accounts, YouTube channels)." }
-    - { name: account_finalize,            description: "Commit a pending account into the active account list. For multi-page platforms, supply page_id." }
+    - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable pages/channels/boards (including Pinterest boards)." }
+    - { name: account_finalize,            description: "Commit a pending account into the active account list. For destination-based platforms, supply page_id." }
     - { name: account_import_provider,     description: "Import provider-backed accounts such as Zernio. Publishing remains available while automatic history import defaults to managed_only." }
     - { name: account_list,                description: "List connected social accounts in this project, including provider import mode." }
     - { name: account_provider_sync_update, description: "Set automatic provider synchronization to off, managed_only (safe default), or explicitly opted-in full_history without changing publishing access." }

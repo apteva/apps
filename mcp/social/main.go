@@ -32,6 +32,7 @@ import (
 	"image/jpeg"
 	_ "image/png"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -41,6 +42,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -49,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.15.3
+version: 0.16.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -227,6 +229,14 @@ type platformDef struct {
 	// (e.g. Facebook's /me/accounts only returns id+name unless we
 	// ask for picture explicitly via fields=...). Nil → empty map.
 	ListPagesArgs map[string]any
+	// ListPagesItemsField/LimitField/CursorArg/CursorResponseField make
+	// destination discovery work for non-Graph APIs too. Defaults are
+	// data, limit, after, and paging.cursors.after. Pinterest uses
+	// items, page_size, bookmark, and bookmark.
+	ListPagesItemsField          string
+	ListPagesLimitField          string
+	ListPagesCursorArg           string
+	ListPagesCursorResponseField string
 	// PageAccessTokenField — JSONPath in the list_pages response that
 	// holds a page-level access token. Facebook rejects user-level
 	// tokens for /feed writes (error 210), so we capture the per-page
@@ -610,6 +620,43 @@ var platforms = map[string]platformDef{
 			CommentsDelete: true,
 		},
 	},
+	"pinterest": {
+		Platform:                     "pinterest",
+		IntegrationSlug:              "pinterest",
+		DisplayName:                  "Pinterest board",
+		Strategy:                     "pinterest",
+		PostTool:                     "create_pin",
+		BodyField:                    "description",
+		ExternalIDField:              "board_id",
+		MediaRequired:                true,
+		MediaType:                    "any",
+		ListPagesTool:                "list_boards",
+		PageIDField:                  "id",
+		PageNameField:                "name",
+		PageAvatarField:              "media.image_cover_url",
+		ListPagesItemsField:          "items",
+		ListPagesLimitField:          "page_size",
+		ListPagesCursorArg:           "bookmark",
+		ListPagesCursorResponseField: "bookmark",
+		ProfileTool:                  "get_user_account",
+		ProfileNameField:             "username",
+		ProfileAvatarField:           "profile_image",
+		DeleteTool:                   "delete_pin",
+		DeleteIDField:                "pin_id",
+		OptionFields: []optionField{
+			{Name: "title", Type: "text", Label: "Pin title",
+				Help: "Optional Pinterest title. Maximum 100 characters."},
+			{Name: "link", Type: "text", Label: "Destination link",
+				Help: "Optional URL opened when someone clicks the Pin."},
+			{Name: "alt_text", Type: "textarea", Label: "Alt text",
+				Help: "Accessible description of the visual. Maximum 500 characters."},
+			{Name: "board_section_id", Type: "text", Label: "Board section ID",
+				Help: "Optional section inside the connected board."},
+			{Name: "thumbnail_storage_id", Type: "media", Label: "Video cover",
+				Help: "Required for video Pins unless an attached image is used as the cover."},
+		},
+		Inbox: inboxCaps{},
+	},
 }
 
 var globalCtx *sdk.AppCtx
@@ -725,7 +772,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "account_list_pending_pages",
-			Description: "After OAuth completes, list the pages/channels/accounts the user can pick from. Empty result means the platform has no setup step (e.g. Twitter personal) and you can call account_finalize directly. Args: pending_account_id.",
+			Description: "After OAuth completes, list the pages/channels/boards/accounts the user can pick from. Empty result means the platform has no setup step (e.g. Twitter personal) and you can call account_finalize directly. Args: pending_account_id.",
 			InputSchema: schemaObject(map[string]any{
 				"pending_account_id": map[string]any{"type": "integer"},
 			}, []string{"pending_account_id"}),
@@ -733,7 +780,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "account_finalize",
-			Description: "Commit a pending account into the active social_accounts list. For multi-page platforms (Facebook, Instagram, YouTube) supply page_id from account_list_pending_pages; for personal platforms (Twitter, LinkedIn personal) page_id is optional. Args: pending_account_id, page_id?, name?.",
+			Description: "Commit a pending account into the active social_accounts list. For destination-based platforms (Facebook, Instagram, Pinterest) supply page_id from account_list_pending_pages; for personal platforms page_id is optional. Args: pending_account_id, page_id?, name?.",
 			InputSchema: schemaObject(map[string]any{
 				"pending_account_id": map[string]any{"type": "integer"},
 				"page_id":            map[string]any{"type": "string"},
@@ -2871,9 +2918,255 @@ func (a *App) runStrategy(ctx *sdk.AppCtx, def platformDef, j publishJob) (strin
 		return a.publishTikTok(ctx, def, j)
 	case "youtube":
 		return a.publishYoutube(ctx, def, j)
+	case "pinterest":
+		return a.publishPinterest(ctx, def, j)
 	default: // "single" or empty
 		return a.publishSingle(ctx, def, j)
 	}
+}
+
+const pinterestVideoMaxBytes int64 = 2 * 1024 * 1024 * 1024
+
+// publishPinterest maps Social's generic post and media model onto
+// Pinterest's nested media_source contract. A connected Pinterest account
+// represents one board, so external_account_id is always the board_id.
+func (a *App) publishPinterest(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	if j.extID == "" {
+		return "", "", errors.New("pinterest account has no board id stored — reconnect and select a board")
+	}
+	if len(j.media) == 0 {
+		return "", "", errors.New("pinterest requires at least one image or video")
+	}
+	if utf8.RuneCountInString(j.body) > 800 {
+		return "", "", errors.New("pinterest description exceeds 800 characters")
+	}
+	title := strOption(j.options, "title")
+	if utf8.RuneCountInString(title) > 100 {
+		return "", "", errors.New("pinterest title exceeds 100 characters")
+	}
+	altText := strOption(j.options, "alt_text")
+	if utf8.RuneCountInString(altText) > 500 {
+		return "", "", errors.New("pinterest alt text exceeds 500 characters")
+	}
+	link := strOption(j.options, "link")
+	if link != "" {
+		parsed, err := url.Parse(link)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return "", "", errors.New("pinterest destination link must be an absolute HTTP(S) URL")
+		}
+	}
+
+	images := make([]mediaItem, 0, len(j.media))
+	videos := make([]mediaItem, 0, 1)
+	for _, item := range j.media {
+		switch {
+		case item.IsImage():
+			images = append(images, item)
+		case item.IsVideo():
+			videos = append(videos, item)
+		default:
+			return "", "", fmt.Errorf("pinterest does not support media type %q", item.Mime)
+		}
+	}
+	if len(videos) > 1 || (len(videos) == 1 && len(images) > 1) {
+		return "", "", errors.New("pinterest supports one video with at most one attached cover image")
+	}
+	if len(videos) == 0 && len(images) > 5 {
+		return "", "", errors.New("pinterest supports at most 5 images per Pin")
+	}
+
+	var mediaSource map[string]any
+	if len(videos) == 1 {
+		coverURL := ""
+		thumb, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID)
+		if err != nil {
+			return "", "", err
+		}
+		if thumb != nil {
+			coverURL = thumb.URL
+		} else if len(images) == 1 {
+			coverURL = images[0].URL
+		}
+		if coverURL == "" {
+			return "", "", errors.New("pinterest video Pins require thumbnail_storage_id or one attached image as the cover")
+		}
+		mediaID, err := a.uploadPinterestVideo(ctx, j.connID, videos[0])
+		if err != nil {
+			return "", "", err
+		}
+		mediaSource = map[string]any{
+			"source_type":     "video_id",
+			"media_id":        mediaID,
+			"cover_image_url": coverURL,
+		}
+	} else if len(images) == 1 {
+		mediaSource = map[string]any{"source_type": "image_url", "url": images[0].URL}
+	} else {
+		items := make([]map[string]any, 0, len(images))
+		for _, image := range images {
+			items = append(items, map[string]any{"url": image.URL})
+		}
+		mediaSource = map[string]any{"source_type": "multiple_image_urls", "items": items}
+	}
+
+	input := map[string]any{
+		def.ExternalIDField: j.extID,
+		def.BodyField:       j.body,
+		"media_source":      mediaSource,
+	}
+	for key, value := range map[string]string{
+		"title": title, "link": link, "alt_text": altText,
+		"board_section_id": strOption(j.options, "board_section_id"),
+	} {
+		if value != "" {
+			input[key] = value
+		}
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
+	if err != nil {
+		return "", "", fmt.Errorf("create_pin: %w", err)
+	}
+	if res == nil || !res.Success {
+		return "", "", upstreamError(res)
+	}
+	id, platformURL := extractPostIdentity("pinterest", res.Data)
+	return id, platformURL, nil
+}
+
+type pinterestMediaRegistration struct {
+	MediaID          string         `json:"media_id"`
+	UploadURL        string         `json:"upload_url"`
+	UploadParameters map[string]any `json:"upload_parameters"`
+}
+
+func (a *App) uploadPinterestVideo(ctx *sdk.AppCtx, connID int64, item mediaItem) (string, error) {
+	if item.Bytes > pinterestVideoMaxBytes {
+		return "", fmt.Errorf("pinterest video is too large: %d bytes (max 2 GB)", item.Bytes)
+	}
+	registered, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "register_media_upload", map[string]any{"media_type": "video"})
+	if err != nil {
+		return "", fmt.Errorf("register pinterest media: %w", err)
+	}
+	if registered == nil || !registered.Success {
+		return "", fmt.Errorf("register pinterest media: %w", upstreamError(registered))
+	}
+	var upload pinterestMediaRegistration
+	if err := json.Unmarshal(registered.Data, &upload); err != nil {
+		return "", fmt.Errorf("decode pinterest media registration: %w", err)
+	}
+	if upload.MediaID == "" || upload.UploadURL == "" {
+		return "", errors.New("pinterest media registration returned no media_id or upload_url")
+	}
+	if err := postPinterestMultipartUpload(upload.UploadURL, upload.UploadParameters, item); err != nil {
+		return "", err
+	}
+	for attempt := 0; attempt < 30; attempt++ {
+		statusRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_media_upload", map[string]any{"media_id": upload.MediaID})
+		if err != nil {
+			return "", fmt.Errorf("check pinterest media: %w", err)
+		}
+		if statusRes == nil || !statusRes.Success {
+			return "", fmt.Errorf("check pinterest media: %w", upstreamError(statusRes))
+		}
+		var status struct {
+			Status string `json:"status"`
+		}
+		_ = json.Unmarshal(statusRes.Data, &status)
+		switch strings.ToLower(status.Status) {
+		case "succeeded":
+			return upload.MediaID, nil
+		case "failed":
+			return "", errors.New("pinterest rejected the uploaded video while processing it")
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return "", errors.New("pinterest video processing did not finish within 60 seconds")
+}
+
+func pinterestUploadURLAllowed(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && strings.EqualFold(u.Hostname(), "pinterest-media-upload.s3-accelerate.amazonaws.com")
+}
+
+// postPinterestMultipartUpload writes the form to a temporary file so the S3
+// upload has an exact Content-Length without holding a potentially large video
+// in memory. Pinterest's pre-authorized upload never receives OAuth headers.
+func postPinterestMultipartUpload(uploadURL string, fields map[string]any, item mediaItem) error {
+	if !pinterestUploadURLAllowed(uploadURL) {
+		return errors.New("pinterest returned an untrusted media upload URL")
+	}
+	tmp, err := os.CreateTemp("", "social-pinterest-upload-*")
+	if err != nil {
+		return fmt.Errorf("create pinterest upload buffer: %w", err)
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	defer tmp.Close()
+
+	mw := multipart.NewWriter(tmp)
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := mw.WriteField(key, toString(fields[key])); err != nil {
+			return fmt.Errorf("write pinterest upload field: %w", err)
+		}
+	}
+	filename := item.Name
+	if filename == "" {
+		filename = "video"
+	}
+	part, err := mw.CreateFormFile("file", filepath.Base(filename))
+	if err != nil {
+		return fmt.Errorf("create pinterest video form part: %w", err)
+	}
+	mediaReq, err := http.NewRequest(http.MethodGet, item.URL, nil)
+	if err != nil {
+		return fmt.Errorf("build pinterest media GET: %w", err)
+	}
+	mediaRes, err := http.DefaultClient.Do(mediaReq)
+	if err != nil {
+		return fmt.Errorf("fetch pinterest video from storage: %w", err)
+	}
+	defer mediaRes.Body.Close()
+	if mediaRes.StatusCode != http.StatusOK {
+		return fmt.Errorf("fetch pinterest video: storage returned %d", mediaRes.StatusCode)
+	}
+	written, err := io.Copy(part, io.LimitReader(mediaRes.Body, pinterestVideoMaxBytes+1))
+	if err != nil {
+		return fmt.Errorf("buffer pinterest video: %w", err)
+	}
+	if written > pinterestVideoMaxBytes {
+		return errors.New("pinterest video exceeds 2 GB")
+	}
+	if err := mw.Close(); err != nil {
+		return fmt.Errorf("finish pinterest upload form: %w", err)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind pinterest upload form: %w", err)
+	}
+	stat, err := tmp.Stat()
+	if err != nil {
+		return fmt.Errorf("size pinterest upload form: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, uploadURL, tmp)
+	if err != nil {
+		return fmt.Errorf("build pinterest upload POST: %w", err)
+	}
+	req.ContentLength = stat.Size()
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("upload pinterest video: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		return fmt.Errorf("upload pinterest video: S3 returned %d: %s", res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 // publishSingle covers Twitter / Facebook / LinkedIn — a single
@@ -5112,6 +5405,7 @@ type normalizedMetrics struct {
 	Comments  int64           `json:"comments"`
 	Shares    int64           `json:"shares"`
 	Saves     int64           `json:"saves"`
+	Clicks    int64           `json:"clicks"`
 	Available []string        `json:"available,omitempty"`
 	Raw       json.RawMessage `json:"raw,omitempty"`
 }
@@ -5175,6 +5469,8 @@ func (a *App) getPostMetrics(ctx *sdk.AppCtx, target metricsTarget) targetMetric
 		return a.getFacebookPostMetrics(ctx, out, target.ConnID, target.ExternalAccountID, target.PageCreds)
 	case "instagram":
 		return a.getInstagramPostMetrics(ctx, out, target.ConnID, target.PageCreds)
+	case "pinterest":
+		return a.getPinterestPostMetrics(ctx, out, target.ConnID)
 	default:
 		// LinkedIn / Reddit / Pinterest / Threads — analytics tools
 		// either aren't in the catalog yet or have slug-style paths
@@ -5194,6 +5490,61 @@ func (a *App) getProviderPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, 
 		out.Reason = "analytics not wired for provider " + target.ProviderSlug
 		return out
 	}
+}
+
+func (a *App) getPinterestPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
+	startDate, endDate := metricsDateWindow(30)
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_pin_analytics", map[string]any{
+		"pin_id":       out.PlatformPostID,
+		"start_date":   startDate,
+		"end_date":     endDate,
+		"metric_types": []string{"IMPRESSION", "PIN_CLICK", "OUTBOUND_CLICK", "SAVE"},
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	metrics := pinterestSummaryMetrics(res.Data)
+	clicks := metrics["OUTBOUND_CLICK"]
+	if _, hasOutbound := metrics["OUTBOUND_CLICK"]; !hasOutbound {
+		clicks = metrics["PIN_CLICK"]
+	}
+	out.Status = "ok"
+	out.Metrics = &normalizedMetrics{
+		Views:     metrics["IMPRESSION"],
+		Clicks:    clicks,
+		Saves:     metrics["SAVE"],
+		Available: []string{"views", "clicks", "saves"},
+		Raw:       sanitizeRawJSON(res.Data),
+	}
+	return out
+}
+
+// pinterestSummaryMetrics accepts both PinAnalyticsResponse and
+// AnalyticsResponse. Each is keyed by a split such as "all" and carries a
+// summary_metrics object; when Pinterest returns several splits we sum them.
+func pinterestSummaryMetrics(raw json.RawMessage) map[string]int64 {
+	var payload map[string]struct {
+		Summary map[string]float64 `json:"summary_metrics"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	out := map[string]int64{}
+	if all, ok := payload["all"]; ok {
+		for key, value := range all.Summary {
+			out[key] = int64(value)
+		}
+		return out
+	}
+	for _, group := range payload {
+		for key, value := range group.Summary {
+			out[key] += int64(value)
+		}
+	}
+	return out
 }
 
 // extractPageToken pulls the page-level access_token out of a
@@ -5333,7 +5684,7 @@ func (a *App) getTwitterPostAnalytics(ctx *sdk.AppCtx, out targetMetricsOutcome,
 }
 
 func hasAnyMetrics(m *normalizedMetrics) bool {
-	return m != nil && (len(m.Available) > 0 || m.Views > 0 || m.Reach > 0 || m.Likes > 0 || m.Comments > 0 || m.Shares > 0 || m.Saves > 0)
+	return m != nil && (len(m.Available) > 0 || m.Views > 0 || m.Reach > 0 || m.Likes > 0 || m.Comments > 0 || m.Shares > 0 || m.Saves > 0 || m.Clicks > 0)
 }
 
 func extractNamedNumbers(raw json.RawMessage) map[string]int64 {
@@ -5864,6 +6215,8 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, pe
 		result = a.getFacebookAccountMetrics(ctx, out, connID, extID, pageCreds, period, query)
 	case "instagram":
 		result = a.getInstagramAccountMetrics(ctx, out, connID, extID, pageCreds, period, query)
+	case "pinterest":
+		result = a.getPinterestAccountMetrics(ctx, out, connID, query)
 	default:
 		out.Status = "unsupported"
 		out.Reason = "account-level metrics not wired for this platform yet"
@@ -5923,6 +6276,92 @@ func (a *App) getTwitterAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult
 	out.Following = pm.FollowingCount
 	out.Posts = pm.TweetCount
 	out.Raw = sanitizeRawJSON(res.Data)
+	return out
+}
+
+func (a *App) getPinterestAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, query analyticsQuery) accountMetricsResult {
+	profileRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_user_account", map[string]any{})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if profileRes == nil || !profileRes.Success {
+		out.Status, out.Error = "failed", upstreamError(profileRes).Error()
+		return out
+	}
+	var profile struct {
+		Username       string `json:"username"`
+		FollowerCount  int64  `json:"follower_count"`
+		FollowingCount int64  `json:"following_count"`
+		PinCount       int64  `json:"pin_count"`
+	}
+	_ = json.Unmarshal(profileRes.Data, &profile)
+	out.Status = "ok"
+	if out.DisplayName == "" {
+		out.DisplayName = profile.Username
+	}
+	out.Followers = profile.FollowerCount
+	out.Following = profile.FollowingCount
+	out.Posts = profile.PinCount
+
+	startDate, endDate := query.dates()
+	analyticsRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_user_analytics", map[string]any{
+		"start_date":   startDate,
+		"end_date":     endDate,
+		"metric_types": []string{"IMPRESSION", "ENGAGEMENT", "PIN_CLICK", "OUTBOUND_CLICK", "SAVE"},
+	})
+	if err != nil || analyticsRes == nil || !analyticsRes.Success {
+		if err == nil {
+			err = upstreamError(analyticsRes)
+		}
+		out.Reason = "pinterest analytics unavailable: " + err.Error()
+		out.Raw = sanitizeRawJSON(profileRes.Data)
+		return out
+	}
+	summary := pinterestSummaryMetrics(analyticsRes.Data)
+	out.Impressions = summary["IMPRESSION"]
+	out.Engagements = summary["ENGAGEMENT"]
+	out.Clicks = summary["OUTBOUND_CLICK"]
+	if _, hasOutbound := summary["OUTBOUND_CLICK"]; !hasOutbound {
+		out.Clicks = summary["PIN_CLICK"]
+	}
+	out.Saves = summary["SAVE"]
+	out.Insights = pinterestDailyInsights(analyticsRes.Data)
+	out.Raw = sanitizeRawJSON(analyticsRes.Data)
+	return out
+}
+
+func pinterestDailyInsights(raw json.RawMessage) insightSeries {
+	var payload map[string]struct {
+		Daily []struct {
+			Date    string             `json:"date"`
+			Metrics map[string]float64 `json:"metrics"`
+		} `json:"daily_metrics"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	out := insightSeries{}
+	groups := payload
+	if all, ok := payload["all"]; ok {
+		groups = map[string]struct {
+			Daily []struct {
+				Date    string             `json:"date"`
+				Metrics map[string]float64 `json:"metrics"`
+			} `json:"daily_metrics"`
+		}{"all": all}
+	}
+	metricNames := map[string]string{
+		"IMPRESSION": "impressions", "ENGAGEMENT": "engagements",
+		"PIN_CLICK": "pin_clicks", "OUTBOUND_CLICK": "outbound_clicks", "SAVE": "saves",
+	}
+	for _, group := range groups {
+		for _, day := range group.Daily {
+			for upstream, name := range metricNames {
+				if value, ok := day.Metrics[upstream]; ok {
+					out[name] = append(out[name], insightPoint{Time: day.Date, Value: int64(value)})
+				}
+			}
+		}
+	}
 	return out
 }
 
@@ -6819,6 +7258,7 @@ func persistPostMetricOutcome(ctx *sdk.AppCtx, pid string, profileID, postID int
 		{"comments", outcome.Metrics.Comments},
 		{"shares", outcome.Metrics.Shares},
 		{"saves", outcome.Metrics.Saves},
+		{"clicks", outcome.Metrics.Clicks},
 	}
 	source := outcome.Platform + "_post_snapshot"
 	for _, point := range points {
@@ -7425,7 +7865,7 @@ type importCandidate struct {
 
 func importSupportedPlatform(platform string) bool {
 	switch platform {
-	case "facebook", "instagram", "tiktok", "twitter", "youtube":
+	case "facebook", "instagram", "pinterest", "tiktok", "twitter", "youtube":
 		return true
 	default:
 		return false
@@ -7586,11 +8026,104 @@ func (a *App) importAccountPosts(ctx *sdk.AppCtx, pid string, accountID int64, l
 		return a.importTwitterPosts(ctx, pid, out, accountID, connID, profileID, limit)
 	case "youtube":
 		return a.importYoutubePosts(ctx, pid, out, accountID, connID, profileID, limit)
+	case "pinterest":
+		return a.importPinterestPosts(ctx, pid, out, accountID, connID, extID, profileID, limit)
 	default:
 		out.Status = "unsupported"
 		out.Reason = "import for this platform isn't wired yet"
 		return out
 	}
+}
+
+func (a *App) importPinterestPosts(
+	ctx *sdk.AppCtx, pid string, out importResult,
+	accountID, connID int64, boardID string,
+	profileID int64, limit int,
+) importResult {
+	if boardID == "" {
+		out.Status, out.Error = "failed", "pinterest account has no board id stored"
+		return out
+	}
+	if profileID == 0 {
+		profileID = projectDefaultProfileID(ctx, pid)
+	}
+	bookmark := ""
+	seen := 0
+	for seen < limit {
+		pageSize := limit - seen
+		if pageSize > 250 {
+			pageSize = 250
+		}
+		args := map[string]any{"board_id": boardID, "page_size": pageSize}
+		if bookmark != "" {
+			args["bookmark"] = bookmark
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_board_pins", args)
+		if err != nil {
+			out.Status, out.Error = "failed", err.Error()
+			return out
+		}
+		if res == nil || !res.Success {
+			out.Status, out.Error = "failed", upstreamError(res).Error()
+			return out
+		}
+		var payload struct {
+			Items []struct {
+				ID             string         `json:"id"`
+				CreatedAt      string         `json:"created_at"`
+				Title          string         `json:"title"`
+				Description    string         `json:"description"`
+				Link           string         `json:"link"`
+				AltText        string         `json:"alt_text"`
+				BoardSectionID string         `json:"board_section_id"`
+				Media          map[string]any `json:"media"`
+			} `json:"items"`
+			Bookmark string `json:"bookmark"`
+		}
+		if err := json.Unmarshal(res.Data, &payload); err != nil {
+			out.Status, out.Error = "failed", "decode pinterest pins: "+err.Error()
+			return out
+		}
+		if len(payload.Items) == 0 {
+			break
+		}
+		for _, pin := range payload.Items {
+			if pin.ID == "" || seen >= limit {
+				continue
+			}
+			seen++
+			options := map[string]any{}
+			for key, value := range map[string]string{
+				"title": pin.Title, "link": pin.Link, "alt_text": pin.AltText,
+				"board_section_id": pin.BoardSectionID,
+			} {
+				if value != "" {
+					options[key] = value
+				}
+			}
+			mediaURL := firstDeepString(pin.Media, "url")
+			imported, err := a.insertImportedPostWithOptions(
+				ctx, pid, accountID, profileID,
+				pin.Description, pin.ID, "https://www.pinterest.com/pin/"+pin.ID+"/", pin.CreatedAt,
+				[]string{mediaURL}, options,
+			)
+			if err != nil {
+				ctx.Logger().Warn("import: insert pinterest pin failed", "pin_id", pin.ID, "err", err)
+				continue
+			}
+			if imported {
+				out.Imported++
+			} else {
+				out.SkippedExisting++
+			}
+		}
+		if payload.Bookmark == "" || payload.Bookmark == bookmark {
+			break
+		}
+		bookmark = payload.Bookmark
+	}
+	out.Status = "ok"
+	return out
 }
 
 func (a *App) importFacebookPosts(
@@ -8396,6 +8929,8 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			out = a.editTwitterPost(ctx, out, r.ConnID, eff)
 		case "youtube":
 			out = a.editYoutubePost(ctx, out, r.ConnID, eff, requested, r.MediaProjectID)
+		case "pinterest":
+			out = a.editPinterestPost(ctx, out, r.ConnID, eff, requested)
 		case "tiktok", "instagram":
 			out.Status = "unsupported"
 			out.Reason = platformEditReason(r.Platform)
@@ -8412,6 +8947,52 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"prior_status": status,
 		"targets":      outcomes,
 	}, nil
+}
+
+func (a *App) editPinterestPost(ctx *sdk.AppCtx, out targetEditOutcome, connID int64, eff, requested map[string]any) targetEditOutcome {
+	input := map[string]any{"pin_id": out.PlatformPostID}
+	fields := map[string]string{
+		"body": "description", "title": "title", "link": "link",
+		"alt_text": "alt_text", "board_section_id": "board_section_id",
+	}
+	for option, upstream := range fields {
+		if _, changed := requested[option]; !changed {
+			continue
+		}
+		value, ok := eff[option].(string)
+		if !ok {
+			value = toString(eff[option])
+		}
+		input[upstream] = value
+	}
+	if len(input) == 1 {
+		out.Status = "skipped"
+		out.Reason = "pinterest edit needs body, title, link, alt_text, or board_section_id"
+		return out
+	}
+	if description, ok := input["description"].(string); ok && utf8.RuneCountInString(description) > 800 {
+		out.Status, out.Error = "failed", "pinterest description exceeds 800 characters"
+		return out
+	}
+	if title, ok := input["title"].(string); ok && utf8.RuneCountInString(title) > 100 {
+		out.Status, out.Error = "failed", "pinterest title exceeds 100 characters"
+		return out
+	}
+	if alt, ok := input["alt_text"].(string); ok && utf8.RuneCountInString(alt) > 500 {
+		out.Status, out.Error = "failed", "pinterest alt text exceeds 500 characters"
+		return out
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "update_pin", input)
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	out.Status = "ok"
+	return out
 }
 
 // platformEditReason explains *why* a given platform's edit returns
@@ -9773,7 +10354,7 @@ type pageEntry struct {
 // iterations so a runaway upstream can't OOM us. Limit per call is set high
 // up-front to minimise round-trips.
 func (a *App) fetchPages(ctx *sdk.AppCtx, connID int64, def platformDef) ([]pageEntry, error) {
-	const maxPagePages = 10 // 10 × 100 = 1000 destinations is a lot for social
+	const maxPagePages = 10
 	const perPage = 100
 
 	// Start with the platform-supplied args and a reasonably high limit.
@@ -9784,8 +10365,12 @@ func (a *App) fetchPages(ctx *sdk.AppCtx, connID int64, def platformDef) ([]page
 	for k, v := range def.ListPagesArgs {
 		args[k] = v
 	}
-	if _, hasLimit := args["limit"]; !hasLimit {
-		args["limit"] = perPage
+	limitField := def.ListPagesLimitField
+	if limitField == "" {
+		limitField = "limit"
+	}
+	if _, hasLimit := args[limitField]; !hasLimit {
+		args[limitField] = perPage
 	}
 
 	pages := make([]pageEntry, 0, perPage)
@@ -9801,17 +10386,12 @@ func (a *App) fetchPages(ctx *sdk.AppCtx, connID int64, def platformDef) ([]page
 			}
 			return nil, fmt.Errorf("upstream non-2xx: %s", body)
 		}
-		// Graph/Twitter shape: {data:[...], paging:{...}}.
-		var envelope struct {
-			Data   []map[string]any `json:"data"`
-			Paging struct {
-				Cursors struct {
-					After string `json:"after"`
-				} `json:"cursors"`
-				Next string `json:"next"`
-			} `json:"paging"`
+		itemsField := def.ListPagesItemsField
+		if itemsField == "" {
+			itemsField = "data"
 		}
-		if err := json.Unmarshal(res.Data, &envelope); err != nil || envelope.Data == nil {
+		var envelope map[string]any
+		if err := json.Unmarshal(res.Data, &envelope); err != nil || envelope == nil {
 			// Fall back to "raw is the array" — no pagination possible
 			// without a paging envelope, so this is necessarily the last
 			// (and only) call.
@@ -9832,7 +10412,15 @@ func (a *App) fetchPages(ctx *sdk.AppCtx, connID int64, def platformDef) ([]page
 			}
 			return pages, nil
 		}
-		for _, p := range envelope.Data {
+		rawItems, _ := walkPath(envelope, itemsField).([]any)
+		if rawItems == nil {
+			return nil, fmt.Errorf("parse %s response: missing %s array", def.ListPagesTool, itemsField)
+		}
+		for _, rawItem := range rawItems {
+			p, ok := rawItem.(map[string]any)
+			if !ok {
+				continue
+			}
 			entry := pageEntry{
 				ID:     toString(walkPath(p, def.PageIDField)),
 				Name:   toString(walkPath(p, def.PageNameField)),
@@ -9851,21 +10439,22 @@ func (a *App) fetchPages(ctx *sdk.AppCtx, connID int64, def platformDef) ([]page
 			}
 			pages = append(pages, entry)
 		}
-		// Done when neither paging.cursors.after nor paging.next is set.
-		// Some shapes use one or the other — Facebook tends to give both;
-		// IG sometimes only `next`. Either signals "more is available".
-		if envelope.Paging.Cursors.After == "" && envelope.Paging.Next == "" {
+		cursorPath := def.ListPagesCursorResponseField
+		if cursorPath == "" {
+			cursorPath = "paging.cursors.after"
+		}
+		cursor := toString(walkPath(envelope, cursorPath))
+		if cursor == "" {
 			break
 		}
-		// Prefer cursor-based continuation (works with our static path);
-		// `paging.next` is a full URL we'd have to call directly which
-		// the integration tool layer doesn't support.
-		if envelope.Paging.Cursors.After == "" {
-			ctx.Logger().Warn("fetchPages: paging.next set but no cursor — stopping",
-				"platform", def.Platform, "fetched", len(pages))
+		cursorArg := def.ListPagesCursorArg
+		if cursorArg == "" {
+			cursorArg = "after"
+		}
+		if toString(args[cursorArg]) == cursor {
 			break
 		}
-		args["after"] = envelope.Paging.Cursors.After
+		args[cursorArg] = cursor
 	}
 	ctx.Logger().Info("fetchPages: done", "platform", def.Platform, "total", len(pages))
 	return pages, nil
@@ -10103,6 +10692,11 @@ func extractPostIdentity(platform string, raw json.RawMessage) (string, string) 
 		id := toString(obj["id"])
 		if id != "" {
 			return id, "https://www.facebook.com/" + id
+		}
+	case "pinterest":
+		id := toString(obj["id"])
+		if id != "" {
+			return id, "https://www.pinterest.com/pin/" + id + "/"
 		}
 	}
 	if id := toString(obj["id"]); id != "" {
