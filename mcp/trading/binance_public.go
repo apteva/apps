@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -161,9 +160,7 @@ func (b *binancePublic) BacktestBarsContext(ctx context.Context, symbol, interva
 		if remaining < pageSize {
 			pageSize = remaining
 		}
-		page, err := retryBacktestBars(ctx, func() ([]Bar, error) {
-			return b.klinesContext(ctx, wire, binanceInterval, pageSize, cursor, effectiveEnd)
-		})
+		page, err := b.klinesContext(ctx, wire, binanceInterval, pageSize, cursor, effectiveEnd)
 		if err != nil {
 			return nil, err
 		}
@@ -315,21 +312,9 @@ func (b *binancePublic) fetch(u string) ([]byte, error) {
 }
 
 func (b *binancePublic) fetchContext(parent context.Context, u string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "apteva-trading/0.2")
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("binancePublic: HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return publicGET(parent, b.client, "binancePublic", u, 1<<20, map[string]string{
+		"Accept": "application/json", "User-Agent": "apteva-trading/0.4",
+	})
 }
 
 // binanceTicker mirrors the relevant subset of /ticker/24hr's response
@@ -343,6 +328,7 @@ type binanceTicker struct {
 	PriceChangePercent string `json:"priceChangePercent"`
 	Volume             string `json:"volume"`      // base-asset volume
 	QuoteVolume        string `json:"quoteVolume"` // USD-side volume; better for our 24h indicator
+	CloseTime          int64  `json:"closeTime"`   // exchange event time, milliseconds since epoch
 }
 
 func (t binanceTicker) toMark(internalSymbol string) (*Mark, error) {
@@ -352,12 +338,25 @@ func (t binanceTicker) toMark(internalSymbol string) (*Mark, error) {
 	}
 	prev, _ := strconv.ParseFloat(t.PrevClosePrice, 64)
 	vol, _ := strconv.ParseFloat(t.QuoteVolume, 64)
-	mk := &Mark{
-		Symbol:     internalSymbol,
-		AssetClass: "crypto",
-		Price:      price,
-		MarkedAt:   time.Now().UTC().Format(time.RFC3339),
+	receivedAt := time.Now().UTC()
+	markedAt := receivedAt
+	timestampKind := "received"
+	if t.CloseTime > 0 {
+		markedAt = time.UnixMilli(t.CloseTime).UTC()
+		timestampKind = "exchange"
 	}
+	mk := &Mark{
+		Symbol:        internalSymbol,
+		AssetClass:    "crypto",
+		Price:         price,
+		MarkedAt:      markedAt.Format(time.RFC3339Nano),
+		TimestampKind: timestampKind,
+		Source:        "binance-public",
+		VolumeUnit:    "quote_currency",
+	}
+	mk.Instrument = defaultInstrument(internalSymbol, "crypto", "binance-public", receivedAt)
+	mk.Instrument.ProviderSymbol = t.Symbol
+	mk.Instrument.QuoteCurrency = "USDT"
 	if prev > 0 {
 		mk.PrevClose = &prev
 	}

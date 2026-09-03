@@ -1,6 +1,57 @@
 package main
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+type MarketSession struct {
+	Calendar    string `json:"calendar"`
+	Timezone    string `json:"timezone"`
+	EvaluatedAt string `json:"evaluated_at"`
+	OpenDay     bool   `json:"open_day"`
+	IsOpen      bool   `json:"is_open"`
+	OpenAt      string `json:"open_at,omitempty"`
+	CloseAt     string `json:"close_at,omitempty"`
+	NextOpenAt  string `json:"next_open_at,omitempty"`
+	Reason      string `json:"reason"`
+}
+
+func marketSessionAt(calendar string, at time.Time) (*MarketSession, error) {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	at = at.UTC()
+	switch strings.ToUpper(strings.TrimSpace(calendar)) {
+	case calendarAlwaysOpen:
+		open := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC)
+		return &MarketSession{
+			Calendar: calendarAlwaysOpen, Timezone: "UTC", EvaluatedAt: at.Format(time.RFC3339Nano),
+			OpenDay: true, IsOpen: true, OpenAt: open.Format(time.RFC3339),
+			CloseAt: open.Add(24 * time.Hour).Format(time.RFC3339), Reason: "continuous_session",
+		}, nil
+	case calendarUSEquity:
+		session := usEquitySessionAt(at)
+		out := &MarketSession{
+			Calendar: calendarUSEquity, Timezone: "America/New_York",
+			EvaluatedAt: at.Format(time.RFC3339Nano), OpenDay: session.OpenDay, Reason: session.Reason,
+		}
+		if session.OpenDay {
+			out.OpenAt = session.Open.UTC().Format(time.RFC3339)
+			out.CloseAt = session.Close.UTC().Format(time.RFC3339)
+			out.IsOpen = !at.Before(session.Open) && at.Before(session.Close)
+		}
+		if !out.IsOpen {
+			if next := nextUSEquityOpen(at); !next.IsZero() {
+				out.NextOpenAt = next.UTC().Format(time.RFC3339)
+			}
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("unsupported exchange calendar %q", calendar)
+	}
+}
 
 type usEquitySession struct {
 	Open    time.Time

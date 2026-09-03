@@ -84,6 +84,10 @@ func (p *liveProvider) Quote(symbol string) (*Mark, error) {
 			p.health.note("crypto", err)
 			return nil, err
 		}
+		m, err = p.normalizeProviderMark("crypto", "binance-public", m)
+		if err != nil {
+			return nil, err
+		}
 		p.health.ok("crypto", "binance-public")
 		p.cache.put(m)
 		return m, nil
@@ -105,6 +109,11 @@ func (p *liveProvider) Quote(symbol string) (*Mark, error) {
 			p.endPolyFailure(err)
 			return nil, err
 		}
+		m, err = p.normalizeProviderMark("polymarket", "polymarket-public", m)
+		if err != nil {
+			p.endPolyFailure(err)
+			return nil, err
+		}
 		p.endPolySuccess()
 		p.cache.put(m)
 		return m, nil
@@ -118,18 +127,23 @@ func (p *liveProvider) Quote(symbol string) (*Mark, error) {
 		if p.equity != nil && p.equity.available() {
 			m, err := p.equity.Quote(symbol)
 			if err == nil {
-				p.health.ok(cls, alpacaMarketDataSlug)
-				p.cache.put(m)
-				return m, nil
+				if m, err = p.normalizeProviderMark(cls, alpacaMarketDataSlug, m); err == nil {
+					p.health.ok(cls, alpacaMarketDataSlug)
+					p.cache.put(m)
+					return m, nil
+				}
 			}
 			p.health.note(cls, err)
 			// Fall through to Yahoo when Alpaca errors — usually a
 			// transient network blip.
 		}
 		if m, err := p.yahoo.Quote(symbol); err == nil {
-			p.health.ok(cls, "yahoo-finance")
-			p.cache.put(m)
-			return m, nil
+			if m, err = p.normalizeProviderMark(cls, "yahoo-finance", m); err == nil {
+				p.health.ok(m.AssetClass, "yahoo-finance")
+				p.cache.put(m)
+				return m, nil
+			}
+			p.health.note(cls, err)
 		} else {
 			p.health.note(cls, err)
 		}
@@ -147,12 +161,18 @@ func (p *liveProvider) Universe() []*Mark {
 
 	// Crypto — single batched ticker call.
 	cryptoSyms := cryptoSymbolsKnown()
-	if cMarks, err := p.crypto.UniverseBatch(cryptoSyms); err == nil && len(cMarks) > 0 {
-		p.health.ok("crypto", "binance-public")
-		for _, m := range cMarks {
-			p.cache.put(m)
+	if cMarks, err := p.crypto.UniverseBatch(cryptoSyms); err == nil {
+		cMarks, err = p.normalizeProviderMarks("crypto", "binance-public", cMarks)
+		if err != nil {
+			p.health.note("crypto", err)
 		}
-		out = append(out, cMarks...)
+		if len(cMarks) > 0 {
+			p.health.ok("crypto", "binance-public")
+			for _, m := range cMarks {
+				p.cache.put(m)
+			}
+			out = append(out, cMarks...)
+		}
 	} else {
 		if err != nil {
 			p.health.note("crypto", err)
@@ -164,6 +184,10 @@ func (p *liveProvider) Universe() []*Mark {
 	pMarks, attempted, perr := p.discoverPolymarket()
 	switch {
 	case perr == nil && len(pMarks) > 0:
+		pMarks, perr = p.normalizeProviderMarks("polymarket", "polymarket-public", pMarks)
+		if perr != nil {
+			p.health.note("polymarket", perr)
+		}
 		for _, m := range pMarks {
 			p.cache.put(m)
 		}
@@ -183,28 +207,42 @@ func (p *liveProvider) Universe() []*Mark {
 	eqSyms := alpacaEquitySymbolsKnown()
 	gotEquity := false
 	if p.equity != nil && p.equity.available() {
-		if eMarks, err := p.equity.UniverseBatch(eqSyms); err == nil && len(eMarks) > 0 {
-			p.health.ok("equity", alpacaMarketDataSlug)
-			p.health.ok("etf", alpacaMarketDataSlug)
-			for _, m := range eMarks {
-				p.cache.put(m)
+		if eMarks, err := p.equity.UniverseBatch(eqSyms); err == nil {
+			eMarks, err = p.normalizeProviderMarks("equity", alpacaMarketDataSlug, eMarks)
+			if err != nil {
+				p.health.note("equity", err)
+				p.health.note("etf", err)
 			}
-			out = append(out, eMarks...)
-			gotEquity = true
+			if len(eMarks) > 0 {
+				p.health.ok("equity", alpacaMarketDataSlug)
+				p.health.ok("etf", alpacaMarketDataSlug)
+				for _, m := range eMarks {
+					p.cache.put(m)
+				}
+				out = append(out, eMarks...)
+				gotEquity = true
+			}
 		} else if err != nil {
 			p.health.note("equity", err)
 			p.health.note("etf", err)
 		}
 	}
 	if !gotEquity {
-		if eMarks, err := p.yahoo.UniverseBatch(eqSyms); err == nil && len(eMarks) > 0 {
-			p.health.ok("equity", "yahoo-finance")
-			p.health.ok("etf", "yahoo-finance")
-			for _, m := range eMarks {
-				p.cache.put(m)
+		if eMarks, err := p.yahoo.UniverseBatch(eqSyms); err == nil {
+			eMarks, err = p.normalizeProviderMarks("equity", "yahoo-finance", eMarks)
+			if err != nil {
+				p.health.note("equity", err)
+				p.health.note("etf", err)
 			}
-			out = append(out, eMarks...)
-			gotEquity = true
+			if len(eMarks) > 0 {
+				p.health.ok("equity", "yahoo-finance")
+				p.health.ok("etf", "yahoo-finance")
+				for _, m := range eMarks {
+					p.cache.put(m)
+				}
+				out = append(out, eMarks...)
+				gotEquity = true
+			}
 		} else if err != nil {
 			p.health.note("equity", err)
 			p.health.note("etf", err)
@@ -233,6 +271,11 @@ func (p *liveProvider) Bars(symbol, rng string) ([]Bar, error) {
 			p.health.note("crypto", err)
 			return nil, err
 		}
+		bars, err = normalizeBars(symbol, "binance-public", bars)
+		if err != nil {
+			p.health.note("crypto", err)
+			return nil, err
+		}
 		p.health.ok("crypto", "binance-public")
 		return bars, nil
 	case "equity", "etf":
@@ -246,11 +289,46 @@ func (p *liveProvider) Bars(symbol, rng string) ([]Bar, error) {
 			}
 			return nil, err
 		}
+		bars, err = normalizeBars(symbol, "yahoo-finance", bars)
+		if err != nil {
+			p.health.note(cls, err)
+			return nil, err
+		}
 		p.health.ok(cls, "yahoo-finance")
 		return bars, nil
 	default:
 		return nil, fmt.Errorf("live history is not available for asset class %q", cls)
 	}
+}
+
+func (p *liveProvider) normalizeProviderMark(class, source string, mark *Mark) (*Mark, error) {
+	now := time.Now().UTC()
+	if p.now != nil {
+		now = p.now().UTC()
+	}
+	normalized, err := normalizeMark(source, mark, now)
+	if err != nil {
+		p.health.note(class, fmt.Errorf("%s quality check: %w", source, err))
+		return nil, err
+	}
+	return normalized, nil
+}
+
+func (p *liveProvider) normalizeProviderMarks(class, source string, marks []*Mark) ([]*Mark, error) {
+	out := make([]*Mark, 0, len(marks))
+	var lastErr error
+	for _, mark := range marks {
+		normalized, err := p.normalizeProviderMark(class, source, mark)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		out = append(out, normalized)
+	}
+	if len(out) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+	return out, nil
 }
 
 func (p *liveProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, error) {
@@ -282,6 +360,11 @@ func (p *liveProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, 
 			p.health.note("crypto", err)
 			return nil, err
 		}
+		bars, err = normalizeBars(symbol, "binance-public", bars)
+		if err != nil {
+			p.health.note("crypto", err)
+			return nil, err
+		}
 		p.health.ok("crypto", "binance-public")
 		return bars, nil
 	}
@@ -303,6 +386,11 @@ func (p *liveProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, 
 		}
 		start := end.Add(-dur * time.Duration(limit) * lookbackFactor)
 		bars, err := p.yahoo.BacktestBars(symbol, interval, start, end, 1000)
+		if err != nil {
+			p.health.note(class, err)
+			return nil, err
+		}
+		bars, err = normalizeBars(symbol, "yahoo-finance", bars)
 		if err != nil {
 			p.health.note(class, err)
 			return nil, err

@@ -81,7 +81,8 @@ var mockUniverse = []seed{
 }
 
 func (m *mockProvider) Universe() []*Mark {
-	now := time.Now().UTC().Format(time.RFC3339)
+	receivedAt := time.Now().UTC()
+	now := receivedAt.Format(time.RFC3339)
 	out := make([]*Mark, 0, len(mockUniverse))
 	for _, s := range mockUniverse {
 		// Tiny pseudo-random walk anchored to s.anchor; deterministic per
@@ -90,11 +91,15 @@ func (m *mockProvider) Universe() []*Mark {
 		bias := float64(s.bias) * s.anchor * 0.00005
 		price := s.anchor + drift + bias
 		mk := &Mark{
-			Symbol:     s.symbol,
-			AssetClass: s.assetClass,
-			Price:      price,
-			MarkedAt:   now,
+			Symbol:        s.symbol,
+			AssetClass:    s.assetClass,
+			Price:         price,
+			MarkedAt:      now,
+			TimestampKind: "generated",
+			Source:        "mock",
 		}
+		mk.Instrument = defaultInstrument(s.symbol, s.assetClass, "mock", receivedAt)
+		mk.Instrument.Exchange = "SIMULATED"
 		if s.assetClass == "polymarket" {
 			no := 1 - price
 			if price < 0.01 {
@@ -112,6 +117,7 @@ func (m *mockProvider) Universe() []*Mark {
 		mk.PrevClose = &pc
 		v := s.volume
 		mk.Volume24h = &v
+		mk.VolumeUnit = mk.Instrument.VolumeUnit
 		out = append(out, mk)
 	}
 	m.tick++

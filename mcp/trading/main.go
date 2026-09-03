@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.41
+version: 0.4.42
 description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 icon: /ui/icon.svg
@@ -112,6 +112,8 @@ provides:
       description: "OHLCV bars or probability history."
     - name: market_source
       description: "Report the live data source per asset class."
+    - name: market_calendar
+      description: "Return normalized exchange-calendar state and instrument metadata."
     - name: watchlist_add
       description: "Track a symbol on a portfolio."
     - name: watchlist_remove

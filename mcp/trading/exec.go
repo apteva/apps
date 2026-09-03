@@ -97,19 +97,12 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 		marks = append(marks, refreshPersistedMarks(e, marks)...)
 		if tx, err := e.db.Begin(); err == nil {
 			for _, m := range marks {
-				if _, err := tx.Exec(`
-					INSERT INTO marks (symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at)
-					VALUES (?, ?, ?, ?, ?, ?, ?)
-					ON CONFLICT(symbol) DO UPDATE SET
-						asset_class = excluded.asset_class,
-						price       = excluded.price,
-						no_price    = excluded.no_price,
-						prev_close  = excluded.prev_close,
-						volume_24h  = excluded.volume_24h,
-						marked_at   = excluded.marked_at`,
-					m.Symbol, m.AssetClass, m.Price, nullable(m.NoPrice), nullable(m.PrevClose),
-					nullable(m.Volume24h), m.MarkedAt); err != nil {
-					e.logger.Warn("upsert mark failed", "symbol", m.Symbol, "err", err)
+				if err := dbUpsertMarkExec(tx, m); err != nil {
+					symbol := ""
+					if m != nil {
+						symbol = m.Symbol
+					}
+					e.logger.Warn("upsert mark failed", "symbol", symbol, "err", err)
 					continue
 				}
 				marksOK++

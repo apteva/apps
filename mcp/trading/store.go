@@ -103,13 +103,18 @@ type JournalEntry struct {
 }
 
 type Mark struct {
-	Symbol     string   `json:"symbol"`
-	AssetClass string   `json:"asset_class"`
-	Price      float64  `json:"price"`
-	NoPrice    *float64 `json:"no_price,omitempty"`
-	PrevClose  *float64 `json:"prev_close,omitempty"`
-	Volume24h  *float64 `json:"volume_24h,omitempty"`
-	MarkedAt   string   `json:"marked_at"`
+	Symbol        string      `json:"symbol"`
+	AssetClass    string      `json:"asset_class"`
+	Price         float64     `json:"price"`
+	NoPrice       *float64    `json:"no_price,omitempty"`
+	PrevClose     *float64    `json:"prev_close,omitempty"`
+	Volume24h     *float64    `json:"volume_24h,omitempty"`
+	VolumeUnit    string      `json:"volume_unit,omitempty"`
+	MarkedAt      string      `json:"marked_at"`
+	ReceivedAt    string      `json:"received_at,omitempty"`
+	TimestampKind string      `json:"timestamp_kind,omitempty"`
+	Source        string      `json:"source,omitempty"`
+	Instrument    *Instrument `json:"instrument,omitempty"`
 }
 
 type Alert struct {
@@ -1091,28 +1096,95 @@ func dbReadJournal(db *sql.DB, portfolioID int64, kind, since string, limit int)
 // ─── Marks ─────────────────────────────────────────────────────────
 
 func dbUpsertMark(db *sql.DB, m *Mark) error {
-	_, err := db.Exec(`
-		INSERT INTO marks (symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+	return dbUpsertMarkExec(db, m)
+}
+
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func dbUpsertMarkExec(exec sqlExecer, m *Mark) error {
+	source := "unknown"
+	if m != nil && strings.TrimSpace(m.Source) != "" {
+		source = m.Source
+	}
+	normalized, err := normalizeMark(source, m, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if err := dbUpsertInstrumentExec(exec, normalized.Instrument); err != nil {
+		return err
+	}
+	_, err = exec.Exec(`
+		INSERT INTO marks (symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at, source, timestamp_kind, volume_unit, received_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(symbol) DO UPDATE SET
 			asset_class = excluded.asset_class,
 			price       = excluded.price,
 			no_price    = excluded.no_price,
 			prev_close  = excluded.prev_close,
 			volume_24h  = excluded.volume_24h,
-			marked_at   = excluded.marked_at`,
-		m.Symbol, m.AssetClass, m.Price, nullable(m.NoPrice), nullable(m.PrevClose),
-		nullable(m.Volume24h), m.MarkedAt)
+			marked_at   = excluded.marked_at,
+			source      = excluded.source,
+			timestamp_kind = excluded.timestamp_kind,
+			volume_unit = excluded.volume_unit,
+			received_at = excluded.received_at`,
+		normalized.Symbol, normalized.AssetClass, normalized.Price, nullable(normalized.NoPrice), nullable(normalized.PrevClose),
+		nullable(normalized.Volume24h), normalized.MarkedAt, normalized.Source, normalized.TimestampKind,
+		normalized.VolumeUnit, normalized.ReceivedAt)
 	return err
+}
+
+func dbUpsertInstrumentExec(exec sqlExecer, i *Instrument) error {
+	if i == nil {
+		return nil
+	}
+	_, err := exec.Exec(`
+		INSERT INTO instruments (
+			symbol, provider_symbol, name, asset_class, exchange, exchange_timezone,
+			calendar, base_currency, quote_currency, volume_unit, tick_size,
+			lot_size, active, expires_at, source, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?)
+		ON CONFLICT(symbol) DO UPDATE SET
+			provider_symbol=excluded.provider_symbol, name=excluded.name,
+			asset_class=excluded.asset_class, exchange=excluded.exchange,
+			exchange_timezone=excluded.exchange_timezone, calendar=excluded.calendar,
+			base_currency=excluded.base_currency, quote_currency=excluded.quote_currency,
+			volume_unit=excluded.volume_unit, tick_size=excluded.tick_size,
+			lot_size=excluded.lot_size, active=excluded.active,
+			expires_at=excluded.expires_at, source=excluded.source,
+			updated_at=excluded.updated_at`,
+		i.Symbol, i.ProviderSymbol, i.Name, i.AssetClass, i.Exchange, i.ExchangeTimezone,
+		i.Calendar, i.BaseCurrency, i.QuoteCurrency, i.VolumeUnit, i.TickSize,
+		i.LotSize, i.Active, i.ExpiresAt, i.Source, i.UpdatedAt)
+	return err
+}
+
+func dbGetInstrument(db *sql.DB, symbol string) (*Instrument, error) {
+	row := db.QueryRow(`
+		SELECT symbol, provider_symbol, name, asset_class, exchange, exchange_timezone,
+		       calendar, base_currency, quote_currency, volume_unit, tick_size,
+		       lot_size, active, COALESCE(expires_at, ''), source, updated_at
+		FROM instruments WHERE symbol = ?`, canonicalSymbol(symbol))
+	var i Instrument
+	if err := row.Scan(&i.Symbol, &i.ProviderSymbol, &i.Name, &i.AssetClass, &i.Exchange,
+		&i.ExchangeTimezone, &i.Calendar, &i.BaseCurrency, &i.QuoteCurrency,
+		&i.VolumeUnit, &i.TickSize, &i.LotSize, &i.Active, &i.ExpiresAt,
+		&i.Source, &i.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &i, nil
 }
 
 func dbGetMark(db *sql.DB, symbol string) (*Mark, error) {
 	row := db.QueryRow(`
-		SELECT symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at
+		SELECT symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at,
+		       source, timestamp_kind, volume_unit, COALESCE(received_at, '')
 		FROM marks WHERE symbol = ?`, symbol)
 	var m Mark
 	var no, pc, vol sql.NullFloat64
-	if err := row.Scan(&m.Symbol, &m.AssetClass, &m.Price, &no, &pc, &vol, &m.MarkedAt); err != nil {
+	if err := row.Scan(&m.Symbol, &m.AssetClass, &m.Price, &no, &pc, &vol, &m.MarkedAt,
+		&m.Source, &m.TimestampKind, &m.VolumeUnit, &m.ReceivedAt); err != nil {
 		return nil, err
 	}
 	if no.Valid {
@@ -1127,12 +1199,14 @@ func dbGetMark(db *sql.DB, symbol string) (*Mark, error) {
 		v := vol.Float64
 		m.Volume24h = &v
 	}
+	m.Instrument, _ = dbGetInstrument(db, symbol)
 	return &m, nil
 }
 
 func dbListMarks(db *sql.DB) ([]*Mark, error) {
 	rows, err := db.Query(`
-		SELECT symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at
+		SELECT symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at,
+		       source, timestamp_kind, volume_unit, COALESCE(received_at, '')
 		FROM marks ORDER BY symbol`)
 	if err != nil {
 		return nil, err
@@ -1142,7 +1216,8 @@ func dbListMarks(db *sql.DB) ([]*Mark, error) {
 	for rows.Next() {
 		var m Mark
 		var no, pc, vol sql.NullFloat64
-		if err := rows.Scan(&m.Symbol, &m.AssetClass, &m.Price, &no, &pc, &vol, &m.MarkedAt); err != nil {
+		if err := rows.Scan(&m.Symbol, &m.AssetClass, &m.Price, &no, &pc, &vol, &m.MarkedAt,
+			&m.Source, &m.TimestampKind, &m.VolumeUnit, &m.ReceivedAt); err != nil {
 			return nil, err
 		}
 		if no.Valid {
@@ -1756,17 +1831,19 @@ func dbListBacktestSnapshots(db *sql.DB, runID int64) ([]*BacktestSnapshot, erro
 }
 
 type BacktestMarketBar struct {
-	RunID      int64
-	Step       int
-	Symbol     string
-	AssetClass string
-	T          int64
-	O          float64
-	H          float64
-	L          float64
-	C          float64
-	V          float64
-	Source     string
+	RunID         int64
+	Step          int
+	Symbol        string
+	AssetClass    string
+	T             int64
+	O             float64
+	H             float64
+	L             float64
+	C             float64
+	V             float64
+	Source        string
+	VolumeUnit    string
+	TimestampKind string
 }
 
 func dbReplaceBacktestMarketBars(db *sql.DB, runID int64, bars []*BacktestMarketBar) error {
@@ -1780,8 +1857,8 @@ func dbReplaceBacktestMarketBars(db *sql.DB, runID int64, bars []*BacktestMarket
 	}
 	stmt, err := tx.Prepare(`
 		INSERT INTO backtest_market_bars (
-			run_id, step, symbol, asset_class, t, o, h, l, c, v, source
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			run_id, step, symbol, asset_class, t, o, h, l, c, v, source, volume_unit, timestamp_kind
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -1790,7 +1867,13 @@ func dbReplaceBacktestMarketBars(db *sql.DB, runID int64, bars []*BacktestMarket
 		if b == nil {
 			continue
 		}
-		if _, err := stmt.Exec(runID, b.Step, b.Symbol, b.AssetClass, b.T, b.O, b.H, b.L, b.C, b.V, b.Source); err != nil {
+		if b.VolumeUnit == "" {
+			b.VolumeUnit = historicalVolumeUnit(b.Source, b.AssetClass)
+		}
+		if b.TimestampKind == "" {
+			b.TimestampKind = "exchange"
+		}
+		if _, err := stmt.Exec(runID, b.Step, b.Symbol, b.AssetClass, b.T, b.O, b.H, b.L, b.C, b.V, b.Source, b.VolumeUnit, b.TimestampKind); err != nil {
 			return err
 		}
 	}
@@ -1799,7 +1882,7 @@ func dbReplaceBacktestMarketBars(db *sql.DB, runID int64, bars []*BacktestMarket
 
 func dbBacktestMarketMarks(db *sql.DB, runID int64, step int, symbols []string) ([]map[string]any, error) {
 	rows, err := db.Query(`
-		SELECT symbol, asset_class, t, o, h, l, c, v, source
+		SELECT symbol, asset_class, t, o, h, l, c, v, source, volume_unit, timestamp_kind
 		FROM backtest_market_bars
 		WHERE run_id = ? AND step = ?
 		ORDER BY symbol ASC`, runID, step)
@@ -1809,15 +1892,16 @@ func dbBacktestMarketMarks(db *sql.DB, runID int64, step int, symbols []string) 
 	defer rows.Close()
 	bySymbol := map[string]map[string]any{}
 	for rows.Next() {
-		var symbol, cls, source string
+		var symbol, cls, source, volumeUnit, timestampKind string
 		var t int64
 		var o, h, l, c, v float64
-		if err := rows.Scan(&symbol, &cls, &t, &o, &h, &l, &c, &v, &source); err != nil {
+		if err := rows.Scan(&symbol, &cls, &t, &o, &h, &l, &c, &v, &source, &volumeUnit, &timestampKind); err != nil {
 			return nil, err
 		}
 		bySymbol[strings.ToUpper(symbol)] = map[string]any{
 			"symbol": symbol, "asset_class": cls, "time": time.Unix(t, 0).UTC().Format(time.RFC3339),
 			"open": o, "high": h, "low": l, "price": c, "close": c, "volume": v, "source": source,
+			"volume_unit": volumeUnit, "timestamp_kind": timestampKind,
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -1844,7 +1928,7 @@ func dbBacktestMarketStepTime(db *sql.DB, runID int64, step int) (time.Time, boo
 
 func dbBacktestMarketHistory(db *sql.DB, runID int64, throughStep int) ([]*BacktestMarketBar, error) {
 	rows, err := db.Query(`
-		SELECT run_id, step, symbol, asset_class, t, o, h, l, c, v, source
+		SELECT run_id, step, symbol, asset_class, t, o, h, l, c, v, source, volume_unit, timestamp_kind
 		FROM backtest_market_bars
 		WHERE run_id = ? AND step <= ?
 		ORDER BY step ASC, symbol ASC`, runID, throughStep)
@@ -1856,7 +1940,7 @@ func dbBacktestMarketHistory(db *sql.DB, runID int64, throughStep int) ([]*Backt
 	for rows.Next() {
 		var bar BacktestMarketBar
 		if err := rows.Scan(&bar.RunID, &bar.Step, &bar.Symbol, &bar.AssetClass, &bar.T,
-			&bar.O, &bar.H, &bar.L, &bar.C, &bar.V, &bar.Source); err != nil {
+			&bar.O, &bar.H, &bar.L, &bar.C, &bar.V, &bar.Source, &bar.VolumeUnit, &bar.TimestampKind); err != nil {
 			return nil, err
 		}
 		out = append(out, &bar)

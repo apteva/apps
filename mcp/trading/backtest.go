@@ -1276,6 +1276,7 @@ func captureBacktestMarketBars(parent context.Context, symbols []string, interva
 				Step: step + 1, Symbol: symbol, AssetClass: inferAssetClass(symbol), T: t,
 				O: nonZeroBarPrice(bar.O, bar.C), H: nonZeroBarPrice(bar.H, bar.C),
 				L: nonZeroBarPrice(bar.L, bar.C), C: bar.C, V: bar.V, Source: source,
+				VolumeUnit: historicalVolumeUnit(source, inferAssetClass(symbol)), TimestampKind: "exchange",
 			})
 		}
 	}
@@ -1284,32 +1285,6 @@ func captureBacktestMarketBars(parent context.Context, symbols []string, interva
 
 type historicalBacktestBarsProvider interface {
 	BacktestBarsContext(ctx context.Context, symbol, interval string, start, end time.Time, limit int) ([]Bar, error)
-}
-
-func retryBacktestBars(ctx context.Context, fetch func() ([]Bar, error)) ([]Bar, error) {
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		bars, err := fetch()
-		if err == nil {
-			return bars, nil
-		}
-		lastErr = err
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if attempt == 2 {
-			break
-		}
-		delay := time.Duration(200*(1<<attempt)) * time.Millisecond
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
-	return nil, lastErr
 }
 
 func backtestBarsProviderForSymbols(symbols []string) (historicalBacktestBarsProvider, string, error) {
@@ -1386,18 +1361,10 @@ func validateBacktestHistory(symbol, source, interval string, startAt, endAt tim
 	if duration <= 0 {
 		return nil, fmt.Errorf("unsupported backtest interval %q", interval)
 	}
-	byTime := make(map[int64]Bar, len(bars))
-	for _, bar := range bars {
-		if bar.T <= 0 || bar.C <= 0 {
-			continue
-		}
-		byTime[bar.T] = bar
+	normalized, err := normalizeBars(symbol, source, bars)
+	if err != nil {
+		return nil, err
 	}
-	normalized := make([]Bar, 0, len(byTime))
-	for _, bar := range byTime {
-		normalized = append(normalized, bar)
-	}
-	sort.Slice(normalized, func(i, j int) bool { return normalized[i].T < normalized[j].T })
 	if source == "yahoo-finance" {
 		normalized = completedYahooStrategyBars(normalized, interval, now)
 	} else {

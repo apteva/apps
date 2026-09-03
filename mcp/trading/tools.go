@@ -86,6 +86,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(nil, nil),
 			Handler:     a.toolMarketSource},
 
+		{Name: "market_calendar", Description: "Return normalized exchange-calendar state for a symbol at an optional RFC3339 timestamp.",
+			InputSchema: schemaObject(map[string]any{
+				"symbol": map[string]any{"type": "string"},
+				"at":     map[string]any{"type": "string"},
+			}, []string{"symbol"}),
+			Handler: a.toolMarketCalendar},
+
 		{Name: "journal_read", Description: "Read recent journal entries for a portfolio.",
 			InputSchema: schemaObject(map[string]any{
 				"portfolio_id": map[string]any{"type": "integer"},
@@ -855,7 +862,11 @@ func (a *App) toolMarketQuote(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	out := map[string]any{
 		"symbol": mark.Symbol, "asset_class": mark.AssetClass,
-		"marked_at": mark.MarkedAt,
+		"marked_at": mark.MarkedAt, "received_at": mark.ReceivedAt,
+		"timestamp_kind": mark.TimestampKind, "source": mark.Source,
+	}
+	if mark.Instrument != nil {
+		out["instrument"] = mark.Instrument
 	}
 	if mark.AssetClass == "polymarket" {
 		out["yes_price"] = mark.Price
@@ -871,6 +882,7 @@ func (a *App) toolMarketQuote(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if mark.Volume24h != nil {
 		out["volume_24h"] = *mark.Volume24h
+		out["volume_unit"] = mark.VolumeUnit
 	}
 	return out, nil
 }
@@ -888,7 +900,24 @@ func (a *App) toolMarketHistory(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"symbol": symbol, "range": rng, "bars": bars}, nil
+	instrument, _ := dbGetInstrument(ctx.AppDB(), symbol)
+	source := "mock"
+	if instrument != nil && instrument.Source != "" {
+		source = instrument.Source
+	}
+	bars, err = normalizeBars(symbol, source, bars)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{
+		"symbol": symbol, "range": rng, "bars": bars, "source": source,
+		"timestamp_format": "unix_seconds_utc",
+	}
+	if instrument != nil {
+		out["instrument"] = instrument
+		out["volume_unit"] = instrument.VolumeUnit
+	}
+	return out, nil
 }
 
 func (a *App) toolMarketSource(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -901,6 +930,39 @@ func (a *App) toolMarketSource(ctx *sdk.AppCtx, args map[string]any) (any, error
 		out["ticks"] = metrics["ticks"]
 	}
 	return out, nil
+}
+
+func (a *App) toolMarketCalendar(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	symbol := canonicalSymbol(strArg(args, "symbol"))
+	if symbol == "" {
+		return nil, errors.New("symbol required")
+	}
+	instrument, err := dbGetInstrument(ctx.AppDB(), symbol)
+	if err != nil && globalEngine != nil {
+		mark, quoteErr := globalEngine.provider.Quote(symbol)
+		if quoteErr != nil {
+			return nil, quoteErr
+		}
+		if err := dbUpsertMark(ctx.AppDB(), mark); err != nil {
+			return nil, err
+		}
+		instrument, err = dbGetInstrument(ctx.AppDB(), symbol)
+	}
+	if err != nil {
+		return nil, err
+	}
+	at := time.Now().UTC()
+	if raw := strings.TrimSpace(strArg(args, "at")); raw != "" {
+		at, err = time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return nil, fmt.Errorf("at must be RFC3339: %w", err)
+		}
+	}
+	session, err := marketSessionAt(instrument.Calendar, at)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"symbol": symbol, "instrument": instrument, "session": session}, nil
 }
 
 func (a *App) toolJournalRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {

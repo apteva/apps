@@ -219,7 +219,7 @@ func TestPolymarketPublic_ActiveMarketsUsesDiscoveryAndNumericVolume(t *testing.
 		if r.URL.Query().Get("active") != "true" || r.URL.Query().Get("closed") != "false" {
 			t.Errorf("discovery query = %q", r.URL.RawQuery)
 		}
-		if r.URL.Query().Get("order") != "volume_24hr" {
+		if r.URL.Query().Get("order") != "volume24hr" {
 			t.Errorf("order = %q", r.URL.Query().Get("order"))
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -286,8 +286,8 @@ func TestLiveProviderPolymarketFailureBacksOff(t *testing.T) {
 	if _, attempted, err := lp.discoverPolymarket(); attempted || err != nil {
 		t.Fatalf("backoff discovery attempted=%v err=%v", attempted, err)
 	}
-	if requests != 1 {
-		t.Fatalf("requests = %d, want one during backoff", requests)
+	if requests != publicHTTPAttempts {
+		t.Fatalf("requests = %d, want %d bounded HTTP attempts before provider backoff", requests, publicHTTPAttempts)
 	}
 	health := lp.Health()["polymarket"].(map[string]any)
 	if retryAt, ok := health["retry_at"].(time.Time); !ok || retryAt.IsZero() {

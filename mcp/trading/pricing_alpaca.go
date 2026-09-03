@@ -182,11 +182,17 @@ func parseAlpacaSnapshots(raw json.RawMessage) ([]*Mark, error) {
 			continue
 		}
 		mk := &Mark{
-			Symbol:     strings.ToUpper(sym),
-			AssetClass: inferAssetClass(sym),
-			Price:      price,
-			MarkedAt:   markedAt,
+			Symbol:        strings.ToUpper(sym),
+			AssetClass:    inferAssetClass(sym),
+			Price:         price,
+			MarkedAt:      markedAt,
+			TimestampKind: "exchange",
+			Source:        alpacaMarketDataSlug,
+			VolumeUnit:    "shares",
 		}
+		mk.Instrument = defaultInstrument(sym, mk.AssetClass, alpacaMarketDataSlug, time.Now().UTC())
+		mk.Instrument.ProviderSymbol = strings.ToUpper(sym)
+		mk.Instrument.Exchange = "ALPACA_US"
 		if s.PrevDailyBar != nil && s.PrevDailyBar.Close > 0 {
 			pc := s.PrevDailyBar.Close
 			mk.PrevClose = &pc
