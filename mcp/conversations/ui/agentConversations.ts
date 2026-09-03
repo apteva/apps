@@ -26,6 +26,19 @@ export function singleConversationListPath(instanceId: number, limit = 1): strin
   return `/chats?lead_agent_id=${encodeURIComponent(instanceId)}&limit=${limit}`;
 }
 
+export function selectedConversationSeenInput(
+  entries: ReadonlyArray<{ conversation_id: string; latest_id: number; unread: number }>,
+  conversationId: string,
+): { chat_id: string; last_seen_id: number } | null {
+  if (!conversationId) return null;
+  const entry = entries.find((item) => item.conversation_id === conversationId);
+  if (!entry || entry.unread <= 0 || entry.latest_id <= 0) return null;
+  return {
+    chat_id: conversationId,
+    last_seen_id: entry.latest_id,
+  };
+}
+
 export function conversationDisplayMode(
   settings?: AgentConversationWidgetSettings,
 ): ConversationDisplayMode {

@@ -5,6 +5,7 @@ import {
   conversationDisplayMode,
   fixedAgentConversationInput,
   scopedConversationListPath,
+  selectedConversationSeenInput,
   showNewConversation,
   singleConversationListPath,
 } from "./agentConversations";
@@ -35,6 +36,24 @@ describe("AgentConversationsWidget scope", () => {
     expect(singleConversationListPath(42, 50)).toBe("/chats?lead_agent_id=42&limit=50");
     expect(() => singleConversationListPath(0)).toThrow("target agent");
     expect(() => singleConversationListPath(42, 201)).toThrow("between 1 and 200");
+  });
+
+  test("single mode marks only the selected unread conversation through its latest message", () => {
+    const entries = [
+      { conversation_id: "older", latest_id: 17, unread: 3 },
+      { conversation_id: "selected", latest_id: 29, unread: 2 },
+      { conversation_id: "read", latest_id: 31, unread: 0 },
+    ];
+    expect(selectedConversationSeenInput(entries, "selected")).toEqual({
+      chat_id: "selected",
+      last_seen_id: 29,
+    });
+    expect(selectedConversationSeenInput(entries, "read")).toBeNull();
+    expect(selectedConversationSeenInput(entries, "missing")).toBeNull();
+
+    const widget = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
+    expect(widget).toContain('appendAgentScope("/unread-summary", instanceId)');
+    expect(widget).toContain('apiPost("/seen", seen, projectId)');
   });
 
   test("browser remains the default and creation visibility is configurable", () => {

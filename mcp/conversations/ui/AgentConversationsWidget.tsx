@@ -11,6 +11,7 @@ import {
   conversationDisplayMode,
   fixedAgentConversationInput,
   scopedConversationListPath,
+  selectedConversationSeenInput,
   showNewConversation,
   singleConversationListPath,
   type AgentConversationWidgetSettings,
@@ -325,6 +326,22 @@ function SingleConversation({
       historyGeneration.current += 1;
     };
   }, [instanceId, loadLatest, projectId, validAgent]);
+
+  useEffect(() => {
+    if (!selected?.id || !projectId || !validAgent) return;
+    let cancelled = false;
+    void apiGet<UnreadEntry[]>(appendAgentScope("/unread-summary", instanceId), projectId)
+      .then((entries) => {
+        if (cancelled) return;
+        const seen = selectedConversationSeenInput(entries, selected.id);
+        if (!seen) return;
+        return apiPost("/seen", seen, projectId);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [instanceId, projectId, selected?.id, validAgent]);
 
   const create = async () => {
     if (!projectId || !validAgent || !showCreate || creating) return;
