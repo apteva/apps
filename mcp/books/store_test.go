@@ -125,11 +125,8 @@ func TestPublicationAssetsAndExports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if packageReport.EPUB.Validator == "W3C EPUBCheck" && !packageReport.Checklist.Ready {
-		t.Fatalf("expected complete checklist after EPUBCheck: %#v", packageReport.Checklist)
-	}
-	if packageReport.EPUB.Validator != "W3C EPUBCheck" && packageReport.Checklist.Ready {
-		t.Fatalf("checklist must require official EPUBCheck: %#v", packageReport.Checklist)
+	if !packageReport.Checklist.Ready {
+		t.Fatalf("expected complete checklist after valid EPUB preflight: %#v", packageReport.Checklist)
 	}
 	zr, err := zip.NewReader(bytes.NewReader(pkg), int64(len(pkg)))
 	if err != nil {

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -183,7 +185,7 @@ func (a *App) handleBooksItem(w http.ResponseWriter, r *http.Request) {
 				AltText       string `json:"alt_text"`
 				Caption       string `json:"caption"`
 			}
-			if err := decodeJSON(r, &body); err != nil {
+			if err := decodeJSONLimit(r, &body, maxAssetUploadRequestBytes); err != nil {
 				httpErr(w, http.StatusBadRequest, err.Error())
 				return
 			}
@@ -404,14 +406,29 @@ func ctxForRequest(r *http.Request) *sdk.AppCtx {
 }
 
 func decodeJSON(r *http.Request, dst any) error {
+	return decodeJSONLimit(r, dst, 2<<20)
+}
+
+// Base64 expands a binary asset by roughly one third. Leave another MiB for
+// JSON field names and metadata while preserving the 25 MiB decoded-asset
+// limit enforced by createAsset.
+const maxAssetUploadRequestBytes = ((maxAssetBytes + 2) / 3 * 4) + (1 << 20)
+
+func decodeJSONLimit(r *http.Request, dst any, maxBytes int64) error {
 	if r.Body == nil {
 		return nil
 	}
-	err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(dst)
-	if errors.Is(err, io.EOF) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
+	if err != nil {
+		return errors.New("read json: " + err.Error())
+	}
+	if int64(len(body)) > maxBytes {
+		return fmt.Errorf("request body exceeds %d MB limit", (maxBytes+(1<<20)-1)>>(20))
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
 		return nil
 	}
-	if err != nil {
+	if err := json.Unmarshal(body, dst); err != nil {
 		return errors.New("invalid json: " + err.Error())
 	}
 	return nil

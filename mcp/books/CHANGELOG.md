@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Accept a successful built-in EPUB structural preflight for publication readiness while continuing to distinguish official W3C EPUBCheck results.
+- Allow base64 JSON uploads for the full 25 MiB binary-asset limit without increasing ordinary Books API request limits.
+
 ## 0.2.0
 
 - Add EPUB 3 export with cover, images, navigation, semantics, and accessibility metadata.

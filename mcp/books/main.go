@@ -15,7 +15,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: books
 display_name: Books
-version: 0.2.0
+version: 0.2.1
 description: |
   Publication-ready book workspace for Apteva. Write structured manuscripts,
   manage covers and images, validate EPUB 3, typeset print PDFs, and build
@@ -99,7 +99,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("books requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("books mounted", "version", "0.2.0")
+	ctx.Logger().Info("books mounted", "version", "0.2.1")
 	return nil
 }
 

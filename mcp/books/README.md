@@ -24,9 +24,9 @@ Use `platform` with package or readiness exports: `kindle`, `apple_books`, `kobo
 
 ## EPUB validation
 
-Every EPUB runs through the built-in structural preflight. When an `epubcheck` executable is on `PATH`, Books runs the official W3C EPUBCheck automatically. A Java distribution can instead be configured with `EPUBCHECK_JAR=/path/to/epubcheck.jar`.
+Every EPUB runs through the built-in structural preflight, which is sufficient for the app's readiness checklist. When an `epubcheck` executable is on `PATH`, Books additionally runs the official W3C EPUBCheck automatically. A Java distribution can instead be configured with `EPUBCHECK_JAR=/path/to/epubcheck.jar`.
 
-The package always includes `EPUB-VALIDATION.md`. If the official checker is unavailable, the report says so explicitly rather than presenting the built-in preflight as EPUBCheck.
+The package always includes `EPUB-VALIDATION.md`. If the official checker is unavailable, the report identifies the built-in preflight accurately and recommends independent EPUBCheck validation before submission.
 
 ## Print scope
 

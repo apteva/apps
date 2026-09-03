@@ -231,12 +231,18 @@ func buildChecklist(book *Book, nodes []*BookNode, assets []BookAsset, platform 
 			}
 		}
 		add("image_alt", "Interior images have alternative text", imagesAccessible, "")
-		officialValidation := validation.Valid && validation.Validator == "W3C EPUBCheck"
+		epubReady := validation.Valid
 		validationDetail := strings.Join(validation.Errors, "; ")
 		if validationDetail == "" {
-			validationDetail = validation.Validator
+			if validation.Validator == "W3C EPUBCheck" {
+				validationDetail = "Official W3C EPUBCheck"
+			} else if validation.Valid {
+				validationDetail = "Books structural preflight; run EPUBCheck for independent certification"
+			} else {
+				validationDetail = validation.Validator
+			}
 		}
-		add("epub", "Official W3C EPUBCheck passes", officialValidation, validationDetail)
+		add("epub", "EPUB validation passes", epubReady, validationDetail)
 	}
 	if platform == "kindle" || platform == "generic" {
 		add("ai_disclosure", "AI-content disclosure is reviewed", book.Publication.AIDisclosure != "", "Choose none, assisted, or generated")

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: books
 display_name: Books
-version: 0.2.0
+version: 0.2.1
 description: |
   Publication-ready book workspace for Apteva. Write structured manuscripts,
   manage covers and images, validate EPUB 3, typeset print PDFs, and build
