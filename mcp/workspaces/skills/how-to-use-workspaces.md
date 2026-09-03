@@ -1,8 +1,8 @@
 # How to use Workspaces
 
 Workspaces answers where work runs, who owns it, what command is active, and
-when its volumes will disappear. It is not a code editor, Git client, or
-interactive terminal.
+when the environment will disappear. Each workspace is one persistent Docker
+container. It is not a code editor, Git client, or interactive terminal.
 
 ## Start a workspace
 
@@ -31,10 +31,13 @@ Use `shell_command` only when shell syntax such as pipes or redirection is
 actually required. Never place secrets in commands. Workspaces intentionally
 does not accept arbitrary environment values.
 
-Every command starts as a separate process container. Files under `/workspace`
-and caches under `/cache` persist, but shell state does not: a `cd`, exported
-variable, or installed OS package from one command will not carry to the next.
-Set `working_directory` on each call; it must remain under `/workspace`.
+Every command starts as a process inside the same workspace container.
+Installed packages, writable-layer files, `/workspace`, and `/cache` persist
+across commands and stop/resume. Background services persist between commands
+while the container runs; stopping the workspace terminates processes. A
+discrete command still gets a fresh shell process, so `cd` and exported shell
+variables do not carry to the next command. Set `working_directory` on each
+call; it must remain under `/workspace`.
 
 Use `workspace_command_get` for status and `workspace_command_logs` for bounded
 output. Do not poll in a tight loop. Terminal states are `succeeded`, `failed`,

@@ -82,7 +82,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "workspaces_create", Description: "Create a local workspace from an approved profile.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
 		{Name: "workspaces_list", Description: "List accessible workspaces in the current project.", InputSchema: schemaObject(map[string]any{"status": strSchema(), "include_destroyed": boolSchema(), "limit": intSchema()}, nil), HandlerCtx: a.toolList},
 		{Name: "workspaces_get", Description: "Fetch a workspace, runtime state, commands, usage, and activity.", InputSchema: schemaObject(workspaceID, []string{"workspace_id"}), HandlerCtx: a.toolGet},
-		{Name: "workspace_command_start", Description: "Start one non-interactive asynchronous command sharing /workspace and /cache.", InputSchema: schemaObject(map[string]any{
+		{Name: "workspace_command_start", Description: "Start one non-interactive asynchronous command inside the persistent workspace container.", InputSchema: schemaObject(map[string]any{
 			"workspace_id": strSchema(), "argv": map[string]any{"type": "array", "items": strSchema(), "maxItems": 256},
 			"shell_command": strSchema(), "working_directory": strSchema(), "timeout_s": intSchema(),
 		}, []string{"workspace_id"}), HandlerCtx: a.toolCommandStart},

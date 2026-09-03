@@ -2,15 +2,16 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.1.1
+version: 0.2.0
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
   UI while the required Containers app owns Docker workloads, volumes,
-  command execution, and bounded logs. This first release is local-only
-  and intentionally provides a command console rather than an interactive
-  PTY or a second code editor. v0.1.1 keeps native panel requests pinned to
-  the selected project and install.
+  command execution, and bounded logs. v0.2.0 makes each workspace a persistent
+  mini-computer: commands execute inside its durable container, so installed
+  packages and system files survive between commands and stop/resume cycles,
+  while background services remain available between commands while it runs.
+  The command console is non-interactive; a PTY remains a later addition.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/workspaces
@@ -27,9 +28,9 @@ requires:
     - platform.apps.call
   apps:
     - name: containers
-      version: ">=0.2.0"
+      version: ">=0.3.0"
       optional: false
-      reason: Owns the isolated Docker workloads, named volumes, asynchronous executions, cancellation, and bounded logs used by Workspaces.
+      reason: Owns each persistent Docker workspace, named volumes, in-container asynchronous execution, cancellation, and bounded logs used by Workspaces.
 
 provides:
   permissions:
@@ -50,7 +51,7 @@ provides:
       description: "Fetch one workspace with its commands and recent activity. Args: workspace_id."
       requires: workspaces.read
     - name: workspace_command_start
-      description: "Start one asynchronous command. This is not an interactive shell; each command is a new process sharing /workspace and /cache. Prefer argv over shell_command. Args: workspace_id, argv? or shell_command?, working_directory?, timeout_s?."
+      description: "Start one asynchronous process inside the persistent workspace container. Installed packages, system files, volumes, and background processes persist across commands. Prefer argv over shell_command. Args: workspace_id, argv? or shell_command?, working_directory?, timeout_s?."
       requires: workspaces.write
     - name: workspace_command_get
       description: "Refresh and fetch one command. Args: workspace_id, command_id."
@@ -62,7 +63,7 @@ provides:
       description: "Cancel one queued or running command. Args: workspace_id, command_id."
       requires: workspaces.write
     - name: workspace_stop
-      description: "Cancel any active command and stop the workspace while preserving its volumes. Args: workspace_id."
+      description: "Cancel any active command and stop the persistent workspace container while preserving its writable layer and volumes. Args: workspace_id."
       requires: workspaces.write
     - name: workspace_resume
       description: "Resume a stopped workspace whose TTL has not expired. Args: workspace_id."
@@ -90,7 +91,7 @@ provides:
     - name: workspace.command.completed
       description: A workspace command reached a terminal state.
     - name: workspace.suspended
-      description: A workspace was stopped with its volumes preserved.
+      description: A workspace container was stopped with its writable layer and volumes preserved.
     - name: workspace.expired
       description: A workspace TTL elapsed and the workspace was suspended.
     - name: workspace.destroyed
@@ -112,7 +113,7 @@ provides:
       description: |
         Operating protocol for durable development workspaces: create from an
         approved profile, run one attributed command at a time, inspect bounded
-        logs and exit state, preserve work across commands under /workspace,
+        logs and exit state, preserve container and volume state across commands,
         extend TTL before expiry, and confirm destructive cleanup.
       metadata:
         category: development
@@ -162,7 +163,7 @@ config_schema:
     type: text
     default: "2"
     label: Default CPUs
-    description: CPU limit applied to newly created workspaces and their execution containers.
+    description: CPU limit applied to newly created persistent workspace containers.
   - name: default_memory_mb
     type: text
     default: "4096"

@@ -147,20 +147,20 @@ func agentContext(project string, agentID int64, threadID, toolCallID string) co
 func TestManifestAndToolsAgree(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "workspaces" || manifest.Version != "0.1.1" {
+	if manifest.Name != "workspaces" || manifest.Version != "0.2.0" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	requiredContainers := false
 	for _, dependency := range manifest.Requires.Apps {
-		if dependency.Name == "containers" && !dependency.Optional && dependency.Version == ">=0.2.0" {
+		if dependency.Name == "containers" && !dependency.Optional && dependency.Version == ">=0.3.0" {
 			requiredContainers = true
 		}
 	}
 	if !requiredContainers {
-		t.Fatal("Containers >=0.2.0 must be the required app dependency")
+		t.Fatal("Containers >=0.3.0 must be the required app dependency")
 	}
 	if len(manifest.Scopes) != 1 || string(manifest.Scopes[0]) != "project" {
-		t.Fatalf("v0.1 must remain project-scoped: %+v", manifest.Scopes)
+		t.Fatalf("Workspaces must remain project-scoped: %+v", manifest.Scopes)
 	}
 	if len(manifest.Provides.UIPanels) != 1 || manifest.Provides.UIPanels[0].Entry != "/ui/WorkspacesPanel.mjs" {
 		t.Fatalf("workspace panel not declared correctly: %+v", manifest.Provides.UIPanels)

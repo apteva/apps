@@ -398,7 +398,7 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
             {tab === "overview" && <Overview workspace={selected} runtime={detail?.runtime} runtimeError={detail?.runtime_error} />}
             {tab === "commands" && (
               <section className="ws-card ws-command-card">
-                <div className="ws-card-head"><div><h2>Commands</h2><p>Each command is a separate process sharing <code>/workspace</code> and <code>/cache</code>. This is not an interactive shell.</p></div></div>
+                <div className="ws-card-head"><div><h2>Commands</h2><p>Commands run inside this persistent container. Installed packages, system files, and background services remain available to later commands. This is not yet an interactive PTY.</p></div></div>
                 <div className="ws-command-compose">
                   <span className="ws-prompt">$</span>
                   <input value={commandText} onChange={(event) => setCommandText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") startCommand(); }} placeholder="go test ./..." disabled={selected.lifecycle_status !== "running" || !!activeCommand} />
