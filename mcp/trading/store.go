@@ -17,20 +17,22 @@ import (
 // ─── Domain types (mirror the JSON shapes returned by tools / REST) ──
 
 type Portfolio struct {
-	ID             int64    `json:"id"`
-	ProjectID      string   `json:"project_id,omitempty"`
-	Name           string   `json:"name"`
-	AgentID        string   `json:"agent_id,omitempty"`
-	Mandate        string   `json:"mandate"`
-	AllowedClasses []string `json:"allowed_classes"`
-	StartingCash   float64  `json:"starting_cash"`
-	Cash           float64  `json:"cash"`
-	AvailableCash  *float64 `json:"available_cash,omitempty"`
-	Status         string   `json:"status"`
-	Mode           string   `json:"mode"`
-	BrokerSlug     string   `json:"broker_slug,omitempty"` // "binance-trading", "alpaca-trading", … — NULL for paper
-	CreatedAt      string   `json:"created_at,omitempty"`
-	UpdatedAt      string   `json:"updated_at,omitempty"`
+	ID                   int64    `json:"id"`
+	ProjectID            string   `json:"project_id,omitempty"`
+	Name                 string   `json:"name"`
+	AgentID              string   `json:"agent_id,omitempty"`
+	Mandate              string   `json:"mandate"`
+	AllowedClasses       []string `json:"allowed_classes"`
+	StartingCash         float64  `json:"starting_cash"`
+	Cash                 float64  `json:"cash"`
+	AvailableCash        *float64 `json:"available_cash,omitempty"`
+	Status               string   `json:"status"`
+	Mode                 string   `json:"mode"`
+	ExecutionEnvironment string   `json:"execution_environment"`
+	LiveArmed            bool     `json:"live_armed"`
+	BrokerSlug           string   `json:"broker_slug,omitempty"` // "binance-trading", "alpaca-trading", … — NULL for paper
+	CreatedAt            string   `json:"created_at,omitempty"`
+	UpdatedAt            string   `json:"updated_at,omitempty"`
 
 	// Computed by snapshot — not stored.
 	Equity      float64  `json:"equity,omitempty"`
@@ -103,18 +105,43 @@ type JournalEntry struct {
 }
 
 type Mark struct {
-	Symbol        string      `json:"symbol"`
-	AssetClass    string      `json:"asset_class"`
-	Price         float64     `json:"price"`
-	NoPrice       *float64    `json:"no_price,omitempty"`
-	PrevClose     *float64    `json:"prev_close,omitempty"`
-	Volume24h     *float64    `json:"volume_24h,omitempty"`
-	VolumeUnit    string      `json:"volume_unit,omitempty"`
-	MarkedAt      string      `json:"marked_at"`
-	ReceivedAt    string      `json:"received_at,omitempty"`
-	TimestampKind string      `json:"timestamp_kind,omitempty"`
-	Source        string      `json:"source,omitempty"`
-	Instrument    *Instrument `json:"instrument,omitempty"`
+	Symbol         string      `json:"symbol"`
+	AssetClass     string      `json:"asset_class"`
+	Price          float64     `json:"price"`
+	NoPrice        *float64    `json:"no_price,omitempty"`
+	PrevClose      *float64    `json:"prev_close,omitempty"`
+	Volume24h      *float64    `json:"volume_24h,omitempty"`
+	VolumeUnit     string      `json:"volume_unit,omitempty"`
+	BidPrice       *float64    `json:"bid_price,omitempty"`
+	AskPrice       *float64    `json:"ask_price,omitempty"`
+	BidSize        *float64    `json:"bid_size,omitempty"`
+	AskSize        *float64    `json:"ask_size,omitempty"`
+	LastTradePrice *float64    `json:"last_trade_price,omitempty"`
+	LastTradeSize  *float64    `json:"last_trade_size,omitempty"`
+	Feed           string      `json:"feed,omitempty"`
+	QuoteAt        string      `json:"quote_at,omitempty"`
+	MarkedAt       string      `json:"marked_at"`
+	ReceivedAt     string      `json:"received_at,omitempty"`
+	TimestampKind  string      `json:"timestamp_kind,omitempty"`
+	Source         string      `json:"source,omitempty"`
+	Instrument     *Instrument `json:"instrument,omitempty"`
+}
+
+type MarketBar struct {
+	Symbol     string  `json:"symbol"`
+	Timeframe  string  `json:"timeframe"`
+	BarAt      string  `json:"bar_at"`
+	Open       float64 `json:"open"`
+	High       float64 `json:"high"`
+	Low        float64 `json:"low"`
+	Close      float64 `json:"close"`
+	Volume     float64 `json:"volume"`
+	TradeCount int64   `json:"trade_count,omitempty"`
+	VWAP       float64 `json:"vwap,omitempty"`
+	Source     string  `json:"source"`
+	Feed       string  `json:"feed,omitempty"`
+	ReceivedAt string  `json:"received_at"`
+	Complete   bool    `json:"complete"`
 }
 
 type Alert struct {
@@ -171,6 +198,17 @@ type StrategyAssignment struct {
 	SessionCloseAt    string `json:"session_close_at,omitempty"`
 	CreatedAt         string `json:"created_at"`
 	UpdatedAt         string `json:"updated_at"`
+}
+
+type StrategyRunEvent struct {
+	ID              int64
+	ProjectID       string
+	PortfolioID     int64
+	AssignmentID    int64
+	StrategyID      int64
+	StrategyVersion int
+	SignalBarAt     time.Time
+	Status          string
 }
 
 type BacktestRun struct {
@@ -239,18 +277,75 @@ func dbCreatePortfolio(db *sql.DB, p *Portfolio) (int64, error) {
 	if mode == "" {
 		mode = "paper"
 	}
+	executionEnvironment := normalizeExecutionEnvironment(p.ExecutionEnvironment, mode, p.BrokerSlug)
 	var brokerArg any
 	if strings.TrimSpace(p.BrokerSlug) != "" {
 		brokerArg = p.BrokerSlug
 	}
 	res, err := db.Exec(`
-		INSERT INTO portfolios (project_id, name, agent_id, mandate, allowed_classes, starting_cash, cash, mode, broker_slug)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ProjectID, p.Name, p.AgentID, p.Mandate, string(classesJSON), p.StartingCash, p.StartingCash, mode, brokerArg)
+		INSERT INTO portfolios (project_id, name, agent_id, mandate, allowed_classes, starting_cash, cash, mode, broker_slug, execution_environment, live_armed)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ProjectID, p.Name, p.AgentID, p.Mandate, string(classesJSON), p.StartingCash, p.StartingCash, mode, brokerArg,
+		executionEnvironment, boolInt(p.LiveArmed))
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+func normalizeExecutionEnvironment(value, legacyMode, brokerSlug string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "simulation", "broker_paper", "broker_live", "backtest":
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+	if strings.EqualFold(strings.TrimSpace(legacyMode), "live") {
+		return "broker_live"
+	}
+	return "simulation"
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func portfolioBrokerBacked(p *Portfolio) bool {
+	if p == nil {
+		return false
+	}
+	env := normalizeExecutionEnvironment(p.ExecutionEnvironment, p.Mode, p.BrokerSlug)
+	return env == "broker_paper" || env == "broker_live"
+}
+
+func portfolioAllowsAutomatedExecution(p *Portfolio) bool {
+	if p == nil {
+		return false
+	}
+	switch normalizeExecutionEnvironment(p.ExecutionEnvironment, p.Mode, p.BrokerSlug) {
+	case "simulation":
+		return true
+	case "broker_paper":
+		return true
+	case "broker_live":
+		return p.LiveArmed
+	default:
+		return false
+	}
+}
+
+func dbSetPortfolioLiveArmed(db *sql.DB, projectID string, id int64, armed bool) error {
+	res, err := db.Exec(`UPDATE portfolios SET live_armed = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND project_id = ? AND execution_environment = 'broker_live'`, boolInt(armed), id, projectID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return errors.New("only broker_live portfolios can be armed")
+	}
+	return nil
 }
 
 func dbUpdatePortfolioConfig(db *sql.DB, id int64, updates map[string]any) error {
@@ -337,7 +432,8 @@ func dbHasBacktestPortfolio(db *sql.DB, projectID string) bool {
 func dbGetPortfolio(db *sql.DB, projectID string, id int64) (*Portfolio, error) {
 	row := db.QueryRow(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
+		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''),
+		       execution_environment, live_armed, created_at, updated_at
 		FROM portfolios WHERE id = ? AND project_id = ?`, id, projectID)
 	return scanPortfolio(row)
 }
@@ -347,7 +443,8 @@ func dbGetPortfolio(db *sql.DB, projectID string, id int64) (*Portfolio, error) 
 func dbGetPortfolioAnyProject(db *sql.DB, id int64) (*Portfolio, error) {
 	row := db.QueryRow(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
+		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''),
+		       execution_environment, live_armed, created_at, updated_at
 		FROM portfolios WHERE id = ?`, id)
 	return scanPortfolio(row)
 }
@@ -355,7 +452,8 @@ func dbGetPortfolioAnyProject(db *sql.DB, id int64) (*Portfolio, error) {
 func dbListPortfolios(db *sql.DB, projectID string) ([]*Portfolio, error) {
 	rows, err := db.Query(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
+		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''),
+		       execution_environment, live_armed, created_at, updated_at
 		FROM portfolios WHERE project_id = ? ORDER BY id`, projectID)
 	if err != nil {
 		return nil, err
@@ -376,7 +474,8 @@ func dbListPortfolios(db *sql.DB, projectID string) ([]*Portfolio, error) {
 func dbAllPortfolios(db *sql.DB) ([]*Portfolio, error) {
 	rows, err := db.Query(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
+		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''),
+		       execution_environment, live_armed, created_at, updated_at
 		FROM portfolios ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -399,7 +498,7 @@ func scanPortfolio(row *sql.Row) (*Portfolio, error) {
 	var availableCash sql.NullFloat64
 	if err := row.Scan(&p.ID, &p.ProjectID, &p.Name, &p.AgentID, &p.Mandate,
 		&classesJSON, &p.StartingCash, &p.Cash, &availableCash, &p.Status, &p.Mode, &p.BrokerSlug,
-		&p.CreatedAt, &p.UpdatedAt); err != nil {
+		&p.ExecutionEnvironment, &p.LiveArmed, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(classesJSON), &p.AllowedClasses); err != nil {
@@ -417,7 +516,7 @@ func scanPortfolioRows(rows *sql.Rows) (*Portfolio, error) {
 	var availableCash sql.NullFloat64
 	if err := rows.Scan(&p.ID, &p.ProjectID, &p.Name, &p.AgentID, &p.Mandate,
 		&classesJSON, &p.StartingCash, &p.Cash, &availableCash, &p.Status, &p.Mode, &p.BrokerSlug,
-		&p.CreatedAt, &p.UpdatedAt); err != nil {
+		&p.ExecutionEnvironment, &p.LiveArmed, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(classesJSON), &p.AllowedClasses); err != nil {
@@ -773,6 +872,16 @@ func dbGetOrder(db *sql.DB, projectID, id string) (*Order, error) {
 	return scanOrder(row)
 }
 
+func dbGetOrderAnyProject(db *sql.DB, id string) (*Order, error) {
+	row := db.QueryRow(`
+		SELECT id, portfolio_id, symbol, asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
+		       limit_price, stop_price, tif, status, rationale, source,
+		       COALESCE(rejection_code, ''), COALESCE(rejection_detail, ''),
+		       placed_at, COALESCE(resolved_at, '')
+		FROM orders WHERE id = ?`, id)
+	return scanOrder(row)
+}
+
 func dbListOrders(db *sql.DB, portfolioID int64, status string, limit int) ([]*Order, error) {
 	q := `SELECT id, portfolio_id, symbol, asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
 	             limit_price, stop_price, tif, status, rationale, source,
@@ -1116,8 +1225,9 @@ func dbUpsertMarkExec(exec sqlExecer, m *Mark) error {
 		return err
 	}
 	_, err = exec.Exec(`
-		INSERT INTO marks (symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at, source, timestamp_kind, volume_unit, received_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO marks (symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at, source, timestamp_kind, volume_unit, received_at,
+			bid_price, ask_price, bid_size, ask_size, last_trade_price, last_trade_size, feed, quote_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(symbol) DO UPDATE SET
 			asset_class = excluded.asset_class,
 			price       = excluded.price,
@@ -1128,10 +1238,20 @@ func dbUpsertMarkExec(exec sqlExecer, m *Mark) error {
 			source      = excluded.source,
 			timestamp_kind = excluded.timestamp_kind,
 			volume_unit = excluded.volume_unit,
-			received_at = excluded.received_at`,
+			received_at = excluded.received_at,
+			bid_price = COALESCE(excluded.bid_price, marks.bid_price),
+			ask_price = COALESCE(excluded.ask_price, marks.ask_price),
+			bid_size = COALESCE(excluded.bid_size, marks.bid_size),
+			ask_size = COALESCE(excluded.ask_size, marks.ask_size),
+			last_trade_price = COALESCE(excluded.last_trade_price, marks.last_trade_price),
+			last_trade_size = COALESCE(excluded.last_trade_size, marks.last_trade_size),
+			feed = CASE WHEN excluded.feed != '' THEN excluded.feed ELSE marks.feed END,
+			quote_at = COALESCE(excluded.quote_at, marks.quote_at)`,
 		normalized.Symbol, normalized.AssetClass, normalized.Price, nullable(normalized.NoPrice), nullable(normalized.PrevClose),
 		nullable(normalized.Volume24h), normalized.MarkedAt, normalized.Source, normalized.TimestampKind,
-		normalized.VolumeUnit, normalized.ReceivedAt)
+		normalized.VolumeUnit, normalized.ReceivedAt, nullable(normalized.BidPrice), nullable(normalized.AskPrice),
+		nullable(normalized.BidSize), nullable(normalized.AskSize), nullable(normalized.LastTradePrice),
+		nullable(normalized.LastTradeSize), normalized.Feed, nullableString(normalized.QuoteAt))
 	return err
 }
 
@@ -1179,12 +1299,15 @@ func dbGetInstrument(db *sql.DB, symbol string) (*Instrument, error) {
 func dbGetMark(db *sql.DB, symbol string) (*Mark, error) {
 	row := db.QueryRow(`
 		SELECT symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at,
-		       source, timestamp_kind, volume_unit, COALESCE(received_at, '')
+		       source, timestamp_kind, volume_unit, COALESCE(received_at, ''),
+		       bid_price, ask_price, bid_size, ask_size, last_trade_price, last_trade_size,
+		       feed, COALESCE(quote_at, '')
 		FROM marks WHERE symbol = ?`, symbol)
 	var m Mark
-	var no, pc, vol sql.NullFloat64
+	var no, pc, vol, bid, ask, bidSize, askSize, lastTrade, lastSize sql.NullFloat64
 	if err := row.Scan(&m.Symbol, &m.AssetClass, &m.Price, &no, &pc, &vol, &m.MarkedAt,
-		&m.Source, &m.TimestampKind, &m.VolumeUnit, &m.ReceivedAt); err != nil {
+		&m.Source, &m.TimestampKind, &m.VolumeUnit, &m.ReceivedAt,
+		&bid, &ask, &bidSize, &askSize, &lastTrade, &lastSize, &m.Feed, &m.QuoteAt); err != nil {
 		return nil, err
 	}
 	if no.Valid {
@@ -1199,6 +1322,24 @@ func dbGetMark(db *sql.DB, symbol string) (*Mark, error) {
 		v := vol.Float64
 		m.Volume24h = &v
 	}
+	if bid.Valid {
+		m.BidPrice = ptr(bid.Float64)
+	}
+	if ask.Valid {
+		m.AskPrice = ptr(ask.Float64)
+	}
+	if bidSize.Valid {
+		m.BidSize = ptr(bidSize.Float64)
+	}
+	if askSize.Valid {
+		m.AskSize = ptr(askSize.Float64)
+	}
+	if lastTrade.Valid {
+		m.LastTradePrice = ptr(lastTrade.Float64)
+	}
+	if lastSize.Valid {
+		m.LastTradeSize = ptr(lastSize.Float64)
+	}
 	m.Instrument, _ = dbGetInstrument(db, symbol)
 	return &m, nil
 }
@@ -1206,7 +1347,9 @@ func dbGetMark(db *sql.DB, symbol string) (*Mark, error) {
 func dbListMarks(db *sql.DB) ([]*Mark, error) {
 	rows, err := db.Query(`
 		SELECT symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at,
-		       source, timestamp_kind, volume_unit, COALESCE(received_at, '')
+		       source, timestamp_kind, volume_unit, COALESCE(received_at, ''),
+		       bid_price, ask_price, bid_size, ask_size, last_trade_price, last_trade_size,
+		       feed, COALESCE(quote_at, '')
 		FROM marks ORDER BY symbol`)
 	if err != nil {
 		return nil, err
@@ -1215,9 +1358,10 @@ func dbListMarks(db *sql.DB) ([]*Mark, error) {
 	out := []*Mark{}
 	for rows.Next() {
 		var m Mark
-		var no, pc, vol sql.NullFloat64
+		var no, pc, vol, bid, ask, bidSize, askSize, lastTrade, lastSize sql.NullFloat64
 		if err := rows.Scan(&m.Symbol, &m.AssetClass, &m.Price, &no, &pc, &vol, &m.MarkedAt,
-			&m.Source, &m.TimestampKind, &m.VolumeUnit, &m.ReceivedAt); err != nil {
+			&m.Source, &m.TimestampKind, &m.VolumeUnit, &m.ReceivedAt,
+			&bid, &ask, &bidSize, &askSize, &lastTrade, &lastSize, &m.Feed, &m.QuoteAt); err != nil {
 			return nil, err
 		}
 		if no.Valid {
@@ -1229,9 +1373,69 @@ func dbListMarks(db *sql.DB) ([]*Mark, error) {
 		if vol.Valid {
 			m.Volume24h = ptr(vol.Float64)
 		}
+		if bid.Valid {
+			m.BidPrice = ptr(bid.Float64)
+		}
+		if ask.Valid {
+			m.AskPrice = ptr(ask.Float64)
+		}
+		if bidSize.Valid {
+			m.BidSize = ptr(bidSize.Float64)
+		}
+		if askSize.Valid {
+			m.AskSize = ptr(askSize.Float64)
+		}
+		if lastTrade.Valid {
+			m.LastTradePrice = ptr(lastTrade.Float64)
+		}
+		if lastSize.Valid {
+			m.LastTradeSize = ptr(lastSize.Float64)
+		}
 		out = append(out, &m)
 	}
 	return out, rows.Err()
+}
+
+func dbUpsertMarketBar(db *sql.DB, bar *MarketBar) error {
+	if bar == nil || canonicalSymbol(bar.Symbol) == "" {
+		return errors.New("market bar symbol required")
+	}
+	if bar.Timeframe == "" || bar.BarAt == "" || bar.Source == "" {
+		return errors.New("market bar timeframe, timestamp, and source required")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, bar.BarAt); err != nil {
+		return fmt.Errorf("market bar timestamp: %w", err)
+	}
+	if !finite(bar.Open) || !finite(bar.High) || !finite(bar.Low) || !finite(bar.Close) || !finite(bar.Volume) ||
+		bar.Open <= 0 || bar.High < maxFloat(bar.Open, bar.Close) || bar.Low > minFloat(bar.Open, bar.Close) || bar.Low <= 0 || bar.Volume < 0 {
+		return errors.New("invalid market bar OHLCV")
+	}
+	if bar.ReceivedAt == "" {
+		bar.ReceivedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	_, err := db.Exec(`INSERT INTO market_bars
+		(symbol, timeframe, bar_at, open, high, low, close, volume, trade_count, vwap, source, feed, received_at, complete)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(symbol, timeframe, bar_at, source, feed) DO UPDATE SET
+			open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close,
+			volume=excluded.volume, trade_count=excluded.trade_count, vwap=excluded.vwap,
+			received_at=excluded.received_at, complete=excluded.complete`,
+		canonicalSymbol(bar.Symbol), bar.Timeframe, bar.BarAt, bar.Open, bar.High, bar.Low, bar.Close,
+		bar.Volume, bar.TradeCount, bar.VWAP, bar.Source, bar.Feed, bar.ReceivedAt, boolInt(bar.Complete))
+	return err
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // dbListRefreshSymbols returns only symbols that can affect executable state.
@@ -1575,6 +1779,42 @@ func dbUnassignStrategy(db *sql.DB, projectID string, portfolioID int64) error {
 }
 
 // ─── Backtests ─────────────────────────────────────────────────────
+
+// dbClaimStrategyRun is the durable, exactly-once boundary for automated
+// execution. The unique assignment/bar key prevents a restarted worker or a
+// second process from submitting the same signal twice.
+func dbClaimStrategyRun(db *sql.DB, event *StrategyRunEvent, decisions, targets any) (bool, error) {
+	decisionsJSON, _ := json.Marshal(decisions)
+	targetsJSON, _ := json.Marshal(targets)
+	res, err := db.Exec(`
+		INSERT INTO strategy_run_events (
+			project_id, portfolio_id, assignment_id, strategy_id, strategy_version,
+			signal_bar_at, status, decisions_json, targets_json
+		) VALUES (?, ?, ?, ?, ?, ?, 'started', ?, ?)
+		ON CONFLICT(assignment_id, signal_bar_at) DO NOTHING`,
+		event.ProjectID, event.PortfolioID, event.AssignmentID, event.StrategyID,
+		event.StrategyVersion, event.SignalBarAt.UTC().Format(time.RFC3339Nano),
+		string(decisionsJSON), string(targetsJSON))
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	return rows == 1, err
+}
+
+func dbFinishStrategyRun(db *sql.DB, assignmentID int64, signalBarAt time.Time, status string, orderIDs []string, runErr error) error {
+	orderIDsJSON, _ := json.Marshal(orderIDs)
+	errorText := ""
+	if runErr != nil {
+		errorText = runErr.Error()
+	}
+	_, err := db.Exec(`
+		UPDATE strategy_run_events
+		   SET status = ?, order_ids_json = ?, error = ?, completed_at = CURRENT_TIMESTAMP
+		 WHERE assignment_id = ? AND signal_bar_at = ?`,
+		status, string(orderIDsJSON), errorText, assignmentID, signalBarAt.UTC().Format(time.RFC3339Nano))
+	return err
+}
 
 func dbCreateBacktestRun(db *sql.DB, run *BacktestRun) (int64, error) {
 	symbolsJSON, err := json.Marshal(run.Symbols)

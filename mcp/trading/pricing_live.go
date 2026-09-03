@@ -11,6 +11,7 @@ package main
 // failures are surfaced and never converted into synthetic executable marks.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -67,8 +68,8 @@ func newLiveProvider() *liveProvider {
 // newLiveProvider directly. It runs as the equity fallback when no
 // alpaca-market-data connection is bound (which is the default state
 // on a fresh install).
-func (p *liveProvider) SetPlatform(platform sdk.PlatformClient, logger sdk.Logger) {
-	p.equity = newAlpacaMarketData(platform, logger)
+func (p *liveProvider) SetPlatform(platform sdk.PlatformClient, logger sdk.Logger, feed string) {
+	p.equity = newAlpacaMarketData(platform, logger, feed)
 }
 
 // Quote — single-symbol fetch with cache and explicit provider errors.
@@ -279,6 +280,14 @@ func (p *liveProvider) Bars(symbol, rng string) ([]Bar, error) {
 		p.health.ok("crypto", "binance-public")
 		return bars, nil
 	case "equity", "etf":
+		if p.equity != nil && p.equity.available() {
+			bars, err := p.equity.Bars(symbol, rng)
+			if err == nil && len(bars) > 0 {
+				p.health.ok(cls, alpacaMarketDataSlug)
+				return bars, nil
+			}
+			p.health.note(cls, err)
+		}
 		bars, err := p.yahoo.Bars(symbol, rng)
 		if err != nil || len(bars) == 0 {
 			if err != nil {
@@ -385,6 +394,21 @@ func (p *liveProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, 
 			lookbackFactor = 2
 		}
 		start := end.Add(-dur * time.Duration(limit) * lookbackFactor)
+		if p.equity != nil && p.equity.available() {
+			bars, err := p.equity.BacktestBarsContext(context.Background(), symbol, interval, start, end, limit)
+			if err != nil {
+				p.health.note(class, err)
+				return nil, err
+			}
+			bars = completedYahooStrategyBars(bars, interval, end)
+			if len(bars) < limit {
+				err := fmt.Errorf("Alpaca returned %d completed %s bars for %s; need %d", len(bars), interval, symbol, limit)
+				p.health.note(class, err)
+				return nil, err
+			}
+			p.health.ok(class, alpacaMarketDataSlug)
+			return bars[len(bars)-limit:], nil
+		}
 		bars, err := p.yahoo.BacktestBars(symbol, interval, start, end, 1000)
 		if err != nil {
 			p.health.note(class, err)

@@ -41,8 +41,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.42
-description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
+version: 0.5.0
+description: Live trading workstation for Apteva agents (simulation, broker paper, broker live, strategies, and backtests).
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -54,6 +54,7 @@ requires:
     - net.egress
     - platform.connections.execute
     - platform.connections.read
+    - platform.connections.read_credentials
     - platform.environments.read
     - platform.environments.call
     - platform.environments.manage
@@ -81,8 +82,12 @@ requires:
       compatible_slugs: [alpaca-market-data, yahoo-finance]
       capabilities:
         - quotes.equity
+        - bars.equity
+        - latest_quotes.equity
       tools:
         quotes.equity: stock_snapshots
+        bars.equity: stock_bars
+        latest_quotes.equity: stock_latest_quotes
       label: "Market Data — Equity (optional — real prices for live equity portfolios)"
 provides:
   http_routes:
@@ -126,6 +131,8 @@ provides:
       description: "Read journal entries for a portfolio."
     - name: portfolio_pause
       description: "Pause a portfolio (no new orders)."
+    - name: portfolio_arm_live
+      description: "Explicitly arm or disarm real-money automated execution."
     - name: strategy_create
       description: "Create a deterministic strategy definition."
     - name: strategy_update
@@ -204,7 +211,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// snapshots from a bound alpaca-market-data connection. Wired
 	// post-construction so newProvider stays a pure factory.
 	if lp, ok := provider.(*liveProvider); ok {
-		lp.SetPlatform(ctx.PlatformAPI(), ctx.Logger())
+		lp.SetPlatform(ctx.PlatformAPI(), ctx.Logger(), ctx.Config().Get("alpaca_feed"))
 	}
 	globalEngine = &engine{
 		db:       ctx.AppDB(),
@@ -256,6 +263,7 @@ func (a *App) Workers() []sdk.Worker {
 		}
 	}
 	return []sdk.Worker{
+		{Name: "alpaca_streams", Run: startAlpacaStreams},
 		{Name: "mark_tick", Schedule: tickEvery, Run: markTick},
 		{Name: "alert_tick", Schedule: "@every 60s", Run: alertTick},
 	}
@@ -402,6 +410,24 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, 200, map[string]any{
 			"portfolio_id": pf.ID, "agent_id": agentRef, "agent_instance_id": agentID,
 		})
+
+	case sub == "arm" && r.Method == http.MethodPost:
+		var body struct {
+			Armed        bool   `json:"armed"`
+			Confirmation string `json:"confirmation"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		out, err := a.toolPortfolioArmLive(globalCtx.WithProject(pid), map[string]any{
+			"_project_id": pid, "portfolio_id": pf.ID, "armed": body.Armed, "confirmation": body.Confirmation,
+		})
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
 
 	case sub == "backtests":
 		snap, _ := snapshotPortfolio(globalCtx.AppDB(), pf)
@@ -669,6 +695,8 @@ func (a *App) handleHTTPHealthDetails(w http.ResponseWriter, r *http.Request) {
 	}
 	out := globalEngine.snapshotMetrics()
 	out["providers"] = providerHealthSnapshot()
+	pid, _ := resolveProjectFromRequest(r)
+	out["streams"] = alpacaStreamHealthSnapshot(pid)
 	httpJSON(w, 200, out)
 }
 

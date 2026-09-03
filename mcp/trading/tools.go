@@ -20,16 +20,17 @@ import (
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		// ─── Lifecycle ────────────────────────────────────────────
-		{Name: "portfolio_create", Description: "Create a new portfolio. Args: name, mandate, allowed_classes, starting_cash (paper only — live pulls from broker), mode (paper|live; default paper), broker_slug (live only — e.g. binance-trading, kraken, coinbase, okx, bybit, bitstamp, alpaca-trading; optional if exactly one broker is bound). Use brokers_list first to see what's available.",
+		{Name: "portfolio_create", Description: "Create a portfolio. execution_environment is simulation, broker_paper, or broker_live. Legacy mode=paper|live remains accepted. Broker portfolios pull balances from the bound broker.",
 			InputSchema: schemaObject(map[string]any{
-				"name":            map[string]any{"type": "string"},
-				"mandate":         map[string]any{"type": "string"},
-				"allowed_classes": map[string]any{"type": "array"},
-				"starting_cash":   map[string]any{"type": "number"},
-				"mode":            map[string]any{"type": "string", "enum": []string{"paper", "live"}},
-				"broker_slug":     map[string]any{"type": "string"},
-				"fee_bps":         map[string]any{"type": "number"},
-				"slippage_bps":    map[string]any{"type": "number"},
+				"name":                  map[string]any{"type": "string"},
+				"mandate":               map[string]any{"type": "string"},
+				"allowed_classes":       map[string]any{"type": "array"},
+				"starting_cash":         map[string]any{"type": "number"},
+				"mode":                  map[string]any{"type": "string", "enum": []string{"paper", "live"}},
+				"execution_environment": map[string]any{"type": "string", "enum": []string{"simulation", "broker_paper", "broker_live"}},
+				"broker_slug":           map[string]any{"type": "string"},
+				"fee_bps":               map[string]any{"type": "number"},
+				"slippage_bps":          map[string]any{"type": "number"},
 			}, []string{"name"}),
 			Handler: a.toolPortfolioCreate},
 
@@ -166,6 +167,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"portfolio_id", "reason"}),
 			Handler: a.toolPortfolioPause},
 
+		{Name: "portfolio_arm_live", Description: "Arm or disarm automated execution for a broker_live portfolio. Requires the exact confirmation LIVE MONEY when arming.",
+			InputSchema: schemaObject(map[string]any{
+				"portfolio_id": map[string]any{"type": "integer"},
+				"armed":        map[string]any{"type": "boolean"},
+				"confirmation": map[string]any{"type": "string"},
+			}, []string{"portfolio_id", "armed"}),
+			Handler: a.toolPortfolioArmLive},
+
 		// ─── Strategies ───────────────────────────────────────────
 		{Name: "strategy_create", Description: "Create a deterministic strategy definition. Supports indicator conditions, ranking, and allocation rules.",
 			InputSchema: schemaObject(map[string]any{
@@ -273,9 +282,23 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	mandate := strArg(args, "mandate")
 
+	executionEnvironment := strings.ToLower(strings.TrimSpace(strArg(args, "execution_environment")))
+	explicitExecutionEnvironment := executionEnvironment != ""
 	mode := strings.ToLower(strings.TrimSpace(strArg(args, "mode")))
-	if mode == "" {
+	if executionEnvironment == "" {
+		if mode == "live" {
+			executionEnvironment = "broker_live"
+		} else {
+			executionEnvironment = "simulation"
+		}
+	}
+	if executionEnvironment != "simulation" && executionEnvironment != "broker_paper" && executionEnvironment != "broker_live" {
+		return rejectStruct("invalid_execution_environment", "execution_environment must be simulation|broker_paper|broker_live"), nil
+	}
+	if executionEnvironment == "simulation" {
 		mode = "paper"
+	} else {
+		mode = "live"
 	}
 	if mode != "paper" && mode != "live" {
 		return rejectStruct("invalid_mode", fmt.Sprintf("mode must be paper|live, got %q", mode)), nil
@@ -325,11 +348,23 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		// Resolve a live connection of this slug + pull initial account.
 		// brokerFor needs a Portfolio to know the slug, so we build a
 		// throwaway and reuse the same lookup at runtime later.
-		probe := &Portfolio{Mode: "live", BrokerSlug: brokerSlug}
+		probe := &Portfolio{Mode: "live", ExecutionEnvironment: executionEnvironment, BrokerSlug: brokerSlug}
 		bb, ferr := brokerFor(ctx, probe)
 		if ferr != nil {
 			return rejectStruct("broker_unbound",
 				fmt.Sprintf("broker %s has no active connection bound; bind one in app settings", brokerSlug)), nil
+		}
+		if brokerSlug == "alpaca-trading" {
+			actual, verified := alpacaConnectionEnvironment(ctx, bb.ConnectionID)
+			if !verified {
+				return rejectStruct("broker_environment_unverified", "Alpaca connection host is not exposed as public metadata; reconnect or upgrade the integration before broker execution"), nil
+			}
+			if explicitExecutionEnvironment && actual != executionEnvironment {
+				return rejectStruct("broker_environment_mismatch", fmt.Sprintf("portfolio requested %s but Alpaca connection is %s", executionEnvironment, actual)), nil
+			}
+			if !explicitExecutionEnvironment {
+				executionEnvironment = actual
+			}
 		}
 		acctRaw, callErr := ctx.PlatformAPI().ExecuteIntegrationTool(
 			bb.ConnectionID, bb.toolFor("account.summary"), map[string]any{},
@@ -365,7 +400,7 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		id, err := dbCreatePortfolio(ctx.AppDB(), &Portfolio{
 			ProjectID: pid, Name: name, Mandate: mandate,
 			AllowedClasses: classes, StartingCash: cash,
-			Mode: "live", BrokerSlug: brokerSlug,
+			Mode: "live", ExecutionEnvironment: executionEnvironment, BrokerSlug: brokerSlug,
 		})
 		if err != nil {
 			return nil, err
@@ -439,15 +474,18 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 			"id": id, "name": name, "mandate": mandate,
 			"allowed_classes": classes, "starting_cash": cash,
 			"mode": "live", "project_id": pid,
+			"execution_environment": executionEnvironment, "live_armed": false,
 			"broker_slug": brokerSlug, "broker_connection_id": bb.ConnectionID,
 		})
 		return map[string]any{
-			"portfolio_id":     id,
-			"name":             name,
-			"starting_cash":    cash,
-			"mode":             "live",
-			"broker_slug":      brokerSlug,
-			"seeded_positions": seeded,
+			"portfolio_id":          id,
+			"name":                  name,
+			"starting_cash":         cash,
+			"mode":                  "live",
+			"execution_environment": executionEnvironment,
+			"live_armed":            false,
+			"broker_slug":           brokerSlug,
+			"seeded_positions":      seeded,
 		}, nil
 	}
 
@@ -463,7 +501,7 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	id, err := dbCreatePortfolio(ctx.AppDB(), &Portfolio{
 		ProjectID: pid, Name: name, Mandate: mandate,
-		AllowedClasses: classes, StartingCash: cash, Mode: "paper",
+		AllowedClasses: classes, StartingCash: cash, Mode: "paper", ExecutionEnvironment: "simulation",
 	})
 	if err != nil {
 		return nil, err
@@ -489,7 +527,7 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		"allowed_classes": classes, "starting_cash": cash,
 		"mode": "paper", "project_id": pid,
 	})
-	return map[string]any{"portfolio_id": id, "name": name, "starting_cash": cash, "mode": "paper"}, nil
+	return map[string]any{"portfolio_id": id, "name": name, "starting_cash": cash, "mode": "paper", "execution_environment": "simulation"}, nil
 }
 
 // defaultBrokerSlug — when portfolio_create's `broker_slug` arg is
@@ -731,6 +769,8 @@ func (a *App) toolPortfolioList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		out = append(out, map[string]any{
 			"id": snap.ID, "name": snap.Name, "mandate": snap.Mandate,
 			"allowed_classes": snap.AllowedClasses, "status": snap.Status,
+			"mode": snap.Mode, "execution_environment": normalizeExecutionEnvironment(snap.ExecutionEnvironment, snap.Mode, snap.BrokerSlug),
+			"live_armed": snap.LiveArmed, "broker_slug": snap.BrokerSlug,
 			"equity": snap.Equity, "cash": snap.Cash,
 			"day_pnl": snap.DayPnL, "day_pnl_pct": snap.DayPnLPct,
 			"open_pnl": snap.OpenPnL, "open_pnl_pct": snap.OpenPnLPct,
@@ -1013,6 +1053,9 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return rejectStruct("portfolio_not_active",
 			fmt.Sprintf("portfolio status is %q", pf.Status)), nil
 	}
+	if normalizeExecutionEnvironment(pf.ExecutionEnvironment, pf.Mode, pf.BrokerSlug) == "broker_live" && !pf.LiveArmed {
+		return rejectStruct("live_not_armed", "broker_live portfolio is disarmed; arm it explicitly before placing real-money orders"), nil
+	}
 	symbol := canonicalSymbol(strArg(args, "symbol"))
 	side := strings.ToLower(strings.TrimSpace(strArg(args, "side")))
 	otype := strings.ToLower(strings.TrimSpace(strArg(args, "type")))
@@ -1151,6 +1194,9 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				estPrice = *lp
 			} else if mark, mErr := dbGetMark(ctx.AppDB(), symbol); mErr == nil && mark != nil {
 				estPrice = mark.Price
+				if mark.AskPrice != nil && *mark.AskPrice > 0 {
+					estPrice = *mark.AskPrice
+				}
 			}
 			if estPrice > 0 {
 				needed := qty * estPrice * 1.005 // 0.5% buffer for slippage + fees
@@ -1446,12 +1492,23 @@ func ensureExecutableMark(ctx *sdk.AppCtx, pf *Portfolio, symbol string) (*Mark,
 	if globalEngine == nil || globalEngine.provider == nil {
 		return nil, errors.New("market data engine not ready")
 	}
+	class := inferAssetClass(symbol)
+	if pf != nil && portfolioBrokerBacked(pf) && (class == "equity" || class == "etf") {
+		if streamed, err := dbGetMark(ctx.AppDB(), symbol); err == nil && streamed != nil &&
+			streamed.Source == alpacaMarketDataSlug && markFresh(streamed, time.Now().UTC()) {
+			return streamed, nil
+		}
+	}
 	mark, err := globalEngine.provider.Quote(symbol)
 	if err != nil {
 		return nil, fmt.Errorf("live quote for %s: %w", symbol, err)
 	}
 	if mark == nil || mark.Price <= 0 {
 		return nil, fmt.Errorf("live quote for %s is empty", symbol)
+	}
+	strict := !strings.EqualFold(strings.TrimSpace(ctx.Config().Get("strict_broker_market_data")), "false")
+	if strict && pf != nil && portfolioBrokerBacked(pf) && (class == "equity" || class == "etf") && mark.Source != alpacaMarketDataSlug {
+		return nil, fmt.Errorf("strict broker market data requires Alpaca for %s; got %s", symbol, mark.Source)
 	}
 	if err := dbUpsertMark(ctx.AppDB(), mark); err != nil {
 		return nil, err
@@ -1541,6 +1598,32 @@ func (a *App) toolPortfolioPause(ctx *sdk.AppCtx, args map[string]any) (any, err
 		})
 	}
 	return map[string]any{"status": "paused"}, nil
+}
+
+func (a *App) toolPortfolioArmLive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "portfolio_id", 0)
+	pf, err := dbGetPortfolio(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", id)
+	}
+	armed, _ := args["armed"].(bool)
+	if armed && strings.TrimSpace(strArg(args, "confirmation")) != "LIVE MONEY" {
+		return rejectStruct("confirmation_required", "arming broker_live requires confirmation exactly LIVE MONEY"), nil
+	}
+	if normalizeExecutionEnvironment(pf.ExecutionEnvironment, pf.Mode, pf.BrokerSlug) != "broker_live" {
+		return rejectStruct("not_broker_live", "only broker_live portfolios can be armed"), nil
+	}
+	if err := dbSetPortfolioLiveArmed(ctx.AppDB(), pid, id, armed); err != nil {
+		return nil, err
+	}
+	emit("portfolio.live_armed.changed", map[string]any{
+		"portfolio_id": id, "execution_environment": "broker_live", "live_armed": armed,
+	})
+	return map[string]any{"portfolio_id": id, "execution_environment": "broker_live", "live_armed": armed}, nil
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────

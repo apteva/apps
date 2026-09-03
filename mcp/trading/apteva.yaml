@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.4.42
+version: 0.5.0
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -39,6 +39,7 @@ requires:
     - net.egress                   # public market-data endpoints (Binance, Polymarket gamma-api)
     - platform.connections.execute # broker calls (live mode)
     - platform.connections.read    # discover bound brokers per slug — see brokers_list, brokerFor()
+    - platform.connections.read_credentials # authenticated Alpaca market + trade WebSockets; credentials remain server-side/in-memory
     - platform.environments.read   # list/read backtest environments
     - platform.environments.call   # seed replay prices into an isolated trading app
     - platform.environments.manage # create/spawn/snapshot/destroy backtest environments
@@ -79,8 +80,12 @@ requires:
       compatible_slugs: [alpaca-market-data, yahoo-finance]
       capabilities:
         - quotes.equity
+        - bars.equity
+        - latest_quotes.equity
       tools:
         quotes.equity: stock_snapshots
+        bars.equity: stock_bars
+        latest_quotes.equity: stock_latest_quotes
       label: "Market Data — Equity (optional — real prices for live equity portfolios)"
       hint: "Bind alpaca-market-data for paid-tier real-time. yahoo-finance works without auth as a free fallback — the trading sidecar already uses Yahoo automatically when nothing's bound here."
 
@@ -126,6 +131,8 @@ provides:
       description: "Read journal entries for a portfolio (recent or filtered by kind)."
     - name: portfolio_pause
       description: "Pause this portfolio (no new orders). Self-only — resume is human-only via REST."
+    - name: portfolio_arm_live
+      description: "Explicitly arm or disarm automated execution for a broker_live portfolio. Arming requires the exact LIVE MONEY confirmation."
     - name: strategy_create
       description: "Create a deterministic strategy definition with indicator/ranking/allocation rules."
     - name: strategy_update
@@ -194,6 +201,16 @@ config_schema:
     default: "5"
     label: Mark refresh cadence (seconds)
     description: How often the paper engine re-marks open positions and tries to fill working orders.
+  - name: alpaca_feed
+    type: text
+    default: "auto"
+    label: Alpaca stock feed
+    description: "auto negotiates the best entitlement; otherwise iex, sip, or delayed_sip. The active feed is always shown in the UI."
+  - name: strict_broker_market_data
+    type: text
+    default: "true"
+    label: Require broker-grade data for broker portfolios
+    description: "When true, broker-backed equity execution never silently falls back to Yahoo marks."
   - name: backtest_max_market_rows
     type: text
     default: "500000"

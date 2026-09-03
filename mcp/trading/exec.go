@@ -240,6 +240,11 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 		"strategy_orders": strategyOrders,
 		"fills_this_tick": fillsThisTick,
 	})
+	app.Emit("market.heartbeat", map[string]any{
+		"schema_version": 1, "tick": tickN, "providers": providerHealthSnapshot(),
+		"streams": alpacaStreamHealthSnapshot(app.CurrentProject()), "marks_refreshed": marksOK,
+		"working_orders": len(working), "strategy_orders": strategyOrders,
+	})
 	return nil
 }
 
@@ -314,7 +319,7 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			e.logger.Warn("strategy portfolio lookup failed", "assignment_id", a.ID, "err", err)
 			continue
 		}
-		if pf.Status != "active" || strings.ToLower(strings.TrimSpace(pf.Mode)) != "paper" {
+		if pf.Status != "active" || !portfolioAllowsAutomatedExecution(pf) {
 			continue
 		}
 		if portfolioUsesBacktestPricing(e.db, pf.ID) {
@@ -367,13 +372,47 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			e.logger.Warn("strategy evaluation failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
 		}
-		created, pending, err := placeStrategyPaperOrders(e, pf, strategy, a, eval)
+		claimed, err := dbClaimStrategyRun(e.db, &StrategyRunEvent{
+			ProjectID: a.ProjectID, PortfolioID: pf.ID, AssignmentID: a.ID,
+			StrategyID: strategy.ID, StrategyVersion: strategy.Version, SignalBarAt: marketBarAt,
+		}, eval.Decisions, eval.TargetAllocations)
+		if err != nil {
+			e.logger.Warn("strategy run claim failed", "assignment_id", a.ID, "err", err)
+			continue
+		}
+		if !claimed {
+			_ = dbSetStrategyAssignmentEvaluated(e.db, a.ID, checkSlot, marketBarAt, checkSlot)
+			continue
+		}
+		app.Emit("strategy.run.started", map[string]any{
+			"schema_version": 1, "portfolio_id": pf.ID, "assignment_id": a.ID,
+			"strategy_id": strategy.ID, "strategy_version": strategy.Version,
+			"signal_bar_at":         marketBarAt.Format(time.RFC3339Nano),
+			"execution_environment": normalizeExecutionEnvironment(pf.ExecutionEnvironment, pf.Mode, pf.BrokerSlug),
+		})
+		app.Emit("strategy.decision.created", map[string]any{
+			"schema_version": 1, "portfolio_id": pf.ID, "assignment_id": a.ID,
+			"strategy_id": strategy.ID, "strategy_version": strategy.Version,
+			"signal_bar_at": marketBarAt.Format(time.RFC3339Nano),
+			"decisions":     eval.Decisions, "target_allocations": eval.TargetAllocations,
+		})
+		created, pending, err := placeStrategyPaperOrders(e, app, pf, strategy, a, eval)
 		if err != nil {
 			e.logger.Warn("strategy order placement failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
+			app.Emit("strategy.run.failed", map[string]any{"schema_version": 1, "portfolio_id": pf.ID,
+				"assignment_id": a.ID, "strategy_id": strategy.ID, "error": err.Error()})
+			_ = dbFinishStrategyRun(e.db, a.ID, marketBarAt, "failed", nil, err)
 			continue
 		}
 		resolved := !pending
 		for _, order := range created {
+			if portfolioBrokerBacked(pf) {
+				stored, err := dbGetOrder(e.db, pf.ProjectID, order.ID)
+				if err != nil || stored.Status == "working" {
+					resolved = false
+				}
+				continue
+			}
 			if err := tryFill(e, order); err != nil {
 				e.logger.Warn("strategy order execution failed", "assignment_id", a.ID, "order_id", order.ID, "err", err)
 				resolved = false
@@ -390,6 +429,23 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 				e.logger.Warn("strategy assignment timestamp update failed", "assignment_id", a.ID, "err", err)
 			}
 		}
+		orderIDs := make([]string, 0, len(created))
+		for _, order := range created {
+			orderIDs = append(orderIDs, order.ID)
+		}
+		eventTopic := "strategy.run.completed"
+		runStatus := "completed"
+		if !resolved {
+			eventTopic = "strategy.run.orders_submitted"
+			runStatus = "orders_submitted"
+		}
+		_ = dbFinishStrategyRun(e.db, a.ID, marketBarAt, runStatus, orderIDs, nil)
+		app.Emit(eventTopic, map[string]any{
+			"schema_version": 1, "portfolio_id": pf.ID, "assignment_id": a.ID,
+			"strategy_id": strategy.ID, "strategy_version": strategy.Version,
+			"signal_bar_at": marketBarAt.Format(time.RFC3339Nano), "order_ids": orderIDs,
+			"orders_pending": !resolved,
+		})
 		totalOrders += len(created)
 	}
 	return totalOrders
@@ -506,7 +562,7 @@ func strategyAssignmentCheckSlot(def *StrategyDefinition, now time.Time) (time.T
 	return open.Add(time.Duration(int64(elapsed) / int64(duration) * int64(duration))).UTC(), true
 }
 
-func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assignment *StrategyAssignment, eval *StrategyEvaluation) ([]*Order, bool, error) {
+func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strategy *Strategy, assignment *StrategyAssignment, eval *StrategyEvaluation) ([]*Order, bool, error) {
 	equity, err := computeEquity(e.db, pf)
 	if err != nil {
 		return nil, false, err
@@ -609,6 +665,30 @@ func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assi
 			continue
 		}
 		rationale := fmt.Sprintf("Strategy %s assignment #%d rebalance: %s", strategy.Name, assignment.ID, strings.Join(eval.Decisions, "; "))
+		if portfolioBrokerBacked(pf) {
+			out, err := (&App{}).toolOrderPlace(app, map[string]any{
+				"_project_id": pf.ProjectID, "portfolio_id": pf.ID, "symbol": p.symbol,
+				"side": p.side, "type": "market", "qty": p.qty, "tif": "day",
+				"rationale": rationale, "source_override": "strategy",
+			})
+			if err != nil {
+				return created, false, err
+			}
+			result, _ := out.(map[string]any)
+			if fmt.Sprint(result["status"]) == "rejected" {
+				return created, false, fmt.Errorf("strategy order rejected: %s", fmt.Sprint(result["detail"]))
+			}
+			orderID := strings.TrimSpace(fmt.Sprint(result["order_id"]))
+			if orderID == "" {
+				return created, false, errors.New("broker strategy order returned no order_id")
+			}
+			order, err := dbGetOrder(e.db, pf.ProjectID, orderID)
+			if err != nil {
+				return created, false, err
+			}
+			created = append(created, order)
+			continue
+		}
 		order := &Order{
 			ID:          "o-" + uuid.NewString()[:8],
 			PortfolioID: pf.ID,

@@ -12,6 +12,7 @@ import { usePortfolios, usePortfolio, usePositions, useOrders, useJournal } from
 import { useUniverse } from "./hooks/useUniverse.ts";
 import { useHealth } from "./hooks/useHealth.ts";
 import { useAppEvents } from "./hooks/useAppEvents.ts";
+import { setLiveArmed } from "./api/portfolios.ts";
 
 export function App() {
   const [dark, setDark] = useState(true);
@@ -37,14 +38,35 @@ export function App() {
     const matchesSelected = portfolioId == null || pid == null || pid === portfolioId;
     switch (ev.topic) {
       case "tick":
-        // Marks moved → universe + health surfaces refresh.
-        universe.refresh();
         health.refresh();
-        // Positions re-mark too (their market_value depends on marks).
+        return;
+      case "market.heartbeat":
+      case "provider.health.changed":
+        health.refresh();
+        return;
+      case "market.quotes.updated": {
+        const marks = Array.isArray(ev.data?.marks) ? ev.data.marks : [];
+        universe.updateData((current) => {
+          if (!current) return current;
+          const updates = new Map(marks.map((mark: any) => [String(mark.symbol), mark]));
+          return current.map((row) => {
+            const mark: any = updates.get(row.symbol);
+            if (!mark) return row;
+            const price = Number(mark.price || row.price);
+            return {
+              ...row, ...mark, price,
+              change_abs: row.prev_close ? price - row.prev_close : row.change_abs,
+              change_pct: row.prev_close ? (price / row.prev_close - 1) * 100 : row.change_pct,
+              spark: [...row.spark.slice(-29), price],
+            };
+          });
+        });
         if (matchesSelected) positions.refresh();
         return;
+      }
       case "portfolio.created":
       case "portfolio.status.changed":
+      case "portfolio.live_armed.changed":
         portfolios.refresh();
         if (matchesSelected) portfolio.refresh();
         return;
@@ -141,7 +163,14 @@ export function App() {
           />
 
           <div className="flex flex-col gap-4 min-h-0">
-            {portfolio.data && <PortfolioHeader p={portfolio.data} />}
+            {portfolio.data && <PortfolioHeader
+              p={portfolio.data}
+              onSetLiveArmed={async (armed) => {
+                await setLiveArmed(portfolio.data!.id, armed);
+                portfolio.refresh();
+                portfolios.refresh();
+              }}
+            />}
 
             <div
               className="grid gap-4"
@@ -179,7 +208,7 @@ export function App() {
                     <span className="text-[10px] t-tertiary mono">{t.count}</span>
                   </button>
                 ))}
-                <span className="ml-auto pr-2 text-[10px] t-tertiary mono">v0.1 · paper</span>
+                <span className="ml-auto pr-2 text-[10px] t-tertiary mono">v0.5 · event driven</span>
               </div>
 
               <div className="flex-1 min-h-0 mt-1.5">
@@ -196,7 +225,7 @@ export function App() {
         <footer className="flex items-center justify-center gap-3 text-[11px] t-tertiary py-1">
           <span>Apteva · Trading</span>
           <span>·</span>
-          <span>Paper mode — no broker connected.</span>
+          <span>Simulation, Alpaca paper, and explicitly armed live execution.</span>
         </footer>
       </div>
     </div>

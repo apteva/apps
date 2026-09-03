@@ -167,6 +167,8 @@ func normalizeMark(source string, mark *Mark, receivedAt time.Time) (*Mark, erro
 	}
 	for label, value := range map[string]*float64{
 		"no_price": mark.NoPrice, "prev_close": mark.PrevClose, "volume_24h": mark.Volume24h,
+		"bid_price": mark.BidPrice, "ask_price": mark.AskPrice, "bid_size": mark.BidSize,
+		"ask_size": mark.AskSize, "last_trade_price": mark.LastTradePrice, "last_trade_size": mark.LastTradeSize,
 	} {
 		if value == nil {
 			continue
@@ -177,6 +179,19 @@ func normalizeMark(source string, mark *Mark, receivedAt time.Time) (*Mark, erro
 	}
 	if mark.NoPrice != nil && *mark.NoPrice > 1 {
 		return nil, fmt.Errorf("invalid NO probability for %s", mark.Symbol)
+	}
+	if mark.BidPrice != nil && mark.AskPrice != nil && *mark.BidPrice > *mark.AskPrice {
+		return nil, fmt.Errorf("crossed quote for %s: bid %.8f > ask %.8f", mark.Symbol, *mark.BidPrice, *mark.AskPrice)
+	}
+	if strings.TrimSpace(mark.QuoteAt) != "" {
+		quoteAt, err := time.Parse(time.RFC3339Nano, mark.QuoteAt)
+		if err != nil {
+			return nil, fmt.Errorf("invalid quote timestamp for %s: %w", mark.Symbol, err)
+		}
+		if quoteAt.After(receivedAt.Add(time.Minute)) {
+			return nil, fmt.Errorf("quote timestamp for %s is more than one minute in the future", mark.Symbol)
+		}
+		mark.QuoteAt = quoteAt.UTC().Format(time.RFC3339Nano)
 	}
 
 	mark.Source = strings.TrimSpace(source)

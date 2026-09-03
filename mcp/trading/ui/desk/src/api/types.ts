@@ -12,6 +12,9 @@ export type Portfolio = {
   allowed_classes: AssetClass[];
   status: "active" | "paused" | "halted";
   mode: "paper" | "live";
+  execution_environment: "simulation" | "broker_paper" | "broker_live" | "backtest";
+  live_armed: boolean;
+  broker_slug?: string;
   equity: number;
   cash: number;
   buying_power: number;
@@ -81,6 +84,14 @@ export type Sym = {
   no_price?: number;
   yes_price?: number;
   volume_24h?: number;
+  bid_price?: number;
+  ask_price?: number;
+  bid_size?: number;
+  ask_size?: number;
+  last_trade_price?: number;
+  last_trade_size?: number;
+  feed?: string;
+  quote_at?: string;
   marked_at: string;
   // Optional polymarket extras (not yet shipped by the v0.1 API).
   resolves_at?: number;       // unix ms

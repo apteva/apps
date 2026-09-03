@@ -198,6 +198,8 @@ interface Portfolio {
   cash: number;
   status: string;
   mode: string;
+  execution_environment: "simulation" | "broker_paper" | "broker_live" | "backtest";
+  live_armed: boolean;
   broker_slug?: string;
   equity?: number;
   day_pnl?: number;
@@ -273,6 +275,14 @@ interface Mark {
   prev_close?: number;
   change_pct_24h?: number;
   volume_24h?: number;
+  bid_price?: number;
+  ask_price?: number;
+  bid_size?: number;
+  ask_size?: number;
+  last_trade_price?: number;
+  last_trade_size?: number;
+  feed?: string;
+  quote_at?: string;
   marked_at: string;
 }
 interface Agent {
@@ -390,7 +400,14 @@ interface BacktestRun {
   slippage_bps: number;
   current_step: number;
   total_steps: number;
-  summary?: { prices?: Array<{ symbol: string; price: number; asset_class?: string }> };
+  summary?: {
+    prices?: Array<{ symbol: string; price: number; asset_class?: string }>;
+    market_source?: string;
+    dataset_sha256?: string;
+    dataset_rows?: number;
+    price_adjustment?: string;
+    execution_model?: Record<string, unknown>;
+  };
   error?: string;
   created_at: string;
   updated_at: string;
@@ -1071,7 +1088,7 @@ function PortfolioStatusPill({ status, mode }: { status: string; mode: string })
   return (
     <span className={`text-xs px-2 py-0.5 rounded-full border uppercase tracking-wide font-semibold inline-flex items-center gap-1 ${cls}`}>
       {status}
-      {mode === "live" && <span className="opacity-70 normal-case">· live</span>}
+      {mode !== "paper" && <span className="opacity-70 normal-case">· {mode.replaceAll("_", " ")}</span>}
     </span>
   );
 }
@@ -1134,7 +1151,7 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
   useEffect(() => { loadPortfolios(); }, [loadPortfolios]);
 
   useAppEvents("trading", projectId, (ev) => {
-    if (["portfolio.created", "portfolio.status.changed", "portfolio.agent.changed", "order.filled", "position.changed"].includes(ev.topic)) {
+    if (["portfolio.created", "portfolio.status.changed", "portfolio.live_armed.changed", "portfolio.agent.changed", "order.filled", "position.changed"].includes(ev.topic)) {
       loadPortfolios();
     }
   });
@@ -1156,11 +1173,11 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
           <option value="">— Select portfolio —</option>
           {portfolios.map((p) => (
             <option key={p.id} value={p.id}>
-              {p.name} {p.mode === "live" ? "(LIVE)" : ""}
+              {p.name} {p.execution_environment === "broker_live" ? "(LIVE)" : p.execution_environment === "broker_paper" ? "(PAPER BROKER)" : ""}
             </option>
           ))}
         </select>
-        {selected && <PortfolioStatusPill status={selected.status} mode={selected.mode} />}
+        {selected && <PortfolioStatusPill status={selected.status} mode={selected.execution_environment || selected.mode} />}
         <span className="flex-1" />
         <button
           onClick={loadPortfolios}
@@ -1169,7 +1186,7 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
           className="p-1.5 rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50"
         ><Icon.Refresh /></button>
         <a
-          href="../desk/dist/"
+          href={`/api/apps/trading/ui/desk/dist/index.html?project_id=${encodeURIComponent(projectId)}&install_id=${installId}`}
           target="_blank"
           rel="noopener"
           className="text-xs text-text-dim hover:text-accent inline-flex items-center gap-1"
@@ -1251,6 +1268,17 @@ function PortfoliosTab({ portfolios, selectedId, onSelect, api, onChanged, setBu
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
 
+  const toggleLiveArm = async (p: Portfolio) => {
+    setBusy(true);
+    try {
+      await api("POST", `/portfolios/${p.id}/arm`, undefined, {
+        armed: !p.live_armed,
+        confirmation: p.live_armed ? "" : "LIVE MONEY",
+      });
+      onChanged();
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
   return (
     <Section
       title="Portfolios"
@@ -1287,7 +1315,7 @@ function PortfoliosTab({ portfolios, selectedId, onSelect, api, onChanged, setBu
               >
                 <div className="flex items-center justify-between mb-2">
                   <strong className="text-sm">{p.name}</strong>
-                  <PortfolioStatusPill status={p.status} mode={p.mode} />
+                  <PortfolioStatusPill status={p.status} mode={p.execution_environment || p.mode} />
                 </div>
                 {p.broker_slug && (
                   <div className="text-xs text-text-dim mb-1">via {p.broker_slug}</div>
@@ -1310,6 +1338,13 @@ function PortfoliosTab({ portfolios, selectedId, onSelect, api, onChanged, setBu
                     <span key={c} className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${classBadgeClass(c)}`}>{c}</span>
                   ))}
                   <span className="flex-1" />
+                  {p.execution_environment === "broker_live" && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); toggleLiveArm(p); }}
+                      className={`px-2 py-1 rounded border text-xs font-semibold ${p.live_armed ? "border-red/40 text-red" : "border-amber/40 text-amber"}`}
+                      title="Live-money strategies and orders require explicit arming"
+                    >{p.live_armed ? "Disarm live" : "Arm live"}</button>
+                  )}
                   <button
                     onClick={(e) => { e.stopPropagation(); togglePause(p); }}
                     className="p-1 rounded border border-border text-text-muted hover:bg-bg-hover"
@@ -1342,7 +1377,7 @@ function CreatePortfolioForm({ api, onCreated, onCancel, setError }: {
   onCancel: () => void;
   setError: (e: string | null) => void;
 }) {
-  const [mode, setMode] = useState<"paper" | "live">("paper");
+  const [executionEnvironment, setExecutionEnvironment] = useState<"simulation" | "broker_paper" | "broker_live">("simulation");
   const [name, setName] = useState("");
   const [mandate, setMandate] = useState("");
   const [startingCash, setStartingCash] = useState("100000");
@@ -1365,10 +1400,10 @@ function CreatePortfolioForm({ api, onCreated, onCancel, setError }: {
     setSubmitting(true);
     try {
       const body: Record<string, unknown> = {
-        name: name.trim(), mandate: mandate.trim(), mode, allowed_classes: classes,
+        name: name.trim(), mandate: mandate.trim(), execution_environment: executionEnvironment, allowed_classes: classes,
       };
-      if (mode === "paper") body.starting_cash = Number(startingCash);
-      if (mode === "live") body.broker_slug = brokerSlug;
+      if (executionEnvironment === "simulation") body.starting_cash = Number(startingCash);
+      if (executionEnvironment !== "simulation") body.broker_slug = brokerSlug;
       await api("POST", "/portfolios", undefined, body);
       onCreated();
     } catch (e) { setError((e as Error).message); } finally { setSubmitting(false); }
@@ -1380,15 +1415,19 @@ function CreatePortfolioForm({ api, onCreated, onCancel, setError }: {
     <div className="p-4 mb-4 border border-border rounded bg-bg-card">
       <div className="flex gap-4 mb-3">
         <label className="text-sm flex items-center gap-2 cursor-pointer">
-          <input type="radio" checked={mode === "paper"} onChange={() => setMode("paper")} />
-          Paper
+          <input type="radio" checked={executionEnvironment === "simulation"} onChange={() => setExecutionEnvironment("simulation")} />
+          Simulation
         </label>
         <label className="text-sm flex items-center gap-2 cursor-pointer">
-          <input type="radio" checked={mode === "live"} onChange={() => setMode("live")} disabled={liveBrokers.length === 0} />
-          Live
+          <input type="radio" checked={executionEnvironment === "broker_paper"} onChange={() => setExecutionEnvironment("broker_paper")} disabled={liveBrokers.length === 0} />
+          Broker paper
           {liveBrokers.length === 0 && (
             <span className="text-xs text-text-dim">(no broker bound — see Brokers tab)</span>
           )}
+        </label>
+        <label className="text-sm flex items-center gap-2 cursor-pointer">
+          <input type="radio" checked={executionEnvironment === "broker_live"} onChange={() => setExecutionEnvironment("broker_live")} disabled={liveBrokers.length === 0} />
+          Broker live (starts disarmed)
         </label>
       </div>
 
@@ -1397,7 +1436,7 @@ function CreatePortfolioForm({ api, onCreated, onCancel, setError }: {
           <FieldLabel>Name</FieldLabel>
           <input value={name} onChange={(e) => setName(e.target.value)} className={inputClass} placeholder="e.g. tech-longs" />
         </div>
-        {mode === "paper" ? (
+        {executionEnvironment === "simulation" ? (
           <div>
             <FieldLabel>Starting cash (USD)</FieldLabel>
             <input value={startingCash} onChange={(e) => setStartingCash(e.target.value)} className={inputClass} type="number" />
@@ -1446,7 +1485,7 @@ function CreatePortfolioForm({ api, onCreated, onCancel, setError }: {
         <button onClick={onCancel} className="px-3 py-1 text-sm rounded border border-border text-text hover:bg-bg-hover">Cancel</button>
         <button
           onClick={submit}
-          disabled={submitting || !name.trim() || (mode === "live" && !brokerSlug)}
+          disabled={submitting || !name.trim() || (executionEnvironment !== "simulation" && !brokerSlug)}
           className="px-3 py-1 text-sm rounded bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50"
         >{submitting ? "Creating…" : "Create portfolio"}</button>
       </div>
@@ -1516,7 +1555,7 @@ function TradeTab({ portfolio, api, setBusy, setError, projectId }: {
   return (
     <>
       <StatsCard portfolio={portfolio} />
-      <PlaceOrderFormWithChart portfolio={portfolio} api={api} onPlaced={reload} setError={setError} />
+      <PlaceOrderFormWithChart portfolio={portfolio} api={api} onPlaced={reload} setError={setError} projectId={projectId} />
       <Section title="Working orders">
         {working.length === 0 ? <EmptyState title="No working orders" /> : <OrdersTable orders={working} onCancel={cancel} />}
       </Section>
@@ -1552,11 +1591,12 @@ function StatsCard({ portfolio }: { portfolio: Portfolio }) {
   );
 }
 
-function PlaceOrderFormWithChart({ portfolio, api, onPlaced, setError }: {
+function PlaceOrderFormWithChart({ portfolio, api, onPlaced, setError, projectId }: {
   portfolio: Portfolio;
   api: <T>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
   onPlaced: () => void;
   setError: (e: string | null) => void;
+  projectId: string;
 }) {
   const [symbol, setSymbol] = useState("");
   const [universe, setUniverse] = useState<Mark[]>([]);
@@ -1574,6 +1614,12 @@ function PlaceOrderFormWithChart({ portfolio, api, onPlaced, setError }: {
       .then((r) => setUniverse(r.symbols || []))
       .catch(() => undefined);
   }, [api]);
+
+  useAppEvents<{ marks?: Mark[] }>("trading", projectId, (ev) => {
+    if (ev.topic !== "market.quotes.updated" || !Array.isArray(ev.data?.marks)) return;
+    const updates = new Map(ev.data.marks.map((mark) => [mark.symbol, mark]));
+    setUniverse((current) => current.map((mark) => ({ ...mark, ...(updates.get(mark.symbol) || {}) })));
+  });
 
   return (
     <>
@@ -2344,8 +2390,15 @@ function AgentsTab({ portfolio, api, projectId, onChanged, setError }: {
     return () => window.clearInterval(id);
   }, [loadQuotes]);
 
-  useAppEvents("trading", projectId, (ev) => {
-    if (ev.topic === "tick" || ev.topic === "watchlist.changed") loadQuotes().catch(() => undefined);
+  useAppEvents<{ marks?: Mark[] }>("trading", projectId, (ev) => {
+    if (ev.topic === "watchlist.changed") loadQuotes().catch(() => undefined);
+    if (ev.topic === "market.quotes.updated" && Array.isArray(ev.data?.marks)) {
+      setQuotes((current) => {
+        const next = { ...current };
+        for (const mark of ev.data.marks || []) next[mark.symbol] = { ...(next[mark.symbol] || mark), ...mark };
+        return next;
+      });
+    }
   });
 
   if (!portfolio) return <EmptyState title="Pick a portfolio" hint="No portfolio selected." />;
@@ -3329,11 +3382,22 @@ function BacktestPerformancePanel({ run, performance }: {
           <Metric label="Cash" value={formatUSD(metrics.cash ?? current?.cash)} />
           <Metric label="Max DD" value={formatPct(metrics.max_drawdown_pct)} colorClass={pnlClass(metrics.max_drawdown_pct)} />
           <Metric label="Sharpe" value={formatRatio(metrics.sharpe_ratio)} colorClass={pnlClass(metrics.sharpe_ratio)} />
+          <Metric label="Sortino" value={formatRatio(metrics.sortino_ratio)} colorClass={pnlClass(metrics.sortino_ratio)} />
+          <Metric label="CAGR" value={formatPct(metrics.cagr_pct)} colorClass={pnlClass(metrics.cagr_pct)} />
+          <Metric label="Volatility" value={formatPct(metrics.annualized_volatility_pct)} />
+          <Metric label="Calmar" value={formatRatio(metrics.calmar_ratio)} colorClass={pnlClass(metrics.calmar_ratio)} />
+          <Metric label="Turnover" value={formatPct(metrics.turnover_pct)} />
           <Metric label="Open P&L" value={formatUSD(metrics.open_pnl)} sub={formatPct(metrics.open_pnl_pct)} colorClass={pnlClass(metrics.open_pnl)} />
           <Metric label="Exposure" value={formatPct(metrics.exposure)} />
           <Metric label="Positions" value={String(positions.length)} />
           <Metric label="Orders" value={String(orders.length)} />
         </div>
+        {run.summary?.market_source && (
+          <div className="mt-3 px-3 py-2 rounded border border-border bg-bg-input text-xs text-text-dim mono">
+            Data: {run.summary.market_source} · {run.summary.dataset_rows ?? "?"} rows · {run.summary.price_adjustment || "provider default"}
+            {run.summary.dataset_sha256 ? ` · sha256 ${run.summary.dataset_sha256.slice(0, 12)}…` : ""}
+          </div>
+        )}
         <div className="mt-3">
           <EquityCurve series={series} startingCash={run.starting_cash} />
         </div>

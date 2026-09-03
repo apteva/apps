@@ -98,7 +98,8 @@ by apteva-server. Bare paths shown here.
 **Writes (5):** `order_place`, `order_cancel`, `journal_write`,
 `watchlist_add`, `watchlist_remove`.
 
-**Governance (2):** `alert_create`, `portfolio_pause`.
+**Governance (3):** `alert_create`, `portfolio_pause`,
+`portfolio_arm_live`.
 
 `order_place` always takes a `rationale` (≥ 30 chars). On reject, the
 status field is `"rejected"` with a structured `code` + `detail` —
@@ -116,11 +117,23 @@ adjusts.
 ## Pricing provider
 
 The default `pricing_provider: live` routes crypto to Binance public REST,
-prediction markets to Polymarket Gamma, and equity/ETF quotes to a bound
-Alpaca market-data integration with Yahoo Finance as the unauthenticated
-real-data fallback. Live mode never substitutes synthetic prices: provider
-failures are surfaced and stale marks cannot fill orders. Set
-`pricing_provider: mock` explicitly for deterministic tests and offline demos.
+prediction markets to Polymarket Gamma, and equity/ETF data to Alpaca when it
+is bound. Alpaca quotes, trades, minute bars, corrections, market status, and
+broker order updates stream over WebSockets; REST snapshots remain the retry
+and recovery path. Yahoo Finance is the unauthenticated display/backtest
+fallback, but broker-backed equity orders require Alpaca marks by default.
+The active feed (`sip`, `iex`, or `delayed_sip`) and stream health are exposed
+to the dashboard. Set `pricing_provider: mock` for deterministic tests and
+offline demos.
+
+Portfolios use an explicit execution environment: `simulation`,
+`broker_paper`, `broker_live`, or `backtest`. Broker-live portfolios start
+disarmed and reject orders and automated strategy runs until an operator arms
+them with the exact `LIVE MONEY` confirmation. Strategy executions claim each
+closed signal bar durably before order submission, preventing duplicate broker
+orders after a restart. Backtests capture data source, adjustment, execution
+model, row count, and a SHA-256 dataset identity alongside professional risk
+metrics.
 
 ## Approvals — by design, not in the sidecar
 

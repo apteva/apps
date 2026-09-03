@@ -19,6 +19,7 @@ const result = await Bun.build({
   sourcemap: "linked",
   define: {
     __API_BASE__: JSON.stringify(API_BASE),
+    "process.env.NODE_ENV": JSON.stringify("production"),
   },
   naming: {
     entry: "[name]-[hash].[ext]",
@@ -45,11 +46,11 @@ const html = `<!DOCTYPE html>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="./style.css" />
   </head>
   <body class="dark">
     <div id="root"></div>
-    <script type="module" src="/${jsFile}"></script>
+    <script type="module" src="./${jsFile}"></script>
   </body>
 </html>`;
 

@@ -10,6 +10,7 @@ export type FetchState<T> = {
   error: string | null;
   loading: boolean;
   refresh: () => void;
+  updateData: (update: (current: T | null) => T | null) => void;
 };
 
 export function useFetch<T>(
@@ -25,6 +26,7 @@ export function useFetch<T>(
 
   const [refreshSeq, setRefreshSeq] = useState(0);
   const refresh = useCallback(() => { setRefreshSeq((n) => n + 1); }, []);
+  const updateData = useCallback((update: (current: T | null) => T | null) => setData(update), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -54,5 +56,5 @@ export function useFetch<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, refreshSeq]);
 
-  return { data, error, loading, refresh };
+  return { data, error, loading, refresh, updateData };
 }

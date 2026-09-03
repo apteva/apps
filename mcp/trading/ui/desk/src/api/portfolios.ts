@@ -27,3 +27,9 @@ export type PlaceOrderResult =
 
 export const placeOrder = (portfolioId: number, args: PlaceOrderArgs) =>
   apiPost<PlaceOrderResult>(`/portfolios/${portfolioId}/orders`, args);
+
+export const setLiveArmed = (portfolioId: number, armed: boolean) =>
+  apiPost<{ portfolio: Portfolio }>(`/portfolios/${portfolioId}/arm`, {
+    armed,
+    confirmation: armed ? "LIVE MONEY" : "",
+  }).then((result) => result.portfolio);

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -267,6 +268,18 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 				"portfolio_name": pf.Name,
 				"market_source":  marketSource,
 				"market_data":    summarizeBacktestMarketCapture(marketBars, symbols, startAt, endAt),
+				"dataset_sha256": backtestMarketBarsChecksum(marketBars),
+				"dataset_rows":   len(marketBars),
+				"price_adjustment": func() string {
+					if marketSource == alpacaMarketDataSlug {
+						return "all"
+					}
+					return "provider_default"
+				}(),
+				"execution_model": map[string]any{
+					"fee_bps": body.FeeBps, "slippage_bps": body.SlippageBps,
+					"fill_model": "next_replay_mark", "lookahead": "disabled",
+				},
 				"strategy_name": func() string {
 					if strategy != nil {
 						return strategy.Name
@@ -805,7 +818,7 @@ func backtestPerformance(run *BacktestRun) (*BacktestPerformance, error) {
 	if perf.Entries == nil {
 		perf.Entries = []*JournalEntry{}
 	}
-	perf.Metrics = backtestPerformanceMetrics(run, perf.Series, perf.Current)
+	perf.Metrics = backtestPerformanceMetricsWithOrders(run, perf.Series, perf.Current, perf.Orders)
 	return perf, nil
 }
 
@@ -962,6 +975,10 @@ func backtestSeriesWithBaseline(run *BacktestRun, snapshots []*BacktestSnapshot)
 }
 
 func backtestPerformanceMetrics(run *BacktestRun, series []*BacktestSnapshot, current *BacktestSnapshot) map[string]float64 {
+	return backtestPerformanceMetricsWithOrders(run, series, current, nil)
+}
+
+func backtestPerformanceMetricsWithOrders(run *BacktestRun, series []*BacktestSnapshot, current *BacktestSnapshot, orders []*Order) map[string]float64 {
 	metrics := map[string]float64{
 		"starting_cash": run.StartingCash,
 		"current_step":  float64(run.CurrentStep),
@@ -994,15 +1011,45 @@ func backtestPerformanceMetrics(run *BacktestRun, series []*BacktestSnapshot, cu
 		}
 	}
 	metrics["max_drawdown_pct"] = maxDD
-	if sharpe, ok := backtestSharpeRatio(series, run.Interval); ok {
+	periods := backtestPeriodsPerYearForRun(run)
+	if sharpe, ok := backtestSharpeRatioWithPeriods(series, periods); ok {
 		metrics["sharpe_ratio"] = sharpe
+	}
+	returns := backtestEquityReturns(series)
+	if len(returns) > 1 {
+		mean, volatility, downside := returnMoments(returns)
+		metrics["annualized_return_pct"] = mean * periods * 100
+		metrics["annualized_volatility_pct"] = volatility * math.Sqrt(periods) * 100
+		if downside > 0 {
+			metrics["sortino_ratio"] = mean / downside * math.Sqrt(periods)
+		}
+	}
+	if current != nil && run.StartingCash > 0 && current.Equity > 0 && len(returns) > 0 {
+		years := float64(len(returns)) / periods
+		if years > 0 {
+			cagr := math.Pow(current.Equity/run.StartingCash, 1/years) - 1
+			metrics["cagr_pct"] = cagr * 100
+			if maxDD < 0 {
+				metrics["calmar_ratio"] = cagr / math.Abs(maxDD/100)
+			}
+		}
+	}
+	metrics["orders"] = float64(len(orders))
+	turnover := 0.0
+	for _, order := range orders {
+		if order != nil && order.FilledQty > 0 && order.AvgFillPrice > 0 {
+			turnover += order.FilledQty * order.AvgFillPrice
+		}
+	}
+	if run.StartingCash > 0 {
+		metrics["turnover_pct"] = turnover / run.StartingCash * 100
 	}
 	return metrics
 }
 
-func backtestSharpeRatio(series []*BacktestSnapshot, interval string) (float64, bool) {
+func backtestEquityReturns(series []*BacktestSnapshot) []float64 {
 	returns := make([]float64, 0, len(series)-1)
-	var prev float64
+	prev := 0.0
 	for _, point := range series {
 		if point == nil || point.Equity <= 0 {
 			continue
@@ -1012,6 +1059,32 @@ func backtestSharpeRatio(series []*BacktestSnapshot, interval string) (float64, 
 		}
 		prev = point.Equity
 	}
+	return returns
+}
+
+func returnMoments(returns []float64) (mean, volatility, downside float64) {
+	for _, value := range returns {
+		mean += value
+	}
+	mean /= float64(len(returns))
+	for _, value := range returns {
+		delta := value - mean
+		volatility += delta * delta
+		if value < 0 {
+			downside += value * value
+		}
+	}
+	volatility = math.Sqrt(volatility / float64(len(returns)-1))
+	downside = math.Sqrt(downside / float64(len(returns)))
+	return
+}
+
+func backtestSharpeRatio(series []*BacktestSnapshot, interval string) (float64, bool) {
+	return backtestSharpeRatioWithPeriods(series, backtestPeriodsPerYear(interval))
+}
+
+func backtestSharpeRatioWithPeriods(series []*BacktestSnapshot, periods float64) (float64, bool) {
+	returns := backtestEquityReturns(series)
 	if len(returns) < 2 {
 		return 0, false
 	}
@@ -1029,7 +1102,34 @@ func backtestSharpeRatio(series []*BacktestSnapshot, interval string) (float64, 
 	if variance <= 0 {
 		return 0, false
 	}
-	return mean / math.Sqrt(variance) * math.Sqrt(backtestPeriodsPerYear(interval)), true
+	return mean / math.Sqrt(variance) * math.Sqrt(periods), true
+}
+
+func backtestPeriodsPerYearForRun(run *BacktestRun) float64 {
+	cryptoOnly := len(run.Symbols) > 0
+	for _, symbol := range run.Symbols {
+		if inferAssetClass(symbol) != "crypto" {
+			cryptoOnly = false
+			break
+		}
+	}
+	if cryptoOnly {
+		return backtestPeriodsPerYear(run.Interval)
+	}
+	switch strings.ToLower(strings.TrimSpace(run.Interval)) {
+	case "5m":
+		return 252 * 78
+	case "15m":
+		return 252 * 26
+	case "1h":
+		return 252 * 6.5
+	case "4h":
+		return 252 * 2
+	case "1w":
+		return 52
+	default:
+		return 252
+	}
 }
 
 func backtestPeriodsPerYear(interval string) float64 {
@@ -1283,6 +1383,16 @@ func captureBacktestMarketBars(parent context.Context, symbols []string, interva
 	return out, len(times), source, nil
 }
 
+func backtestMarketBarsChecksum(bars []*BacktestMarketBar) string {
+	h := sha256.New()
+	encoder := json.NewEncoder(h)
+	encoder.SetEscapeHTML(false)
+	for _, bar := range bars {
+		_ = encoder.Encode(bar)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
 type historicalBacktestBarsProvider interface {
 	BacktestBarsContext(ctx context.Context, symbol, interval string, start, end time.Time, limit int) ([]Bar, error)
 }
@@ -1309,6 +1419,11 @@ func backtestBarsProviderForSymbols(symbols []string) (historicalBacktestBarsPro
 	case "crypto":
 		return newBinancePublic(), "binance-public", nil
 	case "stocks":
+		if globalEngine != nil {
+			if live, ok := globalEngine.provider.(*liveProvider); ok && live.equity != nil && live.equity.available() {
+				return live.equity, alpacaMarketDataSlug, nil
+			}
+		}
 		return newYahooPublic(), "yahoo-finance", nil
 	default:
 		return nil, "", errors.New("no supported backtest symbols")
