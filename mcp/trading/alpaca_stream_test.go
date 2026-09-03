@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -33,6 +35,29 @@ func TestApplyAlpacaMarketPayloadPersistsQuoteAndClosedBar(t *testing.T) {
 	}
 	if close != 226.11 || !complete {
 		t.Fatalf("closed bar = close %v complete %v", close, complete)
+	}
+}
+
+func TestHTTPPortfolioListExposesExecutionSafetyState(t *testing.T) {
+	ctx := newTestCtx(t)
+	id, err := dbCreatePortfolio(ctx.AppDB(), &Portfolio{ProjectID: "test-proj", Name: "paper broker", AllowedClasses: []string{"equity"}, Mode: "live", ExecutionEnvironment: "broker_paper", BrokerSlug: "alpaca-trading"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/portfolios?project_id=test-proj", nil)
+	recorder := httptest.NewRecorder()
+	(&App{}).httpListPortfolios(recorder, req)
+	if recorder.Code != 200 {
+		t.Fatalf("status %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Portfolios []Portfolio `json:"portfolios"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Portfolios) != 1 || response.Portfolios[0].ID != id || response.Portfolios[0].ExecutionEnvironment != "broker_paper" || response.Portfolios[0].LiveArmed {
+		t.Fatalf("unexpected portfolio list: %#v", response.Portfolios)
 	}
 }
 

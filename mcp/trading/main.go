@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.5.0
+version: 0.5.1
 description: Live trading workstation for Apteva agents (simulation, broker paper, broker live, strategies, and backtests).
 author: Apteva
 icon: /ui/icon.svg
@@ -585,6 +585,8 @@ func (a *App) httpListPortfolios(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"id": snap.ID, "name": snap.Name, "agent_id": snap.AgentID, "mandate": snap.Mandate,
 			"allowed_classes": snap.AllowedClasses, "status": snap.Status, "mode": snap.Mode,
+			"execution_environment": normalizeExecutionEnvironment(snap.ExecutionEnvironment, snap.Mode, snap.BrokerSlug),
+			"live_armed":            snap.LiveArmed, "broker_slug": snap.BrokerSlug, "starting_cash": snap.StartingCash,
 			"equity": snap.Equity, "cash": snap.Cash,
 			"day_pnl": snap.DayPnL, "day_pnl_pct": snap.DayPnLPct,
 			"open_pnl": snap.OpenPnL, "open_pnl_pct": snap.OpenPnLPct,
