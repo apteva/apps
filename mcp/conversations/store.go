@@ -233,6 +233,42 @@ func (s *store) ListConversationsForUserAndAgent(projectID string, userID, agent
 	return s.listConversationsForUser(projectID, userID, agentID, false, limit)
 }
 
+// ListConversationsForUserAndLeadAgent is the focused-chat projection. A
+// matching lead id is not sufficient by itself: the agent must remain an
+// explicit participant so a stale lead value cannot keep a removed agent's
+// conversation visible.
+func (s *store) ListConversationsForUserAndLeadAgent(projectID string, userID, leadAgentID int64, limit int) ([]Conversation, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+		SELECT DISTINCT `+prefixCols("c.", conversationCols)+`
+		FROM conversations c
+		LEFT JOIN participants p ON p.conversation_id = c.id
+		WHERE c.project_id = ? AND c.archived_at IS NULL
+		  AND c.lead_agent_id = ?
+		  AND EXISTS (
+		      SELECT 1 FROM participants ap
+		      WHERE ap.conversation_id = c.id AND ap.agent_id = ?
+		  )
+		  AND (c.owner_user_id = ? OR p.user_id = ? OR c.owner_user_id = 0)
+		ORDER BY c.updated_at DESC, c.id DESC LIMIT ?`,
+		projectID, leadAgentID, leadAgentID, userID, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Conversation
+	for rows.Next() {
+		c, err := scanConversation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
 func (s *store) listConversationsForUser(projectID string, userID, agentID int64, archived bool, limit int) ([]Conversation, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50

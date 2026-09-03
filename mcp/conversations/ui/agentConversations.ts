@@ -1,3 +1,10 @@
+export type ConversationDisplayMode = "browser" | "single";
+
+export interface AgentConversationWidgetSettings {
+  display_mode?: ConversationDisplayMode;
+  show_new_conversation?: boolean;
+}
+
 export function appendAgentScope(path: string, instanceId: number): string {
   if (!Number.isInteger(instanceId) || instanceId <= 0) {
     throw new Error("A target agent is required.");
@@ -7,6 +14,28 @@ export function appendAgentScope(path: string, instanceId: number): string {
 
 export function scopedConversationListPath(archived: boolean, instanceId: number): string {
   return appendAgentScope(`/chats${archived ? "?archived=1" : ""}`, instanceId);
+}
+
+export function singleConversationListPath(instanceId: number, limit = 1): string {
+  if (!Number.isInteger(instanceId) || instanceId <= 0) {
+    throw new Error("A target agent is required.");
+  }
+  if (!Number.isInteger(limit) || limit <= 0 || limit > 200) {
+    throw new Error("Conversation limit must be between 1 and 200.");
+  }
+  return `/chats?lead_agent_id=${encodeURIComponent(instanceId)}&limit=${limit}`;
+}
+
+export function conversationDisplayMode(
+  settings?: AgentConversationWidgetSettings,
+): ConversationDisplayMode {
+  return settings?.display_mode === "single" ? "single" : "browser";
+}
+
+export function showNewConversation(
+  settings?: AgentConversationWidgetSettings,
+): boolean {
+  return settings?.show_new_conversation !== false;
 }
 
 export function fixedAgentConversationInput(instanceId: number, projectId: string, title: string) {

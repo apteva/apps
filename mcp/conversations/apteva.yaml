@@ -76,6 +76,18 @@ provides:
       visibility: attached
       supported_sizes: [full]
       default_size: full
+      settings_schema:
+        type: object
+        properties:
+          display_mode:
+            type: string
+            title: Conversation layout
+            enum: [browser, single]
+            default: browser
+          show_new_conversation:
+            type: boolean
+            title: Show new conversation
+            default: true
     - name: inbox-overview
       label: Inbox
       description: Pending approvals, alerts, and reports from agents.

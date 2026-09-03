@@ -9,6 +9,7 @@ export interface ConversationChatViewProps {
   messageNodes: ReactNode;
   hasMessages: boolean;
   streamNode: ReactNode;
+  headerActions?: ReactNode;
   bottomRef: RefObject<HTMLDivElement | null>;
   inputRef: RefObject<HTMLTextAreaElement | null>;
   draft: string;
@@ -77,8 +78,11 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
           </div>
           <p className="text-xs text-text-muted truncate">{props.subtitle}</p>
         </div>
+        {props.headerActions && (
+          <div className="ml-auto flex shrink-0 items-center gap-1">{props.headerActions}</div>
+        )}
         <span
-          className={`ml-auto shrink-0 w-2 h-2 rounded-full ${props.connected ? "bg-success" : "bg-border"}`}
+          className={`${props.headerActions ? "" : "ml-auto"} shrink-0 w-2 h-2 rounded-full ${props.connected ? "bg-success" : "bg-border"}`}
           title={props.connected ? "Live" : "Reconnecting — the 5s poll keeps history current"}
         />
         {!props.archived && props.onOpenDetails && (

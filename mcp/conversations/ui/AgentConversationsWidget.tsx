@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ConversationChat,
   apiGet,
@@ -8,8 +8,12 @@ import {
 import {
   agentConversationWidgetLayout,
   appendAgentScope,
+  conversationDisplayMode,
   fixedAgentConversationInput,
   scopedConversationListPath,
+  showNewConversation,
+  singleConversationListPath,
+  type AgentConversationWidgetSettings,
 } from "./agentConversations";
 
 interface AgentConversationsWidgetProps {
@@ -18,6 +22,7 @@ interface AgentConversationsWidgetProps {
   projectId: string;
   instanceId: number;
   eventRevision?: number;
+  widgetSettings?: AgentConversationWidgetSettings;
 }
 
 interface UnreadEntry {
@@ -50,12 +55,14 @@ function useWideWidgetLayout(): boolean {
   return wide;
 }
 
-export default function AgentConversationsWidget({
+function ConversationBrowser({
   projectId,
   instanceId,
   eventRevision,
+  widgetSettings,
 }: AgentConversationsWidgetProps) {
   const validAgent = Number.isInteger(instanceId) && instanceId > 0;
+  const showCreate = showNewConversation(widgetSettings);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [unread, setUnread] = useState<Map<string, UnreadEntry>>(new Map());
   const [selectedId, setSelectedId] = useState("");
@@ -154,13 +161,15 @@ export default function AgentConversationsWidget({
           : { borderBottom: "1px solid var(--color-border)" }}
       >
         <div className="flex shrink-0 items-center gap-2 border-b border-border p-3">
-          <button
-            type="button"
-            onClick={() => setCreating(true)}
-            className="rounded bg-accent px-2.5 py-1.5 text-xs font-semibold text-bg"
-          >
-            New conversation
-          </button>
+          {showCreate && (
+            <button
+              type="button"
+              onClick={() => setCreating(true)}
+              className="rounded bg-accent px-2.5 py-1.5 text-xs font-semibold text-bg"
+            >
+              New conversation
+            </button>
+          )}
           <button
             type="button"
             onClick={() => {
@@ -172,7 +181,7 @@ export default function AgentConversationsWidget({
             {archived ? "Active" : "Archived"}
           </button>
         </div>
-        {creating && (
+        {showCreate && creating && (
           <form
             className="shrink-0 space-y-2 border-b border-border p-3"
             onSubmit={(event) => {
@@ -250,4 +259,247 @@ export default function AgentConversationsWidget({
       )}
     </div>
   );
+}
+
+interface AgentInfo {
+  id: number;
+  name: string;
+}
+
+function SingleConversation({
+  projectId,
+  instanceId,
+  widgetSettings,
+}: AgentConversationsWidgetProps) {
+  const validAgent = Number.isInteger(instanceId) && instanceId > 0;
+  const showCreate = showNewConversation(widgetSettings);
+  const requestGeneration = useRef(0);
+  const historyGeneration = useRef(0);
+  const [selected, setSelected] = useState<Conversation | null>(null);
+  const [agentName, setAgentName] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [history, setHistory] = useState<Conversation[]>([]);
+  const [error, setError] = useState("");
+
+  const loadLatest = useCallback(async () => {
+    const generation = ++requestGeneration.current;
+    setSelected(null);
+    setLoading(true);
+    setError("");
+    if (!projectId || !validAgent) {
+      setLoading(false);
+      return;
+    }
+    try {
+      const rows = await apiGet<Conversation[]>(singleConversationListPath(instanceId), projectId);
+      if (generation !== requestGeneration.current) return;
+      setSelected(rows[0] ?? null);
+    } catch (loadError) {
+      if (generation !== requestGeneration.current) return;
+      setError(loadError instanceof Error ? loadError.message : String(loadError));
+    } finally {
+      if (generation === requestGeneration.current) setLoading(false);
+    }
+  }, [instanceId, projectId, validAgent]);
+
+  useEffect(() => {
+    setHistoryOpen(false);
+    setHistory([]);
+    setAgentName("");
+    void loadLatest();
+    if (projectId && validAgent) {
+      const generation = requestGeneration.current;
+      void apiGet<AgentInfo[]>("/agents", projectId).then(
+        (agents) => {
+          if (generation !== requestGeneration.current) return;
+          setAgentName(agents.find((agent) => agent.id === instanceId)?.name ?? "");
+        },
+        () => undefined,
+      );
+    }
+    return () => {
+      requestGeneration.current += 1;
+      historyGeneration.current += 1;
+    };
+  }, [instanceId, loadLatest, projectId, validAgent]);
+
+  const create = async () => {
+    if (!projectId || !validAgent || !showCreate || creating) return;
+    setCreating(true);
+    setError("");
+    try {
+      const conversation = await apiPost<Conversation>(
+        "/chats",
+        fixedAgentConversationInput(instanceId, projectId, ""),
+        projectId,
+      );
+      requestGeneration.current += 1;
+      setSelected(conversation);
+      setHistoryOpen(false);
+      setHistory((current) => [conversation, ...current.filter((item) => item.id !== conversation.id)]);
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : String(createError));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const openHistory = async () => {
+    const generation = ++historyGeneration.current;
+    setHistoryOpen(true);
+    setHistoryLoading(true);
+    setError("");
+    try {
+      const rows = await apiGet<Conversation[]>(singleConversationListPath(instanceId, 50), projectId);
+      if (generation === historyGeneration.current) setHistory(rows);
+    } catch (historyError) {
+      if (generation === historyGeneration.current) {
+        setError(historyError instanceof Error ? historyError.message : String(historyError));
+      }
+    } finally {
+      if (generation === historyGeneration.current) setHistoryLoading(false);
+    }
+  };
+
+  if (!projectId || !validAgent) {
+    return (
+      <div className="grid h-full place-items-center bg-bg p-6 text-center text-sm text-text-muted">
+        Agent conversations needs a valid project and target agent.
+      </div>
+    );
+  }
+
+  const displayAgentName = agentName || `agent ${instanceId}`;
+
+  return (
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-bg text-text">
+      {error && selected && (
+        <p className="shrink-0 border-b border-border px-4 py-2 text-xs text-error">{error}</p>
+      )}
+      {loading ? (
+        <section className="grid min-h-0 flex-1 place-items-center p-6 text-sm text-text-muted">
+          Loading conversation…
+        </section>
+      ) : selected ? (
+        <ConversationChat
+          conversation={selected}
+          archived={false}
+          headerActions={(
+            <>
+              {showCreate && (
+                <button
+                  type="button"
+                  onClick={() => void create()}
+                  disabled={creating}
+                  className="rounded px-2 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-40"
+                >
+                  {creating ? "Starting…" : "New conversation"}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => void openHistory()}
+                className="rounded px-2 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text"
+              >
+                History
+              </button>
+            </>
+          )}
+          onActed={() => undefined}
+          onRemoved={() => void loadLatest()}
+        />
+      ) : (
+        <section className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+          <div>
+            <h2 className="text-sm font-semibold text-text">
+              {showCreate ? `Start a conversation with ${displayAgentName}` : `No conversation with ${displayAgentName} yet`}
+            </h2>
+            <p className="mt-1 text-xs text-text-muted">Messages will stay in this agent's durable conversation history.</p>
+          </div>
+          {showCreate && (
+            <button
+              type="button"
+              onClick={() => void create()}
+              disabled={creating}
+              className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40"
+            >
+              {creating ? "Starting…" : "Start conversation"}
+            </button>
+          )}
+          {error && (
+            <div className="space-y-2">
+              <p className="text-xs text-error">{error}</p>
+              <button type="button" onClick={() => void loadLatest()} className="text-xs text-text-muted underline hover:text-text">
+                Try again
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
+      {historyOpen && (
+        <div className="absolute inset-0 z-10 flex justify-end">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/60"
+            onClick={() => {
+              historyGeneration.current += 1;
+              setHistoryOpen(false);
+            }}
+            aria-label="Close conversation history"
+          />
+          <aside className="relative flex h-full w-full max-w-sm flex-col border-l border-border bg-bg-card shadow-xl">
+            <div className="flex shrink-0 items-center border-b border-border px-4 py-3">
+              <h2 className="text-sm font-semibold text-text">Conversation history</h2>
+              <button
+                type="button"
+                onClick={() => {
+                  historyGeneration.current += 1;
+                  setHistoryOpen(false);
+                }}
+                className="ml-auto rounded px-2 py-1 text-xs text-text-muted hover:bg-bg-input hover:text-text"
+              >
+                Close
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto">
+              {historyLoading ? (
+                <p className="p-5 text-center text-xs text-text-muted">Loading history…</p>
+              ) : history.length === 0 ? (
+                <p className="p-5 text-center text-xs text-text-muted">No earlier conversations.</p>
+              ) : (
+                <ul className="divide-y divide-border">
+                  {history.map((conversation) => (
+                    <li key={conversation.id}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          requestGeneration.current += 1;
+                          setSelected(conversation);
+                          setHistoryOpen(false);
+                        }}
+                        className={`w-full px-4 py-3 text-left hover:bg-bg-hover ${conversation.id === selected?.id ? "bg-bg-hover" : ""}`}
+                      >
+                        <span className="block truncate text-sm font-medium text-text">{conversation.title}</span>
+                        <span className="mt-1 block text-xs text-text-dim">{relativeTime(conversation.updated_at)}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </aside>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function AgentConversationsWidget(props: AgentConversationsWidgetProps) {
+  return conversationDisplayMode(props.widgetSettings) === "single"
+    ? <SingleConversation key={`${props.projectId}:${props.instanceId}`} {...props} />
+    : <ConversationBrowser {...props} />;
 }

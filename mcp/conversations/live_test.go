@@ -177,6 +177,53 @@ func TestLive_CodexChatRoundTrip(t *testing.T) {
 	t.Fatal("no agent reply within 120s")
 }
 
+// TestLive_CodexSingleConversationRoundTrip proves the focused widget's
+// server-selected conversation is the same durable chat used for a real Codex
+// turn. It covers the lead-agent projection without introducing a second chat
+// transport or transcript implementation.
+func TestLive_CodexSingleConversationRoundTrip(t *testing.T) {
+	c := newLiveClient(t)
+	agentID, cleanupAgent := c.ensureAgent()
+	defer cleanupAgent()
+
+	var conv Conversation
+	status := c.do("POST", "/api/apps/conversations/chats", map[string]any{
+		"agent_id": agentID, "title": "Live single conversation (codex)",
+	}, &conv)
+	if status != http.StatusOK || conv.ID == "" {
+		t.Fatalf("create conversation: status=%d conv=%+v", status, conv)
+	}
+	defer c.do("DELETE", "/api/apps/conversations/chats?id="+conv.ID, nil, nil)
+
+	var latest []Conversation
+	status = c.do("GET", fmt.Sprintf("/api/apps/conversations/chats?lead_agent_id=%d&limit=1", agentID), nil, &latest)
+	if status != http.StatusOK || len(latest) != 1 || latest[0].ID != conv.ID {
+		t.Fatalf("focused lookup: status=%d latest=%+v want=%s", status, latest, conv.ID)
+	}
+
+	status = c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
+		"content":           "Reply with exactly: SINGLE_MODE_PONG",
+		"client_message_id": "live-single-mode-1",
+	}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("post focused message: status=%d", status)
+	}
+
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
+		var transcript []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript)
+		for _, message := range transcript {
+			if message.Role == "agent" && strings.Contains(message.Content, "SINGLE_MODE_PONG") {
+				t.Log("focused conversation lookup and real Codex reply succeeded")
+				return
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatal("no Codex reply in the focused conversation within 120s")
+}
+
 // TestLive_CodexSoftBreak opens the real streaming channel, waits for the
 // acknowledgement that makes the UI's Break control visible, then submits a
 // durable advisory event against that exact active response. The model may

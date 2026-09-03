@@ -17,7 +17,7 @@
 // no arbitrary Tailwind values. Built by
 // `bun run scripts/build-panels.ts --app conversations`.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import createDOMPurify from "dompurify";
 import { marked } from "marked";
 import ConversationChatView from "./ConversationChatView";
@@ -1443,12 +1443,14 @@ export function ConversationChat({
   conversation,
   archived,
   onOpenDetails,
+  headerActions,
   onActed,
   onRemoved,
 }: {
   conversation: Conversation;
   archived: boolean;
   onOpenDetails?: () => void;
+  headerActions?: ReactNode;
   onActed: () => void;
   onRemoved: () => void;
 }) {
@@ -1588,6 +1590,7 @@ export function ConversationChat({
       ))}
       hasMessages={messages.length > 0}
       streamNode={bubble ? (bubble.text ? <StreamingBubble text={bubble.text} /> : <ThinkingMessagePlaceholder />) : null}
+      headerActions={headerActions}
       bottomRef={bottomRef}
       inputRef={inputRef}
       draft={draft}

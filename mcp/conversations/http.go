@@ -87,6 +87,33 @@ func requestAgentScope(r *http.Request) (int64, error) {
 	return id, nil
 }
 
+// requestLeadAgentScope parses the optional single-conversation projection.
+// Unlike agent_id, which means any explicit participant, lead_agent_id means
+// the selected agent leads the conversation and is still a participant.
+func requestLeadAgentScope(r *http.Request) (int64, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("lead_agent_id"))
+	if raw == "" {
+		return 0, nil
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("lead_agent_id must be a positive integer")
+	}
+	return id, nil
+}
+
+func requestConversationListLimit(r *http.Request) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
+	if raw == "" {
+		return 100, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit <= 0 || limit > 200 {
+		return 0, fmt.Errorf("limit must be an integer between 1 and 200")
+	}
+	return limit, nil
+}
+
 func (a *App) authorizeConversation(r *http.Request, id string) (*Conversation, error) {
 	userID, projectID, err := requestIdentity(r)
 	if err != nil {
@@ -142,12 +169,33 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, scopeErr.Error(), http.StatusBadRequest)
 			return
 		}
+		leadAgentID, leadScopeErr := requestLeadAgentScope(r)
+		if leadScopeErr != nil {
+			http.Error(w, leadScopeErr.Error(), http.StatusBadRequest)
+			return
+		}
+		if agentID != 0 && leadAgentID != 0 {
+			http.Error(w, "agent_id and lead_agent_id cannot be combined", http.StatusBadRequest)
+			return
+		}
+		limit, limitErr := requestConversationListLimit(r)
+		if limitErr != nil {
+			http.Error(w, limitErr.Error(), http.StatusBadRequest)
+			return
+		}
+		archived := r.URL.Query().Get("archived") == "1"
+		if archived && leadAgentID != 0 {
+			http.Error(w, "lead_agent_id only lists active conversations", http.StatusBadRequest)
+			return
+		}
 		var conversations []Conversation
 		var err error
-		if r.URL.Query().Get("archived") == "1" {
-			conversations, err = a.store.ListArchivedForUserAndAgent(projectID, userID, agentID, 100)
+		if leadAgentID != 0 {
+			conversations, err = a.store.ListConversationsForUserAndLeadAgent(projectID, userID, leadAgentID, limit)
+		} else if archived {
+			conversations, err = a.store.ListArchivedForUserAndAgent(projectID, userID, agentID, limit)
 		} else {
-			conversations, err = a.store.ListConversationsForUserAndAgent(projectID, userID, agentID, 100)
+			conversations, err = a.store.ListConversationsForUserAndAgent(projectID, userID, agentID, limit)
 		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

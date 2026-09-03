@@ -2,8 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
   agentConversationWidgetLayout,
+  conversationDisplayMode,
   fixedAgentConversationInput,
   scopedConversationListPath,
+  showNewConversation,
+  singleConversationListPath,
 } from "./agentConversations";
 import {
   isSoftBreakMetadata,
@@ -25,6 +28,21 @@ describe("AgentConversationsWidget scope", () => {
       audience: "operator",
       project_id: "project-a",
     });
+  });
+
+  test("single mode uses a lead-owned, server-limited projection", () => {
+    expect(singleConversationListPath(42)).toBe("/chats?lead_agent_id=42&limit=1");
+    expect(singleConversationListPath(42, 50)).toBe("/chats?lead_agent_id=42&limit=50");
+    expect(() => singleConversationListPath(0)).toThrow("target agent");
+    expect(() => singleConversationListPath(42, 201)).toThrow("between 1 and 200");
+  });
+
+  test("browser remains the default and creation visibility is configurable", () => {
+    expect(conversationDisplayMode()).toBe("browser");
+    expect(conversationDisplayMode({ display_mode: "browser" })).toBe("browser");
+    expect(conversationDisplayMode({ display_mode: "single" })).toBe("single");
+    expect(showNewConversation()).toBe(true);
+    expect(showNewConversation({ show_new_conversation: false })).toBe(false);
   });
 
   test("owns its responsive geometry instead of depending on host Tailwind output", () => {
@@ -51,6 +69,18 @@ describe("AgentConversationsWidget scope", () => {
     expect(widget).not.toContain("new EventSource");
     expect(widget).not.toContain("/messages?chat_id");
     expect(view).toContain("Message the agent…");
+  });
+
+  test("single mode is focused, lazy-loads history, and guards agent switches", () => {
+    const widget = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
+    expect(widget).toContain("function SingleConversation");
+    expect(widget).toContain("singleConversationListPath(instanceId)");
+    expect(widget).toContain("singleConversationListPath(instanceId, 50)");
+    expect(widget).toContain("const openHistory = async");
+    expect(widget).toContain("generation !== requestGeneration.current");
+    expect(widget).toContain('key={`${props.projectId}:${props.instanceId}`}');
+    expect(widget).toContain("headerActions={");
+    expect(widget).not.toContain("/inbox");
   });
 
   test("soft break targets the responding agent and remains an advisory message", () => {

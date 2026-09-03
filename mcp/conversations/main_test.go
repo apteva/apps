@@ -1620,6 +1620,10 @@ func TestAgentScopedPanelEndpoints(t *testing.T) {
 		target  string
 	}{
 		{app.handleChats, "/chats?agent_id=nope"},
+		{app.handleChats, "/chats?lead_agent_id=nope"},
+		{app.handleChats, "/chats?agent_id=41&lead_agent_id=41"},
+		{app.handleChats, "/chats?limit=0"},
+		{app.handleChats, "/chats?limit=201"},
 		{app.handleUnreadSummary, "/unread-summary?agent_id=0"},
 		{app.handleInbox, "/inbox?agent_id=-1"},
 	} {
@@ -1629,6 +1633,90 @@ func TestAgentScopedPanelEndpoints(t *testing.T) {
 	}
 	if rec := get(app.handleChats, "/chats?agent_id=41", false); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated scoped list status=%d want 401", rec.Code)
+	}
+}
+
+func TestLeadAgentScopedConversationListing(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	mountedCtx = ctx
+
+	create := func(projectID string, ownerUserID, leadAgentID int64, title, updatedAt string) *Conversation {
+		t.Helper()
+		conv, err := app.store.CreateConversation(CreateConversationInput{
+			ProjectID: projectID, OwnerUserID: ownerUserID, LeadAgentID: leadAgentID, Title: title,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		if _, err := app.store.db.Exec(`UPDATE conversations SET updated_at=? WHERE id=?`, updatedAt, conv.ID); err != nil {
+			t.Fatalf("timestamp %s: %v", title, err)
+		}
+		return conv
+	}
+
+	older := create(testProject, 1, 41, "Older helper chat", "2026-01-01 10:00:00")
+	newest := create(testProject, 1, 41, "Newest helper chat", "2026-01-02 10:00:00")
+	participantOnly := create(testProject, 1, 42, "Room led elsewhere", "2026-01-03 10:00:00")
+	if err := app.store.AddAgentParticipant(participantOnly.ID, 41); err != nil {
+		t.Fatal(err)
+	}
+	staleLead := create(testProject, 1, 41, "Removed helper", "2026-01-04 10:00:00")
+	if _, err := app.store.db.Exec(`DELETE FROM participants WHERE conversation_id=? AND agent_id=?`, staleLead.ID, 41); err != nil {
+		t.Fatal(err)
+	}
+	otherUser := create(testProject, 2, 41, "Private to another user", "2026-01-05 10:00:00")
+	otherProject := create("proj-other", 1, 41, "Other project", "2026-01-06 10:00:00")
+	archived := create(testProject, 1, 41, "Archived helper chat", "2026-01-07 10:00:00")
+	if _, err := app.store.SetConversationArchived(archived.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	_ = otherUser
+	_ = otherProject
+
+	get := func(target string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		authorizeTestRequest(req)
+		rec := httptest.NewRecorder()
+		app.handleChats(rec, req)
+		return rec
+	}
+	decode := func(rec *httptest.ResponseRecorder) []chatListEntry {
+		t.Helper()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var entries []chatListEntry
+		if err := json.Unmarshal(rec.Body.Bytes(), &entries); err != nil {
+			t.Fatal(err)
+		}
+		return entries
+	}
+
+	latest := decode(get("/chats?lead_agent_id=41&limit=1"))
+	if len(latest) != 1 || latest[0].ID != newest.ID {
+		t.Fatalf("latest=%+v, want %s", latest, newest.ID)
+	}
+	all := decode(get("/chats?lead_agent_id=41&limit=50"))
+	if len(all) != 2 || all[0].ID != newest.ID || all[1].ID != older.ID {
+		t.Fatalf("lead scoped=%+v, want newest then older only", all)
+	}
+	for _, excluded := range []*Conversation{participantOnly, staleLead, otherUser, otherProject, archived} {
+		for _, entry := range all {
+			if entry.ID == excluded.ID {
+				t.Fatalf("lead scope leaked %s", excluded.Title)
+			}
+		}
+	}
+
+	if rows := decode(get("/chats?agent_id=41&limit=50")); len(rows) != 3 {
+		t.Fatalf("participant scope changed: got %d rows, want older, newest, and participant-only room", len(rows))
+	}
+	if rows := decode(get("/chats?limit=1")); len(rows) != 1 {
+		t.Fatalf("unfiltered limit returned %d rows, want 1", len(rows))
+	}
+	if rec := get("/chats?archived=1&lead_agent_id=41"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("archived lead scope status=%d, want 400", rec.Code)
 	}
 }
 
