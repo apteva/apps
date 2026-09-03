@@ -693,12 +693,9 @@ func isDockerMissingResourceError(err error, resource string) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	switch resource {
-	case "container":
-		return strings.Contains(msg, "no such container")
-	case "network":
-		return strings.Contains(msg, "no such network")
-	case "volume":
-		return strings.Contains(msg, "no such volume")
+	case "container", "network", "volume":
+		return strings.Contains(msg, "no such "+resource) ||
+			(strings.Contains(msg, resource+" ") && strings.Contains(msg, "not found"))
 	default:
 		return false
 	}
