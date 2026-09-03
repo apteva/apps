@@ -239,3 +239,32 @@ func TestOnMountFailsWhenHostedRoutesCannotBeRewritten(t *testing.T) {
 		t.Fatalf("OnMount error = %v", err)
 	}
 }
+
+func TestOnMountSkipsStoppedHostedTenantBeforeInstanceLookup(t *testing.T) {
+	platform := &startupReconcilePlatform{}
+	app, ctx := newTestApp(t, tk.WithPlatform(platform))
+	tenantID := seedTenant(t, app, "stopped-hosted", StatusStopped)
+	if err := app.store.setLocation(tenantID, 5, "http://203.0.113.50:7100", remoteFleetRoot+"/stopped-hosted"); err != nil {
+		t.Fatal(err)
+	}
+
+	remounted := &App{startupRetryDelays: []time.Duration{0}}
+	if err := remounted.OnMount(ctx); err != nil {
+		t.Fatalf("OnMount should not look up an intentionally stopped tenant's instance: %v", err)
+	}
+
+	platform.mu.Lock()
+	defer platform.mu.Unlock()
+	if platform.instanceCalls != 0 || platform.tunnelCalls != 0 || platform.listCalls != 0 || platform.exposeCalls != 0 {
+		t.Fatalf("stopped hosted tenant triggered reconciliation calls: instance=%d tunnel=%d list=%d expose=%d",
+			platform.instanceCalls, platform.tunnelCalls, platform.listCalls, platform.exposeCalls)
+	}
+
+	tenant, _, err := remounted.store.get(tenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tenant.Status != StatusStopped {
+		t.Fatalf("stopped hosted tenant changed status to %q", tenant.Status)
+	}
+}

@@ -75,6 +75,14 @@ func hostedTenantExpectedRunning(status string) bool {
 }
 
 func (a *App) reconcileHostedOnBoot(ctx context.Context, app *sdk.AppCtx, t *Tenant, port int) error {
+	// Intentionally offline tenants must not depend on the remote instance
+	// still existing. In particular, a stopped clone may outlive a disposable
+	// rehearsal VPS; looking up that missing instance would otherwise abort
+	// Fleet's entire OnMount and leave every tenant unmanaged.
+	if !hostedTenantExpectedRunning(t.Status) {
+		return nil
+	}
+
 	var alive bool
 	if err := a.retryHostedStartup(ctx, app, "verify hosted tenant port", func() error {
 		var err error
@@ -84,9 +92,6 @@ func (a *App) reconcileHostedOnBoot(ctx context.Context, app *sdk.AppCtx, t *Ten
 		return err
 	}
 	if !alive {
-		if !hostedTenantExpectedRunning(t.Status) {
-			return nil
-		}
 		a.tryRespawnHosted(ctx, app, t)
 		if err := a.retryHostedStartup(ctx, app, "verify respawned hosted tenant port", func() error {
 			var err error
@@ -105,7 +110,7 @@ func (a *App) reconcileHostedOnBoot(ctx context.Context, app *sdk.AppCtx, t *Ten
 			return err
 		}
 	}
-	if t.Status == StatusStopped || t.Status == StatusDisconnected {
+	if t.Status == StatusDisconnected {
 		if err := a.store.setStatus(t.ID, StatusActive, "worker:reconcile"); err != nil {
 			return fmt.Errorf("mark hosted tenant active: %w", err)
 		}
