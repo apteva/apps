@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Apteva adaptive app icon: a gamepad. -->
+  <path d="M7 7h10a4.5 4.5 0 0 1 4.4 3.6l1 5.2A2.6 2.6 0 0 1 17.9 18l-2.4-2.6H8.5L6.1 18a2.6 2.6 0 0 1-4.5-2.2l1-5.2A4.5 4.5 0 0 1 7 7z"/>
+  <path d="M8.5 10.5v3M7 12h3"/>
+  <circle cx="15.5" cy="11" r=".6" fill="currentColor"/>
+  <circle cx="17.5" cy="13" r=".6" fill="currentColor"/>
+</svg>
