@@ -3193,12 +3193,25 @@ func TestPublishTikTok_FileUploadInit_MultiChunkMath(t *testing.T) {
 }
 
 func TestPublishTikTok_PhotoPostInput(t *testing.T) {
+	mediaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("preflight method = %s, want GET", r.Method)
+		}
+		if got := r.Header.Get("Range"); got != "bytes=0-0" {
+			t.Errorf("preflight Range = %q, want bytes=0-0", got)
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte{0xff})
+	}))
+	defer mediaSrv.Close()
+
 	pf := newRecordingPlatform()
 	pf.callAppResponses["storage:files_get"] = json.RawMessage(
 		`{"result":{"content":[{"type":"text","text":"{\"id\":9,\"content_type\":\"image/jpeg\",\"size_bytes\":12345}"}]}}`,
 	)
 	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
-		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://cdn.test/p.jpg\"}"}]}}`,
+		fmt.Sprintf(`{"result":{"content":[{"type":"text","text":%q}]}}`, `{"url":"`+mediaSrv.URL+`/p.jpg"}`),
 	)
 	pf.executeResponses["post_photo"] = &sdk.ExecuteResult{
 		Success: true,
@@ -3218,6 +3231,7 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
 		"mode":              "publish",
+		"media_project_id":  "media-proj",
 		"body":              "photo description #fyp",
 		"media_storage_ids": []any{int64(9)},
 		"targets": []any{
@@ -3256,8 +3270,28 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 		t.Fatalf("unexpected source_info: %+v", srcInfo)
 	}
 	images := srcInfo["photo_images"].([]string)
-	if len(images) != 1 || images[0] != "https://cdn.test/p.jpg" {
+	if len(images) != 1 || images[0] != mediaSrv.URL+"/p.jpg" {
 		t.Fatalf("photo_images = %+v", images)
+	}
+	var proxyCall *callAppCall
+	for i := range pf.callAppCalls {
+		call := &pf.callAppCalls[i]
+		if call.AppName == "storage" && call.Tool == "files_get_url" && call.Input["delivery"] == "proxy" {
+			proxyCall = call
+			break
+		}
+	}
+	if proxyCall == nil {
+		t.Fatalf("TikTok photo did not request a Storage proxy URL: %+v", pf.callAppCalls)
+	}
+	if got := proxyCall.Input["_project_id"]; got != "media-proj" {
+		t.Fatalf("proxy _project_id = %v, want media-proj", got)
+	}
+	if got := proxyCall.Input["ttl_seconds"]; got != 7200 {
+		t.Fatalf("proxy ttl_seconds = %v, want %d", got, tiktokPhotoURLTTLSeconds)
+	}
+	if got := proxyCall.Input["disposition"]; got != "inline" {
+		t.Fatalf("proxy disposition = %v, want inline", got)
 	}
 	var status, platformPostID string
 	ctx.AppDB().QueryRow(
@@ -3265,6 +3299,27 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 	).Scan(&status, &platformPostID)
 	if status != "published" || platformPostID != "photo_post_1" {
 		t.Fatalf("target = status %q platform_post_id %q", status, platformPostID)
+	}
+}
+
+func TestPreflightTikTokPhotoURLRejectsRedirect(t *testing.T) {
+	destinationHit := false
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		destinationHit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer destination.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+
+	err := preflightTikTokPhotoURL(redirect.URL)
+	if err == nil || !strings.Contains(err.Error(), "redirect status 302") {
+		t.Fatalf("preflight error = %v, want redirect rejection", err)
+	}
+	if destinationHit {
+		t.Fatal("preflight followed the redirect")
 	}
 }
 

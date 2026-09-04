@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.16.0
+version: 0.16.1
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -4001,15 +4001,18 @@ func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string
 	if len(j.media) > 35 {
 		return "", "", fmt.Errorf("tiktok photo posts accept at most 35 images, got %d", len(j.media))
 	}
-	images := make([]string, 0, len(j.media))
 	for i, item := range j.media {
 		if !item.IsImage() {
 			return "", "", fmt.Errorf("tiktok photo posts cannot mix images with %q media at index %d", item.Mime, i)
 		}
-		if item.URL == "" {
-			return "", "", fmt.Errorf("tiktok photo %d has no public URL", i)
+	}
+	images := make([]string, 0, len(j.media))
+	for i, item := range j.media {
+		proxyURL, err := a.resolveTikTokPhotoURL(ctx, item, j.mediaProjectID)
+		if err != nil {
+			return "", "", fmt.Errorf("tiktok photo %d: %w", i, err)
 		}
-		images = append(images, item.URL)
+		images = append(images, proxyURL)
 	}
 	coverIndex := 0
 	if n, ok := numericOption(j.options, "photo_cover_index"); ok {
@@ -4053,6 +4056,71 @@ func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string
 		return "", "", fmt.Errorf("post_photo: missing publish_id in response: %s", string(out.Data))
 	}
 	return a.waitTikTokPublish(ctx, j.connID, pubID)
+}
+
+const tiktokPhotoURLTTLSeconds = 2 * 60 * 60
+
+// resolveTikTokPhotoURL mints the redirect-free Storage URL required by
+// TikTok's PULL_FROM_URL flow. The generic media resolver deliberately keeps
+// its provider-neutral delivery behavior; only TikTok photos need Storage to
+// proxy the bytes instead of redirecting to its object-storage backend.
+func (a *App) resolveTikTokPhotoURL(ctx *sdk.AppCtx, item mediaItem, projectID string) (string, error) {
+	if item.ID <= 0 {
+		return "", errors.New("storage file id is missing")
+	}
+	args := map[string]any{
+		"id":          item.ID,
+		"ttl_seconds": tiktokPhotoURLTTLSeconds,
+		"delivery":    "proxy",
+		"disposition": "inline",
+	}
+	if projectID != "" {
+		args["_project_id"] = projectID
+	}
+	var signed struct {
+		URL string `json:"url"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", args, &signed); err != nil {
+		return "", fmt.Errorf("storage files_get_url(%d): %w", item.ID, err)
+	}
+	if strings.TrimSpace(signed.URL) == "" {
+		return "", fmt.Errorf("storage files_get_url(%d) returned no url", item.ID)
+	}
+	fullURL := absoluteStorageURL(signed.URL)
+	if err := preflightTikTokPhotoURL(fullURL); err != nil {
+		return "", err
+	}
+	return fullURL, nil
+}
+
+// preflightTikTokPhotoURL performs a real GET because canonical Storage URLs
+// can answer HEAD directly but redirect GET to the backend. TikTok does not
+// follow redirects for PULL_FROM_URL. A one-byte range avoids downloading the
+// whole image during validation; Storage's proxy endpoint supports ranges.
+func preflightTikTokPhotoURL(mediaURL string) error {
+	req, err := http.NewRequest(http.MethodGet, mediaURL, nil)
+	if err != nil {
+		return fmt.Errorf("build proxy URL preflight: %w", err)
+	}
+	req.Header.Set("Range", "bytes=0-0")
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("preflight proxy URL: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return fmt.Errorf("proxy URL returned redirect status %d", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return fmt.Errorf("proxy URL returned status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // publishTikTokVideo drives TikTok's video publish flow.
@@ -4412,6 +4480,22 @@ func (m mediaItem) IsVideo() bool { return strings.HasPrefix(m.Mime, "video/") }
 // IsImage reports whether this is an image MIME type.
 func (m mediaItem) IsImage() bool { return strings.HasPrefix(m.Mime, "image/") }
 
+func absoluteStorageURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+		return rawURL
+	}
+	publicBase := os.Getenv("APTEVA_PUBLIC_URL")
+	if publicBase == "" {
+		publicBase = "http://127.0.0.1:5280"
+	}
+	publicBase = strings.TrimRight(publicBase, "/")
+	if strings.HasPrefix(rawURL, "/api/apps/storage/") {
+		return publicBase + rawURL
+	}
+	return publicBase + "/api/apps/storage" + rawURL
+}
+
 // resolveMedia turns storage file ids into absolute, publicly fetchable
 // URLs paired with the file's content_type. Calls storage.files_get
 // for the metadata and storage.files_get_url for the signed URL.
@@ -4421,12 +4505,6 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	publicBase := os.Getenv("APTEVA_PUBLIC_URL")
-	if publicBase == "" {
-		publicBase = "http://127.0.0.1:5280"
-	}
-	publicBase = strings.TrimRight(publicBase, "/")
-
 	out := make([]mediaItem, 0, len(ids))
 	for _, id := range ids {
 		storageArgs := map[string]any{"id": id}
@@ -4481,14 +4559,7 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		if rel == "" {
 			return nil, fmt.Errorf("storage files_get_url(%d) returned no url", id)
 		}
-		var fullURL string
-		if strings.HasPrefix(rel, "http://") || strings.HasPrefix(rel, "https://") {
-			fullURL = rel
-		} else if strings.HasPrefix(rel, "/api/apps/storage/") {
-			fullURL = publicBase + rel
-		} else {
-			fullURL = publicBase + "/api/apps/storage" + rel
-		}
+		fullURL := absoluteStorageURL(rel)
 		ctx.Logger().Info("resolveMedia: item",
 			"id", id, "mime", mime, "is_video", strings.HasPrefix(mime, "video/"))
 		out = append(out, mediaItem{ID: id, URL: fullURL, Mime: mime, Name: name, Bytes: size})
