@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -446,18 +447,33 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "repos_run_command",
-			Description: "Run a finite repo command and wait for it to exit. Use this for builds, tests, lint, typecheck, generators, and validation commands such as 'bun run build' or 'go test ./...'. " +
+			Description: "Run a finite repo command and wait for it to exit. runtime=local uses the Code sidecar; runtime=workspace creates or reuses an isolated Workspaces environment, installs dependencies when inputs change, safely synchronizes source, and preserves its cache. Use this for builds, tests, lint, typecheck, generators, and validation commands. " +
 				"Do not use repos_dev_start for finite commands; repos_dev_start is only for long-running preview servers. " +
-				"For JS/Bun/Node repos with package.json, bootstraps dependencies first when node_modules is missing or dependency files changed. " +
-				"Returns structured status, exit_code, duration_ms, dependency_install_ran, stdout_tail, stderr_tail, and log_tail. Args: slug, command, env_json?, timeout_seconds? (default 300, max 1800), tail? (default 200).",
+				"Returns structured status, runtime, workspace_id when applicable, exit_code, duration_ms, dependency_install_ran, and bounded logs. Args: slug, command, runtime? (local|workspace), profile? (go|bun|python|apteva), env_json?, timeout_seconds? (default 300, max 1800), tail? (default 200).",
 			InputSchema: schemaObject(map[string]any{
 				"slug":            map[string]any{"type": "string"},
 				"command":         map[string]any{"type": "string"},
+				"runtime":         map[string]any{"type": "string", "enum": []string{"local", "workspace"}},
+				"profile":         map[string]any{"type": "string", "enum": []string{"go", "bun", "python", "apteva"}},
 				"env_json":        map[string]any{"type": "string"},
 				"timeout_seconds": map[string]any{"type": "integer"},
 				"tail":            map[string]any{"type": "integer"},
 			}, []string{"slug", "command"}),
-			Handler: a.toolRunCommand,
+			HandlerCtx: a.toolRunCommand,
+		},
+		{
+			Name:        "repos_workspace_changes",
+			Description: "Preview source changes produced in a repository's linked execution workspace. Returns added, modified, and deleted paths plus source revision digests and conflict state. Run this before applying workspace-generated changes. Args: slug.",
+			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
+			HandlerCtx:  a.toolWorkspaceChanges,
+		},
+		{
+			Name:        "repos_workspace_apply",
+			Description: "Apply a previously previewed workspace source revision back to Code. Requires expected_workspace_digest from repos_workspace_changes and refuses when Code changed after synchronization or preview. Git metadata and dependency/build caches are never replaced. Args: slug, expected_workspace_digest.",
+			InputSchema: schemaObject(map[string]any{
+				"slug": map[string]any{"type": "string"}, "expected_workspace_digest": map[string]any{"type": "string"},
+			}, []string{"slug", "expected_workspace_digest"}),
+			HandlerCtx: a.toolWorkspaceApply,
 		},
 		{
 			Name:        "repos_dev_stop",
@@ -594,7 +610,7 @@ func (a *App) toolDevLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"log": body, "available": true}, nil
 }
 
-func (a *App) toolRunCommand(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolRunCommand(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -603,6 +619,25 @@ func (a *App) toolRunCommand(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	repo, err := requireRepo(ctx, pid, slug)
 	if err != nil {
 		return nil, err
+	}
+	runtime := strings.ToLower(strings.TrimSpace(strArg(args, "runtime")))
+	if runtime == "workspace" {
+		release, err := a.commands.acquire(callCtx, repo.ID)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		prep, err := a.prepareExecutionWorkspace(callCtx, ctx, repo, strArg(args, "profile"))
+		if err != nil {
+			return nil, err
+		}
+		return a.runWorkspaceCommand(callCtx, ctx, prep, repoCommandInput{
+			Command: strArg(args, "command"), EnvJSON: strArg(args, "env_json"),
+			TimeoutSeconds: intArg(args, "timeout_seconds", 300), TailLines: intArg(args, "tail", 200),
+		})
+	}
+	if runtime != "" && runtime != "local" {
+		return nil, errors.New("runtime must be local or workspace")
 	}
 	pp, ok := a.storeFor(repo).(FileStoreLocalPath)
 	if !ok {
@@ -619,6 +654,36 @@ func (a *App) toolRunCommand(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	return res, nil
+}
+
+func (a *App) toolWorkspaceChanges(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
+		return nil, err
+	}
+	preview, _, _, _, err := a.workspaceChanges(ctx, repo)
+	return preview, err
+}
+
+func (a *App) toolWorkspaceApply(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
+		return nil, err
+	}
+	result, err := a.applyWorkspaceChanges(ctx, repo, strArg(args, "expected_workspace_digest"))
+	if err != nil {
+		return nil, err
+	}
+	ctx.Emit("repo.workspace.applied", map[string]any{"id": repo.ID, "slug": repo.Slug, "workspace_id": result.WorkspaceID, "changes": len(result.Changes)})
+	return result, nil
 }
 
 // ─── repos_import_github handler ──────────────────────────────────

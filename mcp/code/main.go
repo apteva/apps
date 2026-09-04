@@ -34,7 +34,7 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.6.2
+version: 0.7.0
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
@@ -46,6 +46,9 @@ description: |
   renders source with theme-aware syntax highlighting and line numbers,
   manages native repo issues for bugs, feature requests, and tasks,
   atomically claims issues for human and agent collaborators,
+  optionally executes finite commands in isolated durable Workspaces,
+  previews workspace-generated source changes and safely applies an explicitly
+  reviewed revision without transferring Git metadata,
   makes grep/read/patch tools more compact for agents with reusable
   patch previews, targeted rejected-hunk context, and stale-hunk recovery,
   isolates global repository storage and hardens command/import boundaries,
@@ -71,6 +74,11 @@ requires:
     - platform.connections.read_credentials
     - platform.apps.call
     - platform.ingress.write
+  apps:
+    - name: workspaces
+      version: ">=0.4.0"
+      optional: true
+      reason: Provides isolated, durable command execution and generic source transfer while Code remains the repository and Git authority.
   binaries:
     - name: git
       executables: [git]
@@ -145,6 +153,8 @@ provides:
     - { name: repos_git_switch,       description: "Switch to an existing clean local branch." }
     - { name: repos_dev_start,        description: "Start a long-running dev preview server for a repo." }
     - { name: repos_run_command,      description: "Run a finite repo command such as build, test, lint, typecheck, or generator and return exit-code semantics." }
+    - { name: repos_workspace_changes, description: "Preview source changes produced in the linked execution workspace, including revision conflicts." }
+    - { name: repos_workspace_apply, description: "Safely apply an explicitly previewed workspace source revision back to Code." }
     - { name: repos_dev_stop,         description: "Stop the dev process for a repo." }
     - { name: repos_dev_status,       description: "Get the current dev run state (port, pid, status, framework)." }
     - { name: repos_dev_logs,         description: "Tail the dev run's stdout/stderr log file." }

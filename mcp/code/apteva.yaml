@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.6.2
+version: 0.7.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -13,6 +13,10 @@ description: |
   links for agents and humans.
   v0.6.2 adds atomic human and agent issue claims so collaborators can
   reserve work without path locks or workspace coupling.
+  v0.7.0 optionally links repositories to isolated Workspaces environments,
+  installs dependencies there, runs finite commands, previews generated source
+  changes, and applies an explicitly reviewed revision back without transferring
+  Git metadata or overwriting concurrent Code edits.
   v0.6.1 adds theme-aware syntax highlighting, sticky line numbers,
   language and line metadata, copy feedback, and clearer editor typography.
   v0.6.0 adds provider-neutral Git clone, connect, status, fetch,
@@ -70,6 +74,11 @@ requires:
     - platform.connections.read_credentials
     - platform.apps.call
     - platform.ingress.write
+  apps:
+    - name: workspaces
+      version: ">=0.4.0"
+      optional: true
+      reason: Provides isolated, durable command execution and generic source transfer while Code remains the repository and Git authority.
   binaries:
     - name: git
       executables: [git]
@@ -149,7 +158,11 @@ provides:
     - name: repos_dev_start
       description: Start a dev/test preview process for a repo; production deploys belong in the Deploy app. Auto-installs JS dependencies when needed, auto-detects nextjs / node / go / static, and accepts run_cmd override.
     - name: repos_run_command
-      description: Run a finite repo command such as build, test, lint, typecheck, or generator and return exit-code semantics.
+      description: Run a finite repo command locally or in an optional isolated Workspaces environment and return exit-code semantics.
+    - name: repos_workspace_changes
+      description: Preview source changes produced in the linked execution workspace, including revision conflicts.
+    - name: repos_workspace_apply
+      description: Safely apply an explicitly previewed workspace source revision back to Code.
     - name: repos_dev_stop
       description: Stop the dev process for a repo. Idempotent.
     - name: repos_dev_status

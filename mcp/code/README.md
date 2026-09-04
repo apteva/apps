@@ -1,11 +1,11 @@
-# Apteva Code (v0.1)
+# Apteva Code
 
 Repositories — code workspaces scoped to Apteva projects, with
 first-class editing tools modelled on Claude Code.
 
 ## Surfaces
 
-- **36 MCP tools** — repository lifecycle (`repos_list`, `repos_create`,
+- **53 MCP tools** — repository lifecycle (`repos_list`, `repos_create`,
   `repos_get`, `repos_archive`, `repos_set_deploy_hints`) and the
   editing surface (`code_list_files`, `code_glob`, `code_grep`,
   `code_read_file`, `code_read_excerpt`, `code_file_outline`,
@@ -47,6 +47,22 @@ v0.1 stores file bytes on local disk under
 `StorageAppFileStore` once the SDK gains cross-app RPC and Storage
 adds `files_replace`. The editing engine and the MCP surface stay
 unchanged.
+
+## Isolated command execution
+
+`repos_run_command` keeps its existing local runner and adds
+`runtime=workspace`. When the optional Workspaces >=0.4.0 dependency is
+installed, Code creates or reuses one durable isolated environment per
+repository, transfers a source-only snapshot, installs dependencies when the
+dependency inputs change, and runs the requested finite command there.
+
+Code remains the repository and Git authority. Use `repos_workspace_changes`
+to preview formatter, generator, or other command-produced source changes. It
+returns a workspace digest and reports whether Code changed concurrently. Pass
+that exact digest to `repos_workspace_apply`; the apply is rejected if either
+side changed after the preview. Git metadata, dependency caches, and common
+build outputs are never transferred back. Commit and push only through Code's
+Git tools after reviewing the applied files.
 
 Repository metadata lives in `code.db` (SQLite, migrations under
 `migrations/`). Files are **not** shadowed in the DB — the FileStore

@@ -23,6 +23,8 @@ type repoCommandInput struct {
 
 type repoCommandResult struct {
 	Status                string `json:"status"`
+	Runtime               string `json:"runtime,omitempty"`
+	WorkspaceID           string `json:"workspace_id,omitempty"`
 	Command               string `json:"command"`
 	ExitCode              int    `json:"exit_code"`
 	DurationMS            int64  `json:"duration_ms"`
@@ -80,6 +82,7 @@ func (a *App) runRepoCommand(repo *Repo, srcDir string, in repoCommandInput) (*r
 
 	res := &repoCommandResult{
 		Status:   "failed",
+		Runtime:  "local",
 		Command:  command,
 		ExitCode: -1,
 		LogPath:  logPath,
