@@ -34,7 +34,7 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	if err != nil {
 		return nil, err
 	}
-	profile, image, err := resolveProfile(app, strArg(args, "profile"))
+	profile, image, err := resolveProfile(app, strArg(args, "profile"), strArg(args, "image"))
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +122,7 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		}
 		return nil, err
 	}
-	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "workspace.provisioning", actor, "Workspace provisioning started", map[string]any{"profile": profile})
+	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "workspace.provisioning", actor, "Workspace provisioning started", map[string]any{"profile": profile, "image": image})
 
 	input := map[string]any{
 		"name":  "workspace-" + strings.TrimPrefix(w.ID, "wsp_")[:12],

@@ -122,20 +122,22 @@ func (a *App) httpCreateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name        string `json:"name"`
-		Slug        string `json:"slug"`
-		Framework   string `json:"framework"`
-		Description string `json:"description"`
+		Name           string `json:"name"`
+		Slug           string `json:"slug"`
+		Framework      string `json:"framework"`
+		Description    string `json:"description"`
+		WorkspaceImage string `json:"workspace_image"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	repo, err := dbCreateRepo(globalCtx.AppDB(), pid, CreateRepoInput{
-		Name:        body.Name,
-		Slug:        body.Slug,
-		Framework:   body.Framework,
-		Description: body.Description,
+		Name:           body.Name,
+		Slug:           body.Slug,
+		Framework:      body.Framework,
+		Description:    body.Description,
+		WorkspaceImage: body.WorkspaceImage,
 	})
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -189,12 +191,13 @@ func (a *App) httpRepoMeta(w http.ResponseWriter, r *http.Request, slug string) 
 		})
 	case http.MethodPatch:
 		var body struct {
-			Name        *string `json:"name"`
-			Description *string `json:"description"`
-			BuildCmd    *string `json:"build_cmd"`
-			StartCmd    *string `json:"start_cmd"`
-			Port        *int    `json:"port"`
-			EnvJSON     *string `json:"env_json"`
+			Name           *string `json:"name"`
+			Description    *string `json:"description"`
+			BuildCmd       *string `json:"build_cmd"`
+			StartCmd       *string `json:"start_cmd"`
+			Port           *int    `json:"port"`
+			EnvJSON        *string `json:"env_json"`
+			WorkspaceImage *string `json:"workspace_image"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
@@ -209,6 +212,12 @@ func (a *App) httpRepoMeta(w http.ResponseWriter, r *http.Request, slug string) 
 		if body.BuildCmd != nil || body.StartCmd != nil || body.Port != nil || body.EnvJSON != nil {
 			h := DeployHints{BuildCmd: body.BuildCmd, StartCmd: body.StartCmd, Port: body.Port, EnvJSON: body.EnvJSON}
 			if _, err := dbSetDeployHints(globalCtx.AppDB(), pid, slug, h); err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		if body.WorkspaceImage != nil {
+			if _, err := dbSetWorkspaceImage(globalCtx.AppDB(), pid, slug, *body.WorkspaceImage); err != nil {
 				httpErr(w, http.StatusBadRequest, err.Error())
 				return
 			}

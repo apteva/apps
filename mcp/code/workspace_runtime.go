@@ -18,6 +18,7 @@ const workspacesAppName = "workspaces"
 type workspaceWire struct {
 	ID              string   `json:"id"`
 	LifecycleStatus string   `json:"lifecycle_status"`
+	Image           string   `json:"image"`
 	SourceDigest    string   `json:"source_digest"`
 	SourcePaths     []string `json:"source_paths"`
 }
@@ -49,25 +50,44 @@ type workspaceChangesResult struct {
 	Changes          []SourceChange `json:"changes"`
 }
 
-func (a *App) prepareExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx, repo *Repo, profile string) (*workspacePrepareResult, error) {
+func (a *App) prepareExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx, repo *Repo, requestedProfile, requestedImage string) (*workspacePrepareResult, error) {
 	codeSnapshot, err := a.snapshotRepoSource(repo)
 	if err != nil {
 		return nil, err
+	}
+	profile := strings.TrimSpace(requestedProfile)
+	if profile == "" {
+		profile = sourceProfile(repo, codeSnapshot)
+	}
+	image := strings.TrimSpace(requestedImage)
+	if image == "" {
+		image = strings.TrimSpace(repo.WorkspaceImage)
 	}
 	link, err := dbGetRepoWorkspace(app.AppDB(), repo.ProjectID, repo.ID)
 	if err != nil {
 		return nil, err
 	}
 	if link == nil {
-		return a.createExecutionWorkspace(callCtx, app, repo, profile, codeSnapshot)
+		return a.createExecutionWorkspace(callCtx, app, repo, profile, image, codeSnapshot)
 	}
 	workspaceSnapshot, err := a.exportExecutionWorkspace(app, link.WorkspaceID)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "not found") || strings.Contains(strings.ToLower(err.Error()), "destroy") {
 			_ = dbDeleteRepoWorkspace(app.AppDB(), repo.ProjectID, repo.ID)
-			return a.createExecutionWorkspace(callCtx, app, repo, profile, codeSnapshot)
+			return a.createExecutionWorkspace(callCtx, app, repo, profile, image, codeSnapshot)
 		}
 		return nil, err
+	}
+	profileChanged := link.Profile != profile
+	imageChanged := image != "" && link.Image != image
+	if profileChanged || imageChanged {
+		if workspaceSnapshot.Digest != link.SourceDigest {
+			return nil, errors.New("the requested workspace profile or image requires replacement, but the current workspace has unapplied source changes; preview and apply or explicitly destroy it first")
+		}
+		// Keep the previous environment and its volumes intact. The new link is
+		// saved only after provisioning succeeds; failure leaves the old link usable.
+		// The old workspace remains available under its existing retention policy.
+		return a.createExecutionWorkspace(callCtx, app, repo, profile, image, codeSnapshot)
 	}
 	result := &workspacePrepareResult{Link: link, Code: codeSnapshot, Workspace: workspaceSnapshot}
 	codeChanged := codeSnapshot.Digest != link.SourceDigest
@@ -101,17 +121,16 @@ func (a *App) prepareExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx
 	return result, nil
 }
 
-func (a *App) createExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx, repo *Repo, requestedProfile string, snapshot *sourceSnapshot) (*workspacePrepareResult, error) {
-	profile := strings.TrimSpace(requestedProfile)
-	if profile == "" {
-		profile = sourceProfile(repo, snapshot)
-	}
+func (a *App) createExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx, repo *Repo, profile, image string, snapshot *sourceSnapshot) (*workspacePrepareResult, error) {
 	input := map[string]any{
 		"name": repo.Name + " development", "purpose": "Run and test Code repository " + repo.Slug,
 		"profile": profile, "ttl_minutes": 240, "resource_kind": "code.repository",
 		"resource_id": fmt.Sprintf("%d", repo.ID), "repo_label": repo.Slug,
 		"source_archive_base64": snapshot.Archive, "source_digest": snapshot.Digest,
 		"source_paths": snapshot.Paths,
+	}
+	if image != "" {
+		input["image"] = image
 	}
 	if caller := sdk.CallerFrom(callCtx); caller != nil {
 		input["owner_agent_id"] = caller.AgentID
@@ -126,8 +145,12 @@ func (a *App) createExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx,
 	if out.Workspace.ID == "" {
 		return nil, errors.New("Workspaces returned an empty workspace id")
 	}
+	resolvedImage := strings.TrimSpace(out.Workspace.Image)
+	if resolvedImage == "" {
+		resolvedImage = image
+	}
 	link := &RepoWorkspace{ProjectID: repo.ProjectID, RepoID: repo.ID, WorkspaceID: out.Workspace.ID,
-		Profile: profile, SourceDigest: snapshot.Digest, SourcePaths: snapshot.Paths}
+		Profile: profile, Image: resolvedImage, SourceDigest: snapshot.Digest, SourcePaths: snapshot.Paths}
 	if err := dbPutRepoWorkspace(app.AppDB(), link); err != nil {
 		return nil, err
 	}

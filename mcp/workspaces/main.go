@@ -40,7 +40,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("workspaces requires platform app calls")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("workspaces mounted", "version", "0.4.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("workspaces mounted", "version", "0.5.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -69,6 +69,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	createProps := map[string]any{
 		"name": strSchema(), "purpose": strSchema(),
 		"profile":     map[string]any{"type": "string", "enum": []string{"go", "bun", "python", "apteva"}},
+		"image":       strSchema(),
 		"ttl_minutes": intSchema(), "owner_label": strSchema(), "repo_label": strSchema(),
 		"branch_label": strSchema(), "origin_label": strSchema(), "origin_href": strSchema(),
 	}
@@ -84,7 +85,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	appCreateProps["source_digest"] = strSchema()
 	appCreateProps["source_paths"] = map[string]any{"type": "array", "items": strSchema(), "maxItems": 20000}
 	return []sdk.Tool{
-		{Name: "workspaces_create", Description: "Create a local workspace from an approved profile.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
+		{Name: "workspaces_create", Description: "Create a local workspace from an approved profile with an optional allowlisted, digest-pinned image override.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
 		{Name: "workspaces_list", Description: "List accessible workspaces in the current project.", InputSchema: schemaObject(map[string]any{"status": strSchema(), "include_destroyed": boolSchema(), "limit": intSchema()}, nil), HandlerCtx: a.toolList},
 		{Name: "workspaces_get", Description: "Fetch a workspace, runtime state, commands, usage, and activity.", InputSchema: schemaObject(workspaceID, []string{"workspace_id"}), HandlerCtx: a.toolGet},
 		{Name: "workspace_command_start", Description: "Run one asynchronous command through the workspace's persistent PTY shell session.", InputSchema: schemaObject(map[string]any{
@@ -98,7 +99,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "workspace_resume", Description: "Resume a stopped workspace whose TTL is active.", InputSchema: schemaObject(workspaceID, []string{"workspace_id"}), HandlerCtx: a.toolResume},
 		{Name: "workspace_extend", Description: "Set a new workspace TTL relative to now.", InputSchema: schemaObject(map[string]any{"workspace_id": strSchema(), "ttl_minutes": intSchema()}, []string{"workspace_id", "ttl_minutes"}), HandlerCtx: a.toolExtend},
 		{Name: "workspace_destroy", Description: "Permanently destroy a workspace and its volumes after explicit confirmation.", InputSchema: schemaObject(map[string]any{"workspace_id": strSchema(), "confirm": boolSchema()}, []string{"workspace_id", "confirm"}), HandlerCtx: a.toolDestroy},
-		{Name: "workspace_create_for_resource", Description: "Create a workspace for a caller-owned resource with an optional source archive.", InputSchema: schemaObject(appCreateProps, []string{"name"}), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolCreateForResource},
+		{Name: "workspace_create_for_resource", Description: "Create a workspace for a caller-owned resource with an optional source archive and allowlisted, digest-pinned image override.", InputSchema: schemaObject(appCreateProps, []string{"name"}), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolCreateForResource},
 		{Name: "workspace_context_update", Description: "Update origin navigation and consumer-reported Git safety context.", InputSchema: schemaObject(map[string]any{
 			"workspace_id": strSchema(), "repo_label": strSchema(), "branch_label": strSchema(),
 			"origin_label": strSchema(), "origin_href": strSchema(), "dirty_state": strSchema(), "unpushed_state": strSchema(),

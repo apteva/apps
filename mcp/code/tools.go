@@ -31,12 +31,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "repos_create",
 			Description: "Create a repository. Args: name (required), framework? (blank | nextjs | static | go | python), " +
-				"description?, slug?. Walks the template tree into the new repo's storage_root.",
+				"description?, slug?, workspace_image?. Walks the template tree into the new repo's storage_root.",
 			InputSchema: schemaObject(map[string]any{
-				"name":        map[string]any{"type": "string"},
-				"framework":   map[string]any{"type": "string"},
-				"description": map[string]any{"type": "string"},
-				"slug":        map[string]any{"type": "string"},
+				"name":            map[string]any{"type": "string"},
+				"framework":       map[string]any{"type": "string"},
+				"description":     map[string]any{"type": "string"},
+				"slug":            map[string]any{"type": "string"},
+				"workspace_image": map[string]any{"type": "string"},
 			}, []string{"name"}),
 			Handler: a.toolReposCreate,
 		},
@@ -66,6 +67,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"env_json":  map[string]any{"type": "string"},
 			}, []string{"slug"}),
 			Handler: a.toolReposSetDeployHints,
+		},
+		{
+			Name:        "repos_set_workspace_image",
+			Description: "Set or clear the repository's preferred workspace image. Workspaces validates registry policy when the image is used. A changed image provisions a new linked workspace on the next workspace command only when the current workspace has no unapplied source changes; the prior workspace is retained. Args: slug, image (empty clears).",
+			InputSchema: schemaObject(map[string]any{
+				"slug":  map[string]any{"type": "string"},
+				"image": map[string]any{"type": "string"},
+			}, []string{"slug", "image"}),
+			Handler: a.toolReposSetWorkspaceImage,
 		},
 		{
 			Name: "repos_export",
@@ -449,12 +459,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "repos_run_command",
 			Description: "Run a finite repo command and wait for it to exit. runtime=local uses the Code sidecar; runtime=workspace creates or reuses an isolated Workspaces environment, installs dependencies when inputs change, safely synchronizes source, and preserves its cache. Use this for builds, tests, lint, typecheck, generators, and validation commands. " +
 				"Do not use repos_dev_start for finite commands; repos_dev_start is only for long-running preview servers. " +
-				"Returns structured status, runtime, workspace_id when applicable, exit_code, duration_ms, dependency_install_ran, and bounded logs. Args: slug, command, runtime? (local|workspace), profile? (go|bun|python|apteva), env_json?, timeout_seconds? (default 300, max 1800), tail? (default 200).",
+				"Returns structured status, runtime, workspace_id when applicable, exit_code, duration_ms, dependency_install_ran, and bounded logs. Args: slug, command, runtime? (local|workspace), profile? (go|bun|python|apteva), image? (allowlisted immutable workspace image override), env_json?, timeout_seconds? (default 300, max 1800), tail? (default 200).",
 			InputSchema: schemaObject(map[string]any{
 				"slug":            map[string]any{"type": "string"},
 				"command":         map[string]any{"type": "string"},
 				"runtime":         map[string]any{"type": "string", "enum": []string{"local", "workspace"}},
 				"profile":         map[string]any{"type": "string", "enum": []string{"go", "bun", "python", "apteva"}},
+				"image":           map[string]any{"type": "string"},
 				"env_json":        map[string]any{"type": "string"},
 				"timeout_seconds": map[string]any{"type": "integer"},
 				"tail":            map[string]any{"type": "integer"},
@@ -635,7 +646,7 @@ func (a *App) toolRunCommand(callCtx context.Context, ctx *sdk.AppCtx, args map[
 			return nil, err
 		}
 		defer release()
-		prep, err := a.prepareExecutionWorkspace(callCtx, ctx, repo, strArg(args, "profile"))
+		prep, err := a.prepareExecutionWorkspace(callCtx, ctx, repo, strArg(args, "profile"), strArg(args, "image"))
 		if err != nil {
 			return nil, err
 		}
@@ -643,6 +654,9 @@ func (a *App) toolRunCommand(callCtx context.Context, ctx *sdk.AppCtx, args map[
 			Command: strArg(args, "command"), EnvJSON: strArg(args, "env_json"),
 			TimeoutSeconds: intArg(args, "timeout_seconds", 300), TailLines: intArg(args, "tail", 200),
 		})
+	}
+	if strArg(args, "image") != "" {
+		return nil, errors.New("image requires runtime=workspace")
 	}
 	if runtime != "" && runtime != "local" {
 		return nil, errors.New("runtime must be local or workspace")
@@ -1276,10 +1290,11 @@ func (a *App) toolReposCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	in := CreateRepoInput{
-		Name:        strArg(args, "name"),
-		Slug:        strArg(args, "slug"),
-		Description: strArg(args, "description"),
-		Framework:   strArg(args, "framework"),
+		Name:           strArg(args, "name"),
+		Slug:           strArg(args, "slug"),
+		Description:    strArg(args, "description"),
+		Framework:      strArg(args, "framework"),
+		WorkspaceImage: strArg(args, "workspace_image"),
 	}
 	r, err := dbCreateRepo(ctx.AppDB(), pid, in)
 	if err != nil {
@@ -1399,6 +1414,25 @@ func (a *App) toolReposSetDeployHints(ctx *sdk.AppCtx, args map[string]any) (any
 			"id": r.ID, "slug": r.Slug, "name": r.Name, "framework": r.Framework,
 		})
 	}
+	return map[string]any{"repository": r}, nil
+}
+
+func (a *App) toolReposSetWorkspaceImage(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	if slug == "" {
+		return nil, errors.New("slug required")
+	}
+	r, err := dbSetWorkspaceImage(ctx.AppDB(), pid, slug, strArg(args, "image"))
+	if err != nil {
+		return nil, err
+	}
+	ctx.Emit("repo.updated", map[string]any{
+		"id": r.ID, "slug": r.Slug, "name": r.Name, "framework": r.Framework,
+	})
 	return map[string]any{"repository": r}, nil
 }
 

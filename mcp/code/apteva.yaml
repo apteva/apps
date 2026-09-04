@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.7.1
+version: 0.8.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -19,6 +19,9 @@ description: |
   Git metadata or overwriting concurrent Code edits.
   v0.7.1 adds explicit workspace teardown and a real-agent Tier 3 test covering
   the complete Code → Workspaces → Code source round trip.
+  v0.8.0 stores an optional workspace image per repository, accepts safe
+  per-command overrides, and preserves the previous workspace while safely
+  provisioning a replacement after proving it has no unapplied source changes.
   v0.6.1 adds theme-aware syntax highlighting, sticky line numbers,
   language and line metadata, copy feedback, and clearer editor typography.
   v0.6.0 adds provider-neutral Git clone, connect, status, fetch,
@@ -78,7 +81,7 @@ requires:
     - platform.ingress.write
   apps:
     - name: workspaces
-      version: ">=0.4.0"
+      version: ">=0.5.0"
       optional: true
       reason: Provides isolated, durable command execution and generic source transfer while Code remains the repository and Git authority.
   binaries:
@@ -129,6 +132,8 @@ provides:
       description: Archive a repository (files retained on disk).
     - name: repos_set_deploy_hints
       description: Set build_cmd / start_cmd / port / env_json on a repository.
+    - name: repos_set_workspace_image
+      description: Set or clear a repository's preferred workspace image; Workspaces enforces image policy when it is used.
     - name: repos_export
       description: Export a repo as a zip archive — base64-encoded bytes for cross-app calls (used by deploy).
     - name: repos_import_github
@@ -160,7 +165,7 @@ provides:
     - name: repos_dev_start
       description: Start a dev/test preview process for a repo; production deploys belong in the Deploy app. Auto-installs JS dependencies when needed, auto-detects nextjs / node / go / static, and accepts run_cmd override.
     - name: repos_run_command
-      description: Run a finite repo command locally or in an optional isolated Workspaces environment and return exit-code semantics.
+      description: Run a finite repo command locally or in an optional isolated Workspaces environment, optionally selecting an allowlisted immutable image, and return exit-code semantics.
     - name: repos_workspace_changes
       description: Preview source changes produced in the linked execution workspace, including revision conflicts.
     - name: repos_workspace_apply

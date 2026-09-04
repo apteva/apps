@@ -19,8 +19,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 54 {
-		t.Errorf("expected 54 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 55 {
+		t.Errorf("expected 55 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.UIComponents) != 3 {
 		t.Errorf("expected 3 UI components in manifest, got %d", len(m.Provides.UIComponents))
@@ -39,12 +39,12 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	workspacesOptional := false
 	for _, dependency := range m.Requires.Apps {
-		if dependency.Name == "workspaces" && dependency.Version == ">=0.4.0" && dependency.Optional {
+		if dependency.Name == "workspaces" && dependency.Version == ">=0.5.0" && dependency.Optional {
 			workspacesOptional = true
 		}
 	}
 	if !workspacesOptional {
-		t.Error("Workspaces >=0.4.0 must remain an optional dependency")
+		t.Error("Workspaces >=0.5.0 must remain an optional dependency")
 	}
 }
 
@@ -131,7 +131,7 @@ func TestMCPTools_EditingSurfaceComplete(t *testing.T) {
 		got[tool.Name] = true
 	}
 	must := []string{
-		"repos_list", "repos_create", "repos_get", "repos_archive", "repos_set_deploy_hints",
+		"repos_list", "repos_create", "repos_get", "repos_archive", "repos_set_deploy_hints", "repos_set_workspace_image",
 		"repos_run_command", "repos_workspace_changes", "repos_workspace_apply", "repos_workspace_destroy",
 		"code_list_files", "code_glob", "code_grep",
 		"code_read_file", "code_read_excerpt", "code_file_outline",

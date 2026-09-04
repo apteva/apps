@@ -34,7 +34,7 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.7.1
+version: 0.8.0
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
@@ -50,6 +50,8 @@ description: |
   previews workspace-generated source changes and safely applies an explicitly
   reviewed revision without transferring Git metadata,
   explicitly tears down linked execution workspaces while retaining Code files,
+  stores per-repository workspace image preferences and forwards allowlisted
+  per-command image overrides without replacing workspaces that have unapplied changes,
   makes grep/read/patch tools more compact for agents with reusable
   patch previews, targeted rejected-hunk context, and stale-hunk recovery,
   isolates global repository storage and hardens command/import boundaries,
@@ -77,7 +79,7 @@ requires:
     - platform.ingress.write
   apps:
     - name: workspaces
-      version: ">=0.4.0"
+      version: ">=0.5.0"
       optional: true
       reason: Provides isolated, durable command execution and generic source transfer while Code remains the repository and Git authority.
   binaries:
@@ -122,6 +124,7 @@ provides:
     - { name: repos_get,              description: "Repository metadata + tree summary." }
     - { name: repos_archive,          description: "Archive (or hard-delete) a repository." }
     - { name: repos_set_deploy_hints, description: "Set build_cmd / start_cmd / port / env_json." }
+    - { name: repos_set_workspace_image, description: "Set or clear a repository's preferred workspace image." }
     - { name: repos_export,           description: "Export a repo as a zip; returns base64 bytes for cross-app calls." }
     - { name: code_list_files,        description: "List files in a repository." }
     - { name: code_glob,              description: "Find files by glob pattern." }

@@ -91,6 +91,25 @@ func TestCreateRepo_AndGet(t *testing.T) {
 	}
 }
 
+func TestWorkspaceImageMetadataRoundTrip(t *testing.T) {
+	db := openTestDB(t)
+	image := "ghcr.io/apteva/workspace-dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	repo, err := dbCreateRepo(db, "p1", CreateRepoInput{Name: "Image repo", Framework: "go", WorkspaceImage: image})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.WorkspaceImage != image {
+		t.Fatalf("workspace image was not created: %q", repo.WorkspaceImage)
+	}
+	repo, err = dbSetWorkspaceImage(db, "p1", repo.Slug, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.WorkspaceImage != "" {
+		t.Fatalf("workspace image was not cleared: %q", repo.WorkspaceImage)
+	}
+}
+
 func TestCreateRepo_RejectsBadFramework(t *testing.T) {
 	db := openTestDB(t)
 	_, err := dbCreateRepo(db, "p1", CreateRepoInput{Name: "x", Framework: "fortran"})

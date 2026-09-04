@@ -157,7 +157,7 @@ func agentContext(project string, agentID int64, threadID, toolCallID string) co
 func TestManifestAndToolsAgree(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "workspaces" || manifest.Version != "0.4.0" {
+	if manifest.Name != "workspaces" || manifest.Version != "0.5.0" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	requiredContainers := false
@@ -190,6 +190,36 @@ func TestManifestAndToolsAgree(t *testing.T) {
 	}
 	for name := range declared {
 		t.Errorf("manifest tool %s has no handler", name)
+	}
+}
+
+func TestCreateWorkspaceAcceptsOnlyAllowlistedDigestPinnedImage(t *testing.T) {
+	platform := &platformStub{}
+	ctx, _ := newTestContext(t, platform)
+	app := &App{}
+	image := "ghcr.io/apteva/workspace-dev@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	result, err := app.toolCreate(agentContext("project-a", 42, "task-image", "create-custom"), ctx, map[string]any{
+		"name": "Custom image", "profile": "apteva", "image": image,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := result.(map[string]any)["workspace"].(*Workspace)
+	if workspace.Profile != "apteva" || workspace.Image != image {
+		t.Fatalf("custom image was not recorded: %+v", workspace)
+	}
+	if got := platform.calls[0].Input["image"]; got != image {
+		t.Fatalf("custom image was not passed to Containers: %v", got)
+	}
+	if _, err := app.toolCreate(agentContext("project-a", 42, "task-image", "create-tag"), ctx, map[string]any{
+		"name": "Mutable image", "profile": "go", "image": "ghcr.io/apteva/workspace-dev:0.1.1",
+	}); err == nil {
+		t.Fatal("mutable custom image should be rejected")
+	}
+	if _, err := app.toolCreate(agentContext("project-a", 42, "task-image", "create-outside"), ctx, map[string]any{
+		"name": "Outside allowlist", "profile": "go", "image": "docker.io/library/alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}); err == nil {
+		t.Fatal("custom image outside the allowlist should be rejected")
 	}
 }
 

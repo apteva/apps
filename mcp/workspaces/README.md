@@ -1,5 +1,14 @@
 # Workspaces
 
+## v0.5.0
+
+- Accept an operator-allowlisted, digest-pinned image per workspace while
+  retaining profiles for toolchain and lifecycle policy.
+- Let Code forward repository and command image preferences without giving it
+  direct access to the Containers runtime.
+- Publish the multi-architecture Apteva development image definition with
+  persistent language caches and login-shell-safe tool paths.
+
 ## v0.4.0
 
 - Add an app-only, Git-agnostic source round trip: create with a producer
@@ -77,11 +86,19 @@ The combined Apteva image definition lives under
 `images/apteva-dev/Dockerfile`. Build it locally with:
 
 ```bash
-docker build -t apteva/workspace-dev:0.1.0 images/apteva-dev
+docker build -t apteva/workspace-dev:0.1.1 images/apteva-dev
 ```
 
-Then set the Workspaces app's `apteva_image` configuration to
-`apteva/workspace-dev:0.1.0`.
+The published multi-architecture image is available as
+`ghcr.io/apteva/workspace-dev:0.1.1`. Prefer its immutable digest when using it
+as a profile image or per-workspace override.
+
+Workspace creation may also pass an explicit `image`. Explicit images are
+validated against `custom_image_prefixes` and, by default, must use an
+immutable `@sha256` digest. The requested image overrides the selected
+profile's configured image; the profile still describes the expected
+toolchain. Workspaces records the exact image and passes it unchanged to
+Containers.
 
 ## Source handoff
 

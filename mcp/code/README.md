@@ -5,7 +5,7 @@ first-class editing tools modelled on Claude Code.
 
 ## Surfaces
 
-- **53 MCP tools** — repository lifecycle (`repos_list`, `repos_create`,
+- **55 MCP tools** — repository lifecycle (`repos_list`, `repos_create`,
   `repos_get`, `repos_archive`, `repos_set_deploy_hints`) and the
   editing surface (`code_list_files`, `code_glob`, `code_grep`,
   `code_read_file`, `code_read_excerpt`, `code_file_outline`,
@@ -51,7 +51,7 @@ unchanged.
 ## Isolated command execution
 
 `repos_run_command` keeps its existing local runner and adds
-`runtime=workspace`. When the optional Workspaces >=0.4.0 dependency is
+`runtime=workspace`. When the optional Workspaces >=0.5.0 dependency is
 installed, Code creates or reuses one durable isolated environment per
 repository, transfers a source-only snapshot, installs dependencies when the
 dependency inputs change, and runs the requested finite command there.

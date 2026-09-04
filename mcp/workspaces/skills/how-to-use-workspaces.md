@@ -11,6 +11,11 @@ the closest approved profile (`go`, `bun`, or `python`), and a realistic TTL.
 The optional `apteva` profile works only when an operator configured its
 combined development image.
 
+When a profile image is not suitable, pass `image` with an operator-allowlisted
+container reference. Custom images must use an immutable `@sha256` digest by
+default. The profile still describes the expected toolchain; the explicit image
+only overrides what Containers runs.
+
 Keep the returned `workspace.id`; every later operation uses it. If another app
 created the workspace, respect the repository/branch labels and origin link as
 context. Those labels are not proof of the current Git state.

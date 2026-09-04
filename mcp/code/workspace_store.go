@@ -11,6 +11,7 @@ type RepoWorkspace struct {
 	RepoID           int64    `json:"repo_id"`
 	WorkspaceID      string   `json:"workspace_id"`
 	Profile          string   `json:"profile"`
+	Image            string   `json:"image"`
 	SourceDigest     string   `json:"source_digest"`
 	SourcePaths      []string `json:"source_paths,omitempty"`
 	DependencyDigest string   `json:"dependency_digest,omitempty"`
@@ -21,7 +22,7 @@ type RepoWorkspace struct {
 func scanRepoWorkspace(scanner interface{ Scan(...any) error }) (*RepoWorkspace, error) {
 	var row RepoWorkspace
 	var paths string
-	err := scanner.Scan(&row.ProjectID, &row.RepoID, &row.WorkspaceID, &row.Profile,
+	err := scanner.Scan(&row.ProjectID, &row.RepoID, &row.WorkspaceID, &row.Profile, &row.Image,
 		&row.SourceDigest, &paths, &row.DependencyDigest, &row.CreatedAt, &row.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -35,21 +36,22 @@ func scanRepoWorkspace(scanner interface{ Scan(...any) error }) (*RepoWorkspace,
 
 func dbGetRepoWorkspace(db *sql.DB, projectID string, repoID int64) (*RepoWorkspace, error) {
 	return scanRepoWorkspace(db.QueryRow(`SELECT project_id, repo_id, workspace_id,
-		profile, source_digest, source_paths_json, dependency_digest,
+		profile, image, source_digest, source_paths_json, dependency_digest,
 		created_at, updated_at FROM repo_workspaces WHERE project_id=? AND repo_id=?`, projectID, repoID))
 }
 
 func dbPutRepoWorkspace(db *sql.DB, row *RepoWorkspace) error {
 	paths, _ := json.Marshal(row.SourcePaths)
 	_, err := db.Exec(`INSERT INTO repo_workspaces (
-		project_id, repo_id, workspace_id, profile, source_digest,
+		project_id, repo_id, workspace_id, profile, image, source_digest,
 		source_paths_json, dependency_digest, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 	ON CONFLICT(project_id, repo_id) DO UPDATE SET
 		workspace_id=excluded.workspace_id, profile=excluded.profile,
+		image=excluded.image,
 		source_digest=excluded.source_digest, source_paths_json=excluded.source_paths_json,
 		dependency_digest=excluded.dependency_digest, updated_at=CURRENT_TIMESTAMP`,
-		row.ProjectID, row.RepoID, row.WorkspaceID, row.Profile, row.SourceDigest,
+		row.ProjectID, row.RepoID, row.WorkspaceID, row.Profile, row.Image, row.SourceDigest,
 		string(paths), row.DependencyDigest)
 	return err
 }

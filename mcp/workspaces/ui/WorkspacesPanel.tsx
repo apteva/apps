@@ -175,7 +175,7 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [commandText, setCommandText] = useState("");
-  const [create, setCreate] = useState({ name: "", purpose: "", profile: "go", ttl_minutes: 120 });
+  const [create, setCreate] = useState({ name: "", purpose: "", profile: "go", image: "", ttl_minutes: 120 });
 
   const loadList = useCallback(async () => {
     try {
@@ -231,7 +231,7 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
     try {
       const response = await request<{ workspace: Workspace }>(projectId, installId, "/workspaces", { method: "POST", body: JSON.stringify(create) });
       setShowCreate(false);
-      setCreate({ name: "", purpose: "", profile: defaultProfile, ttl_minutes: 120 });
+      setCreate({ name: "", purpose: "", profile: defaultProfile, image: "", ttl_minutes: 120 });
       await loadList();
       setSelectedId(response.workspace.id);
       setTab("overview");
@@ -429,11 +429,12 @@ export default function WorkspacesPanel({ projectId, installId }: NativePanelPro
             <label>Name<input autoFocus value={create.name} onChange={(event) => setCreate({ ...create, name: event.target.value })} placeholder="code-apteva-42" /></label>
             <label>Purpose<input value={create.purpose} onChange={(event) => setCreate({ ...create, purpose: event.target.value })} placeholder="Develop apteva/apps" /></label>
             <div className="ws-form-grid">
-              <label>Runtime profile<select value={create.profile} onChange={(event) => setCreate({ ...create, profile: event.target.value })}>{profiles.filter((profile) => profile.available).map((profile) => <option key={profile.key} value={profile.key}>{profile.label}</option>)}</select></label>
+              <label>Runtime profile<select value={create.profile} onChange={(event) => setCreate({ ...create, profile: event.target.value })}>{profiles.map((profile) => <option key={profile.key} value={profile.key} disabled={!profile.available && !create.image.trim()}>{profile.label}{profile.available ? "" : " (custom image required)"}</option>)}</select></label>
               <label>TTL (minutes)<input type="number" min={1} max={480} value={create.ttl_minutes} onChange={(event) => setCreate({ ...create, ttl_minutes: Number(event.target.value) })} /></label>
             </div>
-            <div className="ws-profile-note">Image: <code>{profiles.find((profile) => profile.key === create.profile)?.image || "Not configured"}</code><br />Network policy: isolated Docker network with outbound access; no host bind mounts.</div>
-            <div className="ws-modal-actions"><button className="ws-button" onClick={() => setShowCreate(false)}>Cancel</button><button className="ws-primary" disabled={!create.name.trim() || !!busy} onClick={createWorkspace}>{busy === "create" ? "Provisioning…" : "Create workspace"}</button></div>
+            <label>Custom image (optional)<input value={create.image} onChange={(event) => setCreate({ ...create, image: event.target.value })} placeholder="ghcr.io/apteva/workspace-dev@sha256:…" /></label>
+            <div className="ws-profile-note">Image: <code>{create.image.trim() || profiles.find((profile) => profile.key === create.profile)?.image || "Not configured"}</code><br />Custom images must match the operator allowlist and use an immutable digest. Network policy: isolated Docker network with outbound access; no host bind mounts.</div>
+            <div className="ws-modal-actions"><button className="ws-button" onClick={() => setShowCreate(false)}>Cancel</button><button className="ws-primary" disabled={!create.name.trim() || !!busy || (!create.image.trim() && !profiles.find((profile) => profile.key === create.profile)?.available)} onClick={createWorkspace}>{busy === "create" ? "Provisioning…" : "Create workspace"}</button></div>
           </div>
         </div>
       )}

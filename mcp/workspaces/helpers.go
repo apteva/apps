@@ -15,7 +15,11 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-var workspaceNameRE = regexp.MustCompile(`^[[:alnum:]][[:alnum:] _.-]{0,79}$`)
+var (
+	workspaceNameRE = regexp.MustCompile(`^[[:alnum:]][[:alnum:] _.-]{0,79}$`)
+	imageRefRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$`)
+	imageDigestRE   = regexp.MustCompile(`@sha256:[a-f0-9]{64}$`)
+)
 
 func nowUTC() string { return time.Now().UTC().Format(time.RFC3339) }
 
@@ -224,10 +228,33 @@ func configFloat(app *sdk.AppCtx, key string, fallback float64) float64 {
 	return parsed
 }
 
-func resolveProfile(app *sdk.AppCtx, requested string) (string, string, error) {
-	profile := strings.ToLower(strings.TrimSpace(requested))
+func configBool(app *sdk.AppCtx, key string, fallback bool) bool {
+	value := strings.ToLower(configString(app, key, ""))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func resolveProfile(app *sdk.AppCtx, requestedProfile, requestedImage string) (string, string, error) {
+	profile := strings.ToLower(strings.TrimSpace(requestedProfile))
 	if profile == "" {
 		profile = strings.ToLower(configString(app, "default_profile", "go"))
+	}
+	switch profile {
+	case "go", "bun", "python", "apteva":
+	default:
+		return "", "", fmt.Errorf("unsupported profile %q; use go, bun, python, or apteva", profile)
+	}
+	if image := strings.TrimSpace(requestedImage); image != "" {
+		if err := validateRequestedImage(app, image); err != nil {
+			return "", "", err
+		}
+		return profile, image, nil
 	}
 	var image string
 	switch profile {
@@ -239,13 +266,34 @@ func resolveProfile(app *sdk.AppCtx, requested string) (string, string, error) {
 		image = configString(app, "python_image", "python:3.13-bookworm")
 	case "apteva":
 		image = configString(app, "apteva_image", "")
-	default:
-		return "", "", fmt.Errorf("unsupported profile %q; use go, bun, python, or apteva", profile)
 	}
 	if image == "" {
 		return "", "", fmt.Errorf("profile %q is not configured with an image", profile)
 	}
 	return profile, image, nil
+}
+
+func validateRequestedImage(app *sdk.AppCtx, image string) error {
+	if !imageRefRE.MatchString(image) || strings.Contains(image, "://") {
+		return errors.New("image must be a valid container image reference without a URL scheme")
+	}
+	prefixes := strings.FieldsFunc(configString(app, "custom_image_prefixes", "ghcr.io/apteva/"), func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
+	})
+	allowed := false
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(image, strings.TrimSpace(prefix)) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("image %q is outside the configured custom_image_prefixes", image)
+	}
+	if configBool(app, "custom_image_require_digest", true) && !imageDigestRE.MatchString(image) {
+		return errors.New("custom images must use an immutable @sha256 digest")
+	}
+	return nil
 }
 
 func parseTime(value string) time.Time {
