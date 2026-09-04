@@ -83,6 +83,49 @@ func TestWorkspaceSourceRejectsEscapingSymlink(t *testing.T) {
 	}
 }
 
+func TestScopedWorkspaceSourceIncludesEditableAndSupportPathsOnly(t *testing.T) {
+	root := t.TempDir()
+	writeTestSource(t, root, "mcp/books/main.go", []byte("package main\n"), 0o644)
+	writeTestSource(t, root, "mcp/other/main.go", []byte("package main\n"), 0o644)
+	writeTestSource(t, root, "go.work", []byte("go 1.25\n"), 0o644)
+
+	snapshot, err := buildScopedSourceSnapshot(root, []string{"mcp/books/**"}, []string{"go.work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"mcp/books/main.go", "go.work"} {
+		if _, ok := snapshot.Entries[path]; !ok {
+			t.Fatalf("scoped snapshot omitted %s", path)
+		}
+	}
+	if _, ok := snapshot.Entries["mcp/other/main.go"]; ok {
+		t.Fatal("scoped snapshot included another monorepo app")
+	}
+	if _, _, err := normalizeWorkspaceScope([]string{"../secret/**"}, nil); err == nil {
+		t.Fatal("escaping workspace pattern should be rejected")
+	}
+}
+
+func TestBooksMonorepoScopeFitsWorkspaceBoundary(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", ".."))
+	snapshot, err := buildScopedSourceSnapshot(root,
+		[]string{"mcp/books/**"},
+		[]string{"package.json", "bun.lock", "scripts/build-panels.ts", "scripts/verify-panels.ts", "scripts/panel-react-surface.json"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Paths) == 0 || len(snapshot.Archive) == 0 {
+		t.Fatal("Books scope produced an empty workspace source archive")
+	}
+	if _, ok := snapshot.Entries["mcp/code/main.go"]; ok {
+		t.Fatal("Books scope included Code source")
+	}
+	if _, ok := snapshot.Entries["scripts/panel-react-surface.json"]; !ok {
+		t.Fatal("Books scope omitted the portable panel verifier contract")
+	}
+}
+
 func writeTestSource(t *testing.T, root, rel string, body []byte, mode os.FileMode) {
 	t.Helper()
 	full := filepath.Join(root, filepath.FromSlash(rel))

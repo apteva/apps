@@ -459,13 +459,16 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "repos_run_command",
 			Description: "Run a finite repo command and wait for it to exit. runtime=local uses the Code sidecar; runtime=workspace creates or reuses an isolated Workspaces environment, installs dependencies when inputs change, safely synchronizes source, and preserves its cache. Use this for builds, tests, lint, typecheck, generators, and validation commands. " +
 				"Do not use repos_dev_start for finite commands; repos_dev_start is only for long-running preview servers. " +
-				"Returns structured status, runtime, workspace_id when applicable, exit_code, duration_ms, dependency_install_ran, and bounded logs. Args: slug, command, runtime? (local|workspace), profile? (go|bun|python|apteva), image? (allowlisted immutable workspace image override), env_json?, timeout_seconds? (default 300, max 1800), tail? (default 200).",
+				"For monorepos, workspace_paths selects editable doublestar globs and support_paths adds read-only build inputs; only the selected files are transferred and only workspace_paths may be applied back. Omitted scope arguments reuse the linked workspace scope; pass workspace_paths=[\"**\"] to switch back to the full repository. " +
+				"Returns structured status, runtime, workspace_id when applicable, exit_code, duration_ms, dependency_install_ran, and bounded logs. Args: slug, command, runtime? (local|workspace), profile? (go|bun|python|apteva), image? (allowlisted immutable workspace image override), workspace_paths?, support_paths?, env_json?, timeout_seconds? (default 300, max 1800), tail? (default 200).",
 			InputSchema: schemaObject(map[string]any{
 				"slug":            map[string]any{"type": "string"},
 				"command":         map[string]any{"type": "string"},
 				"runtime":         map[string]any{"type": "string", "enum": []string{"local", "workspace"}},
 				"profile":         map[string]any{"type": "string", "enum": []string{"go", "bun", "python", "apteva"}},
 				"image":           map[string]any{"type": "string"},
+				"workspace_paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 64},
+				"support_paths":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 64},
 				"env_json":        map[string]any{"type": "string"},
 				"timeout_seconds": map[string]any{"type": "integer"},
 				"tail":            map[string]any{"type": "integer"},
@@ -646,7 +649,7 @@ func (a *App) toolRunCommand(callCtx context.Context, ctx *sdk.AppCtx, args map[
 			return nil, err
 		}
 		defer release()
-		prep, err := a.prepareExecutionWorkspace(callCtx, ctx, repo, strArg(args, "profile"), strArg(args, "image"))
+		prep, err := a.prepareExecutionWorkspace(callCtx, ctx, repo, strArg(args, "profile"), strArg(args, "image"), stringSliceArg(args, "workspace_paths"), stringSliceArg(args, "support_paths"))
 		if err != nil {
 			return nil, err
 		}
@@ -657,6 +660,9 @@ func (a *App) toolRunCommand(callCtx context.Context, ctx *sdk.AppCtx, args map[
 	}
 	if strArg(args, "image") != "" {
 		return nil, errors.New("image requires runtime=workspace")
+	}
+	if len(stringSliceArg(args, "workspace_paths"))+len(stringSliceArg(args, "support_paths")) > 0 {
+		return nil, errors.New("workspace_paths and support_paths require runtime=workspace")
 	}
 	if runtime != "" && runtime != "local" {
 		return nil, errors.New("runtime must be local or workspace")

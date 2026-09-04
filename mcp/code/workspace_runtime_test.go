@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -242,6 +243,69 @@ func TestWorkspaceCommandSyncPreviewAndApply(t *testing.T) {
 	}
 }
 
+func TestScopedWorkspacePersistsScopeAndRejectsSupportChanges(t *testing.T) {
+	db := openTestDB(t)
+	platform := &codeWorkspacePlatform{}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, nil, platform, nil)
+	local := NewLocalFileStore(t.TempDir())
+	locks := newRepoLockSet()
+	app := &App{store: &lockedFileStore{inner: local, locks: locks}, locks: locks, dataDir: t.TempDir()}
+	repo, err := dbCreateRepo(db, "project-a", CreateRepoInput{Name: "Monorepo", Framework: "go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.CreateRepo(repoStoreKey(repo)); err != nil {
+		t.Fatal(err)
+	}
+	root := local.RepoPath(repoStoreKey(repo))
+	writeTestSource(t, root, "mcp/books/main.go", []byte("package main\n"), 0o644)
+	writeTestSource(t, root, "mcp/other/main.go", []byte("package main\n"), 0o644)
+	writeTestSource(t, root, "go.work", []byte("go 1.25\n"), 0o644)
+	callCtx := sdk.WithCaller(context.Background(), &sdk.Caller{ProjectID: "project-a", AgentID: 7, ToolCallID: "scoped"})
+	if _, err := app.toolRunCommand(callCtx, ctx, map[string]any{
+		"_project_id": "project-a", "slug": repo.Slug, "runtime": "workspace", "command": "true",
+		"workspace_paths": []any{"mcp/books/**"}, "support_paths": []any{"go.work"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	transferred, err := parseSourceArchive(platform.archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := transferred.Entries["mcp/other/main.go"]; ok || len(transferred.Paths) != 2 {
+		t.Fatalf("unexpected scoped transfer: %v", transferred.Paths)
+	}
+	link, err := dbGetRepoWorkspace(db, "project-a", repo.ID)
+	if err != nil || link == nil || len(link.WorkspacePaths) != 1 || len(link.SupportPaths) != 1 {
+		t.Fatalf("workspace scope was not persisted: %+v, %v", link, err)
+	}
+	if _, err := app.toolRunCommand(callCtx, ctx, map[string]any{
+		"_project_id": "project-a", "slug": repo.Slug, "runtime": "workspace", "command": "true",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if countCall(platform.calls, "workspaces/workspace_create_for_resource") != 1 {
+		t.Fatalf("omitted scope should reuse the linked scoped workspace: %v", platform.calls)
+	}
+	transferred.Entries["go.work"] = sourceEntry{Path: "go.work", Mode: 0o644, Data: []byte("tampered\n")}
+	mutated, err := finishSourceSnapshot(transferred.Entries, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform.archive = mutated.Archive
+	previewAny, err := app.toolWorkspaceChanges(callCtx, ctx, map[string]any{"_project_id": "project-a", "slug": repo.Slug})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview := previewAny.(*workspaceChangesResult)
+	if _, err := app.toolWorkspaceApply(callCtx, ctx, map[string]any{
+		"_project_id": "project-a", "slug": repo.Slug, "expected_workspace_digest": preview.WorkspaceDigest,
+	}); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("support file change should be rejected, got %v", err)
+	}
+}
+
 func anyStrings(value any) []string {
 	switch values := value.(type) {
 	case []string:
@@ -266,4 +330,14 @@ func containsCall(calls []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func countCall(calls []string, want string) int {
+	count := 0
+	for _, call := range calls {
+		if call == want {
+			count++
+		}
+	}
+	return count
 }

@@ -34,7 +34,7 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.8.0
+version: 0.8.1
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
@@ -52,6 +52,7 @@ description: |
   explicitly tears down linked execution workspaces while retaining Code files,
   stores per-repository workspace image preferences and forwards allowlisted
   per-command image overrides without replacing workspaces that have unapplied changes,
+  scopes monorepo workspaces to editable paths plus read-only build inputs,
   makes grep/read/patch tools more compact for agents with reusable
   patch previews, targeted rejected-hunk context, and stale-hunk recovery,
   isolates global repository storage and hardens command/import boundaries,
@@ -156,7 +157,7 @@ provides:
     - { name: repos_git_branch_create, description: "Create a local branch without switching to it." }
     - { name: repos_git_switch,       description: "Switch to an existing clean local branch." }
     - { name: repos_dev_start,        description: "Start a long-running dev preview server for a repo." }
-    - { name: repos_run_command,      description: "Run a finite repo command such as build, test, lint, typecheck, or generator and return exit-code semantics." }
+    - { name: repos_run_command,      description: "Run a finite repo command locally or in an isolated workspace with optional editable and read-only monorepo path scopes." }
     - { name: repos_workspace_changes, description: "Preview source changes produced in the linked execution workspace, including revision conflicts." }
     - { name: repos_workspace_apply, description: "Safely apply an explicitly previewed workspace source revision back to Code." }
     - { name: repos_workspace_destroy, description: "Permanently destroy and unlink a repository's execution workspace while retaining Code files." }

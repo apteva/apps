@@ -47,11 +47,28 @@ type workspaceChangesResult struct {
 	CodeChanged      bool           `json:"code_changed_since_sync"`
 	WorkspaceChanged bool           `json:"workspace_changed_since_sync"`
 	Conflict         bool           `json:"conflict"`
+	WorkspacePaths   []string       `json:"workspace_paths,omitempty"`
+	SupportPaths     []string       `json:"support_paths,omitempty"`
 	Changes          []SourceChange `json:"changes"`
 }
 
-func (a *App) prepareExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx, repo *Repo, requestedProfile, requestedImage string) (*workspacePrepareResult, error) {
-	codeSnapshot, err := a.snapshotRepoSource(repo)
+func (a *App) prepareExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx, repo *Repo, requestedProfile, requestedImage string, requestedWorkspacePaths, requestedSupportPaths []string) (*workspacePrepareResult, error) {
+	workspacePaths, supportPaths, err := normalizeWorkspaceScope(requestedWorkspacePaths, requestedSupportPaths)
+	if err != nil {
+		return nil, err
+	}
+	link, err := dbGetRepoWorkspace(app.AppDB(), repo.ProjectID, repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	// Omitted scope arguments reuse the linked workspace's scope. Use
+	// workspace_paths=["**"] when intentionally switching back to a full,
+	// editable repository scope.
+	if link != nil && len(requestedWorkspacePaths) == 0 && len(requestedSupportPaths) == 0 {
+		workspacePaths = append([]string(nil), link.WorkspacePaths...)
+		supportPaths = append([]string(nil), link.SupportPaths...)
+	}
+	codeSnapshot, err := a.snapshotRepoSource(repo, workspacePaths, supportPaths)
 	if err != nil {
 		return nil, err
 	}
@@ -63,31 +80,28 @@ func (a *App) prepareExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx
 	if image == "" {
 		image = strings.TrimSpace(repo.WorkspaceImage)
 	}
-	link, err := dbGetRepoWorkspace(app.AppDB(), repo.ProjectID, repo.ID)
-	if err != nil {
-		return nil, err
-	}
 	if link == nil {
-		return a.createExecutionWorkspace(callCtx, app, repo, profile, image, codeSnapshot)
+		return a.createExecutionWorkspace(callCtx, app, repo, profile, image, workspacePaths, supportPaths, codeSnapshot)
 	}
 	workspaceSnapshot, err := a.exportExecutionWorkspace(app, link.WorkspaceID)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "not found") || strings.Contains(strings.ToLower(err.Error()), "destroy") {
 			_ = dbDeleteRepoWorkspace(app.AppDB(), repo.ProjectID, repo.ID)
-			return a.createExecutionWorkspace(callCtx, app, repo, profile, image, codeSnapshot)
+			return a.createExecutionWorkspace(callCtx, app, repo, profile, image, workspacePaths, supportPaths, codeSnapshot)
 		}
 		return nil, err
 	}
 	profileChanged := link.Profile != profile
 	imageChanged := image != "" && link.Image != image
-	if profileChanged || imageChanged {
+	scopeChanged := !stringSlicesEqual(link.WorkspacePaths, workspacePaths) || !stringSlicesEqual(link.SupportPaths, supportPaths)
+	if profileChanged || imageChanged || scopeChanged {
 		if workspaceSnapshot.Digest != link.SourceDigest {
-			return nil, errors.New("the requested workspace profile or image requires replacement, but the current workspace has unapplied source changes; preview and apply or explicitly destroy it first")
+			return nil, errors.New("the requested workspace profile, image, or path scope requires replacement, but the current workspace has unapplied source changes; preview and apply or explicitly destroy it first")
 		}
 		// Keep the previous environment and its volumes intact. The new link is
 		// saved only after provisioning succeeds; failure leaves the old link usable.
 		// The old workspace remains available under its existing retention policy.
-		return a.createExecutionWorkspace(callCtx, app, repo, profile, image, codeSnapshot)
+		return a.createExecutionWorkspace(callCtx, app, repo, profile, image, workspacePaths, supportPaths, codeSnapshot)
 	}
 	result := &workspacePrepareResult{Link: link, Code: codeSnapshot, Workspace: workspaceSnapshot}
 	codeChanged := codeSnapshot.Digest != link.SourceDigest
@@ -121,7 +135,7 @@ func (a *App) prepareExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx
 	return result, nil
 }
 
-func (a *App) createExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx, repo *Repo, profile, image string, snapshot *sourceSnapshot) (*workspacePrepareResult, error) {
+func (a *App) createExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx, repo *Repo, profile, image string, workspacePaths, supportPaths []string, snapshot *sourceSnapshot) (*workspacePrepareResult, error) {
 	input := map[string]any{
 		"name": repo.Name + " development", "purpose": "Run and test Code repository " + repo.Slug,
 		"profile": profile, "ttl_minutes": 240, "resource_kind": "code.repository",
@@ -150,7 +164,8 @@ func (a *App) createExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx,
 		resolvedImage = image
 	}
 	link := &RepoWorkspace{ProjectID: repo.ProjectID, RepoID: repo.ID, WorkspaceID: out.Workspace.ID,
-		Profile: profile, Image: resolvedImage, SourceDigest: snapshot.Digest, SourcePaths: snapshot.Paths}
+		Profile: profile, Image: resolvedImage, SourceDigest: snapshot.Digest, SourcePaths: snapshot.Paths,
+		WorkspacePaths: workspacePaths, SupportPaths: supportPaths}
 	if err := dbPutRepoWorkspace(app.AppDB(), link); err != nil {
 		return nil, err
 	}
@@ -433,17 +448,17 @@ func repoLocalPath(store FileStore, slug string) (string, error) {
 	return local.RepoPath(slug), nil
 }
 
-func (a *App) snapshotRepoSource(repo *Repo) (*sourceSnapshot, error) {
+func (a *App) snapshotRepoSource(repo *Repo, workspacePaths, supportPaths []string) (*sourceSnapshot, error) {
 	root, err := repoLocalPath(a.storeFor(repo), repo.Slug)
 	if err != nil {
 		return nil, err
 	}
 	if a.locks == nil {
-		return buildSourceSnapshot(root)
+		return buildScopedSourceSnapshot(root, workspacePaths, supportPaths)
 	}
 	release := a.locks.rlock(repoStoreKey(repo))
 	defer release()
-	return buildSourceSnapshot(root)
+	return buildScopedSourceSnapshot(root, workspacePaths, supportPaths)
 }
 
 func (a *App) workspaceChanges(app *sdk.AppCtx, repo *Repo) (*workspaceChangesResult, *sourceSnapshot, *sourceSnapshot, *RepoWorkspace, error) {
@@ -454,7 +469,7 @@ func (a *App) workspaceChanges(app *sdk.AppCtx, repo *Repo) (*workspaceChangesRe
 	if link == nil {
 		return nil, nil, nil, nil, errors.New("repository has no linked execution workspace; run a command with runtime=workspace first")
 	}
-	code, err := a.snapshotRepoSource(repo)
+	code, err := a.snapshotRepoSource(repo, link.WorkspacePaths, link.SupportPaths)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -467,7 +482,12 @@ func (a *App) workspaceChanges(app *sdk.AppCtx, repo *Repo) (*workspaceChangesRe
 		CodeDigest: code.Digest, WorkspaceDigest: workspace.Digest,
 		CodeChanged:      code.Digest != link.SourceDigest,
 		WorkspaceChanged: workspace.Digest != link.SourceDigest,
+		WorkspacePaths:   append([]string(nil), link.WorkspacePaths...),
+		SupportPaths:     append([]string(nil), link.SupportPaths...),
 		Changes:          diffSourceSnapshots(code, workspace),
+	}
+	for i := range result.Changes {
+		result.Changes[i].Editable = len(link.WorkspacePaths) == 0 && len(link.SupportPaths) == 0 || matchesWorkspacePatterns(result.Changes[i].Path, link.WorkspacePaths)
 	}
 	result.Conflict = result.CodeChanged && result.WorkspaceChanged && code.Digest != workspace.Digest
 	return result, code, workspace, link, nil
@@ -483,6 +503,13 @@ func (a *App) applyWorkspaceChanges(app *sdk.AppCtx, repo *Repo, expectedDigest 
 	}
 	if preview.Conflict || (preview.CodeChanged && preview.CodeDigest != workspace.Digest) {
 		return nil, errors.New("Code changed since this workspace was synchronized; changes were not applied")
+	}
+	if len(link.WorkspacePaths) > 0 || len(link.SupportPaths) > 0 {
+		for _, change := range preview.Changes {
+			if !change.Editable {
+				return nil, fmt.Errorf("workspace changed read-only or out-of-scope path %q; changes were not applied", change.Path)
+			}
+		}
 	}
 	if preview.CodeDigest == workspace.Digest {
 		if err := a.acceptWorkspaceSource(app, link.WorkspaceID, workspace); err != nil {
@@ -502,7 +529,7 @@ func (a *App) applyWorkspaceChanges(app *sdk.AppCtx, repo *Repo, expectedDigest 
 		return nil, errors.New("repository locks are not initialized")
 	}
 	release := a.locks.lock(repoStoreKey(repo))
-	current, currentErr := buildSourceSnapshot(root)
+	current, currentErr := buildScopedSourceSnapshot(root, link.WorkspacePaths, link.SupportPaths)
 	if currentErr == nil && current.Digest != preview.CodeDigest {
 		currentErr = errors.New("Code changed after the workspace preview; changes were not applied")
 	}

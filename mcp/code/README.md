@@ -64,6 +64,13 @@ side changed after the preview. Git metadata, dependency caches, and common
 build outputs are never transferred back. Commit and push only through Code's
 Git tools after reviewing the applied files.
 
+For monorepos, pass `workspace_paths` with editable doublestar globs and
+`support_paths` with read-only build inputs. Code transfers only their union,
+persists the scope with the linked workspace, detects concurrent changes within
+that scope, and refuses to apply workspace modifications to support or
+out-of-scope files. Changing a scope provisions a new workspace only after the
+old workspace is confirmed free of unapplied source changes.
+
 Repository metadata lives in `code.db` (SQLite, migrations under
 `migrations/`). Files are **not** shadowed in the DB — the FileStore
 is the source of truth for content, the DB is for repos only.

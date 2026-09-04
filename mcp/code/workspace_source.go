@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 const (
@@ -39,14 +41,23 @@ type sourceSnapshot struct {
 }
 
 type SourceChange struct {
-	Path   string `json:"path"`
-	Status string `json:"status"`
+	Path     string `json:"path"`
+	Status   string `json:"status"`
+	Editable bool   `json:"editable"`
 }
 
 func buildSourceSnapshot(root string) (*sourceSnapshot, error) {
+	return buildScopedSourceSnapshot(root, nil, nil)
+}
+
+func buildScopedSourceSnapshot(root string, workspacePaths, supportPaths []string) (*sourceSnapshot, error) {
+	workspacePaths, supportPaths, err := normalizeWorkspaceScope(workspacePaths, supportPaths)
+	if err != nil {
+		return nil, err
+	}
 	entries := make(map[string]sourceEntry)
 	var total int64
-	err := filepath.WalkDir(root, func(full string, d fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(root, func(full string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -59,6 +70,9 @@ func buildSourceSnapshot(root string) (*sourceSnapshot, error) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if !d.IsDir() && !workspaceScopeMatches(rel, workspacePaths, supportPaths) {
 			return nil
 		}
 		if len(entries) >= maxWorkspaceSourceFiles {
@@ -100,6 +114,76 @@ func buildSourceSnapshot(root string) (*sourceSnapshot, error) {
 		return nil, err
 	}
 	return finishSourceSnapshot(entries, true)
+}
+
+func normalizeWorkspaceScope(workspacePaths, supportPaths []string) ([]string, []string, error) {
+	if len(workspacePaths)+len(supportPaths) > 128 {
+		return nil, nil, errors.New("workspace scope supports at most 128 path patterns")
+	}
+	normalize := func(values []string) ([]string, error) {
+		seen := map[string]struct{}{}
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			value = filepath.ToSlash(strings.TrimSpace(value))
+			value = strings.TrimPrefix(value, "./")
+			if value == "" || len(value) > 256 || filepath.IsAbs(value) || strings.IndexByte(value, 0) >= 0 {
+				return nil, fmt.Errorf("invalid workspace path pattern %q", value)
+			}
+			for _, segment := range strings.Split(value, "/") {
+				if segment == ".." || segment == "." || segment == "" {
+					return nil, fmt.Errorf("invalid workspace path pattern %q", value)
+				}
+			}
+			if !doublestar.ValidatePattern(value) {
+				return nil, fmt.Errorf("invalid workspace path pattern %q", value)
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+		sort.Strings(out)
+		return out, nil
+	}
+	editable, err := normalize(workspacePaths)
+	if err != nil {
+		return nil, nil, err
+	}
+	support, err := normalize(supportPaths)
+	if err != nil {
+		return nil, nil, err
+	}
+	return editable, support, nil
+}
+
+func workspaceScopeMatches(path string, workspacePaths, supportPaths []string) bool {
+	if len(workspacePaths) == 0 && len(supportPaths) == 0 {
+		return true
+	}
+	return matchesWorkspacePatterns(path, workspacePaths) || matchesWorkspacePatterns(path, supportPaths)
+}
+
+func matchesWorkspacePatterns(path string, patterns []string) bool {
+	for _, pattern := range patterns {
+		matched, _ := doublestar.Match(pattern, filepath.ToSlash(path))
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func finishSourceSnapshot(entries map[string]sourceEntry, makeArchive bool) (*sourceSnapshot, error) {
