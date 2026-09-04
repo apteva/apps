@@ -1,8 +1,18 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"database/sql"
+	"encoding/json"
+	"errors"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -16,14 +26,128 @@ func testDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	schema, err := os.ReadFile("migrations/001_init.sql")
+	migrations, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(string(schema)); err != nil {
-		t.Fatal(err)
+	sort.Strings(migrations)
+	for _, migration := range migrations {
+		schema, err := os.ReadFile(migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(schema)); err != nil {
+			t.Fatalf("apply %s: %v", migration, err)
+		}
 	}
 	return db
+}
+
+func TestPublicationAssetsAndExports(t *testing.T) {
+	db := testDB(t)
+	book, err := createBook(db, "p1", &Book{
+		Title: "Shipping a Small Book", Subtitle: "A practical field guide", AuthorName: "Ada Writer",
+		Description: "A concise guide to publishing reliable books.", Language: "en",
+		Publication: PublicationMetadata{
+			Publisher: "Example Press", Categories: []string{"Technology"}, Keywords: []string{"publishing", "books"},
+			RightsStatement: "All rights reserved.", Territories: []string{"WORLD"}, AIDisclosure: "none",
+			EbookISBN: "9780000000002", PrintISBN: "9780000000003",
+			Prices: []BookPrice{{Marketplace: "US", Currency: "USD", Amount: 4.99}},
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := createNode(db, &BookNode{BookID: book.ID, Type: "chapter", Title: "Begin", BodyMarkdown: "A first paragraph.\n\n- One\n- Two", Position: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverImage := image.NewRGBA(image.Rect(0, 0, 625, 1000))
+	for y := 0; y < 1000; y++ {
+		for x := 0; x < 625; x++ {
+			coverImage.Set(x, y, color.RGBA{R: 24, G: uint8(60 + y%80), B: 145, A: 255})
+		}
+	}
+	var pngBytes bytes.Buffer
+	if err := png.Encode(&pngBytes, coverImage); err != nil {
+		t.Fatal(err)
+	}
+	cover, err := createAsset(db, &BookAsset{BookID: book.ID, Kind: "cover", Filename: "cover.png", ContentType: "image/png", AltText: "Blue book cover", Content: pngBytes.Bytes()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cover.SHA256 == "" || cover.SizeBytes != pngBytes.Len() || cover.WidthPX != 625 || cover.HeightPX != 1000 {
+		t.Fatalf("asset metadata not populated: %#v", cover)
+	}
+	interior, err := createAsset(db, &BookAsset{BookID: book.ID, NodeID: &node.ID, Kind: "interior_image", Filename: "workflow.png", ContentType: "image/png", AltText: "Publication workflow diagram", Caption: "The publication workflow", Content: pngBytes.Bytes()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := updateNode(db, node.ID, map[string]any{"body_markdown": "A first paragraph.\n\n- One\n- Two\n\n![Publication workflow](asset:" + strconv.FormatInt(interior.ID, 10) + ")"}); err != nil {
+		t.Fatal(err)
+	}
+	assets, err := listAssetsWithContent(db, book.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	book, err = getBook(db, book.ID, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if book.Publication.Publisher != "Example Press" || book.Publication.Print.TrimWidthIn != 6 {
+		t.Fatalf("publication metadata not persisted: %#v", book.Publication)
+	}
+	nodes, _ := listNodes(db, book.ID)
+	epub, validation, err := renderEPUB(book, nodes, nil, assets, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validation.Valid || len(epub) < 1000 {
+		t.Fatalf("invalid EPUB: %#v (%d bytes)", validation, len(epub))
+	}
+	pdf, pdfReport, err := renderPrintPDF(book, nodeTree(nodes), nil, assets, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(pdf, []byte("%PDF-")) || !pdfReport.Valid || pdfReport.PageCount < 4 {
+		t.Fatalf("invalid PDF: %#v (%d bytes)", pdfReport, len(pdf))
+	}
+	if outputDir := os.Getenv("BOOKS_QA_OUTPUT_DIR"); outputDir != "" {
+		if err := os.MkdirAll(outputDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(outputDir, "books-publication-sample.pdf"), pdf, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(outputDir, "books-publication-sample.epub"), epub, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pkg, packageReport, err := renderPublicationPackage(book, nodes, nil, assets, "kindle", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !packageReport.Checklist.Ready {
+		t.Fatalf("expected complete checklist after valid EPUB preflight: %#v", packageReport.Checklist)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(pkg), int64(len(pkg)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"shipping-a-small-book.epub": false, "shipping-a-small-book-ebook-cover.png": false, "metadata.json": false, "PUBLICATION-CHECKLIST.md": false}
+	for _, file := range zr.File {
+		if _, ok := want[file.Name]; ok {
+			want[file.Name] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("package missing %s", name)
+		}
+	}
+	if node.ID == 0 {
+		t.Fatal("node was not created")
+	}
 }
 
 func TestBookNodesRevisionsAndExport(t *testing.T) {
@@ -99,6 +223,85 @@ func TestBookNodesRevisionsAndExport(t *testing.T) {
 	first := strings.Index(md, "# First")
 	if second < 0 || first < 0 || second > first {
 		t.Fatalf("export order wrong:\n%s", md)
+	}
+}
+
+func TestNodeTreeForListOmitsBodiesByDefault(t *testing.T) {
+	parentID := int64(1)
+	nodes := []*BookNode{
+		{ID: 1, BookID: 9, Type: "part", Title: "Part One", BodyMarkdown: "private part prose"},
+		{ID: 2, BookID: 9, ParentID: &parentID, Type: "chapter", Title: "Chapter One", BodyMarkdown: "private chapter prose"},
+	}
+	compact, err := json.Marshal(nodeTreeForList(nodes, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(compact, []byte("body_markdown")) || bytes.Contains(compact, []byte("private")) {
+		t.Fatalf("compact tree leaked manuscript bodies: %s", compact)
+	}
+	full, err := json.Marshal(nodeTreeForList(nodes, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(full, []byte("private chapter prose")) {
+		t.Fatalf("include_body tree omitted manuscript body: %s", full)
+	}
+}
+
+func TestEditNodeBodyIsAtomicRevisionedAndConflictSafe(t *testing.T) {
+	db := testDB(t)
+	book, err := createBook(db, "p1", &Book{Title: "Edit Safely"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := createNode(db, &BookNode{BookID: book.ID, Type: "chapter", Title: "First", BodyMarkdown: "Alpha beta.", Position: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalSHA := nodeBodySHA256(node.BodyMarkdown)
+	appended, err := editNodeBody(db, node.ID, "append", "\n\nGamma delta.", "", originalSHA, "extend scene")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appended.ActualWordCount != 4 || appended.BodySHA256 == originalSHA {
+		t.Fatalf("unexpected append result: %#v", appended)
+	}
+	afterAppend, err := getNode(db, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterAppend.BodyMarkdown != "Alpha beta.\n\nGamma delta." {
+		t.Fatalf("append body = %q", afterAppend.BodyMarkdown)
+	}
+
+	if _, err := editNodeBody(db, node.ID, "append", " stale", "", originalSHA, "stale edit"); !errors.Is(err, errNodeEditConflict) {
+		t.Fatalf("stale checksum error = %v, want conflict", err)
+	}
+	afterConflict, err := getNode(db, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterConflict.BodyMarkdown != afterAppend.BodyMarkdown {
+		t.Fatalf("stale edit changed body: %q", afterConflict.BodyMarkdown)
+	}
+
+	replaced, err := editNodeBody(db, node.ID, "replace", "Epsilon", "Gamma", appended.BodySHA256, "tighten wording")
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterReplace, err := getNode(db, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterReplace.BodyMarkdown != "Alpha beta.\n\nEpsilon delta." || replaced.ActualWordCount != 4 {
+		t.Fatalf("replace result=%#v body=%q", replaced, afterReplace.BodyMarkdown)
+	}
+	revisions, err := listRevisions(db, node.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revisions) != 2 {
+		t.Fatalf("revision count = %d, want 2", len(revisions))
 	}
 }
 

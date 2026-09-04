@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,23 +15,25 @@ import (
 )
 
 var errNotFound = sql.ErrNoRows
+var errNodeEditConflict = errors.New("node body changed since it was read")
 
 type Book struct {
-	ID              int64  `json:"id"`
-	ProjectID       string `json:"project_id,omitempty"`
-	Title           string `json:"title"`
-	Subtitle        string `json:"subtitle,omitempty"`
-	AuthorName      string `json:"author_name,omitempty"`
-	Description     string `json:"description,omitempty"`
-	Kind            string `json:"kind"`
-	Language        string `json:"language"`
-	TargetWordCount int    `json:"target_word_count"`
-	Status          string `json:"status"`
-	ActualWordCount int    `json:"actual_word_count"`
-	NodeCount       int    `json:"node_count"`
-	CreatedAt       string `json:"created_at,omitempty"`
-	UpdatedAt       string `json:"updated_at,omitempty"`
-	ArchivedAt      string `json:"archived_at,omitempty"`
+	ID              int64               `json:"id"`
+	ProjectID       string              `json:"project_id,omitempty"`
+	Title           string              `json:"title"`
+	Subtitle        string              `json:"subtitle,omitempty"`
+	AuthorName      string              `json:"author_name,omitempty"`
+	Description     string              `json:"description,omitempty"`
+	Kind            string              `json:"kind"`
+	Language        string              `json:"language"`
+	TargetWordCount int                 `json:"target_word_count"`
+	Status          string              `json:"status"`
+	Publication     PublicationMetadata `json:"publication"`
+	ActualWordCount int                 `json:"actual_word_count"`
+	NodeCount       int                 `json:"node_count"`
+	CreatedAt       string              `json:"created_at,omitempty"`
+	UpdatedAt       string              `json:"updated_at,omitempty"`
+	ArchivedAt      string              `json:"archived_at,omitempty"`
 }
 
 type BookNode struct {
@@ -87,12 +91,17 @@ type BookExport struct {
 }
 
 type ExportResult struct {
-	Export        BookExport `json:"export"`
-	Content       string     `json:"content,omitempty"`
-	ContentType   string     `json:"content_type"`
-	SizeBytes     int        `json:"size_bytes"`
-	StorageFileID string     `json:"storage_file_id,omitempty"`
-	URL           string     `json:"url,omitempty"`
+	Export        BookExport            `json:"export"`
+	Content       string                `json:"content,omitempty"`
+	ContentBase64 string                `json:"content_base64,omitempty"`
+	ContentType   string                `json:"content_type"`
+	SizeBytes     int                   `json:"size_bytes"`
+	Validation    *ValidationReport     `json:"validation,omitempty"`
+	PDFValidation *PDFReport            `json:"pdf_validation,omitempty"`
+	Package       *PackageReport        `json:"package,omitempty"`
+	Checklist     *PublicationChecklist `json:"checklist,omitempty"`
+	StorageFileID string                `json:"storage_file_id,omitempty"`
+	URL           string                `json:"url,omitempty"`
 }
 
 func createBook(db *sql.DB, projectID string, b *Book, createStarter bool) (*Book, error) {
@@ -114,10 +123,14 @@ func createBook(db *sql.DB, projectID string, b *Book, createStarter bool) (*Boo
 	}
 	defer tx.Rollback()
 
+	publication, err := json.Marshal(normalizePublication(b.Publication))
+	if err != nil {
+		return nil, err
+	}
 	res, err := tx.Exec(`
-		INSERT INTO books (project_id, title, subtitle, author_name, description, kind, language, target_word_count, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		projectID, strings.TrimSpace(b.Title), b.Subtitle, b.AuthorName, b.Description, b.Kind, b.Language, b.TargetWordCount, b.Status)
+		INSERT INTO books (project_id, title, subtitle, author_name, description, kind, language, target_word_count, status, publication_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		projectID, strings.TrimSpace(b.Title), b.Subtitle, b.AuthorName, b.Description, b.Kind, b.Language, b.TargetWordCount, b.Status, string(publication))
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +157,7 @@ func listBooks(db *sql.DB, projectID string, includeArchived bool) ([]Book, erro
 	}
 	rows, err := db.Query(`
 		SELECT b.id, b.project_id, b.title, b.subtitle, b.author_name, b.description, b.kind, b.language,
-		       b.target_word_count, b.status, b.created_at, b.updated_at, COALESCE(b.archived_at, ''),
+		       b.target_word_count, b.status, b.publication_json, b.created_at, b.updated_at, COALESCE(b.archived_at, ''),
 		       COALESCE(SUM(CASE WHEN n.deleted_at IS NULL THEN n.actual_word_count ELSE 0 END), 0) AS actual_word_count,
 		       COALESCE(SUM(CASE WHEN n.deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS node_count
 		FROM books b
@@ -159,9 +172,11 @@ func listBooks(db *sql.DB, projectID string, includeArchived bool) ([]Book, erro
 	out := []Book{}
 	for rows.Next() {
 		var b Book
-		if err := rows.Scan(&b.ID, &b.ProjectID, &b.Title, &b.Subtitle, &b.AuthorName, &b.Description, &b.Kind, &b.Language, &b.TargetWordCount, &b.Status, &b.CreatedAt, &b.UpdatedAt, &b.ArchivedAt, &b.ActualWordCount, &b.NodeCount); err != nil {
+		var publicationRaw string
+		if err := rows.Scan(&b.ID, &b.ProjectID, &b.Title, &b.Subtitle, &b.AuthorName, &b.Description, &b.Kind, &b.Language, &b.TargetWordCount, &b.Status, &publicationRaw, &b.CreatedAt, &b.UpdatedAt, &b.ArchivedAt, &b.ActualWordCount, &b.NodeCount); err != nil {
 			return nil, err
 		}
+		decodePublication(publicationRaw, &b.Publication)
 		out = append(out, b)
 	}
 	return out, rows.Err()
@@ -169,9 +184,10 @@ func listBooks(db *sql.DB, projectID string, includeArchived bool) ([]Book, erro
 
 func getBook(db *sql.DB, id int64, projectID string) (*Book, error) {
 	var b Book
+	var publicationRaw string
 	err := db.QueryRow(`
 		SELECT b.id, b.project_id, b.title, b.subtitle, b.author_name, b.description, b.kind, b.language,
-		       b.target_word_count, b.status, b.created_at, b.updated_at, COALESCE(b.archived_at, ''),
+		       b.target_word_count, b.status, b.publication_json, b.created_at, b.updated_at, COALESCE(b.archived_at, ''),
 		       COALESCE(SUM(CASE WHEN n.deleted_at IS NULL THEN n.actual_word_count ELSE 0 END), 0) AS actual_word_count,
 		       COALESCE(SUM(CASE WHEN n.deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS node_count
 		FROM books b
@@ -179,10 +195,13 @@ func getBook(db *sql.DB, id int64, projectID string) (*Book, error) {
 		WHERE b.id = ? AND b.project_id = ?
 		GROUP BY b.id`, id, projectID).Scan(
 		&b.ID, &b.ProjectID, &b.Title, &b.Subtitle, &b.AuthorName, &b.Description, &b.Kind, &b.Language,
-		&b.TargetWordCount, &b.Status, &b.CreatedAt, &b.UpdatedAt, &b.ArchivedAt, &b.ActualWordCount, &b.NodeCount,
+		&b.TargetWordCount, &b.Status, &publicationRaw, &b.CreatedAt, &b.UpdatedAt, &b.ArchivedAt, &b.ActualWordCount, &b.NodeCount,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
+	}
+	if err == nil {
+		decodePublication(publicationRaw, &b.Publication)
 	}
 	return &b, err
 }
@@ -193,6 +212,18 @@ func updateBook(db *sql.DB, id int64, projectID string, fields map[string]any) e
 		"kind": "kind", "language": "language", "status": "status", "target_word_count": "target_word_count",
 	}
 	sets, args := []string{}, []any{}
+	if raw, ok := fields["publication"]; ok {
+		publication, err := publicationFromValue(raw)
+		if err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(normalizePublication(publication))
+		if err != nil {
+			return err
+		}
+		sets = append(sets, "publication_json = ?")
+		args = append(args, string(encoded))
+	}
 	for k, col := range allowed {
 		v, ok := fields[k]
 		if !ok {
@@ -347,6 +378,34 @@ func nodeTree(nodes []*BookNode) []*BookNode {
 	return attach(0)
 }
 
+// nodeTreeForList keeps inventory reads small by excluding manuscript bodies
+// unless a caller explicitly asks for them. It clones the tree so a compact
+// response cannot mutate nodes that another operation still owns.
+func nodeTreeForList(nodes []*BookNode, includeBody bool) []*BookNode {
+	tree := nodeTree(nodes)
+	if includeBody {
+		return tree
+	}
+	var clone func(*BookNode) *BookNode
+	clone = func(node *BookNode) *BookNode {
+		copyNode := *node
+		copyNode.BodyMarkdown = ""
+		copyNode.Children = make([]*BookNode, 0, len(node.Children))
+		for _, child := range node.Children {
+			copyNode.Children = append(copyNode.Children, clone(child))
+		}
+		if len(copyNode.Children) == 0 {
+			copyNode.Children = nil
+		}
+		return &copyNode
+	}
+	out := make([]*BookNode, 0, len(tree))
+	for _, node := range tree {
+		out = append(out, clone(node))
+	}
+	return out
+}
+
 func getNode(db *sql.DB, id int64) (*BookNode, error) {
 	n, err := scanNode(db.QueryRow(`
 		SELECT id, book_id, parent_id, type, title, body_markdown, summary, position, status,
@@ -440,6 +499,93 @@ func updateNode(db *sql.DB, id int64, fields map[string]any) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+type NodeBodyEditResult struct {
+	ID              int64  `json:"id"`
+	Operation       string `json:"operation"`
+	ActualWordCount int    `json:"actual_word_count"`
+	BodySHA256      string `json:"body_sha256"`
+	UpdatedAt       string `json:"updated_at"`
+}
+
+func nodeBodySHA256(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
+}
+
+// editNodeBody applies a bounded edit without asking the caller to resubmit the
+// whole manuscript node. Every successful edit snapshots the previous body and
+// can be guarded by the checksum returned from the preceding read or edit.
+func editNodeBody(db *sql.DB, id int64, operation, content, match, expectedSHA256, changeSummary string) (*NodeBodyEditResult, error) {
+	operation = strings.ToLower(strings.TrimSpace(operation))
+	if id <= 0 {
+		return nil, errors.New("id required")
+	}
+	if operation != "append" && operation != "prepend" && operation != "replace" {
+		return nil, errors.New("operation must be append, prepend, or replace")
+	}
+	if content == "" && operation != "replace" {
+		return nil, errors.New("content required")
+	}
+	if operation == "replace" && match == "" {
+		return nil, errors.New("match required for replace")
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	old, err := getNodeTx(tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if old == nil {
+		return nil, errNotFound
+	}
+	oldSHA256 := nodeBodySHA256(old.BodyMarkdown)
+	if expected := strings.ToLower(strings.TrimSpace(expectedSHA256)); expected != "" && expected != oldSHA256 {
+		return nil, fmt.Errorf("%w: expected %s, found %s", errNodeEditConflict, expected, oldSHA256)
+	}
+
+	nextBody := old.BodyMarkdown
+	switch operation {
+	case "append":
+		nextBody += content
+	case "prepend":
+		nextBody = content + nextBody
+	case "replace":
+		occurrences := strings.Count(nextBody, match)
+		if occurrences != 1 {
+			return nil, fmt.Errorf("replace match must occur exactly once; found %d occurrences", occurrences)
+		}
+		nextBody = strings.Replace(nextBody, match, content, 1)
+	}
+	if nextBody == old.BodyMarkdown {
+		return nil, errors.New("body edit made no change")
+	}
+	if err := insertRevisionTx(tx, old, changeSummary); err != nil {
+		return nil, err
+	}
+	updatedAt := now()
+	actualWordCount := wordCount(nextBody)
+	if _, err := tx.Exec(`
+		UPDATE book_nodes
+		SET body_markdown = ?, actual_word_count = ?, updated_at = ?
+		WHERE id = ?`, nextBody, actualWordCount, updatedAt, id); err != nil {
+		return nil, err
+	}
+	if err := touchBookTx(tx, old.BookID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &NodeBodyEditResult{
+		ID: id, Operation: operation, ActualWordCount: actualWordCount,
+		BodySHA256: nodeBodySHA256(nextBody), UpdatedAt: updatedAt,
+	}, nil
 }
 
 func getNodeTx(tx *sql.Tx, id int64) (*BookNode, error) {
