@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"os"
 	"os/exec"
@@ -153,6 +152,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/jobs", Handler: a.httpJobs},
 		{Method: http.MethodPost, Pattern: "/jobs", Handler: a.httpCreateJob},
+		{Method: http.MethodPost, Pattern: "/ingest", Handler: a.httpCreateIngestion},
 		{Method: http.MethodPost, Pattern: "/probe", Handler: a.httpProbe},
 		{Method: http.MethodPost, Pattern: "/search", Handler: a.httpSearch},
 		{Method: http.MethodGet, Pattern: "/jobs/", Handler: a.httpJob},
@@ -206,7 +206,26 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"url"}),
 			Handler: a.toolDownload,
 		},
-		{Name: "download_status", Description: "Get one download job with recent logs. Args: job_id, _project_id?.", InputSchema: schemaObj(map[string]any{"job_id": map[string]any{"type": "string"}, "_project_id": map[string]any{"type": "string"}}, []string{"job_id"}), Handler: a.toolStatus},
+		{
+			Name:        "ingest_media",
+			Description: "Start complete source ingestion for one media URL. Downloads the primary video/audio, normalized metadata, thumbnail, and preferred manual or automatic captions into Storage. When captions are unavailable, downloads audio and uses Media/Deepgram transcription. Args: url, mode?, quality?, format_id?, audio_format?, source_profile_id?, caption_languages? (array, language prefixes accepted), fallback_transcribe? (default true), folder?, visibility?, tags?. Returns {job}; poll download_status.",
+			InputSchema: schemaObj(map[string]any{
+				"url":                 map[string]any{"type": "string"},
+				"mode":                map[string]any{"type": "string", "enum": []string{"video", "audio"}},
+				"quality":             map[string]any{"type": "string"},
+				"format_id":           map[string]any{"type": "string"},
+				"audio_format":        map[string]any{"type": "string"},
+				"source_profile_id":   map[string]any{"type": "string"},
+				"caption_languages":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"fallback_transcribe": map[string]any{"type": "boolean", "default": true},
+				"folder":              map[string]any{"type": "string"},
+				"visibility":          map[string]any{"type": "string"},
+				"tags":                map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"_project_id":         map[string]any{"type": "string"},
+			}, []string{"url"}),
+			Handler: a.toolIngest,
+		},
+		{Name: "download_status", Description: "Get one download job with recent logs, typed artifacts, and every resulting Storage file ID. Args: job_id, _project_id?.", InputSchema: schemaObj(map[string]any{"job_id": map[string]any{"type": "string"}, "_project_id": map[string]any{"type": "string"}}, []string{"job_id"}), Handler: a.toolStatus},
 		{Name: "download_list", Description: "List recent download jobs. Args: limit?, _project_id?.", InputSchema: schemaObj(map[string]any{"limit": map[string]any{"type": "integer"}, "_project_id": map[string]any{"type": "string"}}, nil), Handler: a.toolList},
 		{Name: "download_cancel", Description: "Cancel a running download job. Args: job_id, _project_id?.", InputSchema: schemaObj(map[string]any{"job_id": map[string]any{"type": "string"}, "_project_id": map[string]any{"type": "string"}}, []string{"job_id"}), Handler: a.toolCancel},
 		{Name: "source_profile_create", Description: "Create an encrypted cookie source profile. Args: name, cookies_netscape, provider? (youtube|patreon|instagram, default youtube), auth_type? (cookies_netscape), test_url?, _project_id?.", InputSchema: schemaObj(map[string]any{"name": map[string]any{"type": "string"}, "cookies_netscape": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string", "enum": []string{"youtube", "patreon", "instagram"}}, "auth_type": map[string]any{"type": "string"}, "test_url": map[string]any{"type": "string"}, "_project_id": map[string]any{"type": "string"}}, []string{"name", "cookies_netscape"}), Handler: a.toolProfileCreate},
@@ -255,10 +274,18 @@ func (a *App) toolProbe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"metadata": slimMetadata(meta)}, nil
+	return map[string]any{"metadata": normalizeMetadata(meta)}, nil
 }
 
 func (a *App) toolDownload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.startDownload(ctx, args, false)
+}
+
+func (a *App) toolIngest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.startDownload(ctx, args, true)
+}
+
+func (a *App) startDownload(ctx *sdk.AppCtx, args map[string]any, ingest bool) (any, error) {
 	rawURL := strArg(args, "url")
 	if rawURL == "" {
 		return nil, errors.New("url is required")
@@ -294,23 +321,26 @@ func (a *App) toolDownload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	req := downloadRequest{
-		ProjectID:         projectID,
-		URL:               rawURL,
-		Mode:              mode,
-		Quality:           quality,
-		FormatID:          strArg(args, "format_id"),
-		SourceProfileID:   strArg(args, "source_profile_id"),
-		StorageFolder:     folder,
-		StorageVisibility: visibility,
-		AudioFormat:       strArg(args, "audio_format"),
-		FFmpegLocation:    a.ffmpegPath,
-		YoutubePlayer:     configString(ctx, "youtube_player_client", "android"),
-		YTDLPExtraArgs:    parseExtraArgs(configString(ctx, "ytdlp_extra_args", "")),
-		ProxyURL:          a.proxyURL(),
-		MaxDownloadBytes:  int64(configInt(ctx, "max_download_mb", 512)) * 1024 * 1024,
-		Tags:              stringSliceArg(args, "tags"),
+		ProjectID:          projectID,
+		URL:                rawURL,
+		Mode:               mode,
+		Quality:            quality,
+		FormatID:           strArg(args, "format_id"),
+		SourceProfileID:    strArg(args, "source_profile_id"),
+		StorageFolder:      folder,
+		StorageVisibility:  visibility,
+		AudioFormat:        strArg(args, "audio_format"),
+		FFmpegLocation:     a.ffmpegPath,
+		YoutubePlayer:      configString(ctx, "youtube_player_client", "android"),
+		YTDLPExtraArgs:     parseExtraArgs(configString(ctx, "ytdlp_extra_args", "")),
+		ProxyURL:           a.proxyURL(),
+		MaxDownloadBytes:   int64(configInt(ctx, "max_download_mb", 512)) * 1024 * 1024,
+		Tags:               stringSliceArg(args, "tags"),
+		Ingest:             ingest,
+		CaptionLanguages:   stringSliceArg(args, "caption_languages"),
+		FallbackTranscribe: boolArg(args, "fallback_transcribe", true),
 	}
-	j := downloadJob{ID: id, ProjectID: projectID, URL: rawURL, Status: statusQueued, Stage: stageQueued, Mode: mode, Quality: quality, FormatID: req.FormatID, SourceProfileID: req.SourceProfileID, StorageFolder: folder, StorageVisibility: visibility}
+	j := downloadJob{ID: id, ProjectID: projectID, URL: rawURL, Status: statusQueued, Stage: stageQueued, Mode: mode, Ingest: ingest, Quality: quality, FormatID: req.FormatID, SourceProfileID: req.SourceProfileID, StorageFolder: folder, StorageVisibility: visibility}
 	if err := insertDownload(context.Background(), ctx.AppDB(), j); err != nil {
 		return nil, err
 	}
@@ -362,6 +392,23 @@ func (a *App) runDownload(runCtx context.Context, ctx *sdk.AppCtx, id string, re
 			a.finishError(ctx, req.ProjectID, id, err)
 			return
 		}
+	}
+	var metadata *sourceMetadata
+	if req.Ingest {
+		a.setDownloadStage(ctx, req.ProjectID, id, stageProbing, 1)
+		raw, err := probeMedia(runCtx, a.runner, a.ytdlpPath, req.URL, cookieFile, req.YTDLPExtraArgs, req.ProxyURL)
+		if err != nil {
+			a.finishError(ctx, req.ProjectID, id, fmt.Errorf("probe source metadata: %w", err))
+			return
+		}
+		normalized := normalizeMetadata(raw)
+		req.CaptionTracks = selectCaptionTracks(raw, req.CaptionLanguages)
+		if err := setDownloadMetadata(context.Background(), db, id, normalized); err != nil {
+			a.finishError(ctx, req.ProjectID, id, err)
+			return
+		}
+		metadata = &normalized
+		a.setDownloadStage(ctx, req.ProjectID, id, stageDownloading, 3)
 	}
 
 	printed := make([]string, 0, 4)
@@ -427,8 +474,14 @@ func (a *App) runDownload(runCtx context.Context, ctx *sdk.AppCtx, id string, re
 		a.finishError(ctx, req.ProjectID, id, err)
 		return
 	}
-	if err := a.uploadOutput(runCtx, ctx, id, req, output); err != nil {
-		a.finishError(ctx, req.ProjectID, id, err)
+	var completionErr error
+	if req.Ingest {
+		completionErr = a.completeIngestion(runCtx, ctx, id, req, output, jobDir, cookieFile, *metadata)
+	} else {
+		completionErr = a.uploadOutput(runCtx, ctx, id, req, output)
+	}
+	if completionErr != nil {
+		a.finishError(ctx, req.ProjectID, id, completionErr)
 		return
 	}
 	appendLog(context.Background(), db, id, "info", "download completed")
@@ -454,42 +507,54 @@ func (a *App) setDownloadStage(ctx *sdk.AppCtx, projectID, id, stage string, pro
 }
 
 func (a *App) uploadOutput(runCtx context.Context, ctx *sdk.AppCtx, id string, req downloadRequest, path string) error {
-	if err := runCtx.Err(); err != nil {
-		return err
-	}
-	st, err := os.Stat(path)
+	kind := req.Mode
+	artifact, err := a.uploadArtifactFile(runCtx, ctx, id, req, localArtifact{Kind: kind, Path: path}, true)
 	if err != nil {
 		return err
 	}
+	return completeDownload(context.Background(), ctx.AppDB(), id, artifact.Name, artifact.Bytes, artifact.StorageFileID, artifact.StorageURL)
+}
+
+func (a *App) uploadArtifactFile(runCtx context.Context, ctx *sdk.AppCtx, id string, req downloadRequest, local localArtifact, reportProgress bool) (downloadArtifact, error) {
+	if err := runCtx.Err(); err != nil {
+		return downloadArtifact{}, err
+	}
+	st, err := os.Stat(local.Path)
+	if err != nil {
+		return downloadArtifact{}, err
+	}
 	if req.MaxDownloadBytes > 0 && st.Size() > req.MaxDownloadBytes {
-		return fmt.Errorf("output is %d bytes, over max_download_mb", st.Size())
+		return downloadArtifact{}, fmt.Errorf("%s artifact is %d bytes, over max_download_mb", local.Kind, st.Size())
 	}
-	name := filepath.Base(path)
-	ctype := mime.TypeByExtension(filepath.Ext(name))
-	if ctype == "" {
-		ctype = "application/octet-stream"
+	name := filepath.Base(local.Path)
+	ctype := artifactContentType(local.Path)
+	tags := append([]string{"media-downloader", local.Kind, "artifact:" + local.Kind}, req.Tags...)
+	if reportProgress {
+		a.setDownloadStage(ctx, req.ProjectID, id, stagePreparing, 88)
 	}
-	tags := append([]string{"media-downloader", req.Mode}, req.Tags...)
-	a.setDownloadStage(ctx, req.ProjectID, id, stagePreparing, 88)
 	lastHashProgress := -1.0
 	lastUploadProgress := -1.0
-	got, err := uploadFileMultipart(runCtx, req.ProjectID, path, name, ctype, req.StorageFolder, req.StorageVisibility, tags,
+	got, err := uploadFileMultipart(runCtx, req.ProjectID, local.Path, name, ctype, req.StorageFolder, req.StorageVisibility, tags,
 		func(progress float64) {
-			if progress-lastHashProgress >= 0.1 || progress >= 1 {
+			if reportProgress && (progress-lastHashProgress >= 0.1 || progress >= 1) {
 				lastHashProgress = progress
 				a.setDownloadStage(ctx, req.ProjectID, id, stagePreparing, 88+progress*4)
 			}
 		},
 		func(progress float64) {
-			if progress-lastUploadProgress >= 0.01 || progress >= 1 {
+			if reportProgress && (progress-lastUploadProgress >= 0.01 || progress >= 1) {
 				lastUploadProgress = progress
 				a.setDownloadStage(ctx, req.ProjectID, id, stageUploading, 92+progress*7)
 			}
 		})
 	if err != nil {
-		return err
+		return downloadArtifact{}, err
 	}
-	return completeDownload(context.Background(), ctx.AppDB(), id, name, st.Size(), got.ID, got.URL)
+	artifact := downloadArtifact{Kind: local.Kind, StorageFileID: got.ID, StorageURL: got.URL, Name: name, ContentType: ctype, Bytes: st.Size(), Language: local.Language, CaptionSource: local.CaptionSource}
+	if err := insertDownloadArtifact(context.Background(), ctx.AppDB(), id, artifact); err != nil {
+		return downloadArtifact{}, err
+	}
+	return artifact, nil
 }
 
 type storageUploadResult struct {
@@ -699,6 +764,7 @@ func (a *App) emitDownloadJob(ctx *sdk.AppCtx, topic string, job downloadJob) {
 		"url":                job.URL,
 		"title":              job.Title,
 		"mode":               job.Mode,
+		"ingest":             job.Ingest,
 		"quality":            job.Quality,
 		"format_id":          job.FormatID,
 		"extractor":          job.Extractor,
@@ -706,9 +772,13 @@ func (a *App) emitDownloadJob(ctx *sdk.AppCtx, topic string, job downloadJob) {
 		"storage_folder":     job.StorageFolder,
 		"storage_visibility": job.StorageVisibility,
 		"storage_file_id":    job.StorageFileID,
+		"storage_file_ids":   job.StorageFileIDs,
 		"storage_url":        job.StorageURL,
 		"output_name":        job.OutputName,
 		"output_bytes":       job.OutputBytes,
+		"metadata":           job.Metadata,
+		"artifacts":          job.Artifacts,
+		"warnings":           job.Warnings,
 		"updated_at":         job.UpdatedAt,
 		"error":              job.Error,
 	})
@@ -800,19 +870,6 @@ func (a *App) proxyURL() string {
 	return a.proxy.url
 }
 
-func slimMetadata(meta map[string]any) map[string]any {
-	out := map[string]any{}
-	for _, k := range []string{"id", "title", "extractor", "extractor_key", "webpage_url", "duration", "live_status", "age_limit", "channel", "uploader", "upload_date"} {
-		if v, ok := meta[k]; ok {
-			out[k] = v
-		}
-	}
-	if formats, ok := meta["formats"].([]any); ok {
-		out["format_count"] = len(formats)
-	}
-	return out
-}
-
 func (a *App) httpJobs(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project_id")
 	if projectID == "" && a.ctx != nil {
@@ -849,6 +906,17 @@ func (a *App) httpCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 	withHTTPProject(r, args)
 	out, err := a.toolDownload(a.ctx.WithProject(strArg(args, "_project_id")), args)
+	writeJSON(w, out, err)
+}
+
+func (a *App) httpCreateIngestion(w http.ResponseWriter, r *http.Request) {
+	args, err := readJSONArgs(w, r)
+	if err != nil {
+		writeJSON(w, nil, err)
+		return
+	}
+	withHTTPProject(r, args)
+	out, err := a.toolIngest(a.ctx.WithProject(strArg(args, "_project_id")), args)
 	writeJSON(w, out, err)
 }
 

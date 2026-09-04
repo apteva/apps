@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 )
 
@@ -83,23 +84,30 @@ func insertDownload(ctx context.Context, db *sql.DB, j downloadJob) error {
 	ts := nowRFC3339()
 	_, err := db.ExecContext(ctx, `
 INSERT INTO downloads
-  (id, project_id, url, status, stage, progress, mode, quality, format_id, source_profile_id, storage_folder, storage_visibility, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		j.ID, j.ProjectID, j.URL, j.Status, j.Stage, j.Mode, j.Quality, j.FormatID, j.SourceProfileID, j.StorageFolder, j.StorageVisibility, ts, ts)
+  (id, project_id, url, status, stage, progress, mode, ingest, quality, format_id, source_profile_id, storage_folder, storage_visibility, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.ID, j.ProjectID, j.URL, j.Status, j.Stage, j.Mode, j.Ingest, j.Quality, j.FormatID, j.SourceProfileID, j.StorageFolder, j.StorageVisibility, ts, ts)
 	return err
 }
 
 func getDownload(ctx context.Context, db *sql.DB, projectID, id string) (downloadJob, error) {
 	var j downloadJob
+	var metadataJSON, warningsJSON string
 	err := db.QueryRowContext(ctx, `
-SELECT id, project_id, url, status, stage, progress, COALESCE(title,''), COALESCE(extractor,''), mode, quality, COALESCE(format_id,''), COALESCE(source_profile_id,''), storage_folder, storage_visibility,
-       COALESCE(storage_file_id,0), COALESCE(storage_url,''), COALESCE(output_name,''), output_bytes, COALESCE(error,''), created_at, COALESCE(started_at,''), COALESCE(completed_at,''), updated_at
+SELECT id, project_id, url, status, stage, progress, COALESCE(title,''), COALESCE(extractor,''), mode, ingest, quality, COALESCE(format_id,''), COALESCE(source_profile_id,''), storage_folder, storage_visibility,
+       COALESCE(storage_file_id,0), COALESCE(storage_url,''), COALESCE(output_name,''), output_bytes, COALESCE(metadata_json,''), COALESCE(warnings_json,'[]'), COALESCE(error,''), created_at, COALESCE(started_at,''), COALESCE(completed_at,''), updated_at
 FROM downloads
 WHERE id = ? AND project_id = ?`, id, projectID).
-		Scan(&j.ID, &j.ProjectID, &j.URL, &j.Status, &j.Stage, &j.Progress, &j.Title, &j.Extractor, &j.Mode, &j.Quality, &j.FormatID, &j.SourceProfileID, &j.StorageFolder, &j.StorageVisibility, &j.StorageFileID, &j.StorageURL, &j.OutputName, &j.OutputBytes, &j.Error, &j.CreatedAt, &j.StartedAt, &j.CompletedAt, &j.UpdatedAt)
+		Scan(&j.ID, &j.ProjectID, &j.URL, &j.Status, &j.Stage, &j.Progress, &j.Title, &j.Extractor, &j.Mode, &j.Ingest, &j.Quality, &j.FormatID, &j.SourceProfileID, &j.StorageFolder, &j.StorageVisibility, &j.StorageFileID, &j.StorageURL, &j.OutputName, &j.OutputBytes, &metadataJSON, &warningsJSON, &j.Error, &j.CreatedAt, &j.StartedAt, &j.CompletedAt, &j.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return j, errNotFound
 	}
+	if err != nil {
+		return j, err
+	}
+	decodeDownloadDetails(&j, metadataJSON, warningsJSON)
+	j.Artifacts, err = listDownloadArtifacts(ctx, db, j.ID)
+	j.StorageFileIDs = artifactStorageFileIDs(j.Artifacts)
 	return j, err
 }
 
@@ -108,8 +116,8 @@ func listDownloads(ctx context.Context, db *sql.DB, projectID string, limit int)
 		limit = 25
 	}
 	rows, err := db.QueryContext(ctx, `
-SELECT id, project_id, url, status, stage, progress, COALESCE(title,''), COALESCE(extractor,''), mode, quality, COALESCE(format_id,''), COALESCE(source_profile_id,''), storage_folder, storage_visibility,
-       COALESCE(storage_file_id,0), COALESCE(storage_url,''), COALESCE(output_name,''), output_bytes, COALESCE(error,''), created_at, COALESCE(started_at,''), COALESCE(completed_at,''), updated_at
+SELECT id, project_id, url, status, stage, progress, COALESCE(title,''), COALESCE(extractor,''), mode, ingest, quality, COALESCE(format_id,''), COALESCE(source_profile_id,''), storage_folder, storage_visibility,
+       COALESCE(storage_file_id,0), COALESCE(storage_url,''), COALESCE(output_name,''), output_bytes, COALESCE(metadata_json,''), COALESCE(warnings_json,'[]'), COALESCE(error,''), created_at, COALESCE(started_at,''), COALESCE(completed_at,''), updated_at
 FROM downloads
 WHERE project_id = ?
 ORDER BY updated_at DESC
@@ -122,12 +130,27 @@ LIMIT ?`, projectID, limit)
 	var out []downloadJob
 	for rows.Next() {
 		var j downloadJob
-		if err := rows.Scan(&j.ID, &j.ProjectID, &j.URL, &j.Status, &j.Stage, &j.Progress, &j.Title, &j.Extractor, &j.Mode, &j.Quality, &j.FormatID, &j.SourceProfileID, &j.StorageFolder, &j.StorageVisibility, &j.StorageFileID, &j.StorageURL, &j.OutputName, &j.OutputBytes, &j.Error, &j.CreatedAt, &j.StartedAt, &j.CompletedAt, &j.UpdatedAt); err != nil {
+		var metadataJSON, warningsJSON string
+		if err := rows.Scan(&j.ID, &j.ProjectID, &j.URL, &j.Status, &j.Stage, &j.Progress, &j.Title, &j.Extractor, &j.Mode, &j.Ingest, &j.Quality, &j.FormatID, &j.SourceProfileID, &j.StorageFolder, &j.StorageVisibility, &j.StorageFileID, &j.StorageURL, &j.OutputName, &j.OutputBytes, &metadataJSON, &warningsJSON, &j.Error, &j.CreatedAt, &j.StartedAt, &j.CompletedAt, &j.UpdatedAt); err != nil {
 			return nil, err
 		}
+		decodeDownloadDetails(&j, metadataJSON, warningsJSON)
 		out = append(out, j)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Artifacts, err = listDownloadArtifacts(ctx, db, out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		out[i].StorageFileIDs = artifactStorageFileIDs(out[i].Artifacts)
+	}
+	return out, nil
 }
 
 func setDownloadRunning(ctx context.Context, db *sql.DB, id string) error {
@@ -150,6 +173,76 @@ func updateDownloadStage(ctx context.Context, db *sql.DB, id, stage string, prog
 func setDownloadProbe(ctx context.Context, db *sql.DB, id, title, extractor string) error {
 	_, err := db.ExecContext(ctx, `UPDATE downloads SET title = ?, extractor = ?, updated_at = ? WHERE id = ?`, title, extractor, nowRFC3339(), id)
 	return err
+}
+
+func setDownloadMetadata(ctx context.Context, db *sql.DB, id string, metadata sourceMetadata) error {
+	body, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `UPDATE downloads SET title = ?, extractor = ?, metadata_json = ?, updated_at = ? WHERE id = ?`, metadata.Title, metadata.Extractor, string(body), nowRFC3339(), id)
+	return err
+}
+
+func addDownloadWarning(ctx context.Context, db *sql.DB, id, warning string) error {
+	var raw string
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(warnings_json,'[]') FROM downloads WHERE id = ?`, id).Scan(&raw); err != nil {
+		return err
+	}
+	warnings := []string{}
+	_ = json.Unmarshal([]byte(raw), &warnings)
+	warnings = append(warnings, warning)
+	body, _ := json.Marshal(warnings)
+	_, err := db.ExecContext(ctx, `UPDATE downloads SET warnings_json = ?, updated_at = ? WHERE id = ?`, string(body), nowRFC3339(), id)
+	return err
+}
+
+func insertDownloadArtifact(ctx context.Context, db *sql.DB, downloadID string, artifact downloadArtifact) error {
+	_, err := db.ExecContext(ctx, `
+INSERT INTO download_artifacts
+  (download_id, kind, storage_file_id, storage_url, name, content_type, bytes, language, caption_source, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		downloadID, artifact.Kind, artifact.StorageFileID, artifact.StorageURL, artifact.Name, artifact.ContentType, artifact.Bytes, artifact.Language, artifact.CaptionSource, nowRFC3339())
+	return err
+}
+
+func listDownloadArtifacts(ctx context.Context, db *sql.DB, downloadID string) ([]downloadArtifact, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT kind, storage_file_id, COALESCE(storage_url,''), name, COALESCE(content_type,''), bytes, COALESCE(language,''), COALESCE(caption_source,'')
+FROM download_artifacts WHERE download_id = ? ORDER BY id`, downloadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]downloadArtifact, 0)
+	for rows.Next() {
+		var artifact downloadArtifact
+		if err := rows.Scan(&artifact.Kind, &artifact.StorageFileID, &artifact.StorageURL, &artifact.Name, &artifact.ContentType, &artifact.Bytes, &artifact.Language, &artifact.CaptionSource); err != nil {
+			return nil, err
+		}
+		out = append(out, artifact)
+	}
+	return out, rows.Err()
+}
+
+func artifactStorageFileIDs(artifacts []downloadArtifact) []int64 {
+	ids := make([]int64, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		if artifact.StorageFileID != 0 {
+			ids = append(ids, artifact.StorageFileID)
+		}
+	}
+	return ids
+}
+
+func decodeDownloadDetails(job *downloadJob, metadataJSON, warningsJSON string) {
+	if metadataJSON != "" {
+		var metadata sourceMetadata
+		if json.Unmarshal([]byte(metadataJSON), &metadata) == nil {
+			job.Metadata = &metadata
+		}
+	}
+	_ = json.Unmarshal([]byte(warningsJSON), &job.Warnings)
 }
 
 func completeDownload(ctx context.Context, db *sql.DB, id, outputName string, outputBytes, storageFileID int64, storageURL string) error {
@@ -202,8 +295,8 @@ WHERE download_id = ?
 
 func interruptActiveDownloads(ctx context.Context, db *sql.DB, reason string) ([]downloadJob, error) {
 	rows, err := db.QueryContext(ctx, `
-SELECT id, project_id, url, status, stage, progress, COALESCE(title,''), COALESCE(extractor,''), mode, quality, COALESCE(format_id,''), COALESCE(source_profile_id,''), storage_folder, storage_visibility,
-       COALESCE(storage_file_id,0), COALESCE(storage_url,''), COALESCE(output_name,''), output_bytes, COALESCE(error,''), created_at, COALESCE(started_at,''), COALESCE(completed_at,''), updated_at
+SELECT id, project_id, url, status, stage, progress, COALESCE(title,''), COALESCE(extractor,''), mode, ingest, quality, COALESCE(format_id,''), COALESCE(source_profile_id,''), storage_folder, storage_visibility,
+       COALESCE(storage_file_id,0), COALESCE(storage_url,''), COALESCE(output_name,''), output_bytes, COALESCE(metadata_json,''), COALESCE(warnings_json,'[]'), COALESCE(error,''), created_at, COALESCE(started_at,''), COALESCE(completed_at,''), updated_at
 FROM downloads
 WHERE status IN (?, ?)`, statusQueued, statusRunning)
 	if err != nil {
@@ -214,9 +307,11 @@ WHERE status IN (?, ?)`, statusQueued, statusRunning)
 	var jobs []downloadJob
 	for rows.Next() {
 		var j downloadJob
-		if err := rows.Scan(&j.ID, &j.ProjectID, &j.URL, &j.Status, &j.Stage, &j.Progress, &j.Title, &j.Extractor, &j.Mode, &j.Quality, &j.FormatID, &j.SourceProfileID, &j.StorageFolder, &j.StorageVisibility, &j.StorageFileID, &j.StorageURL, &j.OutputName, &j.OutputBytes, &j.Error, &j.CreatedAt, &j.StartedAt, &j.CompletedAt, &j.UpdatedAt); err != nil {
+		var metadataJSON, warningsJSON string
+		if err := rows.Scan(&j.ID, &j.ProjectID, &j.URL, &j.Status, &j.Stage, &j.Progress, &j.Title, &j.Extractor, &j.Mode, &j.Ingest, &j.Quality, &j.FormatID, &j.SourceProfileID, &j.StorageFolder, &j.StorageVisibility, &j.StorageFileID, &j.StorageURL, &j.OutputName, &j.OutputBytes, &metadataJSON, &warningsJSON, &j.Error, &j.CreatedAt, &j.StartedAt, &j.CompletedAt, &j.UpdatedAt); err != nil {
 			return nil, err
 		}
+		decodeDownloadDetails(&j, metadataJSON, warningsJSON)
 		j.Status = statusFailed
 		j.Stage = stageFailed
 		j.Error = reason

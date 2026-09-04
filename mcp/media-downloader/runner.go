@@ -136,6 +136,25 @@ func buildDownloadArgs(req downloadRequest, jobDir, cookieFile string) []string 
 		args = append(args, "--max-filesize", strconv.FormatInt(req.MaxDownloadBytes, 10))
 	}
 	args = append(args, "--no-playlist")
+	if req.Ingest {
+		args = append(args, "--write-thumbnail")
+		if len(req.CaptionTracks) > 0 {
+			manual, automatic := false, false
+			languages := make([]string, 0, len(req.CaptionTracks))
+			for _, track := range req.CaptionTracks {
+				languages = append(languages, track.Language)
+				manual = manual || track.Source == "manual"
+				automatic = automatic || track.Source == "automatic"
+			}
+			if manual {
+				args = append(args, "--write-subs")
+			}
+			if automatic {
+				args = append(args, "--write-auto-subs")
+			}
+			args = append(args, "--sub-langs", strings.Join(languages, ","), "--sub-format", "vtt/best")
+		}
+	}
 	if cookieFile != "" {
 		args = append(args, "--cookies", cookieFile)
 	}
