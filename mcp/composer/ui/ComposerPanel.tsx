@@ -29,6 +29,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import { previewCameraAt, previewCropStyle } from "./composer-preview";
 
 interface NativePanelProps {
   appName: string;
@@ -265,7 +266,7 @@ interface TextClipDraft {
     type: "text";
     text: string;
     font?: { family?: string; size?: number; weight?: number; color?: string; opacity?: number };
-    style?: { letter_spacing?: number; line_height?: number; transform?: "none" | "uppercase" | "lowercase" | "capitalize" };
+    style?: { letter_spacing?: number; line_height?: number; transform?: "none" | "uppercase" | "lowercase" | "capitalize"; wrap?: boolean; auto_size?: boolean; max_width?: number; max_height?: number; min_font_size?: number; padding?: number; safe_area?: number };
     stroke?: { color?: string; width?: number; opacity?: number };
     shadow?: { color?: string; offset_x?: number; offset_y?: number; blur?: number; opacity?: number };
     align?: { horizontal?: "left" | "center" | "right"; vertical?: "top" | "center" | "bottom" };
@@ -2632,7 +2633,6 @@ function PreviewStage({
 function previewLayerStyle(clip: ClipDraft, base: boolean): React.CSSProperties {
   const layout = clip.layout || {};
   const hasPlacement = layout.width !== undefined || layout.height !== undefined || layout.x !== undefined || layout.y !== undefined || layout.anchor !== undefined || layout.position !== undefined;
-  if (!hasPlacement) return { inset: 0, width: "100%", height: "100%" };
   const measure = (value: number | undefined, fallback: string) => value === undefined || value <= 0 ? fallback : value <= 1 ? `${value * 100}%` : `${value}px`;
   const width = measure(layout.width || clip.width, "100%");
   const height = measure(layout.height || clip.height, "100%");
@@ -2643,9 +2643,10 @@ function previewLayerStyle(clip: ClipDraft, base: boolean): React.CSSProperties 
     height,
     opacity: layout.opacity ?? clip.opacity ?? 1,
     borderRadius: layout.border_radius || clip.border_radius || 0,
-    boxShadow: layout.shadow || clip.shadow ? "0 10px 28px rgba(0,0,0,.45)" : undefined,
+    boxShadow: layout.shadow || clip.shadow ? "10px 10px 10px rgba(0,0,0,.45)" : undefined,
     overflow: "hidden",
   };
+  if (!hasPlacement) return { ...style, inset: 0, width: "100%", height: "100%" };
   if (layout.x !== undefined || layout.y !== undefined) {
     style.left = measure(layout.x, "0");
     style.top = measure(layout.y, "0");
@@ -2677,16 +2678,7 @@ function PreviewVisualLayer({ clip, asset, playing, playhead, muted, base }: { c
   const fit = clip.layout?.fit || clip.fit || "cover";
   const camera = previewCameraAt(clip.transform, localTime);
   const crop = clip.crop;
-  const mediaStyle: React.CSSProperties = {
-    position: "absolute",
-    width: crop ? `${100 / crop.width}%` : "100%",
-    height: crop ? `${100 / crop.height}%` : "100%",
-    left: crop ? `${-100 * crop.x / crop.width}%` : 0,
-    top: crop ? `${-100 * crop.y / crop.height}%` : 0,
-    objectFit: fit === "stretch" ? "fill" : fit === "contain" || fit === "none" ? "contain" : "cover",
-    transform: `scale(${camera.scale})`,
-    transformOrigin: `${camera.x * 100}% ${camera.y * 100}%`,
-  };
+  const mediaStyle = previewCropStyle(crop, fit, camera) as React.CSSProperties;
   return (
     <div className="absolute" style={previewLayerStyle(clip, base)}>
       {!url ? <div className="w-full h-full border border-dashed border-border bg-bg-card flex items-center justify-center text-xs text-text-dim">{clip.ai?.status === "generating" ? "Generating..." : "Source missing"}</div>
@@ -2694,43 +2686,6 @@ function PreviewVisualLayer({ clip, asset, playing, playhead, muted, base }: { c
           : <video ref={mediaRef} src={url} muted={muted} playsInline style={mediaStyle} />}
     </div>
   );
-}
-
-function previewCameraAt(transform: SourceTransform | undefined, time: number): { x: number; y: number; scale: number } {
-  let current = { time: 0, x: transform?.x ?? 0.5, y: transform?.y ?? 0.5, scale: transform?.scale || 1, easing: "linear" as TransformKeyframe["easing"] };
-  const points = [current];
-  for (const keyframe of transform?.keyframes || []) {
-    current = {
-      time: keyframe.time,
-      x: keyframe.x ?? current.x,
-      y: keyframe.y ?? current.y,
-      scale: keyframe.scale || current.scale,
-      easing: keyframe.easing || "linear",
-    };
-    if (current.time === 0) points[0] = current;
-    else points.push(current);
-  }
-  if (points.length === 1 || time <= points[0].time) return points[0];
-  for (let index = 1; index < points.length; index++) {
-    const next = points[index];
-    const previous = points[index - 1];
-    if (time > next.time) continue;
-    const raw = Math.max(0, Math.min(1, (time - previous.time) / Math.max(0.001, next.time - previous.time)));
-    const progress = previewEase(raw, next.easing);
-    return {
-      x: previous.x + (next.x - previous.x) * progress,
-      y: previous.y + (next.y - previous.y) * progress,
-      scale: previous.scale + (next.scale - previous.scale) * progress,
-    };
-  }
-  return points[points.length - 1];
-}
-
-function previewEase(progress: number, easing: TransformKeyframe["easing"]): number {
-  if (easing === "ease_in") return progress * progress;
-  if (easing === "ease_out") return 1 - (1 - progress) * (1 - progress);
-  if (easing === "ease_in_out") return progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2;
-  return progress;
 }
 
 function SyncedAudio({ src, playing, playhead, start, volume, loop, sourceStart = 0, sourceEnd, playbackRate = 1 }: { src: string; playing: boolean; playhead: number; start: number; volume: number; loop?: boolean; sourceStart?: number; sourceEnd?: number; playbackRate?: number }) {
@@ -2767,13 +2722,23 @@ function previewTextStyle(text: TextClipDraft): React.CSSProperties {
     color: text.asset.font?.color || "#ffffff",
     fontSize: Math.max(12, Math.min(96, text.asset.font?.size || 64)) / 2,
     fontWeight: text.asset.font?.weight || 800,
+    opacity: text.asset.font?.opacity ?? 1,
     textTransform: text.asset.style?.transform === "uppercase" ? "uppercase" : text.asset.style?.transform === "lowercase" ? "lowercase" : undefined,
     letterSpacing: text.asset.style?.letter_spacing ? `${text.asset.style.letter_spacing}px` : undefined,
     textAlign: align.horizontal || "center",
     WebkitTextStroke: `${text.asset.stroke?.width || 3}px ${text.asset.stroke?.color || "#000000"}`,
-    textShadow: text.asset.shadow ? `0 2px 14px ${text.asset.shadow.color || "#ff2f6d"}` : "0 2px 8px rgba(0,0,0,.8)",
+    textShadow: text.asset.shadow ? `${(text.asset.shadow.offset_x || 0) / 2}px ${(text.asset.shadow.offset_y || 2) / 2}px 0 ${text.asset.shadow.color || "#ff2f6d"}` : "0 1px 0 rgba(0,0,0,.8)",
     whiteSpace: "pre-wrap",
-    maxWidth: "84%",
+    overflowWrap: text.asset.style?.wrap ? "anywhere" : undefined,
+    lineHeight: text.asset.style?.line_height || 1.22,
+    padding: text.asset.style?.padding ? `${text.asset.style.padding / 2}px` : undefined,
+    boxSizing: "border-box",
+    maxWidth: text.asset.style?.max_width
+      ? (text.asset.style.max_width <= 1 ? `${text.asset.style.max_width * 100}%` : `${text.asset.style.max_width / 2}px`)
+      : "84%",
+    maxHeight: text.asset.style?.max_height
+      ? (text.asset.style.max_height <= 1 ? `${text.asset.style.max_height * 100}%` : `${text.asset.style.max_height / 2}px`)
+      : undefined,
   };
 }
 
@@ -3415,6 +3380,26 @@ function ClipEditorModal({
               <Field label="Letter spacing">
                 <input type="number" min={0} max={40} value={textClip.asset.style?.letter_spacing || 0} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, style: { ...(textClip.asset.style || {}), letter_spacing: Number(e.target.value) || undefined } } })} className={field} />
               </Field>
+              <Field label="Line height">
+                <input type="number" min={0.5} max={4} step={0.05} value={textClip.asset.style?.line_height || 1.22} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, style: { ...(textClip.asset.style || {}), line_height: Number(e.target.value) || undefined } } })} className={field} />
+              </Field>
+              <Field label="Max width">
+                <input type="number" min={0} step={0.05} value={textClip.asset.style?.max_width || 0.84} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, style: { ...(textClip.asset.style || {}), max_width: Number(e.target.value) || undefined } } })} className={field} />
+              </Field>
+              <Field label="Max height">
+                <input type="number" min={0} step={0.05} value={textClip.asset.style?.max_height || 0.8} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, style: { ...(textClip.asset.style || {}), max_height: Number(e.target.value) || undefined } } })} className={field} />
+              </Field>
+              <Field label="Minimum font size">
+                <input type="number" min={8} max={512} step={1} value={textClip.asset.style?.min_font_size || 12} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, style: { ...(textClip.asset.style || {}), min_font_size: Number(e.target.value) || undefined } } })} className={field} />
+              </Field>
+              <Field label="Padding">
+                <input type="number" min={0} step={1} value={textClip.asset.style?.padding || 0} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, style: { ...(textClip.asset.style || {}), padding: Number(e.target.value) || undefined } } })} className={field} />
+              </Field>
+              <Field label="Safe area">
+                <input type="number" min={0} max={0.49} step={0.01} value={textClip.asset.style?.safe_area || 0.05} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, style: { ...(textClip.asset.style || {}), safe_area: Number(e.target.value) || undefined } } })} className={field} />
+              </Field>
+              <label className="flex items-center gap-2 text-xs text-text-muted"><input type="checkbox" checked={!!textClip.asset.style?.wrap} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, style: { ...(textClip.asset.style || {}), wrap: e.target.checked || undefined } } })} />Wrap text</label>
+              <label className="flex items-center gap-2 text-xs text-text-muted"><input type="checkbox" checked={!!textClip.asset.style?.auto_size} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, style: { ...(textClip.asset.style || {}), auto_size: e.target.checked || undefined } } })} />Auto-size to fit</label>
               <Field label="Stroke width">
                 <input type="number" min={0} max={20} value={textClip.asset.stroke?.width ?? 3} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, stroke: { ...(textClip.asset.stroke || {}), width: Number(e.target.value) } } })} className={field} />
               </Field>
@@ -4466,6 +4451,12 @@ function RenderPreview({ render, outputFormat, aspect, onOpen }: { render: Rende
           <StatusPill status={render.status} />
           <span className="text-text-muted">render #{render.id} via {render.executor}</span>
         </div>
+        {render.status !== "failed" && render.status !== "cancelled" && (
+          <div className="mt-2">
+            <div className="h-1.5 bg-bg-input rounded overflow-hidden"><div className="h-full bg-accent transition-all duration-300" style={{ width: `${Math.max(2, Math.min(100, render.progress_pct || 0))}%` }} /></div>
+            <div className="mt-1 text-text-dim">{Math.round(render.progress_pct || 0)}% · {render.phase || "queued"}</div>
+          </div>
+        )}
         {render.error && <pre className="mt-2 text-text-muted whitespace-pre-wrap break-all text-[10px]">{render.error}</pre>}
       </div>
     );

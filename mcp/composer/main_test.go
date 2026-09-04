@@ -1,10 +1,7 @@
 package main
 
-// composer v0.1 — smoke tests over the validator + ffmpeg cmd builder.
-// Full executor round-trip (actual ffmpeg invocation) is intentionally
-// skipped — too brittle without a known input fixture, and the
-// per-component pieces (filter graph generation, drawtext escaping)
-// are what's worth pinning.
+// Composer behavior tests cover validation, command construction, and real
+// renderer output using generated, deterministic fixtures.
 
 import (
 	"context"
@@ -733,7 +730,6 @@ func TestV1TypographyWarningsReportSubstitutionAndUnsupportedSpacing(t *testing.
 	for _, want := range []string{
 		"Arial unavailable; rendering with Inter.",
 		"V1 letter_spacing is not rendered; the value was ignored.",
-		"V1 line_height is not rendered; the value was ignored.",
 	} {
 		if !strings.Contains(warnings, want) {
 			t.Fatalf("warning %q missing from %q", want, warnings)
@@ -2159,7 +2155,8 @@ func TestEscDrawText(t *testing.T) {
 		"a:b":          `a\:b`,
 		"it's":         `it\'s`,
 		`a\b`:          `a\\b`,
-		"line1\nline2": "line1 line2",
+		"line1\nline2": `line1\nline2`,
+		"100%":         `100\%`,
 	}
 	for in, want := range cases {
 		if got := escDrawText(in); got != want {
@@ -2590,7 +2587,7 @@ func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
 		map[string]string{composerFontInterBold: "https://agents.example.com/api/apps/composer/render-font?project_id=project-1&face=inter-bold"},
 	)
 	for _, want := range []string{
-		`export STORAGE_BASE="https://agents.example.com/api/apps/callback/apps/storage/proxy"`,
+		`export STORAGE_BASE=https://agents.example.com/api/apps/callback/apps/storage/proxy`,
 		"$STORAGE_BASE/files/init?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID",

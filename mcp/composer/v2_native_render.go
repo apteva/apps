@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -153,6 +154,9 @@ func renderV2Native(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, p
 			cleanup()
 			return Result{}, nil, err
 		}
+		if i == frameCount-1 || i%maxInt(1, fps/2) == 0 {
+			reportRenderProgress(ctx, RenderProgress{Fraction: 0.8 * float64(i+1) / float64(frameCount), OutTimeSeconds: t, Frame: int64(i + 1)})
+		}
 	}
 
 	outFile := filepath.Join(scratch, "out."+out.Format)
@@ -161,19 +165,21 @@ func renderV2Native(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, p
 		cleanup()
 		return Result{}, nil, err
 	}
+	reportRenderProgress(ctx, RenderProgress{Fraction: 0.85, OutTimeSeconds: duration, Frame: int64(frameCount)})
 	cmd := exec.CommandContext(ctx, ffmpegPath(), args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		app.Logger().Warn("kept native v2 scratch dir for post-mortem", "path", scratch, "err", err)
-		return Result{FFmpegCommand: shellEcho(ffmpegPath(), args)}, nil, fmt.Errorf("ffmpeg failed: %w\nstderr (last 1KB):\n%s", err, truncTail(stderr.String(), 1024))
+		return Result{FFmpegCommand: redactSecrets(shellEcho(ffmpegPath(), args))}, nil, fmt.Errorf("ffmpeg failed: %w\nstderr (last 1KB):\n%s", err, redactSecrets(truncTail(stderr.String(), 1024)))
 	}
+	reportRenderProgress(ctx, RenderProgress{Fraction: 1, OutTimeSeconds: duration, Frame: int64(frameCount)})
 	return Result{
 		Sync:          true,
 		LocalPath:     outFile,
 		Cleanup:       cleanup,
 		DurationMS:    time.Since(start).Milliseconds(),
-		FFmpegCommand: shellEcho(ffmpegPath(), args),
+		FFmpegCommand: redactSecrets(shellEcho(ffmpegPath(), args)),
 	}, []string{"native composer/v2 renderer used for image/shape/text scene graph"}, nil
 }
 
@@ -447,15 +453,214 @@ func (r *v2NativeRender) drawShape(dst *image.RGBA, el V2Element, box image.Rect
 	stroke := parseColor(styleString(el.Style, "stroke", ""), color.RGBA{})
 	radius := int(styleFloat(el.Style, "radius", 0) * r.scale)
 	strokeW := int(styleFloat(el.Style, "stroke_width", styleFloat(el.Style, "strokeWidth", 0)) * r.scale)
+	kind := strings.ToLower(styleString(el.Style, "kind", styleString(el.Style, "shape", "rectangle")))
+	if shadow, ok := styleObject(el.Style, "shadow"); ok {
+		r.drawShapeShadow(dst, box, radius, kind, shadow, opacity)
+	}
 	layer := image.NewRGBA(dst.Bounds())
 	if strokeW > 0 && stroke.A > 0 {
-		fillRoundRect(layer, box, radius, stroke)
+		fillShape(layer, box, radius, kind, stroke)
 		inner := image.Rect(box.Min.X+strokeW, box.Min.Y+strokeW, box.Max.X-strokeW, box.Max.Y-strokeW)
-		fillRoundRect(layer, inner, maxInt(0, radius-strokeW), fill)
+		if gradient, ok := parseShapeGradient(el.Style); ok {
+			fillShapeGradient(layer, inner, maxInt(0, radius-strokeW), kind, gradient)
+		} else {
+			fillShape(layer, inner, maxInt(0, radius-strokeW), kind, fill)
+		}
 	} else {
-		fillRoundRect(layer, box, radius, fill)
+		if gradient, ok := parseShapeGradient(el.Style); ok {
+			fillShapeGradient(layer, box, radius, kind, gradient)
+		} else {
+			fillShape(layer, box, radius, kind, fill)
+		}
 	}
 	compositeRect(dst, layer, box, opacity)
+}
+
+type shapeGradientStop struct {
+	offset float64
+	color  color.RGBA
+}
+
+type shapeGradient struct {
+	angle float64
+	stops []shapeGradientStop
+}
+
+func parseShapeGradient(style map[string]any) (shapeGradient, bool) {
+	raw, ok := styleObject(style, "gradient")
+	if !ok {
+		return shapeGradient{}, false
+	}
+	gradient := shapeGradient{angle: mapFloat(raw, "angle", 90)}
+	if values, ok := raw["stops"].([]any); ok {
+		for _, value := range values {
+			stop, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			gradient.stops = append(gradient.stops, shapeGradientStop{
+				offset: clamp01(mapFloat(stop, "offset", float64(len(gradient.stops)))),
+				color:  parseColor(mapString(stop, "color", ""), color.RGBA{}),
+			})
+		}
+	}
+	if len(gradient.stops) == 0 {
+		from := parseColor(mapString(raw, "from", "#ffffff"), color.RGBA{255, 255, 255, 255})
+		to := parseColor(mapString(raw, "to", "#000000"), color.RGBA{0, 0, 0, 255})
+		gradient.stops = []shapeGradientStop{{offset: 0, color: from}, {offset: 1, color: to}}
+	}
+	sort.SliceStable(gradient.stops, func(i, j int) bool { return gradient.stops[i].offset < gradient.stops[j].offset })
+	if gradient.stops[0].offset > 0 {
+		gradient.stops = append([]shapeGradientStop{{offset: 0, color: gradient.stops[0].color}}, gradient.stops...)
+	}
+	last := gradient.stops[len(gradient.stops)-1]
+	if last.offset < 1 {
+		gradient.stops = append(gradient.stops, shapeGradientStop{offset: 1, color: last.color})
+	}
+	return gradient, true
+}
+
+func fillShapeGradient(img *image.RGBA, rect image.Rectangle, radius int, kind string, gradient shapeGradient) {
+	if rect.Empty() || len(gradient.stops) == 0 {
+		return
+	}
+	angle := gradient.angle * math.Pi / 180
+	dx, dy := math.Sin(angle), -math.Cos(angle)
+	corners := [][2]float64{{0, 0}, {float64(rect.Dx()), 0}, {0, float64(rect.Dy())}, {float64(rect.Dx()), float64(rect.Dy())}}
+	minProjection, maxProjection := math.Inf(1), math.Inf(-1)
+	for _, point := range corners {
+		projection := point[0]*dx + point[1]*dy
+		minProjection = math.Min(minProjection, projection)
+		maxProjection = math.Max(maxProjection, projection)
+	}
+	span := math.Max(1, maxProjection-minProjection)
+	for y := rect.Min.Y; y < rect.Max.Y; y++ {
+		for x := rect.Min.X; x < rect.Max.X; x++ {
+			if !pointInsideShape(x, y, rect, radius, kind) {
+				continue
+			}
+			projection := float64(x-rect.Min.X)*dx + float64(y-rect.Min.Y)*dy
+			img.SetRGBA(x, y, gradientColorAt(gradient.stops, clamp01((projection-minProjection)/span)))
+		}
+	}
+}
+
+func gradientColorAt(stops []shapeGradientStop, position float64) color.RGBA {
+	if len(stops) == 0 {
+		return color.RGBA{}
+	}
+	for i := 1; i < len(stops); i++ {
+		if position > stops[i].offset {
+			continue
+		}
+		from, to := stops[i-1], stops[i]
+		span := math.Max(0.000001, to.offset-from.offset)
+		p := clamp01((position - from.offset) / span)
+		mix := func(a, b uint8) uint8 { return uint8(math.Round(float64(a) + (float64(b)-float64(a))*p)) }
+		return color.RGBA{R: mix(from.color.R, to.color.R), G: mix(from.color.G, to.color.G), B: mix(from.color.B, to.color.B), A: mix(from.color.A, to.color.A)}
+	}
+	return stops[len(stops)-1].color
+}
+
+func fillShape(img *image.RGBA, rect image.Rectangle, radius int, kind string, c color.RGBA) {
+	if kind == "ellipse" || kind == "circle" {
+		for y := rect.Min.Y; y < rect.Max.Y; y++ {
+			for x := rect.Min.X; x < rect.Max.X; x++ {
+				if pointInsideShape(x, y, rect, radius, kind) {
+					img.SetRGBA(x, y, c)
+				}
+			}
+		}
+		return
+	}
+	fillRoundRect(img, rect, radius, c)
+}
+
+func pointInsideShape(x, y int, rect image.Rectangle, radius int, kind string) bool {
+	if x < rect.Min.X || x >= rect.Max.X || y < rect.Min.Y || y >= rect.Max.Y || rect.Empty() {
+		return false
+	}
+	if kind == "ellipse" || kind == "circle" {
+		rx, ry := float64(rect.Dx())/2, float64(rect.Dy())/2
+		cx, cy := float64(rect.Min.X)+rx, float64(rect.Min.Y)+ry
+		return math.Pow((float64(x)+0.5-cx)/math.Max(rx, 0.5), 2)+math.Pow((float64(y)+0.5-cy)/math.Max(ry, 0.5), 2) <= 1
+	}
+	if radius <= 0 {
+		return true
+	}
+	radius = minInt(radius, minInt(rect.Dx(), rect.Dy())/2)
+	cx := clampInt(x, rect.Min.X+radius, rect.Max.X-radius-1)
+	cy := clampInt(y, rect.Min.Y+radius, rect.Max.Y-radius-1)
+	dx, dy := x-cx, y-cy
+	return dx*dx+dy*dy <= radius*radius
+}
+
+func (r *v2NativeRender) drawShapeShadow(dst *image.RGBA, box image.Rectangle, radius int, kind string, shadow map[string]any, opacity float64) {
+	offsetX := int(mapFloat(shadow, "offset_x", 0) * r.scaleX)
+	offsetY := int(mapFloat(shadow, "offset_y", 12) * r.scaleY)
+	blur := maxInt(0, int(mapFloat(shadow, "blur", 20)*r.scale))
+	shadowOpacity := clamp01(mapFloat(shadow, "opacity", 0.35)) * opacity
+	base := color.NRGBAModel.Convert(parseColor(mapString(shadow, "color", "#000000"), color.RGBA{0, 0, 0, 255})).(color.NRGBA)
+	mask := image.NewAlpha(dst.Bounds())
+	shadowBox := box.Add(image.Pt(offsetX, offsetY))
+	for y := shadowBox.Min.Y; y < shadowBox.Max.Y; y++ {
+		for x := shadowBox.Min.X; x < shadowBox.Max.X; x++ {
+			if pointInsideShape(x, y, shadowBox, radius, kind) && image.Pt(x, y).In(mask.Bounds()) {
+				mask.SetAlpha(x, y, color.Alpha{A: 255})
+			}
+		}
+	}
+	if blur > 0 {
+		mask = blurAlpha(mask, blur)
+	}
+	layer := image.NewRGBA(dst.Bounds())
+	for y := layer.Bounds().Min.Y; y < layer.Bounds().Max.Y; y++ {
+		for x := layer.Bounds().Min.X; x < layer.Bounds().Max.X; x++ {
+			a := float64(mask.AlphaAt(x, y).A) / 255 * shadowOpacity
+			if a > 0 {
+				layer.SetRGBA(x, y, premultipliedRGBA(float64(base.R), float64(base.G), float64(base.B), a))
+			}
+		}
+	}
+	composite(dst, layer, 1)
+}
+
+func blurAlpha(src *image.Alpha, radius int) *image.Alpha {
+	if radius <= 0 {
+		return src
+	}
+	b := src.Bounds()
+	tmp := image.NewAlpha(b)
+	out := image.NewAlpha(b)
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		prefix := make([]int, b.Dx()+1)
+		for x := b.Min.X; x < b.Max.X; x++ {
+			prefix[x-b.Min.X+1] = prefix[x-b.Min.X] + int(src.AlphaAt(x, y).A)
+		}
+		for x := b.Min.X; x < b.Max.X; x++ {
+			lo, hi := maxInt(b.Min.X, x-radius), minInt(b.Max.X-1, x+radius)
+			tmp.SetAlpha(x, y, color.Alpha{A: uint8((prefix[hi-b.Min.X+1] - prefix[lo-b.Min.X]) / (hi - lo + 1))})
+		}
+	}
+	for x := b.Min.X; x < b.Max.X; x++ {
+		prefix := make([]int, b.Dy()+1)
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			prefix[y-b.Min.Y+1] = prefix[y-b.Min.Y] + int(tmp.AlphaAt(x, y).A)
+		}
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			lo, hi := maxInt(b.Min.Y, y-radius), minInt(b.Max.Y-1, y+radius)
+			out.SetAlpha(x, y, color.Alpha{A: uint8((prefix[hi-b.Min.Y+1] - prefix[lo-b.Min.Y]) / (hi - lo + 1))})
+		}
+	}
+	return out
+}
+
+func styleObject(style map[string]any, key string) (map[string]any, bool) {
+	if style == nil {
+		return nil, false
+	}
+	value, ok := style[key].(map[string]any)
+	return value, ok
 }
 
 func (r *v2NativeRender) drawImage(dst *image.RGBA, el V2Element, box image.Rectangle, opacity float64) {
@@ -487,6 +692,11 @@ func (r *v2NativeRender) drawImage(dst *image.RGBA, el V2Element, box image.Rect
 }
 
 func (r *v2NativeRender) drawText(dst *image.RGBA, el V2Element, box image.Rectangle, opacity float64, t, textScale float64) {
+	padding := maxInt(0, int(styleFloat(el.Style, "padding", 0)*r.scale))
+	contentBox := box.Inset(padding)
+	if contentBox.Empty() {
+		return
+	}
 	if textScale <= 0 {
 		textScale = 1
 	}
@@ -498,21 +708,21 @@ func (r *v2NativeRender) drawText(dst *image.RGBA, el V2Element, box image.Recta
 	face := r.fontFace(bold, size)
 	col := parseColor(styleString(el.Style, "color", "#ffffff"), color.RGBA{255, 255, 255, 255})
 	align := strings.ToLower(styleString(el.Style, "align", "left"))
-	fullLines := wrapText(el.Text, face, box.Dx())
+	fullLines := wrapText(el.Text, face, contentBox.Dx())
 	autoFit := styleBool(el.Style, "auto_fit", styleBool(el.Style, "fit_text", true))
 	if autoFit {
-		size, face, fullLines = r.fitText(el.Text, bold, size, box)
+		size, face, fullLines = r.fitText(el.Text, bold, size, contentBox)
 	}
 	lines := fullLines
 	if reveal := strings.ToLower(mapString(el.Enter, "type", "")); reveal == "typewriter" || reveal == "word_by_word" {
 		delay := mapFloat(el.Enter, "delay", 0)
 		lines = revealTextLines(fullLines, t-delay, mapFloat(el.Enter, "duration", 1.2), reveal)
 	}
-	lineH := maxInt(1, int(size*1.22))
+	lineH := maxInt(1, int(size*styleFloat(el.Style, "line_height", 1.22)))
 	totalH := lineH * len(fullLines)
-	y := box.Min.Y + (box.Dy()-totalH)/2 + int(size)
+	y := contentBox.Min.Y + (contentBox.Dy()-totalH)/2 + int(size)
 	if strings.ToLower(styleString(el.Style, "vertical_align", "")) == "top" {
-		y = box.Min.Y + int(size)
+		y = contentBox.Min.Y + int(size)
 	}
 	layer := image.NewRGBA(dst.Bounds())
 	d := &font.Drawer{Dst: layer, Src: image.NewUniform(col), Face: face}
@@ -522,19 +732,19 @@ func (r *v2NativeRender) drawText(dst *image.RGBA, el V2Element, box image.Recta
 			measureLine = fullLines[i]
 		}
 		lineW := d.MeasureString(measureLine).Ceil()
-		x := box.Min.X
+		x := contentBox.Min.X
 		switch align {
 		case "center":
-			x = box.Min.X + (box.Dx()-lineW)/2
+			x = contentBox.Min.X + (contentBox.Dx()-lineW)/2
 		case "right":
-			x = box.Max.X - lineW
+			x = contentBox.Max.X - lineW
 		}
 		d.Dot = fixed.P(x, y)
 		d.DrawString(line)
 		y += lineH
 	}
 	pad := maxInt(2, int(math.Ceil(size*0.75)))
-	compositeRect(dst, layer, box.Inset(-pad), opacity)
+	compositeRect(dst, layer, contentBox.Inset(-pad), opacity)
 }
 
 func (r *v2NativeRender) fontFace(bold bool, size float64) font.Face {
@@ -837,16 +1047,33 @@ func wrapText(s string, face font.Face, maxWidth int) []string {
 			lines = append(lines, "")
 			continue
 		}
-		line := words[0]
 		d := &font.Drawer{Face: face}
-		for _, word := range words[1:] {
-			next := line + " " + word
-			if d.MeasureString(next).Ceil() <= maxWidth {
-				line = next
-			} else {
-				lines = append(lines, line)
-				line = word
+		line := ""
+		appendWord := func(word string) {
+			if d.MeasureString(word).Ceil() <= maxWidth {
+				if line == "" {
+					line = word
+				} else if d.MeasureString(line+" "+word).Ceil() <= maxWidth {
+					line += " " + word
+				} else {
+					lines = append(lines, line)
+					line = word
+				}
+				return
 			}
+			for _, r := range word {
+				next := line + string(r)
+				if line != "" && d.MeasureString(next).Ceil() > maxWidth {
+					lines = append(lines, line)
+					line = string(r)
+				} else {
+					line = next
+				}
+			}
+		}
+		appendWord(words[0])
+		for _, word := range words[1:] {
+			appendWord(word)
 		}
 		lines = append(lines, line)
 	}

@@ -730,7 +730,7 @@ func validateCompositionJSON(s string) CompositionValidation {
 				Version:         composerV2Version,
 				DurationSeconds: v2DurationSeconds(spec),
 				Renderer:        renderer,
-				Warnings:        []string{warning},
+				Warnings:        append([]string{warning}, v2LayoutWarnings(spec)...),
 			}
 		}
 		_, _, warnings, convErr := v2ToV1FFmpeg(spec)
@@ -748,6 +748,43 @@ func validateCompositionJSON(s string) CompositionValidation {
 	return CompositionValidation{Valid: true, Version: "composer/v1", DurationSeconds: editDurationSeconds(edit), Renderer: "ffmpeg", Warnings: v1TypographyWarnings(edit)}
 }
 
+func v2LayoutWarnings(spec *V2Composition) []string {
+	if spec == nil {
+		return nil
+	}
+	w, h := spec.Output.Width, spec.Output.Height
+	if w <= 0 || h <= 0 {
+		w, h = resolutionWH(spec.Output.Resolution, spec.Output.Aspect)
+	}
+	var warnings []string
+	for si, scene := range spec.Scenes {
+		for ei, el := range scene.Elements {
+			if el.Type != "text" {
+				continue
+			}
+			safe := styleFloat(el.Style, "safe_area", 0)
+			if safe <= 0 {
+				continue
+			}
+			if safe > 1 {
+				safe /= float64(maxInt(w, h))
+			}
+			if safe <= 0 || safe >= 0.5 {
+				warnings = append(warnings, fmt.Sprintf("scene[%d].element[%d] safe_area must be between 0 and 0.5 of the frame", si, ei))
+				continue
+			}
+			x := parseMeasure(el.X, w, 0)
+			y := parseMeasure(el.Y, h, 0)
+			ew := parseMeasure(el.Width, w, float64(w))
+			eh := parseMeasure(el.Height, h, float64(h))
+			if x < float64(w)*safe || y < float64(h)*safe || x+ew > float64(w)*(1-safe) || y+eh > float64(h)*(1-safe) {
+				warnings = append(warnings, fmt.Sprintf("scene[%d].element[%d] text box extends outside the %.0f%% safe area", si, ei, safe*100))
+			}
+		}
+	}
+	return warnings
+}
+
 func v2UseDirectRenderer(spec *V2Composition) bool {
 	if spec == nil || len(spec.Scenes) == 0 {
 		return false
@@ -763,7 +800,7 @@ func composerV2Examples() []map[string]any {
 	  {
 	    "id": "v2-scenes-with-text",
 	    "title": "Native scene graph with grouped motion",
-	    "description": "Native V2 scene graph with design-size scaling, parented text labels, shape cards, fast enter presets, and a soundtrack.",
+	    "description": "Native V2 scene graph with design-size scaling, parented text labels, gradient cards, borders, shadows, fast enter presets, and a soundtrack.",
 	    "spec": {
 	      "version": "composer/v2",
 	      "output": {"format": "mp4", "width": 1920, "height": 1080, "design_width": 1920, "design_height": 1080, "fps": 30, "background": "#05070c"},
@@ -774,9 +811,9 @@ func composerV2Examples() []map[string]any {
 	        {"id": "open", "duration": 4, "elements": [
 	          {"id": "bg", "type": "shape", "x": "0%", "y": "0%", "width": "100%", "height": "100%", "style": {"fill": "#05070c"}},
 	          {"id": "glow", "type": "shape", "x": "60%", "y": "-8%", "width": "46%", "height": "38%", "style": {"fill": "rgba(255,122,26,0.14)", "radius": 260}, "animate": {"scale": [{"start": 0, "duration": 4, "from": 1, "to": 1.06}]}},
-	          {"id": "h", "type": "text", "text": "Launch a sharper\\nAI service offer.", "x": "7%", "y": "22%", "width": "44%", "height": "24%", "style": {"font_size": 76, "weight": 800, "color": "#f7f8fb", "align": "left"}, "enter": {"type": "rise", "duration": 0.36}},
+	          {"id": "h", "type": "text", "text": "Launch a sharper\\nAI service offer.", "x": "7%", "y": "22%", "width": "44%", "height": "24%", "style": {"font_size": 76, "weight": 800, "color": "#f7f8fb", "align": "left", "padding": 8, "safe_area": 0.05}, "enter": {"type": "rise", "duration": 0.36}},
 	          {"id": "sub", "type": "text", "text": "Package outcomes, proof, and delivery into a pitch clients understand.", "x": "7%", "y": "49%", "width": "40%", "height": "10%", "style": {"font_size": 30, "color": "#a8b0bd", "align": "left"}, "enter": {"type": "fade", "delay": 0.12, "duration": 0.32}},
-	          {"id": "card", "type": "shape", "x": "57%", "y": "20%", "width": "31%", "height": "45%", "style": {"fill": "#111827", "stroke": "#2d3a4f", "stroke_width": 2, "radius": 28}, "enter": {"type": "zoom_in", "delay": 0.12, "duration": 0.34}, "animate": {"scale": [{"start": 0.8, "duration": 3.2, "from": 1, "to": 1.018}]}},
+	          {"id": "card", "type": "shape", "x": "57%", "y": "20%", "width": "31%", "height": "45%", "style": {"gradient": {"angle": 135, "stops": [{"offset": 0, "color": "#182238"}, {"offset": 1, "color": "#0b1020"}]}, "stroke": "#2d3a4f", "stroke_width": 2, "radius": 28, "shadow": {"color": "#000000", "offset_y": 18, "blur": 28, "opacity": 0.42}}, "enter": {"type": "zoom_in", "delay": 0.12, "duration": 0.34}, "animate": {"scale": [{"start": 0.8, "duration": 3.2, "from": 1, "to": 1.018}]}},
 	          {"id": "card-title", "parent": "card", "type": "text", "text": "Offer Engine", "x": "60%", "y": "25%", "width": "18%", "height": "5%", "style": {"font_size": 30, "weight": 800, "color": "#ffffff", "align": "left"}},
 	          {"id": "metric", "parent": "card", "type": "text", "text": "+31% qualified calls", "x": "60%", "y": "43%", "width": "24%", "height": "7%", "style": {"font_size": 42, "weight": 800, "color": "#37e6ad", "align": "left"}}
 	        ]},

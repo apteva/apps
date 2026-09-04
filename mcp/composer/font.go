@@ -126,10 +126,10 @@ func v1TypographyWarnings(edit *Edit) []string {
 			if clip.Asset.Style.LetterSpacing != 0 {
 				seen["V1 letter_spacing is not rendered; the value was ignored."] = true
 			}
-			if clip.Asset.Style.LineHeight != 0 {
-				seen["V1 line_height is not rendered; the value was ignored."] = true
-			}
 		}
+	}
+	for _, warning := range v1TextSafeAreaWarnings(edit) {
+		seen[warning] = true
 	}
 	warnings := make([]string, 0, len(seen))
 	for warning := range seen {

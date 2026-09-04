@@ -189,6 +189,13 @@ type TextStyle struct {
 	LetterSpacing int     `json:"letter_spacing,omitempty"`
 	LineHeight    float64 `json:"line_height,omitempty"`
 	Transform     string  `json:"transform,omitempty"` // none|uppercase|lowercase
+	Wrap          bool    `json:"wrap,omitempty"`
+	AutoSize      bool    `json:"auto_size,omitempty"`
+	MaxWidth      float64 `json:"max_width,omitempty"`  // pixels, or viewport fraction when <= 1
+	MaxHeight     float64 `json:"max_height,omitempty"` // pixels, or viewport fraction when <= 1
+	MinFontSize   int     `json:"min_font_size,omitempty"`
+	Padding       int     `json:"padding,omitempty"`
+	SafeArea      float64 `json:"safe_area,omitempty"` // viewport fraction, e.g. 0.05
 }
 
 type TextStroke struct {
@@ -640,6 +647,15 @@ func validateTextStyle(c *Clip) error {
 		case "", "none", "uppercase", "lowercase", "capitalize":
 		default:
 			return fmt.Errorf("text style.transform must be none|uppercase|lowercase|capitalize (got %q)", c.Asset.Style.Transform)
+		}
+		if c.Asset.Style.LineHeight < 0 || c.Asset.Style.LineHeight > 4 {
+			return errors.New("text style.line_height must be 0..4")
+		}
+		if c.Asset.Style.MaxWidth < 0 || c.Asset.Style.MaxHeight < 0 || c.Asset.Style.Padding < 0 || c.Asset.Style.MinFontSize < 0 {
+			return errors.New("text style max_width/max_height/padding/min_font_size must be >= 0")
+		}
+		if c.Asset.Style.SafeArea < 0 || c.Asset.Style.SafeArea >= 0.5 {
+			return errors.New("text style.safe_area must be >= 0 and < 0.5")
 		}
 	}
 	if c.Asset.Stroke != nil {
