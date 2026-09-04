@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.10.4
+version: 0.10.5
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -41,6 +41,10 @@ description: |
 
   v0.10.4 skips intentionally offline hosted tenants during startup
   reconciliation, so a removed rehearsal VPS cannot prevent Fleet from mounting.
+
+  v0.10.5 makes hosted updates fail closed: Fleet stops all validated tenant
+  session processes, verifies ambiguous SSH results, and persists an update
+  lease across restarts to prevent duplicate auto-respawns.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -198,7 +202,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.10.4
+    ref: fleet/v0.10.5
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

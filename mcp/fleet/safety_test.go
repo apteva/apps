@@ -27,6 +27,36 @@ func TestTenantOperationSerializesMutations(t *testing.T) {
 	done2()
 }
 
+func TestDurableUpdateLeaseBlocksRespawnAcrossAppInstances(t *testing.T) {
+	app, _ := newTestApp(t)
+	id := seedTenant(t, app, "leased", StatusActive)
+	if err := app.store.setOperationLease(id, "update", "stop_indeterminate", "0.42.0", "0.34.5", "0.34.5"); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := &App{store: app.store, operations: map[string]string{}}
+	if got := restarted.tenantOperation(id); got != "update (stop_indeterminate)" {
+		t.Fatalf("tenantOperation = %q", got)
+	}
+	if _, err := restarted.beginTenantOperation(id, "hosted auto-respawn"); err == nil {
+		t.Fatal("durable update lease did not block auto-respawn")
+	}
+
+	// A deliberate tenant_update retry is the recovery path and may take over
+	// the durable lease. Other mutation types remain fail-closed.
+	done, err := restarted.beginTenantOperation(id, "update")
+	if err != nil {
+		t.Fatalf("update retry blocked: %v", err)
+	}
+	done()
+	if err := restarted.store.clearOperationLease(id); err != nil {
+		t.Fatal(err)
+	}
+	if got := restarted.tenantOperation(id); got != "" {
+		t.Fatalf("operation remained after clearing lease: %q", got)
+	}
+}
+
 func TestDeleteRejectsUnmanagedDirectoryAndPreservesRow(t *testing.T) {
 	app, ctx := newTestApp(t)
 	id := seedTenant(t, app, "acme", StatusStopped)
