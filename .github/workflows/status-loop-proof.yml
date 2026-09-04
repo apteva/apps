@@ -1,0 +1,25 @@
+name: Status Loop Proof
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "mcp/status/**"
+      - ".github/workflows/status-loop-proof.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp/status
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/status/go.mod
+      - run: go test ./...
