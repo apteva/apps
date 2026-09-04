@@ -199,7 +199,7 @@ export default function StatusPanel({ instanceId }: NativePanelProps) {
                 </>
               ) : (
                 <div className="text-text-muted text-sm py-2">
-                  No status set for agent {pickedAgent}. The agent can publish one
+                  No status has been set for agent {pickedAgent}. The agent can publish one
                   via <code>status_set</code>, or you can write the first line below.
                 </div>
               )}
