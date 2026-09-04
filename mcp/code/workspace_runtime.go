@@ -137,7 +137,7 @@ func (a *App) prepareExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx
 
 func (a *App) createExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx, repo *Repo, profile, image string, workspacePaths, supportPaths []string, snapshot *sourceSnapshot) (*workspacePrepareResult, error) {
 	input := map[string]any{
-		"name": repo.Name + " development", "purpose": "Run and test Code repository " + repo.Slug,
+		"name": workspaceResourceName(repo), "purpose": "Run and test Code repository " + repo.Slug,
 		"profile": profile, "ttl_minutes": 240, "resource_kind": "code.repository",
 		"resource_id": fmt.Sprintf("%d", repo.ID), "repo_label": repo.Slug,
 		"source_archive_base64": snapshot.Archive, "source_digest": snapshot.Digest,
@@ -170,6 +170,18 @@ func (a *App) createExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx,
 		return nil, err
 	}
 	return &workspacePrepareResult{Link: link, Code: snapshot, Workspace: snapshot, Created: true}, nil
+}
+
+func workspaceResourceName(repo *Repo) string {
+	const suffix = " development"
+	base := slugify(repo.Slug)
+	if len(base) > 80-len(suffix) {
+		base = strings.TrimRight(base[:80-len(suffix)], "-_. ")
+	}
+	if base == "" {
+		base = "code-repository"
+	}
+	return base + suffix
 }
 
 func (a *App) syncExecutionWorkspace(app *sdk.AppCtx, link *RepoWorkspace, snapshot *sourceSnapshot) error {

@@ -20,6 +20,7 @@ type codeWorkspacePlatform struct {
 	paths     []string
 	calls     []string
 	images    []string
+	names     []string
 	createErr error
 }
 
@@ -36,6 +37,8 @@ func (p *codeWorkspacePlatform) CallAppResult(appName, tool string, input map[st
 		p.paths = anyStrings(input["source_paths"])
 		image, _ := input["image"].(string)
 		p.images = append(p.images, image)
+		name, _ := input["name"].(string)
+		p.names = append(p.names, name)
 		response = map[string]any{"workspace": map[string]any{"id": "wsp_code", "lifecycle_status": "running", "image": image, "source_digest": p.digest, "source_paths": p.paths}}
 	case "workspace_source_export":
 		response = map[string]any{"workspace_id": "wsp_code", "archive_base64": p.archive, "source_digest": p.digest}
@@ -145,7 +148,7 @@ func TestWorkspaceCommandSyncPreviewAndApply(t *testing.T) {
 	local := NewLocalFileStore(root)
 	locks := newRepoLockSet()
 	app := &App{store: &lockedFileStore{inner: local, locks: locks}, locks: locks, dataDir: t.TempDir()}
-	repo, err := dbCreateRepo(db, "project-a", CreateRepoInput{Name: "Workspace test", Framework: "blank"})
+	repo, err := dbCreateRepo(db, "project-a", CreateRepoInput{Name: "Apteva Apps — Books Trial", Slug: "apteva-apps-books-trial", Framework: "blank"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,6 +167,9 @@ func TestWorkspaceCommandSyncPreviewAndApply(t *testing.T) {
 	command := result.(*repoCommandResult)
 	if command.Status != "success" || command.WorkspaceID != "wsp_code" || command.Runtime != "workspace" {
 		t.Fatalf("unexpected workspace command result: %+v", command)
+	}
+	if len(platform.names) != 1 || platform.names[0] != "apteva-apps-books-trial development" {
+		t.Fatalf("workspace name must use the ASCII-safe repository slug: %v", platform.names)
 	}
 	writeTestSource(t, repoRoot, "hello.txt", []byte("two\n"), 0o644)
 	if _, err := app.toolRunCommand(callCtx, ctx, map[string]any{
