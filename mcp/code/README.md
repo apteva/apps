@@ -111,10 +111,13 @@ REST tree), path-traversal
 rejection, project-scope isolation between sidecars, and the
 global-scope `_project_id` fallback. Catches SDK-wiring drift.
 
-**Tier 3 (scenarios).** Five YAML scenarios under `scenarios/`
+**Tier 3 (scenarios).** Six YAML scenarios under `scenarios/`
 exercising create-from-template, write-and-read, unique-match edit,
-grep-then-edit, and multi-edit refactor — each driven by a real LLM
-through the apteva-server harness.
+grep-then-edit, multi-edit refactor, and the full Code → Workspaces → Code
+source round trip — each driven by a real LLM through the apteva-server
+harness. The workspace scenario recursively installs Containers and Workspaces,
+binds Code explicitly, and destroys its durable execution workspace during
+test cleanup.
 
 ## Out of scope for v0.1
 

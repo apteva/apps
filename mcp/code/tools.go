@@ -476,6 +476,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx: a.toolWorkspaceApply,
 		},
 		{
+			Name:        "repos_workspace_destroy",
+			Description: "Permanently destroy a repository's linked execution workspace and cached volumes, then unlink it from Code. Repository files in Code are retained. Requires confirm=true. Args: slug, confirm.",
+			InputSchema: schemaObject(map[string]any{
+				"slug": map[string]any{"type": "string"}, "confirm": map[string]any{"type": "boolean"},
+			}, []string{"slug", "confirm"}),
+			HandlerCtx: a.toolWorkspaceDestroy,
+		},
+		{
 			Name:        "repos_dev_stop",
 			Description: "Stop the dev process for a repo. SIGTERM the process group, then SIGKILL after 5s. Idempotent.",
 			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
@@ -684,6 +692,44 @@ func (a *App) toolWorkspaceApply(_ context.Context, ctx *sdk.AppCtx, args map[st
 	}
 	ctx.Emit("repo.workspace.applied", map[string]any{"id": repo.ID, "slug": repo.Slug, "workspace_id": result.WorkspaceID, "changes": len(result.Changes)})
 	return result, nil
+}
+
+func (a *App) toolWorkspaceDestroy(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if !boolArg(args, "confirm") {
+		return nil, errors.New("confirm=true is required because workspace destruction permanently deletes its cached volumes")
+	}
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
+		return nil, err
+	}
+	release, err := a.commands.acquire(callCtx, repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	link, err := dbGetRepoWorkspace(ctx.AppDB(), repo.ProjectID, repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	if link == nil {
+		return map[string]any{"slug": repo.Slug, "destroyed": false, "workspace_id": ""}, nil
+	}
+	var destroyed map[string]any
+	if err := ctx.PlatformAPI().CallAppResult(workspacesAppName, "workspace_destroy", map[string]any{
+		"workspace_id": link.WorkspaceID,
+		"confirm":      true,
+	}, &destroyed); err != nil {
+		return nil, fmt.Errorf("destroy execution workspace: %w", err)
+	}
+	if err := dbDeleteRepoWorkspace(ctx.AppDB(), repo.ProjectID, repo.ID); err != nil {
+		return nil, err
+	}
+	ctx.Emit("repo.workspace.destroyed", map[string]any{"id": repo.ID, "slug": repo.Slug, "workspace_id": link.WorkspaceID})
+	return map[string]any{"slug": repo.Slug, "destroyed": true, "workspace_id": link.WorkspaceID}, nil
 }
 
 // ─── repos_import_github handler ──────────────────────────────────

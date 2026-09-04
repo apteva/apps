@@ -44,6 +44,8 @@ func (p *codeWorkspacePlatform) CallAppResult(appName, tool string, input map[st
 		response = map[string]any{"command": map[string]any{"id": "cmd_code", "status": "succeeded", "exit_code": zero}}
 	case "workspace_command_logs":
 		response = map[string]any{"logs": "workspace command output\n"}
+	case "workspace_destroy":
+		response = map[string]any{"destroyed": true, "workspace": map[string]any{"id": "wsp_code", "lifecycle_status": "destroyed"}}
 	default:
 		response = map[string]any{}
 	}
@@ -135,6 +137,26 @@ func TestWorkspaceCommandSyncPreviewAndApply(t *testing.T) {
 	}
 	if body, _ := os.ReadFile(filepath.Join(repoRoot, "hello.txt")); string(body) != "concurrent Code edit\n" {
 		t.Fatalf("rejected apply overwrote Code: %q", body)
+	}
+	if _, err := app.toolWorkspaceDestroy(callCtx, ctx, map[string]any{
+		"_project_id": "project-a", "slug": repo.Slug, "confirm": false,
+	}); err == nil {
+		t.Fatal("workspace destroy without confirmation should fail")
+	}
+	if _, err := app.toolWorkspaceDestroy(callCtx, ctx, map[string]any{
+		"_project_id": "project-a", "slug": repo.Slug, "confirm": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !containsCall(platform.calls, "workspaces/workspace_destroy") {
+		t.Fatal("Code did not destroy the linked Workspaces environment")
+	}
+	link, err := dbGetRepoWorkspace(db, "project-a", repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link != nil {
+		t.Fatalf("destroyed workspace link was retained: %+v", link)
 	}
 }
 

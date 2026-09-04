@@ -155,6 +155,7 @@ provides:
     - { name: repos_run_command,      description: "Run a finite repo command such as build, test, lint, typecheck, or generator and return exit-code semantics." }
     - { name: repos_workspace_changes, description: "Preview source changes produced in the linked execution workspace, including revision conflicts." }
     - { name: repos_workspace_apply, description: "Safely apply an explicitly previewed workspace source revision back to Code." }
+    - { name: repos_workspace_destroy, description: "Permanently destroy and unlink a repository's execution workspace while retaining Code files." }
     - { name: repos_dev_stop,         description: "Stop the dev process for a repo." }
     - { name: repos_dev_status,       description: "Get the current dev run state (port, pid, status, framework)." }
     - { name: repos_dev_logs,         description: "Tail the dev run's stdout/stderr log file." }

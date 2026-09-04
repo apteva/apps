@@ -163,6 +163,8 @@ provides:
       description: Preview source changes produced in the linked execution workspace, including revision conflicts.
     - name: repos_workspace_apply
       description: Safely apply an explicitly previewed workspace source revision back to Code.
+    - name: repos_workspace_destroy
+      description: Permanently destroy and unlink a repository's execution workspace while retaining Code files.
     - name: repos_dev_stop
       description: Stop the dev process for a repo. Idempotent.
     - name: repos_dev_status
