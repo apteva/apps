@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.7.0
+version: 0.7.1
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -17,6 +17,8 @@ description: |
   installs dependencies there, runs finite commands, previews generated source
   changes, and applies an explicitly reviewed revision back without transferring
   Git metadata or overwriting concurrent Code edits.
+  v0.7.1 adds explicit workspace teardown and a real-agent Tier 3 test covering
+  the complete Code → Workspaces → Code source round trip.
   v0.6.1 adds theme-aware syntax highlighting, sticky line numbers,
   language and line metadata, copy feedback, and clearer editor typography.
   v0.6.0 adds provider-neutral Git clone, connect, status, fetch,

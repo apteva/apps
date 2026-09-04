@@ -34,7 +34,7 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.7.0
+version: 0.7.1
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
@@ -49,6 +49,7 @@ description: |
   optionally executes finite commands in isolated durable Workspaces,
   previews workspace-generated source changes and safely applies an explicitly
   reviewed revision without transferring Git metadata,
+  explicitly tears down linked execution workspaces while retaining Code files,
   makes grep/read/patch tools more compact for agents with reusable
   patch previews, targeted rejected-hunk context, and stale-hunk recovery,
   isolates global repository storage and hardens command/import boundaries,
