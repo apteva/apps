@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -221,6 +223,85 @@ func TestBookNodesRevisionsAndExport(t *testing.T) {
 	first := strings.Index(md, "# First")
 	if second < 0 || first < 0 || second > first {
 		t.Fatalf("export order wrong:\n%s", md)
+	}
+}
+
+func TestNodeTreeForListOmitsBodiesByDefault(t *testing.T) {
+	parentID := int64(1)
+	nodes := []*BookNode{
+		{ID: 1, BookID: 9, Type: "part", Title: "Part One", BodyMarkdown: "private part prose"},
+		{ID: 2, BookID: 9, ParentID: &parentID, Type: "chapter", Title: "Chapter One", BodyMarkdown: "private chapter prose"},
+	}
+	compact, err := json.Marshal(nodeTreeForList(nodes, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(compact, []byte("body_markdown")) || bytes.Contains(compact, []byte("private")) {
+		t.Fatalf("compact tree leaked manuscript bodies: %s", compact)
+	}
+	full, err := json.Marshal(nodeTreeForList(nodes, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(full, []byte("private chapter prose")) {
+		t.Fatalf("include_body tree omitted manuscript body: %s", full)
+	}
+}
+
+func TestEditNodeBodyIsAtomicRevisionedAndConflictSafe(t *testing.T) {
+	db := testDB(t)
+	book, err := createBook(db, "p1", &Book{Title: "Edit Safely"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := createNode(db, &BookNode{BookID: book.ID, Type: "chapter", Title: "First", BodyMarkdown: "Alpha beta.", Position: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalSHA := nodeBodySHA256(node.BodyMarkdown)
+	appended, err := editNodeBody(db, node.ID, "append", "\n\nGamma delta.", "", originalSHA, "extend scene")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appended.ActualWordCount != 4 || appended.BodySHA256 == originalSHA {
+		t.Fatalf("unexpected append result: %#v", appended)
+	}
+	afterAppend, err := getNode(db, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterAppend.BodyMarkdown != "Alpha beta.\n\nGamma delta." {
+		t.Fatalf("append body = %q", afterAppend.BodyMarkdown)
+	}
+
+	if _, err := editNodeBody(db, node.ID, "append", " stale", "", originalSHA, "stale edit"); !errors.Is(err, errNodeEditConflict) {
+		t.Fatalf("stale checksum error = %v, want conflict", err)
+	}
+	afterConflict, err := getNode(db, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterConflict.BodyMarkdown != afterAppend.BodyMarkdown {
+		t.Fatalf("stale edit changed body: %q", afterConflict.BodyMarkdown)
+	}
+
+	replaced, err := editNodeBody(db, node.ID, "replace", "Epsilon", "Gamma", appended.BodySHA256, "tighten wording")
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterReplace, err := getNode(db, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterReplace.BodyMarkdown != "Alpha beta.\n\nEpsilon delta." || replaced.ActualWordCount != 4 {
+		t.Fatalf("replace result=%#v body=%q", replaced, afterReplace.BodyMarkdown)
+	}
+	revisions, err := listRevisions(db, node.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revisions) != 2 {
+		t.Fatalf("revision count = %d, want 2", len(revisions))
 	}
 }
 

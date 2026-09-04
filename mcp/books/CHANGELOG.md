@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2
+
+- Keep manuscript inventory reads compact by omitting node bodies unless explicitly requested.
+- Add atomic append, prepend, and exact-text replacement edits with revision snapshots and optional checksum conflict protection.
+
 ## 0.2.1
 
 - Accept a successful built-in EPUB structural preflight for publication readiness while continuing to distinguish official W3C EPUBCheck results.

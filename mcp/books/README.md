@@ -22,6 +22,12 @@ The app prepares files for upload. Publishing remains a deliberate human action 
 
 Use `platform` with package or readiness exports: `kindle`, `apple_books`, `kobo`, `google_play`, `print`, or `generic`.
 
+## Agent-friendly manuscript editing
+
+`book_nodes_list` returns structure and progress metadata without manuscript bodies by default. Use `book_nodes_get` to load only the chapter being edited, or request `include_body` explicitly when a complete tree is genuinely required.
+
+Use `book_node_body_edit` to append, prepend, or replace one exact passage without resubmitting the whole chapter. Pass the current `body_sha256` from a prior read or edit as `expected_body_sha256` when coordinating concurrent workers; stale edits are rejected and every successful change retains the previous node as a revision.
+
 ## EPUB validation
 
 Every EPUB runs through the built-in structural preflight, which is sufficient for the app's readiness checklist. When an `epubcheck` executable is on `PATH`, Books additionally runs the official W3C EPUBCheck automatically. A Java distribution can instead be configured with `EPUBCHECK_JAR=/path/to/epubcheck.jar`.

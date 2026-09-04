@@ -119,7 +119,7 @@ func (a *App) toolNodesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	tree := nodeTree(nodes)
+	tree := nodeTreeForList(nodes, boolArg(args, "include_body"))
 	return map[string]any{"nodes": tree, "count": len(nodes)}, nil
 }
 
@@ -132,7 +132,7 @@ func (a *App) toolNodesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if node == nil {
 		return map[string]any{"found": false}, nil
 	}
-	return map[string]any{"found": true, "node": node}, nil
+	return map[string]any{"found": true, "node": node, "body_sha256": nodeBodySHA256(node.BodyMarkdown)}, nil
 }
 
 func (a *App) toolNodesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -144,6 +144,21 @@ func (a *App) toolNodesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	return map[string]any{"updated": true, "id": id}, nil
+}
+
+func (a *App) toolNodeBodyEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id, _ := int64Arg(args, "id")
+	result, err := editNodeBody(
+		ctx.AppDB(), id, strArg(args, "operation"), strArg(args, "content"),
+		strArg(args, "match"), strArg(args, "expected_body_sha256"), strArg(args, "change_summary"),
+	)
+	if err != nil {
+		if errors.Is(err, errNotFound) {
+			return map[string]any{"found": false}, nil
+		}
+		return nil, err
+	}
+	return map[string]any{"updated": true, "edit": result}, nil
 }
 
 func (a *App) toolNodesMove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
