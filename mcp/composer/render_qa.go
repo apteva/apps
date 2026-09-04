@@ -52,6 +52,7 @@ func timelineWarnings(edit *Edit) []string {
 		return nil
 	}
 	var warnings []string
+	warnings = append(warnings, v1TypographyWarnings(edit)...)
 	for _, c := range audioTimelineClips(edit) {
 		if c.AI != nil {
 			peak := c.AI.PeakDB
