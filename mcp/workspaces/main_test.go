@@ -1,11 +1,16 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -26,6 +31,7 @@ type platformStub struct {
 	workloadStatus  string
 	executionStatus string
 	exitCode        *int
+	volumeArchive   string
 }
 
 func (p *platformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
@@ -87,7 +93,11 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	case "containers_volume_import":
 		response = map[string]any{"workload_id": "wrk_test", "volume": "workspace", "compressed_bytes": 10}
 	case "containers_volume_export":
-		response = map[string]any{"workload_id": "wrk_test", "volume": "workspace", "format": "tar.gz", "archive_base64": "H4sI"}
+		archive := p.volumeArchive
+		if archive == "" {
+			archive = "H4sI"
+		}
+		response = map[string]any{"workload_id": "wrk_test", "volume": input["volume"], "format": "tar.gz", "archive_base64": archive}
 	default:
 		response = map[string]any{}
 	}
@@ -147,7 +157,7 @@ func agentContext(project string, agentID int64, threadID, toolCallID string) co
 func TestManifestAndToolsAgree(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "workspaces" || manifest.Version != "0.3.0" {
+	if manifest.Name != "workspaces" || manifest.Version != "0.4.0" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	requiredContainers := false
@@ -347,6 +357,158 @@ func TestAgentOwnershipAndAppSourceBoundary(t *testing.T) {
 	if _, err := app.toolSourceExport(appCaller, ctx, map[string]any{"workspace_id": appWorkspace.ID}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestManagedSourceSyncDeletesOnlyOldManagedPaths(t *testing.T) {
+	zero := 0
+	platform := &platformStub{executionStatus: "succeeded", exitCode: &zero}
+	ctx, _ := newTestContext(t, platform)
+	app := &App{}
+	caller := sdk.WithCaller(context.Background(), &sdk.Caller{
+		ProjectID: "project-a", AppInstallID: 77, AppName: "code", ToolCallID: "create-source",
+	})
+	initialArchive := sourceArchiveForTest(t, map[string]string{"src/main.go": "package main", "src/removed.go": "package main"})
+	created, err := app.toolCreateForResource(caller, ctx, map[string]any{
+		"name": "Code source", "source_archive_base64": initialArchive, "source_digest": "revision-1",
+		"source_paths": []any{"src/main.go", "src/removed.go"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := created.(map[string]any)["workspace"].(*Workspace)
+	nextArchive := sourceArchiveForTest(t, map[string]string{"src/main.go": "package main", "src/new.go": "package main"})
+	result, err := app.toolSourceSync(caller, ctx, map[string]any{
+		"workspace_id": w.ID, "source_archive_base64": nextArchive, "source_digest": "revision-2",
+		"expected_source_digest": "revision-1", "source_paths": []any{"src/main.go", "src/new.go"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.(map[string]any)["deleted_paths"] != 1 {
+		t.Fatalf("unexpected sync result: %+v", result)
+	}
+	var removeCall *appCall
+	for i := range platform.calls {
+		if platform.calls[i].Tool == "containers_exec_start" {
+			removeCall = &platform.calls[i]
+			break
+		}
+	}
+	if removeCall == nil {
+		t.Fatal("expected stale-path removal execution")
+	}
+	argv, ok := removeCall.Input["argv"].([]string)
+	if !ok || !containsString(argv, "/workspace/src/removed.go") || containsString(argv, "/workspace/src/main.go") {
+		t.Fatalf("unsafe removal argv: %#v", removeCall.Input["argv"])
+	}
+	w, err = requireWorkspace(ctx.AppDB(), "project-a", w.ID)
+	if err != nil || w.SourceDigest != "revision-2" || len(w.SourceManifest) != 2 {
+		t.Fatalf("source revision was not stored: %+v err=%v", w, err)
+	}
+	beforeImports := countCalls(platform.calls, "containers_volume_import")
+	if _, err := app.toolSourceSync(caller, ctx, map[string]any{
+		"workspace_id": w.ID, "source_archive_base64": nextArchive, "source_digest": "revision-3",
+		"expected_source_digest": "stale", "source_paths": []any{"src/main.go"},
+	}); err == nil {
+		t.Fatal("stale producer revision should be rejected")
+	}
+	if countCalls(platform.calls, "containers_volume_import") != beforeImports {
+		t.Fatal("conflicting sync must not import source")
+	}
+}
+
+func TestManagedSourceArchiveMustMatchDeclaredPaths(t *testing.T) {
+	archive := sourceArchiveForTest(t, map[string]string{"src/main.go": "package main"})
+	if err := validateSourceArchive(archive, []string{"src/other.go"}); err == nil {
+		t.Fatal("mismatched source manifest should be rejected")
+	}
+	unsafe := sourceArchiveForTest(t, map[string]string{".git/config": "secret"})
+	if err := validateSourceArchive(unsafe, []string{".git/config"}); err == nil {
+		t.Fatal("Git metadata should be rejected from managed source")
+	}
+}
+
+func TestManagedSourceExportUnwrapsFilteredArchive(t *testing.T) {
+	inner := []byte("managed-source-tar-gzip")
+	zero := 0
+	platform := &platformStub{executionStatus: "succeeded", exitCode: &zero, volumeArchive: wrapArchiveForTest(t, "source.tar.gz", inner)}
+	ctx, _ := newTestContext(t, platform)
+	app := &App{}
+	caller := sdk.WithCaller(context.Background(), &sdk.Caller{ProjectID: "project-a", AppInstallID: 77, AppName: "code"})
+	created, err := app.toolCreateForResource(caller, ctx, map[string]any{"name": "Export source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := created.(map[string]any)["workspace"].(*Workspace)
+	out, err := app.toolSourceExport(caller, ctx, map[string]any{"workspace_id": w.ID, "managed": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := out.(map[string]any)["archive_base64"].(string)
+	decoded, _ := base64.StdEncoding.DecodeString(encoded)
+	if !bytes.Equal(decoded, inner) {
+		t.Fatalf("managed archive changed: %q", decoded)
+	}
+	if countCalls(platform.calls, "containers_exec_start") < 2 {
+		t.Fatal("expected archive creation and cleanup executions")
+	}
+}
+
+func wrapArchiveForTest(t *testing.T, name string, body []byte) string {
+	t.Helper()
+	var out bytes.Buffer
+	gz := gzip.NewWriter(&out)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(out.Bytes())
+}
+
+func sourceArchiveForTest(t *testing.T, files map[string]string) string {
+	t.Helper()
+	var out bytes.Buffer
+	gz := gzip.NewWriter(&out)
+	tw := tar.NewWriter(gz)
+	paths := make([]string, 0, len(files))
+	for name := range files {
+		paths = append(paths, name)
+	}
+	sort.Strings(paths)
+	for _, name := range paths {
+		body := []byte(files[name])
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(out.Bytes())
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestExpirySuspendsThenDestroysAfterRetention(t *testing.T) {

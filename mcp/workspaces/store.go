@@ -13,7 +13,8 @@ const workspaceColumns = `id, project_id, name, purpose, profile, image, workloa
 	network_policy, cpu, memory_mb, consumer_app, consumer_install_id,
 	owner_agent_id, owner_thread_id, owner_label, resource_kind, resource_id,
 	repo_label, branch_label, origin_label, origin_href, dirty_state, unpushed_state,
-	last_error, created_at, updated_at, last_activity_at, expires_at, delete_at, destroyed_at`
+	source_digest, source_manifest_json, source_synced_at, last_error, created_at,
+	updated_at, last_activity_at, expires_at, delete_at, destroyed_at`
 
 func insertWorkspace(db *sql.DB, w *Workspace, idempotencyKey string) error {
 	_, err := db.Exec(`INSERT INTO workspaces (
@@ -22,14 +23,16 @@ func insertWorkspace(db *sql.DB, w *Workspace, idempotencyKey string) error {
 		network_policy, cpu, memory_mb, consumer_app, consumer_install_id,
 		owner_agent_id, owner_thread_id, owner_label, resource_kind, resource_id,
 		repo_label, branch_label, origin_label, origin_href, dirty_state, unpushed_state,
+		source_digest, source_manifest_json, source_synced_at,
 		last_error, idempotency_key, created_at, updated_at, last_activity_at,
 		expires_at, delete_at, destroyed_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		w.ID, w.ProjectID, w.Name, w.Purpose, w.Profile, w.Image, w.WorkloadID,
 		w.LifecycleStatus, w.ActivityStatus, w.RuntimeStatus, w.HealthStatus, w.HostLabel,
 		w.NetworkPolicy, w.CPU, w.MemoryMB, w.ConsumerApp, w.ConsumerInstallID,
 		w.OwnerAgentID, w.OwnerThreadID, w.OwnerLabel, w.ResourceKind, w.ResourceID,
 		w.RepoLabel, w.BranchLabel, w.OriginLabel, w.OriginHref, w.DirtyState, w.UnpushedState,
+		w.SourceDigest, mustJSON(w.SourceManifest), w.SourceSyncedAt,
 		w.LastError, idempotencyKey, w.CreatedAt, w.UpdatedAt, w.LastActivityAt,
 		w.ExpiresAt, w.DeleteAt, w.DestroyedAt)
 	return err
@@ -37,17 +40,20 @@ func insertWorkspace(db *sql.DB, w *Workspace, idempotencyKey string) error {
 
 func scanWorkspace(scanner interface{ Scan(...any) error }) (*Workspace, error) {
 	var w Workspace
+	var sourceManifest string
 	err := scanner.Scan(
 		&w.ID, &w.ProjectID, &w.Name, &w.Purpose, &w.Profile, &w.Image, &w.WorkloadID,
 		&w.LifecycleStatus, &w.ActivityStatus, &w.RuntimeStatus, &w.HealthStatus, &w.HostLabel,
 		&w.NetworkPolicy, &w.CPU, &w.MemoryMB, &w.ConsumerApp, &w.ConsumerInstallID,
 		&w.OwnerAgentID, &w.OwnerThreadID, &w.OwnerLabel, &w.ResourceKind, &w.ResourceID,
 		&w.RepoLabel, &w.BranchLabel, &w.OriginLabel, &w.OriginHref, &w.DirtyState, &w.UnpushedState,
+		&w.SourceDigest, &sourceManifest, &w.SourceSyncedAt,
 		&w.LastError, &w.CreatedAt, &w.UpdatedAt, &w.LastActivityAt, &w.ExpiresAt, &w.DeleteAt, &w.DestroyedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
+	_ = json.Unmarshal([]byte(sourceManifest), &w.SourceManifest)
 	w.deriveStatus()
 	return &w, nil
 }
@@ -125,7 +131,8 @@ func updateWorkspace(db *sql.DB, id string, fields map[string]any) error {
 		"name", "purpose", "workload_id", "lifecycle_status", "activity_status",
 		"runtime_status", "health_status", "repo_label", "branch_label", "origin_label",
 		"origin_href", "dirty_state", "unpushed_state", "last_error", "updated_at",
-		"last_activity_at", "expires_at", "delete_at", "destroyed_at",
+		"last_activity_at", "expires_at", "delete_at", "destroyed_at", "source_digest",
+		"source_manifest_json", "source_synced_at",
 	}
 	sets := make([]string, 0, len(fields))
 	args := make([]any, 0, len(fields)+1)
@@ -141,6 +148,11 @@ func updateWorkspace(db *sql.DB, id string, fields map[string]any) error {
 	args = append(args, id)
 	_, err := db.Exec(`UPDATE workspaces SET `+strings.Join(sets, ", ")+` WHERE id=?`, args...)
 	return err
+}
+
+func mustJSON(value any) string {
+	raw, _ := json.Marshal(value)
+	return string(raw)
 }
 
 func insertCommand(db *sql.DB, c *Command, idempotencyKey string) error {
