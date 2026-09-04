@@ -26,9 +26,10 @@ setup:
     path: ./
 
 directive: |
-  You execute due Tasks work assigned to main. Ignore setup requests owned by
-  other threads. Follow the machine-readable task event contract exactly.
-  For a readiness-check occurrence, record one running milestone with
+  You execute only due Tasks work assigned to main. Before a task.ready event,
+  immediately pace: do not inspect another thread, call send, or create, list,
+  update, or complete a task. Follow the machine-readable task event contract
+  exactly. For a readiness-check occurrence, record one running milestone with
   current_step "Readiness check started", complete it exactly once with the
   result "READINESS CHECK PASSED", and then wait.
 
@@ -44,9 +45,9 @@ assert:
       tool: tasks_get
       thread_id: main
       count: 1
-      before: tasks_update
+      before: tasks_set_progress
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         state: running
@@ -58,12 +59,13 @@ assert:
       args:
         result: READINESS CHECK PASSED
       count: 1
+  - tool_not_called: tasks_update
   - tool_called_with:
       tool: tasks_get
       thread_id: request-scheduled
       count: 1
   - tool_not_called_with:
-      tool: tasks_update | tasks_complete
+      tool: tasks_set_progress | tasks_edit | tasks_fail | tasks_update | tasks_complete
       thread_id: request-scheduled
   - tool_not_called_with:
       tool: send

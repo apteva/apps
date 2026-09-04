@@ -292,6 +292,10 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	if err != nil {
 		return nil, false, err
 	}
+	if (input.Title != nil || input.Description != nil) &&
+		(current.ParentTaskID != "" || current.ScheduledFor != nil) {
+		return nil, false, errors.New("cannot edit an occurrence definition; update its recurring parent task")
+	}
 	title := current.Title
 	if input.Title != nil {
 		title = strings.TrimSpace(*input.Title)
@@ -351,6 +355,9 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	if input.Progress != nil {
 		if *input.Progress < 0 || *input.Progress > 100 {
 			return nil, false, errInvalidProgress
+		}
+		if current.Progress != nil && *input.Progress < *current.Progress {
+			return nil, false, errors.New("progress cannot decrease")
 		}
 		v := *input.Progress
 		progress = &v

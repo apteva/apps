@@ -41,7 +41,16 @@ func (a *App) tools() []sdk.Tool {
 			"states": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "include_runs": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer"},
 		}), HandlerCtx: a.toolList},
 		{Name: "get", Description: "Read the authoritative task and its chronological event history. Every thread receiving a task event, including a delegated worker, must call this before any domain action. Main may grant this read-only tool to a worker without granting Tasks mutation tools.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}}), HandlerCtx: a.toolGet},
-		{Name: "update", Description: "Atomically edit a task definition and/or record meaningful execution progress while preserving every omitted field. title and description rename or revise the task. schedule is a partial patch: omit kind, expression, timezone, or policies to preserve their current values; editing a paused recurring schedule keeps it paused. Edit the recurring parent task, not an already-materialized occurrence, so future occurrences inherit the new definition. Keep the task running while any executor is actively working, including a delegated worker. Use waiting only when no executor can progress until an external event; when work resumes, return to running with a concrete current_step. Multi-stage or delegated work should usually have at least two or three intermediate milestones. Progress 100 and a final-looking current_step are still nonterminal: after successful work, call tasks_complete before pace, idle, stopping, or sending the final response. On failure, record failed with a concrete error before stopping. Do not update after every tool call or mirror task progress into global status.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{
+		{Name: "set_progress", Description: "Record one meaningful nonterminal task milestone. Always provide state, progress, and a concrete current_step. State must be running while any executor is actively working, waiting only when nobody can progress until an external event, or blocked for a concrete dependency. Progress is monotonic and must not decrease. Progress 100 is still nonterminal: call tasks_complete after success or tasks_fail after failure. Do not call after every tool call.", InputSchema: objectSchema([]string{"task_id", "state", "progress", "current_step"}, map[string]any{
+			"task_id": map[string]any{"type": "string"}, "state": map[string]any{"type": "string", "enum": []string{"running", "waiting", "blocked"}}, "progress": map[string]any{"type": "integer", "minimum": 0, "maximum": 100}, "current_step": map[string]any{"type": "string"},
+		}), Meta: wakeAlways, HandlerCtx: a.toolSetProgress},
+		{Name: "edit", Description: "Atomically edit an existing task definition while preserving omitted fields. Change title, description, and/or a partial schedule. Use clear_description=true to intentionally remove the description. For recurring work, edit the recurring parent; dispatched or materialized occurrence definitions are immutable. Editing a paused schedule keeps it paused. Call tasks_get first and never create a placeholder replacement task.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{
+			"task_id": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "clear_description": map[string]any{"type": "boolean"}, "schedule": scheduleSchema(false),
+		}), Meta: wakeAlways, HandlerCtx: a.toolEdit},
+		{Name: "fail", Description: "Record an explicit terminal task failure with a concrete error. Use this instead of tasks_update(state=failed). Include result_reference when durable evidence or an external operation record exists. Call exactly once before pace, idle, stopping, or sending the final response.", InputSchema: objectSchema([]string{"task_id", "error"}, map[string]any{
+			"task_id": map[string]any{"type": "string"}, "error": map[string]any{"type": "string"}, "result_reference": map[string]any{"type": "string"},
+		}), Meta: wakeAlways, HandlerCtx: a.toolFail},
+		{Name: "update", Description: "Legacy compatibility tool combining definition edits, progress, and failure state. Do not use for new work. Use tasks_set_progress for milestones, tasks_edit for definitions, tasks_fail for failures, and tasks_complete for success.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{
 			"task_id": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "state": map[string]any{"type": "string", "enum": []string{"queued", "running", "waiting", "blocked", "failed"}}, "progress": map[string]any{"type": "integer", "minimum": 0, "maximum": 100}, "current_step": map[string]any{"type": "string"}, "error": map[string]any{"type": "string"}, "result_reference": map[string]any{"type": "string"}, "schedule": scheduleSchema(false),
 		}), Meta: wakeAlways, HandlerCtx: a.toolUpdate},
 		{Name: "assign", Description: "Assign a task to an existing opaque thread id belonging to the same agent. This records ownership and sends an event containing the authoritative task ID, which wakes a paused worker; it never creates a thread. Main must use the platform spawn tool first, grant the worker tasks_get plus only required domain tools, and retain all Tasks mutation tools. The worker must call tasks_get before any domain action.", InputSchema: objectSchema([]string{"task_id", "thread_id"}, map[string]any{"task_id": map[string]any{"type": "string"}, "thread_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolAssign},
@@ -218,6 +227,104 @@ func (a *App) toolGet(ctx context.Context, app *sdk.AppCtx, args map[string]any)
 		return nil, err
 	}
 	return map[string]any{"task": task, "events": events, "agent_executions": executions}, nil
+}
+
+func (a *App) toolSetProgress(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	caller, task, err := a.taskForCaller(ctx, app, args)
+	if err != nil {
+		return nil, err
+	}
+	state := strings.ToLower(strings.TrimSpace(stringArg(args, "state")))
+	if state != stateRunning && state != stateWaiting && state != stateBlocked {
+		return nil, errors.New("state must be running, waiting, or blocked")
+	}
+	progress, ok := optionalIntArg(args, "progress")
+	if !ok {
+		return nil, errors.New("progress required")
+	}
+	if progress < 0 || progress > 100 {
+		return nil, errInvalidProgress
+	}
+	if task.Progress != nil && progress < *task.Progress {
+		return nil, errors.New("progress cannot decrease")
+	}
+	step := strings.TrimSpace(stringArg(args, "current_step"))
+	if step == "" {
+		return nil, errors.New("current_step required")
+	}
+	input := UpdateTaskInput{State: &state, Progress: &progress, CurrentStep: &step}
+	if state == stateRunning && strings.TrimSpace(task.ExecutionThreadID) == "" {
+		executionThreadID := strings.TrimSpace(task.AssignedThreadID)
+		if executionThreadID == "" {
+			executionThreadID = caller.ThreadID
+		}
+		input.ExecutionThreadID = &executionThreadID
+	}
+	updated, _, err := a.store.Update(task.ID, caller.ThreadID, input)
+	return updated, err
+}
+
+func (a *App) toolEdit(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	caller, task, err := a.taskForCaller(ctx, app, args)
+	if err != nil {
+		return nil, err
+	}
+	if terminalState(task.State) {
+		return nil, errTerminalTask
+	}
+	if task.ParentTaskID != "" || task.ScheduledFor != nil {
+		return nil, errors.New("occurrence definitions are immutable; edit the recurring parent task")
+	}
+	input := UpdateTaskInput{}
+	if title := strings.TrimSpace(stringArg(args, "title")); title != "" {
+		input.Title = &title
+	}
+	clearDescription := boolArg(args, "clear_description")
+	if clearDescription {
+		description := ""
+		input.Description = &description
+	} else if description := stringArg(args, "description"); description != "" {
+		input.Description = &description
+	}
+	schedule, err := decodeSchedulePatch(args["schedule"])
+	if err != nil {
+		return nil, err
+	}
+	// Structured-output providers can fill an omitted optional kind with the
+	// enum's first value. Keep the existing recurring kind when the call has no
+	// concrete one-time expression and edits another schedule field instead.
+	if schedule != nil && schedule.Kind == scheduleOnce && schedule.At == "" &&
+		schedule.After == "" && task.ScheduleKind != scheduleOnce {
+		schedule.Kind = ""
+	}
+	input.Schedule = schedule
+	if input.Title == nil && input.Description == nil && input.Schedule == nil {
+		return nil, errors.New("at least one definition field is required")
+	}
+	updated, _, err := a.store.Update(task.ID, caller.ThreadID, input)
+	return updated, err
+}
+
+func (a *App) toolFail(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	caller, task, err := a.taskForCaller(ctx, app, args)
+	if err != nil {
+		return nil, err
+	}
+	failure := strings.TrimSpace(stringArg(args, "error"))
+	if failure == "" {
+		return nil, errors.New("error required")
+	}
+	state, step := stateFailed, "Failed"
+	input := UpdateTaskInput{State: &state, Error: &failure, CurrentStep: &step}
+	if reference := strings.TrimSpace(stringArg(args, "result_reference")); reference != "" {
+		input.ResultReference = &reference
+	}
+	updated, _, err := a.store.Update(task.ID, caller.ThreadID, input)
+	if err != nil {
+		return nil, err
+	}
+	_ = a.notifyCreator(updated)
+	return updated, nil
 }
 
 func (a *App) toolUpdate(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {

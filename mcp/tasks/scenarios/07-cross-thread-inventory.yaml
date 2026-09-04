@@ -48,7 +48,7 @@ assert:
       tool: tasks_list
       thread_id: inventory-reader
       count: 1
-  - tool_not_called: tasks_create | tasks_update | tasks_complete
+  - tool_not_called: tasks_create | tasks_set_progress | tasks_edit | tasks_fail | tasks_update | tasks_complete
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_status: 200
     expect_count_at: tasks
