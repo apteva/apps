@@ -17,11 +17,13 @@ import { useReferenceData } from "./hooks/useReferenceData.ts";
 import { DataIntelligence } from "./components/DataIntelligence.tsx";
 import { useRisk } from "./hooks/useRisk.ts";
 import { RiskObjectives } from "./components/RiskObjectives.tsx";
+import { useExecution } from "./hooks/useExecution.ts";
+import { ExecutionIntelligence } from "./components/ExecutionIntelligence.tsx";
 
 export function App() {
   const [dark, setDark] = useState(true);
   const [portfolioId, setPortfolioId] = useState<number | null>(null);
-  const [bottomTab, setBottomTab] = useState<"positions" | "orders" | "feed" | "data" | "risk">("positions");
+  const [bottomTab, setBottomTab] = useState<"positions" | "orders" | "feed" | "data" | "risk" | "execution">("positions");
   const [symbol, setSymbol] = useState<string>("");
 
   useEffect(() => { document.body.classList.toggle("dark", dark); }, [dark]);
@@ -35,6 +37,7 @@ export function App() {
   const health = useHealth();
   const reference = useReferenceData(symbol);
   const risk = useRisk(portfolioId);
+  const execution = useExecution(portfolioId);
 
   // Event-driven cache invalidation. Each app-event from the sidecar
   // (order.placed, fill, journal.appended, tick, etc.) bumps the
@@ -50,6 +53,14 @@ export function App() {
       case "market.heartbeat":
       case "provider.health.changed":
         health.refresh();
+        return;
+      case "venue.health.changed":
+      case "venue.profile.changed":
+        execution.profiles.refresh(); health.refresh();
+        return;
+      case "funding.applied":
+        if (!matchesSelected) return;
+        execution.costs.refresh(); portfolio.refresh(); journal.refresh();
         return;
       case "reference.sync.completed":
       case "reference.security.changed":
@@ -96,6 +107,10 @@ export function App() {
         if (!matchesSelected) return;
         risk.risk.refresh(); risk.objectives.refresh(); portfolio.refresh();
         return;
+      case "portfolio.universe.changed":
+        if (!matchesSelected) return;
+        risk.universe.refresh(); portfolio.refresh();
+        return;
       case "order.placed":
       case "order.filled":
       case "order.cancelled":
@@ -104,6 +119,7 @@ export function App() {
         orders.refresh();
         portfolio.refresh();   // cash/equity drift
         positions.refresh();   // potential new/removed position
+        execution.costs.refresh();
         return;
       case "position.changed":
         if (!matchesSelected) return;
@@ -224,6 +240,7 @@ export function App() {
                     { k: "feed",      label: "Agent",     count: journal.data?.length ?? 0 },
                     { k: "data",      label: "Data",      count: reference.actions.data?.length ?? 0 },
                     { k: "risk",      label: "Risk & goals", count: risk.objectives.data?.length ?? 0 },
+                    { k: "execution", label: "Execution", count: execution.costs.data?.costs.length ?? 0 },
                   ] as const
                 ).map((t) => (
                   <button
@@ -235,7 +252,7 @@ export function App() {
                     <span className="text-[10px] t-tertiary mono">{t.count}</span>
                   </button>
                 ))}
-                <span className="ml-auto pr-2 text-[10px] t-tertiary mono">v0.7.0 · event driven</span>
+                <span className="ml-auto pr-2 text-[10px] t-tertiary mono">v0.9.0 · event driven</span>
               </div>
 
               <div className="flex-1 min-h-0 mt-1.5">
@@ -245,7 +262,8 @@ export function App() {
                   <AgentFeed portfolio={portfolio.data} entries={journal.data ?? []} />
                 )}
                 {bottomTab === "data" && <DataIntelligence status={reference.status.data} actions={reference.actions.data ?? []} issues={reference.issues.data ?? []} sessions={reference.sessions.data ?? []} symbol={symbol} />}
-                {bottomTab === "risk" && portfolio.data && <RiskObjectives portfolioId={portfolio.data.id} policy={risk.risk.data?.policy} state={risk.risk.data?.state} objectives={risk.objectives.data ?? []} onRefresh={() => { risk.risk.refresh(); risk.objectives.refresh(); }} />}
+                {bottomTab === "risk" && portfolio.data && <RiskObjectives portfolioId={portfolio.data.id} policy={risk.risk.data?.policy} state={risk.risk.data?.state} objectives={risk.objectives.data ?? []} universe={risk.universe.data?.policy} allowedClasses={risk.universe.data?.allowed_classes ?? portfolio.data.allowed_classes} onRefresh={() => { risk.risk.refresh(); risk.objectives.refresh(); risk.universe.refresh(); }} />}
+                {bottomTab === "execution" && <ExecutionIntelligence profiles={execution.profiles.data ?? []} costs={execution.costs.data?.costs ?? []} totals={execution.costs.data?.totals ?? {}} onRefresh={() => { execution.profiles.refresh(); execution.costs.refresh(); }} />}
               </div>
             </section>
           </div>

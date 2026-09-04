@@ -61,6 +61,9 @@ export function Header({
         {health?.streams?.corporate_actions && (
           <StreamPill label="Actions" stream={health.streams.corporate_actions} />
         )}
+        {Object.entries(health?.venues ?? {}).filter(([,v]) => v.status !== "healthy").map(([venue,v]) => (
+          <StreamPill key={venue} label={venue} stream={{status:v.status,last_error:v.last_error}} />
+        ))}
         <span className="w-px h-5 bg-[var(--border)] mx-1" />
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium bg-up-soft tabular">
           <span className="status-dot" style={{ color: "var(--color-up)", background: "var(--color-up)" }} />

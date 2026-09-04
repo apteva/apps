@@ -835,6 +835,18 @@ func syncAlpacaAssets(ctx *sdk.AppCtx, connectionID int64, result *referenceSync
 			if err := dbUpsertSecurity(ctx.AppDB(), security, listing, map[string]string{"alpaca_asset_id": assetID, "isin": isin, "cusip": cusip}); err != nil {
 				return err
 			}
+			// Alpaca includes precision/minimum fields for asset classes that
+			// require them (notably crypto). Persist any published values in the
+			// same normalized instrument record used by pre-trade validation.
+			instrument := defaultInstrument(symbol, class, referenceProviderAlpaca, time.Now().UTC())
+			instrument.Exchange, instrument.Active = venue, active
+			instrument.MinQty = refFloat(asset, "min_order_size", "min_qty")
+			instrument.MinNotional = refFloat(asset, "min_order_value", "min_notional")
+			instrument.LotSize = refFloat(asset, "min_trade_increment", "qty_increment", "step_size")
+			instrument.TickSize = refFloat(asset, "price_increment", "tick_size")
+			if err := dbUpsertInstrumentExec(ctx.AppDB(), instrument); err != nil {
+				return err
+			}
 			result.Securities++
 			result.Listings++
 			if active {

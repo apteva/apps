@@ -66,7 +66,7 @@ func TestEngineMaxDrawdownPolicyHaltsPortfolio(t *testing.T) {
 func TestPreTradeRiskRejectsOrderAndStackedPosition(t *testing.T) {
 	ctx := newTestCtx(t)
 	id := mustCreatePortfolio(t, ctx, "Pretrade", []string{"equity"})
-	if err := dbUpsertMark(ctx.AppDB(), &Mark{Symbol: "AAPL", AssetClass: "equity", Price: 100, MarkedAt: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+	if err := dbUpsertMark(ctx.AppDB(), &Mark{Symbol: "AAPL", AssetClass: "equity", Price: 100, Source: "mock", MarkedAt: time.Now().UTC().Format(time.RFC3339)}); err != nil {
 		t.Fatal(err)
 	}
 	app := &App{}
@@ -101,13 +101,17 @@ func TestPreTradeRiskRejectsOrderAndStackedPosition(t *testing.T) {
 func TestConcurrentOrdersCannotRacePastPositionLimit(t *testing.T) {
 	ctx := newTestCtx(t)
 	id := mustCreatePortfolio(t, ctx, "Concurrent risk", []string{"equity"})
-	if err := dbUpsertMark(ctx.AppDB(), &Mark{Symbol: "AAPL", AssetClass: "equity", Price: 100, MarkedAt: time.Now().UTC().Format(time.RFC3339)}); err != nil { t.Fatal(err) }
+	if err := dbUpsertMark(ctx.AppDB(), &Mark{Symbol: "AAPL", AssetClass: "equity", Price: 100, Source: "mock", MarkedAt: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
 	app := &App{}
 	_, err := app.toolPortfolioRiskUpdate(ctx, map[string]any{
 		"portfolio_id": id, "risk_level": "custom", "max_daily_loss_pct": 5, "max_drawdown_pct": 20,
 		"max_position_pct": 15, "max_gross_exposure_pct": 100, "max_order_pct": 20,
 	})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	var wg sync.WaitGroup
 	results := make(chan map[string]any, 2)
 	for range 2 {
@@ -118,17 +122,27 @@ func TestConcurrentOrdersCannotRacePastPositionLimit(t *testing.T) {
 				"portfolio_id": id, "symbol": "AAPL", "side": "buy", "type": "limit", "limit_price": 100,
 				"qty": 100, "rationale": "Concurrent risk-gate test with enough rationale for order placement.",
 			})
-			if placeErr != nil { t.Errorf("place: %v", placeErr); return }
+			if placeErr != nil {
+				t.Errorf("place: %v", placeErr)
+				return
+			}
 			results <- out.(map[string]any)
 		}()
 	}
-	wg.Wait(); close(results)
+	wg.Wait()
+	close(results)
 	working, rejected := 0, 0
 	for result := range results {
-		if result["status"] == "working" { working++ }
-		if result["code"] == "risk_max_position" { rejected++ }
+		if result["status"] == "working" {
+			working++
+		}
+		if result["code"] == "risk_max_position" {
+			rejected++
+		}
 	}
-	if working != 1 || rejected != 1 { t.Fatalf("working=%d rejected=%d", working, rejected) }
+	if working != 1 || rejected != 1 {
+		t.Fatalf("working=%d rejected=%d", working, rejected)
+	}
 }
 
 func TestRiskHighWaterDrawdown(t *testing.T) {

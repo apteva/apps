@@ -224,6 +224,24 @@ interface PortfolioObjective {
   starts_at: string; deadline_at?: string; status: string; actual_pct?: number; progress_pct?: number;
   achieved: boolean; period_state: string;
 }
+interface PortfolioUniversePolicy {
+  portfolio_id: number;
+  selection_mode: "all_allowed_classes" | "symbol_allowlist" | "reference_universe";
+  include_symbols: string[]; exclude_symbols: string[]; reference_universe_id?: string;
+  require_active_listing: boolean; enforcement_enabled: boolean;
+}
+interface ScorecardCriterion { metric: string; operator: "min" | "max"; threshold: number; required: boolean; }
+interface StrategyScorecardPolicy {
+  portfolio_id: number; strategy_id: number; criteria: ScorecardCriterion[]; min_completed_runs: number;
+  require_out_of_sample: boolean; enforcement_enabled: boolean;
+  promotion_stage: "research" | "paper_candidate" | "paper" | "live_candidate" | "live" | "suspended";
+  policy_hash: string;
+}
+interface StrategyScorecardEvaluation {
+  id: number; strategy_version: number; backtest_run_id: number; evaluation_scope: string;
+  passed: boolean; verdict: string; metrics: Record<string, number>; checks: Array<{ metric: string; passed: boolean; detail?: string }>;
+  policy_hash: string; dataset_sha256?: string; evaluated_at: string;
+}
 interface Position {
   symbol: string;
   asset_class: string;
@@ -276,6 +294,37 @@ interface BrokerInfo {
   quote: string;
   bound?: boolean;
   connections: { id: number; name: string; status: string }[];
+  runtime?: VenueRuntimeHealth;
+  execution_profiles?: VenueExecutionProfile[];
+}
+interface VenueRuntimeHealth {
+  status: string;
+  consecutive_failures: number;
+  last_ok_at?: string;
+  last_error?: string;
+  retry_at?: string;
+}
+interface VenueExecutionProfile {
+  venue_slug: string;
+  asset_class: string;
+  symbol: string;
+  status: "active" | "degraded" | "maintenance" | "outage";
+  calendar: string;
+  session_policy: "continuous" | "regular_only" | "venue_managed";
+  maker_fee_bps: number;
+  taker_fee_bps: number;
+  fee_currency: string;
+  spread_model: "quote" | "fixed_bps" | "none";
+  fallback_spread_bps: number;
+  slippage_model: "fixed_bps" | "none";
+  slippage_bps: number;
+  min_qty: number;
+  min_notional: number;
+  qty_step: number;
+  price_tick: number;
+  funding_rate_bps: number;
+  funding_interval_hours: number;
+  runtime?: VenueRuntimeHealth;
 }
 interface Mark {
   symbol: string;
@@ -389,6 +438,7 @@ interface StrategyValidation {
   train: StrategyValidationPeriod;
   test: StrategyValidationPeriod;
   verdict: string;
+  scorecard?: StrategyScorecardEvaluation;
 }
 interface BacktestRun {
   id: number;
@@ -528,7 +578,7 @@ function classBadgeClass(c: string): string {
 }
 
 const TRADING_TOOLS = new Set([
-  "portfolio_create", "brokers_list", "portfolio_list", "portfolio_get",
+  "portfolio_create", "brokers_list", "venue_profiles_list", "venue_profile_update", "portfolio_list", "portfolio_get",
   "account_summary", "positions_list", "orders_list", "order_place",
   "order_cancel", "market_quote", "market_history", "market_source",
   "watchlist_add", "watchlist_remove", "alert_create", "journal_write",
@@ -536,7 +586,10 @@ const TRADING_TOOLS = new Set([
   "strategy_get", "strategy_list", "strategy_validate", "strategy_evaluate",
   "strategy_assign", "strategy_backtest_create",
   "risk_profiles_list", "portfolio_risk_get", "portfolio_risk_update",
+  "portfolio_universe_get", "portfolio_universe_update",
   "portfolio_objective_create", "portfolio_objectives_list", "portfolio_objective_update",
+  "strategy_scorecard_get", "strategy_scorecard_update", "strategy_scorecard_evaluate", "strategy_promotion_update",
+  "execution_costs_list", "funding_payment_record",
 ]);
 
 function compactText(value: unknown, fallback = ""): string {
@@ -1170,7 +1223,7 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
     if (["portfolio.created", "portfolio.status.changed", "portfolio.live_armed.changed", "portfolio.agent.changed", "order.filled", "position.changed", "corporate_action.applied"].includes(ev.topic)) {
       loadPortfolios();
     }
-    if (["risk.policy.changed", "risk.limit.breached", "portfolio.objective.changed", "portfolio.performance.updated"].includes(ev.topic)) {
+    if (["risk.policy.changed", "risk.limit.breached", "portfolio.objective.changed", "portfolio.performance.updated", "portfolio.universe.changed"].includes(ev.topic)) {
       setRiskRefresh((n) => n + 1);
     }
   });
@@ -1252,7 +1305,7 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
           <AgentsTab portfolio={selected} api={api} projectId={projectId} onChanged={loadPortfolios} setError={setError} />
         )}
         {tab === "strategies" && (
-          <StrategiesTab portfolio={selected} api={api} setError={setError} />
+          <StrategiesTab portfolio={selected} api={api} projectId={projectId} setError={setError} />
         )}
         {tab === "backtests" && (
           <BacktestsTab portfolio={selected} api={api} projectId={projectId} setError={setError} />
@@ -1279,6 +1332,9 @@ function RiskObjectivesTab({ portfolio, api, refreshToken, setError }: {
   const [policy, setPolicy] = useState<RiskPolicy | null>(null);
   const [state, setState] = useState<RiskState | null>(null);
   const [objectives, setObjectives] = useState<PortfolioObjective[]>([]);
+  const [universePolicy, setUniversePolicy] = useState<PortfolioUniversePolicy | null>(null);
+  const [includeSymbols, setIncludeSymbols] = useState("");
+  const [excludeSymbols, setExcludeSymbols] = useState("");
   const [name, setName] = useState("Growth target");
   const [metric, setMetric] = useState("period_return_pct");
   const [target, setTarget] = useState(10);
@@ -1286,11 +1342,13 @@ function RiskObjectivesTab({ portfolio, api, refreshToken, setError }: {
   const load = useCallback(async () => {
     if (!portfolio) return;
     try {
-      const [risk, goals] = await Promise.all([
+      const [risk, goals, universe] = await Promise.all([
         api<{ policy: RiskPolicy; state: RiskState }>("GET", `/portfolios/${portfolio.id}/risk`),
         api<{ objectives: PortfolioObjective[] }>("GET", `/portfolios/${portfolio.id}/objectives`),
+        api<{ policy: PortfolioUniversePolicy }>("GET", `/portfolios/${portfolio.id}/universe-policy`),
       ]);
       setPolicy(risk.policy); setState(risk.state); setObjectives(goals.objectives || []); setError(null);
+      setUniversePolicy(universe.policy); setIncludeSymbols((universe.policy.include_symbols || []).join(", ")); setExcludeSymbols((universe.policy.exclude_symbols || []).join(", "));
     } catch (e) { setError((e as Error).message); }
   }, [portfolio?.id, api]);
   useEffect(() => { load(); }, [load, refreshToken]);
@@ -1309,6 +1367,15 @@ function RiskObjectivesTab({ portfolio, api, refreshToken, setError }: {
         ...(deadline ? { deadline_at: new Date(deadline).toISOString() } : {}),
       });
       await load();
+    } catch (e) { setError((e as Error).message); }
+  };
+  const saveUniversePolicy = async () => {
+    if (!universePolicy) return;
+    try {
+      const out = await api<{ policy: PortfolioUniversePolicy }>("PUT", `/portfolios/${portfolio.id}/universe-policy`, undefined, {
+        ...universePolicy, include_symbols: parseSymbolText(includeSymbols), exclude_symbols: parseSymbolText(excludeSymbols),
+      });
+      setUniversePolicy(out.policy); setError(null);
     } catch (e) { setError((e as Error).message); }
   };
   return <div className="grid gap-4 lg:grid-cols-2">
@@ -1354,8 +1421,22 @@ function RiskObjectivesTab({ portfolio, api, refreshToken, setError }: {
         </div>;
       })}</div>
     </Section>
+    <Section title="Tradable universe">
+      <div className="p-3 border border-border rounded bg-bg-card grid gap-3">
+        {universePolicy && <>
+          <label className="text-xs text-text-muted">Selection mode<select value={universePolicy.selection_mode} onChange={(e) => setUniversePolicy({ ...universePolicy, selection_mode: e.target.value as PortfolioUniversePolicy["selection_mode"] })} className={`${inputClass} mt-1`}><option value="all_allowed_classes">All allowed asset classes</option><option value="symbol_allowlist">Symbol allowlist</option><option value="reference_universe">Reference universe</option></select></label>
+          <div className="grid grid-cols-2 gap-2"><label className="text-xs text-text-muted">Included symbols<input value={includeSymbols} onChange={(e) => setIncludeSymbols(e.target.value)} placeholder="SPY, QQQ" className={`${inputClass} mt-1 font-mono`} /></label><label className="text-xs text-text-muted">Excluded symbols<input value={excludeSymbols} onChange={(e) => setExcludeSymbols(e.target.value)} placeholder="GME" className={`${inputClass} mt-1 font-mono`} /></label></div>
+          <label className="text-xs text-text-muted">Reference universe ID<input value={universePolicy.reference_universe_id || ""} onChange={(e) => setUniversePolicy({ ...universePolicy, reference_universe_id: e.target.value })} placeholder="alpaca-active-assets" className={`${inputClass} mt-1 font-mono`} /></label>
+          <div className="flex flex-wrap gap-4 text-xs"><label className="flex items-center gap-2"><input type="checkbox" checked={universePolicy.require_active_listing} onChange={(e) => setUniversePolicy({ ...universePolicy, require_active_listing: e.target.checked })} />Require active listing</label><label className="flex items-center gap-2"><input type="checkbox" checked={universePolicy.enforcement_enabled} onChange={(e) => setUniversePolicy({ ...universePolicy, enforcement_enabled: e.target.checked })} />Enforce every order</label></div>
+          <div className="text-xs text-text-dim">Allowed asset classes: {portfolio.allowed_classes.join(", ")}</div>
+          <button onClick={saveUniversePolicy} className="px-3 py-1.5 rounded bg-accent text-bg text-xs font-semibold">Save universe policy</button>
+        </>}
+      </div>
+    </Section>
   </div>;
 }
+
+function parseSymbolText(value: string) { return [...new Set(value.split(/[\s,]+/).map((v) => v.trim().toUpperCase()).filter(Boolean))]; }
 
 function PortfoliosTab({ portfolios, selectedId, onSelect, api, onChanged, setBusy, setError }: {
   portfolios: Portfolio[];
@@ -2730,9 +2811,10 @@ function activityDotClass(a: AgentActivity): string {
 
 // ─── Strategies tab ───────────────────────────────────────────────
 
-function StrategiesTab({ portfolio, api, setError }: {
+function StrategiesTab({ portfolio, api, projectId, setError }: {
   portfolio: Portfolio | null;
   api: <T>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
+  projectId: string;
   setError: (e: string | null) => void;
 }) {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
@@ -2742,6 +2824,8 @@ function StrategiesTab({ portfolio, api, setError }: {
   const [definitionText, setDefinitionText] = useState("");
   const [evaluation, setEvaluation] = useState<StrategyEvaluation | null>(null);
   const [validation, setValidation] = useState<StrategyValidation | null>(null);
+  const [scorecard, setScorecard] = useState<StrategyScorecardPolicy | null>(null);
+  const [scorecardHistory, setScorecardHistory] = useState<StrategyScorecardEvaluation[]>([]);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -2764,6 +2848,23 @@ function StrategiesTab({ portfolio, api, setError }: {
     () => strategies.find((s) => s.id === selectedId) || null,
     [strategies, selectedId],
   );
+  const loadScorecard = useCallback(async () => {
+    if (!portfolio || !selectedId) { setScorecard(null); setScorecardHistory([]); return; }
+    try {
+      const out = await api<{ policy: StrategyScorecardPolicy; evaluations: StrategyScorecardEvaluation[] }>("GET", `/strategies/${selectedId}/scorecard`, { portfolio_id: String(portfolio.id) });
+      setScorecard(out.policy); setScorecardHistory(out.evaluations || []);
+    } catch (e) { setError((e as Error).message); }
+  }, [portfolio?.id, selectedId, api, setError]);
+  useEffect(() => { loadScorecard(); }, [loadScorecard]);
+  useAppEvents("trading", projectId, (ev) => {
+    const eventData = (ev.data || {}) as Record<string, any>;
+    const eventPortfolioID = Number(eventData.portfolio_id || 0);
+    const eventStrategyID = Number(eventData.strategy_id || eventData.id || 0);
+    if (["strategy.created", "strategy.updated", "strategy.assigned"].includes(ev.topic)) load();
+    if (["strategy.scorecard.policy.changed", "strategy.scorecard.evaluated", "strategy.promotion.changed"].includes(ev.topic)
+      && (!eventPortfolioID || eventPortfolioID === portfolio?.id)
+      && (!eventStrategyID || eventStrategyID === selectedId)) loadScorecard();
+  });
 
   const create = async () => {
     setBusy(true);
@@ -2824,8 +2925,28 @@ function StrategiesTab({ portfolio, api, setError }: {
         slippage_bps: 5,
       });
       setValidation(r.validation);
+      if (r.validation.scorecard) await loadScorecard();
       setEvaluation(null);
       setError(null);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const saveScorecard = async () => {
+    if (!selected || !portfolio || !scorecard) return;
+    setBusy(true);
+    try {
+      await api("PUT", `/strategies/${selected.id}/scorecard`, undefined, scorecard);
+      await loadScorecard(); setError(null);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+  const changePromotion = async (promotion_stage: StrategyScorecardPolicy["promotion_stage"]) => {
+    if (!selected || !portfolio) return;
+    setBusy(true);
+    try {
+      await api("POST", `/strategies/${selected.id}/promotion`, undefined, { portfolio_id: portfolio.id, promotion_stage });
+      await loadScorecard(); setError(null);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   };
@@ -2973,6 +3094,17 @@ function StrategiesTab({ portfolio, api, setError }: {
           ) : (
             <EmptyState title="No evaluation" hint="Select a saved strategy and evaluate or validate it." />
           )}
+        </Section>
+        <Section title="Strategy scorecard & promotion">
+          {!selected || !scorecard ? <EmptyState title="Select a strategy" hint="Scorecards are specific to a strategy and portfolio." /> : <div className="p-3 border border-border rounded bg-bg-card grid gap-3">
+            <div className="flex items-center gap-2"><span className={`px-2 py-1 rounded text-xs font-semibold uppercase ${scorecard.promotion_stage === "suspended" ? "bg-red/10 text-red" : scorecard.promotion_stage === "live" ? "bg-green/10 text-green" : "bg-bg-input text-text-muted"}`}>{scorecard.promotion_stage.replaceAll("_", " ")}</span><span className="text-xs text-text-dim">{scorecardHistory.filter((e) => e.passed && e.policy_hash === scorecard.policy_hash).length} current passing evaluation(s)</span></div>
+            <div className="grid grid-cols-2 gap-2">{scorecard.criteria.map((criterion, index) => <div key={`${criterion.metric}-${index}`} className="grid grid-cols-[1fr_70px_90px_auto] gap-1 items-end"><label className="text-xs text-text-muted">Metric<input value={criterion.metric} onChange={(e) => setScorecard({ ...scorecard, criteria: scorecard.criteria.map((c, i) => i === index ? { ...c, metric: e.target.value } : c) })} className={`${inputClass} mt-1 font-mono`} /></label><select value={criterion.operator} onChange={(e) => setScorecard({ ...scorecard, criteria: scorecard.criteria.map((c, i) => i === index ? { ...c, operator: e.target.value as "min" | "max" } : c) })} className={inputClass}><option value="min">min</option><option value="max">max</option></select><input type="number" step="any" value={criterion.threshold} onChange={(e) => setScorecard({ ...scorecard, criteria: scorecard.criteria.map((c, i) => i === index ? { ...c, threshold: Number(e.target.value) } : c) })} className={`${inputClass} font-mono`} /><div className="flex items-center gap-1 pb-1"><label className="text-[10px] text-text-dim flex items-center gap-1"><input type="checkbox" checked={criterion.required} onChange={(e) => setScorecard({ ...scorecard, criteria: scorecard.criteria.map((c, i) => i === index ? { ...c, required: e.target.checked } : c) })} />required</label><button title="Remove criterion" disabled={scorecard.criteria.length === 1} onClick={() => setScorecard({ ...scorecard, criteria: scorecard.criteria.filter((_, i) => i !== index) })} className="px-1 text-red disabled:opacity-30">×</button></div></div>)}</div>
+            <button onClick={() => setScorecard({ ...scorecard, criteria: [...scorecard.criteria, { metric: `metric_${scorecard.criteria.length + 1}`, operator: "min", threshold: 0, required: true }] })} className="justify-self-start px-2 py-1 rounded border border-border text-xs">Add metric criterion</button>
+            <div className="grid grid-cols-3 gap-3 text-xs"><label>Required passing runs<input type="number" min="1" value={scorecard.min_completed_runs} onChange={(e) => setScorecard({ ...scorecard, min_completed_runs: Number(e.target.value) })} className={`${inputClass} mt-1`} /></label><label className="flex items-center gap-2 mt-5"><input type="checkbox" checked={scorecard.require_out_of_sample} onChange={(e) => setScorecard({ ...scorecard, require_out_of_sample: e.target.checked })} />Require out-of-sample</label><label className="flex items-center gap-2 mt-5"><input type="checkbox" checked={scorecard.enforcement_enabled} onChange={(e) => setScorecard({ ...scorecard, enforcement_enabled: e.target.checked })} />Enforce paper/live gate</label></div>
+            <button disabled={busy} onClick={saveScorecard} className="px-3 py-1.5 rounded bg-accent text-bg text-xs font-semibold">Save scorecard</button>
+            <div className="flex flex-wrap gap-2 border-t border-border pt-3">{(["research", "paper_candidate", "paper", "live_candidate", "live"] as const).map((stage) => <button key={stage} disabled={busy || stage === scorecard.promotion_stage} onClick={() => changePromotion(stage)} className="px-2 py-1 rounded border border-border text-xs disabled:opacity-40">{stage.replaceAll("_", " ")}</button>)}<button disabled={busy} onClick={() => changePromotion("suspended")} className="px-2 py-1 rounded border border-red/40 text-red text-xs">Suspend</button></div>
+            <div className="grid gap-1">{scorecardHistory.slice(0, 5).map((entry) => { const current = entry.policy_hash === scorecard.policy_hash; return <div key={entry.id} className="flex justify-between text-xs border-t border-border pt-1"><span>run #{entry.backtest_run_id} · {entry.evaluation_scope} · v{entry.strategy_version}</span><span className={!current ? "text-text-dim" : entry.passed ? "text-green" : "text-red"}>{entry.verdict}{current ? "" : " · superseded"}</span></div>; })}</div>
+          </div>}
         </Section>
       </div>
     </div>
@@ -3777,12 +3909,17 @@ function BrokersTab({ api, setError }: {
   setError: (e: string | null) => void;
 }) {
   const [brokers, setBrokers] = useState<BrokerInfo[]>([]);
+  const [profiles, setProfiles] = useState<VenueExecutionProfile[]>([]);
   const [connectSlug, setConnectSlug] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const r = await api<{ brokers: BrokerInfo[] }>("GET", "/brokers");
+      const [r, execution] = await Promise.all([
+        api<{ brokers: BrokerInfo[] }>("GET", "/brokers"),
+        api<{ profiles: VenueExecutionProfile[] }>("GET", "/execution/venues"),
+      ]);
       setBrokers(r.brokers || []);
+      setProfiles(execution.profiles || []);
     } catch (e) { setError((e as Error).message); }
   }, [api, setError]);
 
@@ -3808,6 +3945,20 @@ function BrokersTab({ api, setError }: {
         Connect a broker to enable live trading. Each portfolio binds to
         one broker at creation (Portfolios tab → New → Live). Credentials
         are encrypted at rest and stay on this server.
+      </div>
+      <div className="mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <div>
+            <div className="text-sm font-semibold">Execution profiles</div>
+            <div className="text-xs text-text-muted">One rule model for simulation and live venues. Symbol-specific profiles override the venue defaults.</div>
+          </div>
+          <button onClick={load} className="px-2 py-1 text-xs rounded border border-border hover:border-accent">Refresh</button>
+        </div>
+        <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(330px, 1fr))" }}>
+          {profiles.map((profile) => (
+            <ExecutionProfileEditor key={`${profile.venue_slug}:${profile.asset_class}:${profile.symbol}`} profile={profile} api={api} onSaved={load} setError={setError} />
+          ))}
+        </div>
       </div>
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
         {brokers.map((b) => (
@@ -3869,6 +4020,52 @@ function BrokersTab({ api, setError }: {
       )}
     </Section>
   );
+}
+
+function ExecutionProfileEditor({ profile, api, onSaved, setError }: {
+  profile: VenueExecutionProfile;
+  api: <T>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
+  onSaved: () => void;
+  setError: (e: string | null) => void;
+}) {
+  const [draft, setDraft] = useState(profile);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setDraft(profile), [profile]);
+  const numberField = (key: keyof VenueExecutionProfile, label: string) => (
+    <label className="text-[10px] text-text-muted">{label}
+      <input className="mt-0.5 w-full px-1.5 py-1 text-xs font-mono bg-bg-input border border-border rounded" type="number" step="any"
+        value={String(draft[key] ?? 0)} onChange={(e) => setDraft({ ...draft, [key]: Number(e.target.value) })} />
+    </label>
+  );
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api("PUT", "/execution/venues", {}, draft);
+      onSaved();
+    } catch (e) { setError((e as Error).message); }
+    finally { setSaving(false); }
+  };
+  const runtime = draft.runtime;
+  return <div className="p-3 bg-bg-card border border-border rounded">
+    <div className="flex items-center justify-between mb-2">
+      <div><strong className="text-xs">{draft.venue_slug}</strong><span className="text-xs text-text-muted"> · {draft.asset_class} · {draft.symbol}</span></div>
+      <span className={`text-[10px] uppercase font-semibold ${runtime?.status === "outage" || draft.status === "outage" ? "text-red" : runtime?.status === "degraded" || draft.status === "degraded" ? "text-amber" : "text-green"}`}>{draft.status}/{runtime?.status || "healthy"}</span>
+    </div>
+    <div className="grid grid-cols-3 gap-2 mb-2">
+      <label className="text-[10px] text-text-muted">Venue status<select className="mt-0.5 w-full px-1 py-1 text-xs bg-bg-input border border-border rounded" value={draft.status} onChange={(e) => setDraft({...draft,status:e.target.value as VenueExecutionProfile["status"]})}>{["active","degraded","maintenance","outage"].map(v=><option key={v}>{v}</option>)}</select></label>
+      <label className="text-[10px] text-text-muted">Session<select className="mt-0.5 w-full px-1 py-1 text-xs bg-bg-input border border-border rounded" value={draft.session_policy} onChange={(e) => setDraft({...draft,session_policy:e.target.value as VenueExecutionProfile["session_policy"]})}>{["continuous","regular_only","venue_managed"].map(v=><option key={v}>{v}</option>)}</select></label>
+      <label className="text-[10px] text-text-muted">Spread<select className="mt-0.5 w-full px-1 py-1 text-xs bg-bg-input border border-border rounded" value={draft.spread_model} onChange={(e) => setDraft({...draft,spread_model:e.target.value as VenueExecutionProfile["spread_model"]})}>{["quote","fixed_bps","none"].map(v=><option key={v}>{v}</option>)}</select></label>
+    </div>
+    <div className="grid grid-cols-4 gap-2">
+      {numberField("maker_fee_bps", "Maker bps")}{numberField("taker_fee_bps", "Taker bps")}
+      {numberField("slippage_bps", "Slip bps")}{numberField("fallback_spread_bps", "Spread bps")}
+      {numberField("min_qty", "Min qty")}{numberField("min_notional", "Min notional")}
+      {numberField("qty_step", "Qty step")}{numberField("price_tick", "Price tick")}
+      {numberField("funding_rate_bps", "Funding bps")}{numberField("funding_interval_hours", "Funding hours")}
+    </div>
+    {runtime?.last_error && <div className="mt-2 text-[10px] text-red truncate" title={runtime.last_error}>{runtime.last_error}</div>}
+    <button disabled={saving} onClick={save} className="mt-3 w-full px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">{saving ? "Saving…" : "Save execution profile"}</button>
+  </div>;
 }
 
 // CatalogApp — minimal subset of the platform's catalog response we

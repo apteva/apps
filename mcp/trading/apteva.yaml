@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.7.0
+version: 0.9.0
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -20,8 +20,10 @@ description: |
 
   Each portfolio has its own mandate, allowed asset classes, enforceable
   risk profile, high-water drawdown and daily-loss halts, and percentage
-  performance objectives. Approval flow lives in the agent's directive (via
-  channel-chat), not in this sidecar — keeps the trading surface
+  performance objectives. Portfolio tradable-universe policies gate human and
+  automated orders, while durable strategy scorecards control staged promotion
+  into broker-paper and broker-live execution. Approval flow lives in the
+  agent's directive (via channel-chat), not in this sidecar — keeps the trading surface
   focused on state, execution, market data, and audit log.
 
 author: Apteva
@@ -117,6 +119,10 @@ provides:
       description: "Create a new paper or live portfolio. Live portfolios pass broker_slug — use brokers_list to enumerate."
     - name: brokers_list
       description: "Enumerate registered broker adapters and their currently-bound connections."
+    - name: venue_profiles_list
+      description: "List effective venue fees, spread/slippage, sessions, funding, minimums, precision, and health."
+    - name: venue_profile_update
+      description: "Create or update a generic venue-wide or symbol-specific execution profile."
     - name: portfolio_list
       description: "List portfolios visible to this agent."
     - name: portfolio_get
@@ -127,6 +133,10 @@ provides:
       description: "Get a portfolio's resolved risk policy and current drawdown state."
     - name: portfolio_risk_update
       description: "Set an enforceable risk preset or custom percentage limits."
+    - name: portfolio_universe_get
+      description: "Get the portfolio's enforced tradable universe policy."
+    - name: portfolio_universe_update
+      description: "Configure a hard symbol allowlist, exclusions, or reference universe."
     - name: portfolio_objective_create
       description: "Create a native Trading percentage objective."
     - name: portfolio_objectives_list
@@ -169,6 +179,10 @@ provides:
       description: "Append a thesis/rationale/note to a portfolio's journal."
     - name: journal_read
       description: "Read journal entries for a portfolio (recent or filtered by kind)."
+    - name: execution_costs_list
+      description: "List attributed fee, spread, slippage, funding, and rebate entries for a portfolio."
+    - name: funding_payment_record
+      description: "Idempotently record a signed venue funding payment."
     - name: portfolio_pause
       description: "Pause this portfolio (no new orders). Self-only — resume is human-only via REST."
     - name: portfolio_arm_live
@@ -191,6 +205,14 @@ provides:
       description: "Create a deterministic strategy backtest using the existing backtest tables."
     - name: strategy_validate_backtest
       description: "Run fixed-parameter strategy validation with in-sample and out-of-sample backtests."
+    - name: strategy_scorecard_get
+      description: "Get scorecard policy, promotion stage, and durable evaluations."
+    - name: strategy_scorecard_update
+      description: "Configure generic scorecard metric thresholds and enforcement."
+    - name: strategy_scorecard_evaluate
+      description: "Evaluate a completed strategy backtest against its scorecard."
+    - name: strategy_promotion_update
+      description: "Promote, demote, or suspend a strategy under its scorecard gate."
     - name: backtest_market_step
       description: "Internal backtest runner tool: load replay prices into an isolated environment."
   # Same shape as crm + storage: a panel mounted in the dashboard's

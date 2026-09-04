@@ -41,8 +41,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.7.0
-description: Live trading workstation with canonical market data, portfolio risk controls, objectives, broker execution, strategies, and reproducible backtests.
+version: 0.9.0
+description: Live trading workstation with canonical market data, codified portfolio universes, generic execution profiles, hard risk controls, objectives, durable strategy scorecards, broker execution, and reproducible backtests.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -115,6 +115,10 @@ provides:
       description: "Create a paper or live portfolio (live: pass broker_slug)."
     - name: brokers_list
       description: "List registered broker adapters + bound connections."
+    - name: venue_profiles_list
+      description: "List effective venue fees, sessions, constraints, funding, and health."
+    - name: venue_profile_update
+      description: "Configure generic venue or symbol-level execution behavior."
     - name: portfolio_list
       description: "List portfolios visible to this agent."
     - name: portfolio_get
@@ -125,6 +129,10 @@ provides:
       description: "Get a portfolio's resolved risk policy and current drawdown state."
     - name: portfolio_risk_update
       description: "Set an enforceable risk preset or custom percentage limits."
+    - name: portfolio_universe_get
+      description: "Get the portfolio's enforced tradable universe policy."
+    - name: portfolio_universe_update
+      description: "Configure a hard symbol allowlist, exclusions, or reference universe."
     - name: portfolio_objective_create
       description: "Create a native Trading percentage objective."
     - name: portfolio_objectives_list
@@ -167,6 +175,10 @@ provides:
       description: "Append a thesis or rationale to the journal."
     - name: journal_read
       description: "Read journal entries for a portfolio."
+    - name: execution_costs_list
+      description: "List attributed fees, spread, slippage, funding, and rebates."
+    - name: funding_payment_record
+      description: "Idempotently record a signed venue funding payment."
     - name: portfolio_pause
       description: "Pause a portfolio (no new orders)."
     - name: portfolio_arm_live
@@ -189,6 +201,14 @@ provides:
       description: "Create a deterministic strategy backtest."
     - name: strategy_validate_backtest
       description: "Run fixed-parameter strategy validation with in-sample and out-of-sample backtests."
+    - name: strategy_scorecard_get
+      description: "Get scorecard policy, promotion stage, and durable evaluations."
+    - name: strategy_scorecard_update
+      description: "Configure generic scorecard metric thresholds and enforcement."
+    - name: strategy_scorecard_evaluate
+      description: "Evaluate a completed strategy backtest against its scorecard."
+    - name: strategy_promotion_update
+      description: "Promote, demote, or suspend a strategy under its scorecard gate."
     - name: backtest_market_step
       description: "Internal backtest runner tool: load replay prices into an isolated environment."
   ui_panels:
@@ -345,6 +365,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/history/", Handler: a.handleHTTPHistory},
 		{Pattern: "/universe", Handler: a.handleHTTPUniverse},
 		{Pattern: "/reference/", Handler: a.handleHTTPReferenceData},
+		{Pattern: "/execution/", Handler: a.handleHTTPExecution},
 		{Pattern: "/risk-profiles", Handler: a.handleHTTPRiskProfiles},
 		{Pattern: "/brokers", Handler: a.handleHTTPBrokers},
 		{Pattern: "/strategies", Handler: a.handleHTTPStrategies},
@@ -499,6 +520,28 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 		}
 		httpJSON(w, 200, out)
 
+	case sub == "universe-policy" && r.Method == http.MethodGet:
+		out, err := a.toolPortfolioUniverseGet(globalCtx, map[string]any{"_project_id": pid, "portfolio_id": pf.ID})
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+
+	case sub == "universe-policy" && r.Method == http.MethodPut:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["portfolio_id"] = pid, pf.ID
+		out, err := a.toolPortfolioUniverseUpdate(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+
 	case sub == "objectives" && subID == "" && r.Method == http.MethodGet:
 		out, err := a.toolPortfolioObjectivesList(globalCtx, map[string]any{
 			"_project_id": pid, "portfolio_id": pf.ID, "include_archived": r.URL.Query().Get("include_archived") == "true",
@@ -541,6 +584,28 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpJSON(w, 200, out)
+
+	case sub == "execution-costs" && r.Method == http.MethodGet:
+		out, err := a.toolExecutionCostsList(globalCtx, map[string]any{"_project_id": pid, "portfolio_id": pf.ID, "limit": r.URL.Query().Get("limit")})
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+
+	case sub == "funding" && r.Method == http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["portfolio_id"] = pid, pf.ID
+		out, err := a.toolFundingPaymentRecord(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 201, out)
 
 	case sub == "positions" && r.Method == http.MethodGet:
 		pos, _ := dbListPositions(globalCtx.AppDB(), pf.ID)
@@ -659,6 +724,37 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) handleHTTPExecution(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/execution/"), "/")
+	if path != "venues" {
+		httpErr(w, 404, "no such execution route")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		out, err := a.toolVenueProfilesList(globalCtx, map[string]any{"venue_slug": r.URL.Query().Get("venue_slug"), "asset_class": r.URL.Query().Get("asset_class")})
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case http.MethodPut:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		out, err := a.toolVenueProfileUpdate(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	default:
+		httpErr(w, 405, "GET or PUT only")
+	}
+}
+
 // handleHTTPBrokers — list every registered broker adapter + its
 // currently-bound connections. Mirrors the brokers_list MCP tool so the
 // panel's Brokers tab + portfolio_create's broker_slug picker don't
@@ -708,7 +804,7 @@ func (a *App) httpListPortfolios(w http.ResponseWriter, r *http.Request) {
 			"equity": snap.Equity, "cash": snap.Cash,
 			"day_pnl": snap.DayPnL, "day_pnl_pct": snap.DayPnLPct,
 			"open_pnl": snap.OpenPnL, "open_pnl_pct": snap.OpenPnLPct,
-			"realized_pnl": snap.RealizedPnL, "fees_paid": snap.FeesPaid,
+			"realized_pnl": snap.RealizedPnL, "fees_paid": snap.FeesPaid, "funding_paid": snap.FundingPaid,
 			"total_pnl": snap.TotalPnL, "total_pnl_pct": snap.TotalPnLPct,
 			"watchlist": snap.Watchlist, "buying_power": snap.BuyingPower,
 		})
@@ -815,6 +911,11 @@ func (a *App) handleHTTPHealthDetails(w http.ResponseWriter, r *http.Request) {
 	}
 	out := globalEngine.snapshotMetrics()
 	out["providers"] = providerHealthSnapshot()
+	venues := map[string]VenueRuntimeHealth{}
+	for _, adapter := range allAdapters() {
+		venues[adapter.Slug()] = venueRuntimeSnapshot(adapter.Slug())
+	}
+	out["venues"] = venues
 	pid, _ := resolveProjectFromRequest(r)
 	out["streams"] = alpacaStreamHealthSnapshot(pid)
 	out["reference_data"] = referenceDataStatus(globalCtx.AppDB())

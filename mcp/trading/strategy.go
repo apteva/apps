@@ -68,13 +68,14 @@ type StrategyEvaluation struct {
 }
 
 type StrategyValidationResult struct {
-	StrategyID      int64                     `json:"strategy_id"`
-	StrategyVersion int                       `json:"strategy_version"`
-	SplitPct        float64                   `json:"split_pct"`
-	MarketSource    string                    `json:"market_source"`
-	Train           *StrategyValidationPeriod `json:"train"`
-	Test            *StrategyValidationPeriod `json:"test"`
-	Verdict         string                    `json:"verdict"`
+	StrategyID      int64                        `json:"strategy_id"`
+	StrategyVersion int                          `json:"strategy_version"`
+	SplitPct        float64                      `json:"split_pct"`
+	MarketSource    string                       `json:"market_source"`
+	Train           *StrategyValidationPeriod    `json:"train"`
+	Test            *StrategyValidationPeriod    `json:"test"`
+	Verdict         string                       `json:"verdict"`
+	Scorecard       *StrategyScorecardEvaluation `json:"scorecard,omitempty"`
 }
 
 type StrategyValidationPeriod struct {
@@ -1015,18 +1016,27 @@ func (a *App) toolStrategyAssign(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if portfolioID <= 0 || strategyID <= 0 {
 		return nil, errors.New("portfolio_id and strategy_id required")
 	}
-	if _, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID); err != nil {
+	portfolio, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
+	if err != nil {
 		return nil, err
 	}
 	strategy, err := dbGetStrategy(ctx.AppDB(), pid, strategyID)
 	if err != nil {
 		return nil, err
 	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateStrategyUniverseForPortfolio(ctx.AppDB(), portfolio, def); err != nil {
+		return nil, err
+	}
+	if allowed, reason := scorecardAllowsExecution(ctx.AppDB(), portfolio, strategy.ID); !allowed {
+		return nil, fmt.Errorf("strategy scorecard gate: %s", reason)
+	}
 	cadence := strings.TrimSpace(strArg(args, "cadence"))
 	if cadence == "" {
-		if def, _, err := validateStrategyDefinition(strategy.Definition); err == nil {
-			cadence = strings.TrimSpace(def.Cadence)
-		}
+		cadence = strings.TrimSpace(def.Cadence)
 	}
 	id, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
 		ProjectID: pid, PortfolioID: portfolioID, StrategyID: strategyID,
@@ -1234,6 +1244,12 @@ func (a *App) createStrategyValidation(ctx *sdk.AppCtx, args map[string]any) (*S
 		Test:            test,
 	}
 	result.Verdict = strategyValidationVerdict(train.Metrics, test.Metrics)
+	scorecard, scoreErr := evaluateAndStoreStrategyScorecard(ctx.AppDB(), pid, portfolioID, strategyID, test.Run.ID)
+	if scoreErr != nil {
+		return nil, fmt.Errorf("persist validation scorecard: %w", scoreErr)
+	}
+	result.Scorecard = scorecard
+	emit("strategy.scorecard.evaluated", map[string]any{"portfolio_id": portfolioID, "strategy_id": strategyID, "evaluation": scorecard})
 	return result, nil
 }
 
@@ -1443,6 +1459,10 @@ func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
 	if len(parts) > 1 {
 		action = parts[1]
 	}
+	subaction := ""
+	if len(parts) > 2 {
+		subaction = parts[2]
+	}
 	switch {
 	case action == "" && r.Method == http.MethodGet:
 		strategy, err := dbGetStrategy(globalCtx.AppDB(), pid, id)
@@ -1537,6 +1557,54 @@ func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
 			"_project_id": pid, "strategy_id": id, "portfolio_id": body.PortfolioID,
 			"control_mode": body.ControlMode, "cadence": body.Cadence,
 		})
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "scorecard" && subaction == "" && r.Method == http.MethodGet:
+		out, err := a.toolStrategyScorecardGet(globalCtx, map[string]any{
+			"_project_id": pid, "strategy_id": id, "portfolio_id": r.URL.Query().Get("portfolio_id"), "limit": r.URL.Query().Get("limit"),
+		})
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "scorecard" && subaction == "" && r.Method == http.MethodPut:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["strategy_id"] = pid, id
+		out, err := a.toolStrategyScorecardUpdate(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "scorecard" && subaction == "evaluate" && r.Method == http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["strategy_id"] = pid, id
+		out, err := a.toolStrategyScorecardEvaluate(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "promotion" && r.Method == http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["strategy_id"] = pid, id
+		out, err := a.toolStrategyPromotionUpdate(globalCtx, body)
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return

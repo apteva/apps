@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,14 +36,18 @@ var binanceUSDPairs = map[string]string{
 }
 
 type binancePublic struct {
-	base   string
-	client *http.Client
+	base        string
+	client      *http.Client
+	rulesMu     sync.Mutex
+	rules       map[string]binanceSymbolRules
+	rulesLoaded time.Time
 }
 
 func newBinancePublic() *binancePublic {
 	return &binancePublic{
 		base:   binanceDefaultBase,
 		client: &http.Client{Timeout: 4 * time.Second},
+		rules:  map[string]binanceSymbolRules{},
 	}
 }
 
@@ -64,7 +69,14 @@ func (b *binancePublic) Quote(symbol string) (*Mark, error) {
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return nil, fmt.Errorf("binancePublic: decode ticker: %w", err)
 	}
-	return t.toMark(symbol)
+	mark, err := t.toMark(symbol)
+	if err != nil {
+		return nil, err
+	}
+	if rules, ok := b.symbolRules([]string{wire})[wire]; ok {
+		applyBinanceRules(mark.Instrument, rules)
+	}
+	return mark, nil
 }
 
 // UniverseBatch fetches all requested internal symbols in one HTTP
@@ -100,6 +112,7 @@ func (b *binancePublic) UniverseBatch(symbols []string) ([]*Mark, error) {
 	if err := json.Unmarshal(raw, &arrOut); err != nil {
 		return nil, fmt.Errorf("binancePublic: decode batch ticker: %w", err)
 	}
+	rules := b.symbolRules(wireSyms)
 	out := make([]*Mark, 0, len(arrOut))
 	for _, t := range arrOut {
 		internal, ok := canonicalByWire[t.Symbol]
@@ -109,6 +122,9 @@ func (b *binancePublic) UniverseBatch(symbols []string) ([]*Mark, error) {
 		m, err := t.toMark(internal)
 		if err != nil {
 			continue
+		}
+		if rule, ok := rules[t.Symbol]; ok {
+			applyBinanceRules(m.Instrument, rule)
 		}
 		out = append(out, m)
 	}
@@ -328,7 +344,11 @@ type binanceTicker struct {
 	PriceChangePercent string `json:"priceChangePercent"`
 	Volume             string `json:"volume"`      // base-asset volume
 	QuoteVolume        string `json:"quoteVolume"` // USD-side volume; better for our 24h indicator
-	CloseTime          int64  `json:"closeTime"`   // exchange event time, milliseconds since epoch
+	BidPrice           string `json:"bidPrice"`
+	BidQty             string `json:"bidQty"`
+	AskPrice           string `json:"askPrice"`
+	AskQty             string `json:"askQty"`
+	CloseTime          int64  `json:"closeTime"` // exchange event time, milliseconds since epoch
 }
 
 func (t binanceTicker) toMark(internalSymbol string) (*Mark, error) {
@@ -363,7 +383,104 @@ func (t binanceTicker) toMark(internalSymbol string) (*Mark, error) {
 	if vol > 0 {
 		mk.Volume24h = &vol
 	}
+	if bid := parseFloat(t.BidPrice); bid > 0 {
+		mk.BidPrice = ptr(bid)
+	}
+	if ask := parseFloat(t.AskPrice); ask > 0 {
+		mk.AskPrice = ptr(ask)
+	}
+	if size := parseFloat(t.BidQty); size > 0 {
+		mk.BidSize = ptr(size)
+	}
+	if size := parseFloat(t.AskQty); size > 0 {
+		mk.AskSize = ptr(size)
+	}
 	return mk, nil
+}
+
+type binanceSymbolRules struct{ TickSize, QtyStep, MinQty, MinNotional float64 }
+
+func (b *binancePublic) symbolRules(wireSymbols []string) map[string]binanceSymbolRules {
+	b.rulesMu.Lock()
+	defer b.rulesMu.Unlock()
+	if b.rules == nil {
+		b.rules = map[string]binanceSymbolRules{}
+	}
+	fresh := !b.rulesLoaded.IsZero() && time.Since(b.rulesLoaded) < 6*time.Hour
+	missing := make([]string, 0, len(wireSymbols))
+	seen := make(map[string]bool, len(wireSymbols))
+	for _, symbol := range wireSymbols {
+		if seen[symbol] {
+			continue
+		}
+		seen[symbol] = true
+		_, cached := b.rules[symbol]
+		if !fresh || !cached {
+			missing = append(missing, symbol)
+		}
+	}
+	if len(missing) == 0 {
+		return cloneBinanceRules(b.rules)
+	}
+	query := ""
+	if len(missing) == 1 {
+		query = "symbol=" + url.QueryEscape(missing[0])
+	} else {
+		arr, _ := json.Marshal(missing)
+		query = "symbols=" + url.QueryEscape(string(arr))
+	}
+	raw, err := publicGET(context.Background(), b.client, "binancePublic", b.base+"/exchangeInfo?"+query, 4<<20, map[string]string{"Accept": "application/json", "User-Agent": "apteva-trading/0.8"})
+	if err != nil {
+		return cloneBinanceRules(b.rules)
+	}
+	var payload struct {
+		Symbols []struct {
+			Symbol  string `json:"symbol"`
+			Filters []struct {
+				FilterType  string `json:"filterType"`
+				TickSize    string `json:"tickSize"`
+				StepSize    string `json:"stepSize"`
+				MinQty      string `json:"minQty"`
+				MinNotional string `json:"minNotional"`
+			} `json:"filters"`
+		} `json:"symbols"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return cloneBinanceRules(b.rules)
+	}
+	for _, symbol := range payload.Symbols {
+		var rule binanceSymbolRules
+		for _, filter := range symbol.Filters {
+			switch filter.FilterType {
+			case "PRICE_FILTER":
+				rule.TickSize = parseFloat(filter.TickSize)
+			case "LOT_SIZE":
+				rule.QtyStep, rule.MinQty = parseFloat(filter.StepSize), parseFloat(filter.MinQty)
+			case "MIN_NOTIONAL", "NOTIONAL":
+				rule.MinNotional = parseFloat(filter.MinNotional)
+			}
+		}
+		b.rules[symbol.Symbol] = rule
+	}
+	b.rulesLoaded = time.Now()
+	return cloneBinanceRules(b.rules)
+}
+
+func cloneBinanceRules(in map[string]binanceSymbolRules) map[string]binanceSymbolRules {
+	out := make(map[string]binanceSymbolRules, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+func applyBinanceRules(instrument *Instrument, rule binanceSymbolRules) {
+	if instrument == nil {
+		return
+	}
+	instrument.TickSize = rule.TickSize
+	instrument.LotSize = rule.QtyStep
+	instrument.MinQty = rule.MinQty
+	instrument.MinNotional = rule.MinNotional
 }
 
 // cryptoSymbolsKnown is the bootstrap set fetched in one batch. Symbols

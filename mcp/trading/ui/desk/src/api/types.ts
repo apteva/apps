@@ -22,6 +22,7 @@ export type Portfolio = {
   day_pnl_pct: number;
   open_pnl: number;
   open_pnl_pct: number;
+  funding_paid?: number;
   watchlist?: string[];
 };
 
@@ -69,7 +70,7 @@ export type Order = {
 export type JournalEntry = {
   id: number;
   portfolio_id: number;
-  kind: "thesis" | "alert" | "fill" | "rationale" | "rejection" | "note" | "corporate_action";
+  kind: "thesis" | "alert" | "fill" | "funding" | "rationale" | "rejection" | "note" | "corporate_action";
   body: string;
   metadata?: Record<string, unknown>;
   created_at: string;
@@ -85,6 +86,12 @@ export type PortfolioObjective = {
   id: number; name: string; metric: string; target_pct: number; direction: "at_least" | "at_most";
   starts_at: string; deadline_at?: string; status: string; actual_pct?: number; progress_pct?: number;
   achieved: boolean; period_state: string;
+};
+export type PortfolioUniversePolicy = {
+  portfolio_id: number;
+  selection_mode: "all_allowed_classes" | "symbol_allowlist" | "reference_universe";
+  include_symbols: string[]; exclude_symbols: string[]; reference_universe_id?: string;
+  require_active_listing: boolean; enforcement_enabled: boolean;
 };
 
 // Symbol — what /universe and /quotes/:s return. Decorated with a

@@ -23,6 +23,14 @@ func TestBinancePublic_Quote_ParsesWireShape(t *testing.T) {
 			t.Errorf("expected BTCUSDT in query, got %q", r.URL.RawQuery)
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/exchangeInfo") {
+			w.Write([]byte(`{"symbols":[{"symbol":"BTCUSDT","filters":[
+				{"filterType":"PRICE_FILTER","tickSize":"0.10"},
+				{"filterType":"LOT_SIZE","minQty":"0.00001","stepSize":"0.00001"},
+				{"filterType":"MIN_NOTIONAL","minNotional":"5.00"}
+			]}]}`))
+			return
+		}
 		w.Write([]byte(`{
 			"symbol": "BTCUSDT",
 			"lastPrice": "67842.10",
@@ -30,7 +38,9 @@ func TestBinancePublic_Quote_ParsesWireShape(t *testing.T) {
 			"priceChange": "1374.20",
 			"priceChangePercent": "2.07",
 			"volume": "418234.51",
-			"quoteVolume": "28400000000.00"
+			"quoteVolume": "28400000000.00",
+			"bidPrice": "67841.90", "bidQty": "1.2",
+			"askPrice": "67842.20", "askQty": "0.8"
 		}`))
 	}))
 	defer srv.Close()
@@ -54,6 +64,40 @@ func TestBinancePublic_Quote_ParsesWireShape(t *testing.T) {
 	}
 	if mark.Volume24h == nil || *mark.Volume24h != 28_400_000_000 {
 		t.Errorf("volume_24h mismatch: %v", mark.Volume24h)
+	}
+	if mark.BidPrice == nil || *mark.BidPrice != 67841.90 || mark.AskPrice == nil || *mark.AskPrice != 67842.20 {
+		t.Errorf("book mismatch: bid=%v ask=%v", mark.BidPrice, mark.AskPrice)
+	}
+	if mark.Instrument.TickSize != 0.1 || mark.Instrument.LotSize != 0.00001 || mark.Instrument.MinQty != 0.00001 || mark.Instrument.MinNotional != 5 {
+		t.Errorf("execution constraints mismatch: %#v", mark.Instrument)
+	}
+}
+
+func TestBinancePublic_Quote_RefreshesExpiredCachedRules(t *testing.T) {
+	exchangeCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/exchangeInfo") {
+			exchangeCalls++
+			if got := r.URL.Query().Get("symbol"); got != "BTCUSDT" {
+				t.Errorf("expired cache must refresh requested symbol, got query %q", r.URL.RawQuery)
+			}
+			w.Write([]byte(`{"symbols":[{"symbol":"BTCUSDT","filters":[{"filterType":"PRICE_FILTER","tickSize":"0.01"}]}]}`))
+			return
+		}
+		w.Write([]byte(`{"symbol":"BTCUSDT","lastPrice":"68000","prevClosePrice":"67000"}`))
+	}))
+	defer srv.Close()
+	b := &binancePublic{
+		base: srv.URL, client: srv.Client(), rulesLoaded: time.Now().Add(-7 * time.Hour),
+		rules: map[string]binanceSymbolRules{"BTCUSDT": {TickSize: 0.1}},
+	}
+	mark, err := b.Quote("BTC-USD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exchangeCalls != 1 || mark.Instrument.TickSize != 0.01 {
+		t.Fatalf("exchange calls=%d tick=%v", exchangeCalls, mark.Instrument.TickSize)
 	}
 }
 

@@ -42,6 +42,7 @@ type Portfolio struct {
 	OpenPnLPct  float64  `json:"open_pnl_pct,omitempty"`
 	RealizedPnL float64  `json:"realized_pnl,omitempty"`
 	FeesPaid    float64  `json:"fees_paid,omitempty"`
+	FundingPaid float64  `json:"funding_paid,omitempty"`
 	TotalPnL    float64  `json:"total_pnl,omitempty"`
 	TotalPnLPct float64  `json:"total_pnl_pct,omitempty"`
 	BuyingPower float64  `json:"buying_power,omitempty"`
@@ -82,6 +83,8 @@ type Order struct {
 	Status          string   `json:"status"`
 	Rationale       string   `json:"rationale"`
 	Source          string   `json:"source"`
+	LiquidityRole   string   `json:"liquidity_role,omitempty"`
+	VenueFeeBps     float64  `json:"-"`
 	RejectionCode   string   `json:"rejection_code,omitempty"`
 	RejectionDetail string   `json:"rejection_detail,omitempty"`
 	PlacedAt        string   `json:"placed_at"`
@@ -89,12 +92,18 @@ type Order struct {
 }
 
 type Fill struct {
-	ID       int64   `json:"id"`
-	OrderID  string  `json:"order_id"`
-	Qty      float64 `json:"qty"`
-	Price    float64 `json:"price"`
-	Fee      float64 `json:"fee"`
-	FilledAt string  `json:"filled_at"`
+	ID            int64   `json:"id"`
+	OrderID       string  `json:"order_id"`
+	Qty           float64 `json:"qty"`
+	Price         float64 `json:"price"`
+	Fee           float64 `json:"fee"`
+	FeeCurrency   string  `json:"fee_currency"`
+	LiquidityRole string  `json:"liquidity_role"`
+	SpreadCost    float64 `json:"spread_cost"`
+	SlippageCost  float64 `json:"slippage_cost"`
+	VenueSlug     string  `json:"venue_slug"`
+	FeeSource     string  `json:"fee_source"`
+	FilledAt      string  `json:"filled_at"`
 }
 
 type JournalEntry struct {
@@ -859,10 +868,10 @@ func dbRebuildPositionAccounting(db *sql.DB) error {
 func dbInsertOrder(db *sql.DB, o *Order, projectID string) error {
 	_, err := db.Exec(`
 		INSERT INTO orders (id, project_id, portfolio_id, symbol, security_id, asset_class, side, outcome, type,
-		                    qty, limit_price, stop_price, tif, status, rationale, source)
-		VALUES (?, ?, ?, ?, (SELECT security_id FROM security_listings WHERE symbol=? ORDER BY active DESC,updated_at DESC LIMIT 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                    qty, limit_price, stop_price, tif, status, rationale, source, liquidity_role)
+		VALUES (?, ?, ?, ?, (SELECT security_id FROM security_listings WHERE symbol=? ORDER BY active DESC,updated_at DESC LIMIT 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		o.ID, projectID, o.PortfolioID, o.Symbol, o.Symbol, o.AssetClass, o.Side, nullableString(o.Outcome), o.Type,
-		o.Qty, nullable(o.LimitPrice), nullable(o.StopPrice), o.TIF, o.Status, o.Rationale, o.Source)
+		o.Qty, nullable(o.LimitPrice), nullable(o.StopPrice), o.TIF, o.Status, o.Rationale, o.Source, firstString(o.LiquidityRole, "unknown"))
 	return err
 }
 
@@ -871,7 +880,7 @@ func dbGetOrder(db *sql.DB, projectID, id string) (*Order, error) {
 		SELECT id, portfolio_id, symbol, COALESCE(security_id,''), asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
 		       limit_price, stop_price, tif, status, rationale, source,
 		       COALESCE(rejection_code, ''), COALESCE(rejection_detail, ''),
-		       placed_at, COALESCE(resolved_at, '')
+		       placed_at, COALESCE(resolved_at, ''), liquidity_role
 		FROM orders WHERE id = ? AND project_id = ?`, id, projectID)
 	return scanOrder(row)
 }
@@ -881,7 +890,7 @@ func dbGetOrderAnyProject(db *sql.DB, id string) (*Order, error) {
 		SELECT id, portfolio_id, symbol, COALESCE(security_id,''), asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
 		       limit_price, stop_price, tif, status, rationale, source,
 		       COALESCE(rejection_code, ''), COALESCE(rejection_detail, ''),
-		       placed_at, COALESCE(resolved_at, '')
+		       placed_at, COALESCE(resolved_at, ''), liquidity_role
 		FROM orders WHERE id = ?`, id)
 	return scanOrder(row)
 }
@@ -890,7 +899,7 @@ func dbListOrders(db *sql.DB, portfolioID int64, status string, limit int) ([]*O
 	q := `SELECT id, portfolio_id, symbol, COALESCE(security_id,''), asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
 	             limit_price, stop_price, tif, status, rationale, source,
 	             COALESCE(rejection_code, ''), COALESCE(rejection_detail, ''),
-	             placed_at, COALESCE(resolved_at, '')
+	             placed_at, COALESCE(resolved_at, ''), liquidity_role
 	      FROM orders WHERE portfolio_id = ?`
 	args := []any{portfolioID}
 	if status != "" && status != "all" {
@@ -925,7 +934,7 @@ func dbWorkingOrders(db *sql.DB) ([]*Order, error) {
 		SELECT id, portfolio_id, symbol, COALESCE(security_id,''), asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
 		       limit_price, stop_price, tif, status, rationale, source,
 		       COALESCE(rejection_code, ''), COALESCE(rejection_detail, ''),
-		       placed_at, COALESCE(resolved_at, '')
+		       placed_at, COALESCE(resolved_at, ''), liquidity_role
 		FROM orders WHERE status = 'working' ORDER BY placed_at`)
 	if err != nil {
 		return nil, err
@@ -949,7 +958,7 @@ func scanOrder(row *sql.Row) (*Order, error) {
 	if err := row.Scan(&o.ID, &o.PortfolioID, &o.Symbol, &o.SecurityID, &o.AssetClass, &o.Side, &o.Outcome, &o.Type,
 		&o.Qty, &o.FilledQty, &o.AvgFillPrice, &lp, &sp, &o.TIF, &o.Status,
 		&o.Rationale, &o.Source, &o.RejectionCode, &o.RejectionDetail,
-		&o.PlacedAt, &resolvedAt); err != nil {
+		&o.PlacedAt, &resolvedAt, &o.LiquidityRole); err != nil {
 		return nil, err
 	}
 	if lp.Valid {
@@ -973,7 +982,7 @@ func scanOrderRows(rows *sql.Rows) (*Order, error) {
 	if err := rows.Scan(&o.ID, &o.PortfolioID, &o.Symbol, &o.SecurityID, &o.AssetClass, &o.Side, &o.Outcome, &o.Type,
 		&o.Qty, &o.FilledQty, &o.AvgFillPrice, &lp, &sp, &o.TIF, &o.Status,
 		&o.Rationale, &o.Source, &o.RejectionCode, &o.RejectionDetail,
-		&o.PlacedAt, &resolvedAt); err != nil {
+		&o.PlacedAt, &resolvedAt, &o.LiquidityRole); err != nil {
 		return nil, err
 	}
 	if lp.Valid {
@@ -1128,10 +1137,58 @@ func dbBrokerOrderIDFor(db *sql.DB, orderID string) (string, error) {
 // ─── Fills + journal ───────────────────────────────────────────────
 
 func dbInsertFill(tx *sql.Tx, projectID, orderID string, portfolioID int64, qty, price, fee float64) error {
-	_, err := tx.Exec(`
-		INSERT INTO fills (project_id, order_id, portfolio_id, qty, price, fee)
-		VALUES (?, ?, ?, ?, ?, ?)`, projectID, orderID, portfolioID, qty, price, fee)
-	return err
+	return dbInsertFillDetailed(tx, projectID, orderID, portfolioID, qty, price, fee, FillCostDetails{
+		VenueSlug: "simulation", FeeCurrency: "USD", FeeSource: "model", LiquidityRole: "unknown",
+	})
+}
+
+func dbInsertFillDetailed(tx *sql.Tx, projectID, orderID string, portfolioID int64, qty, price, fee float64, cost FillCostDetails) error {
+	if cost.VenueSlug == "" {
+		cost.VenueSlug = "simulation"
+	}
+	if cost.FeeCurrency == "" {
+		cost.FeeCurrency = "USD"
+	}
+	if cost.FeeSource == "" {
+		cost.FeeSource = "model"
+	}
+	if cost.LiquidityRole == "" {
+		cost.LiquidityRole = "unknown"
+	}
+	res, err := tx.Exec(`
+		INSERT INTO fills (project_id, order_id, portfolio_id, qty, price, fee, fee_currency,
+			liquidity_role, spread_cost, slippage_cost, venue_slug, fee_source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, projectID, orderID, portfolioID, qty, price, fee,
+		strings.ToUpper(cost.FeeCurrency), cost.LiquidityRole, cost.SpreadCost, cost.SlippageCost,
+		cost.VenueSlug, cost.FeeSource)
+	if err != nil {
+		return err
+	}
+	fillID, _ := res.LastInsertId()
+	if fee != 0 {
+		rate := cost.FeeBps
+		kind := "fee"
+		if fee < 0 {
+			kind = "rebate"
+		}
+		if _, _, err := dbInsertExecutionCostTx(tx, projectID, portfolioID, orderID, &fillID,
+			cost.VenueSlug, "", kind, fee, cost.FeeCurrency, &rate, cost.LiquidityRole, "", cost.Metadata, ""); err != nil {
+			return err
+		}
+	}
+	if cost.SpreadCost > 0 {
+		if _, _, err := dbInsertExecutionCostTx(tx, projectID, portfolioID, orderID, &fillID,
+			cost.VenueSlug, "", "spread", cost.SpreadCost, cost.FeeCurrency, nil, cost.LiquidityRole, "", cost.Metadata, ""); err != nil {
+			return err
+		}
+	}
+	if cost.SlippageCost > 0 {
+		if _, _, err := dbInsertExecutionCostTx(tx, projectID, portfolioID, orderID, &fillID,
+			cost.VenueSlug, "", "slippage", cost.SlippageCost, cost.FeeCurrency, nil, cost.LiquidityRole, "", cost.Metadata, ""); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func dbMarkOrderFilled(tx *sql.Tx, orderID string, qty, avgFill float64) (bool, error) {
@@ -1268,20 +1325,24 @@ func dbUpsertInstrumentExec(exec sqlExecer, i *Instrument) error {
 		INSERT INTO instruments (
 			symbol, provider_symbol, name, asset_class, exchange, exchange_timezone,
 			calendar, base_currency, quote_currency, volume_unit, tick_size,
-			lot_size, active, expires_at, source, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?)
+			lot_size, min_qty, min_notional, active, expires_at, source, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?)
 		ON CONFLICT(symbol) DO UPDATE SET
 			provider_symbol=excluded.provider_symbol, name=excluded.name,
 			asset_class=excluded.asset_class, exchange=excluded.exchange,
 			exchange_timezone=excluded.exchange_timezone, calendar=excluded.calendar,
 			base_currency=excluded.base_currency, quote_currency=excluded.quote_currency,
-			volume_unit=excluded.volume_unit, tick_size=excluded.tick_size,
-			lot_size=excluded.lot_size, active=excluded.active,
+			volume_unit=excluded.volume_unit,
+			tick_size=CASE WHEN excluded.tick_size>0 THEN excluded.tick_size ELSE instruments.tick_size END,
+			lot_size=CASE WHEN excluded.lot_size>0 THEN excluded.lot_size ELSE instruments.lot_size END,
+			min_qty=CASE WHEN excluded.min_qty>0 THEN excluded.min_qty ELSE instruments.min_qty END,
+			min_notional=CASE WHEN excluded.min_notional>0 THEN excluded.min_notional ELSE instruments.min_notional END,
+			active=excluded.active,
 			expires_at=excluded.expires_at, source=excluded.source,
 			updated_at=excluded.updated_at`,
 		i.Symbol, i.ProviderSymbol, i.Name, i.AssetClass, i.Exchange, i.ExchangeTimezone,
 		i.Calendar, i.BaseCurrency, i.QuoteCurrency, i.VolumeUnit, i.TickSize,
-		i.LotSize, i.Active, i.ExpiresAt, i.Source, i.UpdatedAt)
+		i.LotSize, i.MinQty, i.MinNotional, i.Active, i.ExpiresAt, i.Source, i.UpdatedAt)
 	return err
 }
 
@@ -1289,12 +1350,12 @@ func dbGetInstrument(db *sql.DB, symbol string) (*Instrument, error) {
 	row := db.QueryRow(`
 		SELECT symbol, provider_symbol, name, asset_class, exchange, exchange_timezone,
 		       calendar, base_currency, quote_currency, volume_unit, tick_size,
-		       lot_size, active, COALESCE(expires_at, ''), source, updated_at
+		       lot_size, min_qty, min_notional, active, COALESCE(expires_at, ''), source, updated_at
 		FROM instruments WHERE symbol = ?`, canonicalSymbol(symbol))
 	var i Instrument
 	if err := row.Scan(&i.Symbol, &i.ProviderSymbol, &i.Name, &i.AssetClass, &i.Exchange,
 		&i.ExchangeTimezone, &i.Calendar, &i.BaseCurrency, &i.QuoteCurrency,
-		&i.VolumeUnit, &i.TickSize, &i.LotSize, &i.Active, &i.ExpiresAt,
+		&i.VolumeUnit, &i.TickSize, &i.LotSize, &i.MinQty, &i.MinNotional, &i.Active, &i.ExpiresAt,
 		&i.Source, &i.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -2396,6 +2457,8 @@ func snapshotPortfolioWithMarks(db *sql.DB, p *Portfolio, marks map[string]*Mark
 		p.OpenPnLPct = p.OpenPnL / openCost * 100
 	}
 	p.RealizedPnL, p.FeesPaid, _ = dbPortfolioAccounting(db, p.ID)
+	p.FundingPaid = dbFundingPaid(db, p.ID)
+	p.RealizedPnL -= p.FundingPaid
 	p.TotalPnL = p.RealizedPnL + p.OpenPnL
 	returnBasis := p.StartingCash
 	if p.Mode == "live" {
