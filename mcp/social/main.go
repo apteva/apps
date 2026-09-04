@@ -29,6 +29,8 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
+	"image/draw"
 	"image/jpeg"
 	_ "image/png"
 	"io"
@@ -51,7 +53,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.16.1
+version: 0.16.2
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -4008,7 +4010,11 @@ func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string
 	}
 	images := make([]string, 0, len(j.media))
 	for i, item := range j.media {
-		proxyURL, err := a.resolveTikTokPhotoURL(ctx, item, j.mediaProjectID)
+		prepared, err := a.prepareTikTokPhoto(ctx, item, j.mediaProjectID)
+		if err != nil {
+			return "", "", fmt.Errorf("tiktok photo %d: %w", i, err)
+		}
+		proxyURL, err := a.resolveTikTokPhotoURL(ctx, prepared, j.mediaProjectID)
 		if err != nil {
 			return "", "", fmt.Errorf("tiktok photo %d: %w", i, err)
 		}
@@ -4058,7 +4064,102 @@ func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string
 	return a.waitTikTokPublish(ctx, j.connID, pubID)
 }
 
-const tiktokPhotoURLTTLSeconds = 2 * 60 * 60
+const (
+	tiktokPhotoURLTTLSeconds = 2 * 60 * 60
+	tiktokPhotoMaxBytes      = 20 << 20
+	tiktokPhotoMaxPixels     = 40_000_000
+	tiktokJPEGFolder         = "/.social/tiktok-jpeg/"
+	tiktokJPEGVariant        = "tiktok-photo-jpeg-v1"
+)
+
+func isTikTokPhotoMime(mime string) bool {
+	mime = strings.ToLower(strings.TrimSpace(strings.SplitN(mime, ";", 2)[0]))
+	return mime == "image/jpeg" || mime == "image/webp"
+}
+
+// prepareTikTokPhoto preserves formats accepted by TikTok and turns every
+// other decodable image (notably PNG) into a private JPEG derivation. The
+// deterministic folder/name pair lets Storage return the existing row on
+// retries, while the leading-dot folder keeps the derivative out of Media's
+// user-facing catalog.
+func (a *App) prepareTikTokPhoto(ctx *sdk.AppCtx, item mediaItem, projectID string) (mediaItem, error) {
+	if isTikTokPhotoMime(item.Mime) {
+		return item, nil
+	}
+	if item.ID <= 0 {
+		return mediaItem{}, errors.New("storage file id is missing")
+	}
+	args := map[string]any{"id": item.ID}
+	if projectID != "" {
+		args["_project_id"] = projectID
+	}
+	var source struct {
+		ContentBase64 string `json:"content_base64"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_content", args, &source); err != nil {
+		return mediaItem{}, fmt.Errorf("read source from storage: %w", err)
+	}
+	body, err := base64.StdEncoding.DecodeString(source.ContentBase64)
+	if err != nil {
+		return mediaItem{}, fmt.Errorf("decode storage content: %w", err)
+	}
+	if len(body) == 0 {
+		return mediaItem{}, errors.New("storage returned empty image content")
+	}
+	config, _, err := image.DecodeConfig(bytes.NewReader(body))
+	if err != nil {
+		return mediaItem{}, fmt.Errorf("decode unsupported TikTok image: %w", err)
+	}
+	if config.Width <= 0 || config.Height <= 0 || int64(config.Width)*int64(config.Height) > tiktokPhotoMaxPixels {
+		return mediaItem{}, fmt.Errorf("image dimensions are too large: %dx%d", config.Width, config.Height)
+	}
+	sourceImage, _, err := image.Decode(bytes.NewReader(body))
+	if err != nil {
+		return mediaItem{}, fmt.Errorf("decode unsupported TikTok image: %w", err)
+	}
+	bounds := sourceImage.Bounds()
+	opaque := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
+	draw.Draw(opaque, opaque.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	draw.Draw(opaque, opaque.Bounds(), sourceImage, bounds.Min, draw.Over)
+	var encoded bytes.Buffer
+	if err := jpeg.Encode(&encoded, opaque, &jpeg.Options{Quality: 92}); err != nil {
+		return mediaItem{}, fmt.Errorf("encode TikTok JPEG: %w", err)
+	}
+	if encoded.Len() > tiktokPhotoMaxBytes {
+		return mediaItem{}, fmt.Errorf("converted JPEG is %d bytes; TikTok limit is %d", encoded.Len(), tiktokPhotoMaxBytes)
+	}
+	name := fmt.Sprintf("%d-%s.jpg", item.ID, tiktokJPEGVariant)
+	uploadArgs := map[string]any{
+		"name":           name,
+		"folder":         tiktokJPEGFolder,
+		"content_type":   "image/jpeg",
+		"content_base64": base64.StdEncoding.EncodeToString(encoded.Bytes()),
+		"source":         "social-tiktok-derivative",
+		"tags":           []string{"internal", "derived", "tiktok"},
+		"visibility":     "private",
+	}
+	if projectID != "" {
+		uploadArgs["_project_id"] = projectID
+	}
+	var uploaded struct {
+		ID        int64  `json:"id"`
+		Name      string `json:"name"`
+		SizeBytes int64  `json:"size_bytes"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", uploadArgs, &uploaded); err != nil {
+		return mediaItem{}, fmt.Errorf("store TikTok JPEG derivative: %w", err)
+	}
+	if uploaded.ID <= 0 {
+		return mediaItem{}, errors.New("storage returned no id for TikTok JPEG derivative")
+	}
+	if uploaded.Name == "" {
+		uploaded.Name = name
+	}
+	if uploaded.SizeBytes <= 0 {
+		uploaded.SizeBytes = int64(encoded.Len())
+	}
+	return mediaItem{ID: uploaded.ID, Mime: "image/jpeg", Name: uploaded.Name, Bytes: uploaded.SizeBytes}, nil
+}
 
 // resolveTikTokPhotoURL mints the redirect-free Storage URL required by
 // TikTok's PULL_FROM_URL flow. The generic media resolver deliberately keeps

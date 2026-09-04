@@ -3302,6 +3302,95 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 	}
 }
 
+func TestPrepareTikTokPhotoStoresHiddenJPEGDerivative(t *testing.T) {
+	sourceImage := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	for y := 4; y < 12; y++ {
+		for x := 4; x < 12; x++ {
+			i := sourceImage.PixOffset(x, y)
+			sourceImage.Pix[i] = 255
+			sourceImage.Pix[i+3] = 128
+		}
+	}
+	var source bytes.Buffer
+	if err := png.Encode(&source, sourceImage); err != nil {
+		t.Fatal(err)
+	}
+
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get_content"] = json.RawMessage(
+		fmt.Sprintf(`{"result":{"content":[{"type":"text","text":%q}]}}`,
+			`{"content_base64":"`+base64.StdEncoding.EncodeToString(source.Bytes())+`"}`),
+	)
+	pf.callAppResponses["storage:files_upload"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":109,\"name\":\"9-tiktok-photo-jpeg-v1.jpg\",\"size_bytes\":456}"}]}}`,
+	)
+	ctx := newSocialCtx(t, pf)
+	prepared, err := (&App{}).prepareTikTokPhoto(ctx, mediaItem{
+		ID: 9, Mime: "image/png", Name: "source.png", Bytes: int64(source.Len()),
+	}, "media-proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.ID != 109 || prepared.Mime != "image/jpeg" || prepared.Name != "9-tiktok-photo-jpeg-v1.jpg" {
+		t.Fatalf("prepared media = %+v", prepared)
+	}
+
+	var upload *callAppCall
+	for i := range pf.callAppCalls {
+		call := &pf.callAppCalls[i]
+		if call.AppName == "storage" && call.Tool == "files_upload" {
+			upload = call
+			break
+		}
+	}
+	if upload == nil {
+		t.Fatalf("files_upload was not called: %+v", pf.callAppCalls)
+	}
+	if upload.Input["folder"] != tiktokJPEGFolder || upload.Input["source"] != "social-tiktok-derivative" {
+		t.Fatalf("hidden derivative identity = %+v", upload.Input)
+	}
+	if upload.Input["content_type"] != "image/jpeg" || upload.Input["visibility"] != "private" {
+		t.Fatalf("derivative delivery metadata = %+v", upload.Input)
+	}
+	if upload.Input["_project_id"] != "media-proj" {
+		t.Fatalf("derivative project = %v, want media-proj", upload.Input["_project_id"])
+	}
+	tags, ok := upload.Input["tags"].([]string)
+	if !ok || strings.Join(tags, ",") != "internal,derived,tiktok" {
+		t.Fatalf("derivative tags = %#v", upload.Input["tags"])
+	}
+	jpegBody, err := base64.StdEncoding.DecodeString(upload.Input["content_base64"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	converted, err := jpeg.Decode(bytes.NewReader(jpegBody))
+	if err != nil {
+		t.Fatalf("uploaded derivative is not JPEG: %v", err)
+	}
+	r, g, b, _ := converted.At(0, 0).RGBA()
+	if r < 50000 || g < 50000 || b < 50000 {
+		t.Fatalf("transparent background was not composited onto white: rgb16=(%d,%d,%d)", r, g, b)
+	}
+}
+
+func TestPrepareTikTokPhotoPassesSupportedFormatsThrough(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newSocialCtx(t, pf)
+	for _, mime := range []string{"image/jpeg", "image/webp"} {
+		item := mediaItem{ID: 9, URL: "https://cdn.test/image", Mime: mime, Name: "image"}
+		got, err := (&App{}).prepareTikTokPhoto(ctx, item, "media-proj")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != item {
+			t.Fatalf("%s changed: got %+v want %+v", mime, got, item)
+		}
+	}
+	if len(pf.callAppCalls) != 0 {
+		t.Fatalf("supported formats touched Storage: %+v", pf.callAppCalls)
+	}
+}
+
 func TestPreflightTikTokPhotoURLRejectsRedirect(t *testing.T) {
 	destinationHit := false
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
