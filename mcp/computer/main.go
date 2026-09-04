@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -56,11 +57,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.86
+version: 0.7.87
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.86 adds
-  provider-neutral media embed state, terminal media waits, draft-save
-  diagnostics, and rendered-media guidance after unmatched text waits.
+  Watch, steer, and replay hosted browser sessions. v0.7.87 adds browser-native
+  download lifecycle tracking and secure byte export for local Chrome,
+  Browserbase, and Steel.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -95,7 +96,9 @@ provides:
     - name: browser_session
       description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name, for example {\"action\":\"open\",\"url\":\"https://example.com\"}. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. Computer ignores mechanically populated empty/default arguments and reports what it ignored. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Omitted timeout gives cloud sessions a 1800-second maximum lifetime. timeout terminates the entire cloud browser on wall-clock expiry even while it is active; omit it unless the user explicitly requested that exact provider lifetime. Never derive timeout from estimated task duration. Use computer_use timeout_ms for action waits. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
-      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, semantic scroll_regions, date-field format metadata, and visible semantic calendar cells. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. expected_text guards click identity. When dangerous=true, expected_effect and an identical confirm_consequence are required and checked against the live target before dispatch; omit both for ordinary clicks. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and uses scalar verification for native single-line inputs. set_temporal accepts ISO dates for native or confidently detected masked date fields and returns requested/actual values, format, and validity diagnostics. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes."
+      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, semantic scroll_regions, date-field format metadata, and visible semantic calendar cells. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. expected_text guards click identity. When dangerous=true, expected_effect and an identical confirm_consequence are required and checked against the live target before dispatch; omit both for ordinary clicks. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and uses scalar verification for native single-line inputs. set_temporal accepts ISO dates for native or confidently detected masked date fields and returns requested/actual values, format, and validity diagnostics. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes. A click that starts a browser download may return downloads_started metadata; this does not mean the download completed. Use browser_download(action=wait), then browser_download(action=get)."
+    - name: browser_download
+      description: "List, wait for, or export files captured by an active browser session. After a click returns a dl_* id, wait for browser-confirmed completion before get. get exports the browser-captured bytes as a Core-managed blobref; it never refetches the URL and Computer never unzips or interprets the file. Actions: list, wait, get."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -318,7 +321,22 @@ type session struct {
 	somRevision          int
 	somPrevious          map[string]backends.SetOfMarkTarget
 	somDirty             bool
+	owner                sessionOwner
 }
+
+type sessionOwner struct {
+	ProjectID   string
+	AgentID     int64
+	ThreadID    string
+	SubjectType string
+	SubjectID   string
+}
+
+const (
+	defaultDownloadWaitMS  = 30_000
+	maximumDownloadWaitMS  = 120_000
+	maxDownloadExportBytes = int64(64 << 20)
+)
 
 const (
 	defaultCloudSessionTimeoutSeconds = 30 * 60
@@ -609,7 +627,8 @@ func (a *App) MCPTools() []sdk.Tool {
 					},
 				},
 			}, []string{"action"}),
-			Handler: a.toolBrowserSession,
+			Handler:    a.toolBrowserSession,
+			HandlerCtx: a.toolBrowserSessionCaller,
 		},
 		{
 			Name: "computer_use",
@@ -679,6 +698,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"include_som": map[string]any{"type": "boolean", "description": "For action=screenshot. Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
 			}, []string{"session_id", "action"}),
 			Handler: a.toolComputerUse,
+		},
+		{
+			Name:        "browser_download",
+			Description: "List, wait for, or export files captured by an active browser session. Workflow: after computer_use clicks a download control, use action=list when the click did not return downloads_started; use action=wait with its dl_* download_id until browser-confirmed completed/failed/cancelled state; then use action=get to receive a Core-managed blobref file handle. Click success never proves download completion. get exports the browser-captured bytes and never refetches the source URL. Computer does not unzip or interpret files. Actions: list, wait, get.",
+			InputSchema: strictSchemaObject(map[string]any{
+				"action":      map[string]any{"type": "string", "enum": []string{"list", "wait", "get"}},
+				"session_id":  map[string]any{"type": "string", "description": "Active app-owned br_* browser session."},
+				"download_id": map[string]any{"type": "string", "description": "Opaque dl_* id returned by downloads_started, list, or wait. Required for wait and get."},
+				"timeout_ms":  map[string]any{"type": "integer", "minimum": 0, "maximum": maximumDownloadWaitMS, "default": defaultDownloadWaitMS, "description": "Bounded wait duration for action=wait. This does not alter browser-session lifetime."},
+			}, []string{"action", "session_id"}),
+			HandlerCtx: a.toolBrowserDownload,
 		},
 		{
 			Name:        "computer_context_create",
@@ -1152,6 +1182,163 @@ func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, err
 	default:
 		return nil, fmt.Errorf("unknown browser_session action %q", action)
 	}
+}
+
+func (a *App) toolBrowserSessionCaller(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	out, err := a.toolBrowserSession(app, args)
+	if err != nil || stringArg(args, "action") != "open" {
+		return out, err
+	}
+	result, ok := out.(map[string]any)
+	if !ok {
+		return out, nil
+	}
+	id, _ := result["session_id"].(string)
+	if id == "" {
+		return out, nil
+	}
+	owner, valid := sessionOwnerFromCaller(callCtx, app)
+	if !valid {
+		return out, nil
+	}
+	if sess, found := a.reg.get(id); found {
+		sess.actionMu.Lock()
+		sess.owner = owner
+		sess.actionMu.Unlock()
+	}
+	return out, nil
+}
+
+func sessionOwnerFromCaller(callCtx context.Context, app *sdk.AppCtx) (sessionOwner, bool) {
+	caller := sdk.CallerFrom(callCtx)
+	if caller == nil {
+		return sessionOwner{}, false
+	}
+	projectID := caller.ProjectID
+	if projectID == "" && app != nil {
+		projectID = app.CurrentProject()
+	}
+	owner := sessionOwner{
+		ProjectID: projectID, AgentID: caller.AgentID, ThreadID: caller.ThreadID,
+		SubjectType: caller.SubjectType, SubjectID: caller.SubjectID,
+	}
+	valid := owner.AgentID != 0 || owner.ThreadID != "" || owner.SubjectID != ""
+	return owner, valid
+}
+
+func (owner sessionOwner) matches(other sessionOwner) bool {
+	return owner.ProjectID == other.ProjectID && owner.AgentID == other.AgentID && owner.ThreadID == other.ThreadID &&
+		owner.SubjectType == other.SubjectType && owner.SubjectID == other.SubjectID
+}
+
+func (a *App) toolBrowserDownload(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	action := strings.TrimSpace(stringArg(args, "action"))
+	sessionID := strings.TrimSpace(stringArg(args, "session_id"))
+	if action == "" || sessionID == "" {
+		return nil, fmt.Errorf("invalid_download_request: action and session_id are required")
+	}
+	if action != "list" && action != "wait" && action != "get" {
+		return nil, fmt.Errorf("invalid_download_request: unsupported action %q", action)
+	}
+	owner, valid := sessionOwnerFromCaller(callCtx, app)
+	if !valid {
+		return nil, fmt.Errorf("downloads_caller_context_required")
+	}
+	sess, ok := a.reg.get(sessionID)
+	if !ok {
+		if app != nil && app.AppDB() != nil {
+			if row, err := dbGetSession(app.AppDB(), sessionID); err == nil && row.Status != "active" {
+				return nil, fmt.Errorf("session_closed: downloads must be retrieved before closing the browser session")
+			}
+		}
+		return nil, fmt.Errorf("session_not_active")
+	}
+	sess.actionMu.Lock()
+	defer sess.actionMu.Unlock()
+	if !sess.owner.matches(owner) {
+		return nil, fmt.Errorf("download_not_found_or_not_owned")
+	}
+	manager, supported := sess.comp.(backends.DownloadManager)
+	if !supported {
+		return nil, fmt.Errorf("downloads_not_supported: backend=%s", sess.backend)
+	}
+	requestCtx := callCtx
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+	switch action {
+	case "list":
+		listed, err := manager.ListDownloads(requestCtx)
+		if err != nil {
+			return nil, normalizeDownloadError(err)
+		}
+		return map[string]any{"session_id": sessionID, "downloads": listed}, nil
+	case "wait":
+		downloadID := strings.TrimSpace(stringArg(args, "download_id"))
+		if downloadID == "" {
+			return nil, fmt.Errorf("invalid_download_request: download_id is required for wait")
+		}
+		timeoutMS := defaultDownloadWaitMS
+		if rawArgPresent(args, "timeout_ms") {
+			timeoutMS = intArg(args, "timeout_ms")
+		}
+		if timeoutMS < 0 || timeoutMS > maximumDownloadWaitMS {
+			return nil, fmt.Errorf("invalid_download_request: timeout_ms must be between 0 and %d", maximumDownloadWaitMS)
+		}
+		waitCtx, cancel := context.WithTimeout(requestCtx, time.Duration(timeoutMS)*time.Millisecond)
+		defer cancel()
+		download, err := manager.WaitForDownload(waitCtx, downloadID)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return map[string]any{"session_id": sessionID, "download": download, "terminal": false, "timed_out": true}, nil
+		}
+		if err != nil {
+			return nil, normalizeDownloadError(err)
+		}
+		return map[string]any{"session_id": sessionID, "download": download, "terminal": true, "timed_out": false}, nil
+	case "get":
+		downloadID := strings.TrimSpace(stringArg(args, "download_id"))
+		if downloadID == "" {
+			return nil, fmt.Errorf("invalid_download_request: download_id is required for get")
+		}
+		reader, meta, err := manager.OpenDownload(requestCtx, downloadID)
+		if err != nil {
+			return nil, normalizeDownloadError(err)
+		}
+		defer reader.Close()
+		payload, err := io.ReadAll(io.LimitReader(reader, maxDownloadExportBytes+1))
+		if err != nil {
+			return nil, fmt.Errorf("download_bytes_unavailable")
+		}
+		if int64(len(payload)) > maxDownloadExportBytes {
+			return nil, fmt.Errorf("download_size_limit_exceeded")
+		}
+		if meta.Size > 0 && meta.Size != int64(len(payload)) {
+			return nil, fmt.Errorf("download_integrity_mismatch: expected_size=%d actual_size=%d", meta.Size, len(payload))
+		}
+		sum := sha256.Sum256(payload)
+		if meta.SHA256 != "" && !strings.EqualFold(meta.SHA256, hex.EncodeToString(sum[:])) {
+			return nil, fmt.Errorf("download_integrity_mismatch: sha256")
+		}
+		mimeType := strings.TrimSpace(strings.Split(meta.MIMEType, ";")[0])
+		if mimeType == "" || mimeType == "application/octet-stream" {
+			mimeType = http.DetectContentType(payload)
+		}
+		return binaryEnvelope(payload, mimeType), nil
+	}
+	return nil, fmt.Errorf("invalid_download_request")
+}
+
+func normalizeDownloadError(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	for _, code := range []string{"session_closed", "download_not_found_or_not_owned", "download_not_ready", "download_size_limit_exceeded", "download_session_limit_exceeded", "download_bytes_unavailable"} {
+		if strings.Contains(message, code) {
+			return fmt.Errorf("%s", message)
+		}
+	}
+	return fmt.Errorf("download_provider_error")
 }
 
 func (a *App) sessionTabController(args map[string]any) (string, *session, backends.TabController, error) {
@@ -2429,6 +2616,12 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 
 	beforeURL := currentURL(sess.comp)
+	var downloadEvents backends.DownloadEventSource
+	var downloadCursor uint64
+	if source, supported := sess.comp.(backends.DownloadEventSource); supported {
+		downloadEvents = source
+		downloadCursor = source.DownloadEventCursor()
+	}
 	beforeTabs := []backends.TabInfo(nil)
 	if action == "click" || action == "double_click" {
 		beforeTabs = tabsFor(sess.comp)
@@ -2564,6 +2757,10 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"Take a fresh screenshot and retry once. If the session is stale, close it and reopen from context.",
 			err)
 	}
+	var downloadsStarted []backends.Download
+	if downloadEvents != nil {
+		downloadsStarted = downloadEvents.DownloadsStartedSince(downloadCursor)
+	}
 	tabEvent := tabFollowResult{}
 	if len(beforeTabs) > 0 && (action == "click" || action == "double_click") {
 		tabEvent = autoFollowNewTab(sess.comp, beforeTabs)
@@ -2671,6 +2868,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 	mergeMediaObservationPayload(payload, mediaObservation)
+	mergeDownloadsStartedPayload(payload, downloadsStarted)
 	if mediaObservationErr != nil {
 		payload["media_observation_error"] = mediaObservationErr.Error()
 	}
@@ -2696,6 +2894,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 	mergeMediaObservationPayload(out, mediaObservation)
+	mergeDownloadsStartedPayload(out, downloadsStarted)
 	if mediaObservationErr != nil {
 		out["media_observation_error"] = mediaObservationErr.Error()
 	}
@@ -2837,6 +3036,12 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 	}
 	beforeURL := currentURL(sess.comp)
 	beforeTabs := tabsFor(sess.comp)
+	var downloadEvents backends.DownloadEventSource
+	var downloadCursor uint64
+	if source, supported := sess.comp.(backends.DownloadEventSource); supported {
+		downloadEvents = source
+		downloadCursor = source.DownloadEventCursor()
+	}
 	completed := make([]map[string]any, 0, len(steps))
 	completedCount := 0
 	batchTimedOut := false
@@ -3044,7 +3249,14 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 	mergeNavigationDelta(out, "batch", beforeURL, afterURL, "")
 	mergeMediaObservationPayload(out, mediaObservation)
 	mergeTabFollowPayload(out, tabEvent)
-	emitEvent(ctx, "session.action", map[string]any{"session_id": id, "action": "batch", "completed_steps": completedCount, "timed_out": batchTimedOut, "current_url": afterURL})
+	var downloadsStarted []backends.Download
+	if downloadEvents != nil {
+		downloadsStarted = downloadEvents.DownloadsStartedSince(downloadCursor)
+	}
+	mergeDownloadsStartedPayload(out, downloadsStarted)
+	eventPayload := map[string]any{"session_id": id, "action": "batch", "completed_steps": completedCount, "timed_out": batchTimedOut, "current_url": afterURL}
+	mergeDownloadsStartedPayload(eventPayload, downloadsStarted)
+	emitEvent(ctx, "session.action", eventPayload)
 	return out, nil
 }
 
@@ -3169,6 +3381,26 @@ func mergeTabFollowPayload(payload map[string]any, result tabFollowResult) {
 	if result.Switched {
 		payload["switched_tab"] = true
 	}
+}
+
+func mergeDownloadsStartedPayload(payload map[string]any, started []backends.Download) {
+	if len(started) == 0 {
+		return
+	}
+	compact := make([]map[string]any, 0, len(started))
+	for _, download := range started {
+		item := map[string]any{
+			"id":       download.ID,
+			"filename": download.Filename,
+			"status":   download.Status,
+		}
+		if download.MIMEType != "" {
+			item["mime_type"] = download.MIMEType
+		}
+		compact = append(compact, item)
+	}
+	payload["downloads_started"] = compact
+	payload["download_next_step"] = "Call browser_download(action=wait) for the download id; only a completed result may be exported with action=get."
 }
 
 func mergeNavigationDelta(payload map[string]any, action, beforeURL, afterURL, requestedURL string) {

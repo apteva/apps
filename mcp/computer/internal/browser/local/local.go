@@ -10,6 +10,7 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -28,6 +29,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
+	"github.com/apteva/apps/mcp/computer/internal/browser/downloads"
 	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
@@ -111,6 +113,7 @@ type Computer struct {
 	// fetch failed; see WARN log line for cause.
 	debugURL    string
 	environment computer.EnvironmentOptions
+	downloads   *downloads.Tracker
 }
 
 // pickFreePort asks the OS for an unused TCP port on loopback by
@@ -450,6 +453,25 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 		allocCancel()
 		return fmt.Errorf("local chrome: failed to start: %w (goos=%s)", err, runtime.GOOS)
 	}
+	downloadDir, err := os.MkdirTemp("", "apteva-computer-downloads-")
+	if err != nil {
+		cancel()
+		allocCancel()
+		return fmt.Errorf("local chrome: create download directory: %w", err)
+	}
+	downloadTracker := downloads.New(downloads.Options{Directory: downloadDir, Lifetime: allocCtx})
+	if err := downloadTracker.Attach(ctx); err != nil {
+		_ = downloadTracker.Close()
+		cancel()
+		allocCancel()
+		return fmt.Errorf("local chrome: enable downloads: %w", err)
+	}
+	downloadReady := false
+	defer func() {
+		if !downloadReady {
+			_ = downloadTracker.Close()
+		}
+	}()
 
 	// Proxy auth: Chrome can't accept inline credentials in the
 	// --proxy-server flag, so we intercept the proxy's 407 challenge
@@ -537,6 +559,8 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 	c.allocCancel = allocCancel
 	c.proxyActive = useProxy
 	c.activeContextID = contextID
+	c.downloads = downloadTracker
+	downloadReady = true
 	return nil
 }
 
@@ -1833,6 +1857,10 @@ func (c *Computer) gracefulCancel() {
 // persistent contexts, where SIGKILL would lose any state still in
 // the cookie write journal. Always falls through to a hard cancel.
 func (c *Computer) Close() error {
+	if c.downloads != nil {
+		_ = c.downloads.Close()
+		c.downloads = nil
+	}
 	c.gracefulCancel()
 	if c.cancel != nil {
 		c.cancel()
@@ -1850,6 +1878,10 @@ func (c *Computer) Close() error {
 // (load-bearing — context switches must flush) and from
 // relaunchIfProxyChanged (less critical but matches user expectations).
 func (c *Computer) gracefulTeardownForRelaunch() {
+	if c.downloads != nil {
+		_ = c.downloads.Close()
+		c.downloads = nil
+	}
 	c.gracefulCancel()
 	if c.cancel != nil {
 		c.cancel()
@@ -1858,6 +1890,41 @@ func (c *Computer) gracefulTeardownForRelaunch() {
 		c.allocCancel()
 	}
 	c.allocCtx = nil
+}
+
+func (c *Computer) ListDownloads(ctx context.Context) ([]computer.Download, error) {
+	if c.downloads == nil {
+		return nil, downloads.ErrClosed
+	}
+	return c.downloads.ListDownloads(ctx)
+}
+
+func (c *Computer) WaitForDownload(ctx context.Context, id string) (computer.Download, error) {
+	if c.downloads == nil {
+		return computer.Download{}, downloads.ErrClosed
+	}
+	return c.downloads.WaitForDownload(ctx, id)
+}
+
+func (c *Computer) OpenDownload(ctx context.Context, id string) (io.ReadCloser, computer.Download, error) {
+	if c.downloads == nil {
+		return nil, computer.Download{}, downloads.ErrClosed
+	}
+	return c.downloads.OpenDownload(ctx, id)
+}
+
+func (c *Computer) DownloadEventCursor() uint64 {
+	if c.downloads == nil {
+		return 0
+	}
+	return c.downloads.DownloadEventCursor()
+}
+
+func (c *Computer) DownloadsStartedSince(cursor uint64) []computer.Download {
+	if c.downloads == nil {
+		return nil
+	}
+	return c.downloads.DownloadsStartedSince(cursor)
 }
 
 func (c *Computer) ListTabs() ([]computer.TabInfo, error) {

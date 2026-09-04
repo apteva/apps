@@ -11,6 +11,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,6 +24,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
+	"github.com/apteva/apps/mcp/computer/internal/browser/downloads"
 	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
@@ -35,6 +37,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/stability"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
+	cdpbrowser "github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/target"
@@ -134,6 +137,9 @@ type Computer struct {
 
 	recoveryMu            sync.Mutex
 	lastScreenshotRecover *computer.ScreenshotRecoveryInfo
+	downloads             *downloads.Tracker
+	downloadProviderMu    sync.Mutex
+	downloadProviderIDs   map[string]string
 }
 
 // New constructs a Browserbase-backed Computer. NO session is created
@@ -1509,17 +1515,40 @@ func (c *Computer) establishCDP(connectURL string) error {
 		remoteCancel()
 		return err
 	}
+	downloadTracker := downloads.New(downloads.Options{
+		DownloadPath: "downloads",
+		Behavior:     cdpbrowser.SetDownloadBehaviorBehaviorAllow,
+		Open:         c.openDownloadedFile,
+		Lifetime:     browserCtx,
+	})
+	if err := downloadTracker.Attach(ctx); err != nil {
+		cancel()
+		browserCancel()
+		remoteCancel()
+		return fmt.Errorf("browserbase: enable downloads: %w", err)
+	}
+	downloadReady := false
+	defer func() {
+		if !downloadReady {
+			_ = downloadTracker.Close()
+		}
+	}()
 	c.allocCancel = func() {
 		browserCancel()
 		remoteCancel()
 	}
 	c.allocCtx = browserCtx
 	c.ctx = ctx
+	c.downloads = downloadTracker
+	c.downloadProviderMu.Lock()
+	c.downloadProviderIDs = make(map[string]string)
+	c.downloadProviderMu.Unlock()
 	c.attachStabilityTracker()
 	c.cancel = cancel
 	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
 		return fmt.Errorf("reapply browser environment: %w", err)
 	}
+	downloadReady = true
 	return nil
 }
 
@@ -1583,6 +1612,10 @@ func pickInitialPageTarget(infos []*target.Info) target.ID {
 // releaseCDP cancels the chromedp context + allocator. Safe to call
 // when no session is attached (no-op).
 func (c *Computer) releaseCDP() {
+	if c.downloads != nil {
+		_ = c.downloads.Close()
+		c.downloads = nil
+	}
 	if c.cancel != nil {
 		c.cancel()
 		c.cancel = nil
@@ -1683,6 +1716,10 @@ func (c *Computer) fetchSessionConnectURL(sessionID string) (string, error) {
 }
 
 func (c *Computer) Close() error {
+	if c.downloads != nil {
+		_ = c.downloads.Close()
+		c.downloads = nil
+	}
 	// Officially release the session so Browserbase stops billing minutes
 	// and has a clean close point for persisting context state. Keep the
 	// CDP connection open until after the release request so the session
@@ -1719,6 +1756,136 @@ func (c *Computer) Close() error {
 	c.contextID = ""
 	c.contextPersist = false
 	return nil
+}
+
+func (c *Computer) ListDownloads(ctx context.Context) ([]computer.Download, error) {
+	if c.downloads == nil {
+		return nil, downloads.ErrClosed
+	}
+	return c.downloads.ListDownloads(ctx)
+}
+
+func (c *Computer) WaitForDownload(ctx context.Context, id string) (computer.Download, error) {
+	if c.downloads == nil {
+		return computer.Download{}, downloads.ErrClosed
+	}
+	return c.downloads.WaitForDownload(ctx, id)
+}
+
+func (c *Computer) OpenDownload(ctx context.Context, id string) (io.ReadCloser, computer.Download, error) {
+	if c.downloads == nil {
+		return nil, computer.Download{}, downloads.ErrClosed
+	}
+	return c.downloads.OpenDownload(ctx, id)
+}
+
+func (c *Computer) DownloadEventCursor() uint64 {
+	if c.downloads == nil {
+		return 0
+	}
+	return c.downloads.DownloadEventCursor()
+}
+
+func (c *Computer) DownloadsStartedSince(cursor uint64) []computer.Download {
+	if c.downloads == nil {
+		return nil
+	}
+	return c.downloads.DownloadsStartedSince(cursor)
+}
+
+type browserbaseDownloadList struct {
+	Downloads []struct {
+		ID        string `json:"id"`
+		SessionID string `json:"sessionId"`
+		Filename  string `json:"filename"`
+		Size      int64  `json:"size"`
+		CreatedAt string `json:"createdAt"`
+	} `json:"downloads"`
+}
+
+var errDownloadNotSynchronized = errors.New("browserbase download not yet synchronized")
+
+func (c *Computer) openDownloadedFile(ctx context.Context, _ string, meta computer.Download) (io.ReadCloser, error) {
+	syncCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	var providerID string
+	for {
+		var err error
+		providerID, err = c.browserbaseDownloadID(syncCtx, meta)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, errDownloadNotSynchronized) {
+			return nil, err
+		}
+		select {
+		case <-syncCtx.Done():
+			return nil, fmt.Errorf("download_bytes_unavailable: browserbase synchronization: %w", syncCtx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/downloads/%s", apiBase, providerID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-BB-API-Key", c.apiKey)
+	req.Header.Set("Accept", "application/octet-stream")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("download_bytes_unavailable: browserbase HTTP %d", resp.StatusCode)
+	}
+	return resp.Body, nil
+}
+
+func (c *Computer) browserbaseDownloadID(ctx context.Context, meta computer.Download) (string, error) {
+	c.downloadProviderMu.Lock()
+	if id := c.downloadProviderIDs[meta.ID]; id != "" {
+		c.downloadProviderMu.Unlock()
+		return id, nil
+	}
+	used := make(map[string]bool, len(c.downloadProviderIDs))
+	for _, id := range c.downloadProviderIDs {
+		used[id] = true
+	}
+	c.downloadProviderMu.Unlock()
+
+	requestURL := fmt.Sprintf("%s/downloads?sessionId=%s&filename=%s&limit=100", apiBase, url.QueryEscape(c.sessionID), url.QueryEscape(meta.Filename))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("X-BB-API-Key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("download_bytes_unavailable: browserbase list HTTP %d", resp.StatusCode)
+	}
+	var listed browserbaseDownloadList
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&listed); err != nil {
+		return "", fmt.Errorf("download_bytes_unavailable: browserbase list: %w", err)
+	}
+	for _, candidate := range listed.Downloads {
+		if candidate.ID == "" || used[candidate.ID] || candidate.SessionID != "" && candidate.SessionID != c.sessionID || candidate.Filename != meta.Filename {
+			continue
+		}
+		if meta.Size > 0 && candidate.Size > 0 && meta.Size != candidate.Size {
+			continue
+		}
+		c.downloadProviderMu.Lock()
+		c.downloadProviderIDs[meta.ID] = candidate.ID
+		c.downloadProviderMu.Unlock()
+		return candidate.ID, nil
+	}
+	return "", errDownloadNotSynchronized
 }
 
 const (

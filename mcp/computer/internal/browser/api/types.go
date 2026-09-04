@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -417,6 +418,47 @@ type StabilityWaiter interface {
 // active document for rendered media and draft-save state.
 type MediaObserver interface {
 	ObserveMedia() (MediaObservation, error)
+}
+
+type DownloadStatus string
+
+const (
+	DownloadInProgress DownloadStatus = "in_progress"
+	DownloadCompleted  DownloadStatus = "completed"
+	DownloadFailed     DownloadStatus = "failed"
+	DownloadCancelled  DownloadStatus = "cancelled"
+)
+
+// Download is safe browser-visible metadata. Provider identifiers, local
+// paths, signed URLs, and downloaded bytes are deliberately excluded.
+type Download struct {
+	ID            string         `json:"id"`
+	Filename      string         `json:"filename"`
+	MIMEType      string         `json:"mime_type,omitempty"`
+	Size          int64          `json:"size,omitempty"`
+	ReceivedBytes int64          `json:"received_bytes,omitempty"`
+	SHA256        string         `json:"sha256,omitempty"`
+	Status        DownloadStatus `json:"status"`
+	ErrorCode     string         `json:"error_code,omitempty"`
+	SourceOrigin  string         `json:"source_origin,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	CompletedAt   *time.Time     `json:"completed_at,omitempty"`
+}
+
+// DownloadManager is an optional, session-bound backend capability. IDs are
+// opaque within one browser session and never represent filesystem paths.
+type DownloadManager interface {
+	ListDownloads(ctx context.Context) ([]Download, error)
+	WaitForDownload(ctx context.Context, id string) (Download, error)
+	OpenDownload(ctx context.Context, id string) (io.ReadCloser, Download, error)
+}
+
+// DownloadEventSource lets computer_use include compact downloads_started
+// metadata without waiting for completion. Absence is harmless: callers can
+// always discover downloads through browser_download(action=list).
+type DownloadEventSource interface {
+	DownloadEventCursor() uint64
+	DownloadsStartedSince(cursor uint64) []Download
 }
 
 // TabInfo describes one browser page target inside a provider session.

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
+	"github.com/apteva/apps/mcp/computer/internal/browser/downloads"
 	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
@@ -88,6 +90,7 @@ type Computer struct {
 	allocCancel context.CancelFunc
 	http        *http.Client
 	environment computer.EnvironmentOptions
+	downloads   *downloads.Tracker
 
 	// SoM: same wiring as local.Computer / browserbase.Computer.
 	labelMu          sync.RWMutex
@@ -337,18 +340,36 @@ func (c *Computer) establishCDP(connectURL string) error {
 		allocCancel()
 		return err
 	}
+	downloadTracker := downloads.New(downloads.Options{DownloadPath: "/files", Open: c.openDownloadedFile, Lifetime: allocCtx})
+	if err := downloadTracker.Attach(ctx); err != nil {
+		cancel()
+		allocCancel()
+		return fmt.Errorf("steel: enable downloads: %w", err)
+	}
+	downloadReady := false
+	defer func() {
+		if !downloadReady {
+			_ = downloadTracker.Close()
+		}
+	}()
 	c.allocCancel = allocCancel
 	c.allocCtx = allocCtx
 	c.ctx = ctx
+	c.downloads = downloadTracker
 	c.attachStabilityTracker()
 	c.cancel = cancel
 	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
 		return fmt.Errorf("reapply browser environment: %w", err)
 	}
+	downloadReady = true
 	return nil
 }
 
 func (c *Computer) releaseCDP() {
+	if c.downloads != nil {
+		_ = c.downloads.Close()
+		c.downloads = nil
+	}
 	if c.cancel != nil {
 		c.cancel()
 		c.cancel = nil
@@ -873,6 +894,10 @@ func (c *Computer) ExtractDOM(opts computer.ExtractOptions) (computer.ExtractRes
 func (c *Computer) DebugURL() string { return c.viewerURL }
 
 func (c *Computer) Close() error {
+	if c.downloads != nil {
+		_ = c.downloads.Close()
+		c.downloads = nil
+	}
 	if c.cancel != nil {
 		c.cancel()
 	}
@@ -891,4 +916,77 @@ func (c *Computer) Close() error {
 	}
 	c.sessionID = ""
 	return nil
+}
+
+func (c *Computer) ListDownloads(ctx context.Context) ([]computer.Download, error) {
+	if c.downloads == nil {
+		return nil, downloads.ErrClosed
+	}
+	return c.downloads.ListDownloads(ctx)
+}
+
+func (c *Computer) WaitForDownload(ctx context.Context, id string) (computer.Download, error) {
+	if c.downloads == nil {
+		return computer.Download{}, downloads.ErrClosed
+	}
+	return c.downloads.WaitForDownload(ctx, id)
+}
+
+func (c *Computer) OpenDownload(ctx context.Context, id string) (io.ReadCloser, computer.Download, error) {
+	if c.downloads == nil {
+		return nil, computer.Download{}, downloads.ErrClosed
+	}
+	return c.downloads.OpenDownload(ctx, id)
+}
+
+func (c *Computer) DownloadEventCursor() uint64 {
+	if c.downloads == nil {
+		return 0
+	}
+	return c.downloads.DownloadEventCursor()
+}
+
+func (c *Computer) DownloadsStartedSince(cursor uint64) []computer.Download {
+	if c.downloads == nil {
+		return nil
+	}
+	return c.downloads.DownloadsStartedSince(cursor)
+}
+
+func (c *Computer) openDownloadedFile(ctx context.Context, providerPath string, _ computer.Download) (io.ReadCloser, error) {
+	providerPath = strings.TrimSpace(providerPath)
+	if !strings.HasPrefix(providerPath, "/files/") && !strings.HasPrefix(providerPath, "files/") {
+		return nil, fmt.Errorf("download_bytes_unavailable: invalid provider path")
+	}
+	relative := strings.TrimPrefix(providerPath, "/files/")
+	relative = strings.TrimPrefix(relative, "files/")
+	for _, segment := range strings.Split(relative, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return nil, fmt.Errorf("download_bytes_unavailable: invalid provider path")
+		}
+	}
+	clean := strings.TrimPrefix(path.Clean("/"+relative), "/")
+	if clean == "" || clean == "." || strings.HasPrefix(clean, "../") {
+		return nil, fmt.Errorf("download_bytes_unavailable: invalid provider path")
+	}
+	parts := strings.Split(clean, "/")
+	for index := range parts {
+		parts[index] = url.PathEscape(parts[index])
+	}
+	requestURL := fmt.Sprintf("%s/sessions/%s/files/%s", apiBase, url.PathEscape(c.sessionID), strings.Join(parts, "/"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Steel-Api-Key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("download_bytes_unavailable: steel HTTP %d", resp.StatusCode)
+	}
+	return resp.Body, nil
 }

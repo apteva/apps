@@ -189,8 +189,9 @@ func callComputerLLM(t *testing.T, frame []byte, prompt, schema string, out any)
 	}
 	model := strings.TrimSpace(os.Getenv("COMPUTER_LLM_TEST_MODEL"))
 	if model == "" {
-		model = "gpt-5.5"
+		model = "gpt-5.6-terra"
 	}
+	t.Logf("LLM regression model: %s", model)
 	args := []string{"exec", "--ephemeral", "--ignore-rules", "--skip-git-repo-check", "-s", "read-only", "-m", model}
 	if len(frame) > 0 {
 		imagePath := filepath.Join(tmp, "frame.jpg")

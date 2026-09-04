@@ -124,8 +124,9 @@ func askBrowserModel(t *testing.T, frame []byte, targets []computer.SetOfMarkTar
 	prompt := fmt.Sprintf("You are a cautious browser agent. Inspect the attached current frame and this current structured SoM: %s\nGoal: %s\nReturn only the required decision object. A label is valid only if it appears in the current SoM. loading=true means do not click it.", targetJSON, goal)
 	model := strings.TrimSpace(os.Getenv("COMPUTER_LLM_TEST_MODEL"))
 	if model == "" {
-		model = "gpt-5.5"
+		model = "gpt-5.6-terra"
 	}
+	t.Logf("LLM regression model: %s", model)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "codex", "exec", "--ephemeral", "--ignore-rules", "--skip-git-repo-check", "-s", "read-only", "-m", model, "--image", imagePath, "--output-schema", schemaPath, "--output-last-message", resultPath, prompt)

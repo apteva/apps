@@ -3,6 +3,7 @@ name: how-to-use-computer
 triggers:
   - browser_session
   - computer_use
+  - browser_download
   - computer_context_create
   - computer_context_list
   - computer_context_get
@@ -50,6 +51,31 @@ Never set `timeout=60` to bound a page load, click, wait, or task. Use the
 relevant `computer_use` action's `timeout_ms` for short operation waits.
 Even when the whole task is expected to take about one minute, omit `timeout`;
 estimated task duration is not authorization to shorten the browser lifetime.
+
+## Browser downloads are a three-step lifecycle
+
+A click only dispatches the page action. When it starts a download,
+`computer_use` may return compact `downloads_started` metadata with a `dl_*`
+id. That is not completion. Use the same browser session to wait and export:
+
+```json
+{"action":"wait","session_id":"br_...","download_id":"dl_..."}
+```
+
+Only after the browser reports `status="completed"`, retrieve the captured
+bytes:
+
+```json
+{"action":"get","session_id":"br_...","download_id":"dl_..."}
+```
+
+Core replaces that binary response with a compact `blobref://...` handle.
+Pass the handle to Storage, archive extraction, or document-processing tools.
+Do not refetch the source URL: authenticated, POST-generated, signed, and
+`blob:` downloads may only be reproducible from the browser's captured bytes.
+If a click did not surface an id, call `browser_download(action="list")`.
+Retrieve downloads before closing the browser session; Computer deletes local
+download bytes at session close and does not unzip or interpret them.
 
 ## SoM badge colors
 
