@@ -8,6 +8,9 @@ on:
     paths: ['mcp/social/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', 'package.json', 'bun.lock', '.github/workflows/social-checks.yml']
 permissions:
   contents: read
+concurrency:
+  group: social-checks-${{ github.sha }}
+  cancel-in-progress: true
 jobs:
   social:
     runs-on: ubuntu-latest

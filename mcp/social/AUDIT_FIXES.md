@@ -1,7 +1,7 @@
 # Social 0.16.2 audit fixes
 
 Base: `social/v0.16.2`, commit `ae7bb44436018dcaa3180cc8e07bbabf44603bde`.
-Branch: `fix/social-v0.16.2-audit`. This is a source patch, not a deployed release.
+Released as **Social 0.16.3**, with App SDK **v0.74.1**. Publication updates the source release and marketplace; running installations upgrade separately.
 
 ## Changes
 
@@ -49,3 +49,9 @@ With 50,000 retained metric rows, the latest-breakdown query averaged about **0.
 Tests use temporary databases and stub providers. No live post, message, account connection, deployment, or production data repair was performed. Actual provider permissions, end-to-end browser behavior, and production load still need deployment validation. Unknown native delivery outcomes intentionally require checking the remote service before creating a replacement.
 
 The broader audit suggestions for production observability, webhook adoption, automatic historical downsampling, and a larger module/view decomposition remain future improvements. This patch preserves historical metrics and implements bounded polling, pagination, cache expiry, and the measured query/bundle changes above.
+
+## Release validation
+
+The 0.16.3 release candidate was rebased onto current apps/main and revalidated with the topology-latest SDK tag v0.74.1. The release changes the embedded and external manifest versions together and republishes the rebuilt frontend artifacts.
+
+SDK v0.74.1 release rerun: all 196 Go tests passed (3.858 seconds), the full race suite passed (143.931 seconds), all 27 UI tests passed, and build/vet plus source/binary vulnerability scans passed. Both manifests declare 0.16.3.

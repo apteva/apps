@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/social
 go 1.26.6
 
 require (
-	github.com/apteva/app-sdk v0.73.0
+	github.com/apteva/app-sdk v0.74.1
 	modernc.org/sqlite v1.50.0
 )
 
