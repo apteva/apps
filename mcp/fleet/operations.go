@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -90,10 +91,22 @@ func (a *App) beginTenantOperation(tenantID, operation string) (func(), error) {
 	} else if lease != nil && operation != "update" {
 		return nil, fmt.Errorf("tenant already has a durable operation in progress: %s (%s)", lease.Operation, lease.Phase)
 	}
+	opID := newID()
+	tenant, _, getErr := a.store.get(tenantID)
+	if getErr != nil && getErr != ErrNotFound {
+		return nil, getErr
+	}
+	if tenant != nil {
+		snapshot, _ := json.Marshal(map[string]any{"source": tenant})
+		if _, err := a.store.db.Exec(`INSERT INTO fleet_active_operations(tenant_id,id,operation,snapshot) VALUES(?,?,?,?)`, tenantID, opID, operation, string(snapshot)); err != nil {
+			return nil, fmt.Errorf("tenant operation pending; inspect/recover before retrying: %w", err)
+		}
+	}
 	a.operations[tenantID] = operation
 	return func() {
 		a.opMu.Lock()
 		if a.operations[tenantID] == operation {
+			_, _ = a.store.db.Exec(`DELETE FROM fleet_active_operations WHERE tenant_id=? AND id=? AND phase!='recovery_required'`, tenantID, opID)
 			delete(a.operations, tenantID)
 		}
 		a.opMu.Unlock()
@@ -106,6 +119,11 @@ func (a *App) tenantOperation(tenantID string) string {
 	a.opMu.Unlock()
 	if active != "" {
 		return active
+	}
+	if op, err := a.store.activeOperation(tenantID); err != nil {
+		return "operation state unavailable"
+	} else if op != nil {
+		return op.Operation + " (" + op.Phase + ")"
 	}
 	lease, err := a.store.operationLease(tenantID)
 	if err != nil {

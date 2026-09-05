@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -38,7 +37,6 @@ import (
 // Multiple tenant_update calls for the same version race for cache
 // dir creation; rather than installing twice, hold a lock for the
 // whole resolve-and-install path.
-var versionInstallMu sync.Mutex
 
 // httpUpdateClient is separate from httpClient (the health poller's
 // short-timeout client) — npm metadata calls are typically fast but
@@ -276,8 +274,11 @@ func ensureVersionInstalled(ctx context.Context, version string) (binPath string
 		}
 		return "", err
 	}
-	versionInstallMu.Lock()
-	defer versionInstallMu.Unlock()
+	unlock, lockErr := lockResource(ctx, "local-version:"+version)
+	if lockErr != nil {
+		return "", lockErr
+	}
+	defer unlock()
 
 	dir := filepath.Join(versionsRoot(), version)
 	runtime := versionedRuntimePaths(dir)
@@ -352,6 +353,10 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer done()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
 	// kind=remote (tenant_connect to an external apteva-server) is
 	// out of scope — fleet doesn't supervise the binary. kind=local
 	// covers both true-local (instance_id=0) and hosted-on-VPS
@@ -410,7 +415,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		// must restore that verified version, not preserve the failed pin.
 		rollbackTarget = oldVersion
 	}
-	wasRunning := t.Status == StatusActive || t.Status == StatusSetupPending
+	wasRunning := hostedTenantExpectedRunning(t.Status)
 	restoreTarget := func() { _ = a.store.setTargetVersion(t.ID, rollbackTarget) }
 
 	port, _ := portFromBaseURL(t.BaseURL)

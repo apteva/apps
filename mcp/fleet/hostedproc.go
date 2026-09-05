@@ -187,12 +187,21 @@ VERSION=%s
 	SERVER=%s
 	CORE=%s
 	PACKAGE_JSON="$VERSION_DIR/node_modules/apteva/package.json"
-	mkdir -p "$VERSION_DIR"
+ FINAL_DIR="$VERSION_DIR"
+ mkdir -p "$(dirname "$VERSION_DIR")"
+ command -v flock >/dev/null 2>&1 || { echo "flock required for atomic runtime installation" >&2; exit 127; }
+ exec 9>"$VERSION_DIR.install.lock"
+ flock -w 240 9
 	if [ ! -x "$CLI" ] || [ ! -x "$SERVER" ] || [ ! -x "$CORE" ]; then
+  VERSION_DIR=$(mktemp -d "$FINAL_DIR.stage-XXXXXX")
+  CLI="$VERSION_DIR/node_modules/apteva/apteva"
+  SERVER="$VERSION_DIR/node_modules/apteva/apteva-server"
+  CORE="$VERSION_DIR/node_modules/apteva/apteva-core"
+  PACKAGE_JSON="$VERSION_DIR/node_modules/apteva/package.json"
   INSTALL_HOME="$VERSION_DIR/.npm-apteva-home"
   rm -rf -- "$INSTALL_HOME"
   mkdir -p "$INSTALL_HOME"
-  trap 'rm -rf -- "$INSTALL_HOME"' EXIT
+  trap 'rm -rf -- "$INSTALL_HOME"; if [ "$VERSION_DIR" != "$FINAL_DIR" ]; then rm -rf -- "$VERSION_DIR"; fi' EXIT
   env APTEVA_HOME="$INSTALL_HOME" npm install --prefix "$VERSION_DIR" --no-audit --no-fund --silent "apteva@$VERSION"
 fi
 	[ -f "$PACKAGE_JSON" ] || { echo "versioned package manifest missing: $PACKAGE_JSON" >&2; exit 65; }
@@ -217,6 +226,11 @@ fi
 	  actual=${actual#v}
 	  [ "$actual" = "$expected" ] || { echo "Requested Apteva $expected, but $label reports ${actual:-unknown}" >&2; exit 65; }
 done
+if [ "$VERSION_DIR" != "$FINAL_DIR" ]; then
+  rm -rf -- "$INSTALL_HOME"
+  if [ -e "$FINAL_DIR" ]; then mv "$FINAL_DIR" "$FINAL_DIR.invalid-$(date +%%s)-$$"; fi
+  mv "$VERSION_DIR" "$FINAL_DIR"
+fi
 printf 'FLEET_VERSION_READY %%s\n' "$expected"`, sh(version), sh(versionDir), sh(runtime.CLI), sh(runtime.Server), sh(runtime.Core))
 }
 
@@ -231,6 +245,11 @@ func (a *App) ensureHostedVersionInstalled(ctx *sdk.AppCtx, instanceID int64, ve
 	if err := a.ensureHostedRuntime(ctx, instanceID); err != nil {
 		return aptevaRuntimePaths{}, "", err
 	}
+	unlock, lockErr := lockResource(context.Background(), fmt.Sprintf("host-version:%d:%s", instanceID, version))
+	if lockErr != nil {
+		return aptevaRuntimePaths{}, "", lockErr
+	}
+	defer unlock()
 	versionDir := remoteFleetRoot + "/versions/" + version
 	runtime := versionedRuntimePaths(versionDir)
 	out, code, err := instanceRunCommand(ctx, instanceID, hostedVersionInstallScript(versionDir, version), 240)
@@ -301,11 +320,15 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 	logPath := dataDir + "/fleet-child.log"
 	pidPath := dataDir + "/fleet.pid"
 
-	// 1) Create the tenant data directory.
-	if _, code, err := instanceRunCommand(ctx, spec.InstanceID,
-		fmt.Sprintf(`mkdir -p %s`, sh(dataDir)),
-		30,
-	); err != nil || code != 0 {
+	// A fresh provisioning attempt must never adopt an existing directory.
+	mkdirCmd := fmt.Sprintf(`mkdir -p %s`, sh(dataDir))
+	if spec.FreshSetup {
+		mkdirCmd = fmt.Sprintf(`mkdir -p %s && { mkdir %s || exit 73; }`, sh(remoteFleetRoot), sh(dataDir))
+	}
+	if _, code, err := instanceRunCommand(ctx, spec.InstanceID, mkdirCmd, 30); err != nil || code != 0 {
+		if code == 73 {
+			return "", "", errHostedDataDirExists
+		}
 		return "", "", fmt.Errorf("mkdir remote dirs: %w (exit %d)", err, code)
 	}
 	// 2) Prepare and validate the exact package binaries. npm's .bin/apteva
@@ -319,6 +342,21 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 	// The management port always stays on loopback. Direct hosted ingress
 	// additionally binds the server-native HTTP/TLS listeners on 80/443.
 	envArgs := hostedProcessEnv(spec)
+	if tenant, _, lookupErr := a.store.getBySlug(spec.Slug); lookupErr == nil {
+		dnsEnv, envErr := a.tenantDNSEnv(tenant.ID, true)
+		if envErr != nil {
+			return "", "", envErr
+		}
+		base, envErr := a.reserveAppPortBlock(tenant.ID, spec.InstanceID, spec.Port)
+		if envErr != nil {
+			return "", "", envErr
+		}
+		dnsEnv = applyAppPortEnv(dnsEnv, base)
+		for _, kv := range dnsEnv {
+			envArgs += " " + sh(kv)
+		}
+	}
+
 	quarantineEnv := "APTEVA_CLONE_QUARANTINE=0"
 	if spec.Quarantine {
 		quarantineEnv = "APTEVA_CLONE_QUARANTINE=1"
@@ -678,7 +716,10 @@ func hostedPortListening(ctx *sdk.AppCtx, instanceID int64, port int) (bool, err
 // party binding that port between now and spawn, but good enough for
 // v0.6 (operator can pass an explicit port to dodge collisions).
 func (a *App) pickHostedPort(ctx *sdk.AppCtx, instanceID int64, override int) (int, error) {
-	rows, _ := a.store.list(map[string]string{"kind": KindLocal}) // includes hosted (kind=local) too
+	rows, listErr := a.store.list(map[string]string{"kind": KindLocal}) // includes hosted (kind=local) too
+	if listErr != nil {
+		return 0, listErr
+	}
 	used := map[int]bool{}
 	for _, t := range rows {
 		if t.InstanceID == instanceID {
@@ -690,6 +731,13 @@ func (a *App) pickHostedPort(ctx *sdk.AppCtx, instanceID int64, override int) (i
 	check := func(port int) (bool, error) {
 		if err := validateTenantPort(port); err != nil {
 			return false, err
+		}
+		var reservations int
+		if err := a.store.db.QueryRow(`SELECT (SELECT COUNT(*) FROM fleet_port_reservations WHERE instance_id=? AND port=?)+(SELECT COUNT(*) FROM fleet_app_port_blocks WHERE instance_id=? AND ? BETWEEN base AND base+999)`, instanceID, port, instanceID, port).Scan(&reservations); err != nil {
+			return false, err
+		}
+		if reservations > 0 {
+			return false, nil
 		}
 		if used[port] {
 			return false, nil
@@ -797,9 +845,11 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 	if err != nil {
 		return nil, err
 	}
-	if err := a.store.insert(t, apiKeyStub, nil); err != nil {
+	initializationDone, err := a.insertTenantForOperation(t, apiKeyStub, nil, "provision", false)
+	if err != nil {
 		return nil, err
 	}
+	defer initializationDone()
 	if pendingTemplate != nil {
 		pendingTemplate.TenantID = t.ID
 		if err := a.store.savePendingTemplate(*pendingTemplate); err != nil {
@@ -819,6 +869,10 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 		FreshSetup: true,
 	})
 	if spawnErr != nil {
+		if errors.Is(spawnErr, errHostedDataDirExists) {
+			_ = a.store.hardDelete(t.ID)
+			return nil, spawnErr
+		}
 		_ = a.store.setStatus(t.ID, StatusFailed, "user")
 		_ = a.store.recordEvent(t.ID, "spawn_failed", "user",
 			map[string]any{"error": spawnErr.Error()})
@@ -830,13 +884,17 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 	_ = a.store.recordEvent(t.ID, "spawned", "user",
 		map[string]any{"base_url": baseURL, "instance_id": instanceID, "port": port})
 
+	if err := a.persistSetupToken(t.ID, setupToken); err != nil {
+		a.requireRecovery(t.ID, err)
+		return nil, err
+	}
 	controlURL, err := a.hostedTunnelBaseURL(ctx, instanceID, port)
 	if err != nil {
 		return nil, fmt.Errorf("open hosted setup tunnel: %w", err)
 	}
 	// Setup credentials stay inside the SSH tunnel; baseURL is only
 	// retained as the tenant's operator-facing location.
-	autoSetup, err := a.autoSetupTenant(context.Background(), controlURL, setupToken, owner, "")
+	autoSetup, err := a.provisionTenant(context.Background(), t, controlURL, setupToken, owner)
 	if err != nil {
 		ctx.Logger().Warn("hosted: auto-setup failed, falling back to setup_pending",
 			"tenant", t.ID, "err", err)
@@ -895,3 +953,5 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 	out["a2a"] = a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_create")
 	return out, nil
 }
+
+var errHostedDataDirExists = errors.New("remote tenant directory already exists or cannot be reserved; existing data was preserved")

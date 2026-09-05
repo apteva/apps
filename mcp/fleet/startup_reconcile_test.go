@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -146,7 +145,7 @@ func seedHostedStartupTenant(t *testing.T, app *App, routeCount int) (*Tenant, [
 	return tenant, routes
 }
 
-func TestOnMountWaitsForCompleteHostedRouteReconciliation(t *testing.T) {
+func TestStartupWorkerWaitsForCompleteHostedRouteReconciliation(t *testing.T) {
 	platform := &startupReconcilePlatform{}
 	app, ctx := newTestApp(t, tk.WithPlatform(platform))
 	tenant, routes := seedHostedStartupTenant(t, app, 7)
@@ -163,9 +162,10 @@ func TestOnMountWaitsForCompleteHostedRouteReconciliation(t *testing.T) {
 
 	remounted := &App{startupRetryDelays: []time.Duration{0, 0, 0}}
 	mountDone := make(chan error, 1)
-	go func() {
-		mountDone <- remounted.OnMount(ctx)
-	}()
+	if err := remounted.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	go func() { mountDone <- remounted.reconcileOnBoot(ctx) }()
 
 	select {
 	case <-platform.allRoutesChanged:
@@ -223,7 +223,7 @@ func TestOnMountWaitsForCompleteHostedRouteReconciliation(t *testing.T) {
 	}
 }
 
-func TestOnMountFailsWhenHostedRoutesCannotBeRewritten(t *testing.T) {
+func TestOnMountRemainsAvailableWhenHostedRoutesCannotBeRewritten(t *testing.T) {
 	platform := &startupReconcilePlatform{}
 	app, ctx := newTestApp(t, tk.WithPlatform(platform))
 	_, routes := seedHostedStartupTenant(t, app, 1)
@@ -235,7 +235,7 @@ func TestOnMountFailsWhenHostedRoutesCannotBeRewritten(t *testing.T) {
 
 	remounted := &App{startupRetryDelays: []time.Duration{0}}
 	err := remounted.OnMount(ctx)
-	if err == nil || !strings.Contains(err.Error(), "replace hosted ingress routes") {
+	if err != nil {
 		t.Fatalf("OnMount error = %v", err)
 	}
 }

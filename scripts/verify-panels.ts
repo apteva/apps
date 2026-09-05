@@ -135,6 +135,8 @@ async function main() {
   let checked = 0;
   for (const a of apps) {
     if (!a.isDirectory()) continue;
+    const flag=Bun.argv.indexOf("--app");
+    if(flag>=0 && a.name!==Bun.argv[flag+1])continue;
     const uiDir = join(MCP_DIR, a.name, "ui");
     if (!existsSync(uiDir)) continue;
     const entries = await readdir(uiDir);

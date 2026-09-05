@@ -2,27 +2,31 @@
 
 Control plane for Apteva tenants. Each managed tenant is a separate `apteva` process with its own data directory and port, either on the parent host or on an Instances-managed host. Cross-app features are optional.
 
-## Status — v0.2 (admin-driven bootstrap)
+## Current behavior
 
-v0.2 changes the auth model: fleet no longer tries to auto-register a user inside the spawned tenant. Instead it mints a setup token, injects it via `APTEVA_SETUP_TOKEN`, and surfaces token + URL back to the operator. The operator finishes admin registration in the browser, then hands fleet the resulting api_key. Three reasons for the change:
+This worktree is based on **fleet/v0.10.5**. The audit patch is not yet a published release; see [AUDIT_FIXES.md](AUDIT_FIXES.md) for the changes, validation and rollout requirements.
 
-- The old v0.1 path read `api_key` from the freshly-created `apteva.json`, but the apteva CLI's `--no-browser` mode deliberately doesn't bootstrap a user — so the key was always empty and `tenant_create` always errored.
-- Fleet never has to handle a password. The operator picks credentials directly on the tenant's own dashboard.
-- The tenant's setup mode is the existing apteva-server mechanism — no CLI or server changes needed.
+- `tenant_create` provisions a local or hosted process, registers its administrator and returns credentials. Generated credentials and setup progress are encrypted and persisted before registration so **Resume setup** can recover a partial failure.
+- Setup readiness, clone quarantine, health failure streaks and lifecycle operations are durable state, independent of process status and audit-log retention. Interrupted operations block activation until recovery fences their recorded runtimes.
+- Local and hosted tenants receive a minimal environment, tenant-scoped delegated DNS credentials and disjoint application port ranges. Existing listeners are not accepted as managed tenants without identity validation.
+- Health polling uses eight workers. Startup reconciliation runs after mounting so an unavailable VPS cannot hide the control plane.
+- Snapshots stream by default. Local snapshot staging uses filesystem cloning where available and consistent SQLite copies; compression happens after the tenant restarts. Restores retain the prior directory and restore matching credentials/runtime metadata.
+- The panel provides paginated search, operation recovery, template project selection and local storage cleanup. Child logs rotate on the one-minute maintenance cadence, retaining five 10 MiB tails. Copy/truncate preserves descriptors held by children that outlive Fleet; a small concurrent-write window and temporary growth between ticks remain possible.
+- `tenant_connect`, tenant control, support login, DNS/ingress, templates and optional A2A remain available. Remote monitoring can be suspended and resumed separately from managed process lifecycle.
 
-What works today:
+## Verification
 
-- `tenant_create` — spawns a fresh apteva tenant in setup-pending mode. Allocates port, makes data dir, runs the apteva CLI with `--data-dir <dir> --port <N> --no-browser` + `APTEVA_SETUP_TOKEN`/`APTEVA_REGISTRATION=setup`, waits for `/api/health`. Returns `{ tenant_id, base_url, status: setup_pending, setup_url, setup_token, next_steps }`.
-- `tenant_attach_key` — operator pastes the api_key generated on the tenant dashboard. Fleet validates against `/api/auth/status`, encrypts and stores it, clears the setup token, flips status to `active`.
-- `tenant_connect` — registers a pre-existing apteva-server (local or remote) without spawning anything. Skips setup entirely.
-- `tenant_list` / `tenant_get` — registry queries, filterable by status/owner/version/kind. `tenant_get` returns the decrypted setup token + URL while status is `setup_pending` so refreshes don't lose the info.
-- `tenant_start` / `tenant_stop` — process lifecycle for local tenants. `tenant_start` preserves `setup_pending` status if the tenant was mid-bootstrap.
-- `tenant_delete` — stops the process and removes the registry row. For local tenants, wipes the data dir only when `confirm=true`.
-- `tenant_support_login` — POSTs to tenant's `/api/admin/support_session`, returns a short-lived URL. **Server route not yet implemented** — falls through with a friendly 404 message.
-- `tenant_run_remote` — proxies any tenant-side MCP tool call, JSON-RPC envelope unwrapped. Refuses if tenant is still `setup_pending`.
-- **health poller** — every 60s probes active tenants; flips to `disconnected` after 5 consecutive failures. Skips tenants in `setup_pending` / `starting` / `stopped` / `suspended` / `failed`.
-- **boot reconciler** — on parent restart, probes each local tenant's port and reattaches by URL (children survive fleet restart because they're spawned in their own process group).
-- **UI panel** — full tenant list + detail view + setup-pending banner with copy-token / open-URL / attach-key form. Lives at `ui/FleetPanel.tsx`, slot `project.page`.
+```sh
+env GOWORK=off go test -race -tags=integration ./...
+env GOWORK=off go vet ./...
+cd ui
+bun install --frozen-lockfile
+bun run typecheck
+bun test fleet-state.test.ts
+bun run test:browser
+```
+
+Browser tests use installed Chrome on macOS and Playwright Chromium elsewhere (`bunx playwright install chromium`). Tests mock provider APIs; they do not change live tenants or DNS. Linux tests additionally execute hosted installation scripts and concurrency checks. Rebuild the shipped panel from the apps root with `bun run scripts/build-panels.ts --app fleet`.
 
 ## Optional A2A pairing (v0.9)
 
@@ -46,9 +50,7 @@ The allowlists are generic A2A agent selectors, not Fleet-specific exposure tier
 
 Both default to `["*"]`. Parent agents still have to be deliberately attached to the parent A2A install. Fleet does not modify instances registered with `tenant_connect`, because it does not own their lifecycle.
 
-Fleet v0.9.1 also strips the parent Fleet sidecar's app identity variables
-before spawning a tenant. This prevents tenant-owned apps from accidentally
-using the parent's callback credentials.
+Tenant environments use an allowlist and a dedicated DNS capability endpoint; they do not receive Fleet's install token or master key.
 
 ## Project template provisioning (v0.10.0)
 

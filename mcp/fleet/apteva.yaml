@@ -91,6 +91,8 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - prefix: /dns/
+      no_auth: true
     - prefix: /transfers/
       no_auth: true
     - prefix: /provider-grants/

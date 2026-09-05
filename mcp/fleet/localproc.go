@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -14,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,9 +25,11 @@ import (
 
 // tenantProc tracks the live OS process of a local tenant.
 type tenantProc struct {
-	cmd     *exec.Cmd
-	port    int
-	started time.Time
+	cmd      *exec.Cmd
+	port     int
+	started  time.Time
+	done     chan struct{}
+	waitOnce sync.Once
 }
 
 // spawnTenant boots a new local apteva child:
@@ -70,6 +75,18 @@ func (a *App) spawnTenantWithMode(ctx context.Context, tenantID, slug, configDir
 	}
 	expectedVersion := ""
 	spawnEnv := tenantSpawnEnvForMode(configDir, port, tenantID, quarantine)
+	dnsEnv, err := a.tenantDNSEnv(tenantID, false)
+	if err != nil {
+		return "", nil, err
+	}
+	spawnEnv = append(spawnEnv, dnsEnv...)
+	if tenantID != "" {
+		base, err := a.reserveAppPortBlock(tenantID, 0, port)
+		if err != nil {
+			return "", nil, err
+		}
+		spawnEnv = applyAppPortEnv(spawnEnv, base)
+	}
 	if runtime, ok := versionedRuntimeFromCLI(bin); ok {
 		expectedVersion, err = verifyVersionedRuntime(ctx, runtime, "")
 		if err != nil {
@@ -85,7 +102,10 @@ func (a *App) spawnTenantWithMode(ctx context.Context, tenantID, slug, configDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Wire stdout/stderr into a logs file per tenant.
 	logsPath := filepath.Join(configDir, "fleet-child.log")
-	logFile, err := os.OpenFile(logsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err := rotateTenantLog(logsPath); err != nil {
+		return "", nil, err
+	}
+	logFile, err := os.OpenFile(logsPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return "", nil, fmt.Errorf("open logs: %w", err)
 	}
@@ -96,11 +116,18 @@ func (a *App) spawnTenantWithMode(ctx context.Context, tenantID, slug, configDir
 		_ = logFile.Close()
 		return "", nil, fmt.Errorf("start apteva: %w", err)
 	}
-	proc = &tenantProc{cmd: cmd, port: port, started: time.Now()}
+	proc = &tenantProc{cmd: cmd, port: port, started: time.Now(), done: make(chan struct{})}
+	a.procMu.Lock()
+	if a.procs == nil {
+		a.procs = map[string]*tenantProc{}
+	}
+	a.procs[slug] = proc
+	a.procMu.Unlock()
 
 	// Reap on exit so a crashed child doesn't become a zombie.
 	go func() {
 		_ = cmd.Wait()
+		close(proc.done)
 		_ = logFile.Close()
 		a.procMu.Lock()
 		// Only forget the proc if it's still the same one (avoid racing
@@ -148,7 +175,12 @@ func applyVersionedRuntimeEnv(env []string, runtime aptevaRuntimePaths) []string
 
 func tenantSpawnEnv(configDir string, port int, tenantID string) []string {
 	deployStart, deployEnd, codeStart, codeEnd := tenantAppPortRanges(port)
-	env := append([]string{}, os.Environ()...)
+	env := []string{}
+	for _, key := range []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"} {
+		if value, ok := os.LookupEnv(key); ok {
+			env = append(env, key+"="+value)
+		}
+	}
 	// A Fleet sidecar is itself an app process. Never pass its install identity
 	// into the independent tenant server: tenant-owned sidecars must receive
 	// credentials minted by that tenant, not reuse the parent's callback token
@@ -172,15 +204,6 @@ func tenantSpawnEnv(configDir string, port int, tenantID string) []string {
 	env = setEnv(env, "DEPLOY_RELEASE_PORT_RANGE_END", strconv.Itoa(deployEnd))
 	env = setEnv(env, "CODE_DEV_PORT_RANGE_START", strconv.Itoa(codeStart))
 	env = setEnv(env, "CODE_DEV_PORT_RANGE_END", strconv.Itoa(codeEnd))
-	if fleetPort := strings.TrimSpace(os.Getenv("APTEVA_APP_PORT")); fleetPort != "" {
-		env = setEnv(env, "APTEVA_DELEGATED_DNS_FLEET_URL", "http://127.0.0.1:"+fleetPort)
-	}
-	if token := strings.TrimSpace(os.Getenv("APTEVA_APP_TOKEN")); token != "" {
-		env = setEnv(env, "APTEVA_DELEGATED_DNS_TOKEN", token)
-	}
-	if projectID := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); projectID != "" {
-		env = setEnv(env, "APTEVA_DELEGATED_DNS_PROJECT_ID", projectID)
-	}
 	if tenantID = strings.TrimSpace(tenantID); tenantID != "" {
 		env = setEnv(env, "APTEVA_DELEGATED_DNS_TENANT_ID", tenantID)
 	}
@@ -256,19 +279,43 @@ func stopProcess(p *tenantProc, grace time.Duration) error {
 	if p == nil || p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
-	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		// Process already gone — fine.
+	p.waitOnce.Do(func() {
+		if p.done == nil {
+			p.done = make(chan struct{})
+			go func() { _ = p.cmd.Wait(); close(p.done) }()
+		}
+	})
+	pid := p.cmd.Process.Pid
+	ownedPIDs := []int{pid}
+	if table, err := readProcTable(); err == nil {
+		ownedPIDs = procTreePIDs(pid, table)
 	}
-	done := make(chan error, 1)
-	go func() { done <- p.cmd.Wait() }()
+	signal := func(sig syscall.Signal) {
+		if pg, err := syscall.Getpgid(pid); err == nil && pg == pid {
+			_ = syscall.Kill(-pid, sig)
+		} else {
+			_ = p.cmd.Process.Signal(sig)
+		}
+	}
+	signal(syscall.SIGTERM)
 	select {
-	case <-done:
-		return nil
+	case <-p.done:
 	case <-time.After(grace):
-		_ = p.cmd.Process.Kill()
-		<-done
-		return nil
+		signal(syscall.SIGKILL)
+		select {
+		case <-p.done:
+		case <-time.After(5 * time.Second):
+			return errors.New("tenant launcher did not exit")
+		}
 	}
+	if !waitForOwnedProcesses(ownedPIDs, p.port, grace) {
+		signal(syscall.SIGKILL)
+		signalPIDs(ownedPIDs, syscall.SIGKILL)
+		if !waitForOwnedProcesses(ownedPIDs, p.port, 5*time.Second) {
+			return errors.New("tenant workers remain after launcher exit")
+		}
+	}
+	return nil
 }
 
 // stopTenantBy makes "stop this tenant's process" work even when
@@ -301,11 +348,8 @@ func (a *App) stopTenantBy(slug, configDir string, port int, grace time.Duration
 	}
 	a.procMu.Lock()
 	p := a.procs[slug]
-	if p != nil {
-		// Clear the handle eagerly; we own the kill now.
-		delete(a.procs, slug)
-	}
 	a.procMu.Unlock()
+	// Keep the known process handle until completion has been verified.
 
 	if stopped, err := stopTenantScopes(slug, port, grace); err != nil {
 		return err
@@ -322,12 +366,28 @@ func (a *App) stopTenantBy(slug, configDir string, port int, grace time.Duration
 		}
 	}
 
+	// Find owned workers even after the listener or original launcher exited.
+	table, tableErr := readProcTable()
+	if tableErr != nil {
+		return fmt.Errorf("cannot verify tenant process completion: %w", tableErr)
+	}
+	for pid, info := range table {
+		if processHasExactTenantArg(info, marker) {
+			if _, err := stopTenantProcessTree(pid, marker, port, grace); err != nil {
+				return err
+			}
+		}
+	}
+
 	if port <= 0 {
 		return nil
 	}
-	pid, _ := findPidOnPort(port)
+	pid, lookupErr := findPidOnPort(port)
 	if pid <= 0 {
-		return nil // nothing to stop
+		if portInUse(port) {
+			return fmt.Errorf("cannot establish ownership of listener on port %d: %v", port, lookupErr)
+		}
+		return nil
 	}
 	if stopped, err := stopTenantProcessTree(pid, marker, port, grace); err != nil {
 		return err
@@ -347,8 +407,13 @@ func tenantProcessMarker(slug, configDir string) string {
 	return string(os.PathSeparator) + ".apteva-fleet" + string(os.PathSeparator) + sanitizeUnit(slug)
 }
 
+func tenantScopeBase(slug string) string {
+	digest := sha256.Sum256([]byte(slug))
+	return "fleet-tenant-" + hex.EncodeToString(digest[:16])
+}
+
 func tenantScopePattern(slug string) string {
-	return "fleet-tenant-" + sanitizeUnit(slug) + "*.scope"
+	return tenantScopeBase(slug) + "*.scope"
 }
 
 func stopTenantScopes(slug string, port int, grace time.Duration) (bool, error) {
@@ -365,12 +430,12 @@ func stopTenantScopes(slug string, port int, grace time.Duration) (bool, error) 
 	}
 	args := append([]string{"kill", "--signal=TERM"}, units...)
 	_ = exec.Command(systemctl, args...).Run()
-	if waitForPortFree(port, grace) {
+	if waitForScopes(systemctl, units, port, grace) {
 		return true, nil
 	}
 	args = append([]string{"kill", "--signal=KILL"}, units...)
 	_ = exec.Command(systemctl, args...).Run()
-	if waitForPortFree(port, 5*time.Second) {
+	if waitForScopes(systemctl, units, port, 5*time.Second) {
 		return true, nil
 	}
 	return true, fmt.Errorf("tenant scope(s) %s still listening on :%d after SIGKILL", strings.Join(units, ","), port)
@@ -388,7 +453,7 @@ func listTenantScopeUnits(systemctl, slug string) ([]string, error) {
 			continue
 		}
 		unit := fields[0]
-		base := "fleet-tenant-" + sanitizeUnit(slug)
+		base := tenantScopeBase(slug)
 		if unit == base+".scope" || (strings.HasPrefix(unit, base+"-") && strings.HasSuffix(unit, ".scope")) {
 			units = append(units, unit)
 		}
@@ -417,11 +482,11 @@ func stopTenantProcessTree(seedPID int, marker string, port int, grace time.Dura
 	}
 	pids := procTreePIDs(root, procs)
 	signalPIDs(pids, syscall.SIGTERM)
-	if waitForPortFree(port, grace) {
+	if waitForOwnedProcesses(pids, port, grace) {
 		return true, nil
 	}
 	signalPIDs(pids, syscall.SIGKILL)
-	if waitForPortFree(port, 5*time.Second) {
+	if waitForOwnedProcesses(pids, port, 5*time.Second) {
 		return true, nil
 	}
 	return true, fmt.Errorf("tenant process tree rooted at pid %d still listening on :%d after SIGKILL", root, port)
@@ -637,38 +702,54 @@ func (a *App) reconcileOnBoot(app *sdk.AppCtx) error {
 	ctx := context.Background()
 	var reconcileErrs []error
 	for _, t := range tenants {
-		if a.tenantOperation(t.ID) != "" {
-			continue
-		}
-		port, err := portFromBaseURL(t.BaseURL)
-		if err != nil || port == 0 {
-			continue
-		}
-		if t.IsHosted() {
-			if reconcileErr := a.reconcileHostedOnBoot(ctx, app, t, port); reconcileErr != nil {
-				_ = a.store.recordEvent(t.ID, "hosted_reconcile_failed", "worker:reconcile",
-					map[string]any{"error": reconcileErr.Error(), "instance_id": t.InstanceID})
-				reconcileErrs = append(reconcileErrs, fmt.Errorf("tenant %s: %w", t.ID, reconcileErr))
-			}
-			continue
-		}
-		alive := portInUse(port)
-		switch {
-		case alive:
-			if t.Status == StatusStopped {
-				_ = a.store.setStatus(t.ID, StatusActive, "worker:reconcile")
-			}
-			_ = a.store.resetRespawn(t.ID)
-		case !alive && (t.Status == StatusActive || t.Status == StatusStarting || t.Status == StatusSetupPending):
-			a.tryRespawn(ctx, t)
+		if err := a.reconcileBootTenant(ctx, app, t.ID); err != nil {
+			reconcileErrs = append(reconcileErrs, fmt.Errorf("tenant %s: %w", t.ID, err))
+			_ = a.store.recordEvent(t.ID, "startup_reconcile_failed", "worker:reconcile", map[string]any{"error": err.Error()})
 		}
 	}
+
 	return errors.Join(reconcileErrs...)
 }
 
 // portInUse reports whether something is bound to localhost:<port>. We
 // try to bind and free immediately — if the bind fails with EADDRINUSE
 // the port is in use.
+func (a *App) reconcileBootTenant(ctx context.Context, app *sdk.AppCtx, id string) error {
+	done, err := a.beginTenantOperation(id, "startup reconciliation")
+	if err != nil {
+		return nil
+	}
+	defer done()
+	t, enc, err := a.store.get(id)
+	if err != nil {
+		return err
+	}
+	if !hostedTenantExpectedRunning(t.Status) {
+		return nil
+	}
+	port := portFromTenant(t)
+	if port == 0 {
+		return nil
+	}
+	if t.IsHosted() {
+		return a.reconcileHostedOnBoot(ctx, app, t, port)
+	}
+	if !portInUse(port) {
+		a.tryRespawnLocked(ctx, t)
+		return nil
+	}
+	if a.setupComplete(t.ID) {
+		key, err := a.keys.open(enc)
+		if err != nil {
+			return err
+		}
+		if err = verifyAPIKey(ctx, t.BaseURL, string(key)); err != nil {
+			return fmt.Errorf("running listener identity is unverified: %w", err)
+		}
+	}
+	return a.store.resetRespawn(id)
+}
+
 func portInUse(port int) bool {
 	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
@@ -728,6 +809,16 @@ func waitForReady(ctx context.Context, port int, timeout time.Duration) error {
 // in practice often skips the user's npm bin dir. Adding well-known
 // fallbacks lets the install work out of the box on a default setup.
 func resolveAptevaBin(explicit string) (string, error) {
+	if explicit != "" {
+		info, err := os.Stat(explicit)
+		if err != nil {
+			return "", fmt.Errorf("requested runtime unavailable: %w", err)
+		}
+		if info.IsDir() || info.Mode()&0111 == 0 {
+			return "", fmt.Errorf("requested runtime is not executable: %s", explicit)
+		}
+		return explicit, nil
+	}
 	candidates := []string{explicit, os.Getenv("FLEET_APTEVA_BIN")}
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates, filepath.Join(home, ".apteva", "bin", "apteva"))
@@ -818,7 +909,7 @@ func buildSpawnCmd(slug, bin string, args []string) *exec.Cmd {
 	// the new spawn tried to register. --collect cleans up stopped
 	// scopes, but the cleanup is asynchronous; a unique name dodges
 	// the race entirely.
-	unit := fmt.Sprintf("fleet-tenant-%s-%d", sanitizeUnit(slug), time.Now().UnixNano())
+	unit := fmt.Sprintf("%s-%d", tenantScopeBase(slug), time.Now().UnixNano())
 	full := append([]string{
 		"--quiet", "--collect", "--scope", "--unit=" + unit, "--", bin,
 	}, args...)
@@ -853,7 +944,19 @@ const (
 )
 
 func (a *App) tryRespawn(ctx context.Context, t *Tenant) {
-	if t.Kind != KindLocal || t.IsHosted() || a.tenantOperation(t.ID) != "" {
+	done, err := a.beginTenantOperation(t.ID, "auto respawn")
+	if err != nil {
+		return
+	}
+	defer done()
+	t, _, err = a.store.get(t.ID)
+	if err != nil || !hostedTenantExpectedRunning(t.Status) {
+		return
+	}
+	a.tryRespawnLocked(ctx, t)
+}
+func (a *App) tryRespawnLocked(ctx context.Context, t *Tenant) {
+	if t.Kind != KindLocal || t.IsHosted() {
 		return
 	}
 	// Respect a small grace so we don't hammer a tenant that's mid-boot.
@@ -902,6 +1005,13 @@ func (a *App) tryRespawnHosted(ctx context.Context, app *sdk.AppCtx, t *Tenant) 
 		return
 	}
 	defer done()
+	t, _, err = a.store.get(t.ID)
+	if err != nil || !hostedTenantExpectedRunning(t.Status) {
+		return
+	}
+	a.tryRespawnHostedLocked(ctx, app, t)
+}
+func (a *App) tryRespawnHostedLocked(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
 	if t.LastRespawnAt != nil && time.Since(*t.LastRespawnAt) < respawnGraceTime {
 		return
 	}

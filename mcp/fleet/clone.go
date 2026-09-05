@@ -28,6 +28,10 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer done()
+	source, apiKeyEnc, err = a.store.get(source.ID)
+	if err != nil {
+		return nil, err
+	}
 	if source.Kind != KindLocal {
 		return nil, fmt.Errorf("tenant %s is kind=%s; clone is only supported for Fleet-managed tenants", sourceID, source.Kind)
 	}
@@ -113,18 +117,29 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		Status:         StatusStopped,
 		InstanceID:     targetID,
 	}
-	if err := a.store.insert(clone, apiKeyEnc, setupTokenEnc); err != nil {
+	destinationDone, err := a.insertTenantForOperation(clone, apiKeyEnc, setupTokenEnc, "clone destination", true)
+	if err != nil {
 		return nil, err
 	}
+	defer destinationDone()
 	cleanup := true
+	targetOwned := false
 	targetStarted := false
 	defer func() {
 		if cleanup {
 			if targetStarted {
-				_ = a.stopTenantOnHost(ctx, clone, port)
+				if stopErr := a.stopTenantOnHost(ctx, clone, port); stopErr != nil {
+					a.requireRecovery(clone.ID, stopErr)
+					return
+				}
+			}
+			if targetOwned {
+				if err := a.removeTenantData(ctx, targetHost, slug, targetDir); err != nil {
+					a.requireRecovery(clone.ID, err)
+					return
+				}
 			}
 			_ = a.store.hardDelete(clone.ID)
-			_ = a.removeTenantData(ctx, targetHost, slug, targetDir)
 		}
 	}()
 	_ = a.store.recordEvent(clone.ID, "clone_transfer_started", "user", map[string]any{
@@ -146,8 +161,13 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		})
 	}
 	if err := a.transferTenantDataWithProgress(ctx, sourceHost, targetHost, sourceDir, targetDir, slug, true, progress); err != nil {
+		var published *publishedTransferError
+		if errors.As(err, &published) {
+			targetOwned = true
+		}
 		return nil, fmt.Errorf("transfer clone: %w", err)
 	}
+	targetOwned = true
 	_ = a.store.recordEvent(clone.ID, "clone_transfer_completed", "system", map[string]any{
 		"resumable": sourceHost.InstanceID > 0 && targetHost.InstanceID > 0,
 	})
@@ -182,6 +202,7 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}, nil
 	}
 	_ = a.store.setStatus(clone.ID, StatusStarting, "user")
+	targetStarted = true // Starting can fail after a process was launched.
 	baseURL, _, err := a.startTenantOnHostMode(ctx, targetHost, clone, targetDir, cloneVersion, port, source.Status, true)
 	if err != nil {
 		_ = a.store.setStatus(clone.ID, StatusFailed, "user")
