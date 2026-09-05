@@ -89,7 +89,7 @@ Raw-event retention is disabled by default. When enabled, expiry archives eligib
 
 PII classifications remain annotations rather than automatic business-field redaction. URL scrubbing is enforced, but arbitrary event properties are not silently rewritten. Public collection cannot establish authenticated provenance from browser-supplied data.
 
-The browser suite uses actual components, React and local app routes with synthetic authorized project fixtures and representative CSS. It does not validate every host dashboard layout, production dataset, browser engine or third-party integration. CI is added but has not run on the remote GitHub service in this task.
+The browser suite uses actual components, React and local app routes with synthetic authorized project fixtures and representative CSS. It does not validate every host dashboard layout, production dataset, browser engine or third-party integration. Release validation runs on Ubuntu in [the Analytics GitHub workflow](https://github.com/apteva/apps/actions/runs/33966204682).
 
 ## Release dependency check
 
