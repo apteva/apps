@@ -1,4 +1,4 @@
-# Tables 0.1.15 implementation and validation
+# Tables 0.1.16 implementation and validation
 
 Implemented from `tables/v0.1.14` (`c04ba353`) in `codex/tables-hardening`.
 Release preparation uses isolated worktrees; no production database, running
@@ -12,14 +12,14 @@ deployment or original checkout was changed.
 - SDK: `/Users/marcoschwartz/Documents/code/app-sdk-tables-hardening`,
   branch `codex/tables-lossless-mcp`. Opt-in exact numeric decoding, leaving other apps' float64 behavior unchanged.
 
-App SDK **v0.74.0** is published and pinned in Tables' `go.mod`/`go.sum`.
+App SDK **v0.74.1** is published and pinned in Tables' `go.mod`/`go.sum`.
 Dashboard **v0.34.2** includes the companion navigation and reconnect fixes.
 Release validation uses the published SDK directly with `GOWORK=off`, without
 a local module replacement. Follow the database upgrade notes in
 [CHANGELOG.md](CHANGELOG.md). The additional app-call permission and optional
 Storage binding are handled by the platform when upgrading an installation.
 
-## Validation
+## Original hardening validation
 
 - Tables: **105 top-level Go tests passed**, including 41 added backend regression
   tests; **77.0% statement coverage**. Existing tests remain present.
@@ -30,7 +30,7 @@ Storage binding are handled by the platform when upgrading an installation.
 - SDK: **139 top-level tests passed** across its packages, including 2 new numeric
   decoding tests; race suite and `go vet` passed.
 - Tables race suite passed with the companion SDK; `go vet` passed. The published
-  v0.74.0 pinned-SDK suite also passed. All four Tables bundles and source maps rebuilt.
+  v0.74.1 pinned-SDK suite also passed. All four Tables bundles and source maps rebuilt.
 - Real sidecar smoke test passed over localhost HTTP/MCP: exact large JSON inputs
   and defaults, cursor pages, projected optimistic updates, graceful restart,
   legacy timestamp/schema migration and the first write after upgrade.
@@ -121,3 +121,18 @@ events are best-effort invalidations, not durable workflow delivery; an outbox
 would require a workflow delivery contract and consumer deduplication. Project-wide
 disk quotas remain a platform capacity policy. Migration behavior was tested on
 historical-schema fixtures and a restarted local sidecar, not production data.
+
+## 0.1.16 dependency follow-up
+
+SDK v0.74.1 (`4e35902`) directly descends from the Tables companion SDK v0.74.0
+(`ba8c188`): both exact MCP decoding and the new signed-route authentication
+change are retained. Apps main also retains the Fleet v0.10.6 commits; the Tables
+release did not modify Fleet files. This patch advances only the SDK dependency,
+version metadata, documentation and an HTTP smoke regression for unauthenticated
+requests with a `sig` query parameter. Existing release tags are unchanged.
+
+For 0.1.16, reran the complete Tables Go suite, race suite, vet and release build
+against the published v0.74.1 module, plus the published SDK's package tests.
+The real HTTP/MCP smoke now verifies missing authentication is rejected both
+with and without `sig`, while valid authenticated requests still succeed; its
+existing exact-number, cursor, optimistic update and migration checks remain.

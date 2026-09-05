@@ -122,7 +122,7 @@ The build emits all four tracked browser bundles and source maps. React and
 
 ### Exact MCP numbers
 
-Tables pins App SDK v0.74.0 and opts into its `PreserveJSONNumbers()` capability.
+Tables pins App SDK v0.74.1 and opts into its `PreserveJSONNumbers()` capability.
 Large numeric input literals reach tool handlers without being rounded by the
 MCP decoder. Normal release builds and HTTP/MCP smoke tests use this published
 SDK dependency directly, with no local module replacement.

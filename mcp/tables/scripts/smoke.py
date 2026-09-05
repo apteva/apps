@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+import urllib.error
 import uuid
 
 binary = str(Path(sys.argv[1]).resolve())
@@ -58,6 +59,13 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         return json.loads(reply["result"]["content"][0]["text"])
     try:
         start()
+        for path in ("/tables", "/tables?sig=untrusted"):
+            try:
+                with urllib.request.urlopen(base + path, timeout=5) as response:
+                    raise AssertionError(f"Unauthenticated request accepted: {path}: {response.status}")
+            except urllib.error.HTTPError as error:
+                assert error.code == 401, (path, error.code)
+        assert "tables" in request("GET", "/tables?sig=untrusted")
         created = mcp("tables_create", {"name":"records", "columns":[
             {"name":"revision","type":"text"}, {"name":"at","type":"datetime"},
             {"name":"payload","type":"json","default":{"id":9007199254740993}}]})
@@ -87,7 +95,7 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         assert upgraded["at"] == "2026-01-01T00:00:00.000000000Z", upgraded
         assert upgraded["revision"] == "patched"
         assert upgraded["payload"]["id"] == 9007199254740993
-        print("PASS: real HTTP/MCP, exact input/default numbers, cursors, projected optimistic update, restart migration and first write")
+        print("PASS: real HTTP/MCP authentication (including sig query), exact input/default numbers, cursors, projected optimistic update, restart migration and first write")
     finally:
         stop()
         log.close()

@@ -1,3 +1,10 @@
+# 0.1.16 — SDK authentication update
+
+Pins App SDK v0.74.1, retaining v0.74.0's exact MCP numeric decoding and adding
+the concurrently released signed-route authentication fix. Query parameters such
+as `?sig=...` no longer bypass authentication on protected HTTP routes.
+Tables v0.1.15 remains an immutable release. No database or UI changes.
+
 # 0.1.15 — Tables hardening
 
 Based on `tables/v0.1.14` (`c04ba353`). Pins published App SDK v0.74.0 for
