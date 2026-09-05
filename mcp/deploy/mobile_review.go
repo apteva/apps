@@ -381,7 +381,7 @@ func (a *App) toolReleaseSync(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if releaseID <= 0 {
 		return nil, errors.New("release_id required")
 	}
-	rel, err := dbGetRelease(ctx.AppDB(), releaseID)
+	rel, err := releaseFromArgs(ctx, args, releaseID)
 	if err != nil || rel == nil {
 		return nil, fmt.Errorf("release %d not found", releaseID)
 	}

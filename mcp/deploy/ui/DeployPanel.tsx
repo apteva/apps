@@ -4,6 +4,8 @@
 // panel's interaction model so users moving between them feel
 // consistent.
 
+import { RequestGate } from "./requestGate";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 
 interface AppEventEnvelope<T = unknown> {
@@ -189,6 +191,8 @@ interface MobileReviewOutcome {
 }
 
 interface DeploymentDetail {
+  routing?: {state: "pending" | "degraded" | "applied"; error: string} | null;
+ environments?: {id: number; name: string}[];
   deployment: Deployment;
   builds: Build[];
   releases: Release[];
@@ -622,6 +626,11 @@ function artifactDownloadLabel(deployment: Deployment, build: Build): string {
 export default function DeployPanel({ projectId, installId }: NativePanelProps) {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
+  const selectedRef = useRef<number | null>(null);
+  const [environment, setEnvironment] = useState("production");
+  const detailGate = useRef(new RequestGate());
+  const scope = `${projectId}:${installId}:${environment}`;
+  const scopeRef = useRef(scope); scopeRef.current = scope;
   const [detail, setDetail] = useState<DeploymentDetail | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -658,15 +667,17 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
       new URLSearchParams({
         project_id: projectId,
         install_id: String(installId),
+        environment,
         ...extra,
       }).toString(),
-    [projectId, installId],
+    [projectId, installId, environment],
   );
 
   const api = useCallback(
-    async <T,>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<T> => {
+    async <T,>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}, signal?: AbortSignal): Promise<T> => {
       const res = await fetch(`${API}${path}?${withParams(extra)}`, {
         method,
+        signal,
         credentials: "same-origin",
         headers: body ? { "Content-Type": "application/json" } : {},
         body: body ? JSON.stringify(body) : undefined,
@@ -689,55 +700,53 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   const loadDeployments = useCallback(async () => {
     try {
       const r = await api<{ deployments?: Deployment[] }>("GET", "/deployments");
+      if (scopeRef.current !== scope) return;
       setDeployments(r.deployments || []);
       setError("");
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [api]);
+  }, [api, scope]);
 
-  const loadDetail = useCallback(
-    async (id: number) => {
-      try {
-        const d = await api<DeploymentDetail>("GET", `/deployments/${id}`);
-        setDetail(d);
-		if (d.deployment.target_kind === "ios" || d.deployment.target_kind === "android") {
-			const signing = await api<{ setups?: MobileSigningSetup[]; identities?: MobileSigningIdentity[] }>("GET", `/deployments/${id}/mobile-signing`);
-			setMobileSigning(
-            (signing.setups || []).find((setup) => setup.provider === d.deployment.build_backend)
-              || signing.setups?.[0]
-              || null,
-			);
-			setMobileSigningIdentity(signing.identities?.[0] || null);
-			setStoreState(await api<StoreConfigState>("GET", `/deployments/${id}/store-config`));
-		} else {
-			setMobileSigning(null);
-			setMobileSigningIdentity(null);
-          setStoreState(null);
-        }
-        // Always re-anchor the log pane to THIS deployment, so
-        // switching from a deployment with a live release to a
-        // deployment without one doesn't leave the previous one's
-        // log target stuck in view. Preference: live release > latest
-        // build > nothing.
-        if (d.current_release) {
-          setLogKind("release");
-          setLogTargetId(d.current_release.id);
-        } else if (d.deployment.target_kind !== "service" && d.releases?.[0]) {
-          setLogKind("release");
-          setLogTargetId(d.releases[0].id);
-        } else if (d.builds && d.builds[0]) {
-          setLogKind("build");
-          setLogTargetId(d.builds[0].id);
-        } else {
-          setLogTargetId(null);
-        }
-      } catch (e) {
-        setError((e as Error).message);
+  const loadDetail = useCallback(async (id: number) => {
+    if (selectedRef.current !== id) return;
+    const request = detailGate.current.begin();
+    const current = () => request.current() && scopeRef.current === scope && selectedRef.current === id;
+    try {
+      const d = await api<DeploymentDetail>("GET", `/deployments/${id}`, undefined, {}, request.signal);
+      let signing: { setups?: MobileSigningSetup[]; identities?: MobileSigningIdentity[] } | null = null;
+      let store: StoreConfigState | null = null;
+      if (d.deployment.target_kind === "ios" || d.deployment.target_kind === "android") {
+        [signing, store] = await Promise.all([
+          api<{setups?: MobileSigningSetup[]; identities?: MobileSigningIdentity[]}>("GET", `/deployments/${id}/mobile-signing`, undefined, {}, request.signal),
+          api<StoreConfigState>("GET", `/deployments/${id}/store-config`, undefined, {}, request.signal),
+        ]);
       }
-    },
-    [api],
-  );
+      if (!current()) return;
+      setDetail(d);
+      setMobileSigning(signing?.setups?.find(setup => setup.provider === d.deployment.build_backend) || signing?.setups?.[0] || null);
+      setMobileSigningIdentity(signing?.identities?.[0] || null); setStoreState(store);
+      // Preserve a user's historical log selection when refreshing the same detail.
+      setLogTargetId(old => {
+        if (old != null) return old;
+        if (d.current_release) { setLogKind("release"); return d.current_release.id; }
+        if (d.deployment.target_kind !== "service" && d.releases?.[0]) { setLogKind("release"); return d.releases[0].id; }
+        if (d.builds?.[0]) { setLogKind("build"); return d.builds[0].id; }
+        return null;
+      });
+    } catch (e) { if (current()) setError((e as Error).message); }
+  }, [api, scope]);
+
+  useEffect(() => {
+    detailGate.current.invalidate(); selectedRef.current = null;
+    setSelected(null); setDetail(null); setLogTargetId(null); setLogs(""); setEnvironment("production");
+    setShowEditConfig(false); setShowAttachDomain(false); setShowStoreListing(false);
+  }, [projectId, installId]);
+  useEffect(() => {
+    detailGate.current.invalidate(); setDetail(null); setLogTargetId(null); setLogs("");
+    if (selectedRef.current != null) loadDetail(selectedRef.current);
+    return () => detailGate.current.invalidate();
+  }, [loadDetail]);
 
   useEffect(() => { loadDeployments(); }, [loadDeployments]);
 
@@ -832,20 +841,25 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     return () => window.clearInterval(handle);
   }, [loadHealth]);
 
-  // Auto-tail logs every 2s when there's an active build or live release.
+  // Poll sequentially; terminal logs need only one read and hidden tabs wait.
+  const logActive = logKind === "build"
+    ? detail?.builds?.some(b => b.id === logTargetId && ["pending", "running"].includes(b.status))
+    : detail?.releases?.some(r => r.id === logTargetId && ["starting", "live"].includes(r.status));
   useEffect(() => {
     if (logTargetId == null) return;
-    let alive = true;
+    let alive = true; let timer: ReturnType<typeof setTimeout>;
     const tick = async () => {
-      try {
-        const txt = await apiText(`/${logKind === "build" ? "builds" : "releases"}/${logTargetId}/log`, { tail: "300" });
-        if (alive) setLogs(txt);
-      } catch {/* swallow — endpoint may 404 briefly */}
+      if (!alive) return;
+      if (document.visibilityState !== "hidden") {
+        try {
+          const txt = await apiText(`/${logKind === "build" ? "builds" : "releases"}/${logTargetId}/log`, { tail: "300" });
+          if (alive) setLogs(txt);
+        } catch {}
+      }
+      if (alive && logActive) timer = setTimeout(tick, 2000);
     };
-    tick();
-    const handle = window.setInterval(tick, 2000);
-    return () => { alive = false; window.clearInterval(handle); };
-  }, [logKind, logTargetId, apiText]);
+    tick(); return () => { alive = false; clearTimeout(timer); };
+  }, [logKind, logTargetId, apiText, logActive]);
 
   const selectDeployment = (id: number) => {
     // Clear deployment-scoped state synchronously BEFORE the async
@@ -854,6 +868,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     // this, switching from a deployment with a live release to
     // another briefly shows the previous deployment's logs / build
     // card / status — visibly confusing for ~1s.
+    detailGate.current.invalidate(); selectedRef.current=id;
     setSelected(id);
     setDetail(null);
     setLogs("");
@@ -870,7 +885,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   };
 
   const handleBuild = async (release: boolean) => {
-    if (!detail) return;
+    if (!detail || detail.deployment.id !== selectedRef.current) return;
     setBusy(true);
     try {
       const r = await api<{ build: Build; release?: Release; release_error?: string }>(
@@ -892,7 +907,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   };
 
   const handleReleaseBuild = async (buildId: number) => {
-    if (!detail) return;
+    if (!detail || detail.deployment.id !== selectedRef.current) return;
     try {
       const r = await api<{ release: Release }>(
         "POST", `/deployments/${detail.deployment.id}/release`, {
@@ -909,7 +924,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   };
 
   const handleCancelBuild = async (buildId: number) => {
-    if (!detail) return;
+    if (!detail || detail.deployment.id !== selectedRef.current) return;
     try {
       await api("POST", `/builds/${buildId}/cancel`);
       await loadDetail(detail.deployment.id);
@@ -919,7 +934,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   };
 
   const handlePromoteMobile = async (releaseId: number) => {
-    if (!detail) return;
+    if (!detail || detail.deployment.id !== selectedRef.current) return;
     setBusy(true);
     try {
       const r = await api<{ release: Release }>("POST", `/deployments/${detail.deployment.id}/promote`, {
@@ -938,7 +953,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   };
 
   const handleValidateMobilePromotion = async (releaseId: number) => {
-    if (!detail) return;
+    if (!detail || detail.deployment.id !== selectedRef.current) return;
     setBusy(true);
     try {
       const r = await api<{ validation: MobilePromotionValidation }>("POST", `/deployments/${detail.deployment.id}/promote`, {
@@ -959,7 +974,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   const [confirmState, setConfirmState] = useState<ConfirmRequest | null>(null);
 
   const runMobileSigningSetup = async (rotate: boolean) => {
-    if (!detail) return;
+    if (!detail || detail.deployment.id !== selectedRef.current) return;
     setSigningBusy(true);
     try {
 		const result = await api<{ setup: MobileSigningSetup; identity?: MobileSigningIdentity; ready: boolean; manual_actions?: string[] }>(
@@ -1042,7 +1057,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 	};
 
 	const downloadSigningRecovery = () => {
-		if (!detail) return;
+		if (!detail || detail.deployment.id !== selectedRef.current) return;
 		setConfirmState({
 			title: "Export signing recovery",
 			body: "Download a sensitive archive containing the private signing key and recovery credentials?",
@@ -1166,7 +1181,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   };
 
   const handleStop = () => {
-    if (!detail) return;
+    if (!detail || detail.deployment.id !== selectedRef.current) return;
     setConfirmState({
       title: "Stop release",
       body: "Stop the live release? The supervised process will be terminated.",
@@ -1183,7 +1198,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   };
 
   const handleRestart = async () => {
-    if (!detail) return;
+    if (!detail || detail.deployment.id !== selectedRef.current) return;
     setBusy(true);
     try {
       const r = await api<{ release: Release }>(
@@ -1200,7 +1215,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   };
 
   const handleDetachDomain = () => {
-    if (!detail) return;
+    if (!detail || detail.deployment.id !== selectedRef.current) return;
     setConfirmState({
       title: "Detach domain",
       body: `Remove the domain "${detail.deployment.domain}" from this deployment? The DNS record will be deleted via the Domains app.`,
@@ -1218,7 +1233,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   };
 
   const handleDestroy = () => {
-    if (!detail) return;
+    if (!detail || detail.deployment.id !== selectedRef.current) return;
     setConfirmState({
       title: "Destroy deployment",
       body: `Destroy deployment "${detail.deployment.name}"? This stops the live release and deletes all builds and artifacts on disk. This can't be undone.`,
@@ -1305,6 +1320,12 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 
       {/* Detail */}
       <main className="flex-1 overflow-hidden flex flex-col">
+        {selected != null && <label className="px-4 py-2 text-xs border-b border-border">Environment
+          <select aria-label="Environment" className="ml-2 bg-bg-input border border-border rounded px-2 py-1" value={environment}
+            onChange={event => { detailGate.current.invalidate(); setDetail(null); setLogTargetId(null); setEnvironment(event.target.value); }}>
+            {(detail?.environments?.length ? detail.environments : [{id: 0, name: environment}]).map(env => <option key={env.id} value={env.name}>{env.name}</option>)}
+          </select>
+        </label>}
         {!detail ? (
           <div className="p-8 text-text-muted text-sm text-center mt-12">
             {deployments.length === 0
@@ -1323,6 +1344,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                   {detail.deployment.framework ? ` · ${detail.deployment.framework}` : ""}
                 </div>
               </div>
+              {detail.routing && detail.routing.state !== "applied" && <span role="status" className="text-xs text-yellow" title={detail.routing.error}>Routing {detail.routing.state}; retrying</span>}
               {detail.url && (
                 <a
                   href={detail.url}
@@ -1808,7 +1830,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 							)}
 						</td>
 						<td className="text-text-dim">
-							{isProductionMobileChannel(detail.deployment.target_kind, rel.channel) ? "-" : (() => {
+							{isProductionMobileChannel(detail.deployment.target_kind, rel.channel || "") ? "-" : (() => {
 								const access = releaseTesterAccess(rel);
 								return access.installURL
 									? <a href={access.installURL} target="_blank" rel="noreferrer" className="text-accent hover:underline">{access.count} · install</a>
@@ -3322,7 +3344,7 @@ function StoreListingDialog({
                   <TextField
                     label={doc.distribution.availability?.mode === "all_except" ? "Excluded territories" : "Included territories"}
                     value={(doc.distribution.availability?.mode === "all_except"
-                      ? doc.distribution.availability?.excluded_territories
+                      ? (doc.distribution.availability?.excluded_territories || [])
                       : doc.distribution.availability?.included_territories || doc.distribution.territories || []).join(", ")}
                     onChange={(value) => {
                       const territories = value.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean);

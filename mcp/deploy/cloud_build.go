@@ -312,6 +312,11 @@ func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, re
 	if err != nil {
 		return nil, err
 	}
+	if releaseOpts != nil {
+		if err := dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"release_requested": true, "release_options_json": mustJSON(releaseOpts)}); err != nil {
+			return nil, err
+		}
+	}
 	d, err = a.prepareMobileBuildTarget(d, build)
 	if err != nil {
 		return a.failBuild(build, "prepare mobile version: "+err.Error()), nil
@@ -348,11 +353,13 @@ func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, re
 			capsule.SHA256, capsule.Size, capsule.Expires,
 		))
 	}
-	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"external_status": "submitting"})
+	if err := dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"status": "running", "external_status": "submitting"}); err != nil {
+		return dbGetBuild(globalCtx.AppDB(), build.ID)
+	}
 	_ = appendCloudBuildLog(logPath, "submitting "+backendName+" build")
 	job, err := backend.Submit(ctx, bound, cfg, d, build, capsule)
 	if err != nil {
-		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"external_status": "submission_failed"})
+		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"status": "running", "external_status": "submission_failed"})
 		return a.failBuild(build, "submit "+backendName+": "+err.Error()), nil
 	}
 	fields := map[string]any{
@@ -368,7 +375,14 @@ func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, re
 	if job.SourceSHA != "" && cfg.SourceMode != "bundle" {
 		fields["source_sha"] = job.SourceSHA
 	}
-	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
+	fields["status"] = "running"
+	if err := dbUpdateBuild(globalCtx.AppDB(), build.ID, fields); err != nil {
+		// Submission may finish after cancellation. Keep the returned identity so
+		// the durable cancellation worker can stop that exact remote job.
+		fields["status"] = "cancelled"
+		fields["external_status"] = "cancel_pending"
+		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
+	}
 	_ = appendCloudBuildLog(logPath, fmt.Sprintf("submitted job %s status=%s", job.ID, defaultStr(job.Status, "queued")))
 	return dbGetBuild(globalCtx.AppDB(), build.ID)
 }
@@ -377,6 +391,10 @@ func (a *App) syncPendingCloudBuilds(ctx context.Context) error {
 	a.cloudBuildMu.Lock()
 	defer a.cloudBuildMu.Unlock()
 	defer func() {
+		if time.Since(a.capsuleCleanupAt) < 10*time.Minute {
+			return
+		}
+		a.capsuleCleanupAt = time.Now()
 		if builds, err := dbListAllBuilds(globalCtx.AppDB()); err == nil {
 			a.cleanupSourceCapsules(builds, time.Now())
 		}
@@ -386,6 +404,7 @@ func (a *App) syncPendingCloudBuilds(ctx context.Context) error {
 		return err
 	}
 	var firstErr error
+	a.resumeBuildActions(ctx)
 	for i := range builds {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -440,8 +459,16 @@ func (a *App) syncCloudBuild(ctx context.Context, build *Build) error {
 		a.scheduleCloudBuildPoll(build, errors.New("cloud backend returned no status"))
 		return nil
 	}
+	freshBuild, readErr := dbGetBuild(globalCtx.AppDB(), build.ID)
+	if readErr != nil {
+		return readErr
+	}
+	if freshBuild.Status != "running" && freshBuild.Status != "pending" {
+		return nil
+	}
 	now := nowUTC()
 	fields := map[string]any{
+		"status":                    freshBuild.Status,
 		"external_status":           status.Status,
 		"external_poll_attempts":    build.ExternalPollAttempts + 1,
 		"external_poll_lease_until": "",
@@ -541,6 +568,7 @@ func (a *App) handleUnavailableCloudJob(build *Build, unavailable *externalJobUn
 			nextPoll = deadline
 		}
 		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{
+			"status":                    "running",
 			"external_status":           "propagating",
 			"external_poll_attempts":    attempt,
 			"external_next_poll_at":     nextPoll.UTC().Format(time.RFC3339),
@@ -591,6 +619,13 @@ func providerDisplayName(provider string) string {
 }
 
 func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend, bound *sdk.BoundIntegration, cfg cloudBuildConfig, build *Build, status *externalBuildStatus) error {
+	fresh, err := dbGetBuild(globalCtx.AppDB(), build.ID)
+	if err != nil {
+		return err
+	}
+	if fresh.Status != "running" && fresh.Status != "pending" {
+		return nil
+	}
 	d, err := a.deploymentForBuild(build)
 	if err != nil {
 		return err
@@ -657,30 +692,49 @@ func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend,
 	if status.SourceSHA != "" && cfg.SourceMode != "bundle" {
 		fields["source_sha"] = status.SourceSHA
 	}
-	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
+	if err := dbUpdateBuild(globalCtx.AppDB(), build.ID, fields); err != nil {
+		_ = os.RemoveAll(distDir)
+		return nil
+	}
 	dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "built")
 	a.removeSourceCapsule(build.ID)
 	_ = appendCloudBuildLog(build.LogPath, fmt.Sprintf("build succeeded artifact=%s size=%d", distDir, size))
-	fresh, _ := dbGetBuild(globalCtx.AppDB(), build.ID)
+	fresh, _ = dbGetBuild(globalCtx.AppDB(), build.ID)
 	emit("deploy.build.succeeded", map[string]any{
 		"deployment_id": build.DeploymentID, "environment_id": build.EnvironmentID,
 		"build_id": build.ID, "backend": build.BuildBackend, "duration_ms": duration, "size": size,
 	})
 	a.pruneBuildArtifactsAsync("cloud_build_succeeded")
-	if fresh != nil && fresh.ReleaseRequested {
+	if fresh != nil && fresh.Status == "succeeded" && fresh.ReleaseRequested {
 		return a.runRequestedCloudRelease(d, fresh)
 	}
 	return nil
 }
 
 func (a *App) runRequestedCloudRelease(d *Deployment, build *Build) error {
+	unlock := a.lockEnvironment(-build.ID, -1)
+	defer unlock()
+	snapshot := *d
+	snapshot.AutomaticRelease = true
+	d = &snapshot
 	var opts releaseOptions
 	if raw := strings.TrimSpace(build.ReleaseOptionsJSON); raw != "" && raw != "{}" {
 		if err := json.Unmarshal([]byte(raw), &opts); err != nil {
 			return err
 		}
 	}
-	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"release_requested": false})
+	var dispatchedID int64
+	_ = globalCtx.AppDB().QueryRow(`SELECT COALESCE(automatic_release_id,0) FROM builds WHERE id=?`, build.ID).Scan(&dispatchedID)
+	if dispatchedID > 0 {
+		existing, err := dbGetRelease(globalCtx.AppDB(), dispatchedID)
+		if err != nil {
+			return err
+		}
+		if existing == nil || existing.Status != "starting" || existing.Provider != "pending_mobile" {
+			_, _ = globalCtx.AppDB().Exec(`UPDATE builds SET release_requested=0 WHERE id=?`, build.ID)
+			return nil
+		}
+	}
 	rel, err := a.runReleaseWithOptions(d, build, opts)
 	if err != nil {
 		_ = appendCloudBuildLog(build.LogPath, "automatic release failed: "+err.Error())
@@ -689,6 +743,7 @@ func (a *App) runRequestedCloudRelease(d *Deployment, build *Build) error {
 		})
 		return err
 	}
+	_, _ = globalCtx.AppDB().Exec(`UPDATE builds SET release_requested=0,automatic_release_id=? WHERE id=?`, rel.ID, build.ID)
 	_ = appendCloudBuildLog(build.LogPath, fmt.Sprintf("automatic release created release=%d", rel.ID))
 	return nil
 }
@@ -698,40 +753,40 @@ func (a *App) cancelCloudBuild(ctx context.Context, build *Build) (*Build, error
 		return nil, errors.New("build required")
 	}
 	if normalizeBuildBackend(build.BuildBackend) == buildBackendLocal {
-		return nil, errors.New("local build cancellation is not supported")
+		return a.cancelLocalBuild(build)
 	}
-	if build.Status != "pending" && build.Status != "running" {
-		return build, nil
+	if err := dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"status": "cancelled", "external_status": "cancel_pending", "release_requested": false, "finished_at": nowUTC(), "error": "cancelled by operator"}); err != nil {
+		return dbGetBuild(globalCtx.AppDB(), build.ID)
+	}
+	fresh, _ := dbGetBuild(globalCtx.AppDB(), build.ID)
+	if err := a.finishCloudCancellation(ctx, fresh); err != nil {
+		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"external_last_poll_error": err.Error()})
+		return fresh, err
+	}
+	return dbGetBuild(globalCtx.AppDB(), build.ID)
+}
+func (a *App) finishCloudCancellation(ctx context.Context, build *Build) error {
+	if build == nil || build.ExternalJobID == "" {
+		return nil
 	}
 	cfg, err := parseCloudBuildConfig(build.BuildBackend, build.BuildBackendJSON)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	backend, err := cloudBackendFor(build.BuildBackend)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	bound, err := cloudIntegrationFor(build.BuildBackend)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if err := backend.Cancel(ctx, bound, cfg, build); err != nil {
-		return nil, err
+	if err = backend.Cancel(ctx, bound, cfg, build); err != nil {
+		return err
 	}
-	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{
-		"status": "cancelled", "external_status": "cancelled",
-		"finished_at": nowUTC(), "error": "cancelled by operator",
-		"external_next_poll_at": "", "external_poll_lease_until": "",
-		"external_last_poll_error": "",
-	})
-	dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "failed")
+	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"external_status": "cancelled", "external_last_poll_error": ""})
 	a.removeSourceCapsule(build.ID)
-	_ = appendCloudBuildLog(build.LogPath, "cancelled by operator")
-	emit("deploy.build.cancelled", map[string]any{
-		"deployment_id": build.DeploymentID, "environment_id": build.EnvironmentID,
-		"build_id": build.ID, "backend": build.BuildBackend,
-	})
-	return dbGetBuild(globalCtx.AppDB(), build.ID)
+	return nil
 }
 
 func (a *App) deploymentForBuild(build *Build) (*Deployment, error) {
@@ -986,7 +1041,8 @@ func (githubActionsBuildBackend) Submit(_ context.Context, bound *sdk.BoundInteg
 			inputs[strings.ToLower(key)] = value
 		}
 	}
-	submittedAt := time.Now().UTC()
+	correlation := fmt.Sprintf("apteva-deploy-%d-%d", build.ID, time.Now().UnixNano())
+	inputs["apteva_deploy_run_id"] = correlation
 	data, err := executeIntegration(bound, "trigger_workflow", map[string]any{
 		"owner": cfg.Owner, "repo": cfg.Repo, "workflow_id": cfg.WorkflowID,
 		"ref": cfg.Ref, "inputs": inputs,
@@ -996,7 +1052,7 @@ func (githubActionsBuildBackend) Submit(_ context.Context, bound *sdk.BoundInteg
 	}
 	id := firstRecursiveString(data, "workflow_run_id", "run_id", "id")
 	if id == "" {
-		id = "discover:" + submittedAt.Format(time.RFC3339Nano)
+		id = "discover:" + correlation
 	}
 	return &externalBuildJob{ID: id, Status: "queued", MetaJSON: rawOrEmpty(data)}, nil
 }
@@ -1009,9 +1065,13 @@ func (githubActionsBuildBackend) Inspect(_ context.Context, bound *sdk.BoundInte
 			return nil, err
 		}
 		if discovered == "" {
+			if submitted, ok := cloudBuildSubmissionTime(build); ok && time.Since(submitted) > 15*time.Minute {
+				return nil, &externalJobUnavailableError{Provider: buildBackendGitHubActions, JobID: jobID, Reason: "workflow run correlation timed out; set run-name to inputs.apteva_deploy_run_id"}
+			}
 			return &externalBuildStatus{Status: "queued", ProviderRaw: data}, nil
 		}
 		jobID = discovered
+		build.ExternalJobID = discovered
 		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"external_job_id": jobID})
 	}
 	runID, err := strconv.ParseInt(jobID, 10, 64)
@@ -1108,20 +1168,20 @@ func discoverGitHubRun(bound *sdk.BoundIntegration, cfg cloudBuildConfig, submit
 	if err != nil {
 		return "", nil, err
 	}
-	submittedAt, _ := time.Parse(time.RFC3339Nano, submitted)
+
 	var payload struct {
 		Runs []struct {
-			ID         int64  `json:"id"`
-			CreatedAt  string `json:"created_at"`
-			HeadBranch string `json:"head_branch"`
+			ID           int64  `json:"id"`
+			CreatedAt    string `json:"created_at"`
+			HeadBranch   string `json:"head_branch"`
+			DisplayTitle string `json:"display_title"`
 		} `json:"workflow_runs"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return "", data, err
 	}
 	for _, run := range payload.Runs {
-		created, _ := time.Parse(time.RFC3339, run.CreatedAt)
-		if run.ID > 0 && (submittedAt.IsZero() || !created.Before(submittedAt.Add(-5*time.Second))) {
+		if run.ID > 0 && strings.HasPrefix(submitted, "apteva-deploy-") && run.DisplayTitle == submitted {
 			return strconv.FormatInt(run.ID, 10), data, nil
 		}
 	}

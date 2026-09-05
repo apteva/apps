@@ -166,43 +166,7 @@ func (f *localFetcher) Fetch(d *Deployment, destDir string) error {
 // unpackZip extracts zr into destDir. Rejects path traversal and
 // preserves file modes the zip carried.
 func unpackZip(zr *zip.Reader, destDir string) error {
-	for _, f := range zr.File {
-		clean := filepath.Clean(f.Name)
-		if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
-			return fmt.Errorf("zip entry escapes root: %q", f.Name)
-		}
-		out := filepath.Join(destDir, clean)
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(out, 0o755); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-			return err
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		mode := f.Mode()
-		if mode == 0 {
-			mode = 0o644
-		}
-		w, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-		if err != nil {
-			rc.Close()
-			return err
-		}
-		if _, err := io.Copy(w, rc); err != nil {
-			rc.Close()
-			w.Close()
-			return err
-		}
-		rc.Close()
-		w.Close()
-	}
-	return nil
+	return extractBoundedZip(zr, destDir, maxArchiveExpandedBytes, true)
 }
 
 // copyTree mirrors src into dst. Plain file copy; symlinks become
@@ -216,6 +180,12 @@ func copyTree(src, dst string) error {
 		rel, err := filepath.Rel(src, path)
 		if err != nil {
 			return err
+		}
+		if rel != "." && shouldSkipForBuild(rel) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		out := filepath.Join(dst, rel)
 		if info.IsDir() {
@@ -273,12 +243,20 @@ func hashTree(root string) (string, error) {
 		if err != nil {
 			return err
 		}
-		body, err := os.ReadFile(path)
+		file, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		h := sha256.Sum256(body)
-		entries = append(entries, entry{path: rel, sum: h[:]})
+		h := sha256.New()
+		_, err = io.Copy(h, file)
+		closeErr := file.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		entries = append(entries, entry{path: rel, sum: h.Sum(nil)})
 		return nil
 	})
 	if err != nil {

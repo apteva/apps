@@ -46,11 +46,12 @@ func TestExistingDeploymentDefaultsToServiceTarget(t *testing.T) {
 func TestAndroidBuilderStagesAABManifest(t *testing.T) {
 	src := t.TempDir()
 	dist := t.TempDir()
+	writeMobileFixture(t, filepath.Join(src, "fixture.aab"), "android", "com.example.app", "1.0", "1")
 	gradlew := filepath.Join(src, "gradlew")
 	script := `#!/bin/sh
 set -eu
 mkdir -p app/build/outputs/bundle/release
-printf 'test-aab' > app/build/outputs/bundle/release/app-release.aab
+cp fixture.aab app/build/outputs/bundle/release/app-release.aab
 `
 	if err := os.WriteFile(gradlew, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -80,10 +81,11 @@ printf 'test-aab' > app/build/outputs/bundle/release/app-release.aab
 
 func TestIOSCustomBuilderStagesIPAManifest(t *testing.T) {
 	src := t.TempDir()
+	writeMobileFixture(t, filepath.Join(src, "fixture.ipa"), "ios", "com.example.ios", "1.2.3", "42")
 	dist := t.TempDir()
 	var log sinkWriter
 	_, err := (&iosBuilder{}).Build(src, dist, BuildOverrides{
-		BuildCmd:         `mkdir -p output && printf 'test-ipa' > output/Example.ipa`,
+		BuildCmd:         `mkdir -p output && mv fixture.ipa output/Example.ipa`,
 		TargetConfigJSON: `{"bundle_id":"com.example.ios","version_name":"1.2.3","build_number":"42"}`,
 	}, &log)
 	if err != nil {
@@ -155,6 +157,8 @@ func (p *iosPlatform) ExecuteIntegrationTool(_ int64, tool string, input map[str
 	switch tool {
 	case "list_builds":
 		data = json.RawMessage(`{"data":[{"id":"build-42","attributes":{"version":"42","processingState":"VALID"}}]}`)
+	case "get_build":
+		data = json.RawMessage(`{"included":[{"type":"buildBetaDetails","attributes":{"internalBuildState":"IN_BETA_TESTING","externalBuildState":"IN_BETA_TESTING"}}]}`)
 	case "list_beta_groups", "list_app_versions":
 		data = json.RawMessage(`{"data":[]}`)
 	case "create_beta_group":
@@ -434,7 +438,7 @@ func TestIOSReleaseSyncAssignsProcessedBuildToTestFlight(t *testing.T) {
 	if fresh.Status != "live" || fresh.ExternalID != "build-42" || fresh.ExternalStatus != "testflight_available" {
 		t.Fatalf("release=%+v", fresh)
 	}
-	want := []string{"list_builds", "list_beta_groups", "list_beta_groups", "create_beta_group", "add_builds_to_beta_group"}
+	want := []string{"list_builds", "list_beta_groups", "list_beta_groups", "create_beta_group", "add_builds_to_beta_group", "get_build"}
 	if len(platform.calls) != len(want) {
 		t.Fatalf("calls=%+v", platform.calls)
 	}

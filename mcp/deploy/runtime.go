@@ -37,14 +37,15 @@ type Runtime interface {
 }
 
 type ReleaseSpec struct {
+	Activated    <-chan struct{}
 	ReleaseID    int64
 	DeploymentID int64
-	Name         string  // for log/process labels
-	Framework    string  // 'go' | 'node' | 'bun' | 'static' | 'blank'
-	ArtifactDir  string  // /data/builds/<id>/dist/
-	Entrypoint   string  // relative path within ArtifactDir; "" = static FileServer
-	StartCmd     string  // override; if non-empty wins over framework default
-	Port         int     // assigned port
+	Name         string // for log/process labels
+	Framework    string // 'go' | 'node' | 'bun' | 'static' | 'blank'
+	ArtifactDir  string // /data/builds/<id>/dist/
+	Entrypoint   string // relative path within ArtifactDir; "" = static FileServer
+	StartCmd     string // override; if non-empty wins over framework default
+	Port         int    // assigned port
 	Env          map[string]string
 }
 
@@ -55,15 +56,16 @@ type RunningRelease struct {
 	ReleaseID int64
 	Port      int
 	PID       int
-	cmd     *exec.Cmd // nil for adopted releases (we didn't spawn them);
-	                  // set for every spawn including static-server subprocess (v0.11)
+	cmd       *exec.Cmd // nil for adopted releases (we didn't spawn them);
+	// set for every spawn including static-server subprocess (v0.11)
 	cancel  context.CancelFunc
-	logFile   *os.File
-	stopCh    chan struct{} // closed when supervisor exits
+	logFile *os.File
+	stopCh  chan struct{} // closed when supervisor exits
 
 	// adopted marks a release we re-attached to on boot rather than
 	// spawned ourselves — no cmd handle, so Stop signals by pid.
-	adopted bool
+	identity string
+	adopted  bool
 	// stopping is set by Stop so the adopted-release watcher can tell
 	// an operator-requested stop from a genuine crash.
 	stopping atomic.Bool
@@ -160,24 +162,32 @@ func (r *LocalRuntime) startStatic(spec ReleaseSpec, root string, logF *os.File,
 
 	rr := &RunningRelease{
 		ReleaseID: spec.ReleaseID, Port: spec.Port, PID: cmd.Process.Pid,
-		cmd: cmd, cancel: cancel, logFile: logF, stopCh: make(chan struct{}),
+		cmd: cmd, cancel: cancel, logFile: logF, stopCh: make(chan struct{}), identity: processIdentity(cmd.Process.Pid),
 	}
 	go func() {
 		defer close(rr.stopCh)
 		err := cmd.Wait()
+		if spec.Activated != nil {
+			<-spec.Activated
+		}
 		exit := -1
 		if cmd.ProcessState != nil {
 			exit = cmd.ProcessState.ExitCode()
 		}
 		fmt.Fprintf(logF, "=== static-server exited at %s (exit=%d, err=%v) ===\n", nowUTC(), exit, err)
 		_ = logF.Close()
-		if ctx.Err() != nil {
+		if rr.stopping.Load() || ctx.Err() != nil {
 			r.app.markStopped(rr.ReleaseID)
 		} else {
 			r.app.markCrashed(rr.ReleaseID, fmt.Errorf("exit %d", exit))
 		}
 	}()
-	go r.app.probeReady(rr.ReleaseID, rr.PID, spec.Port, 5*time.Second)
+	go func() {
+		if spec.Activated != nil {
+			<-spec.Activated
+		}
+		r.app.probeReady(rr.ReleaseID, rr.PID, spec.Port, 5*time.Second)
+	}()
 	return rr, nil
 }
 
@@ -206,13 +216,16 @@ func (r *LocalRuntime) startProcess(spec ReleaseSpec, logF *os.File, logPath str
 
 	rr := &RunningRelease{
 		ReleaseID: spec.ReleaseID, Port: spec.Port, PID: cmd.Process.Pid,
-		cmd: cmd, cancel: cancel, logFile: logF, stopCh: make(chan struct{}),
+		cmd: cmd, cancel: cancel, logFile: logF, stopCh: make(chan struct{}), identity: processIdentity(cmd.Process.Pid),
 	}
 
 	// Supervisor goroutine: waits for the process, marks state.
 	go func() {
 		defer close(rr.stopCh)
 		err := cmd.Wait()
+		if spec.Activated != nil {
+			<-spec.Activated
+		}
 		exit := -1
 		if cmd.ProcessState != nil {
 			exit = cmd.ProcessState.ExitCode()
@@ -220,7 +233,7 @@ func (r *LocalRuntime) startProcess(spec ReleaseSpec, logF *os.File, logPath str
 		fmt.Fprintf(logF, "=== process exited at %s (exit=%d, err=%v) ===\n", nowUTC(), exit, err)
 		_ = logF.Close()
 		// Distinguish clean stop (cancel was called) vs crash.
-		if ctx.Err() != nil {
+		if rr.stopping.Load() || ctx.Err() != nil {
 			r.app.markStopped(rr.ReleaseID)
 		} else {
 			r.app.markCrashed(rr.ReleaseID, fmt.Errorf("exit %d", exit))
@@ -228,12 +241,17 @@ func (r *LocalRuntime) startProcess(spec ReleaseSpec, logF *os.File, logPath str
 	}()
 
 	// Health probe verifies the child PID owns a LISTEN socket on the
-	// port (procfs check on linux, stub-true elsewhere). On success it
+	// port (procfs on Linux, lsof/ps on macOS). On success it
 	// flips status starting→live, registers the route, sets the
 	// current_release pointer. On timeout the release stays "starting"
 	// — the watchdog (60s tick) promotes slow-bootstrap apps once they
 	// finally bind.
-	go r.app.probeReady(rr.ReleaseID, rr.PID, spec.Port, 5*time.Second)
+	go func() {
+		if spec.Activated != nil {
+			<-spec.Activated
+		}
+		r.app.probeReady(rr.ReleaseID, rr.PID, spec.Port, 5*time.Second)
+	}()
 
 	return rr, nil
 }
@@ -269,9 +287,13 @@ func (r *LocalRuntime) Adopt(releaseID int64, pid, port int) (*RunningRelease, e
 		return nil, fmt.Errorf("adopt: pid %d is alive but no longer holds port %d (owner changed)", pid, port)
 	}
 
+	identity, err := verifiedReleaseProcessIdentity(releaseID, pid)
+	if err != nil {
+		return nil, fmt.Errorf("adopt: %w", err)
+	}
 	rr := &RunningRelease{
 		ReleaseID: releaseID, Port: port, PID: pid,
-		adopted: true, stopCh: make(chan struct{}),
+		adopted: true, stopCh: make(chan struct{}), identity: identity,
 	}
 	// Watcher: we can't cmd.Wait() a non-child, so poll the pid. When
 	// it goes away, update DB state the same way the spawn-path
@@ -281,7 +303,7 @@ func (r *LocalRuntime) Adopt(releaseID int64, pid, port int) (*RunningRelease, e
 		defer close(rr.stopCh)
 		for {
 			time.Sleep(3 * time.Second)
-			if syscall.Kill(pid, 0) != nil {
+			if processIdentity(pid) != rr.identity || syscall.Kill(pid, 0) != nil {
 				if rr.stopping.Load() {
 					r.app.markStopped(releaseID)
 				} else {
@@ -298,32 +320,24 @@ func (r *LocalRuntime) Stop(rr *RunningRelease) error {
 	if rr == nil {
 		return nil
 	}
-	if rr.adopted {
-		// No cmd handle — signal the process group by pid. The process
-		// was spawned as its own group leader, so pgid == pid. The
-		// watcher goroutine observes the death and closes stopCh.
-		rr.stopping.Store(true)
-		_ = syscall.Kill(-rr.PID, syscall.SIGTERM)
-		select {
-		case <-rr.stopCh:
-		case <-time.After(5 * time.Second):
-			_ = syscall.Kill(-rr.PID, syscall.SIGKILL)
-			<-rr.stopCh
+	rr.stopping.Store(true)
+	if rr.PID <= 0 {
+		if rr.cancel != nil {
+			rr.cancel()
 		}
 		return nil
 	}
-	if rr.cancel != nil {
-		rr.cancel() // sends SIGKILL after Wait returns; CommandContext owns the lifecycle
+	if processIdentity(rr.PID) == "" {
+		return nil
 	}
-	if rr.cmd != nil && rr.cmd.Process != nil {
-		// Try graceful first.
-		_ = syscall.Kill(-rr.cmd.Process.Pid, syscall.SIGTERM)
-		select {
-		case <-rr.stopCh:
-		case <-time.After(5 * time.Second):
-			_ = syscall.Kill(-rr.cmd.Process.Pid, syscall.SIGKILL)
-			<-rr.stopCh
-		}
+	if rr.identity == "" {
+		return errors.New("cannot stop process without verified identity")
+	}
+	if err := terminateOwnedGroup(rr.PID, rr.identity, 5*time.Second); err != nil {
+		return err
+	}
+	if rr.cancel != nil {
+		rr.cancel()
 	}
 	return nil
 }
@@ -438,12 +452,12 @@ func fileExists(path string) bool {
 }
 
 func mergeEnv(extra map[string]string, port int) []string {
-	out := append([]string{}, os.Environ()...)
-	out = append(out, "PORT="+strconv.Itoa(port))
+	values := map[string]string{}
 	for k, v := range extra {
-		out = append(out, k+"="+v)
+		values[k] = v
 	}
-	return out
+	values["PORT"] = strconv.Itoa(port)
+	return workloadEnv(values)
 }
 
 // ─── supervisor registry ──────────────────────────────────────────

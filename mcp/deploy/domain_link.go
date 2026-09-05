@@ -58,6 +58,9 @@ func callDomainsTool(ctx *sdk.AppCtx, projectID, tool string, args map[string]an
 	if env.Error != nil {
 		return fmt.Errorf("domains.%s: %s", tool, env.Error.Message)
 	}
+	if isError, _ := env.Result["isError"].(bool); isError {
+		return fmt.Errorf("domains.%s returned a tool error", tool)
+	}
 	content, _ := env.Result["content"].([]any)
 	if len(content) == 0 {
 		return fmt.Errorf("domains.%s returned empty content", tool)
@@ -129,6 +132,9 @@ func callCertsTool(ctx *sdk.AppCtx, projectID, tool string, args map[string]any,
 	}
 	if env.Error != nil {
 		return fmt.Errorf("certs.%s: %s", tool, env.Error.Message)
+	}
+	if isError, _ := env.Result["isError"].(bool); isError {
+		return fmt.Errorf("domains.%s returned a tool error", tool)
 	}
 	content, _ := env.Result["content"].([]any)
 	if len(content) == 0 {
@@ -247,7 +253,10 @@ func deriveHostIP() string {
 // inferRecordType picks the record type when the caller didn't pin
 // one: a literal IP → A, a hostname → CNAME.
 func inferRecordType(target string) string {
-	if net.ParseIP(target) != nil {
+	if ip := net.ParseIP(target); ip != nil {
+		if ip.To4() == nil {
+			return "AAAA"
+		}
 		return "A"
 	}
 	return "CNAME"
@@ -283,6 +292,11 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 	}
 
 	res := &attachDomainResult{FQDN: fqdn}
+	if d.Domain != "" && d.Domain != fqdn {
+		if err := a.detachDomain(ctx, d); err != nil {
+			return nil, err
+		}
+	}
 	var apex, recordID string
 
 	// DNS step runs only if the Domains app is bound. In the multi-
@@ -300,8 +314,8 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 		if rtype == "" {
 			rtype = inferRecordType(target)
 		}
-		if rtype != "CNAME" && rtype != "A" {
-			return nil, fmt.Errorf("unsupported record type %q (CNAME or A)", rtype)
+		if rtype != "CNAME" && rtype != "A" && rtype != "AAAA" {
+			return nil, fmt.Errorf("unsupported record type %q (CNAME, A or AAAA)", rtype)
 		}
 		if rtype == "CNAME" {
 			target = strings.TrimSuffix(target, ".")
@@ -390,8 +404,11 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 	if fresh.CurrentReleaseID == nil {
 		res.RouteStatus = "skipped" // No live release; registers on next deploy_release.
 	} else {
-		registerRouteForDeployment(ctx, a, fresh)
-		res.RouteStatus = "ok"
+		if err := registerRouteForDeployment(ctx, a, fresh); err != nil {
+			res.RouteStatus = "error"
+		} else {
+			res.RouteStatus = "ok"
+		}
 	}
 	return res, nil
 }
@@ -587,6 +604,9 @@ func callRoutesTool(ctx *sdk.AppCtx, tool string, args map[string]any, out any) 
 	if env.Error != nil {
 		return fmt.Errorf("routes.%s: %s", tool, env.Error.Message)
 	}
+	if isError, _ := env.Result["isError"].(bool); isError {
+		return fmt.Errorf("domains.%s returned a tool error", tool)
+	}
 	content, _ := env.Result["content"].([]any)
 	if len(content) == 0 {
 		return nil
@@ -626,63 +646,32 @@ func myInstallID() int64 {
 // the panel triggering a manual re-register, future code paths) gets
 // the same guarantee — the route never points at a port whose owner
 // we can't prove.
-func registerRouteForDeployment(ctx *sdk.AppCtx, app *App, d *Deployment) {
-	if d == nil || d.Domain == "" {
-		return
-	}
-	if app == nil || ctx == nil || ctx.PlatformAPI() == nil {
-		return
-	}
-	if d.CurrentReleaseID == nil {
-		return
+func registerRouteForDeployment(ctx *sdk.AppCtx, app *App, d *Deployment) error {
+	if d == nil || d.Domain == "" || d.CurrentReleaseID == nil {
+		return nil
 	}
 	rel, err := dbGetRelease(ctx.AppDB(), *d.CurrentReleaseID)
-	if err != nil || rel == nil {
-		return
+	if err != nil {
+		return err
 	}
-	if rel.Status != "live" {
-		emit("deploy.route.register_skipped", map[string]any{
-			"deployment_id": d.ID, "fqdn": d.Domain,
-			"reason": "release_not_live", "status": rel.Status,
-		})
-		return
+	if rel == nil || rel.Status != "live" {
+		return nil
 	}
-	if !pidOwnsPort(rel.PID, rel.Port) {
-		emit("deploy.route.register_skipped", map[string]any{
-			"deployment_id": d.ID, "fqdn": d.Domain,
-			"reason": "pid_does_not_own_port", "pid": rel.PID, "port": rel.Port,
-		})
-		return
+	err = app.queueIngress(ctx, d.Domain, d.ProjectID, fmt.Sprintf("http://127.0.0.1:%d", rel.Port), rel.ID)
+	if err != nil {
+		emit("deploy.route.register_failed", map[string]any{"deployment_id": d.ID, "fqdn": d.Domain, "error": err.Error()})
+		return err
 	}
-	target := fmt.Sprintf("http://127.0.0.1:%d", rel.Port)
-	if _, err := ctx.PlatformAPI().ExposeIngress(sdk.IngressExposeRequest{
-		Hostname:  d.Domain,
-		Target:    target,
-		OwnerKind: "deploy",
-		CertFQDN:  d.Domain,
-		ProjectID: d.ProjectID,
-	}); err != nil {
-		emit("deploy.route.register_failed", map[string]any{
-			"deployment_id": d.ID, "fqdn": d.Domain, "error": err.Error(),
-		})
-		return
-	}
-	emit("deploy.route.registered", map[string]any{
-		"deployment_id": d.ID, "fqdn": d.Domain, "port": rel.Port,
-	})
+	emit("deploy.route.registered", map[string]any{"deployment_id": d.ID, "fqdn": d.Domain, "port": rel.Port})
+	return nil
 }
-
-// unregisterRouteForDeployment is the cleanup half — called from
-// detachDomain and from deploy_destroy. Safe when no route was ever
-// registered.
 func unregisterRouteForDeployment(ctx *sdk.AppCtx, app *App, fqdn string) {
-	if fqdn == "" {
+	if fqdn == "" || ctx == nil || app == nil {
 		return
 	}
-	if app == nil || ctx == nil || ctx.PlatformAPI() == nil {
-		return
+	if err := app.queueIngress(ctx, fqdn, "", "", 0); err != nil {
+		emit("deploy.route.unregister_failed", map[string]any{"fqdn": fqdn, "error": err.Error()})
 	}
-	_ = ctx.PlatformAPI().UnexposeIngress(fqdn)
 }
 
 // currentReleasePort returns the live port for a deployment, or 0

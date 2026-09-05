@@ -21,7 +21,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	pkcs12 "github.com/ggpslop/go-pkcs12"
@@ -188,6 +187,13 @@ func (*androidBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW
 	if err := ensureAndroidBundleSigned(dst, false, logW, ov.Credentials.AndroidSigning); err != nil {
 		return "", err
 	}
+	actual, err := verifyMobileBinaryIdentity(dst, "android", cfg)
+	if err != nil {
+		return "", err
+	}
+	cfg.PackageName = actual.Identifier
+	cfg.VersionName = actual.Version
+	cfg.VersionCode = actual.Build
 	manifest := artifactManifest{
 		Platform: "android", Primary: primary, PackageName: cfg.PackageName,
 		VersionName: cfg.VersionName, VersionCode: cfg.VersionCode,
@@ -278,7 +284,7 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	profileUUID := ""
 	if len(ov.Credentials.IOSSigning) > 0 {
 		var cleanup func()
-		profileUUID, cleanup, err = prepareIOSSigningAssets(tmp, ov.Credentials.IOSSigning)
+		profileUUID, cleanup, err = prepareIOSSigningAssets(buildContext(ov), tmp, ov.Credentials.IOSSigning)
 		if err != nil {
 			return "", err
 		}
@@ -340,7 +346,17 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	return stageIPAWithVersion(ipa, artifactDir, cfg, version, buildNumber, logW)
 }
 
-func prepareIOSSigningAssets(tmp string, fields map[string]string) (string, func(), error) {
+func prepareIOSSigningAssets(ctx context.Context, tmp string, fields map[string]string) (string, func(), error) {
+	unlock, lockErr := lockIOSSigningResources(ctx)
+	if lockErr != nil {
+		return "", func() {}, lockErr
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			unlock()
+		}
+	}()
 	cleanup := func() {}
 	privateKeyPEM := normalizePEM(fields["certificate_private_key"])
 	certificatePEM := normalizePEM(fields["certificate_pem"])
@@ -406,26 +422,41 @@ func prepareIOSSigningAssets(tmp string, fields map[string]string) (string, func
 		return "", cleanup, err
 	}
 	installedProfile := filepath.Join(profilesDir, profileMetadata.UUID+".mobileprovision")
+	previousProfile, previousErr := os.ReadFile(installedProfile)
+	if previousErr != nil && !os.IsNotExist(previousErr) {
+		return "", cleanup, previousErr
+	}
+	restoreProfile := func() {
+		if previousErr == nil {
+			_ = os.WriteFile(installedProfile, previousProfile, 0600)
+		} else {
+			_ = os.Remove(installedProfile)
+		}
+	}
 	if err := os.WriteFile(installedProfile, profile, 0o600); err != nil {
 		return "", cleanup, err
 	}
 	password, err := randomSigningSecret(24)
 	if err != nil {
-		_ = os.Remove(installedProfile)
+		restoreProfile()
 		return "", cleanup, err
 	}
 	pfx, err := pkcs12.Modern.Encode(privateKey, certificate, nil, password)
 	if err != nil {
-		_ = os.Remove(installedProfile)
+		restoreProfile()
 		return "", cleanup, err
 	}
 	pfxPath := filepath.Join(tmp, "identity.p12")
 	keychainPath := filepath.Join(tmp, "build.keychain-db")
 	if err := os.WriteFile(pfxPath, pfx, 0o600); err != nil {
-		_ = os.Remove(installedProfile)
+		restoreProfile()
 		return "", cleanup, err
 	}
-	oldKeychains, _ := exec.Command("security", "list-keychains", "-d", "user").Output()
+	oldKeychains, listErr := exec.Command("security", "list-keychains", "-d", "user").Output()
+	if listErr != nil {
+		restoreProfile()
+		return "", cleanup, fmt.Errorf("read keychain search list: %w", listErr)
+	}
 	runSecurity := func(args ...string) error {
 		if output, commandErr := exec.Command("security", args...).CombinedOutput(); commandErr != nil {
 			return fmt.Errorf("security %s: %s", args[0], strings.TrimSpace(string(output)))
@@ -433,13 +464,20 @@ func prepareIOSSigningAssets(tmp string, fields map[string]string) (string, func
 		return nil
 	}
 	if err := runSecurity("create-keychain", "-p", password, keychainPath); err != nil {
-		_ = os.Remove(installedProfile)
+		restoreProfile()
 		return "", cleanup, err
 	}
 	cleanup = func() {
-		_ = os.Remove(installedProfile)
-		keychains := parseSecurityKeychainList(oldKeychains)
-		if len(keychains) > 0 {
+		defer unlock()
+		restoreProfile()
+		current, listErr := exec.Command("security", "list-keychains", "-d", "user").Output()
+		keychains := []string{}
+		for _, keychain := range parseSecurityKeychainList(current) {
+			if keychain != keychainPath {
+				keychains = append(keychains, keychain)
+			}
+		}
+		if listErr == nil {
 			_ = exec.Command("security", append([]string{"list-keychains", "-d", "user", "-s"}, keychains...)...).Run()
 		}
 		_ = exec.Command("security", "delete-keychain", keychainPath).Run()
@@ -461,6 +499,7 @@ func prepareIOSSigningAssets(tmp string, fields map[string]string) (string, func
 		cleanup()
 		return "", func() {}, err
 	}
+	transferred = true
 	return profileMetadata.UUID, cleanup, nil
 }
 
@@ -591,6 +630,16 @@ func stageIPAWithVersion(ipa, artifactDir string, cfg mobileTargetConfig, versio
 	if len(cfg.DeviceFamilies) == 0 {
 		cfg.DeviceFamilies, _ = readIPADeviceFamilies(ipa)
 	}
+	expected := cfg
+	expected.VersionName = version
+	expected.BuildNumber = buildNumber
+	actual, err := verifyMobileBinaryIdentity(ipa, "ios", expected)
+	if err != nil {
+		return "", err
+	}
+	cfg.BundleID = actual.Identifier
+	version = actual.Version
+	buildNumber = actual.Build
 	primary := filepath.Base(ipa)
 	dst := filepath.Join(artifactDir, primary)
 	if err := copyMobileFile(ipa, dst); err != nil {
@@ -679,49 +728,21 @@ func runMobileBuildCommand(parent context.Context, dir, bin string, args []strin
 	ctx, cancel := context.WithTimeout(parent, 45*time.Minute)
 	defer cancel()
 	fmt.Fprintf(logW, "+ %s %s (cwd=%s)\n", bin, strings.Join(args, " "), dir)
-	cmd := exec.Command(bin, args...)
+	cmd := newBuildCommand(ctx, bin, args...)
 	cmd.Dir = dir
 	cmd.Stdout = logW
 	cmd.Stderr = logW
 	cmd.Env = mobileBuildEnv(userEnv)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("mobile build interrupted: %w", ctx.Err())
+		}
 		return err
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			<-done
-		}
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return context.Canceled
-		}
-		return errors.New("mobile build timed out after 45 minutes")
-	}
+	return nil
 }
 
-func mobileBuildEnv(user map[string]string) []string {
-	out := []string{}
-	for _, entry := range os.Environ() {
-		key, _, ok := strings.Cut(entry, "=")
-		if !ok || strings.HasPrefix(strings.ToUpper(key), "APTEVA_") {
-			continue
-		}
-		out = append(out, entry)
-	}
-	for key, value := range user {
-		out = append(out, key+"="+value)
-	}
-	return out
-}
+func mobileBuildEnv(user map[string]string) []string { return workloadEnv(user) }
 
 func findMobileArtifact(root, suffix, pathFragment string) (string, error) {
 	var matches []string

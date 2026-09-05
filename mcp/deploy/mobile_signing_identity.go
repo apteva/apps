@@ -82,6 +82,9 @@ func (a *App) mobileSigningVaultKey() ([]byte, error) {
 		return append([]byte(nil), a.mobileSigningKey...), nil
 	}
 	dataDir := strings.TrimSpace(a.dataDir)
+	if dataDir == "" {
+		dataDir = strings.TrimSpace(os.Getenv("DEPLOY_DATA_DIR"))
+	}
 	if dataDir == "" && globalCtx != nil {
 		dataDir = strings.TrimSpace(globalCtx.DataDir())
 	}
@@ -250,7 +253,15 @@ func (a *App) replaceMobileSigningIdentity(db *sql.DB, current *MobileSigningIde
 	if err != nil {
 		return nil, err
 	}
-	_, err = db.Exec(`UPDATE mobile_signing_identities SET
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`INSERT OR IGNORE INTO signing_identity_revisions(identity_id,revision,identity_json,encrypted_payload,created_at) VALUES(?,?,?,?,?)`, current.ID, current.Revision, mustJSON(current), current.EncryptedPayload, nowUTC()); err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(`UPDATE mobile_signing_identities SET
 		format=?, encrypted_payload=?, revision=?, source=?, key_alias=?, certificate_pem=?,
 		certificate_sha1=?, certificate_sha256=?, expires_at=?, external_state_json=?, updated_at=?
 		WHERE id=?`,
@@ -259,6 +270,9 @@ func (a *App) replaceMobileSigningIdentity(db *sql.DB, current *MobileSigningIde
 		normalizeCertificateFingerprint(input.CertificateSHA256), input.ExpiresAt,
 		defaultStr(input.ExternalStateJSON, "{}"), nowUTC(), current.ID)
 	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
 	return dbGetMobileSigningIdentityByID(db, current.ID)
@@ -388,4 +402,22 @@ func (a *App) iosSigningCredentials(d *Deployment) (map[string]string, error) {
 		"provisioning_profile_base64": payload.ProvisioningProfileBase64,
 		"certificate_sha256":          identity.CertificateSHA256,
 	}, nil
+}
+
+func stageSigningRevision(db *sql.DB, candidate *MobileSigningIdentity) (*MobileSigningIdentity, error) {
+	_, err := db.Exec(`INSERT OR IGNORE INTO signing_identity_revisions(identity_id,revision,identity_json,encrypted_payload,created_at) VALUES(?,?,?,?,?)`, candidate.ID, candidate.Revision, mustJSON(candidate), candidate.EncryptedPayload, nowUTC())
+	if err != nil {
+		return nil, err
+	}
+	var body string
+	var encrypted []byte
+	if err = db.QueryRow(`SELECT identity_json,encrypted_payload FROM signing_identity_revisions WHERE identity_id=? AND revision=?`, candidate.ID, candidate.Revision).Scan(&body, &encrypted); err != nil {
+		return nil, err
+	}
+	var saved MobileSigningIdentity
+	if err = json.Unmarshal([]byte(body), &saved); err != nil {
+		return nil, err
+	}
+	saved.EncryptedPayload = encrypted
+	return &saved, nil
 }

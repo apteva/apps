@@ -2,18 +2,22 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.24.8
+version: 0.25.0
 description: |
   Build and release services, Android apps, and iOS apps across local
   and external build backends using a provider-neutral build contract.
-  Takes a code repo (from the Code app, a local path, or a git URL),
+  Takes a code repo (from the Code app or a local path),
   builds it with the framework's toolchain, and runs the result as
   a supervised child process bound to a local port. The Apteva
   server proxies traffic to live deployments under /_deploy/<slug>/.
 
-  v0.1 supports source kinds {code, local} and frameworks {go, node, static}.
-  Future runtimes (Docker, SSH-to-VPS) plug in behind the same
-  Runtime interface — no schema or surface changes required.
+  Supports source kinds {code, local} and frameworks
+  {go, node, bun, static, blank, android, ios}.
+  v0.25.0 adds durable release and cancellation intent, scoped record access,
+  process ownership checks, safe replacement/recovery, signing revisions,
+  bounded archives/logging, ingress retries and environment-aware panel actions.
+  Local builds now return asynchronously. GitHub workflows must declare
+  apteva_deploy_run_id and use it as their run-name.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/deploy
@@ -165,7 +169,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: deploy/v0.25.0
     entry: mcp/deploy
   port: 8080
   health_check: /health
@@ -194,6 +198,11 @@ config_schema:
     default: "2"
     label: Max concurrent builds
     description: Hard cap on simultaneous build processes per host.
+  - name: build_timeout_seconds
+    type: text
+    default: "1800"
+    label: Local build timeout
+    description: Maximum time for a queued or running local build, in seconds.
   - name: retain_rollback_builds
     type: text
     default: "3"

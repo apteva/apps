@@ -25,7 +25,7 @@ func TestRunnerBackendReceivesGenericExecutionRequirements(t *testing.T) {
 		MachineClass:     "performance",
 		SoftwareVersions: map[string]string{"xcode": "26.6"},
 	}
-	d := &Deployment{ProjectID: "p1", Name: "ios", TargetKind: "ios", Framework: "ios"}
+	d := &Deployment{ProjectID: "p1", Name: "generic", TargetKind: "service", Framework: "blank"}
 	build := &Build{ID: 42}
 	capsule := &sourceCapsule{
 		URL: "https://deploy.example/source.zip", SHA256: "abc", Size: 123, Format: sourceCapsuleFormat,
@@ -36,5 +36,15 @@ func TestRunnerBackendReceivesGenericExecutionRequirements(t *testing.T) {
 	if received.Build.MachineClass != "performance" ||
 		received.Build.SoftwareVersions["xcode"] != "26.6" {
 		t.Fatalf("build requirements=%+v", received.Build)
+	}
+}
+
+func TestUnsignedSmokeBuildDoesNotRequireSigningIdentity(t *testing.T) {
+	for _, platform := range []string{"android", "ios"} {
+		d := &Deployment{TargetKind: platform, Framework: platform, TargetConfigJSON: `{"smoke_only":true}`}
+		credentials, err := (&App{}).mobileSigningBuildCredentials(d)
+		if err != nil || len(credentials.AndroidSigning) != 0 || len(credentials.IOSSigning) != 0 {
+			t.Fatalf("%s smoke credentials: %+v %v", platform, credentials, err)
+		}
 	}
 }

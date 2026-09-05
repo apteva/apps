@@ -426,7 +426,7 @@ targets:
 	}
 }
 
-func TestGitHubSubmitDoesNotInjectUndeclaredWorkflowInputs(t *testing.T) {
+func TestGitHubSubmitIncludesRequiredCorrelationInput(t *testing.T) {
 	platform := &cloudBuildPlatform{provider: "github"}
 	withCloudBuildContext(t, platform)
 	cfg := cloudBuildConfig{
@@ -445,7 +445,7 @@ func TestGitHubSubmitDoesNotInjectUndeclaredWorkflowInputs(t *testing.T) {
 		t.Fatalf("job=%+v calls=%+v", job, platform.calls)
 	}
 	inputs, ok := platform.calls[0].Input["inputs"].(map[string]any)
-	if !ok || len(inputs) != 1 || inputs["release"] != true {
+	if !ok || len(inputs) != 2 || inputs["release"] != true || !strings.HasPrefix(fmt.Sprint(inputs["apteva_deploy_run_id"]), "apteva-deploy-9-") {
 		t.Fatalf("workflow inputs=%#v", platform.calls[0].Input["inputs"])
 	}
 }
@@ -872,7 +872,7 @@ func TestCloudBuildPollingUsesPersistentDueTimeAndLease(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	if err := dbUpdateBuild(ctx.AppDB(), build.ID, map[string]any{
-		"status": "running", "external_next_poll_at": now.Add(time.Minute).Format(time.RFC3339),
+		"status": "running", "external_job_id": "submitted-job", "external_next_poll_at": now.Add(time.Minute).Format(time.RFC3339),
 	}); err != nil {
 		t.Fatal(err)
 	}

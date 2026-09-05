@@ -84,6 +84,10 @@ func (runnerBuildBackend) Submit(ctx context.Context, _ *sdk.BoundIntegration, c
 		"%s\n%d\n%s\n%s",
 		d.ProjectID, build.ID, capsule.SHA256, capsule.URL,
 	)))
+	credentials, err := (&App{}).mobileSigningBuildCredentials(d)
+	if err != nil {
+		return nil, err
+	}
 	request := runnerJobRequest{
 		Protocol:       runnerProtocolVersion,
 		IdempotencyKey: hex.EncodeToString(idempotencyHash[:]),
@@ -97,7 +101,7 @@ func (runnerBuildBackend) Submit(ctx context.Context, _ *sdk.BoundIntegration, c
 			Env: parseEnvJSON(d.EnvJSON), TargetConfigJSON: defaultStr(d.TargetConfigJSON, "{}"),
 			MachineClass: resolvedMachineClass(cfg), SoftwareVersions: cfg.SoftwareVersions,
 		},
-		Credentials: runnerBuildCredentials(d),
+		Credentials: credentials,
 	}
 	var response runnerJobResponse
 	raw, err := runnerDoJSON(ctx, cfg, http.MethodPost, "/v1/jobs", request, &response)
@@ -247,33 +251,29 @@ func runnerDoJSON(ctx context.Context, cfg cloudBuildConfig, method, endpoint st
 	return append(json.RawMessage(nil), raw...), nil
 }
 
-func runnerBuildCredentials(d *Deployment) runnerCredentials {
+func (a *App) mobileSigningBuildCredentials(d *Deployment) (runnerCredentials, error) {
 	var out runnerCredentials
+	var err error
 	if d == nil {
-		return out
+		return out, nil
+	}
+	if isMobileDeployment(d, &Build{Framework: d.Framework}) {
+		target, parseErr := parseMobileTargetConfig(d.TargetConfigJSON)
+		if parseErr != nil {
+			return out, parseErr
+		}
+		if target.SmokeOnly {
+			return out, nil
+		}
 	}
 	if d.TargetKind == "ios" || d.Framework == "ios" {
 		out.AppStore = selectedBoundCredentialFields("app_store", []string{"issuer_id", "key_id", "private_key"})
-		out.IOSSigning, _ = (&App{}).iosSigningCredentials(d)
+		out.IOSSigning, err = a.iosSigningCredentials(d)
 	}
 	if d.TargetKind == "android" || d.Framework == "android" {
-		out.AndroidSigning, _ = (&App{}).androidSigningCredentials(d)
+		out.AndroidSigning, err = a.androidSigningCredentials(d)
 	}
-	return out
-}
-
-func (a *App) mobileSigningBuildCredentials(d *Deployment) runnerCredentials {
-	if d == nil {
-		return runnerCredentials{}
-	}
-	out := runnerBuildCredentials(d)
-	if d.TargetKind == "android" || d.Framework == "android" {
-		out.AndroidSigning, _ = a.androidSigningCredentials(d)
-	}
-	if d.TargetKind == "ios" || d.Framework == "ios" {
-		out.IOSSigning, _ = a.iosSigningCredentials(d)
-	}
-	return out
+	return out, err
 }
 
 func selectedBoundCredentialFields(role string, keys []string) map[string]string {

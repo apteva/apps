@@ -22,10 +22,8 @@ or GitHub Actions.
 
 | Kind     | `source_ref`                       | Status        |
 |----------|------------------------------------|---------------|
-| `code`   | Code app repo slug                 | v0.1 ✓        |
-| `local`  | Absolute path on the deploy host   | v0.1 ✓        |
-| `git`    | https://github.com/owner/repo[@ref] | v0.2          |
-| `zip`    | uploaded zip id                    | v0.2          |
+| `code`   | Code app repo slug                 | Supported |
+| `local`  | Absolute path on the deploy host   | Supported |
 
 ## Frameworks (pluggable)
 
@@ -33,7 +31,8 @@ or GitHub Actions.
 |-----------|--------------------------------------------------------|------------------------------------------|
 | `go`      | `go build -o app . ` (CGO disabled)                    | exec the compiled binary                 |
 | `node`    | `<pm> install` + `<pm> run build` (if defined)         | `<pm> run start` (override via start_cmd) |
-| `static`  | (none) or `build_cmd` → `dist/`                        | in-process `http.FileServer`             |
+| `bun` | Bun install/build | Bun start script |
+| `static`  | (none) or `build_cmd` → `dist/`                        | separately supervised HTTP server             |
 | `blank`   | optional `build_cmd`                                   | requires `start_cmd`                     |
 | `android` | Gradle bundle task or `build_cmd` -> signed `.aab`       | Google Play track                        |
 | `ios`     | Xcode archive/export or `build_cmd` -> `.ipa`            | TestFlight or App Store                  |
@@ -41,7 +40,7 @@ or GitHub Actions.
 Auto-detected from the source tree (`go.mod` → `go`, `package.json` →
 `node`, `index.html` → `static`, etc.) when `framework` is empty. The
 node builder picks `<pm>` from lockfiles in priority order:
-`bun.lockb` → bun, `pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn,
+`bun.lock` / `bun.lockb` → bun, `pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn,
 otherwise npm.
 
 ## Mobile releases
@@ -327,8 +326,23 @@ GitHub Actions example:
 The capsule runner serves authenticated artifact and log routes directly.
 Codemagic reads short-lived artifact URLs from the completed build.
 GitHub Actions expects a workflow artifact named `apteva-build` unless
-overridden. GitHub workflow inputs are passed exactly as configured, so
-the workflow must declare each configured `workflow_dispatch` input.
+overridden. Every workflow must declare the configured inputs and the required
+`apteva_deploy_run_id` input. Use that input as its run name so concurrent
+dispatches can be matched safely:
+
+```yaml
+run-name: ${{ inputs.apteva_deploy_run_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      apteva_deploy_run_id:
+        type: string
+        required: true
+```
+
+This correlation input is required even when `contract_inputs` is false.
+Discovery never selects an unrelated run by timestamp and expires after
+15 minutes if the workflow does not honor this contract.
 The `cloud_build_sync` worker polls providers, persists provider job
 IDs/status, stages outputs, and performs a requested release only after
 the build succeeds. `deploy_build_cancel` and
@@ -392,15 +406,64 @@ reported as manual requirements rather than successful provider writes.
 
 ## Runtime targets (pluggable)
 
-v0.1 ships a single `LocalRuntime` that supervises the build artifact
-as a child process — port allocated from a configurable range,
-stdout/stderr captured to a per-release log file, TERM-then-KILL
-shutdown, in-process FileServer for static deployments.
+`LocalRuntime` supervises artifacts in separate process groups, including
+static servers. It allocates candidate ports, verifies listener ownership on
+Linux/macOS, and switches routing before retiring the previous service.
+An explicit `port_hint` requires downtime; failed replacement restores the
+previous release intent and schedules recovery. Stop allows five seconds for
+SIGTERM before escalating the verified group to SIGKILL.
 
-The `Runtime` interface is the seam: `DockerRuntime` (isolation +
-resource caps) and `SSHRuntime` (deploy to a VPS by `scp` + `ssh`)
-plug in behind the same interface in v0.2 with no schema or surface
-changes.
+Process identity is persisted so PID/port reuse cannot authorize stopping an
+unrelated service. Existing 0.24.8 processes can be adopted only when listener
+ownership and launch time match their release records. Recovery restarts the
+intended artifact and configuration, never the latest unpromoted build.
+
+Local workloads share the Deploy user's filesystem and OS privileges. Only
+trusted code should use this runtime; environment filtering is not OS isolation.
+Container/user isolation and hard CPU/memory/disk quotas require a separate
+runtime. `DockerRuntime` and `SSHRuntime` are not implemented.
+
+## Operation contracts
+
+Local HTTP/MCP build submission returns a pending build immediately. Observe
+`deploy_status`, build events, or build detail until completion; a returned build
+is not proof of success. A requested release is durable and idempotent. Local
+builds have a configurable timeout (default 1,800 seconds), cancellation and
+interrupted-build reporting after restart. Cloud cancellation remains queued
+until the provider confirms it, including jobs discovered after cancellation.
+Stop also clears queued automatic releases for that environment.
+
+Migration 013 adds durable environment intent, immutable release configuration,
+process identity, automatic release references, encrypted signing revisions and
+ingress retry work. HTTP detail and `deploy_status` expose `routing.state` and
+`routing.error` separately from process readiness. The panel shows the selected
+environment and rejects obsolete detail/signing/store responses.
+
+Android rotation stages an encrypted revision before changing provider secrets,
+then activates it only after successful provisioning. Previous revisions remain
+recoverable with the database and vault key. iOS signing resources are locked
+across Deploy processes, preexisting profiles are restored, and cleanup removes
+only the build's keychain from the current search list.
+
+Downloaded and locally staged AAB/IPA metadata must match the requested binary
+identifier and version. Android managed certificate/signature checks remain
+mandatory. IPA identity checking is not an independent Apple code-signature or
+trust-chain validator; Xcode and App Store Connect still perform those checks.
+TestFlight is reported available only after Apple reports `IN_BETA_TESTING`;
+assignment to a beta group alone is insufficient. Failed processing and modern
+App Store states are visible, and interrupted review preparation is retried.
+
+Artifact reads and release starts hold a retention lock. Retention also pins
+requested releases and recovery artifacts; newly discovered orphan directories
+receive a grace period. ZIP extraction is limited to 100,000 entries and 2 GiB
+expanded data (1 GiB for runner source capsules), rejects duplicate/special files
+and escaping links, and preserves confined relative runtime symlinks.
+
+Log tails read at most the last 1 MiB. Build logs rotate at 16 MiB with one backup;
+runtime logs use periodic copy/truncate rotation so services can survive sidecar
+restarts. This is not a hard disk quota, and copy/truncate can lose concurrent
+log bytes. The panel polls logs sequentially and stops periodic polling for
+terminal records or hidden tabs. Retention summaries are cached for one minute.
 
 ## Local development
 
@@ -414,8 +477,10 @@ curl http://localhost:8080/health
 ## Tests
 
 ```bash
-go test ./...                       # tier 1, ~20ms
-go test -tags integration ./...     # tier 2, ~6s — real binary, real build, real HTTP
+GOWORK=off go test ./...
+GOWORK=off go test -race -tags=integration ./... -timeout=300s
+bun test ui/requestGate.test.ts
+(cd ui/tests && bun install && bun run typecheck && bunx playwright install chromium && bun test)
 apteva test ./scenarios/            # tier 3, ~3min — real LLM
 ```
 
@@ -444,6 +509,7 @@ PATH (the build step shells out to it).
 | `port_range_start`      | `7100`                   | First port the supervisor may assign (skips macOS AirPlay on 5000/7000) |
 | `port_range_end`        | `7999`                   | Last port the supervisor may assign     |
 | `max_build_concurrency` | `2`                      | Hard cap on simultaneous builds         |
+| `build_timeout_seconds` | `1800` | Local build deadline |
 
 The `code` source kind reaches the Code app over `PlatformClient.CallApp`
 (MCP `repos_export`); install-time binding to a code app fills the
@@ -456,3 +522,5 @@ The `code` source kind reaches the Code app over `PlatformClient.CallApp`
 - Build caches — every `deploy_build` is a cold build
 - Resource caps (CPU/mem) — supervised process inherits the host's
   limits; add via `setrlimit` when it matters
+
+The corrective audit and test coverage are tracked in [AUDIT_FIXES.md](AUDIT_FIXES.md).

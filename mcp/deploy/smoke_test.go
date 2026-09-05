@@ -511,6 +511,7 @@ var testMigrationFiles = []string{
 	"migrations/010_mobile_store_partial_status.sql",
 	"migrations/011_cloud_build_lifecycle.sql",
 	"migrations/012_mobile_signing_identities.sql",
+	"migrations/013_operation_safety.sql",
 }
 
 // openSchemaDB opens an in-memory SQLite and applies every app migration.
@@ -989,6 +990,8 @@ func TestBuildRetentionPrunesOldArtifactsKeepsLiveAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	old := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(filepath.Dir(orphan), old, old)
 	summary, err := app.pruneBuildArtifacts(db, "test")
 	if err != nil {
 		t.Fatal(err)

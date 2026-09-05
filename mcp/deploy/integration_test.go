@@ -120,6 +120,7 @@ func TestSidecar_FullFlow_BuildReleaseStopDestroy(t *testing.T) {
 		"id":      depID,
 		"release": true,
 	})
+	out = awaitBuildResult(t, sc, depID, out, true)
 	build, ok := out["build"].(map[string]any)
 	if !ok || build["status"] != "succeeded" {
 		t.Fatalf("build did not succeed: %v", out)
@@ -194,6 +195,7 @@ func TestSidecar_RecoversDeadReleaseAfterRestart(t *testing.T) {
 	depID := int64(dep["id"].(float64))
 
 	out = sc.MCP("deploy_build", map[string]any{"id": depID, "release": true})
+	out = awaitBuildResult(t, sc, depID, out, true)
 	liveBuild := out["build"].(map[string]any)
 	liveRelease := out["release"].(map[string]any)
 	liveBuildID := int64(liveBuild["id"].(float64))
@@ -211,6 +213,7 @@ func TestSidecar_RecoversDeadReleaseAfterRestart(t *testing.T) {
 	// A newer successful build must not be selected: it was built but
 	// never promoted to this environment.
 	out = sc.MCP("deploy_build", map[string]any{"id": depID})
+	out = awaitBuildResult(t, sc, depID, out, false)
 	newerBuild := out["build"].(map[string]any)
 	newerBuildID := int64(newerBuild["id"].(float64))
 	if newerBuildID == liveBuildID {
@@ -341,6 +344,7 @@ func TestSidecar_FullFlow_Node(t *testing.T) {
 		"id":      depID,
 		"release": true,
 	})
+	out = awaitBuildResult(t, sc, depID, out, true)
 	build, ok := out["build"].(map[string]any)
 	if !ok || build["status"] != "succeeded" {
 		t.Fatalf("build did not succeed: %v", out)
@@ -398,6 +402,7 @@ func TestSidecar_BuildFailure_SetsStatus(t *testing.T) {
 	depID := int64(dep["id"].(float64))
 
 	out = sc.MCP("deploy_build", map[string]any{"id": depID})
+	out = awaitBuildResult(t, sc, depID, out, false)
 	build := out["build"].(map[string]any)
 	if build["status"] != "failed" {
 		t.Fatalf("expected failed, got %v", build["status"])
@@ -516,4 +521,39 @@ var execLookPath = func(name string) (string, error) {
 		}
 	}
 	return "", os.ErrNotExist
+}
+
+// Build submission is asynchronous. Observe the durable record and its matching release.
+func awaitBuildResult(t *testing.T, sc *tk.Sidecar, deploymentID int64, out map[string]any, release bool) map[string]any {
+	t.Helper()
+	build, ok := out["build"].(map[string]any)
+	if !ok {
+		t.Fatalf("no build in submission: %v", out)
+	}
+	id := build["id"].(float64)
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		status := sc.MCP("deploy_status", map[string]any{"id": deploymentID})
+		if builds, ok := status["builds"].([]any); ok {
+			for _, item := range builds {
+				b, ok := item.(map[string]any)
+				if !ok || b["id"] != id {
+					continue
+				}
+				if b["status"] == "failed" || b["status"] == "cancelled" || b["status"] == "succeeded" {
+					out["build"] = b
+					if !release || b["status"] != "succeeded" {
+						return out
+					}
+					if r, ok := status["current_release"].(map[string]any); ok && r["build_id"] == id && r["status"] == "live" {
+						out["release"] = r
+						return out
+					}
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("build %v did not finish/release: %v", id, sc.MCP("deploy_status", map[string]any{"id": deploymentID}))
+	return out
 }

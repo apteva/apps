@@ -12,7 +12,7 @@ import (
 // provider and Deploy. Provider metadata is required, but never sufficient:
 // Deploy verifies the downloaded bundle and managed signer itself.
 func (a *App) verifyStagedCloudMobileArtifact(d *Deployment, build *Build, distDir string) error {
-	if d == nil || d.TargetKind != "android" {
+	if d == nil || (d.TargetKind != "android" && d.TargetKind != "ios") {
 		return nil
 	}
 	targetJSON := d.TargetConfigJSON
@@ -33,6 +33,26 @@ func (a *App) verifyStagedCloudMobileArtifact(d *Deployment, build *Build, distD
 		}
 		return fmt.Errorf("read Android cloud artifact manifest: %w", err)
 	}
+	primaryPath, err := confinedDownloadArtifactPath(distDir, manifest.Primary)
+	if err != nil {
+		return err
+	}
+	actual, err := verifyMobileBinaryIdentity(primaryPath, d.TargetKind, target)
+	if err != nil {
+		return err
+	}
+	if d.TargetKind == "ios" {
+		if manifest.Platform != "ios" {
+			return errors.New("iOS artifact platform mismatch")
+		}
+		manifest.BundleID = actual.Identifier
+		manifest.VersionName = actual.Version
+		manifest.BuildNumber = actual.Build
+		return writeArtifactManifest(distDir, manifest)
+	}
+	manifest.PackageName = actual.Identifier
+	manifest.VersionName = actual.Version
+	manifest.VersionCode = actual.Build
 	if manifest.Platform != "android" {
 		return fmt.Errorf("Android cloud artifact reports platform %q", manifest.Platform)
 	}

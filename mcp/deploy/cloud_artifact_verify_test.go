@@ -42,7 +42,7 @@ func TestAndroidCloudBuildVerifiesManagedSignerBeforeSuccess(t *testing.T) {
 	app, deployment, platform, input, payload := newAndroidCloudSigningFixture(t)
 	privateKey, certificate := decodeGeneratedAndroidIdentity(t, payload)
 	bundle := filepath.Join(t.TempDir(), "app.aab")
-	writeTestSignedAAB(t, bundle, privateKey, certificate, []byte("payload"), []byte("payload"))
+	writeTestSignedAAB(t, bundle, privateKey, certificate, testAndroidManifest("com.example.android", "1.0", "1"), testAndroidManifest("com.example.android", "1.0", "1"))
 	platform.artifactURL = serveCloudArtifactArchive(t, bundle, artifactManifest{
 		Platform: "android", Primary: "app.aab",
 		SigningContract: mobileSigningArtifactContractVersion,
@@ -116,7 +116,7 @@ func writeUnsignedTestAAB(t *testing.T, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = entry.Write([]byte("unsigned"))
+	_, _ = entry.Write(testAndroidManifest("com.example.android", "1.0", "1"))
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}

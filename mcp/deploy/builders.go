@@ -42,12 +42,7 @@ type BuildOverrides struct {
 // so they override host env on collision — same precedence rule as
 // the runtime's mergeEnv.
 func buildEnv(user map[string]string, extra ...string) []string {
-	out := append([]string{}, os.Environ()...)
-	out = append(out, extra...)
-	for k, v := range user {
-		out = append(out, k+"="+v)
-	}
-	return out
+	return workloadEnv(user, extra...)
 }
 
 // detectFramework picks a builder when the deployment doesn't pin
@@ -120,7 +115,22 @@ func (*goBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.W
 	if ov.BuildCmd != "" {
 		// Honour the override but still write to artifactDir/app so
 		// the runtime knows where to find the binary.
-		return runShellInSrc(buildContext(ov), srcDir, ov.BuildCmd, logW, binPath, ov.Env)
+		if _, err := runShellInSrc(buildContext(ov), srcDir, ov.BuildCmd, logW, binPath, ov.Env); err != nil {
+			return "", err
+		}
+		if !exists(binPath) && exists(filepath.Join(srcDir, "app")) {
+			if err := copyMobileFile(filepath.Join(srcDir, "app"), binPath); err != nil {
+				return "", err
+			}
+			if err := os.Chmod(binPath, 0755); err != nil {
+				return "", err
+			}
+		}
+		info, err := os.Stat(binPath)
+		if err != nil || info.IsDir() || info.Mode()&0111 == 0 {
+			return "", errors.New("Go build_cmd did not produce an executable app artifact")
+		}
+		return binPath, nil
 	}
 	cmd := newBuildCommand(buildContext(ov), "go", args...)
 	cmd.Dir = srcDir
@@ -433,7 +443,7 @@ func (*blankBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW i
 	if ov.BuildCmd == "" {
 		// No build step. The artifact is the source tree itself; the
 		// runtime will run start_cmd against it.
-		if err := copyTree(srcDir, artifactDir); err != nil {
+		if err := copyTreeAll(srcDir, artifactDir); err != nil {
 			return "", err
 		}
 		return "", nil
@@ -447,7 +457,7 @@ func (*blankBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW i
 	if err := c.Run(); err != nil {
 		return "", fmt.Errorf("build_cmd: %w", err)
 	}
-	if err := copyTree(srcDir, artifactDir); err != nil {
+	if err := copyTreeAll(srcDir, artifactDir); err != nil {
 		return "", err
 	}
 	return "", nil
@@ -488,11 +498,7 @@ func newBuildCommand(ctx context.Context, name string, args ...string) *exec.Cmd
 		if cmd.Process == nil {
 			return nil
 		}
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
-			return nil
-		}
-		return err
+		return terminateOwnedGroup(cmd.Process.Pid, processIdentity(cmd.Process.Pid), 5*time.Second)
 	}
 	cmd.WaitDelay = 5 * time.Second
 	return cmd
