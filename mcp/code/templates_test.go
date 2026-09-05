@@ -51,12 +51,12 @@ func TestApplyTemplate_Blank(t *testing.T) {
 	}
 }
 
-func TestApplyTemplate_UnknownFrameworkSilent(t *testing.T) {
+func TestApplyTemplate_UnknownFrameworkRejected(t *testing.T) {
 	store := newMemFileStore()
 	store.CreateRepo("r")
 	count, err := applyTemplate(store, "r", "fortran")
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("expected unavailable template error")
 	}
 	if count != 0 {
 		t.Errorf("unknown framework should write 0 files, wrote %d", count)

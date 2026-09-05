@@ -1,0 +1,4 @@
+import {resolve} from 'node:path';
+const result=await Bun.build({entrypoints:[resolve(import.meta.dir,'browser-entry.tsx')],target:'browser',plugins:[{name:'host-ui-kit',setup(build){build.onResolve({filter:/^(react(\/.*)?|lucide-react)$/},args=>({path:Bun.resolveSync(args.path,resolve(import.meta.dir,"../../../.."))}));build.onResolve({filter:/^@apteva\/ui-kit$/},()=>({path:resolve(import.meta.dir,'../../../../../ui-kit/src/index.ts')}));}}]});
+if(!result.success)throw new Error(result.logs.join('\n'));
+Bun.serve({hostname:'127.0.0.1',port:5389,fetch(request){const path=new URL(request.url).pathname;if(path==='/entry.js')return new Response(result.outputs[0],{headers:{'Content-Type':'text/javascript'}});return new Response('<html><body><div id="root"></div><script type="module" src="/entry.js"></script></body></html>',{headers:{'Content-Type':'text/html'}})}});

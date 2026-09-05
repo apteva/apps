@@ -1,7 +1,8 @@
 package main
 
 import (
-	"errors"
+	"golang.org/x/sys/unix"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -44,22 +45,63 @@ func staticPreviewHandler(repoRoot string) http.Handler {
 type safePreviewFS struct{ root string }
 
 func (s safePreviewFS) Open(name string) (http.File, error) {
-	rootReal, err := filepath.EvalSymlinks(s.root)
+	// Open every component relative to the previous directory descriptor. No
+	// symlink can redirect the lookup, including during a concurrent rename.
+	fd, err := unix.Open(s.root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
-	clean := path.Clean("/" + name)
-	full := filepath.Join(s.root, filepath.FromSlash(strings.TrimPrefix(clean, "/")))
-	real, err := filepath.EvalSymlinks(full)
-	if err != nil {
-		return nil, err
+	parts := strings.Split(strings.TrimPrefix(path.Clean("/"+name), "/"), "/")
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		if previewHidden(part) {
+			_ = unix.Close(fd)
+			return nil, fs.ErrPermission
+		}
+		flags := unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC | unix.O_NONBLOCK
+		if i < len(parts)-1 {
+			flags |= unix.O_DIRECTORY
+		}
+		next, e := unix.Openat(fd, part, flags, 0)
+		_ = unix.Close(fd)
+		if e != nil {
+			return nil, fs.ErrNotExist
+		}
+		fd = next
 	}
-	if real != rootReal && !strings.HasPrefix(real, rootReal+string(filepath.Separator)) {
+	f := os.NewFile(uintptr(fd), name)
+	info, err := f.Stat()
+	if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
+		f.Close()
 		return nil, fs.ErrPermission
 	}
-	file, err := os.Open(real)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, fs.ErrNotExist
+	return previewFile{f}, nil
+}
+func previewHidden(name string) bool {
+	return strings.HasPrefix(name, ".") || strings.EqualFold(name, "node_modules") || strings.EqualFold(name, "package-lock.json") || strings.EqualFold(name, "bun.lockb")
+}
+
+type previewFile struct{ *os.File }
+
+func (f previewFile) Readdir(n int) ([]os.FileInfo, error) {
+	out := []os.FileInfo{}
+	for {
+		entries, err := f.File.Readdir(1)
+		for _, entry := range entries {
+			if !previewHidden(entry.Name()) && entry.Mode()&os.ModeSymlink == 0 && (entry.IsDir() || entry.Mode().IsRegular()) {
+				out = append(out, entry)
+			}
+		}
+		if n > 0 && len(out) >= n {
+			return out, nil
+		}
+		if err != nil {
+			if err == io.EOF && (n <= 0 || len(out) > 0) {
+				err = nil
+			}
+			return out, err
+		}
 	}
-	return file, err
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -87,7 +88,8 @@ func importGitHub(ctx *sdk.AppCtx, store FileStore, in importGitHubInput) (*impo
 	// fully-formed set to detectFramework() before we touch the store.
 	// Streaming straight into the store is fine for production but
 	// makes "no files imported" cleanup awkward.
-	files, err := readGitHubTarball(tarBytes)
+	modes := map[string]os.FileMode{}
+	files, err := readGitHubTarballModes(tarBytes, modes)
 	if err != nil {
 		return nil, err
 	}
@@ -117,12 +119,14 @@ func importGitHub(ctx *sdk.AppCtx, store FileStore, in importGitHubInput) (*impo
 		_ = dbHardDeleteRepo(ctx.AppDB(), pid, slug)
 		return nil, fmt.Errorf("create repo storage: %w", err)
 	}
+	changes := []fileMutation{}
 	for path, body := range files {
-		if _, err := repoStore.Write(slug, path, body); err != nil {
-			_ = repoStore.DropRepo(slug)
-			_ = dbHardDeleteRepo(ctx.AppDB(), pid, slug)
-			return nil, fmt.Errorf("write %s: %w", path, err)
-		}
+		changes = append(changes, fileMutation{Path: path, Body: body, Mode: modes[path]})
+	}
+	if _, err := withRepoWrite(repoStore, slug, func(raw FileStore) (bool, error) { return true, applyFileMutations(raw, slug, changes) }); err != nil {
+		_ = repoStore.DropRepo(slug)
+		_ = dbHardDeleteRepo(ctx.AppDB(), pid, slug)
+		return nil, err
 	}
 
 	bytesWritten := 0
@@ -207,6 +211,9 @@ func decodeBinaryEnvelope(raw json.RawMessage) ([]byte, error) {
 // not a real filesystem). Skips directory entries — folders exist
 // implicitly when a file lives under them.
 func readGitHubTarball(body []byte) (map[string][]byte, error) {
+	return readGitHubTarballModes(body, nil)
+}
+func readGitHubTarballModes(body []byte, modes map[string]os.FileMode) (map[string][]byte, error) {
 	gz, err := gzip.NewReader(bytesReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("gzip: %w", err)
@@ -239,6 +246,13 @@ func readGitHubTarball(body []byte) (map[string][]byte, error) {
 		if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, "/../") {
 			return nil, fmt.Errorf("tar entry escapes root: %q", hdr.Name)
 		}
+		clean, err = normalisePath(clean)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := out[clean]; exists {
+			return nil, fmt.Errorf("duplicate archive path %q", clean)
+		}
 		count++
 		if err := checkImportEntry(limits, clean, hdr.Size, total, count); err != nil {
 			return nil, err
@@ -246,6 +260,9 @@ func readGitHubTarball(body []byte) (map[string][]byte, error) {
 		buf := make([]byte, hdr.Size)
 		if _, err := io.ReadFull(tr, buf); err != nil {
 			return nil, fmt.Errorf("read %s: %w", clean, err)
+		}
+		if modes != nil {
+			modes[clean] = os.FileMode(hdr.Mode).Perm()
 		}
 		out[clean] = buf
 		total += hdr.Size

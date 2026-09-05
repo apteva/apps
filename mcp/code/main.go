@@ -1,13 +1,3 @@
-// Apteva Code v0.1 — repositories with first-class editing tools.
-//
-// Disk layout (LocalFileStore — v0.1 backend):
-//
-//	/data/repos/<slug>/files/<path>       file content
-//	/data/code.db                         repositories metadata
-//
-// v0.2 will swap LocalFileStore for a StorageAppFileStore backed by
-// the Storage app over the cross-app RPC the SDK is gaining. The
-// editing engine and MCP surface stay unchanged.
 package main
 
 import (
@@ -31,209 +21,19 @@ var templatesFS embed.FS
 
 // ─── Embedded manifest ─────────────────────────────────────────────
 
-const manifestYAML = `schema: apteva-app/v1
-name: code
-display_name: Apteva Code
-version: 0.8.2
-description: |
-  Repositories — code workspaces scoped to Apteva projects, with
-  first-class editing tools modelled on Claude Code. Optionally
-  imports repositories from GitHub when a github connection is bound,
-  imports ZIP archives through the UI,
-  renders live repository, source-file, and issue chat cards,
-  synchronizes standard HTTPS Git repositories using optional bound
-  GitHub, GitLab, or Bitbucket connections,
-  renders source with theme-aware syntax highlighting and line numbers,
-  manages native repo issues for bugs, feature requests, and tasks,
-  atomically claims issues for human and agent collaborators,
-  optionally executes finite commands in isolated durable Workspaces,
-  previews workspace-generated source changes and safely applies an explicitly
-  reviewed revision without transferring Git metadata,
-  explicitly tears down linked execution workspaces while retaining Code files,
-  stores per-repository workspace image preferences and forwards allowlisted
-  per-command image overrides without replacing workspaces that have unapplied changes,
-  scopes monorepo workspaces to editable paths plus read-only build inputs,
-  makes grep/read/patch tools more compact for agents with reusable
-  patch previews, targeted rejected-hunk context, and stale-hunk recovery,
-  isolates global repository storage and hardens command/import boundaries,
-  runs finite build/test/lint/generator commands through repos_run_command,
-  unifies project navigation with a Repositories tab,
-  gives the project-wide Issues inbox the full panel width,
-  adds a project-wide Issues inbox in the UI,
-  exposes project-wide issue search for agents,
-  edits issue metadata in a focused modal,
-  presents a compact issue list and chip-based issue metadata controls,
-  separates issue lifecycle state from workflow status,
-  presents Code and Issues as top-level repository tabs,
-  and optionally publishes dev runs at <slug>.<dev_base_hostname>
-  through server-native ingress.
-author: Apteva
-icon: /ui/icon.svg
-icon_style: monochrome
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - platform.connections.execute
-    - platform.connections.read_credentials
-    - platform.apps.call
-    - platform.ingress.write
-  apps:
-    - name: workspaces
-      version: ">=0.5.0"
-      optional: true
-      reason: Provides isolated, durable command execution and generic source transfer while Code remains the repository and Git authority.
-  binaries:
-    - name: git
-      executables: [git]
-      required: true
-      hint: Git 2.23 or newer is required for provider-neutral repository synchronization.
-      sources: {}
-  integrations:
-    - role: git
-      kind: integration
-      mode: multiple
-      required: false
-      compatible_slugs: [github, gitlab, bitbucket]
-      label: Git provider
-      hint: Connect a Git provider to clone and synchronize private repositories. Public HTTPS remotes work without one.
-      capabilities: [git.clone, git.fetch, git.push]
-    - role: github
-      kind: integration
-      required: false
-      compatible_slugs: [github]
-      label: GitHub
-      hint: Connect GitHub to import repositories. Optional — local templates work without it.
-      capabilities: [repo.import]
-      tools:
-        list_repos:  list_repos
-        get_archive: get_archive
-        get_repo:    get_repo
-    - role: simulator
-      kind: app
-      required: false
-      compatible_app_names: [simulator]
-      label: Simulator app
-      hint: Install the Simulator app to run iOS/Android repos. repos_dev_start delegates mobile frameworks to it automatically.
-      capabilities: [sim.run]
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - { name: repos_list,             description: "List repositories in this project." }
-    - { name: repos_create,           description: "Create a repository from a template." }
-    - { name: repos_get,              description: "Repository metadata + tree summary." }
-    - { name: repos_archive,          description: "Archive (or hard-delete) a repository." }
-    - { name: repos_set_deploy_hints, description: "Set build_cmd / start_cmd / port / env_json." }
-    - { name: repos_set_workspace_image, description: "Set or clear a repository's preferred workspace image." }
-    - { name: repos_export,           description: "Export a repo as a zip; returns base64 bytes for cross-app calls." }
-    - { name: code_list_files,        description: "List files in a repository." }
-    - { name: code_glob,              description: "Find files by glob pattern." }
-    - { name: code_grep,              description: "Search file contents compactly; defaults to file paths." }
-    - { name: code_read_file,         description: "Read small paged slices with line numbers; supports offset+limit." }
-    - { name: code_read_excerpt,      description: "Read targeted excerpts around lines, ranges, starts, or tails." }
-    - { name: code_file_outline,      description: "Return compact Markdown/code structure with line numbers." }
-    - { name: code_write_file,        description: "Write or overwrite a file (full content)." }
-    - { name: code_apply_patch,       description: "Apply unified diffs with dry-run preview support." }
-    - { name: code_edit_file,         description: "Exact-string replacement; uniqueness enforced." }
-    - { name: code_multi_edit,        description: "Multiple edits to one file, atomic." }
-    - { name: code_rename_path,       description: "Move or rename a file or folder." }
-    - { name: code_delete_file,       description: "Delete a file or folder." }
-    - { name: repos_mark_template,    description: "Flip a repo into being a template (and set scope)." }
-    - { name: repos_unmark_template,  description: "Clear template flag on a repo. Existing forks unaffected." }
-    - { name: templates_list,         description: "List user templates visible to this project + embedded ones." }
-    - { name: repos_fork,             description: "Create a new repo by snapshot-copying a template or another repo." }
-    - { name: repos_import_github,    description: "Import a GitHub repo as a local repository (gzip tarball snapshot)." }
-    - { name: repos_git_import,       description: "Clone a standard HTTPS Git remote with history and upstream tracking." }
-    - { name: repos_git_connect,      description: "Safely connect an existing Code repository to a Git remote." }
-    - { name: repos_git_status,       description: "Get branch, upstream, ahead/behind, and working-tree changes." }
-    - { name: repos_git_fetch,        description: "Fetch origin refs without changing checked-out files." }
-    - { name: repos_git_pull,         description: "Fetch and fast-forward the current clean branch." }
-    - { name: repos_git_commit,       description: "Commit selected or all visible Code changes." }
-    - { name: repos_git_push,         description: "Push the current branch without force." }
-    - { name: repos_git_diff,         description: "Return a bounded unified diff." }
-    - { name: repos_git_log,          description: "List recent Git commits." }
-    - { name: repos_git_branches,     description: "List local and origin-tracking branches." }
-    - { name: repos_git_branch_create, description: "Create a local branch without switching to it." }
-    - { name: repos_git_switch,       description: "Switch to an existing clean local branch." }
-    - { name: repos_dev_start,        description: "Start a long-running dev preview server for a repo." }
-    - { name: repos_run_command,      description: "Run a finite repo command locally or in an isolated workspace with optional editable and read-only monorepo path scopes." }
-    - { name: repos_workspace_changes, description: "Preview source changes produced in the linked execution workspace, including revision conflicts." }
-    - { name: repos_workspace_apply, description: "Safely apply an explicitly previewed workspace source revision back to Code." }
-    - { name: repos_workspace_destroy, description: "Permanently destroy and unlink a repository's execution workspace while retaining Code files." }
-    - { name: repos_dev_stop,         description: "Stop the dev process for a repo." }
-    - { name: repos_dev_status,       description: "Get the current dev run state (port, pid, status, framework)." }
-    - { name: repos_dev_logs,         description: "Tail the dev run's stdout/stderr log file." }
-    - { name: issues_list,            description: "List native Code issues for a repository, including their current claims. Claim an unclaimed issue before starting work." }
-    - { name: issues_search,          description: "Search native Code issues and their current claims across all repositories in a project." }
-    - { name: issues_get,             description: "Get a native Code issue with comments, links, and activity." }
-    - { name: issues_claim,           description: "Atomically claim an open issue for the authenticated agent or user before starting work." }
-    - { name: issues_release,         description: "Release the authenticated caller's issue claim; closing an issue releases it automatically." }
-    - { name: issues_create,          description: "Create a native Code issue." }
-    - { name: issues_update,          description: "Update native Code issue fields." }
-    - { name: issues_comment,         description: "Add a comment to a native Code issue." }
-    - { name: issues_close,           description: "Close a native Code issue." }
-    - { name: issues_reopen,          description: "Reopen a native Code issue." }
-    - { name: issues_link_path,       description: "Link an issue to a repository path or line range." }
-  ui_panels:
-    - { slot: project.page, label: "Code", icon: code, entry: /ui/CodePanel.mjs }
-  ui_components:
-    - name: repository-card
-      entry: /ui/RepositoryCard.mjs
-      slots: [chat.message_attachment]
-      props_schema:
-        type: object
-        required: [repo]
-        properties:
-          repo: { type: string }
-      preview_props: { preview: true, repo: apteva-site }
-    - name: source-file-card
-      entry: /ui/SourceFileCard.mjs
-      slots: [chat.message_attachment]
-      props_schema:
-        type: object
-        required: [repo, path]
-        properties:
-          repo: { type: string }
-          path: { type: string }
-          line_start: { type: integer, minimum: 1 }
-          line_end: { type: integer, minimum: 1 }
-          expected_sha256: { type: string }
-      preview_props: { preview: true, repo: apteva-site, path: src/App.tsx, line_start: 12, line_end: 14 }
-    - name: issue-card
-      entry: /ui/IssueCard.mjs
-      slots: [chat.message_attachment]
-      props_schema:
-        type: object
-        required: [repo, issue_number]
-        properties:
-          repo: { type: string }
-          issue_number: { type: integer, minimum: 1 }
-      preview_props: { preview: true, repo: apteva-site, issue_number: 42 }
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/code
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/code.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 // ─── App ───────────────────────────────────────────────────────────
 
 type App struct {
-	store    FileStore
-	dataDir  string
-	dev      *devSupervisor
-	commands commandCoordinator
-	git      *gitService
-	locks    *repoLockSet
+	store     FileStore
+	dataDir   string
+	dev       *devSupervisor
+	commands  commandCoordinator
+	git       *gitService
+	locks     *repoLockSet
+	summaries summaryCache
 }
 
 var globalCtx *sdk.AppCtx
@@ -307,6 +107,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.commands.cancelAll()
 	if a.dev != nil {
 		a.dev.stopAll()
 	}
@@ -389,9 +190,25 @@ func writeZip(w http.ResponseWriter, store FileStore, slug string) error {
 // Same skip list Deploy's kind=local fetcher already uses, so a
 // kind=code fetch and a kind=local fetch produce equivalent trees.
 func zipRepo(w io.Writer, store FileStore, slug string) error {
-	files, err := store.List(slug, "", true)
+	_, err := withRepoWrite(store, slug, func(raw FileStore) (bool, error) { return true, zipRepoUnlocked(w, raw, slug) })
+	return err
+}
+func zipRepoUnlocked(w io.Writer, store FileStore, slug string) error {
+	files, err := listSourceFiles(store, slug, "", true, false)
 	if err != nil {
 		return err
+	}
+	var total int64
+	for _, f := range files {
+		if !f.IsDir {
+			if f.Size > maxFileBytes() {
+				return fmt.Errorf("file %s exceeds export size limit", f.Path)
+			}
+			total += f.Size
+		}
+	}
+	if total > currentImportLimits().TotalBytes {
+		return errors.New("repository source exceeds export limit; export a smaller source scope")
 	}
 	zw := zip.NewWriter(w)
 	defer zw.Close()
@@ -407,6 +224,11 @@ func zipRepo(w io.Writer, store FileStore, slug string) error {
 			return err
 		}
 		hdr := &zip.FileHeader{Name: f.Path, Method: zip.Deflate}
+		mode := os.FileMode(f.Mode)
+		if mode == 0 {
+			mode = 0644
+		}
+		hdr.SetMode(mode)
 		fw, err := zw.CreateHeader(hdr)
 		if err != nil {
 			return err
@@ -415,23 +237,29 @@ func zipRepo(w io.Writer, store FileStore, slug string) error {
 			return err
 		}
 	}
-	return nil
+	return zw.Close()
 }
 
 // shouldSkipForExport drops dev/build cache directories so exports
 // stay source-only. A path is skipped if any of its segments names a
 // well-known dev artifact dir.
-func shouldSkipForExport(rel string) bool {
-	for _, seg := range strings.Split(rel, "/") {
-		switch strings.ToLower(seg) {
-		case "node_modules", ".next", ".git", "dist", "build", ".cache":
-			return true
-		}
-	}
-	return false
-}
+func shouldSkipForExport(rel string) bool { return shouldSkipGenerated(rel) }
 
 func shouldSkipGenerated(rel string) bool {
+	if raw, ok := os.LookupEnv("CODE_SOURCE_EXCLUDE_DIRS"); ok {
+		names := strings.Split(raw, ",")
+		for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+			if seg == ".git" {
+				return true
+			}
+			for _, name := range names {
+				if seg == strings.TrimSpace(name) {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
 		switch seg {
 		case "node_modules", ".git", ".next", ".nuxt", ".cache", ".turbo",
@@ -472,6 +300,9 @@ func listSourceFiles(store FileStore, slug, path string, recursive, includeGener
 
 // readZipInto unpacks a zip into a repo via the store. Used by import.
 func readZipInto(store FileStore, slug string, zr *zip.Reader) (int, error) {
+	return withRepoWrite(store, slug, func(raw FileStore) (int, error) { return readZipIntoUnlocked(raw, slug, zr) })
+}
+func readZipIntoUnlocked(store FileStore, slug string, zr *zip.Reader) (int, error) {
 	count := 0
 	var total int64
 	limits := currentImportLimits()
@@ -480,6 +311,7 @@ func readZipInto(store FileStore, slug string, zr *zip.Reader) (int, error) {
 		body []byte
 	}
 	pending := make([]pendingFile, 0, len(zr.File))
+	modes := map[string]os.FileMode{}
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() {
 			continue
@@ -496,6 +328,16 @@ func readZipInto(store FileStore, slug string, zr *zip.Reader) (int, error) {
 		clean, err := normalisePath(name)
 		if err != nil {
 			return count, fmt.Errorf("zip entry %q: %w", f.Name, err)
+		}
+		if _, exists := modes[clean]; exists {
+			return 0, fmt.Errorf("duplicate archive path %q", clean)
+		}
+		if f.Mode()&os.ModeSymlink != 0 {
+			return 0, errors.New("ZIP symlinks are not supported; use Git or workspace transfer")
+		}
+		modes[clean] = f.Mode().Perm()
+		if modes[clean] == 0 {
+			modes[clean] = 0644
 		}
 		count++
 		size := int64(f.UncompressedSize64)
@@ -518,10 +360,12 @@ func readZipInto(store FileStore, slug string, zr *zip.Reader) (int, error) {
 		pending = append(pending, pendingFile{path: clean, body: body})
 		total += size
 	}
+	changes := make([]fileMutation, 0, len(pending))
 	for _, file := range pending {
-		if _, err := store.Write(slug, file.path, file.body); err != nil {
-			return 0, err
-		}
+		changes = append(changes, fileMutation{Path: file.path, Body: file.body, Mode: modes[file.path]})
+	}
+	if err := applyFileMutations(store, slug, changes); err != nil {
+		return 0, err
 	}
 	return count, nil
 }

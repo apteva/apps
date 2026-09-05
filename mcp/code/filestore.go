@@ -70,6 +70,7 @@ type FileMeta struct {
 	Path    string `json:"path"` // repo-relative, forward slashes
 	Size    int64  `json:"size"`
 	SHA256  string `json:"sha256,omitempty"`
+	Mode    uint32 `json:"mode,omitempty"`
 	ModTime int64  `json:"mod_time"` // unix seconds
 	IsDir   bool   `json:"is_dir,omitempty"`
 }
@@ -164,6 +165,13 @@ func (s *LocalFileStore) Read(slug, relPath string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	info, err := os.Stat(full)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxFileBytes() {
+		return nil, errors.New("file is not a regular file or exceeds configured size limit")
+	}
 	return os.ReadFile(full)
 }
 
@@ -181,27 +189,57 @@ func (s *LocalFileStore) Stat(slug, relPath string) (FileMeta, error) {
 		Size:    info.Size(),
 		ModTime: info.ModTime().Unix(),
 		IsDir:   info.IsDir(),
+		Mode:    uint32(info.Mode().Perm()),
 	}
-	if !info.IsDir() {
-		// Stat is also called by code_read_file's caller chain to get
-		// sha256 for the read-receipt check; compute it here so the
-		// caller doesn't need a second read.
-		b, err := os.ReadFile(full)
-		if err == nil {
-			h := sha256.Sum256(b)
-			meta.SHA256 = hex.EncodeToString(h[:])
+	if info.Mode().IsRegular() {
+		if info.Size() > maxFileBytes() {
+			return meta, nil
 		}
+		f, err := os.Open(full)
+		if err != nil {
+			return FileMeta{}, err
+		}
+		defer f.Close()
+		hash := sha256.New()
+		if _, err = io.Copy(hash, f); err != nil {
+			return FileMeta{}, err
+		}
+		meta.SHA256 = hex.EncodeToString(hash.Sum(nil))
 	}
 	return meta, nil
 }
 
 func (s *LocalFileStore) Write(slug, relPath string, content []byte) (FileMeta, error) {
+	if int64(len(content)) > maxFileBytes() {
+		return FileMeta{}, errors.New("file exceeds configured size limit")
+	}
 	full, err := s.resolve(slug, relPath)
 	if err != nil {
 		return FileMeta{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return FileMeta{}, err
+	}
+	mode := os.FileMode(0644)
+	oldSize := int64(0)
+	if info, e := os.Lstat(full); e == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return FileMeta{}, errors.New("replace symlinks explicitly through workspace source operations")
+		}
+		if !info.Mode().IsRegular() {
+			return FileMeta{}, errors.New("destination is not a regular file")
+		}
+		mode = info.Mode().Perm()
+		oldSize = info.Size()
+	}
+	if int64(len(content)) > oldSize {
+		total, e := s.TotalSize(slug)
+		if e != nil {
+			return FileMeta{}, e
+		}
+		if total-oldSize+int64(len(content)) > maxRepoBytes() {
+			return FileMeta{}, errors.New("repository exceeds configured size limit")
+		}
 	}
 	// Atomic write: temp file + rename, both in the same dir so it's
 	// a same-filesystem rename (always atomic on posix).
@@ -217,6 +255,10 @@ func (s *LocalFileStore) Write(slug, relPath string, content []byte) (FileMeta, 
 		}
 	}()
 	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return FileMeta{}, err
+	}
+	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
 		return FileMeta{}, err
 	}
@@ -272,6 +314,14 @@ func (s *LocalFileStore) Move(slug, src, dst string) ([]string, error) {
 	dstFull, err := s.resolve(slug, dst)
 	if err != nil {
 		return nil, err
+	}
+	if dstInfo, e := os.Lstat(dstFull); e == nil {
+		srcInfo, se := os.Lstat(srcFull)
+		if se != nil || !os.SameFile(srcInfo, dstInfo) {
+			return nil, fmt.Errorf("%w: destination exists", errRevisionConflict)
+		}
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return nil, e
 	}
 	info, err := os.Stat(srcFull)
 	if err != nil {
@@ -361,6 +411,7 @@ func (s *LocalFileStore) list(slug, relPrefix string, recursive, skipGenerated b
 				Path:    filepath.ToSlash(rel),
 				Size:    info.Size(),
 				ModTime: info.ModTime().Unix(),
+				Mode:    uint32(info.Mode().Perm()),
 			})
 			return nil
 		})

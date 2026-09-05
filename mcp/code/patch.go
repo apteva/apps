@@ -14,6 +14,7 @@ import (
 
 type PatchFileResult struct {
 	Path      string `json:"path"`
+	Relocated []int  `json:"relocated_hunks,omitempty"`
 	Hunks     int    `json:"hunks"`
 	OldSHA256 string `json:"old_sha256,omitempty"`
 	NewSHA256 string `json:"new_sha256,omitempty"`
@@ -46,11 +47,14 @@ type patchFile struct {
 }
 
 type patchHunk struct {
-	oldStart int
-	oldCount int
-	newStart int
-	newCount int
-	lines    []string
+	oldStart   int
+	oldCount   int
+	newStart   int
+	newCount   int
+	lines      []string
+	oldNoNL    bool
+	newNoNL    bool
+	allowFuzzy bool
 }
 
 var hunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
@@ -61,6 +65,8 @@ type patchPreview struct {
 	Slug      string
 	Patch     string
 	CreatedAt time.Time
+	Expected  map[string]string
+	Fuzzy     bool
 }
 
 var patchPreviewStore = struct {
@@ -69,6 +75,17 @@ var patchPreviewStore = struct {
 }{items: map[string]patchPreview{}}
 
 func applyUnifiedPatch(store FileStore, slug, patch string, dryRun bool) (*PatchResult, error) {
+	return applyUnifiedPatchOptions(store, slug, patch, dryRun, false)
+}
+func applyUnifiedPatchOptions(store FileStore, slug, patch string, dryRun, fuzzy bool) (*PatchResult, error) {
+	return withRepoWrite(store, slug, func(raw FileStore) (*PatchResult, error) {
+		return applyUnifiedPatchUnlocked(raw, slug, patch, dryRun, fuzzy)
+	})
+}
+func applyUnifiedPatchUnlocked(store FileStore, slug, patch string, dryRun, fuzzy bool) (*PatchResult, error) {
+	if int64(len(patch)) > maxFileBytes()*2 {
+		return nil, errors.New("patch exceeds configured size limit")
+	}
 	files, err := parseUnifiedPatch(patch)
 	if err != nil {
 		return nil, err
@@ -83,6 +100,7 @@ func applyUnifiedPatch(store FileStore, slug, patch string, dryRun bool) (*Patch
 		deleted bool
 	}
 	pending := []pendingWrite{}
+	seen := map[string]bool{}
 	for _, pf := range files {
 		path := pf.newPath
 		if path == "/dev/null" {
@@ -95,10 +113,30 @@ func applyUnifiedPatch(store FileStore, slug, patch string, dryRun bool) (*Patch
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
+		if len(pf.hunks) == 0 {
+			return nil, errors.New("file section has no hunks; binary or mode-only patches are unsupported")
+		}
+		if seen[clean] {
+			return nil, fmt.Errorf("duplicate patch section for %s", clean)
+		}
+		seen[clean] = true
+		if pf.oldPath != "/dev/null" && pf.newPath != "/dev/null" && pf.oldPath != pf.newPath {
+			return nil, errors.New("patch renames are unsupported; use move")
+		}
+		for i := range pf.hunks {
+			pf.hunks[i].allowFuzzy = fuzzy
+		}
 		oldBody := []byte{}
 		oldSHA := ""
 		created := pf.oldPath == "/dev/null"
 		deleted := pf.newPath == "/dev/null"
+		if created {
+			if occupied, e := sourcePathExists(store, slug, clean); occupied {
+				return nil, fmt.Errorf("%w: %s exists", errRevisionConflict, clean)
+			} else if e != nil {
+				return nil, e
+			}
+		}
 		if !created {
 			body, sha, err := readWithSHA(store, slug, clean)
 			if err != nil {
@@ -107,7 +145,8 @@ func applyUnifiedPatch(store FileStore, slug, patch string, dryRun bool) (*Patch
 			oldBody = body
 			oldSHA = sha
 		}
-		nextBody, err := applyFilePatch(oldBody, pf.hunks)
+		relocated := []int{}
+		nextBody, err := applyFilePatchReport(oldBody, pf.hunks, &relocated)
 		if err != nil {
 			result.Applied = false
 			result.RejectedHunks = append(result.RejectedHunks, fmt.Sprintf("%s: %v", clean, err))
@@ -123,6 +162,7 @@ func applyUnifiedPatch(store FileStore, slug, patch string, dryRun bool) (*Patch
 		}
 		result.ChangedFiles = append(result.ChangedFiles, PatchFileResult{
 			Path:      clean,
+			Relocated: relocated,
 			Hunks:     len(pf.hunks),
 			OldSHA256: oldSHA,
 			NewSHA256: newSHA,
@@ -133,25 +173,22 @@ func applyUnifiedPatch(store FileStore, slug, patch string, dryRun bool) (*Patch
 		pending = append(pending, pendingWrite{path: clean, body: nextBody, deleted: deleted})
 	}
 	if dryRun {
-		id := patchPreviewID(slug, patch)
-		storePatchPreview(id, slug, patch)
+		id := patchPreviewID(slug, patch+fmt.Sprintf("%d", time.Now().UnixNano()))
+		preview := patchPreview{Slug: slug, Patch: patch, CreatedAt: time.Now(), Expected: map[string]string{}, Fuzzy: fuzzy}
+		for _, f := range result.ChangedFiles {
+			preview.Expected[f.Path] = f.OldSHA256
+		}
+		storePatchPreview(id, preview)
 		result.PatchID = id
 		result.Hint = "dry run succeeded; call code_apply_patch again with the same slug and patch_id to apply this exact patch"
 		return result, nil
 	}
-	for i, p := range pending {
-		if p.deleted {
-			if err := store.Delete(slug, p.path); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		meta, err := store.Write(slug, p.path, p.body)
-		if err != nil {
-			return nil, err
-		}
-		result.ChangedFiles[i].NewSHA256 = meta.SHA256
-		result.ChangedFiles[i].NewSize = meta.Size
+	changes := make([]fileMutation, 0, len(pending))
+	for _, p := range pending {
+		changes = append(changes, fileMutation{Path: p.path, Body: p.body, Delete: p.deleted})
+	}
+	if err := applyFileMutations(store, slug, changes); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -161,7 +198,7 @@ func patchPreviewID(slug, patch string) string {
 	return hex.EncodeToString(sum[:])[:24]
 }
 
-func storePatchPreview(id, slug, patch string) {
+func storePatchPreview(id string, preview patchPreview) {
 	patchPreviewStore.Lock()
 	defer patchPreviewStore.Unlock()
 	now := time.Now()
@@ -170,7 +207,26 @@ func storePatchPreview(id, slug, patch string) {
 			delete(patchPreviewStore.items, k)
 		}
 	}
-	patchPreviewStore.items[id] = patchPreview{Slug: slug, Patch: patch, CreatedAt: now}
+	totalBytes := len(preview.Patch)
+	for _, item := range patchPreviewStore.items {
+		totalBytes += len(item.Patch)
+	}
+	for len(patchPreviewStore.items) >= 128 || totalBytes > 32<<20 {
+		var oldest string
+		var at time.Time
+		for k, v := range patchPreviewStore.items {
+			if oldest == "" || v.CreatedAt.Before(at) {
+				oldest = k
+				at = v.CreatedAt
+			}
+		}
+		if oldest == "" {
+			break
+		}
+		totalBytes -= len(patchPreviewStore.items[oldest].Patch)
+		delete(patchPreviewStore.items, oldest)
+	}
+	patchPreviewStore.items[id] = preview
 }
 
 func loadPatchPreview(id, slug string) (string, error) {
@@ -259,27 +315,43 @@ func parseUnifiedPatch(patch string) ([]patchFile, error) {
 		if err != nil {
 			return nil, fmt.Errorf("line %d: %w", i+1, err)
 		}
-		i++
-		for ; i < len(lines); i++ {
-			if strings.HasPrefix(lines[i], "@@ ") || strings.HasPrefix(lines[i], "--- ") {
-				i--
-				break
+		oldN, newN := 0, 0
+		for oldN < h.oldCount || newN < h.newCount {
+			i++
+			if i >= len(lines) || lines[i] == "" {
+				return nil, fmt.Errorf("line %d: hunk shorter than declared counts", i+1)
 			}
-			if i == len(lines)-1 && lines[i] == "" {
-				break
+			row := lines[i]
+			if row == `\ No newline at end of file` {
+				return nil, fmt.Errorf("line %d: misplaced newline marker", i+1)
 			}
-			if strings.HasPrefix(lines[i], `\ No newline at end of file`) {
-				continue
+			switch row[0] {
+			case ' ':
+				oldN++
+				newN++
+			case '-':
+				oldN++
+			case '+':
+				newN++
+			default:
+				return nil, fmt.Errorf("line %d: invalid hunk prefix", i+1)
 			}
-			if lines[i] == "" {
-				h.lines = append(h.lines, " ")
-				continue
+			if oldN > h.oldCount || newN > h.newCount {
+				return nil, fmt.Errorf("line %d: hunk exceeds declared counts", i+1)
 			}
-			prefix := lines[i][0]
-			if prefix != ' ' && prefix != '+' && prefix != '-' {
-				return nil, fmt.Errorf("line %d: invalid hunk line prefix %q", i+1, prefix)
+			h.lines = append(h.lines, row)
+			if i+1 < len(lines) && lines[i+1] == `\ No newline at end of file` {
+				if row[0] != '+' {
+					h.oldNoNL = true
+				}
+				if row[0] != '-' {
+					h.newNoNL = true
+				}
+				i++
 			}
-			h.lines = append(h.lines, lines[i])
+		}
+		if i+1 < len(lines) && len(lines[i+1]) > 0 && (lines[i+1][0] == ' ' || lines[i+1][0] == '+' || lines[i+1][0] == '-') && !strings.HasPrefix(lines[i+1], "--- ") {
+			return nil, fmt.Errorf("line %d: hunk exceeds declared counts", i+2)
 		}
 		cur.hunks = append(cur.hunks, h)
 	}
@@ -291,25 +363,43 @@ func parseHunkHeader(line string) (patchHunk, error) {
 	if m == nil {
 		return patchHunk{}, fmt.Errorf("invalid hunk header %q", line)
 	}
-	oldStart, _ := strconv.Atoi(m[1])
+	oldStart, err := strconv.Atoi(m[1])
+	if err != nil {
+		return patchHunk{}, err
+	}
 	oldCount := 1
 	if m[2] != "" {
-		oldCount, _ = strconv.Atoi(m[2])
+		oldCount, err = strconv.Atoi(m[2])
+		if err != nil {
+			return patchHunk{}, err
+		}
 	}
-	newStart, _ := strconv.Atoi(m[3])
+	newStart, err := strconv.Atoi(m[3])
+	if err != nil {
+		return patchHunk{}, err
+	}
 	newCount := 1
 	if m[4] != "" {
-		newCount, _ = strconv.Atoi(m[4])
+		newCount, err = strconv.Atoi(m[4])
+		if err != nil {
+			return patchHunk{}, err
+		}
+	}
+	if (oldStart == 0 && oldCount > 0) || (newStart == 0 && newCount > 0) {
+		return patchHunk{}, errors.New("invalid zero-based nonempty range")
 	}
 	return patchHunk{oldStart: oldStart, oldCount: oldCount, newStart: newStart, newCount: newCount}, nil
 }
 
 func patchPath(raw string) string {
-	p := strings.Fields(raw)
-	if len(p) == 0 {
-		return ""
+	path := strings.SplitN(raw, "\t", 2)[0]
+	if strings.HasPrefix(path, `"`) {
+		decoded, err := strconv.Unquote(path)
+		if err != nil {
+			return ""
+		}
+		path = decoded
 	}
-	path := strings.Trim(p[0], `"`)
 	if path == "/dev/null" {
 		return path
 	}
@@ -319,29 +409,51 @@ func patchPath(raw string) string {
 }
 
 func applyFilePatch(body []byte, hunks []patchHunk) ([]byte, error) {
+	return applyFilePatchReport(body, hunks, nil)
+}
+func applyFilePatchReport(body []byte, hunks []patchHunk, relocated *[]int) ([]byte, error) {
 	lines, trailingNL := patchSplitLines(string(body))
 	out := make([]string, 0, len(lines))
 	cursor := 0
 	for idx, h := range hunks {
 		start := h.oldStart - 1
-		if h.oldStart == 0 {
-			start = 0
+		if h.oldCount == 0 {
+			start = h.oldStart
 		}
 		if start < cursor || start > len(lines) {
 			return nil, patchApplyError{Hunk: idx + 1, OldLine: start + 1, Reason: "starts outside file"}
+		}
+		wantNew := len(out) + start - cursor
+		if h.newCount > 0 {
+			wantNew++
+		}
+		if !h.allowFuzzy && h.newStart != wantNew {
+			return nil, patchApplyError{Hunk: idx + 1, Reason: "inconsistent new range position"}
 		}
 		applied, err := applyHunk(lines, cursor, start, h)
 		if err != nil {
 			return nil, withHunkNumber(err, idx+1)
 		}
+		if relocated != nil && (start != applied.start || applied.drifts > 0) {
+			*relocated = append(*relocated, idx+1)
+		}
 		start = applied.start
 		out = append(out, lines[cursor:start]...)
 		out = append(out, applied.lines...)
+		if h.oldNoNL && (applied.next != len(lines) || trailingNL) {
+			return nil, fmt.Errorf("invalid old newline marker")
+		}
+		if applied.next == len(lines) {
+			trailingNL = !h.newNoNL
+		}
+		if h.newNoNL && applied.next != len(lines) {
+			return nil, fmt.Errorf("new newline marker must be at EOF")
+		}
 		cursor = applied.next
 	}
 	out = append(out, lines[cursor:]...)
 	joined := strings.Join(out, "\n")
-	if trailingNL || len(out) > 0 {
+	if trailingNL && len(out) > 0 {
 		joined += "\n"
 	}
 	return []byte(joined), nil
@@ -358,6 +470,9 @@ func applyHunk(lines []string, cursor, nominalStart int, h patchHunk) (hunkApply
 	res, firstErr := applyHunkAt(lines, nominalStart, h, false)
 	if firstErr == nil {
 		return res, nil
+	}
+	if !h.allowFuzzy {
+		return hunkApplyResult{}, firstErr
 	}
 	if res, ok := findStrictHunkLocation(lines, cursor, nominalStart, h); ok {
 		return res, nil
@@ -530,4 +645,27 @@ func patchSplitLines(body string) ([]string, bool) {
 		lines = lines[:len(lines)-1]
 	}
 	return lines, trailingNL
+}
+
+func applyPatchPreview(store FileStore, slug, id string) (*PatchResult, error) {
+	patchPreviewStore.Lock()
+	preview, ok := patchPreviewStore.items[id]
+	patchPreviewStore.Unlock()
+	if !ok || preview.Slug != slug || time.Since(preview.CreatedAt) > 30*time.Minute {
+		return nil, errors.New("patch preview missing, expired, or belongs to another repository")
+	}
+	patch := preview.Patch
+	return withRepoWrite(store, slug, func(raw FileStore) (*PatchResult, error) {
+		for path, expected := range preview.Expected {
+			meta, err := raw.Stat(slug, path)
+			if expected == "" {
+				if occupied, e := sourcePathExists(raw, slug, path); e != nil || occupied {
+					return nil, errRevisionConflict
+				}
+			} else if err != nil || meta.SHA256 != expected {
+				return nil, errRevisionConflict
+			}
+		}
+		return applyUnifiedPatchUnlocked(raw, slug, patch, false, preview.Fuzzy)
+	})
 }

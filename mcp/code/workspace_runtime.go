@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+
 	"sort"
 	"strings"
 	"time"
@@ -85,10 +87,7 @@ func (a *App) prepareExecutionWorkspace(callCtx context.Context, app *sdk.AppCtx
 	}
 	workspaceSnapshot, err := a.exportExecutionWorkspace(app, link.WorkspaceID)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "not found") || strings.Contains(strings.ToLower(err.Error()), "destroy") {
-			_ = dbDeleteRepoWorkspace(app.AppDB(), repo.ProjectID, repo.ID)
-			return a.createExecutionWorkspace(callCtx, app, repo, profile, image, workspacePaths, supportPaths, codeSnapshot)
-		}
+
 		return nil, err
 	}
 	profileChanged := link.Profile != profile
@@ -192,15 +191,7 @@ func (a *App) syncExecutionWorkspace(app *sdk.AppCtx, link *RepoWorkspace, snaps
 		"source_paths": snapshot.Paths,
 	}, &out)
 	if err != nil {
-		var destroyed map[string]any
-		destroyErr := app.PlatformAPI().CallAppResult(workspacesAppName, "workspace_destroy", map[string]any{
-			"workspace_id": link.WorkspaceID, "confirm": true,
-		}, &destroyed)
-		_ = dbDeleteRepoWorkspace(app.AppDB(), link.ProjectID, link.RepoID)
-		if destroyErr != nil {
-			return fmt.Errorf("sync Code source to workspace: %w; the partial workspace could not be destroyed: %v", err, destroyErr)
-		}
-		return fmt.Errorf("sync Code source to workspace: %w; the partial workspace was destroyed and will be recreated on the next run", err)
+		return fmt.Errorf("sync Code source to workspace: %w; workspace and its source link were preserved; preview and reconcile the changes before retrying", err)
 	}
 	return nil
 }
@@ -240,37 +231,92 @@ func sourceProfile(repo *Repo, snapshot *sourceSnapshot) string {
 	if _, ok := snapshot.Entries["requirements.txt"]; ok || repo.Framework == "python" {
 		return "python"
 	}
+	if _, ok := snapshot.Entries["pyproject.toml"]; ok {
+		return "python"
+	}
 	return "go"
 }
 
 func dependencyPlan(snapshot *sourceSnapshot) (string, string) {
-	paths := []string{"package.json", "bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "go.mod", "go.sum", "requirements.txt", "pyproject.toml", "uv.lock"}
+	names := map[string]bool{}
+	for _, name := range []string{"package.json", "bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "yarn.lock", "go.mod", "go.sum", "go.work", "go.work.sum", "requirements.txt", "pyproject.toml", "uv.lock"} {
+		names[name] = true
+	}
+	paths := []string{}
+	for path := range snapshot.Entries {
+		if names[filepath.Base(path)] {
+			paths = append(paths, path)
+		}
+	}
+	sort.Strings(paths)
 	h := sha256.New()
 	for _, path := range paths {
-		if entry, ok := snapshot.Entries[path]; ok {
-			fmt.Fprintf(h, "%s\x00%s\n", path, shaOf(entry.Data))
+		fmt.Fprintf(h, "%s\x00%s\n", path, shaOf(snapshot.Entries[path].Data))
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		a, b := strings.Count(paths[i], "/"), strings.Count(paths[j], "/")
+		if a != b {
+			return a < b
+		}
+		return paths[i] < paths[j]
+	})
+	commands := []string{}
+	jsRoots := []string{}
+	for _, path := range paths {
+		base, dir := filepath.Base(path), filepath.ToSlash(filepath.Dir(path))
+		command := ""
+		exists := func(name string) bool {
+			_, ok := snapshot.Entries[filepath.ToSlash(filepath.Join(dir, name))]
+			return ok
+		}
+		switch base {
+		case "package.json":
+			covered := false
+			for _, root := range jsRoots {
+				if root == "." || strings.HasPrefix(dir, root+"/") {
+					covered = true
+				}
+			}
+			if covered {
+				continue
+			}
+			jsRoots = append(jsRoots, dir)
+			command = "bun install"
+			if exists("bun.lock") || exists("bun.lockb") {
+				command += " --frozen-lockfile"
+			}
+		case "go.mod":
+			command = "go mod download"
+		case "requirements.txt":
+			command = "python -m pip install -r requirements.txt"
+		case "pyproject.toml":
+			if exists("requirements.txt") {
+				continue
+			}
+			if exists("uv.lock") {
+				command = "uv sync --frozen"
+			} else {
+				command = "python -m pip install ."
+			}
+		}
+		if command != "" {
+			if dir != "." {
+				command = "(cd " + shellQuote(dir) + " && " + command + ")"
+			}
+			commands = append(commands, command)
 		}
 	}
-	digest := fmt.Sprintf("%x", h.Sum(nil))
-	if _, ok := snapshot.Entries["package.json"]; ok {
-		if _, ok := snapshot.Entries["bun.lock"]; ok {
-			return "bun install --frozen-lockfile", digest
-		}
-		if _, ok := snapshot.Entries["bun.lockb"]; ok {
-			return "bun install --frozen-lockfile", digest
-		}
-		return "bun install", digest
-	}
-	if _, ok := snapshot.Entries["go.mod"]; ok {
-		return "go mod download", digest
-	}
-	if _, ok := snapshot.Entries["requirements.txt"]; ok {
-		return "python -m pip install -r requirements.txt", digest
-	}
-	return "", digest
+	plan := strings.Join(commands, " && ")
+	fmt.Fprintf(h, "plan-v2:%s", plan)
+	return plan, fmt.Sprintf("%x", h.Sum(nil))
 }
+func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
 
 func (a *App) runWorkspaceCommand(callCtx context.Context, app *sdk.AppCtx, prep *workspacePrepareResult, input repoCommandInput) (*repoCommandResult, error) {
+	env, err := workspaceEnv(input.EnvJSON)
+	if err != nil {
+		return nil, err
+	}
 	command := strings.TrimSpace(input.Command)
 	if command == "" {
 		return nil, errors.New("command required")
@@ -282,6 +328,8 @@ func (a *App) runWorkspaceCommand(callCtx context.Context, app *sdk.AppCtx, prep
 	if timeout > 1800 {
 		timeout = 1800
 	}
+	callCtx, cancel := context.WithTimeout(callCtx, time.Duration(timeout)*time.Second)
+	defer cancel()
 	startedAt := time.Now()
 	result := &repoCommandResult{Status: "failed", Command: command, ExitCode: -1, WorkspaceID: prep.Link.WorkspaceID, Runtime: "workspace"}
 	activeSnapshot := prep.Workspace
@@ -292,7 +340,7 @@ func (a *App) runWorkspaceCommand(callCtx context.Context, app *sdk.AppCtx, prep
 	if installCommand != "" && prep.Link.DependencyDigest != dependencyDigest {
 		result.DependencyInstallRan = true
 		result.DependencyInstallNote = installCommand
-		install, logs, err := a.executeWorkspaceCommand(callCtx, app, prep.Link.WorkspaceID, installCommand, nil, timeout, input.TailLines, "install")
+		install, logs, err := a.executeWorkspaceCommand(callCtx, app, prep.Link.WorkspaceID, installCommand, env, timeout, input.TailLines, "install")
 		if err != nil {
 			result.Error, result.LogTail = err.Error(), logs
 			result.DurationMS = time.Since(startedAt).Milliseconds()
@@ -307,10 +355,6 @@ func (a *App) runWorkspaceCommand(callCtx context.Context, app *sdk.AppCtx, prep
 		if err := dbPutRepoWorkspace(app.AppDB(), prep.Link); err != nil {
 			return nil, err
 		}
-	}
-	env, err := workspaceEnv(input.EnvJSON)
-	if err != nil {
-		return nil, err
 	}
 	wire, logs, err := a.executeWorkspaceCommand(callCtx, app, prep.Link.WorkspaceID, command, env, timeout, input.TailLines, "run")
 	result.DurationMS = time.Since(startedAt).Milliseconds()
@@ -354,11 +398,9 @@ func (a *App) executeWorkspaceCommand(callCtx context.Context, app *sdk.AppCtx, 
 	for !workspaceCommandTerminal(commandWire.Status) {
 		select {
 		case <-callCtx.Done():
-			a.cancelWorkspaceCommand(app, workspaceID, commandWire.ID)
-			return nil, "", callCtx.Err()
+			return nil, "", errors.Join(callCtx.Err(), a.cancelWorkspaceCommand(app, workspaceID, commandWire.ID))
 		case <-deadline.C:
-			a.cancelWorkspaceCommand(app, workspaceID, commandWire.ID)
-			return nil, "", context.DeadlineExceeded
+			return nil, "", errors.Join(context.DeadlineExceeded, a.cancelWorkspaceCommand(app, workspaceID, commandWire.ID))
 		case <-ticker.C:
 			var current struct {
 				Command workspaceCommandWire `json:"command"`
@@ -366,7 +408,7 @@ func (a *App) executeWorkspaceCommand(callCtx context.Context, app *sdk.AppCtx, 
 			if err := app.PlatformAPI().CallAppResult(workspacesAppName, "workspace_command_get", map[string]any{
 				"workspace_id": workspaceID, "command_id": commandWire.ID,
 			}, &current); err != nil {
-				return nil, "", err
+				return nil, "", errors.Join(err, a.cancelWorkspaceCommand(app, workspaceID, commandWire.ID))
 			}
 			commandWire = current.Command
 		}
@@ -398,11 +440,15 @@ func workspaceCommandIdempotencyKey(callCtx context.Context, phase, command stri
 	return fmt.Sprintf("code:%s:%s:%x", callID, phase, hash[:8])
 }
 
-func (a *App) cancelWorkspaceCommand(app *sdk.AppCtx, workspaceID, commandID string) {
+func (a *App) cancelWorkspaceCommand(app *sdk.AppCtx, workspaceID, commandID string) error {
 	var out map[string]any
-	_ = app.PlatformAPI().CallAppResult(workspacesAppName, "workspace_command_cancel", map[string]any{
+	err := app.PlatformAPI().CallAppResult(workspacesAppName, "workspace_command_cancel", map[string]any{
 		"workspace_id": workspaceID, "command_id": commandID,
 	}, &out)
+	if err != nil {
+		return fmt.Errorf("command %s in workspace %s may still be running; cancellation failed: %w", commandID, workspaceID, err)
+	}
+	return nil
 }
 
 func workspaceCommandTerminal(status string) bool {
@@ -461,16 +507,19 @@ func repoLocalPath(store FileStore, slug string) (string, error) {
 }
 
 func (a *App) snapshotRepoSource(repo *Repo, workspacePaths, supportPaths []string) (*sourceSnapshot, error) {
+	return a.snapshotRepoSourceMode(repo, workspacePaths, supportPaths, true)
+}
+func (a *App) snapshotRepoSourceMode(repo *Repo, workspacePaths, supportPaths []string, archive bool) (*sourceSnapshot, error) {
 	root, err := repoLocalPath(a.storeFor(repo), repo.Slug)
 	if err != nil {
 		return nil, err
 	}
 	if a.locks == nil {
-		return buildScopedSourceSnapshot(root, workspacePaths, supportPaths)
+		return buildSourceSnapshotMode(root, workspacePaths, supportPaths, archive)
 	}
 	release := a.locks.rlock(repoStoreKey(repo))
 	defer release()
-	return buildScopedSourceSnapshot(root, workspacePaths, supportPaths)
+	return buildSourceSnapshotMode(root, workspacePaths, supportPaths, archive)
 }
 
 func (a *App) workspaceChanges(app *sdk.AppCtx, repo *Repo) (*workspaceChangesResult, *sourceSnapshot, *sourceSnapshot, *RepoWorkspace, error) {
@@ -481,7 +530,7 @@ func (a *App) workspaceChanges(app *sdk.AppCtx, repo *Repo) (*workspaceChangesRe
 	if link == nil {
 		return nil, nil, nil, nil, errors.New("repository has no linked execution workspace; run a command with runtime=workspace first")
 	}
-	code, err := a.snapshotRepoSource(repo, link.WorkspacePaths, link.SupportPaths)
+	code, err := a.snapshotRepoSourceMode(repo, link.WorkspacePaths, link.SupportPaths, false)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -541,7 +590,7 @@ func (a *App) applyWorkspaceChanges(app *sdk.AppCtx, repo *Repo, expectedDigest 
 		return nil, errors.New("repository locks are not initialized")
 	}
 	release := a.locks.lock(repoStoreKey(repo))
-	current, currentErr := buildScopedSourceSnapshot(root, link.WorkspacePaths, link.SupportPaths)
+	current, currentErr := buildSourceSnapshotMode(root, link.WorkspacePaths, link.SupportPaths, false)
 	if currentErr == nil && current.Digest != preview.CodeDigest {
 		currentErr = errors.New("Code changed after the workspace preview; changes were not applied")
 	}

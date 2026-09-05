@@ -1,3 +1,4 @@
+import { containsPath } from "./editorState";
 export interface CodePanelLink {
   view: "repositories" | "issues";
   repo?: string;
@@ -46,7 +47,7 @@ export function eventTouchesRepository(topic: string, data: CodeEventData, repo:
 
 export function eventTouchesFile(topic: string, data: CodeEventData, repo: string, path: string): boolean {
   if (data.slug !== repo) return false;
-  if (topic === "repo.deleted") return true;
-  if (topic === "file.renamed") return data.from === path || data.to === path;
-  return (topic === "file.changed" || topic === "file.deleted") && data.path === path;
+  if (["repo.deleted","repo.git.switched","repo.git.pulled","repo.workspace.applied","repo.imported"].includes(topic)) return true;
+  if (topic === "file.renamed") return !!((data.from && containsPath(data.from,path)) || (data.to && containsPath(data.to,path)));
+  return (topic === "file.changed" || topic === "file.deleted") && !!data.path && containsPath(data.path,path);
 }

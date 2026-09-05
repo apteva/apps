@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"regexp"
@@ -65,6 +66,9 @@ func renderReadResult(p string, body []byte, sha string, offset, limit int) *Rea
 	if n := len(lines); n > 0 && lines[n-1] == "" {
 		lines = lines[:n-1]
 	}
+	return renderReadLines(p, lines, int64(len(body)), sha, offset, limit)
+}
+func renderReadLines(p string, lines []string, size int64, sha string, offset, limit int) *ReadResult {
 	total := len(lines)
 	if offset <= 0 {
 		offset = 1
@@ -112,7 +116,7 @@ func renderReadResult(p string, body []byte, sha string, offset, limit int) *Rea
 		StartLine:          start + 1,
 		EndLine:            end,
 		NextOffset:         nextOffset,
-		Size:               int64(len(body)),
+		Size:               size,
 		SHA256:             sha,
 		Truncated:          truncated,
 		LongLinesTruncated: longLinesTruncated,
@@ -381,6 +385,12 @@ func joinInts(xs []int) string {
 // editFile reads a file, applies one Edit, writes back atomically.
 // The store's Write is atomic so partial writes never linger.
 func editFile(store FileStore, slug, p, oldStr, newStr string, replaceAll bool) (*EditResult, error) {
+	return withRepoWrite(store, slug, func(raw FileStore) (*EditResult, error) {
+		return editFileUnlocked(raw, slug, p, oldStr, newStr, replaceAll)
+	})
+}
+
+func editFileUnlocked(store FileStore, slug, p, oldStr, newStr string, replaceAll bool) (*EditResult, error) {
 	body, oldSHA, err := readWithSHA(store, slug, p)
 	if err != nil {
 		return nil, err
@@ -426,6 +436,10 @@ type MultiEditResult struct {
 // written. The error includes the failing op index so the agent can
 // debug without re-running each edit one-by-one.
 func multiEditFile(store FileStore, slug, p string, ops []EditOp) (*MultiEditResult, error) {
+	return withRepoWrite(store, slug, func(raw FileStore) (*MultiEditResult, error) { return multiEditFileUnlocked(raw, slug, p, ops) })
+}
+
+func multiEditFileUnlocked(store FileStore, slug, p string, ops []EditOp) (*MultiEditResult, error) {
 	if len(ops) == 0 {
 		return nil, errors.New("edits required (non-empty array)")
 	}
@@ -553,6 +567,9 @@ const (
 // enough for repos up to a few thousand files; v0.2 adds a content
 // cache + FTS5 for larger trees.
 func grepRepo(store FileStore, slug string, o GrepOptions) (*GrepResult, error) {
+	return withRepoWrite(store, slug, func(raw FileStore) (*GrepResult, error) { return grepRepoUnlocked(raw, slug, o) })
+}
+func grepRepoUnlocked(store FileStore, slug string, o GrepOptions) (*GrepResult, error) {
 	if o.Pattern == "" {
 		return nil, errors.New("pattern required")
 	}
@@ -610,36 +627,35 @@ func grepRepo(store FileStore, slug string, o GrepOptions) (*GrepResult, error) 
 				continue
 			}
 		}
-		body, err := store.Read(slug, f.Path)
-		if err != nil {
+		if f.IsDir || f.Size > maxFileBytes() {
 			continue
 		}
-		if !isLikelyText(body) {
+		stream, err := openGrepLines(store, slug, f.Path, o.Context)
+		if err != nil || stream == nil {
 			continue
-		}
-		lines := strings.Split(string(body), "\n")
-		// Drop trailing empty from final \n so line counts match
-		// readWithLineNumbers' convention.
-		if n := len(lines); n > 0 && lines[n-1] == "" {
-			lines = lines[:n-1]
 		}
 		fileCount := 0
 	lineLoop:
-		for i, ln := range lines {
+		for stream.Next() {
+			i := stream.line - 1
+			raw := stream.scanner.Bytes()
+			if o.Context > 0 {
+				raw = []byte(stream.queue[0])
+			}
 			var matched bool
 			var col int
 			if re != nil {
-				loc := re.FindStringIndex(ln)
+				loc := re.FindIndex(raw)
 				if loc != nil {
 					matched = true
 					col = loc[0] + 1
 				}
 			} else {
-				probe := ln
+				probe := raw
 				if o.IgnoreCase {
-					probe = strings.ToLower(probe)
+					probe = bytes.ToLower(probe)
 				}
-				idx := strings.Index(probe, needle)
+				idx := bytes.Index(probe, []byte(needle))
 				if idx >= 0 {
 					matched = true
 					col = idx + 1
@@ -668,19 +684,11 @@ func grepRepo(store FileStore, slug string, o GrepOptions) (*GrepResult, error) 
 					Path:  f.Path,
 					Line:  i + 1,
 					Col:   col,
-					Match: truncateGrepLine(ln),
+					Match: truncateGrepLine(string(raw)),
 				}
 				if o.Context > 0 {
-					lo := i - o.Context
-					if lo < 0 {
-						lo = 0
-					}
-					hi := i + o.Context + 1
-					if hi > len(lines) {
-						hi = len(lines)
-					}
-					match.Before = truncateLines(lines[lo:i])
-					match.After = truncateLines(lines[i+1 : hi])
+					match.Before = truncateLines(stream.before)
+					match.After = truncateLines(stream.queue[1:])
 				}
 				result.Matches = append(result.Matches, match)
 				result.Count++
@@ -689,6 +697,10 @@ func grepRepo(store FileStore, slug string, o GrepOptions) (*GrepResult, error) 
 				result.Truncated = true
 				break
 			}
+		}
+		stream.Close()
+		if err := stream.scanner.Err(); err != nil {
+			return nil, err
 		}
 		if o.OutputMode == "count" && fileCount > 0 {
 			result.Counts = append(result.Counts, GrepFileCount{Path: f.Path, Count: fileCount})

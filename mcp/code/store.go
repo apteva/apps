@@ -215,58 +215,51 @@ func dbListRepos(db *sql.DB, projectID string, includeArchived bool, q string) (
 }
 
 // dbPatchRepo updates name / description on an existing repo.
-func dbPatchRepo(db *sql.DB, projectID, slug string, name, description *string) (*Repo, error) {
-	r, err := dbGetRepoBySlug(db, projectID, slug)
+type repoMetadataPatch struct {
+	Name           *string `json:"name"`
+	Description    *string `json:"description"`
+	BuildCmd       *string `json:"build_cmd"`
+	StartCmd       *string `json:"start_cmd"`
+	Port           *int    `json:"port"`
+	EnvJSON        *string `json:"env_json"`
+	WorkspaceImage *string `json:"workspace_image"`
+}
+
+func dbPatchRepoMetadata(db *sql.DB, projectID, slug string, p repoMetadataPatch) (*Repo, error) {
+	if p.Name != nil && strings.TrimSpace(*p.Name) == "" {
+		return nil, errors.New("name required")
+	}
+	if p.Port != nil && (*p.Port < 0 || *p.Port > 65535) {
+		return nil, errors.New("port must be between 0 and 65535")
+	}
+	if p.EnvJSON != nil {
+		if _, err := workspaceEnv(*p.EnvJSON); err != nil {
+			return nil, err
+		}
+	}
+	if p.WorkspaceImage != nil {
+		image, err := normalizeWorkspaceImage(*p.WorkspaceImage)
+		if err != nil {
+			return nil, err
+		}
+		p.WorkspaceImage = &image
+	}
+	// COALESCE preserves omitted columns inside the statement, avoiding a stale
+	// read-modify-write and committing every supplied field together.
+	result, err := db.Exec(`UPDATE repositories SET name=COALESCE(?,name),description=COALESCE(?,description),build_cmd=COALESCE(?,build_cmd),start_cmd=COALESCE(?,start_cmd),port=COALESCE(?,port),env_json=COALESCE(?,env_json),workspace_image=COALESCE(?,workspace_image),updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND slug=?`, p.Name, p.Description, p.BuildCmd, p.StartCmd, p.Port, p.EnvJSON, p.WorkspaceImage, projectID, slug)
 	if err != nil {
 		return nil, err
 	}
-	if r == nil {
+	if n, _ := result.RowsAffected(); n == 0 {
 		return nil, errors.New("repo not found")
-	}
-	if name != nil {
-		r.Name = *name
-	}
-	if description != nil {
-		r.Description = *description
-	}
-	if _, err := db.Exec(`
-		UPDATE repositories
-		   SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE project_id = ? AND slug = ?
-	`, r.Name, r.Description, projectID, slug); err != nil {
-		return nil, err
 	}
 	return dbGetRepoBySlug(db, projectID, slug)
 }
-
+func dbPatchRepo(db *sql.DB, projectID, slug string, name, description *string) (*Repo, error) {
+	return dbPatchRepoMetadata(db, projectID, slug, repoMetadataPatch{Name: name, Description: description})
+}
 func dbSetDeployHints(db *sql.DB, projectID, slug string, h DeployHints) (*Repo, error) {
-	r, err := dbGetRepoBySlug(db, projectID, slug)
-	if err != nil {
-		return nil, err
-	}
-	if r == nil {
-		return nil, errors.New("repo not found")
-	}
-	if h.BuildCmd != nil {
-		r.BuildCmd = *h.BuildCmd
-	}
-	if h.StartCmd != nil {
-		r.StartCmd = *h.StartCmd
-	}
-	if h.Port != nil {
-		r.Port = *h.Port
-	}
-	if h.EnvJSON != nil {
-		r.EnvJSON = *h.EnvJSON
-	}
-	if _, err := db.Exec(`
-		UPDATE repositories
-		   SET build_cmd = ?, start_cmd = ?, port = ?, env_json = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE project_id = ? AND slug = ?
-	`, r.BuildCmd, r.StartCmd, r.Port, r.EnvJSON, projectID, slug); err != nil {
-		return nil, err
-	}
-	return dbGetRepoBySlug(db, projectID, slug)
+	return dbPatchRepoMetadata(db, projectID, slug, repoMetadataPatch{BuildCmd: h.BuildCmd, StartCmd: h.StartCmd, Port: h.Port, EnvJSON: h.EnvJSON})
 }
 
 func normalizeWorkspaceImage(image string) (string, error) {
@@ -278,24 +271,7 @@ func normalizeWorkspaceImage(image string) (string, error) {
 }
 
 func dbSetWorkspaceImage(db *sql.DB, projectID, slug, image string) (*Repo, error) {
-	r, err := dbGetRepoBySlug(db, projectID, slug)
-	if err != nil {
-		return nil, err
-	}
-	if r == nil {
-		return nil, errors.New("repo not found")
-	}
-	image, err = normalizeWorkspaceImage(image)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := db.Exec(`
-		UPDATE repositories SET workspace_image = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE project_id = ? AND slug = ?
-	`, image, projectID, slug); err != nil {
-		return nil, err
-	}
-	return dbGetRepoBySlug(db, projectID, slug)
+	return dbPatchRepoMetadata(db, projectID, slug, repoMetadataPatch{WorkspaceImage: &image})
 }
 
 func dbArchiveRepo(db *sql.DB, projectID, slug string) error {
@@ -435,19 +411,21 @@ func dbGetFork(db *sql.DB, childID int64) (*ForkInfo, error) {
 // the reconcile pass at OnMount checks whether the recorded pid is
 // still alive and demotes orphans to stopped.
 type DevRun struct {
-	ID        int64  `json:"id"`
-	ProjectID string `json:"project_id"`
-	RepoID    int64  `json:"repo_id"`
-	Status    string `json:"status"`
-	Port      int    `json:"port"`
-	PID       int    `json:"pid"`
-	Framework string `json:"framework"`
-	RunCmd    string `json:"run_cmd,omitempty"`
-	EnvJSON   string `json:"env_json,omitempty"`
-	LogPath   string `json:"log_path,omitempty"`
-	StartedAt string `json:"started_at,omitempty"`
-	StoppedAt string `json:"stopped_at,omitempty"`
-	Error     string `json:"error,omitempty"`
+	IngressHostname string `json:"ingress_hostname,omitempty"`
+	PreviewURL      string `json:"preview_url,omitempty"`
+	ID              int64  `json:"id"`
+	ProjectID       string `json:"project_id"`
+	RepoID          int64  `json:"repo_id"`
+	Status          string `json:"status"`
+	Port            int    `json:"port"`
+	PID             int    `json:"pid"`
+	Framework       string `json:"framework"`
+	RunCmd          string `json:"run_cmd,omitempty"`
+	EnvJSON         string `json:"env_json,omitempty"`
+	LogPath         string `json:"log_path,omitempty"`
+	StartedAt       string `json:"started_at,omitempty"`
+	StoppedAt       string `json:"stopped_at,omitempty"`
+	Error           string `json:"error,omitempty"`
 
 	// Remote-runner fields (mobile repos delegated to the Simulator
 	// app). Empty for local dev runs. See migration 004.
@@ -460,7 +438,7 @@ const devRunCols = `id, project_id, repo_id, status, port, pid, framework,
 		run_cmd, env_json, log_path,
 		COALESCE(started_at, '') AS started_at,
 		COALESCE(stopped_at, '') AS stopped_at,
-		error, runner, sim_id, stream_url`
+		error, runner, sim_id, stream_url, ingress_hostname`
 
 func scanDevRunRow(s rowScanner) (*DevRun, error) {
 	var dr DevRun
@@ -468,9 +446,12 @@ func scanDevRunRow(s rowScanner) (*DevRun, error) {
 		&dr.ID, &dr.ProjectID, &dr.RepoID, &dr.Status, &dr.Port, &dr.PID,
 		&dr.Framework, &dr.RunCmd, &dr.EnvJSON, &dr.LogPath,
 		&dr.StartedAt, &dr.StoppedAt, &dr.Error,
-		&dr.Runner, &dr.SimID, &dr.StreamURL,
+		&dr.Runner, &dr.SimID, &dr.StreamURL, &dr.IngressHostname,
 	); err != nil {
 		return nil, err
+	}
+	if dr.IngressHostname != "" {
+		dr.PreviewURL = "https://" + dr.IngressHostname + "/"
 	}
 	return &dr, nil
 }
@@ -542,7 +523,7 @@ func dbUpdateDevRun(db *sql.DB, id int64, fields map[string]any) error {
 	args := []any{}
 	for _, k := range []string{"status", "port", "pid", "framework", "run_cmd",
 		"env_json", "log_path", "started_at", "stopped_at", "error",
-		"runner", "sim_id", "stream_url"} {
+		"runner", "sim_id", "stream_url", "ingress_hostname"} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
 			args = append(args, v)
@@ -560,7 +541,7 @@ func dbUpdateDevRun(db *sql.DB, id int64, fields map[string]any) error {
 // boot reconcile pass — the orchestrator checks each PID against the
 // real process table and demotes orphans to stopped.
 func dbListLiveDevRuns(db *sql.DB) ([]*DevRun, error) {
-	rows, err := db.Query(`SELECT ` + devRunCols + ` FROM dev_runs WHERE status IN ('starting','live')`)
+	rows, err := db.Query(`SELECT ` + devRunCols + ` FROM dev_runs WHERE status IN ('starting','live','orphaned') OR ingress_hostname <> ''`)
 	if err != nil {
 		return nil, err
 	}

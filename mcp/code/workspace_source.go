@@ -51,6 +51,10 @@ func buildSourceSnapshot(root string) (*sourceSnapshot, error) {
 }
 
 func buildScopedSourceSnapshot(root string, workspacePaths, supportPaths []string) (*sourceSnapshot, error) {
+	return buildSourceSnapshotMode(root, workspacePaths, supportPaths, true)
+}
+
+func buildSourceSnapshotMode(root string, workspacePaths, supportPaths []string, archive bool) (*sourceSnapshot, error) {
 	workspacePaths, supportPaths, err := normalizeWorkspaceScope(workspacePaths, supportPaths)
 	if err != nil {
 		return nil, err
@@ -113,7 +117,7 @@ func buildScopedSourceSnapshot(root string, workspacePaths, supportPaths []strin
 	if err != nil {
 		return nil, err
 	}
-	return finishSourceSnapshot(entries, true)
+	return finishSourceSnapshot(entries, archive)
 }
 
 func normalizeWorkspaceScope(workspacePaths, supportPaths []string) ([]string, []string, error) {
@@ -384,76 +388,157 @@ func sourceEntriesEqual(a, b sourceEntry) bool {
 }
 
 func applySourceSnapshot(root string, previousPaths []string, snapshot *sourceSnapshot) (returnErr error) {
-	managed := make(map[string]struct{}, len(previousPaths))
-	for _, path := range previousPaths {
-		managed[path] = struct{}{}
+	managed := map[string]bool{}
+	for _, p := range previousPaths {
+		managed[p] = true
 	}
-	for _, path := range snapshot.Paths {
-		managed[path] = struct{}{}
+	for _, p := range snapshot.Paths {
+		managed[p] = true
 	}
 	paths := make([]string, 0, len(managed))
-	for path := range managed {
-		paths = append(paths, path)
+	for p := range managed {
+		clean, e := normalizeWorkspaceSourcePath(p)
+		if e != nil || clean != p || clean == "" {
+			return fmt.Errorf("unsafe source path %q", p)
+		}
+		paths = append(paths, p)
 	}
 	sort.Strings(paths)
+	// Validate the proposed tree and budgets before any mutation.
+	if _, e := finishSourceSnapshot(snapshot.Entries, false); e != nil {
+		return e
+	}
+	for _, p := range snapshot.Paths {
+		for parent := filepath.ToSlash(filepath.Dir(p)); parent != "."; parent = filepath.ToSlash(filepath.Dir(parent)) {
+			if _, ok := snapshot.Entries[parent]; ok {
+				return fmt.Errorf("source path %s has a non-directory parent", p)
+			}
+		}
+	}
+	var total int64
+	err := filepath.WalkDir(root, func(full string, d fs.DirEntry, e error) error {
+		if e != nil {
+			return e
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, full)
+		if managed[filepath.ToSlash(rel)] {
+			return nil
+		}
+		info, e := d.Info()
+		if e != nil {
+			return e
+		}
+		total += info.Size()
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, entry := range snapshot.Entries {
+		if int64(len(entry.Data)) > maxFileBytes() {
+			return errors.New("file exceeds configured size limit")
+		}
+		total += int64(len(entry.Data))
+	}
+	if total > maxRepoBytes() {
+		return errors.New("repository exceeds configured size limit")
+	}
 	backup, err := os.MkdirTemp(filepath.Dir(root), ".workspace-apply-backup-")
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if returnErr == nil {
-			_ = os.RemoveAll(backup)
-		} else {
-			returnErr = fmt.Errorf("%w; original source backup retained at %s", returnErr, backup)
-		}
-	}()
-	touched := make([]string, 0, len(paths))
-	rollback := func() {
-		for i := len(touched) - 1; i >= 0; i-- {
-			path := touched[i]
-			dst, dstErr := safeJoinSource(root, path)
-			if dstErr != nil {
-				continue
+	originals := []string{}
+	directories := []string{}
+	// Back up every affected existing entry, without following symlink parents.
+	for _, p := range paths {
+		dst := filepath.Join(root, filepath.FromSlash(p))
+		blocked := false
+		for parent := filepath.Dir(p); parent != "."; parent = filepath.Dir(parent) {
+			info, e := os.Lstat(filepath.Join(root, parent))
+			if e == nil && !info.IsDir() {
+				if managed[filepath.ToSlash(parent)] {
+					blocked = true
+					break
+				}
+				os.RemoveAll(backup)
+				return fmt.Errorf("non-directory source parent: %s", parent)
 			}
-			_ = os.Remove(dst)
-			src := filepath.Join(backup, filepath.FromSlash(path))
-			if _, statErr := os.Lstat(src); statErr == nil {
-				_ = restoreSourceEntry(src, dst)
+		}
+		if blocked {
+			continue
+		}
+		info, e := os.Lstat(dst)
+		if errors.Is(e, os.ErrNotExist) {
+			continue
+		}
+		if e != nil {
+			os.RemoveAll(backup)
+			return e
+		}
+		if info.IsDir() {
+			directories = append(directories, p)
+			continue
+		}
+		if e = copySourceEntry(dst, filepath.Join(backup, filepath.FromSlash(p))); e != nil {
+			os.RemoveAll(backup)
+			return e
+		}
+		originals = append(originals, p)
+	}
+	remove := append([]string(nil), paths...)
+	deepestFirst(remove)
+	// Include empty parents left by removed paths (never recursively remove a directory).
+	prune := func(p string) {
+		for dir := filepath.Dir(p); dir != "."; dir = filepath.Dir(dir) {
+			if e := os.Remove(filepath.Join(root, dir)); e != nil {
+				break
 			}
 		}
 	}
-	for _, path := range paths {
-		dst, err := safeJoinSource(root, path)
-		if err != nil {
-			rollback()
-			return err
-		}
-		if info, statErr := os.Lstat(dst); statErr == nil {
-			if info.IsDir() {
-				rollback()
-				return fmt.Errorf("source path is an existing directory: %s", path)
+	rollback := func() error {
+		var errs error
+		for _, p := range remove {
+			dst := filepath.Join(root, filepath.FromSlash(p))
+			if e := removeSourcePath(root, p); e != nil && !errors.Is(e, os.ErrNotExist) {
+				if info, se := os.Lstat(dst); se != nil || !info.IsDir() {
+					errs = errors.Join(errs, e)
+				}
 			}
-			backupPath := filepath.Join(backup, filepath.FromSlash(path))
-			if err := copySourceEntry(dst, backupPath); err != nil {
-				rollback()
-				return err
-			}
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			rollback()
-			return statErr
+			prune(p)
 		}
-		touched = append(touched, path)
-		entry, exists := snapshot.Entries[path]
-		if !exists {
-			if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
-				rollback()
-				return err
-			}
-			continue
+		for _, p := range directories {
+			errs = errors.Join(errs, os.MkdirAll(filepath.Join(root, p), 0755))
 		}
-		if err := writeSourceEntry(dst, entry); err != nil {
-			rollback()
-			return err
+		for _, p := range originals {
+			errs = errors.Join(errs, restoreSourceEntry(filepath.Join(backup, p), filepath.Join(root, p)))
+		}
+		return errs
+	}
+	defer func() {
+		if returnErr != nil {
+			if e := rollback(); e != nil {
+				returnErr = fmt.Errorf("%w; rollback failed: %v; backup retained at %s", returnErr, e, backup)
+				return
+			}
+		}
+		_ = os.RemoveAll(backup)
+	}()
+	for _, p := range remove {
+		if e := removeSourcePath(root, p); e != nil && !errors.Is(e, os.ErrNotExist) {
+			return e
+		}
+		prune(p)
+	}
+	for _, p := range snapshot.Paths {
+		dst, e := safeJoinSource(root, p)
+		if e != nil {
+			return e
+		}
+		if e = writeSourceEntry(dst, snapshot.Entries[p]); e != nil {
+			return e
 		}
 	}
 	return nil
@@ -545,3 +630,12 @@ func copySourceEntry(src, dst string) error {
 func restoreSourceEntry(src, dst string) error { return copySourceEntry(src, dst) }
 
 var epochTime = func() (t time.Time) { return time.Unix(0, 0).UTC() }()
+
+func removeSourcePath(root, path string) error {
+	for parent := filepath.Dir(path); parent != "."; parent = filepath.Dir(parent) {
+		if info, err := os.Lstat(filepath.Join(root, parent)); err == nil && !info.IsDir() {
+			return nil
+		}
+	}
+	return os.Remove(filepath.Join(root, filepath.FromSlash(path)))
+}

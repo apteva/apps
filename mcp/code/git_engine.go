@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,12 +39,16 @@ func newGitEngine(dataDir string) (*gitEngine, error) {
 }
 
 type cappedBuffer struct {
-	buf bytes.Buffer
-	max int
+	buf      bytes.Buffer
+	max      int
+	overflow bool
 }
 
 func (w *cappedBuffer) Write(p []byte) (int, error) {
 	n := len(p)
+	if w.buf.Len()+n > w.max {
+		w.overflow = true
+	}
 	if w.buf.Len() < w.max {
 		keep := w.max - w.buf.Len()
 		if keep > len(p) {
@@ -77,20 +82,27 @@ func (g *gitEngine) run(ctx context.Context, workTree, gitDir string, auth *gitA
 	var output cappedBuffer
 	output.max = gitOutputLimit
 	cmd.Stdout = &output
-	cmd.Stderr = &output
+	var stderr cappedBuffer
+	stderr.max = gitOutputLimit
+	cmd.Stderr = &stderr
 	err = cmd.Run()
-	text := strings.TrimSpace(output.String())
+	text := output.String()
+	detail := strings.TrimSpace(stderr.String())
 	if auth != nil && auth.Password != "" {
 		text = strings.ReplaceAll(text, auth.Password, "[REDACTED]")
+		detail = strings.ReplaceAll(detail, auth.Password, "[REDACTED]")
 	}
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return text, errors.New("git operation timed out")
 		}
-		if text == "" {
+		if detail == "" {
 			return text, fmt.Errorf("git %s: %w", firstArg(args), err)
 		}
-		return text, fmt.Errorf("git %s: %s", firstArg(args), text)
+		return text, fmt.Errorf("git %s: %s", firstArg(args), detail)
+	}
+	if output.overflow {
+		return "", errors.New("git output exceeds limit; narrow the request")
 	}
 	return text, nil
 }
@@ -132,6 +144,35 @@ func firstArg(args []string) string {
 }
 
 func (g *gitEngine) clone(ctx context.Context, remoteURL, ref, workTree, gitDir string, auth *gitAuth) error {
+	select {
+	case gitCloneSlots <- struct{}{}:
+		defer func() { <-gitCloneSlots }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var exceeded atomic.Bool
+	stopped := make(chan struct{})
+	defer func() { cancel(); <-stopped }()
+	go func() {
+		defer close(stopped)
+		tick := time.NewTicker(250 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				if treeBytes(workTree)+treeBytes(gitDir) > maxRepoBytes() {
+					exceeded.Store(true)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
 	args := []string{
 		"-c", "protocol.file.allow=never",
 		"-c", "protocol.ext.allow=never",
@@ -144,7 +185,13 @@ func (g *gitEngine) clone(ctx context.Context, remoteURL, ref, workTree, gitDir 
 	}
 	args = append(args, "--", remoteURL, workTree)
 	if _, err := g.run(ctx, "", "", auth, args...); err != nil {
+		if exceeded.Load() {
+			return errors.New("clone exceeds configured repository size limit")
+		}
 		return err
+	}
+	if treeBytes(workTree)+treeBytes(gitDir) > maxRepoBytes() {
+		return errors.New("clone exceeds configured repository size limit")
 	}
 	return g.configure(ctx, workTree, gitDir)
 }
@@ -284,7 +331,7 @@ func (g *gitEngine) remoteDefaultBranch(ctx context.Context, remoteURL string, a
 	return "", errors.New("remote default branch could not be determined; pass branch explicitly")
 }
 
-func (g *gitEngine) commit(ctx context.Context, workTree, gitDir, message string, paths []string, authorName, authorEmail string) (string, error) {
+func (g *gitEngine) commit(ctx context.Context, workTree, gitDir, message string, paths []string, authorName, authorEmail string) (sha string, retErr error) {
 	if strings.TrimSpace(message) == "" {
 		return "", errors.New("commit message required")
 	}
@@ -294,24 +341,64 @@ func (g *gitEngine) commit(ctx context.Context, workTree, gitDir, message string
 	if authorEmail == "" {
 		authorEmail = "code@apteva.local"
 	}
-	if len(paths) == 0 {
-		if _, err := g.run(ctx, workTree, gitDir, nil, "add", "--all"); err != nil {
+	indexPath := filepath.Join(gitDir, "index")
+	original, indexErr := os.ReadFile(indexPath)
+	if indexErr != nil && !errors.Is(indexErr, os.ErrNotExist) {
+		return "", indexErr
+	}
+	success := false
+	defer func() {
+		if !success {
+			if indexErr == nil {
+				if err := os.WriteFile(indexPath, original, 0600); err != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("restore Git index: %w", err))
+				}
+			} else {
+				if err := os.Remove(indexPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+					retErr = errors.Join(retErr, fmt.Errorf("restore absent Git index: %w", err))
+				}
+			}
+		}
+	}()
+	args := []string{"--literal-pathspecs", "add", "--all"}
+	stagePaths := []string{}
+	for _, path := range paths {
+		_, statErr := os.Lstat(filepath.Join(workTree, filepath.FromSlash(path)))
+		if statErr == nil {
+			stagePaths = append(stagePaths, path)
+			continue
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return "", statErr
+		}
+		tracked, err := g.run(ctx, workTree, gitDir, nil, "--literal-pathspecs", "ls-files", "-z", "--", path)
+		if err != nil {
 			return "", err
 		}
-	} else {
-		args := []string{"--literal-pathspecs", "add", "--"}
-		args = append(args, paths...)
+		// An already-staged deletion is absent from both the worktree and
+		// index. git add would reject it; commit --only still knows it via HEAD.
+		if tracked != "" {
+			stagePaths = append(stagePaths, path)
+		}
+	}
+	if len(paths) > 0 {
+		args = append(args, "--")
+		args = append(args, stagePaths...)
+	}
+	if len(paths) == 0 || len(stagePaths) > 0 {
 		if _, err := g.run(ctx, workTree, gitDir, nil, args...); err != nil {
 			return "", err
 		}
 	}
-	_, err := g.run(ctx, workTree, gitDir, nil,
-		"-c", "user.name="+authorName,
-		"-c", "user.email="+authorEmail,
-		"commit", "-m", message)
-	if err != nil {
+	args = []string{"--literal-pathspecs", "-c", "user.name=" + authorName, "-c", "user.email=" + authorEmail, "commit", "-m", message}
+	if len(paths) > 0 {
+		args = append(args, "--only", "--")
+		args = append(args, paths...)
+	}
+	if _, err := g.run(ctx, workTree, gitDir, nil, args...); err != nil {
 		return "", err
 	}
+	success = true
 	return g.head(ctx, workTree, gitDir), nil
 }
 
@@ -454,4 +541,22 @@ func copyFile(dst string, src io.Reader, mode os.FileMode) error {
 		return copyErr
 	}
 	return closeErr
+}
+
+var gitCloneSlots = make(chan struct{}, 2)
+
+func treeBytes(root string) int64 {
+	var total int64
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			if info, e := d.Info(); e == nil {
+				total += info.Size()
+			}
+		}
+		return nil
+	})
+	return total
 }

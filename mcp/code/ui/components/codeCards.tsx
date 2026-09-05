@@ -98,10 +98,12 @@ export function useCodeJSON<T>(url: string | null, previewData?: T) {
       setState("ready");
       return;
     }
+    setData(null);setState("loading");
     if (!url) return;
     const controller = new AbortController();
     fetch(url, { credentials: "same-origin", signal: controller.signal })
       .then(async (response) => {
+        if(controller.signal.aborted) return null;
         if (response.status === 404) {
           setData(null);
           setState("missing");
@@ -116,7 +118,7 @@ export function useCodeJSON<T>(url: string | null, previewData?: T) {
         setState("ready");
       })
       .catch((error) => {
-        if (error?.name !== "AbortError") setState("error");
+        if (!controller.signal.aborted && error?.name !== "AbortError") setState("error");
       });
     return () => controller.abort();
   }, [url, revision, previewData]);

@@ -13,10 +13,23 @@ import (
 )
 
 type gitService struct {
+	callCtx context.Context
 	engine  *gitEngine
 	store   *LocalFileStore
 	locks   *repoLockSet
 	dataDir string
+}
+
+func (s *gitService) context() context.Context {
+	if s.callCtx != nil {
+		return s.callCtx
+	}
+	return context.Background()
+}
+func (s *gitService) withContext(ctx context.Context) *gitService {
+	copy := *s
+	copy.callCtx = ctx
+	return &copy
 }
 
 func newGitService(dataDir string, store *LocalFileStore, locks *repoLockSet) (*gitService, error) {
@@ -103,7 +116,7 @@ func (s *gitService) Import(ctx *sdk.AppCtx, in GitImportInput) (*GitImportResul
 	defer os.RemoveAll(stage)
 	stageWork := filepath.Join(stage, "worktree")
 	stageGit := filepath.Join(stage, "gitdir")
-	if err := s.engine.clone(context.Background(), in.RemoteURL, in.Ref, stageWork, stageGit, auth); err != nil {
+	if err := s.engine.clone(s.context(), in.RemoteURL, in.Ref, stageWork, stageGit, auth); err != nil {
 		return nil, err
 	}
 	if in.Framework == "" {
@@ -151,11 +164,11 @@ func (s *gitService) Import(ctx *sdk.AppCtx, in GitImportInput) (*GitImportResul
 	if err := os.WriteFile(filepath.Join(finalWork, ".git"), []byte("gitdir: "+finalGit+"\n"), 0o600); err != nil {
 		return nil, err
 	}
-	if err := s.engine.configure(context.Background(), finalWork, finalGit); err != nil {
+	if err := s.engine.configure(s.context(), finalWork, finalGit); err != nil {
 		return nil, err
 	}
 	branch := in.Ref
-	status, err := s.engine.status(context.Background(), finalWork, finalGit)
+	status, err := s.engine.status(s.context(), finalWork, finalGit)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +217,7 @@ func (s *gitService) Connect(ctx *sdk.AppCtx, repo *Repo, in GitConnectInput) (*
 	}
 	branch := strings.TrimSpace(in.Branch)
 	if branch == "" {
-		branch, err = s.engine.remoteDefaultBranch(context.Background(), remoteURL.String(), auth)
+		branch, err = s.engine.remoteDefaultBranch(s.context(), remoteURL.String(), auth)
 		if err != nil {
 			return nil, err
 		}
@@ -215,7 +228,7 @@ func (s *gitService) Connect(ctx *sdk.AppCtx, repo *Repo, in GitConnectInput) (*
 	if _, err := os.Stat(gitDir); err == nil {
 		return nil, errors.New("repository is already Git-backed")
 	}
-	if _, err := s.engine.run(context.Background(), "", "", nil,
+	if _, err := s.engine.run(s.context(), "", "", nil,
 		"init", "--separate-git-dir="+gitDir, "--initial-branch=apteva-local", workTree); err != nil {
 		return nil, err
 	}
@@ -226,23 +239,23 @@ func (s *gitService) Connect(ctx *sdk.AppCtx, repo *Repo, in GitConnectInput) (*
 			_ = os.Remove(filepath.Join(workTree, ".git"))
 		}
 	}()
-	if err := s.engine.configure(context.Background(), workTree, gitDir); err != nil {
+	if err := s.engine.configure(s.context(), workTree, gitDir); err != nil {
 		return nil, err
 	}
-	if _, err := s.engine.run(context.Background(), workTree, gitDir, nil, "remote", "add", "origin", remoteURL.String()); err != nil {
+	if _, err := s.engine.run(s.context(), workTree, gitDir, nil, "remote", "add", "origin", remoteURL.String()); err != nil {
 		return nil, err
 	}
-	if err := s.engine.fetch(context.Background(), workTree, gitDir, remoteURL.String(), "origin", auth); err != nil {
+	if err := s.engine.fetch(s.context(), workTree, gitDir, remoteURL.String(), "origin", auth); err != nil {
 		return nil, err
 	}
-	if _, err := s.engine.run(context.Background(), workTree, gitDir, nil, "add", "--all", "--force"); err != nil {
+	if _, err := s.engine.run(s.context(), workTree, gitDir, nil, "add", "--all", "--force"); err != nil {
 		return nil, err
 	}
-	localTree, err := s.engine.run(context.Background(), workTree, gitDir, nil, "write-tree")
+	localTree, err := s.engine.run(s.context(), workTree, gitDir, nil, "write-tree")
 	if err != nil {
 		return nil, err
 	}
-	remoteTree, err := s.engine.run(context.Background(), workTree, gitDir, nil, "rev-parse", "refs/remotes/origin/"+branch+"^{tree}")
+	remoteTree, err := s.engine.run(s.context(), workTree, gitDir, nil, "rev-parse", "refs/remotes/origin/"+branch+"^{tree}")
 	if err != nil {
 		return nil, fmt.Errorf("remote branch %q not found: %w", branch, err)
 	}
@@ -250,19 +263,19 @@ func (s *gitService) Connect(ctx *sdk.AppCtx, repo *Repo, in GitConnectInput) (*
 	safetyBranch := ""
 	if reconcile {
 		safetyBranch = "apteva/local-before-connect"
-		if _, err := s.engine.run(context.Background(), workTree, gitDir, nil, "checkout", "-B", safetyBranch); err != nil {
+		if _, err := s.engine.run(s.context(), workTree, gitDir, nil, "checkout", "-B", safetyBranch); err != nil {
 			return nil, err
 		}
-		if _, err := s.engine.run(context.Background(), workTree, gitDir, nil,
+		if _, err := s.engine.run(s.context(), workTree, gitDir, nil,
 			"-c", "user.name=Apteva Code", "-c", "user.email=code@apteva.local",
 			"commit", "--allow-empty", "-m", "Preserve local files before connecting remote"); err != nil {
 			return nil, err
 		}
 	} else {
-		if _, err := s.engine.run(context.Background(), workTree, gitDir, nil, "checkout", "-B", branch, "origin/"+branch); err != nil {
+		if _, err := s.engine.run(s.context(), workTree, gitDir, nil, "checkout", "-B", branch, "origin/"+branch); err != nil {
 			return nil, err
 		}
-		_, _ = s.engine.run(context.Background(), workTree, gitDir, nil, "branch", "--set-upstream-to=origin/"+branch, branch)
+		_, _ = s.engine.run(s.context(), workTree, gitDir, nil, "branch", "--set-upstream-to=origin/"+branch, branch)
 	}
 	remoteRow, err := dbUpsertGitRemote(ctx.AppDB(), GitRemote{
 		RepoID: repo.ID, Name: "origin", FetchURL: remoteURL.String(), PushURL: remoteURL.String(),
@@ -271,7 +284,7 @@ func (s *gitService) Connect(ctx *sdk.AppCtx, repo *Repo, in GitConnectInput) (*
 	if err != nil {
 		return nil, err
 	}
-	status, err := s.engine.status(context.Background(), workTree, gitDir)
+	status, err := s.engine.status(s.context(), workTree, gitDir)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +305,7 @@ func (s *gitService) Status(ctx *sdk.AppCtx, repo *Repo) (*GitStatus, error) {
 		}
 		return nil, err
 	}
-	status, err := s.engine.status(context.Background(), workTree, gitDir)
+	status, err := s.engine.status(s.context(), workTree, gitDir)
 	if err != nil {
 		return nil, err
 	}
@@ -302,13 +315,13 @@ func (s *gitService) Status(ctx *sdk.AppCtx, repo *Repo) (*GitStatus, error) {
 
 func (s *gitService) Fetch(ctx *sdk.AppCtx, repo *Repo, actor string) (*GitStatus, error) {
 	return s.networkOperation(ctx, repo, "fetch", actor, func(workTree, gitDir string, remote *GitRemote, auth *gitAuth) error {
-		return s.engine.fetch(context.Background(), workTree, gitDir, remote.FetchURL, remote.Name, auth)
+		return s.engine.fetch(s.context(), workTree, gitDir, remote.FetchURL, remote.Name, auth)
 	})
 }
 
 func (s *gitService) Pull(ctx *sdk.AppCtx, repo *Repo, actor string) (*GitStatus, error) {
 	return s.networkOperation(ctx, repo, "pull", actor, func(workTree, gitDir string, remote *GitRemote, auth *gitAuth) error {
-		status, err := s.engine.status(context.Background(), workTree, gitDir)
+		status, err := s.engine.status(s.context(), workTree, gitDir)
 		if err != nil {
 			return err
 		}
@@ -322,16 +335,16 @@ func (s *gitService) Pull(ctx *sdk.AppCtx, repo *Repo, actor string) (*GitStatus
 		if branch == "" {
 			return errors.New("cannot pull a detached HEAD")
 		}
-		if err := s.engine.fetch(context.Background(), workTree, gitDir, remote.FetchURL, remote.Name, auth); err != nil {
+		if err := s.engine.fetch(s.context(), workTree, gitDir, remote.FetchURL, remote.Name, auth); err != nil {
 			return err
 		}
-		return s.engine.fastForward(context.Background(), workTree, gitDir, remote.Name, branch)
+		return s.engine.fastForward(s.context(), workTree, gitDir, remote.Name, branch)
 	})
 }
 
 func (s *gitService) Push(ctx *sdk.AppCtx, repo *Repo, actor string, setUpstream bool) (*GitStatus, error) {
 	return s.networkOperation(ctx, repo, "push", actor, func(workTree, gitDir string, remote *GitRemote, auth *gitAuth) error {
-		status, err := s.engine.status(context.Background(), workTree, gitDir)
+		status, err := s.engine.status(s.context(), workTree, gitDir)
 		if err != nil {
 			return err
 		}
@@ -343,10 +356,10 @@ func (s *gitService) Push(ctx *sdk.AppCtx, repo *Repo, actor string, setUpstream
 		if err != nil {
 			return err
 		}
-		if err := s.engine.push(context.Background(), workTree, gitDir, remote.Name, status.Branch, setUpstream || status.Upstream == "", pushAuth); err != nil {
+		if err := s.engine.push(s.context(), workTree, gitDir, remote.Name, status.Branch, setUpstream || status.Upstream == "", pushAuth); err != nil {
 			return err
 		}
-		s.engine.updateRemoteTracking(context.Background(), workTree, gitDir, remote.Name, status.Branch)
+		s.engine.updateRemoteTracking(s.context(), workTree, gitDir, remote.Name, status.Branch)
 		return nil
 	})
 }
@@ -368,15 +381,15 @@ func (s *gitService) networkOperation(ctx *sdk.AppCtx, repo *Repo, operation, ac
 	if err != nil {
 		return nil, err
 	}
-	before := s.engine.head(context.Background(), workTree, gitDir)
+	before := s.engine.head(s.context(), workTree, gitDir)
 	opErr := fn(workTree, gitDir, remote, auth)
-	after := s.engine.head(context.Background(), workTree, gitDir)
+	after := s.engine.head(s.context(), workTree, gitDir)
 	dbMarkGitRemoteResult(ctx.AppDB(), repo.ID, remote.Name, operation, opErr)
 	dbRecordGitOperation(ctx.AppDB(), repo.ID, operation, actor, before, after, opErr)
 	if opErr != nil {
 		return nil, opErr
 	}
-	status, err := s.engine.status(context.Background(), workTree, gitDir)
+	status, err := s.engine.status(s.context(), workTree, gitDir)
 	if err != nil {
 		return nil, err
 	}
@@ -400,14 +413,14 @@ func (s *gitService) Commit(ctx *sdk.AppCtx, repo *Repo, message string, paths [
 	if err != nil {
 		return nil, err
 	}
-	before := s.engine.head(context.Background(), workTree, gitDir)
-	_, opErr := s.engine.commit(context.Background(), workTree, gitDir, message, cleanPaths, authorName, authorEmail)
-	after := s.engine.head(context.Background(), workTree, gitDir)
+	before := s.engine.head(s.context(), workTree, gitDir)
+	_, opErr := s.engine.commit(s.context(), workTree, gitDir, message, cleanPaths, authorName, authorEmail)
+	after := s.engine.head(s.context(), workTree, gitDir)
 	dbRecordGitOperation(ctx.AppDB(), repo.ID, "commit", actor, before, after, opErr)
 	if opErr != nil {
 		return nil, opErr
 	}
-	status, err := s.engine.status(context.Background(), workTree, gitDir)
+	status, err := s.engine.status(s.context(), workTree, gitDir)
 	if err != nil {
 		return nil, err
 	}
@@ -422,7 +435,7 @@ func (s *gitService) Diff(ctx *sdk.AppCtx, repo *Repo, base string, maxBytes int
 	if err != nil {
 		return "", false, err
 	}
-	return s.engine.diff(context.Background(), workTree, gitDir, base, maxBytes)
+	return s.engine.diff(s.context(), workTree, gitDir, base, maxBytes)
 }
 
 func (s *gitService) Log(ctx *sdk.AppCtx, repo *Repo, limit int) ([]GitCommit, error) {
@@ -431,7 +444,7 @@ func (s *gitService) Log(ctx *sdk.AppCtx, repo *Repo, limit int) ([]GitCommit, e
 	if err != nil {
 		return nil, err
 	}
-	return s.engine.log(context.Background(), workTree, gitDir, limit)
+	return s.engine.log(s.context(), workTree, gitDir, limit)
 }
 
 func (s *gitService) Branches(ctx *sdk.AppCtx, repo *Repo) ([]GitBranch, error) {
@@ -440,7 +453,7 @@ func (s *gitService) Branches(ctx *sdk.AppCtx, repo *Repo) ([]GitBranch, error) 
 	if err != nil {
 		return nil, err
 	}
-	return s.engine.branches(context.Background(), workTree, gitDir)
+	return s.engine.branches(s.context(), workTree, gitDir)
 }
 
 func (s *gitService) CreateBranch(ctx *sdk.AppCtx, repo *Repo, name, startPoint, actor string) (*GitStatus, error) {
@@ -449,13 +462,13 @@ func (s *gitService) CreateBranch(ctx *sdk.AppCtx, repo *Repo, name, startPoint,
 	if err != nil {
 		return nil, err
 	}
-	before := s.engine.head(context.Background(), workTree, gitDir)
-	opErr := s.engine.createBranch(context.Background(), workTree, gitDir, name, startPoint)
+	before := s.engine.head(s.context(), workTree, gitDir)
+	opErr := s.engine.createBranch(s.context(), workTree, gitDir, name, startPoint)
 	dbRecordGitOperation(ctx.AppDB(), repo.ID, "branch_create", actor, before, before, opErr)
 	if opErr != nil {
 		return nil, opErr
 	}
-	status, err := s.engine.status(context.Background(), workTree, gitDir)
+	status, err := s.engine.status(s.context(), workTree, gitDir)
 	if err == nil {
 		status.Remote, _ = dbGetGitRemote(ctx.AppDB(), repo.ID, "origin")
 	}
@@ -468,7 +481,7 @@ func (s *gitService) Switch(ctx *sdk.AppCtx, repo *Repo, name, actor string) (*G
 	if err != nil {
 		return nil, err
 	}
-	status, err := s.engine.status(context.Background(), workTree, gitDir)
+	status, err := s.engine.status(s.context(), workTree, gitDir)
 	if err != nil {
 		return nil, err
 	}
@@ -476,13 +489,13 @@ func (s *gitService) Switch(ctx *sdk.AppCtx, repo *Repo, name, actor string) (*G
 		return nil, errors.New("working tree must be clean before switching branches")
 	}
 	before := status.HeadSHA
-	opErr := s.engine.switchBranch(context.Background(), workTree, gitDir, name)
-	after := s.engine.head(context.Background(), workTree, gitDir)
+	opErr := s.engine.switchBranch(s.context(), workTree, gitDir, name)
+	after := s.engine.head(s.context(), workTree, gitDir)
 	dbRecordGitOperation(ctx.AppDB(), repo.ID, "switch", actor, before, after, opErr)
 	if opErr != nil {
 		return nil, opErr
 	}
-	status, err = s.engine.status(context.Background(), workTree, gitDir)
+	status, err = s.engine.status(s.context(), workTree, gitDir)
 	if err != nil {
 		return nil, err
 	}

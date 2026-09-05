@@ -124,7 +124,7 @@ func TestApplyUnifiedPatch_RelocatesHunkWhenLineNumbersAreStale(t *testing.T) {
 +TWO
  three
 `
-	res, err := applyUnifiedPatch(store, "r", patch, false)
+	res, err := applyUnifiedPatchOptions(store, "r", patch, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestApplyUnifiedPatch_ToleratesStaleContextWhenRemovalAnchorMatches(t *test
 	store.Write("r", "App.jsx", []byte("const selectedIssue = issueData[0];\n<span className=\"status-chip\">{selectedIssue.status}</span>\n<h2>{selectedIssue.title}</h2>\n"))
 	patch := `--- a/App.jsx
 +++ b/App.jsx
-@@ -1,3 +1,6 @@
+@@ -1,3 +1,5 @@
  const selected = issueData[0];
 -<span className="status-chip">{selectedIssue.status}</span>
 +<div className="detail-header">
@@ -151,7 +151,7 @@ func TestApplyUnifiedPatch_ToleratesStaleContextWhenRemovalAnchorMatches(t *test
 +</div>
  <h2>{selected.title}</h2>
 `
-	res, err := applyUnifiedPatch(store, "r", patch, false)
+	res, err := applyUnifiedPatchOptions(store, "r", patch, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

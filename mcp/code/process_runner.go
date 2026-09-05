@@ -22,17 +22,48 @@ const maxProcessLogBytes int64 = 16 << 20
 type cappedWriter struct {
 	w         io.Writer
 	remaining int64
+	limit     int64
+	tail      []byte
 	truncated bool
 	mu        sync.Mutex
 }
 
 func newCappedWriter(w io.Writer, limit int64) *cappedWriter {
-	return &cappedWriter{w: w, remaining: limit}
+	return &cappedWriter{w: w, remaining: limit, limit: limit}
 }
 
 func (w *cappedWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	keep := min(int(w.limit/2), 64*1024)
+	if len(p) >= keep {
+		w.tail = append(w.tail[:0], p[len(p)-keep:]...)
+	} else {
+		w.tail = append(w.tail, p...)
+		if len(w.tail) > keep {
+			w.tail = append(w.tail[:0], w.tail[len(w.tail)-keep:]...)
+		}
+	}
+	if int64(len(p)) > w.remaining {
+		if f, ok := w.w.(*os.File); ok {
+			if err := f.Truncate(0); err != nil {
+				return 0, err
+			}
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				return 0, err
+			}
+			marker := []byte("=== earlier log output discarded; retaining recent output ===\n")
+			if _, err := f.Write(marker); err != nil {
+				return 0, err
+			}
+			if _, err := f.Write(w.tail); err != nil {
+				return 0, err
+			}
+			w.remaining = w.limit - int64(len(marker)+len(w.tail))
+			w.truncated = true
+			return len(p), nil
+		}
+	}
 	original := len(p)
 	overflow := int64(len(p)) > w.remaining
 	if w.remaining > 0 {
@@ -56,10 +87,16 @@ type commandCoordinator struct {
 	mu        sync.Mutex
 	repoSlots map[int64]chan struct{}
 	global    chan struct{}
+	deleting  map[int64]bool
+	active    map[int64]map[*context.CancelFunc]bool
 }
 
 func (c *commandCoordinator) acquire(ctx context.Context, repoID int64) (func(), error) {
 	c.mu.Lock()
+	if c.deleting[repoID] {
+		c.mu.Unlock()
+		return nil, errors.New("repository is being deleted")
+	}
 	if c.repoSlots == nil {
 		c.repoSlots = map[int64]chan struct{}{}
 	}
@@ -81,18 +118,23 @@ func (c *commandCoordinator) acquire(ctx context.Context, repoID int64) (func(),
 	c.mu.Unlock()
 
 	select {
-	case global <- struct{}{}:
+	case repoSlot <- struct{}{}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 	select {
-	case repoSlot <- struct{}{}:
-		return func() {
-			<-repoSlot
+	case global <- struct{}{}:
+		c.mu.Lock()
+		deleting := c.deleting[repoID]
+		c.mu.Unlock()
+		if deleting {
 			<-global
-		}, nil
+			<-repoSlot
+			return nil, errors.New("repository is being deleted")
+		}
+		return func() { <-global; <-repoSlot }, nil
 	case <-ctx.Done():
-		<-global
+		<-repoSlot
 		return nil, ctx.Err()
 	}
 }
@@ -185,4 +227,71 @@ func sortStrings(values []string) {
 
 func isContextDeadline(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
+
+func (c *commandCoordinator) track(ctx context.Context, id int64) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	c.mu.Lock()
+	if c.active == nil {
+		c.active = map[int64]map[*context.CancelFunc]bool{}
+	}
+	if c.active[id] == nil {
+		c.active[id] = map[*context.CancelFunc]bool{}
+	}
+	c.active[id][&cancel] = true
+	if c.deleting[id] {
+		cancel()
+	}
+	c.mu.Unlock()
+	return ctx, func() { cancel(); c.mu.Lock(); delete(c.active[id], &cancel); c.mu.Unlock() }
+}
+func (c *commandCoordinator) beginDelete(ctx context.Context, id int64) (func(bool), error) {
+	c.mu.Lock()
+	if c.deleting == nil {
+		c.deleting = map[int64]bool{}
+	}
+	if c.deleting[id] {
+		c.mu.Unlock()
+		return nil, errors.New("repository deletion already in progress")
+	}
+	c.deleting[id] = true
+	for cancel := range c.active[id] {
+		(*cancel)()
+	}
+	if c.repoSlots == nil {
+		c.repoSlots = map[int64]chan struct{}{}
+	}
+	slot := c.repoSlots[id]
+	if slot == nil {
+		slot = make(chan struct{}, 1)
+		c.repoSlots[id] = slot
+	}
+	c.mu.Unlock()
+	done := func(success bool) {
+		c.mu.Lock()
+		if !success {
+			delete(c.deleting, id)
+		}
+		c.mu.Unlock()
+		<-slot
+	}
+	select {
+	case slot <- struct{}{}:
+		return done, nil
+	case <-ctx.Done():
+		c.mu.Lock()
+		delete(c.deleting, id)
+		c.mu.Unlock()
+		return nil, ctx.Err()
+	}
+}
+
+func (c *commandCoordinator) cancelAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, active := range c.active {
+		for cancel := range active {
+			(*cancel)()
+		}
+	}
 }

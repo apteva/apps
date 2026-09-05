@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.8.2
+version: 0.9.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -25,6 +25,10 @@ description: |
   v0.8.1 adds monorepo-scoped workspaces: editable path globs and read-only
   support inputs are transferred independently and only editable paths can be
   applied back to Code.
+  v0.9.0 hardens transactional edits, conditional saves, Git commits, source
+  transfers, preview ownership, cancellation, issue pagination and bounded I/O.
+  Finite commands now default to Workspaces; local execution requires explicit
+  trusted_local_execution configuration. Includes regression and browser coverage.
   v0.8.2 derives Workspaces resource names from repository slugs so Unicode
   display names cannot violate the Workspaces naming contract.
   v0.6.1 adds theme-aware syntax highlighting, sticky line numbers,
@@ -127,6 +131,10 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: repos_mark_template, description: "Mark a repository as a reusable template." }
+    - { name: repos_unmark_template, description: "Clear the template flag." }
+    - { name: templates_list, description: "List accessible user and embedded templates." }
+    - { name: repos_fork, description: "Fork a repository or template." }
     - name: repos_list
       description: List repositories in this Apteva project.
     - name: repos_create
@@ -286,6 +294,16 @@ db:
   migrations: migrations/
 
 config_schema:
+  - name: trusted_local_execution
+    type: text
+    default: "false"
+    label: Enable trusted local commands
+    description: Local commands and dependency scripts have installation-wide OS authority. Use isolated Workspaces for untrusted source.
+  - name: dev_base_hostname
+    type: text
+    default: ""
+    label: Dev preview base hostname
+    description: Optional ingress domain; preview hostnames include the repository identity.
   - name: max_file_size_mb
     type: text
     default: "10"
