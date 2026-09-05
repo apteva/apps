@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"path"
 	"regexp"
@@ -25,12 +27,13 @@ const (
 )
 
 const (
-	StatusCreating  = "creating"
-	StatusRunning   = "running"
-	StatusStopped   = "stopped"
-	StatusUnhealthy = "unhealthy"
-	StatusError     = "error"
-	StatusDestroyed = "destroyed"
+	StatusCreating   = "creating"
+	StatusRunning    = "running"
+	StatusStopped    = "stopped"
+	StatusUnhealthy  = "unhealthy"
+	StatusError      = "error"
+	StatusDestroyed  = "destroyed"
+	StatusDestroying = "destroying"
 )
 
 type Workload struct {
@@ -83,6 +86,7 @@ type VolumeSpec struct {
 	DockerVolumeName string `json:"docker_volume_name,omitempty"`
 	MountPath        string `json:"mount_path"`
 	SizeBytes        int64  `json:"size_bytes,omitempty"`
+	RetainedFrom     string `json:"retained_from,omitempty"`
 }
 
 type FileSpec struct {
@@ -91,6 +95,7 @@ type FileSpec struct {
 	ContentBase64 string `json:"content_base64,omitempty"`
 	Mode          string `json:"mode,omitempty"`
 	Secret        bool   `json:"secret,omitempty"`
+	Owner         string `json:"owner,omitempty"`
 }
 
 type ResourceSpec struct {
@@ -114,24 +119,28 @@ type WorkloadUsage struct {
 }
 
 type RunSpec struct {
-	Name              string            `json:"name"`
-	Image             string            `json:"image"`
-	BlueprintSlug     string            `json:"blueprint_slug,omitempty"`
-	HostID            int64             `json:"host_id,omitempty"`
-	InstanceID        int64             `json:"instance_id,omitempty"`
-	UseLocal          bool              `json:"use_local,omitempty"`
-	Ports             []PortSpec        `json:"ports,omitempty"`
-	Env               map[string]string `json:"env,omitempty"`
-	Volumes           []VolumeSpec      `json:"volumes,omitempty"`
-	Files             []FileSpec        `json:"files,omitempty"`
-	PullPolicy        string            `json:"pull_policy,omitempty"`
-	HealthPath        string            `json:"health_path,omitempty"`
-	Resources         ResourceSpec      `json:"resources,omitempty"`
-	RestartPolicy     string            `json:"restart_policy,omitempty"`
-	Command           []string          `json:"command,omitempty"`
-	WorkingDirectory  string            `json:"working_directory,omitempty"`
-	User              string            `json:"user,omitempty"`
-	runtimeWorkloadID string            `json:"-"`
+	resourcesPresent   bool
+	Name               string            `json:"name"`
+	Image              string            `json:"image"`
+	BlueprintSlug      string            `json:"blueprint_slug,omitempty"`
+	HostID             int64             `json:"host_id,omitempty"`
+	InstanceID         int64             `json:"instance_id,omitempty"`
+	UseLocal           bool              `json:"use_local,omitempty"`
+	Ports              []PortSpec        `json:"ports,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	Volumes            []VolumeSpec      `json:"volumes,omitempty"`
+	Files              []FileSpec        `json:"files,omitempty"`
+	PullPolicy         string            `json:"pull_policy,omitempty"`
+	HealthPath         string            `json:"health_path,omitempty"`
+	HealthScheme       string            `json:"health_scheme,omitempty"`
+	HealthPort         int               `json:"health_port,omitempty"`
+	DisableHealthCheck bool              `json:"disable_health_check,omitempty"`
+	Resources          ResourceSpec      `json:"resources,omitempty"`
+	RestartPolicy      string            `json:"restart_policy,omitempty"`
+	Command            []string          `json:"command,omitempty"`
+	WorkingDirectory   string            `json:"working_directory,omitempty"`
+	User               string            `json:"user,omitempty"`
+	runtimeWorkloadID  string            `json:"-"`
 }
 
 type Blueprint struct {
@@ -153,10 +162,13 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 	if in.Image == "" {
 		return in, errors.New("image is required")
 	}
+	if strings.HasPrefix(in.Image, "-") || strings.ContainsAny(in.Image, " \t\r\n\x00") {
+		return in, errors.New("image must be a Docker image reference, not an option")
+	}
 	if len(in.Image) > 512 {
 		return in, errors.New("image must be at most 512 characters")
 	}
-	if in.Resources.MemoryMB < 0 || in.Resources.CPU < 0 {
+	if in.Resources.MemoryMB < 0 || in.Resources.CPU < 0 || math.IsNaN(in.Resources.CPU) || math.IsInf(in.Resources.CPU, 0) {
 		return in, errors.New("resources.memory_mb and resources.cpu must be >= 0")
 	}
 	if len(in.Ports) > 64 || len(in.Volumes) > 32 || len(in.Env) > 256 {
@@ -166,6 +178,9 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 	for key, value := range in.Env {
 		if !validEnvKey(key) {
 			return in, fmt.Errorf("invalid env key %q", key)
+		}
+		if strings.IndexByte(value, 0) >= 0 {
+			return in, errors.New("environment contains NUL")
 		}
 		envBytes += len(key) + len(value)
 		if envBytes > maxEnvironmentBytes {
@@ -206,16 +221,29 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 	default:
 		return in, fmt.Errorf("unsupported pull_policy %q", in.PullPolicy)
 	}
-	if in.HealthPath == "" {
-		in.HealthPath = "/"
+	if in.HealthScheme == "" {
+		in.HealthScheme = "http"
+	}
+	if in.HealthScheme != "http" && in.HealthScheme != "https" {
+		return in, errors.New("health_scheme must be http or https")
+	}
+	if in.HealthPort < 0 || in.HealthPort > 65535 {
+		return in, errors.New("invalid health_port")
 	}
 	if len(in.HealthPath) > 2048 {
 		return in, errors.New("health_path must be at most 2048 characters")
+	}
+	if envBytes > maxEnvironmentBytes {
+		return in, errors.New("run input exceeds byte limit")
 	}
 	if len(in.Command) > 256 {
 		return in, errors.New("command may contain at most 256 arguments")
 	}
 	for i, arg := range in.Command {
+		envBytes += len(arg)
+		if envBytes > maxEnvironmentBytes {
+			return in, errors.New("command and environment exceed total byte limit")
+		}
 		if strings.IndexByte(arg, 0) >= 0 {
 			return in, fmt.Errorf("command[%d] contains a NUL byte", i)
 		}
@@ -233,7 +261,7 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 	if in.User != "" && !containerUserRE.MatchString(in.User) {
 		return in, errors.New("user must be a user, uid, or user:group without whitespace")
 	}
-	if !strings.HasPrefix(in.HealthPath, "/") {
+	if in.HealthPath != "" && !strings.HasPrefix(in.HealthPath, "/") {
 		in.HealthPath = "/" + in.HealthPath
 	}
 	seenPorts := map[string]struct{}{}
@@ -282,6 +310,9 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 		}
 		if !workloadNameRE.MatchString(v.Name) {
 			return in, fmt.Errorf("volumes[%d].name must use lowercase letters, numbers, dashes", i)
+		}
+		if strings.ContainsAny(v.MountPath, ":\x00") {
+			return in, errors.New("volume mount path must not contain colon or NUL")
 		}
 		if !strings.HasPrefix(v.MountPath, "/") {
 			return in, fmt.Errorf("volumes[%d].mount_path must be absolute", i)
@@ -348,6 +379,9 @@ func normalizeFileSpec(f *FileSpec, i int, volumes []VolumeSpec) (int, error) {
 	if contentSize > maxInjectedFileBytes {
 		return 0, fmt.Errorf("files[%d] content exceeds %d bytes", i, maxInjectedFileBytes)
 	}
+	if f.Owner != "" && !regexp.MustCompile(`^[0-9]+:[0-9]+$`).MatchString(f.Owner) {
+		return 0, errors.New("file owner must be numeric uid:gid")
+	}
 	mode := strings.TrimSpace(f.Mode)
 	if mode == "" {
 		mode = "0600"
@@ -370,6 +404,7 @@ type VolumeFileWrite struct {
 	Content    []byte
 	Mode       string
 	Secret     bool
+	Owner      string
 }
 
 func resolveFileWrites(spec RunSpec) ([]VolumeFileWrite, error) {
@@ -396,6 +431,7 @@ func resolveFileWrites(spec RunSpec) ([]VolumeFileWrite, error) {
 			Content:    content,
 			Mode:       f.Mode,
 			Secret:     f.Secret,
+			Owner:      f.Owner,
 		})
 	}
 	return out, nil
@@ -530,4 +566,21 @@ func decodeResources(raw string) ResourceSpec {
 	var out ResourceSpec
 	_ = json.Unmarshal([]byte(raw), &out)
 	return out
+}
+
+func (s *RunSpec) UnmarshalJSON(data []byte) error {
+	type alias RunSpec
+	var v alias
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&v); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*s = RunSpec(v)
+	_, s.resourcesPresent = fields["resources"]
+	return nil
 }

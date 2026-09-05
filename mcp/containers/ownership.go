@@ -41,7 +41,7 @@ func ownerCanAccess(owner ownerIdentity, workload *Workload) bool {
 	if workload == nil {
 		return false
 	}
-	if workload.ProjectID != "" && owner.ProjectID != "" && workload.ProjectID != owner.ProjectID {
+	if workload.ProjectID != owner.ProjectID {
 		return false
 	}
 	if workload.OwnerAppInstallID > 0 {

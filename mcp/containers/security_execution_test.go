@@ -125,7 +125,7 @@ func TestDockerRunArgsIncludesCommandWorkingDirectoryAndUser(t *testing.T) {
 		t.Fatalf("docker args: %v", err)
 	}
 	joined := strings.Join(args, "|")
-	if !strings.Contains(joined, "--workdir|/workspace|--user|1000:1000|alpine:3.20|sleep|infinity") {
+	if !strings.Contains(joined, "--workdir|/workspace|--user|1000:1000") || !strings.Contains(joined, "--|alpine:3.20|sleep|infinity") {
 		t.Fatalf("missing command overrides: %v", args)
 	}
 }
@@ -330,7 +330,16 @@ func (f *executionBackendStub) StartExecution(_ context.Context, spec executionR
 }
 
 func (f *executionBackendStub) InspectExecution(context.Context, *Execution) (*ContainerState, error) {
-	return f.state, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stopped {
+		return &ContainerState{Status: "exited", ExitCode: 137}, nil
+	}
+	if f.state == nil {
+		return &ContainerState{Status: "exited"}, nil
+	}
+	copy := *f.state
+	return &copy, nil
 }
 
 func (f *executionBackendStub) StopExecution(context.Context, *Execution) error {

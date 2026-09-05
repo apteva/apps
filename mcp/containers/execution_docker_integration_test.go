@@ -31,7 +31,7 @@ func TestLocalDockerExecutionPersistsInsideWorkspaceContainer(t *testing.T) {
 		t.Helper()
 		execution := &Execution{ID: id, RuntimeContainerName: name}
 		runtimeID, err := backend.StartExecution(ctx, executionRuntimeSpec{
-			ExecutionID: id, ContainerName: name, SessionKey: "workspace", Argv: argv,
+			ExecutionID: id, ContainerName: name, SessionKey: "workspace", Argv: argv, StatefulCommand: true,
 		})
 		if err != nil {
 			t.Fatalf("start execution %s: %v", id, err)
@@ -79,7 +79,7 @@ echo prepared`)
 
 	cancelled := &Execution{ID: "exe_persist_cancel", RuntimeContainerName: name}
 	runtimeID, err := backend.StartExecution(ctx, executionRuntimeSpec{
-		ExecutionID: cancelled.ID, ContainerName: name, SessionKey: "workspace",
+		ExecutionID: cancelled.ID, ContainerName: name, SessionKey: "workspace", StatefulCommand: true,
 		Argv: []string{"/bin/sh", "-c", "echo cancellation-started; sleep 60; echo cancellation-failed"},
 	})
 	if err != nil {

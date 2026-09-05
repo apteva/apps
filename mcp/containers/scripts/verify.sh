@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+export GOWORK=off
+go test -race -count=1 -timeout=6m ./...
+go vet ./...
+(cd ui && bun install --frozen-lockfile && bun run test && bun run typecheck && bun audit)
+bun run scripts/build-panel.ts
+go run golang.org/x/vuln/cmd/govulncheck@latest ./...

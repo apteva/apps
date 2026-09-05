@@ -30,24 +30,33 @@ type volumeArchiveBackend interface {
 
 func (d LocalDocker) ImportVolumeArchive(ctx context.Context, volumeName, relativePath string, archive []byte) error {
 	script := `set -eu
+umask 077
+mkdir /tmp/stage
+tar -xzf - -C /tmp/stage
+# No pre-existing links may redirect this import. The caller pauses the workload
+# while committing so its processes cannot replace checked components.
 dest=/volume
-if [ "$1" != "." ]; then dest="/volume/$1"; fi
+rel="$1"; set -f; oldifs="$IFS"; IFS=/; set -- $rel; IFS="$oldifs"
+for part in "$@"; do [ "$part" = . ] && continue; dest="$dest/$part"; [ ! -L "$dest" ] || { echo 'destination symlink rejected' >&2; exit 73; }; done
+if [ -d "$dest" ] && [ -n "$(find "$dest" -type l -print -quit)" ]; then echo 'destination contains symlinks' >&2; exit 73; fi
 mkdir -p "$dest"
-tar -xzf - -C "$dest"`
-	_, err := dockerWithInput(ctx, archive, "run", "--rm", "-i", "-v", volumeName+":/volume", "alpine:3.20", "sh", "-c", script, "sh", relativePath)
+cp -a /tmp/stage/. "$dest/"`
+	_, err := helperContainer(ctx, archive, 1024, "-i", "--tmpfs", "/tmp:rw,nosuid,nodev,size=160m", "-v", volumeName+":/volume", "alpine:3.20", "sh", "-c", script, "sh", relativePath)
 	return err
 }
-
 func (d LocalDocker) ExportVolumeArchive(ctx context.Context, volumeName, relativePath string, maxBytes int) ([]byte, error) {
+	return d.exportVolumeArchiveLimited(ctx, volumeName, relativePath, maxBytes, defaultMaxExpandedBytes, defaultMaxArchiveFiles)
+}
+func (d LocalDocker) exportVolumeArchiveLimited(ctx context.Context, volumeName, relativePath string, maxBytes, maxExpanded, maxFiles int) ([]byte, error) {
 	script := `set -eu
-src=/volume
-item=.
-if [ "$1" != "." ]; then item="$1"; fi
-tar -czf /tmp/archive.tgz -C "$src" "$item"
-size=$(wc -c < /tmp/archive.tgz)
-if [ "$size" -gt "$2" ]; then echo "archive exceeds compressed size limit" >&2; exit 73; fi
-cat /tmp/archive.tgz`
-	out, err := dockerWithInputLimit(ctx, nil, maxBytes+1, "run", "--rm", "-v", volumeName+":/volume:ro", "alpine:3.20", "sh", "-c", script, "sh", relativePath, strconv.Itoa(maxBytes))
+cd /volume
+item="./$1"
+rel="$1"; expanded="$2"; files="$3"; current=.; set -f; oldifs="$IFS"; IFS=/; set -- $rel; IFS="$oldifs"
+for part in "$@"; do current="$current/$part"; [ ! -L "$current" ] || { echo 'source symlink rejected' >&2; exit 73; }; done
+[ -e "$item" ] || exit 1
+find "$item" -exec stat -c '%s' '{}' + | awk -v bytes="$expanded" -v files="$files" '{ total+=$1; count++; if(total>bytes || count>files) exit 73; }'
+tar -czf - "$item"`
+	out, err := helperContainer(ctx, nil, maxBytes, "-v", volumeName+":/volume:ro", "alpine:3.20", "sh", "-c", script, "sh", relativePath, strconv.Itoa(maxExpanded), strconv.Itoa(maxFiles))
 	if err != nil {
 		return nil, err
 	}
@@ -81,12 +90,15 @@ func validateTarGzip(archive []byte, maxCompressed, maxExpanded, maxFiles int) e
 	if len(archive) > maxCompressed {
 		return fmt.Errorf("archive exceeds compressed size limit of %d bytes", maxCompressed)
 	}
-	gz, err := gzip.NewReader(bytes.NewReader(archive))
+	compressed := bytes.NewReader(archive)
+	gz, err := gzip.NewReader(compressed)
 	if err != nil {
 		return errors.New("archive must be a valid tar.gz stream")
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
+	gz.Multistream(false)
+	expandedStream := &io.LimitedReader{R: gz, N: int64(maxExpanded) + int64(maxFiles)*1024 + 2*1024*1024}
+	tr := tar.NewReader(expandedStream)
 	var expanded int64
 	files := 0
 	for {
@@ -127,6 +139,28 @@ func validateTarGzip(archive []byte, maxCompressed, maxExpanded, maxFiles int) e
 			return fmt.Errorf("archive exceeds expanded size limit of %d bytes", maxExpanded)
 		}
 	}
+	// Finish gzip validation, including CRC, and bound padding/extension headers.
+	padding := make([]byte, 32768)
+	for {
+		n, err := expandedStream.Read(padding)
+		for _, b := range padding[:n] {
+			if b != 0 {
+				return errors.New("archive contains data after tar end")
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("gzip checksum: %w", err)
+		}
+	}
+	if expandedStream.N == 0 {
+		return errors.New("archive decompressed stream exceeds limit")
+	}
+	if compressed.Len() != 0 {
+		return errors.New("archive contains concatenated gzip streams or trailing data")
+	}
 	return nil
 }
 
@@ -150,6 +184,11 @@ func validateArchiveLink(entry, target string, symbolic bool) error {
 	if target == "" || strings.HasPrefix(target, "/") || strings.IndexByte(target, 0) >= 0 {
 		return fmt.Errorf("archive link %q has unsafe target %q", entry, target)
 	}
+	for _, part := range strings.Split(target, "/") {
+		if part == ".." {
+			return fmt.Errorf("archive link %q may not contain parent traversal", entry)
+		}
+	}
 	resolved := target
 	if symbolic {
 		resolved = path.Join(path.Dir(entry), target)
@@ -171,7 +210,7 @@ func findWorkloadVolume(workload *Workload, name string) (*VolumeSpec, error) {
 	return nil, fmt.Errorf("volume %q is not attached to workload", name)
 }
 
-func (a *App) importVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeName, relativePath, encoded string) (map[string]any, error) {
+func (a *App) importVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeName, relativePath, encoded string) (result map[string]any, resultErr error) {
 	if workload.HostID != 0 || workload.InstanceID != 0 {
 		return nil, errors.New("volume archive transfer currently supports local workloads only")
 	}
@@ -215,13 +254,36 @@ func (a *App) importVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeNam
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	ctx, unlock, lockErr := a.lockWorkload(ctx, workload.ID, false)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+	fresh, err := requireWorkload(app.AppDB(), workload.ID)
+	if err != nil {
+		return nil, err
+	}
+	volume, err = findWorkloadVolume(fresh, volumeName)
+	if err != nil {
+		return nil, err
+	}
+	workload = fresh
+	resume, err := a.pauseArchive(ctx, app, workload)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := resume(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("archive completed but workload resume is pending: %w", err))
+		}
+	}()
 	if err := archiveBackend.ImportVolumeArchive(ctx, volume.DockerVolumeName, relativePath, archive); err != nil {
 		return nil, err
 	}
 	return map[string]any{"workload_id": workload.ID, "volume": volume.Name, "path": relativePath, "compressed_bytes": len(archive)}, nil
 }
 
-func (a *App) exportVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeName, relativePath string) (map[string]any, error) {
+func (a *App) exportVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeName, relativePath string) (result map[string]any, resultErr error) {
 	if workload.HostID != 0 || workload.InstanceID != 0 {
 		return nil, errors.New("volume archive transfer currently supports local workloads only")
 	}
@@ -255,7 +317,35 @@ func (a *App) exportVolumeArchive(app *sdk.AppCtx, workload *Workload, volumeNam
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	archive, err := archiveBackend.ExportVolumeArchive(ctx, volume.DockerVolumeName, relativePath, maxCompressed)
+	ctx, unlock, lockErr := a.lockWorkload(ctx, workload.ID, false)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+	fresh, err := requireWorkload(app.AppDB(), workload.ID)
+	if err != nil {
+		return nil, err
+	}
+	volume, err = findWorkloadVolume(fresh, volumeName)
+	if err != nil {
+		return nil, err
+	}
+	workload = fresh
+	resume, err := a.pauseArchive(ctx, app, workload)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := resume(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("archive completed but workload resume is pending: %w", err))
+		}
+	}()
+	var archive []byte
+	if local, ok := backend.(LocalDocker); ok {
+		archive, err = local.exportVolumeArchiveLimited(ctx, volume.DockerVolumeName, relativePath, maxCompressed, maxExpanded, maxFiles)
+	} else {
+		archive, err = archiveBackend.ExportVolumeArchive(ctx, volume.DockerVolumeName, relativePath, maxCompressed)
+	}
 	if err != nil {
 		return nil, err
 	}

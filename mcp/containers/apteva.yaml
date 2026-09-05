@@ -10,11 +10,13 @@ description: |
   checks, bounded logs, pre-start files and secrets, pull policies,
   lifecycle actions, safe volume archive transfer, and owned asynchronous
   command executions.
-  v0.4.0 adds named persistent PTY shell sessions, preserving shell state such
+  Named persistent PTY shell sessions preserve shell state such
   as the current directory and exported variables between commands. Installed
   packages, files, services, cancellation, bounded logs, and audit events remain
   part of the same owned workload lifecycle.
-  Routes, backups, and multi-container blueprints build on the same surface.
+  Execution and archive transfer support local workloads only. Shell state is
+  process-local; routes, scheduled backups, and multi-container blueprints are
+  not implemented by this app.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/containers
@@ -42,32 +44,32 @@ requires:
       required: false
       compatible_app_names: [routes]
       label: Routes app
-      hint: Install Routes to publish container workloads at hostnames.
+      hint: Reserved integration; automatic route publishing is not implemented.
     - role: domains
       kind: app
       required: false
       compatible_app_names: [domains]
       label: Domains app
-      hint: Install Domains to write DNS records when exposing workloads.
+      hint: Reserved integration; automatic DNS publishing is not implemented.
     - role: certs
       kind: app
       required: false
       compatible_app_names: [certs]
       label: Certs app
-      hint: Install Certs to issue TLS certificates for workload hostnames.
+      hint: Reserved integration; automatic certificate provisioning is not implemented.
     - role: backup
       kind: app
       required: false
       compatible_app_names: [backup]
       label: Backup app
-      hint: Install Backup to schedule and retain container volume snapshots.
+      hint: Reserved integration; automatic scheduled backups are not implemented.
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: containers_run
-      description: "Run a Docker image as a managed workload on the local Docker host or an Instances host. Args: name, image, host_id?/instance_id?, use_local?, ports?, env?, volumes?, files?, pull_policy?, health_path?, resources?, restart_policy?, command?, working_directory?, user?. files may write up to 32 pre-start files under declared volume mount paths (1 MiB each, 4 MiB total). Secret file contents and environment values are not persisted. pull_policy controls Docker image pulls: missing, always, or never. App-created workloads are isolated to their authenticated owner install."
+      description: "Run a Docker image as a managed workload on the local Docker host or an Instances host. Args: name, image, host_id?/instance_id?, use_local?, ports?, env?, volumes?, files?, pull_policy?, health_path?, health_scheme?, health_port?, disable_health_check?, resources?, restart_policy?, command?, working_directory?, user?. files may write up to 32 pre-start files under declared volume mount paths (1 MiB each, 4 MiB total). Secret file contents and environment values are not persisted. pull_policy controls Docker image pulls: missing, always, or never. App-created workloads are isolated to their authenticated owner install and project. HTTP health checks are opt-in. Files inherit the workload UID, or use files[].owner (numeric uid:gid). volumes[].retained_from reuses a volume from a destroyed workload on the same host; metadata moves to the replacement."
     - name: containers_create
       description: Alias of containers_run.
     - name: containers_get
@@ -90,8 +92,14 @@ provides:
       description: "Measure generic workload usage metrics such as storage bytes for attached volumes. Args: workload_id or id."
     - name: containers_blueprints_list
       description: List built-in and custom container blueprints.
+    - name: containers_sessions_list
+      description: List persistent sessions for an owned workload.
+      exposure: app_only
+    - name: containers_session_close
+      description: Close an idle session on an owned workload.
+      exposure: app_only
     - name: containers_exec_start
-      description: "Start an asynchronous command inside an owned local workload container. Set session_key to reuse a stateful PTY shell so current directory and exported variables persist across commands. Writable-layer files, installed packages, named volumes, and background processes persist for the workload lifetime. Args: workload_id, argv? or shell_command?, working_directory?, env?, timeout_s?, idempotency_key?, session_key?."
+      description: "Start an asynchronous command inside an owned local workload container. Set session_key and shell_command to reuse a stateful /bin/sh shell; explicit argv is always executed literally. Sessions expire after 30 idle minutes; at most 64 sessions and 64 active executions are allowed. Writable-layer files, installed packages, named volumes, and background processes persist for the workload lifetime. Args: workload_id, argv? or shell_command?, working_directory?, env?, timeout_s?, idempotency_key?, session_key?."
       exposure: app_only
     - name: containers_exec_get
       description: "Fetch one caller-owned execution. Args: execution_id."
@@ -121,7 +129,7 @@ provides:
     - name: health-poll
       schedule: "@every 30s"
     - name: execution-retention
-      schedule: "@every 1h"
+      schedule: "@every 10s"
   ui_panels:
     - slot: project.page
       label: Containers

@@ -1,0 +1,36 @@
+Audit fixes against Containers v0.4.0
+
+Base: `containers/v0.4.0` / `f04ae9c59d127b168e30ec7e14300387e80f0d4f`. Work was isolated on branch `fix/containers-v040-audit`. No deployment, release tag, production database operation, or remote VPS mutation was performed.
+
+| Audit finding | Implemented change | Main regression evidence |
+|---|---|---|
+| 1. Docker option injection | Reject option-shaped/whitespace image values; terminate options before the image, including remote argument construction. | `TestAuditImageCannotInjectCLIOptions`; Docker argument boundary test |
+| 2. HTTP project isolation | Trusted request project is applied to list, create, item actions, history, cancellation and sessions; operator policy is explicit. | HTTP isolation and cross-project mutation/history tests |
+| 3. Lifecycle races | Per-workload cancellable coordination; creation/destruction/health transitions reject stale operations; idle guards released. | Destroyed/creating health regressions; guard concurrency test |
+| 4. Cancellation/completion race | SQL conditional transitions elect one terminal winner; events follow successful persistence. | Stale-completion regression; 20-contender terminal transition test |
+| 5. Abandoned commands | Persist runtime identity before starting; serialize launch; retry cancelling and observation errors; verify termination; reconcile interrupted startup; durable late-create cleanup. | Runtime identity, cancellation retry, lost-PTY recovery, uncooperative-command and late-create tests |
+| 6. Lost retained volumes | Keep metadata after preserve; scoped, exclusive transfer to a replacement; delete rows only after confirmed deletion. | Preserve regression; cross-project/exclusive transfer and deletion test |
+| 7. PTY transport | Stage scripts over stdin to a file, send short control lines, keep argv literal, close command stdin, retain actual shell exit status. Session generations prevent old cleanup from deleting a replacement session. | Alpine, 6 KiB command, exit 0, Bash, multiline, stdin, redirects and original persistent-state integration tests |
+| 8. Unbounded output storage | Bounded capture spool and memory tail; captured-byte accounting; per-container Docker log rotation and PID limit. | 3 MiB output regression; 4 KiB tail/count/marker integration test |
+| 9. Missing stderr | Bounded combined log stream for local workload logs. | stdout/stderr Docker regression |
+| 10. Remote cancellation race | Immutable response handoff, wait for RPC settlement, aligned creation budget, durable cleanup of late labelled containers. | Race-enabled cancellation stub; late-result cleanup tests; SDK/Instances contract inspection |
+| 11. Panel scope | Installation-qualified URLs with project query; keyed scope reset; abort pending requests. | UI requests before/after install/project change |
+| 12. Worker project scope | SQL-scoped health/reconciliation/retention and persisted downstream project context; legacy empty-project pass once per interval. | Scoped active-execution queries; owner/project isolation tests |
+| 13. Session resource pressure | Startup outside global mutex, per-session admission, 64-session cap, 30-minute idle expiry, explicit close, descriptor cleanup, status-only inspection, release completed buffers. | Persistent-shell tests; Docker cancellation/recovery matrix; race detector |
+| 14. Cleanup forgotten | Keep runtime identity/output after cleanup failure; stopped-container cleanup retries; terminal events only after successful state write. | Retention failure/retry test; destruction failure tests |
+| 15. Port allocation | Delegate allocation to Docker and inspect actual protocol-specific bindings. | TCP/UDP real-daemon allocation; binding parser test |
+| 16. Misleading health | HTTP checks opt-in, scheme/port/disable controls, workload network namespace probing, suppress remote loopback URLs, actual host probe status. | Health defaults/URL tests; existing host discovery tests |
+| 17. Non-root file access | Workload UID/GID resolution and explicit owner; private atomic file writes and secure remote staging. | Non-root file regression plus complete RunSpec-to-container test; remote staging test |
+| 18. Input decoding | Reject JSON type/unknown-field errors, finite resource values, excess collection/input bytes and malformed environment. | Malformed RunSpec, total argv/environment, unsafe input tests; UI numeric validation |
+| 19. Archive safety/limits | Bound helper output while streaming, preflight expanded export size, bound decompression and validate CRC, reject path/symlink hazards, isolate helpers, pause with durable recovery, retry helper removal-in-progress. | Destination symlink, compressed/expanded limits, helper cleanup, CRC/concatenation and interrupted-pause recovery tests |
+| 20. Truncation metadata | Store total captured bytes independently of retained tail; requested line tails also set truncation. | Bounded capture/count integration test and execution log tests |
+| 21. Query/polling cost | Scope and paginate SQL before hydrating related rows; supervisor uses base workload reads/status-only PTY inspection; remote bootstrap capability cache expires after one minute. | Scoped-query tests; race suite; panel pagination and scope tests |
+| 22. Vulnerable toolchain | Go 1.25.13, SDK v0.75.0 pinned by tag topology, x/sys v0.44.0; repeatable vulnerability scan. | `govulncheck`; build and vet |
+
+Additional UI and maintenance work: persistent action errors with dismissal, per-workload busy state, secret-free quick presets, validated numbers, collision-resistant names with registry-port parsing, all-port display, unlimited-resource labels, explicit empty/zero blueprint overrides, focus trapping/restoration, panel-scoped CSS, retained-volume and execution/session controls, correct HTTP error categories, removal of unused legacy tool handlers, and documented support boundaries.
+
+Validation: 85 top-level Go tests passed with the race detector, including the Docker matrix; all 7 UI interaction tests (34 assertions), TypeScript, build, vet, panel/source-map checks, Go vulnerability scan and Bun dependency audit passed. The subsequent startup-order regression also passed with the race detector. Details are recorded in `validation-summary.json`. Tests used disposable local Docker containers/volumes with Alpine 3.20 and oven/bun:1-debian, plus backend and platform stubs. UI interaction tests use React with Happy DOM and include focus, form, retained data, action errors and scope changes. The panel and source map are rebuilt from the final TSX. `scripts/verify.sh` repeats the app-scoped checks.
+
+The repository-wide panel import scanner also reports an existing `trading/ui/TradingPanel.mjs` development-JSX import. Containers passes that scan; its standalone build script avoids making unrelated application bundles a prerequisite for Containers validation.
+
+Limits of verification: no live remote VPS or production permission smoke test was run; no production binary was replaced. The server proxy and SDK contracts were inspected, and remote interactions were exercised with stubs. No guarantee is made about undiscovered defects. Historical volume records erased by 0.4.0 and pre-upgrade PTY processes require the recovery care described in README.md.

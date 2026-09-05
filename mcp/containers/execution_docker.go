@@ -19,50 +19,76 @@ import (
 )
 
 const persistentExecutionScript = `set -eu
-state_dir="$1"
-shift
+state_dir="$1"; limit="$2"; shift 2
+umask 077
 mkdir -p "$state_dir"
 : > "$state_dir/output"
-rm -f "$state_dir/pid" "$state_dir/process_group"
+printf 0 > "$state_dir/bytes"
+rm -f "$state_dir/pid" "$state_dir/process_group" "$state_dir/pipe"
+mkfifo "$state_dir/pipe"
+(
+ total=0
+ while :; do
+  dd bs=32768 count=1 of="$state_dir/chunk" 2>/dev/null
+  n=$(wc -c < "$state_dir/chunk")
+  [ "$n" -gt 0 ] || break
+  total=$((total+n))
+  cat "$state_dir/output" "$state_dir/chunk" | tail -c "$limit" > "$state_dir/next"
+  mv "$state_dir/next" "$state_dir/output"
+  printf '%s' "$total" > "$state_dir/bytes.next"
+  mv "$state_dir/bytes.next" "$state_dir/bytes"
+ done
+ rm -f "$state_dir/chunk"
+) < "$state_dir/pipe" &
+capture=$!
 if command -v setsid >/dev/null 2>&1; then
-  setsid "$@" > "$state_dir/output" 2>&1 &
-  child=$!
-  : > "$state_dir/process_group"
+ setsid "$@" </dev/null > "$state_dir/pipe" 2>&1 &
+ child=$!; : > "$state_dir/process_group"
 else
-  "$@" > "$state_dir/output" 2>&1 &
-  child=$!
+ "$@" </dev/null > "$state_dir/pipe" 2>&1 &
+ child=$!
 fi
 printf '%s\n' "$child" > "$state_dir/pid"
 set +e
-wait "$child"
-exit $?
+wait "$child"; status=$?
+# Normal foreground output drains to EOF. Detached children must redirect their
+# output; do not let them keep the capture process alive indefinitely.
+i=0
+while kill -0 "$capture" 2>/dev/null && [ "$i" -lt 40 ]; do sleep 0.05; i=$((i+1)); done
+kill "$capture" 2>/dev/null || true
+wait "$capture" 2>/dev/null || true
+rm -f "$state_dir/pipe" "$state_dir/pid" "$state_dir/process_group" "$state_dir/chunk" "$state_dir/next"
+printf '%s\n' "$status" > "$state_dir/exit_code"
+exit "$status"
 `
 
 const stopPersistentExecutionScript = `state_dir="$1"
 i=0
 while [ ! -s "$state_dir/pid" ] && [ "$i" -lt 5 ]; do
-  sleep 1
-  i=$((i + 1))
+ [ ! -f "$state_dir/exit_code" ] || exit 0
+ sleep 1; i=$((i+1))
 done
 [ -s "$state_dir/pid" ] || exit 0
 pid=$(cat "$state_dir/pid")
-if [ -f "$state_dir/process_group" ]; then
-  kill -TERM -"$pid" 2>/dev/null || true
-else
-  kill -TERM "$pid" 2>/dev/null || true
-fi
-i=0
-while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 5 ]; do
-  sleep 1
-  i=$((i + 1))
+case "$pid" in ''|*[!0-9]*|0|1) exit 1;; esac
+group=false; [ ! -f "$state_dir/process_group" ] || group=true
+# Snapshot descendants before terminating the leader, including children which
+# created a new process group. Escalate the original group even if its leader exits.
+pids="$pid"
+while :; do
+ old="$pids"
+ for f in /proc/[0-9]*/status; do
+  child=; parent=
+  while read -r k v rest; do case "$k" in Pid:) child="$v";; PPid:) parent="$v";; esac; done < "$f" 2>/dev/null || continue
+  case " $pids " in *" $parent "*) case " $pids " in *" $child "*) ;; *) pids="$pids $child";; esac;; esac
+ done
+ [ "$pids" = "$old" ] && break
 done
-if kill -0 "$pid" 2>/dev/null; then
-  if [ -f "$state_dir/process_group" ]; then
-    kill -KILL -"$pid" 2>/dev/null || true
-  else
-    kill -KILL "$pid" 2>/dev/null || true
-  fi
-fi
+if $group; then kill -TERM -"$pid" 2>/dev/null || true; fi
+for p in $pids; do kill -TERM "$p" 2>/dev/null || true; done
+sleep 1
+if $group; then kill -KILL -"$pid" 2>/dev/null || true; fi
+for p in $pids; do kill -KILL "$p" 2>/dev/null || true; done
 `
 
 type dockerEngineConnection struct {
@@ -90,7 +116,7 @@ func (d LocalDocker) StartExecution(ctx context.Context, spec executionRuntimeSp
 	if spec.SessionKey != "" {
 		return persistentShells.Start(ctx, spec)
 	}
-	cmd := []string{"/bin/sh", "-c", persistentExecutionScript, "apteva-exec", executionControlDir(spec.ExecutionID)}
+	cmd := []string{"/bin/sh", "-c", persistentExecutionScript, "apteva-exec", executionControlDir(spec.ExecutionID), strconv.Itoa(executionOutputLimit(spec.MaxOutputBytes))}
 	cmd = append(cmd, spec.Argv...)
 	env := make([]string, 0, len(spec.Env))
 	for _, key := range envKeys(spec.Env) {
@@ -120,6 +146,11 @@ func (d LocalDocker) StartExecution(ctx context.Context, spec executionRuntimeSp
 	if created.ID == "" {
 		return "", errors.New("Docker returned an empty exec id")
 	}
+	if spec.RuntimeReady != nil {
+		if err := spec.RuntimeReady(created.ID); err != nil {
+			return "", err
+		}
+	}
 	if err := dockerEngineJSON(ctx, http.MethodPost, "/exec/"+url.PathEscape(created.ID)+"/start", map[string]any{
 		"Detach": true,
 		"Tty":    false,
@@ -134,6 +165,11 @@ func (d LocalDocker) InspectExecution(ctx context.Context, execution *Execution)
 		return d.Inspect(ctx, execution.RuntimeContainerName)
 	}
 	if execution != nil && persistentShellRuntime(execution.RuntimeContainerID) {
+		if persistentShells.execution(execution.ID) == nil {
+			if err := containerTreeKill(ctx, execution.RuntimeContainerName, shellRuntimeControlDir(execution.RuntimeContainerID)); err != nil && !dockerExecUnavailable(err) {
+				return nil, err
+			}
+		}
 		return persistentShells.Inspect(execution), nil
 	}
 	if execution == nil || execution.RuntimeContainerID == "" {
@@ -145,6 +181,12 @@ func (d LocalDocker) InspectExecution(ctx context.Context, execution *Execution)
 		ExitCode int    `json:"ExitCode"`
 	}
 	if err := dockerEngineJSON(ctx, http.MethodGet, "/exec/"+url.PathEscape(execution.RuntimeContainerID)+"/json", nil, &inspected); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such exec") {
+			if stopErr := d.StopExecution(ctx, execution); stopErr != nil {
+				return nil, stopErr
+			}
+			return &ContainerState{ID: execution.RuntimeContainerID, Status: "exited", ExitCode: 125}, nil
+		}
 		return nil, err
 	}
 	status := "exited"
@@ -163,6 +205,13 @@ func (d LocalDocker) StopExecution(ctx context.Context, execution *Execution) er
 		return err
 	}
 	if persistentShellRuntime(execution.RuntimeContainerID) {
+		if persistentShells.execution(execution.ID) == nil {
+			err := containerTreeKill(ctx, execution.RuntimeContainerName, shellRuntimeControlDir(execution.RuntimeContainerID))
+			if dockerExecUnavailable(err) {
+				return nil
+			}
+			return err
+		}
 		return persistentShells.Interrupt(ctx, execution)
 	}
 	_, err := docker(ctx, "exec", execution.RuntimeContainerName, "/bin/sh", "-c", stopPersistentExecutionScript,
@@ -204,7 +253,7 @@ func (d LocalDocker) RemoveExecution(ctx context.Context, execution *Execution) 
 		return nil
 	}
 	_, err := docker(ctx, "exec", execution.RuntimeContainerName, "rm", "-rf", executionControlDir(execution.ID))
-	if dockerExecUnavailable(err) {
+	if isDockerMissingResourceError(err, "container") {
 		return nil
 	}
 	return err

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -82,17 +81,7 @@ func (d LocalDocker) EnsureVolume(ctx context.Context, name string) (bool, error
 }
 
 func (d LocalDocker) WriteVolumeFile(ctx context.Context, volumeName, relPath string, content []byte, mode string) error {
-	target := "/target/" + strings.TrimLeft(relPath, "/")
-	script := `set -eu
-dest="$1"
-mode="$2"
-mkdir -p "$(dirname "$dest")"
-tmp="${dest}.tmp.$$"
-cat > "$tmp"
-chmod "$mode" "$tmp"
-mv "$tmp" "$dest"`
-	_, err := dockerWithInput(ctx, content, "run", "--rm", "-i", "-v", volumeName+":/target", "alpine:3.20", "sh", "-c", script, "sh", target, mode)
-	return err
+	return d.WriteOwnedVolumeFile(ctx, volumeName, relPath, content, mode, "0:0")
 }
 
 func (d LocalDocker) Run(ctx context.Context, spec RunSpec, containerName, networkName string) (string, error) {
@@ -169,7 +158,7 @@ func (d LocalDocker) Logs(ctx context.Context, containerName string, tail int) (
 	if tail <= 0 || tail > 2000 {
 		tail = 200
 	}
-	return docker(ctx, "logs", "--tail", strconv.Itoa(tail), containerName)
+	return dockerCombined(ctx, "logs", "--tail", strconv.Itoa(tail), containerName)
 }
 
 func (d LocalDocker) Inspect(ctx context.Context, containerName string) (*ContainerState, error) {
@@ -227,13 +216,25 @@ func (d *RemoteDocker) EnsureVolume(ctx context.Context, name string) (bool, err
 }
 
 func (d *RemoteDocker) WriteVolumeFile(ctx context.Context, volumeName, relPath string, content []byte, mode string) error {
+	return d.writeOwnedRemoteFile(ctx, volumeName, relPath, content, mode, "0:0")
+}
+func (d *RemoteDocker) writeOwnedRemoteFile(ctx context.Context, volumeName, relPath string, content []byte, mode, owner string) error {
 	if d.app == nil || d.app.PlatformAPI() == nil {
 		return errors.New("platform API unavailable")
 	}
 	if err := d.ensureDocker(ctx); err != nil {
 		return err
 	}
-	hostPath := fmt.Sprintf("/tmp/apteva-containers-files/%d/%d", d.instanceID, time.Now().UnixNano())
+	hostDir := "/tmp/apteva-containers-files-" + newExecutionID()
+	hostPath := hostDir + "/payload"
+	if _, _, err := d.runRemote(ctx, "umask 077; mkdir "+shellQuote(hostDir), 15); err != nil {
+		return err
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_, _, _ = d.runRemote(cleanupCtx, "rm -rf "+shellQuote(hostDir), 15)
+	}()
 	var uploadOut map[string]any
 	if err := d.app.PlatformAPI().CallAppResult("instances", "instance_upload_file", map[string]any{
 		"id":          d.instanceID,
@@ -242,21 +243,10 @@ func (d *RemoteDocker) WriteVolumeFile(ctx context.Context, volumeName, relPath 
 	}, &uploadOut); err != nil {
 		return fmt.Errorf("stage remote volume file: %w", err)
 	}
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		_, _, _ = d.runRemote(cleanupCtx, "rm -f "+shellQuote(hostPath), 15)
-	}()
-	target := "/target/" + strings.TrimLeft(relPath, "/")
-	script := `set -eu
-dest="$1"
-mode="$2"
-mkdir -p "$(dirname "$dest")"
-tmp="${dest}.tmp.$$"
-cat /payload > "$tmp"
-chmod "$mode" "$tmp"
-mv "$tmp" "$dest"`
-	cmd := shellJoin("docker", "run", "--rm", "-v", volumeName+":/target", "-v", hostPath+":/payload:ro", "alpine:3.20", "sh", "-c", script, "sh", target, mode)
+	name := "containers-file-" + newExecutionID()
+	script := "exec 0</payload\n" + ownedVolumeWriteScript
+	cleanup := "docker rm -f " + shellQuote(name) + " >/dev/null 2>&1 || true"
+	cmd := "trap " + shellQuote(cleanup) + " EXIT; " + shellJoin("docker", "run", "--rm", "--name", name, "--network", "none", "--memory", "64m", "--cpus", "1", "--pids-limit", "32", "-v", volumeName+":/target", "-v", hostPath+":/payload:ro", "alpine:3.20", "sh", "-c", script, "sh", relPath, mode, owner)
 	_, _, err := d.runRemote(ctx, cmd, 120)
 	if err != nil {
 		return formatDockerError([]string{"run", "--rm", "-v", volumeName + ":/target", "-v", "<staged-file>:/payload:ro", "alpine:3.20", "sh", "-c", "<write-file>"}, err.Error())
@@ -286,13 +276,6 @@ func dockerRunArgs(spec RunSpec, containerName, networkName string) ([]string, e
 	}
 	for _, p := range spec.Ports {
 		hostPort := p.HostPort
-		if hostPort == 0 {
-			allocated, err := freePort()
-			if err != nil {
-				return nil, err
-			}
-			hostPort = allocated
-		}
 		args = append(args, "-p", fmt.Sprintf("%s:%d:%d/%s", p.BindAddr, hostPort, p.ContainerPort, p.Protocol))
 	}
 	for k, v := range spec.Env {
@@ -316,7 +299,10 @@ func dockerRunArgs(spec RunSpec, containerName, networkName string) ([]string, e
 	if spec.User != "" {
 		args = append(args, "--user", spec.User)
 	}
-	args = append(args, spec.Image)
+	if strings.HasPrefix(spec.Image, "-") {
+		return nil, errors.New("invalid Docker image")
+	}
+	args = append(args, "--log-driver", "local", "--log-opt", "max-size=10m", "--log-opt", "max-file=3", "--pids-limit", "512", "--", spec.Image)
 	args = append(args, spec.Command...)
 	return args, nil
 }
@@ -436,15 +422,40 @@ func (d *RemoteDocker) remoteDocker(ctx context.Context, timeoutS int, args ...s
 
 func (d *RemoteDocker) ensureDocker(ctx context.Context) error {
 	d.ensureOnce.Do(func() {
+		key := fmt.Sprintf("%p/%s/%d", d.app.AppDB(), d.app.CurrentProject(), d.instanceID)
+		if d.app.AppDB() == nil {
+			key = fmt.Sprintf("%p/%s/%d", d.app, d.app.CurrentProject(), d.instanceID)
+		}
+		remoteCapabilities.mu.Lock()
+		ready := remoteCapabilities.ready[key]
+		remoteCapabilities.mu.Unlock()
+		if time.Since(ready) < time.Minute {
+			return
+		}
 		_, _, err := d.runRemote(ctx, remoteDockerBootstrapScript, 360)
 		if err != nil {
 			d.ensureErr = fmt.Errorf("bootstrap remote docker: %w", err)
+		} else {
+			remoteCapabilities.mu.Lock()
+			if remoteCapabilities.ready == nil {
+				remoteCapabilities.ready = map[string]time.Time{}
+			}
+			for k, t := range remoteCapabilities.ready {
+				if time.Since(t) > time.Minute {
+					delete(remoteCapabilities.ready, k)
+				}
+			}
+			remoteCapabilities.ready[key] = time.Now()
+			remoteCapabilities.mu.Unlock()
 		}
 	})
 	return d.ensureErr
 }
 
 func (d *RemoteDocker) runRemote(ctx context.Context, cmd string, timeoutS int) (string, int, error) {
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
+	}
 	if d.app == nil || d.app.PlatformAPI() == nil {
 		return "", 0, errors.New("platform API unavailable")
 	}
@@ -456,31 +467,33 @@ func (d *RemoteDocker) runRemote(ctx context.Context, cmd string, timeoutS int) 
 		ExitCode int    `json:"exit_code"`
 		Err      string `json:"error"`
 	}
-	var resp result
-	done := make(chan error, 1)
-	go func() {
-		done <- d.app.PlatformAPI().CallAppResult("instances", "instance_run_command", map[string]any{
-			"id":        d.instanceID,
-			"cmd":       cmd,
-			"timeout_s": timeoutS,
-		}, &resp)
-	}()
-	select {
-	case <-ctx.Done():
-		return resp.Output, resp.ExitCode, ctx.Err()
-	case err := <-done:
-		resp.Output = truncateOutput(resp.Output, maxDockerOutputBytes)
-		if err != nil {
-			return resp.Output, resp.ExitCode, fmt.Errorf("instance_run_command instance_id=%d: %w", d.instanceID, err)
-		}
-		if resp.Err != "" {
-			return resp.Output, resp.ExitCode, errors.New(resp.Err)
-		}
-		if resp.ExitCode != 0 {
-			return resp.Output, resp.ExitCode, fmt.Errorf("remote command exited %d: %s", resp.ExitCode, strings.TrimSpace(resp.Output))
-		}
-		return resp.Output, resp.ExitCode, nil
+	type response struct {
+		result
+		err error
 	}
+	done := make(chan response, 1)
+	go func() {
+		var res response
+		res.err = d.app.PlatformAPI().CallAppResult("instances", "instance_run_command", map[string]any{"id": d.instanceID, "cmd": cmd, "timeout_s": timeoutS}, &res.result)
+		done <- res
+	}()
+	// The Instances API has no cancellation operation. Wait for its bounded command
+	// to settle before returning cancellation, so cleanup cannot race the command.
+	res := <-done
+	if ctx.Err() != nil {
+		return "", 0, ctx.Err()
+	}
+	res.Output = truncateOutput(res.Output, maxDockerOutputBytes)
+	if res.err != nil {
+		return res.Output, res.ExitCode, fmt.Errorf("instance_run_command instance_id=%d: %w", d.instanceID, res.err)
+	}
+	if res.Err != "" {
+		return res.Output, res.ExitCode, errors.New(res.Err)
+	}
+	if res.ExitCode != 0 {
+		return res.Output, res.ExitCode, fmt.Errorf("remote command exited %d: %s", res.ExitCode, res.Output)
+	}
+	return res.Output, res.ExitCode, nil
 }
 
 const remoteDockerBootstrapScript = `set -eu
@@ -616,15 +629,6 @@ func redactDockerArgs(args []string) string {
 		}
 	}
 	return strings.Join(out, " ")
-}
-
-func freePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
 func validEnvKey(k string) bool {

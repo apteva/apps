@@ -11,9 +11,13 @@ import (
 
 func (a *App) toolRunCtx(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	owner := ownerFromCaller(callCtx, app)
-	ctx, cancel := context.WithTimeout(callCtx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(callCtx, 10*time.Minute)
 	defer cancel()
-	workload, err := a.createOwnedWorkload(ctx, app, app.AppDB(), parseRunSpec(args), owner)
+	spec, err := parseRunSpec(args)
+	if err != nil {
+		return nil, err
+	}
+	workload, err := a.createOwnedWorkload(ctx, app, app.AppDB(), spec, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -29,18 +33,20 @@ func (a *App) toolGetCtx(callCtx context.Context, app *sdk.AppCtx, args map[stri
 }
 
 func (a *App) toolListCtx(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	rows, err := listWorkloads(app.AppDB(), getStr(args, "status"))
+	owner := ownerFromCaller(callCtx, app)
+	limit := intArg(args, "limit", 100)
+	if limit < 1 || limit > 500 {
+		limit = 100
+	}
+	offset := intArg(args, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := queryWorkloads(app.AppDB(), getStr(args, "status"), &owner.ProjectID, &owner.InstallID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
-	owner := ownerFromCaller(callCtx, app)
-	filtered := make([]*Workload, 0, len(rows))
-	for _, workload := range rows {
-		if ownerCanAccess(owner, workload) {
-			filtered = append(filtered, workload)
-		}
-	}
-	return map[string]any{"workloads": filtered, "count": len(filtered)}, nil
+	return map[string]any{"workloads": rows, "count": len(rows), "limit": limit, "offset": offset}, nil
 }
 
 func (a *App) toolStartCtx(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
@@ -174,7 +180,7 @@ func (a *App) ownedExecution(callCtx context.Context, app *sdk.AppCtx, id string
 	if err != nil {
 		return nil, err
 	}
-	if execution == nil || execution.OwnerAppInstallID != owner.InstallID || (execution.ProjectID != "" && owner.ProjectID != "" && execution.ProjectID != owner.ProjectID) {
+	if execution == nil || execution.OwnerAppInstallID != owner.InstallID || (execution.ProjectID != owner.ProjectID) {
 		return nil, errors.New("execution not found")
 	}
 	return execution, nil
@@ -202,14 +208,15 @@ func (a *App) toolExecutionLogs(callCtx context.Context, app *sdk.AppCtx, args m
 			return nil, backendErr
 		}
 		ctx, cancel := context.WithTimeout(callCtx, 15*time.Second)
-		logs, err = backend.ExecutionLogs(ctx, execution, intArg(args, "tail", 200))
+		logs, outputBytes, outputTruncated, err = readExecutionOutput(ctx, backend, execution)
 		cancel()
-		outputBytes = len(logs)
-		logs, outputTruncated = capExecutionOutput(logs, configInt(app, "max_execution_output_bytes", 1048576))
 	} else {
 		logs, err = executionLogs(app.AppDB(), execution)
-		logs = tailLines(logs, intArg(args, "tail", 200))
 	}
+	before := len(logs)
+	logs = tailLines(logs, intArg(args, "tail", 200))
+	outputTruncated = outputTruncated || len(logs) < before
+
 	if err != nil {
 		return nil, err
 	}

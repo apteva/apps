@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -178,6 +179,16 @@ func insertWorkload(db *sql.DB, w *Workload, ports []PortSpec, volumes []VolumeS
 		}
 	}
 	for _, v := range volumes {
+		if v.RetainedFrom != "" {
+			res, err := tx.ExecContext(ctx, `DELETE FROM containers_volumes WHERE workload_id=? AND name=? AND docker_volume_name=? AND EXISTS(SELECT 1 FROM containers_workloads WHERE id=? AND status='destroyed' AND project_id=? AND (owner_app_install_id=? OR ?=0))`, v.RetainedFrom, v.Name, v.DockerVolumeName, v.RetainedFrom, w.ProjectID, w.OwnerAppInstallID, w.OwnerAppInstallID)
+			if err != nil {
+				return err
+			}
+			n, _ := res.RowsAffected()
+			if n != 1 {
+				return fmt.Errorf("%w: retained volume already claimed", errConflict)
+			}
+		}
 		log.Printf("[containers] db insert volume begin workload_id=%s volume=%q mount=%q", w.ID, v.DockerVolumeName, v.MountPath)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO containers_volumes (workload_id, name, docker_volume_name, mount_path) VALUES (?, ?, ?, ?)`,
 			w.ID, v.Name, v.DockerVolumeName, v.MountPath); err != nil {
@@ -274,6 +285,9 @@ func getWorkloadBase(db *sql.DB, where string, arg any) (*Workload, error) {
 }
 
 func listWorkloads(db *sql.DB, status string) ([]*Workload, error) {
+	return queryWorkloads(db, status, nil, nil, 0, 0)
+}
+func queryWorkloads(db *sql.DB, status string, project *string, owner *int64, limit, offset int, retainedOnly ...bool) ([]*Workload, error) {
 	q := `SELECT id, name, blueprint_slug, host_id, instance_id, kind, image, status,
 		desired_status, container_id, container_name, network_name, public_url,
 		health_status, health_path, health_url, config_json, env_json, resources_json,
@@ -288,8 +302,22 @@ func listWorkloads(db *sql.DB, status string) ([]*Workload, error) {
 		q += ` WHERE status != ?`
 		args = append(args, StatusDestroyed)
 	}
-	q += ` ORDER BY created_at DESC`
-	log.Printf("[containers] db list workloads begin status=%q", status)
+	if project != nil {
+		q += ` AND project_id=?`
+		args = append(args, *project)
+	}
+	if owner != nil {
+		q += ` AND owner_app_install_id=?`
+		args = append(args, *owner)
+	}
+	if len(retainedOnly) > 0 && retainedOnly[0] {
+		q += ` AND EXISTS (SELECT 1 FROM containers_volumes v WHERE v.workload_id=containers_workloads.id)`
+	}
+	q += ` ORDER BY created_at DESC, id DESC`
+	if limit > 0 {
+		q += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	}
 	rows, err := db.Query(q, args...)
 	if err != nil {
 		log.Printf("[containers] db list workloads query error status=%q err=%q", status, err.Error())
@@ -317,7 +345,6 @@ func listWorkloads(db *sql.DB, status string) ([]*Workload, error) {
 	if err := hydrateWorkloads(db, out); err != nil {
 		return nil, err
 	}
-	log.Printf("[containers] db list workloads done count=%d status=%q", len(out), status)
 	return out, nil
 }
 
@@ -358,11 +385,18 @@ func loadWorkloadRuntimeOptions(w *Workload) {
 }
 
 func hydrateWorkloads(db *sql.DB, workloads []*Workload) error {
+	if len(workloads) == 0 {
+		return nil
+	}
+	ids := make([]any, 0, len(workloads))
+	marks := make([]string, 0, len(workloads))
 	byID := make(map[string]*Workload, len(workloads))
 	for _, w := range workloads {
 		byID[w.ID] = w
+		ids = append(ids, w.ID)
+		marks = append(marks, "?")
 	}
-	portRows, err := db.Query(`SELECT workload_id, protocol, container_port, host_port, bind_addr FROM containers_ports ORDER BY id`)
+	portRows, err := db.Query(`SELECT workload_id, protocol, container_port, host_port, bind_addr FROM containers_ports WHERE workload_id IN (`+strings.Join(marks, ",")+`) ORDER BY id`, ids...)
 	if err != nil {
 		return err
 	}
@@ -384,7 +418,7 @@ func hydrateWorkloads(db *sql.DB, workloads []*Workload) error {
 	if err := portRows.Close(); err != nil {
 		return err
 	}
-	volumeRows, err := db.Query(`SELECT workload_id, name, docker_volume_name, mount_path, size_bytes FROM containers_volumes ORDER BY id`)
+	volumeRows, err := db.Query(`SELECT workload_id, name, docker_volume_name, mount_path, size_bytes FROM containers_volumes WHERE workload_id IN (`+strings.Join(marks, ",")+`) ORDER BY id`, ids...)
 	if err != nil {
 		return err
 	}
@@ -411,6 +445,7 @@ func hydrateWorkload(db *sql.DB, w *Workload) error {
 	if err != nil {
 		return err
 	}
+	defer portRows.Close()
 	for portRows.Next() {
 		var p PortSpec
 		if err := portRows.Scan(&p.Protocol, &p.ContainerPort, &p.HostPort, &p.BindAddr); err != nil {
@@ -453,7 +488,7 @@ func deleteWorkloadRows(db *sql.DB, id string) error {
 	defer func() { _ = tx.Rollback() }()
 	for _, q := range []string{
 		`DELETE FROM containers_ports WHERE workload_id=?`,
-		`DELETE FROM containers_volumes WHERE workload_id=?`,
+
 		`UPDATE containers_workloads
 		 SET status='destroyed', desired_status='stopped', health_status='destroyed', last_error='', updated_at=?
 		 WHERE id=?`,

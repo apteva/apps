@@ -109,7 +109,7 @@ func TestNormalizeRunSpecDefaults(t *testing.T) {
 	if spec.PullPolicy != "missing" {
 		t.Fatalf("pull_policy=%q", spec.PullPolicy)
 	}
-	if spec.HealthPath != "/" {
+	if spec.HealthPath != "" {
 		t.Fatalf("health_path=%q", spec.HealthPath)
 	}
 	if spec.Ports[0].BindAddr != "127.0.0.1" || spec.Ports[0].Protocol != "tcp" {
@@ -649,25 +649,26 @@ func TestRemoteDockerWritesVolumeFileWithoutContentInRunCommand(t *testing.T) {
 	if err := remote.WriteVolumeFile(context.Background(), "containers-demo-data", "secrets/password", []byte(secret), "0400"); err != nil {
 		t.Fatalf("write volume file: %v", err)
 	}
-	if len(platform.calls) < 3 {
-		t.Fatalf("calls=%d, want at least 3", len(platform.calls))
+	var runCall containersPlatformCall
+	foundUpload := false
+	for _, c := range platform.calls {
+		if c.tool == "instance_upload_file" {
+			foundUpload = true
+		}
+		cmd, _ := c.input["cmd"].(string)
+		if strings.Contains(cmd, "'docker' 'run'") {
+			runCall = c
+		}
 	}
-	if platform.calls[0].tool != "instance_run_command" {
-		t.Fatalf("first call = %+v, want docker bootstrap", platform.calls[0])
-	}
-	if platform.calls[1].tool != "instance_upload_file" {
-		t.Fatalf("second call = %+v, want upload", platform.calls[1])
-	}
-	runCall := platform.calls[2]
-	if runCall.tool != "instance_run_command" {
-		t.Fatalf("third call = %+v, want run command", runCall)
+	if !foundUpload || runCall.tool != "instance_run_command" {
+		t.Fatalf("missing upload/write calls: %+v", platform.calls)
 	}
 	cmd, _ := runCall.input["cmd"].(string)
 	encoded := base64.StdEncoding.EncodeToString([]byte(secret))
 	if strings.Contains(cmd, secret) || strings.Contains(cmd, encoded) {
 		t.Fatalf("remote run command leaked file content: %q", cmd)
 	}
-	for _, want := range []string{"'docker' 'run'", "'containers-demo-data:/target'", "'/target/secrets/password'", "'0400'"} {
+	for _, want := range []string{"'docker' 'run'", "'containers-demo-data:/target'", "'secrets/password'", "'0400'"} {
 		if !strings.Contains(cmd, want) {
 			t.Fatalf("remote write command missing %q in %q", want, cmd)
 		}
@@ -695,10 +696,11 @@ func TestPrepareWorkloadStoresRemoteTargetAndPublicURL(t *testing.T) {
 	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{}, platform, nil)
 	app := &App{backend: fakeDockerBackend{}}
 	w, spec, err := app.prepareWorkload(ctx, db, RunSpec{
-		Name:   "demo",
-		Image:  "nginx:alpine",
-		HostID: 7,
-		Ports:  []PortSpec{{ContainerPort: 80, HostPort: 18080}},
+		Name:       "demo",
+		Image:      "nginx:alpine",
+		HealthPath: "/",
+		HostID:     7,
+		Ports:      []PortSpec{{ContainerPort: 80, HostPort: 18080}},
 	})
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
