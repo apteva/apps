@@ -45,7 +45,7 @@ export async function fetchSocialPost(postID: number, projectId?: string): Promi
   const response = await fetch(socialURL(`/posts/${postID}`, projectId), { credentials: "same-origin" });
   if (!response.ok) throw new Error(response.status === 404 ? "Post not found" : await response.text());
   const data = await response.json() as { post?: SocialPost } | SocialPost;
-  const post = "post" in data ? data.post : data;
+  const post = "id" in data ? data : data.post;
   if (!post) throw new Error("Post response was empty");
   return post;
 }
@@ -105,10 +105,10 @@ export function postTitle(post: Pick<SocialPost, "body">): string {
   return first.length > 96 ? `${first.slice(0, 95)}…` : first;
 }
 
-export function postStatusVariant(status: string): "muted" | "ok" | "warn" | "err" {
+export function postStatusVariant(status: string): "muted" | "live" | "warn" | "error" {
   switch (status) {
-    case "published": return "ok";
-    case "failed": return "err";
+    case "published": return "live";
+    case "failed": return "error";
     case "partial": return "warn";
     default: return "muted";
   }

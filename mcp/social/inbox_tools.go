@@ -14,6 +14,7 @@ import (
 // ─── inbox_list ────────────────────────────────────────────────────
 
 func (a *App) toolInboxList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	pid := projectScope(ctx, args)
 	filter := inboxListFilter{ProjectID: pid}
 
@@ -63,6 +64,7 @@ func (a *App) toolInboxList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── inbox_get ─────────────────────────────────────────────────────
 
 func (a *App) toolInboxGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id <= 0 {
@@ -79,9 +81,20 @@ func (a *App) toolInboxGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	out := map[string]any{"item": item}
 	if withThread {
-		thread, terr := getInboxThread(ctx.AppDB(), pid, item)
+		limit := intArg(args, "thread_limit", 200)
+		if limit < 1 || limit > 500 {
+			limit = 200
+		}
+		thread, terr := getInboxThreadPage(ctx.AppDB(), pid, item, limit+1, int64(intArg(args, "thread_before", 0)))
 		if terr != nil {
 			return nil, fmt.Errorf("get inbox thread: %w", terr)
+		}
+		out["thread_has_more"] = len(thread) > limit
+		if len(thread) > limit {
+			thread = thread[1:]
+		}
+		if len(thread) > 0 {
+			out["thread_next_before"] = thread[0].ID
 		}
 		out["thread"] = thread
 	}
@@ -91,14 +104,17 @@ func (a *App) toolInboxGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── inbox_mark_read / inbox_mark_unread / inbox_archive ───────────
 
 func (a *App) toolInboxMarkRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	return setInboxStatusTool(ctx, args, inboxStatusRead)
 }
 
 func (a *App) toolInboxMarkUnread(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	return setInboxStatusTool(ctx, args, inboxStatusUnread)
 }
 
 func (a *App) toolInboxArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	return setInboxStatusTool(ctx, args, inboxStatusArchived)
 }
 
@@ -150,6 +166,7 @@ type inboxOutcome struct {
 }
 
 func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id <= 0 {
@@ -248,19 +265,23 @@ func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolInboxPrivateReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	args["mode"] = inboxReplyModePrivate
 	return a.toolInboxReply(ctx, args)
 }
 
 func (a *App) toolInboxHide(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	return moderateComment(ctx, args, "hide", true)
 }
 
 func (a *App) toolInboxUnhide(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	return moderateComment(ctx, args, "hide", false)
 }
 
 func (a *App) toolInboxLike(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	// Like isn't wired on any platform yet — IG Graph API doesn't
 	// expose the verb at all; FB pages support /{id}/likes POST but
 	// that integration tool isn't in the catalog. Honest stub.
@@ -268,6 +289,7 @@ func (a *App) toolInboxLike(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolInboxDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id <= 0 {
@@ -390,6 +412,7 @@ func commentModerationStub(ctx *sdk.AppCtx, args map[string]any, action string) 
 // ─── inbox_sync (stub — poll worker lands later) ───────────────────
 
 func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	pid := projectScope(ctx, args)
 	// Resolve which accounts to (eventually) sync — if caller passed
 	// none we'd cover all active accounts. For now we still return the
@@ -479,7 +502,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			results = append(results, syncResult{
 				SocialAccountID: id,
 				Platform:        platform,
-				Status:          "ok",
+				Status:          inboxSyncStatus(report.Warnings),
 				Report:          report,
 			})
 		case "instagram":
@@ -496,7 +519,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			results = append(results, syncResult{
 				SocialAccountID: id,
 				Platform:        platform,
-				Status:          "ok",
+				Status:          inboxSyncStatus(report.Warnings),
 				Report:          report,
 			})
 		case "twitter":
@@ -602,4 +625,11 @@ func diffIDs(have, kept []int64) []int64 {
 		}
 	}
 	return miss
+}
+
+func inboxSyncStatus(warnings []string) string {
+	if len(warnings) > 0 {
+		return "partial"
+	}
+	return "ok"
 }

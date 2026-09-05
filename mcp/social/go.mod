@@ -1,6 +1,6 @@
 module github.com/apteva/apps/mcp/social
 
-go 1.25.1
+go 1.26.6
 
 require (
 	github.com/apteva/app-sdk v0.73.0

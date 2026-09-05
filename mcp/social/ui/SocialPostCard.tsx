@@ -60,7 +60,7 @@ export default function SocialPostCard({ post_id, projectId, preview }: Props) {
   if (error && !post) {
     return (
       <Card>
-        <CardHeader vendor={socialVendor} title={`Post #${post_id}`} status={{ label: "unavailable", variant: "err" }} />
+        <CardHeader vendor={socialVendor} title={`Post #${post_id}`} status={{ label: "unavailable", variant: "error" }} />
         <div className="px-4 py-4 text-xs text-red">{error}</div>
       </Card>
     );

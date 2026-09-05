@@ -91,6 +91,8 @@ func loadTwitterAccountCreds(ctx *sdk.AppCtx, projectID string, accountID int64)
 }
 
 func syncTwitterAccount(ctx *sdk.AppCtx, projectID string, accountID int64) (*twitterSyncReport, error) {
+	done := beginInboxSync(ctx, accountID)
+	defer done()
 	creds, err := loadTwitterAccountCreds(ctx, projectID, accountID)
 	if err != nil {
 		return nil, err
@@ -120,7 +122,7 @@ func syncTwitterAccount(ctx *sdk.AppCtx, projectID string, accountID int64) (*tw
 }
 
 func syncTwitterMentions(ctx *sdk.AppCtx, projectID string, creds *twitterAccountCreds) (int, []string) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "get_user_mentions", map[string]any{
+	res, err := collectInboxPages(ctx, creds.AccountID, creds.ConnID, "get_user_mentions", map[string]any{
 		"user_id":      creds.UserID,
 		"max_results":  100,
 		"tweet.fields": "id,text,author_id,created_at,public_metrics,conversation_id,in_reply_to_user_id,referenced_tweets,edit_history_tweet_ids",
@@ -179,6 +181,9 @@ func syncTwitterMentions(ctx *sdk.AppCtx, projectID string, creds *twitterAccoun
 			added++
 		}
 	}
+	if warning := finishInboxPages(ctx, creds.AccountID, res); warning != "" {
+		return added, []string{warning}
+	}
 	return added, nil
 }
 
@@ -186,7 +191,7 @@ func syncTwitterDMs(ctx *sdk.AppCtx, projectID string, creds *twitterAccountCred
 	if twitterDMBackoffActive(ctx.AppDB(), creds.AccountID) {
 		return -1, []string{twitterDMPermissionHelp}
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "get_dm_events", map[string]any{
+	res, err := collectInboxPages(ctx, creds.AccountID, creds.ConnID, "get_dm_events", map[string]any{
 		"max_results":     100,
 		"event_types":     "MessageCreate",
 		"dm_event.fields": "id,text,event_type,created_at,dm_conversation_id,sender_id",
@@ -227,6 +232,7 @@ func syncTwitterDMs(ctx *sdk.AppCtx, projectID string, creds *twitterAccountCred
 			Platform:         "twitter",
 			Kind:             inboxKindDM,
 			ExternalID:       dm.ID,
+			Outbound:         dm.SenderID == creds.UserID,
 			ExternalPostID:   dm.DMConversationID,
 			AuthorExternalID: dm.SenderID,
 			AuthorName:       twitterDisplayName(author),
@@ -243,6 +249,9 @@ func syncTwitterDMs(ctx *sdk.AppCtx, projectID string, creds *twitterAccountCred
 		if inserted {
 			added++
 		}
+	}
+	if warning := finishInboxPages(ctx, creds.AccountID, res); warning != "" {
+		return added, []string{warning}
 	}
 	return added, nil
 }
@@ -330,6 +339,7 @@ func twitterReplyToPost(ctx *sdk.AppCtx, out inboxOutcome, creds *twitterAccount
 	_ = markInboxRepliedByExternalID(ctx.AppDB(), creds.AccountID, item.Kind, item.ExternalID)
 	if id != "" {
 		_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+			Outbound:         true,
 			ProjectID:        item.ProjectID,
 			SocialAccountID:  creds.AccountID,
 			Platform:         "twitter",
@@ -371,6 +381,7 @@ func twitterSendDM(ctx *sdk.AppCtx, out inboxOutcome, creds *twitterAccountCreds
 	_ = markInboxRepliedByExternalID(ctx.AppDB(), creds.AccountID, inboxKindDM, item.ExternalID)
 	if out.ExternalID != "" {
 		_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+			Outbound:         true,
 			ProjectID:        item.ProjectID,
 			SocialAccountID:  creds.AccountID,
 			Platform:         "twitter",
