@@ -112,6 +112,7 @@ type rtpJitterBuffer struct {
 	started  bool
 	primed   bool
 	buffered int
+	missing  int
 }
 
 func newRTPJitterBuffer() *rtpJitterBuffer {
@@ -158,6 +159,18 @@ func (b *rtpJitterBuffer) pop() ([]byte, bool) {
 	delete(b.packets, b.expected)
 	b.buffered -= len(payload)
 	b.expected++
+	if ok {
+		b.missing = 0
+	} else {
+		b.missing++
+	}
+	// After sustained silence, re-prime from the next packet instead of
+	// inventing sequence numbers indefinitely (RTP DTX advances timestamps only).
+	if b.missing >= 10 && len(b.packets) == 0 {
+		b.started = false
+		b.primed = false
+		b.missing = 0
+	}
 	if ok {
 		return payload, true
 	}
@@ -406,7 +419,11 @@ func (p *sipRTPPacer) clear(ctx context.Context) (int, error) {
 func (p *sipRTPPacer) Err() <-chan error { return p.errCh }
 
 func (a *App) bridgeDirectSIPMedia(session *sipSession) {
-	row := session.call
+	row, err := a.db().findCall(session.call.ID)
+	if err != nil {
+		session.finish("local_error", err)
+		return
+	}
 	session.answerMu.Lock()
 	media := session.media
 	session.answerMu.Unlock()
@@ -430,11 +447,14 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 		session.finish("local_error", err)
 		return
 	}
-	core, _, _, err := (ws.Dialer{}).Dial(session.ctx, coreURL.String())
+	core, buffered, _, err := (ws.Dialer{}).Dial(session.ctx, coreURL.String())
 	if err != nil {
 		_ = a.db().updateMediaStatusWithLeg(row.ID, "error", err.Error(), 1011, "core audio bridge rejected", string(mediaCloseLegCore))
 		session.finish("core", err)
 		return
+	}
+	if buffered != nil {
+		core = hijackedConn{Conn: core, reader: buffered}
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
@@ -451,7 +471,7 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 	playback := &sipPlaybackState{}
 	pacerPolicy := bufferedCarrierPacerPolicy()
 	pacerMode := "buffered"
-	if row.PeerKind == peerKindHuman {
+	if row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal {
 		pacerPolicy = liveHumanCarrierPacerPolicy()
 		pacerMode = "live_human"
 	}

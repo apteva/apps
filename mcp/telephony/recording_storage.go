@@ -304,15 +304,15 @@ func (c *recordingStorageClient) download(ctx context.Context, projectID string,
 			_ = os.Remove(path)
 		}
 	}()
-	written, err := io.Copy(tmp, resp.Body)
+	written, err := io.Copy(tmp, io.LimitReader(resp.Body, recordingDownloadLimit(ctx)+1))
 	if err != nil {
 		return "", 0, err
 	}
 	if err := tmp.Close(); err != nil {
 		return "", 0, err
 	}
-	if written <= 0 {
-		return "", 0, errors.New("stored recording download was empty")
+	if written <= 0 || written > recordingDownloadLimit(ctx) {
+		return "", 0, errors.New("stored recording download empty or exceeds size limit")
 	}
 	ok = true
 	return path, written, nil

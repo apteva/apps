@@ -393,7 +393,7 @@ func TestConnectedNumbersPanelContract(t *testing.T) {
 		"void loadConnected()",
 		"Call from",
 		`withProject("/numbers/connected")`,
-		`{ to, from: fromNumber, timeout_sec: dialTimeoutSec }`,
+		`{ to, from: fromNumber, timeout_sec: dialTimeoutSec, idempotency_key:placementKey.current.key }`,
 		"Enable call sounds",
 		"Ring destination for",
 		"chooseFromNumber",

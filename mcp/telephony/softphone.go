@@ -176,7 +176,11 @@ func (h *softphoneHub) browserWriter() *websocketWriterPump {
 // for the call — the carrier leg stays up regardless.
 func (h *softphoneHub) toBrowser(op ws.OpCode, data []byte) {
 	if w := h.browserWriter(); w != nil {
-		_ = w.Write(op, data)
+		if op == ws.OpBinary {
+			w.QueueAudio(data)
+		} else {
+			_ = w.Write(op, data)
+		}
 	}
 }
 
@@ -267,7 +271,7 @@ func (a *App) peerLoopbackURL(row *callRow) string {
 		return ""
 	}
 	return fmt.Sprintf("ws://127.0.0.1:%d/peer/%s/%s",
-		softphoneListenPort(), row.ID, firstNonEmpty(row.PeerToken, row.CallbackSecret))
+		softphoneListenPort(), row.ID, row.CallbackSecret)
 }
 
 // ─── /peer/<call_id>/<secret> — the carrier bridge dials this ──────
@@ -283,11 +287,15 @@ func (a *App) handlePeerSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown call_id", http.StatusNotFound)
 		return
 	}
+	if row.PeerKind == peerKindExternal {
+		a.handleRingPeerSocket(w, r, row, token)
+		return
+	}
 	if row.PeerKind != peerKindHuman {
 		http.Error(w, "call is not a softphone call", http.StatusConflict)
 		return
 	}
-	if !secureEqual(token, firstNonEmpty(row.PeerToken, row.CallbackSecret)) {
+	if !secureEqual(token, row.CallbackSecret) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -309,6 +317,7 @@ func (a *App) handlePeerSocket(w http.ResponseWriter, r *http.Request) {
 	// socket so it cannot keep delivering stale audio after a fast reconnect.
 	if previous := hub.setPeer(writer); previous != nil {
 		previous.Stop()
+		_ = previous.conn.Close()
 	}
 	logSoftphone("softphone peer attached", "call", callID)
 	if browser := hub.browserWriter(); browser != nil {
@@ -383,12 +392,19 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)
 	hub := a.softphones.hubFor(callID)
+	defer func() {
+		hub.clearBrowser(writer)
+		closer.Close(ws.StatusNormalClosure, "softphone browser closed")
+		a.softphones.dropIfEmpty(callID, hub)
+		logSoftphone("softphone browser detached", "call", callID)
+	}()
 	hub.setCallState(row.Direction, row.Status)
 	// A reconnecting tab replaces the previous socket. Close the old one so a
 	// stale session cannot keep injecting audio into a live call.
 	if previous := hub.setBrowser(writer); previous != nil {
 		_ = previous.Write(ws.OpText, softphoneEvent("session.replaced", ""))
 		previous.Stop()
+		_ = previous.conn.Close()
 	}
 	// A browser can reconnect while the carrier peer remains attached. Mirror
 	// handlePeerSocket's notification so the client can safely reopen its
@@ -419,17 +435,22 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			_ = writer.Write(ws.OpText, softphoneEventDetail("call.error", callID, "The call connected, but Telephony could not save its status."))
 			return
 		}
+		if a.callUsesDirectSIP(row) {
+			gateway := a.directSIPGateway()
+			if gateway == nil {
+				_ = writer.Write(ws.OpText, softphoneEventDetail("call.error", callID, "SIP gateway stopped"))
+				return
+			}
+			if err := gateway.StartMedia(row); err != nil {
+				_ = gateway.Hangup(row)
+				_ = writer.Write(ws.OpText, softphoneEventDetail("call.error", callID, "SIP audio could not start"))
+				return
+			}
+		}
 		row.Status = "answered"
 		hub.setCallState(row.Direction, row.Status)
 	}
 	_ = writer.Write(ws.OpText, softphoneEvent("ready", callID))
-
-	defer func() {
-		hub.clearBrowser(writer)
-		closer.Close(ws.StatusNormalClosure, "softphone browser closed")
-		a.softphones.dropIfEmpty(callID, hub)
-		logSoftphone("softphone browser detached", "call", callID)
-	}()
 
 	for {
 		data, op, err := readWebSocketData(readConn, ws.StateServerSide, writer)
@@ -463,7 +484,8 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			}
 			switch control.Type {
 			case "ping":
-				pong, _ := json.Marshal(map[string]any{"type": "pong", "nonce": control.Nonce})
+				gaps, _ := hub.captureDiagnostics()
+				pong, _ := json.Marshal(map[string]any{"type": "pong", "nonce": control.Nonce, "capture_sequence_gaps": gaps})
 				_ = writer.Write(ws.OpText, pong)
 			case "interrupt":
 				payload, _ := json.Marshal(realtimeBridgeControl{Type: "interrupt", Source: "operator"})
@@ -618,10 +640,11 @@ func (a *App) softphoneMediaURL(callID, token string) string {
 
 func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project string) {
 	var body struct {
-		To         string `json:"to"`
-		From       string `json:"from"`
-		Recording  *bool  `json:"recording"`
-		TimeoutSec int    `json:"timeout_sec"`
+		To             string `json:"to"`
+		From           string `json:"from"`
+		Recording      *bool  `json:"recording"`
+		TimeoutSec     int    `json:"timeout_sec"`
+		IdempotencyKey string `json:"idempotency_key"`
 	}
 	if err := decodeJSONBody(r, &body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -633,7 +656,7 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 		return
 	}
 	ctx := globalCtx.WithProject(project)
-	session, err := a.placeHumanCall(ctx, project, to, strings.TrimSpace(body.From), body.TimeoutSec, body.Recording)
+	session, err := a.placeHumanCall(ctx, project, to, strings.TrimSpace(body.From), body.TimeoutSec, body.Recording, body.IdempotencyKey)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -642,6 +665,16 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 }
 
 func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, callID string) {
+	var request struct {
+		DestinationID string `json:"destination_id"`
+		Rejoin        bool   `json:"rejoin"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeJSONBody(r, &request); err != nil {
+			http.Error(w, "invalid answer request", 400)
+			return
+		}
+	}
 	callID = strings.Trim(callID, "/")
 	if callID == "" || strings.Contains(callID, "/") {
 		http.Error(w, "missing call_id", http.StatusBadRequest)
@@ -656,13 +689,27 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		http.Error(w, "unknown call_id", http.StatusNotFound)
 		return
 	}
-	if row.PeerKind != peerKindHuman {
+	offers, err := a.db().activeRingOffers(callID, project)
+	if err != nil {
+		http.Error(w, "load ring offers", 500)
+		return
+	}
+	if row.PeerKind != peerKindHuman && !(row.Status == "pending" && ringHasBrowser(offers)) {
 		http.Error(w, "call is routed to an agent, not the softphone", http.StatusConflict)
 		return
 	}
 	// Already answered by this or another operator — hand back the live session
 	// so a reloading tab can rejoin instead of erroring.
-	if row.Status == "answering" || row.Status == "answered" || row.Status == "in-progress" {
+	if row.Status == "answering" || row.Status == "answered" || row.Status == "in-progress" || (row.Direction == "outbound" && (row.Status == "initiated" || row.Status == "ringing")) {
+		var grouped int
+		if err := a.db().db.QueryRow(`SELECT COUNT(*) FROM call_ring_runs WHERE call_id=?`, row.ID).Scan(&grouped); err != nil {
+			http.Error(w, "load answer state", 500)
+			return
+		}
+		if grouped > 0 && !request.Rejoin {
+			http.Error(w, "another operator already claimed this call; use Join audio to reconnect explicitly", 409)
+			return
+		}
 		if row.PeerToken == "" {
 			http.Error(w, "call is answered but has no operator session", http.StatusConflict)
 			return
@@ -681,7 +728,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		return
 	}
 
-	claimed, err := a.db().claimPendingCallForHuman(callID, project)
+	claimed, err := a.db().claimPendingCallForHuman(callID, project, request.DestinationID)
 	if err != nil {
 		http.Error(w, "claim pending call: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -693,6 +740,11 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 	if err := a.db().settleHumanOffers(callID, project); err != nil {
 		_ = a.db().releaseAnswerClaim(callID)
 		http.Error(w, "claim ring-group offer: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	row, err = a.db().findCall(callID)
+	if err != nil || row == nil {
+		http.Error(w, "reload answer claim", 500)
 		return
 	}
 	peerToken := newSecret()
@@ -792,12 +844,31 @@ func decodeJSONBody(r *http.Request, out any) error {
 // placement path (placeOutboundLeg) and differs only in what sits on the far
 // side of the bridge: a loopback softphone hub instead of a spawned realtime
 // thread. No agent id is involved, because no thread is spawned.
-func (a *App) placeHumanCall(ctx *sdk.AppCtx, projectID, to, requestedFrom string, timeoutSec int, recordingOverride *bool) (*softphoneSession, error) {
+func (a *App) placeHumanCall(ctx *sdk.AppCtx, projectID, to, requestedFrom string, timeoutSec int, recordingOverride *bool, keys ...string) (*softphoneSession, error) {
 	// Carriers dial this app's public wss:// media endpoint (publicWSStreamURL),
 	// so an unreachable public URL must fail here rather than after the callee's
 	// phone has already rung. Mirrors the check toolPlaceCall makes.
 	if err := a.validatePublicEndpoint(); err != nil {
 		return nil, err
+	}
+	key := ""
+	if len(keys) > 0 {
+		key = strings.TrimSpace(keys[0])
+	}
+	if len(key) > 128 {
+		return nil, errors.New("idempotency_key must be at most 128 characters")
+	}
+	if key != "" {
+		existing, err := a.db().findOutboundByIdempotency(0, projectID, key)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			if existing.ToNumber != to || (requestedFrom != "" && existing.FromNumber != requestedFrom) {
+				return nil, errors.New("idempotency key was used for a different call")
+			}
+			return &softphoneSession{CallID: existing.ID, MediaURL: a.softphoneMediaURL(existing.ID, existing.PeerToken), To: existing.ToNumber, From: existing.FromNumber}, nil
+		}
 	}
 	bound, creds, from, err := a.resolveCarrierBinding(ctx, projectID, requestedFrom)
 	if err != nil {
@@ -847,7 +918,8 @@ func (a *App) placeHumanCall(ctx *sdk.AppCtx, projectID, to, requestedFrom strin
 		Status:                 "initiated",
 		PlacedAt:               now.Format(time.RFC3339),
 		ProjectID:              projectID,
-		StateExpiresAt:         now.Add(60 * time.Second).Format(time.RFC3339),
+		StateExpiresAt:         now.Add(time.Duration(timeoutSec) * time.Second).Format(time.RFC3339),
+		IdempotencyKey:         key,
 		DeadlineAt:             now.Add(time.Hour).Format(time.RFC3339),
 		RecordingMode:          recordingMode,
 		RecordingChannels:      recordingPolicy.Channels,

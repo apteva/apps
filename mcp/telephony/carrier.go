@@ -418,6 +418,23 @@ func (a *App) handlePlivoXML(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if isTerminalStatus(row.Status) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte("<Response><Hangup/></Response>"))
+		return
+	}
+	if err := a.db().updateStatus(callID, "in-progress", ""); err != nil {
+		http.Error(w, "persist answer", 500)
+		return
+	}
+	if row.IngressPath == "ring_group" {
+		if err := a.claimAnsweredRingLeg(callID); err != nil {
+			http.Error(w, "claim ring leg", 500)
+			return
+		}
+	}
+	row.Status = "in-progress"
+	a.softphones.updateCallState(callID, row.Direction, row.Status)
 	streamURL := xmlEscape(a.publicWSStreamURL("plivo", callID, row.CallbackSecret))
 	w.Header().Set("Content-Type", "application/xml")
 	_, _ = w.Write([]byte(a.plivoStreamXML(row, streamURL)))

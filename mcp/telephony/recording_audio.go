@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -104,7 +105,7 @@ func inspectPCM16WAV(file *os.File) (wavPCMInfo, error) {
 	}
 }
 
-func forEachWAVFrame(file *os.File, info wavPCMInfo, visit func([]int16) error) error {
+func forEachWAVFrame(file *os.File, info wavPCMInfo, visit func([]int16) error, contexts ...context.Context) error {
 	if _, err := file.Seek(info.DataOffset, io.SeekStart); err != nil {
 		return err
 	}
@@ -114,6 +115,9 @@ func forEachWAVFrame(file *os.File, info wavPCMInfo, visit func([]int16) error) 
 	remaining := info.DataSize
 	samples := make([]int16, info.Channels)
 	for remaining > 0 {
+		if len(contexts) > 0 && contexts[0].Err() != nil {
+			return contexts[0].Err()
+		}
 		n := int64(len(buffer))
 		if remaining < n {
 			n = remaining
@@ -134,7 +138,7 @@ func forEachWAVFrame(file *os.File, info wavPCMInfo, visit func([]int16) error) 
 	return nil
 }
 
-func recordingChannelGains(file *os.File, info wavPCMInfo) ([]float64, error) {
+func recordingChannelGains(file *os.File, info wavPCMInfo, contexts ...context.Context) ([]float64, error) {
 	sums := make([]float64, info.Channels)
 	counts := make([]int64, info.Channels)
 	err := forEachWAVFrame(file, info, func(samples []int16) error {
@@ -147,7 +151,7 @@ func recordingChannelGains(file *os.File, info wavPCMInfo) ([]float64, error) {
 			counts[channel]++
 		}
 		return nil
-	})
+	}, contexts...)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +202,7 @@ func compressRecordingSample(value float64) int16 {
 	return int16(math.Round(value))
 }
 
-func buildRecordingVariant(sourcePath, variant string) (string, error) {
+func buildRecordingVariant(sourcePath, variant string, contexts ...context.Context) (string, error) {
 	variant, err := normalizedRecordingVariant(variant)
 	if err != nil {
 		return "", err
@@ -218,7 +222,7 @@ func buildRecordingVariant(sourcePath, variant string) (string, error) {
 	if (variant == recordingVariantCaller || variant == recordingVariantAgent) && info.Channels < 2 {
 		return "", fmt.Errorf("%s channel is unavailable in a mono recording", variant)
 	}
-	gains, err := recordingChannelGains(source, info)
+	gains, err := recordingChannelGains(source, info, contexts...)
 	if err != nil {
 		return "", err
 	}
@@ -255,7 +259,7 @@ func buildRecordingVariant(sourcePath, variant string) (string, error) {
 		binary.LittleEndian.PutUint16(encoded, uint16(compressRecordingSample(value)))
 		_, err := buffered.Write(encoded)
 		return err
-	})
+	}, contexts...)
 	if err != nil {
 		return "", err
 	}
