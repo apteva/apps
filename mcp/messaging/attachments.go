@@ -790,7 +790,8 @@ func dbInsertMessageAttachments(db *sql.DB, pid string, messageID int64, attachm
 		_, err := db.Exec(`INSERT OR IGNORE INTO message_attachments
 			(project_id, message_id, storage_id, url, filename, content_type, size_bytes,
 			 content_id, disposition, source, provider_ref, processing_status, processing_error)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ ON CONFLICT DO UPDATE SET filename=excluded.filename,content_type=excluded.content_type,size_bytes=excluded.size_bytes,storage_id=excluded.storage_id,url=excluded.url,processing_status=excluded.processing_status,processing_error=excluded.processing_error,source=excluded.source`,
 			pid, messageID, nullableInt64(att.StorageID), nullableString(att.URL),
 			att.Filename, nullableString(att.ContentType), att.SizeBytes,
 			nullableString(att.ContentID), att.Disposition, att.Source, nullableString(att.ProviderRef),

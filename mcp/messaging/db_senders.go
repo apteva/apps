@@ -495,13 +495,13 @@ func senderRowToMap(s *senderRow) map[string]any {
 	if s.InboundConfig != "" {
 		var inb map[string]any
 		if json.Unmarshal([]byte(s.InboundConfig), &inb) == nil {
-			out["inbound_config"] = inb
+			out["inbound_config"] = redactCallbackCredentials(inb)
 		}
 	}
 	if s.Metadata != "" {
 		var meta map[string]any
 		if json.Unmarshal([]byte(s.Metadata), &meta) == nil {
-			out["metadata"] = meta
+			out["metadata"] = redactCallbackCredentials(meta)
 		}
 	}
 	return out

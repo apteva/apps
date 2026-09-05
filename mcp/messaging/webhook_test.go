@@ -681,7 +681,7 @@ func TestInboundWebhook_PersistsAndDispatches(t *testing.T) {
 	r := httptest.NewRequest("POST", "/webhooks/ses-inbound?project_id=test-proj", strings.NewReader(string(body)))
 	signTestSNSRequest(r, body)
 	w := httptest.NewRecorder()
-	app.handleInboundWebhook(w, r)
+	app.handleInboundAndProcessForTest(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
@@ -718,7 +718,7 @@ func TestInboundWebhook_PersistsAndDispatches(t *testing.T) {
 		t.Fatalf("expected 1 CallApp, got %d", len(plat.callAppCalls))
 	}
 	call := plat.callAppCalls[0]
-	if call.App != "support" || call.Tool != "/inbound" {
+	if call.App != "support" || call.Tool != "inbound" {
 		t.Errorf("call=%+v", call)
 	}
 	if call.Input["matched_recipient"] != "support+t-1234@acme.com" {
@@ -751,7 +751,7 @@ func TestInboundWebhook_NoMatchSetsNoMatch(t *testing.T) {
 	r := httptest.NewRequest("POST", "/webhooks/ses-inbound?project_id=test-proj", strings.NewReader(string(body)))
 	signTestSNSRequest(r, body)
 	w := httptest.NewRecorder()
-	app.handleInboundWebhook(w, r)
+	app.handleInboundAndProcessForTest(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d", w.Code)

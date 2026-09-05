@@ -4,7 +4,7 @@
 // Architecture:
 //   - Email and phone providers are optional so installs can enable only
 //     the channels they need. Storage optionally backs attachments.
-//   - send_message resolves recipient URIs to channels (mailto: → email),
+//   - send_message requires an explicit channel and normalizes addresses,
 //     checks suppression + idempotency, calls the bound provider via
 //     ctx.PlatformAPI().ExecuteIntegrationTool, and persists a row.
 //   - Bounce/complaint SNS webhooks land at /webhooks/ses-bounces,
@@ -65,7 +65,7 @@ const (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.46
+version: 0.13.47
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through Twilio.
 author: Apteva
@@ -170,6 +170,8 @@ provides:
       icon: mail
       entry: /ui/MessagingPanel.mjs
   workers:
+    - name: messaging-recovery
+      schedule: "@every 30s"
     - name: ses-verify-poller
       schedule: "@every 5m"
 runtime:
@@ -209,7 +211,11 @@ upgrade_policy: auto-patch
 
 // ─── App ───────────────────────────────────────────────────────────
 
-type App struct{}
+type App struct {
+	syncMu      sync.Mutex
+	syncNext    map[string]time.Time
+	syncRunning map[string]bool
+}
 
 var globalCtx *sdk.AppCtx
 
@@ -253,6 +259,7 @@ const pollVerifyMaxAge = 7 * 24 * time.Hour
 // (verified/failed) or older than the poll cap.
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "messaging-recovery", Schedule: "@every 30s", Run: func(_ context.Context, ctx *sdk.AppCtx) error { return a.retryMessagingWork(ctx) }},
 		{
 			Name:     "ses-verify-poller",
 			Schedule: "@every 5m",
@@ -365,7 +372,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"template_id":            map[string]any{"type": "integer"},
 				"vars":                   map[string]any{"type": "object"},
 				"idempotency_key":        map[string]any{"type": "string"},
-			}, []string{"channel", "from", "to"}),
+			}, []string{"channel", "to"}),
 			Handler: a.toolSendMessage,
 		},
 		{
@@ -380,7 +387,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"attachments":            map[string]any{"type": "array", "items": attachmentInputSchema, "maxItems": maxAttachmentCount},
 				"attachment_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "maxItems": maxAttachmentCount},
 				"idempotency_key":        map[string]any{"type": "string"},
-			}, []string{"template_id", "channel", "from", "to"}),
+			}, []string{"template_id", "channel", "to"}),
 			Handler: a.toolSendMessageTemplate,
 		},
 		{
@@ -474,10 +481,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "template_list",
-			Description: "List templates. Args: channel?, limit?.",
+			Description: "List templates. Args: channel?, limit?, offset?.",
 			InputSchema: schemaObject(map[string]any{
 				"channel": map[string]any{"type": "string"},
 				"limit":   map[string]any{"type": "integer"},
+				"offset":  map[string]any{"type": "integer", "minimum": 0},
 			}, nil),
 			Handler: a.toolTemplateList,
 		},
@@ -844,6 +852,7 @@ func extractSubaddress(addr string) string {
 // ─── Domain types ──────────────────────────────────────────────────
 
 type Message struct {
+	RecipientStatuses    map[string]string   `json:"recipient_statuses,omitempty"`
 	ID                   int64               `json:"id"`
 	ProjectID            string              `json:"project_id,omitempty"`
 	Channel              string              `json:"channel"`
@@ -1244,10 +1253,16 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return sendResponse(m), nil
 	}
 
-	_, _ = ctx.AppDB().Exec(
+	_, saveErr := ctx.AppDB().Exec(
 		`UPDATE messages SET status='sent', provider_message_id=?, sent_at=?, last_event_at=? WHERE id=?`,
 		providerMessageID, now, now, id,
 	)
+	if saveErr != nil {
+		return nil, fmt.Errorf("provider accepted message %s but local persistence failed; do not resend blindly: %w", providerMessageID, saveErr)
+	}
+	if err := replayProviderEvents(ctx); err != nil {
+		ctx.Logger().Warn("provider event replay", "err", err)
+	}
 	emitMessagingEvent(ctx, pid, "message.sent", map[string]any{
 		"id":               id,
 		"channel":          channel,
@@ -1263,7 +1278,10 @@ func validateOutboundSender(db *sql.DB, pid, channel, address string, requireReg
 	if err != nil {
 		return nil, fmt.Errorf("lookup sender: %w", err)
 	}
-	if sender == nil || sender.DeletedAt != nil {
+	if sender != nil && sender.DeletedAt != nil {
+		return nil, fmt.Errorf("from %q was removed from this project", address)
+	}
+	if sender == nil {
 		if requireRegistered {
 			return nil, fmt.Errorf("from %q is not registered to project %q", address, pid)
 		}
@@ -1281,7 +1299,14 @@ func sendResponse(m *Message) map[string]any {
 	}
 	recips := make([]map[string]any, 0, len(m.To))
 	for _, r := range m.To {
-		recips = append(recips, map[string]any{"address": r, "status": m.Status})
+		status := m.Status
+		if len(m.RecipientStatuses) > 0 {
+			status = "sent"
+			if value, ok := m.RecipientStatuses[strings.ToLower(r)]; ok {
+				status = value
+			}
+		}
+		recips = append(recips, map[string]any{"address": r, "status": status})
 	}
 	return map[string]any{
 		"id":                  m.ID,
@@ -1352,7 +1377,7 @@ func sendViaSES(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 	if len(in.BCC) > 0 {
 		dest["BccAddresses"] = in.BCC
 	}
-	if in.InReplyTo != "" || len(in.References) > 0 || len(in.Attachments) > 0 {
+	if in.InReplyTo != "" || len(in.References) > 0 || len(in.Attachments) > 0 || len(in.Headers) > 0 {
 		return sendViaSESRaw(ctx, bound.ConnectionID, dest, in)
 	}
 
@@ -1383,7 +1408,7 @@ func sendViaSES(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 	}
 	trackingEnabled := in.MessageID > 0
 	if trackingEnabled {
-		payload["ConfigurationSetName"] = sesEventConfigurationSetName
+		payload["ConfigurationSetName"] = sesConfigName(ctx, bound.ConnectionID)
 		payload["EmailTags"] = []map[string]string{
 			{"Name": "apteva_message_id", "Value": strconv.FormatInt(in.MessageID, 10)},
 			{"Name": "project_id", "Value": in.ProjectID},
@@ -1452,7 +1477,7 @@ func sendViaSESRaw(ctx *sdk.AppCtx, connID int64, dest map[string]any, in provid
 	}
 	trackingEnabled := in.MessageID > 0
 	if trackingEnabled {
-		payload["ConfigurationSetName"] = sesEventConfigurationSetName
+		payload["ConfigurationSetName"] = sesConfigName(ctx, connID)
 	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "send_raw_email", payload)
 	if err != nil {
@@ -1586,7 +1611,7 @@ func writeRawEmailBodyPart(b *bytes.Buffer, boundary, textBody, htmlBody string,
 	case textBody != "":
 		writeMIMEPart(b, boundary, "text/plain; charset=UTF-8", textBody)
 	default:
-		return errors.New("raw email body is empty")
+		writeMIMEPart(b, boundary, "text/plain; charset=UTF-8", "")
 	}
 	return nil
 }
@@ -1795,10 +1820,8 @@ func twilioWebhookURL(ctx *sdk.AppCtx, routePath, projectID string) string {
 	if err != nil {
 		return ""
 	}
-	q := url.Values{}
-	if token := strings.TrimSpace(os.Getenv("APTEVA_APP_TOKEN")); token != "" {
-		q.Set("api_key", token)
-	}
+	q := webhookRoutingQuery(ctx)
+
 	if projectID != "" {
 		q.Set("project_id", projectID)
 	}
@@ -1893,7 +1916,15 @@ func (a *App) toolInboundRedispatch(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if m == nil || m.Direction != "in" {
 		return nil, errors.New("inbound message not found")
 	}
-	if err := dispatchInbound(ctx, pid, m); err != nil {
+	var jobs int
+	if err := ctx.AppDB().QueryRow(`SELECT count(*) FROM inbound_jobs WHERE message_id=? AND project_id=?`, id, pid).Scan(&jobs); err != nil {
+		return nil, err
+	}
+	if jobs > 0 {
+		if err := processInboundJob(ctx, pid, id, true); err != nil {
+			return nil, err
+		}
+	} else if err := dispatchInbound(ctx, pid, m); err != nil {
 		return nil, err
 	}
 	updated, _ := dbMessageGet(ctx.AppDB(), pid, id)
@@ -2276,14 +2307,16 @@ func (a *App) toolTemplateList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		limit = 100
 	}
 	channel := strArg(args, "channel")
-	out, err := dbTemplateList(ctx.AppDB(), pid, channel, limit)
+	offset := max(0, intArg(args, "offset", 0))
+	out, err := dbTemplateListOffset(ctx.AppDB(), pid, channel, limit, offset)
 	if err != nil {
 		return nil, err
 	}
 	lastSynced, lastErr, _ := dbSyncStateGet(ctx.AppDB(), pid, channel)
 	return map[string]any{
-		"templates":       out,
-		"count":           len(out),
+		"templates": out,
+		"count":     len(out),
+		"offset":    offset, "has_more": len(out) == limit,
 		"last_synced_at":  lastSynced,
 		"last_sync_error": lastErr,
 	}, nil
@@ -2796,12 +2829,7 @@ func (a *App) toolSendersList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, fmt.Errorf("list senders (local): %w", err)
 	}
 	if stale, _ := dbHasStaleSenders(ctx.AppDB(), pid, channel); stale {
-		// Stale known rows → fire-and-forget background refresh.
-		go func() {
-			if err := a.refreshSendersFromProviders(ctx, pid); err != nil {
-				ctx.Logger().Warn("senders background refresh", "err", err)
-			}
-		}()
+		a.refreshSendersInBackground(ctx, pid)
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
@@ -2947,47 +2975,14 @@ func (a *App) refreshOneTwilioNumber(ctx *sdk.AppCtx, pid, channel, addr string)
 	if bound == nil {
 		return errors.New("phone_provider not bound")
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_phone_numbers", map[string]any{
-		"PhoneNumber": addr,
-		"PageSize":    10,
-	})
+	local, err := dbFindSender(ctx.AppDB(), pid, channel, addr)
 	if err != nil {
 		return err
 	}
-	if res == nil || !res.Success {
-		body := ""
-		if res != nil {
-			body = string(res.Data)
-		}
-		return fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+	if local == nil || local.DeletedAt != nil {
+		return errors.New("sender not registered")
 	}
-	var listed struct {
-		IncomingPhoneNumbers []struct {
-			SID         string `json:"sid"`
-			PhoneNumber string `json:"phone_number"`
-			SmsURL      string `json:"sms_url"`
-		} `json:"incoming_phone_numbers"`
-	}
-	_ = json.Unmarshal(res.Data, &listed)
-	for _, pn := range listed.IncomingPhoneNumbers {
-		if pn.PhoneNumber == addr {
-			_, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{
-				ProjectID:          pid,
-				Channel:            channel,
-				Address:            addr,
-				Kind:               "phone",
-				Provider:           "twilio",
-				ProviderIdentityID: pn.SID,
-				Verified:           true,
-				VerificationStatus: "verified",
-				SendingEnabled:     true,
-				MarkSyncedNow:      true,
-			})
-			return err
-		}
-	}
-	// Not found — the number was released. Soft-delete the local row.
-	return dbSoftDeleteSender(ctx.AppDB(), pid, channel, addr)
+	return a.refreshTwilioChannel(ctx, pid, bound.ConnectionID, channel)
 }
 
 // looksLikeIdentityNotFound classifies a delete_identity failure as a
@@ -3006,7 +3001,7 @@ func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	addr := strArg(args, "address")
+	addr := strings.ToLower(strings.TrimSpace(stripScheme(strArg(args, "address"))))
 	channel := strArg(args, "channel")
 	if channel == "" {
 		channel = inferChannelFromAddress(addr)
@@ -3016,7 +3011,34 @@ func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	// Look up provider from the local row (so we know which integration
 	// to call). Fall back to channel-based default if the row is missing.
-	local, _ := dbFindSender(ctx.AppDB(), pid, channel, addr)
+	local, err := dbFindSender(ctx.AppDB(), pid, channel, addr)
+	if err != nil {
+		return nil, err
+	}
+	var anchor *identityRow
+	if local == nil && channel == channelEmail {
+		anchor, err = dbFindIdentity(ctx.AppDB(), pid, "email_domain", addr)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if (local == nil || local.DeletedAt != nil) && (anchor == nil || anchor.DeletedAt != nil) {
+		return map[string]any{"deleted": true, "address": addr, "already_absent": true}, nil
+	}
+	if anchor != nil {
+		n, err := dbCountSendersForIdentity(ctx.AppDB(), anchor.ID)
+		if err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			return nil, errors.New("identity has active mailboxes; remove their assignments first")
+		}
+	}
+	// An upstream identity shared with another project must retain its provider state.
+	var owners int
+	if err := ctx.AppDB().QueryRow(`SELECT count(*) FROM (SELECT project_id FROM senders WHERE address=? AND channel=? AND deleted_at IS NULL UNION SELECT project_id FROM identities WHERE address=? AND deleted_at IS NULL) WHERE project_id<>?`, addr, channel, addr, pid).Scan(&owners); err != nil {
+		return nil, err
+	}
 	provider := ""
 	if local != nil {
 		provider = local.Provider
@@ -3042,13 +3064,10 @@ func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		// explicit via senders.parent_identity_id, so the skip check
 		// is now a single FK existence test instead of a string-
 		// suffix walk.
-		skipUpstream := false
-		if local != nil && local.Kind == "email_mailbox" && local.ParentIdentityID != nil {
-			if p, _ := dbGetIdentity(ctx.AppDB(), *local.ParentIdentityID); p != nil && p.Verified && p.DeletedAt == nil {
-				skipUpstream = true
-			}
-		}
-		if !skipUpstream {
+		// An inherited mailbox never owned a standalone SES identity, even
+		// when its parent is no longer verified or available.
+		skipUpstream := local != nil && local.Kind == "email_mailbox" && local.ParentIdentityID != nil
+		if !skipUpstream && owners == 0 {
 			res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "delete_identity", map[string]any{
 				"EmailIdentity": raw,
 			})
@@ -3075,19 +3094,33 @@ func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		// (the number goes back to the pool). For now we just clear the
 		// SmsUrl webhook + soft-delete locally — operators who want to
 		// fully release the number do it via twilio.release_phone_number.
-		if local != nil && local.ProviderIdentityID != "" {
+		if local != nil && local.ProviderIdentityID != "" && owners == 0 {
 			phoneBound := ctx.IntegrationFor("phone_provider")
 			if phoneBound != nil {
-				_, _ = ctx.PlatformAPI().ExecuteIntegrationTool(phoneBound.ConnectionID, "update_phone_number", map[string]any{
-					"PhoneNumberSid": local.ProviderIdentityID,
-					"SmsUrl":         "",
-				})
+				tool := "update_phone_number"
+				payload := map[string]any{"PhoneNumberSid": local.ProviderIdentityID, "SmsUrl": ""}
+				if channel == channelWhatsApp {
+					tool = "update_whatsapp_sender"
+					payload = map[string]any{"SenderSid": local.ProviderIdentityID, "webhook": map[string]any{"callback_url": "", "status_callback_url": ""}}
+				}
+				res, err := ctx.PlatformAPI().ExecuteIntegrationTool(phoneBound.ConnectionID, tool, payload)
+				if err != nil {
+					return nil, err
+				}
+				if res == nil || !res.Success {
+					return nil, fmt.Errorf("clear sender webhook: %s", truncateResData(res))
+				}
 			}
 		}
 	default:
 		return nil, fmt.Errorf("unsupported provider %q for senders_delete", provider)
 	}
 
+	if anchor != nil {
+		if err := dbSoftDeleteIdentity(ctx.AppDB(), pid, anchor.Kind, addr); err != nil {
+			return nil, err
+		}
+	}
 	if err := dbSoftDeleteSender(ctx.AppDB(), pid, channel, addr); err != nil {
 		return nil, fmt.Errorf("soft delete: %w", err)
 	}
@@ -3224,8 +3257,15 @@ func (a *App) handleBounceWebhook(w http.ResponseWriter, r *http.Request) {
 		// looking up the message across all projects via provider id.
 		pid = ""
 	}
+	for i := range events {
+		events[i].ProviderEventID = fmt.Sprintf("sns:%s:%d", env.MessageID, i)
+	}
 	msg, err := dbMessageByProviderID(globalCtx.AppDB(), pid, events[0].ProviderMessageID)
-	if err != nil || msg == nil {
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	if msg == nil {
 		if !snsTopicAuthorized(globalCtx, pid, env.TopicARN, "ses_bounce_topic_arn") {
 			httpErr(w, http.StatusForbidden, "SNS topic is not authorized")
 			return
@@ -3235,6 +3275,10 @@ func (a *App) handleBounceWebhook(w http.ResponseWriter, r *http.Request) {
 		globalCtx.Logger().Warn("webhook: unknown provider message id",
 			"provider_message_id", events[0].ProviderMessageID,
 			"kind", events[0].Kind)
+		if err := queueProviderEvents(globalCtx, pid, env.TopicARN, events); err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
 		httpJSON(w, map[string]any{"ok": true, "matched": false})
 		return
 	}
@@ -3292,8 +3336,12 @@ func messageStatusRank(status string) int {
 		return 30
 	case "clicked":
 		return 40
-	case "failed", "bounced", "complained":
+	case "failed":
 		return 100
+	case "bounced":
+		return 110
+	case "complained":
+		return 120
 	default:
 		return 0
 	}
@@ -3423,10 +3471,11 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 	ccJSON, _ := json.Marshal(cc)
 	refsJSON, _ := json.Marshal(parsed.References)
 	now := time.Now().UTC().Format(time.RFC3339)
-	if existingID, duplicate, err := findExistingInboundMessage(globalCtx.AppDB(), pid, s3Key, parsed.MessageID); err != nil {
+	if existingID, duplicate, err := findExistingInboundMessage(globalCtx.AppDB(), pid, s3Key, sesEnv.Mail.MessageID); err != nil {
 		httpErr(w, http.StatusInternalServerError, "dedupe lookup: "+err.Error())
 		return
 	} else if duplicate {
+		_ = scheduleInboundRetry(globalCtx, pid, existingID)
 		httpJSON(w, map[string]any{"ok": true, "id": existingID, "duplicate": true})
 		return
 	}
@@ -3435,42 +3484,33 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 	if s3Key != "" {
 		s3KeyArg = s3Key
 	}
-	res, err := globalCtx.AppDB().Exec(
+	res, err := persistInbound(globalCtx, pid, "email", parsed.Attachments,
 		`INSERT OR IGNORE INTO messages
 			(project_id, channel, direction, from_addr, to_addrs, cc_addrs,
 			 subject, body_text, body_html, headers,
 			 message_id_header, in_reply_to, references_json,
 			 status, route_status, received_at, last_event_at,
-			 verdicts, s3_key)
-		 VALUES (?, 'email', 'in', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', 'pending', ?, ?, ?, ?)`,
+			 verdicts, s3_key, provider_message_id, envelope_recipients)
+		 VALUES (?, 'email', 'in', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', 'pending', ?, ?, ?, ?, NULLIF(?, ''), ?)`,
 		pid, from, string(toJSON), string(ccJSON),
 		parsed.Subject, parsed.BodyText, parsed.BodyHTML, string(hdrJSON),
 		parsed.MessageID, parsed.InReplyTo, string(refsJSON),
 		now, now,
-		string(verdictsJSON), s3KeyArg,
+		string(verdictsJSON), s3KeyArg, sesEnv.Mail.MessageID, string(mustJSON(normaliseEmailListPlain(sesEnv.Receipt.Recipients))),
 	)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "persist: "+err.Error())
 		return
 	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
-		existingID, _, _ := findExistingInboundMessage(globalCtx.AppDB(), pid, s3Key, parsed.MessageID)
+		existingID, _, _ := findExistingInboundMessage(globalCtx.AppDB(), pid, s3Key, sesEnv.Mail.MessageID)
+		_ = scheduleInboundRetry(globalCtx, pid, existingID)
 		httpJSON(w, map[string]any{"ok": true, "id": existingID, "duplicate": true})
 		return
 	}
 	id, _ := res.LastInsertId()
-	if attachments := prepareInboundAttachments(globalCtx, pid, parsed.Attachments); len(attachments) > 0 {
-		if err := dbInsertMessageAttachments(globalCtx.AppDB(), pid, id, attachments); err != nil {
-			// The provider message itself is authoritative and must still be
-			// routed even when attachment metadata cannot be persisted.
-			globalCtx.Logger().Warn("persist inbound email attachments failed", "message_id", id, "err", err)
-		}
-	}
-	m, _ := dbMessageGet(globalCtx.AppDB(), pid, id)
 
-	if err := dispatchInbound(globalCtx, pid, m); err != nil {
-		globalCtx.Logger().Warn("dispatch failed", "id", id, "err", err)
-	}
+	m, _ := dbMessageGet(globalCtx.AppDB(), pid, id)
 	emitMessagingEvent(globalCtx, pid, "message.received", map[string]any{
 		"id":               id,
 		"channel":          "email",
@@ -3484,7 +3524,7 @@ func findExistingInboundMessage(db *sql.DB, projectID, s3Key, messageID string) 
 	checks := []struct {
 		column string
 		value  string
-	}{{"s3_key", s3Key}, {"message_id_header", messageID}}
+	}{{"s3_key", s3Key}, {"provider_message_id", messageID}}
 	for _, check := range checks {
 		if check.value == "" {
 			continue
@@ -3599,11 +3639,6 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	if existing, _ := dbMessageByProviderID(globalCtx.AppDB(), pid, messageSid); existing != nil && existing.Direction == "in" {
-		w.Header().Set("Content-Type", "text/xml")
-		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Response/>`))
-		return
-	}
 
 	toJSON, _ := json.Marshal([]string{to})
 	hdrs := map[string]string{
@@ -3616,7 +3651,7 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 	hdrJSON, _ := json.Marshal(hdrs)
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	res, err := globalCtx.AppDB().Exec(
+	res, err := persistInbound(globalCtx, pid, "twilio", form,
 		`INSERT OR IGNORE INTO messages
 			(project_id, channel, direction, from_addr, to_addrs, cc_addrs,
 			 subject, body_text, body_html, headers,
@@ -3648,22 +3683,21 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 		globalCtx.Logger().Info("auto-suppressed on STOP keyword", "channel", channel, "address", canonical)
 	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
+		existing, lookupErr := dbMessageByProviderID(globalCtx.AppDB(), pid, messageSid)
+		if lookupErr != nil {
+			httpErr(w, 500, lookupErr.Error())
+			return
+		}
+		if existing != nil {
+			_ = scheduleInboundRetry(globalCtx, pid, existing.ID)
+		}
 		w.Header().Set("Content-Type", "text/xml")
 		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Response/>`))
 		return
 	}
 	id, _ := res.LastInsertId()
-	twilioAttachments := twilioInboundAttachments(form, messageSid, form.Get("AccountSid"), authToken)
-	if attachments := prepareInboundAttachments(globalCtx, pid, twilioAttachments); len(attachments) > 0 {
-		if err := dbInsertMessageAttachments(globalCtx.AppDB(), pid, id, attachments); err != nil {
-			globalCtx.Logger().Warn("persist inbound Twilio attachments failed", "message_id", id, "err", err)
-		}
-	}
 
 	m, _ := dbMessageGet(globalCtx.AppDB(), pid, id)
-	if err := dispatchInbound(globalCtx, pid, m); err != nil {
-		globalCtx.Logger().Warn("dispatch failed", "id", id, "err", err)
-	}
 	emitMessagingEvent(globalCtx, pid, "message.received", map[string]any{
 		"id":               id,
 		"channel":          channel,
@@ -3733,10 +3767,8 @@ func (a *App) handleTwilioStatusWebhook(w http.ResponseWriter, r *http.Request) 
 
 	pid, _ := resolveProjectFromRequest(r)
 	msg, err := dbMessageByProviderID(globalCtx.AppDB(), pid, messageSID)
-	if err != nil || msg == nil {
-		globalCtx.Logger().Warn("twilio status: unknown provider message id",
-			"provider_message_id", messageSID, "status", status)
-		httpJSON(w, map[string]any{"ok": true, "matched": false})
+	if err != nil {
+		httpErr(w, 500, err.Error())
 		return
 	}
 	raw, _ := json.Marshal(form)
@@ -3761,6 +3793,14 @@ func (a *App) handleTwilioStatusWebhook(w http.ResponseWriter, r *http.Request) 
 			"error_code":    strings.TrimSpace(form.Get("ErrorCode")),
 			"error_message": strings.TrimSpace(form.Get("ErrorMessage")),
 		},
+	}
+	if msg == nil {
+		if err := queueProviderEvents(globalCtx, pid, "", []providerEvent{ev}); err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"ok": true, "matched": false, "queued": true})
+		return
 	}
 	if _, err := persistAndEmitProviderEvent(globalCtx, msg, ev); err != nil {
 		globalCtx.Logger().Warn("persist Twilio provider event failed", "message_id", msg.ID, "err", err)
@@ -3933,7 +3973,19 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 		subaddr   string
 	}
 	var winner *matched
-	for _, recip := range append(append([]string{}, m.To...), m.CC...) {
+	recipients := append(append([]string{}, m.To...), m.CC...)
+	envelope := "[]"
+	if err := ctx.AppDB().QueryRow(`SELECT envelope_recipients FROM messages WHERE id=? AND project_id=?`, m.ID, pid).Scan(&envelope); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	var delivered []string
+	if err := json.Unmarshal([]byte(envelope), &delivered); err != nil {
+		return err
+	}
+	if len(delivered) > 0 {
+		recipients = delivered
+	}
+	for _, recip := range recipients {
 		for i := range routes {
 			r := &routes[i]
 			if r.Channel != "" && r.Channel != m.Channel {
@@ -3952,11 +4004,11 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if winner == nil {
-		_, _ = ctx.AppDB().Exec(
+		_, err := ctx.AppDB().Exec(
 			`UPDATE messages SET route_status='no_match', route_attempts = route_attempts + 1, last_event_at = ? WHERE id = ?`,
 			now, m.ID,
 		)
-		return nil
+		return err
 	}
 
 	// Build dispatch payload.
@@ -3968,6 +4020,8 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	}
 	payload := map[string]any{
 		"message_id":        m.ID,
+		"idempotency_key":   fmt.Sprintf("messaging:%s:%d", pid, m.ID),
+		"verdicts":          m.Verdicts,
 		"channel":           m.Channel,
 		"matched_recipient": winner.recipient,
 		"matched_pattern":   winner.route.Pattern,
@@ -3999,7 +4053,7 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 		status = "target_failed"
 		errMsg = truncate(callErr.Error(), 500)
 	}
-	_, _ = ctx.AppDB().Exec(
+	_, saveErr := ctx.AppDB().Exec(
 		`UPDATE messages
 		 SET route_status = ?, route_target_app = ?, route_target_route = ?,
 		     route_error = ?, route_attempts = route_attempts + 1,
@@ -4011,7 +4065,7 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	if callErr != nil {
 		return callErr
 	}
-	return nil
+	return saveErr
 }
 
 func inboundRouteTargetTool(appName, route string) string {
@@ -4022,7 +4076,7 @@ func inboundRouteTargetTool(appName, route string) string {
 			return crmInboundReceiveTool
 		}
 	}
-	return normaliseRoutePath(route)
+	return strings.TrimPrefix(route, "/")
 }
 
 // patternMatches checks whether `addr` (a canonical URI) matches
@@ -4688,17 +4742,33 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 			return false, fmt.Errorf("persist automatic suppression: %w", err)
 		}
 	}
+	var currentStatus string
+	if err := tx.QueryRow(`SELECT status FROM messages WHERE id=?`, msg.ID).Scan(&currentStatus); err != nil {
+		return false, err
+	}
 	status := mapSESKindToStatus(ev.Kind)
-	promote := status != "" && shouldPromoteMessageStatus(msg.Status, status)
+	if status != "" && ev.Recipient != "" {
+		recipient := strings.ToLower(ev.Recipient)
+		var prior string
+		if err := tx.QueryRow(`SELECT status FROM recipient_delivery_status WHERE message_id=? AND recipient=?`, msg.ID, recipient).Scan(&prior); err != nil && err != sql.ErrNoRows {
+			return false, err
+		}
+		if shouldPromoteMessageStatus(prior, status) {
+			if _, err := tx.Exec(`INSERT INTO recipient_delivery_status(message_id,recipient,status,occurred_at) VALUES(?,?,?,?) ON CONFLICT(message_id,recipient) DO UPDATE SET status=excluded.status,occurred_at=CASE WHEN julianday(excluded.occurred_at)>julianday(occurred_at) THEN excluded.occurred_at ELSE occurred_at END`, msg.ID, recipient, status, occurred); err != nil {
+				return false, err
+			}
+		}
+	}
+	promote := status != "" && shouldPromoteMessageStatus(currentStatus, status)
 	if promote {
 		if _, err := tx.Exec(
-			`UPDATE messages SET status = ?, last_event_at = ? WHERE id = ?`,
-			status, occurred, msg.ID,
+			`UPDATE messages SET status = ?, last_event_at = CASE WHEN julianday(?) > COALESCE(julianday(last_event_at),0) THEN ? ELSE last_event_at END WHERE id = ?`,
+			status, occurred, occurred, msg.ID,
 		); err != nil {
 			return false, fmt.Errorf("update message status: %w", err)
 		}
 	} else {
-		if _, err := tx.Exec(`UPDATE messages SET last_event_at = ? WHERE id = ?`, occurred, msg.ID); err != nil {
+		if _, err := tx.Exec(`UPDATE messages SET last_event_at = CASE WHEN julianday(?) > COALESCE(julianday(last_event_at),0) THEN ? ELSE last_event_at END WHERE id = ?`, occurred, occurred, msg.ID); err != nil {
 			return false, fmt.Errorf("update message event time: %w", err)
 		}
 	}
@@ -4831,7 +4901,7 @@ func resolveProjectFromInboundEmail(ctx *sdk.AppCtx, parsed *parsedInbound, sesE
 	if sesEnv != nil {
 		candidates = append(candidates, sesEnv.Receipt.Recipients...)
 	}
-	if parsed != nil {
+	if len(candidates) == 0 && parsed != nil {
 		candidates = append(candidates, parsed.To...)
 	}
 	seen := map[string]bool{}
@@ -5446,7 +5516,7 @@ func (a *App) handleMessagesList(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
-	out, total, err := dbMessageListPage(globalCtx.AppDB(), pid, messageListOpts{
+	out, total, err := dbMessageListPage(globalCtx.AppDB(), pid, messageListOpts{Summary: r.URL.Query().Get("summary") == "true",
 		Q:         strings.TrimSpace(q.Get("q")),
 		Direction: q.Get("direction"),
 		Channel:   q.Get("channel"),
@@ -5477,7 +5547,8 @@ func (a *App) handleMessageItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/messages/")
-	id, _ := strconv.ParseInt(rest, 10, 64)
+	parts := strings.Split(rest, "/")
+	id, _ := strconv.ParseInt(parts[0], 10, 64)
 	if id == 0 {
 		httpErr(w, http.StatusBadRequest, "id required")
 		return
@@ -5491,6 +5562,27 @@ func (a *App) handleMessageItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "not found")
 		return
 	}
+	if len(parts) > 1 {
+		if r.Method != "GET" || len(parts) != 3 || parts[1] != "attachments" {
+			httpErr(w, 404, "not found")
+			return
+		}
+		attachmentID, _ := strconv.ParseInt(parts[2], 10, 64)
+		for _, att := range m.Attachments {
+			if att.ID == attachmentID && att.StorageID > 0 {
+				stored, err := getAttachmentURL(globalCtx, pid, att.StorageID)
+				if err != nil {
+					httpErr(w, 502, err.Error())
+					return
+				}
+				w.Header().Set("Cache-Control", "no-store")
+				httpJSON(w, map[string]any{"url": stored.URL})
+				return
+			}
+		}
+		httpErr(w, 404, "attachment not found")
+		return
+	}
 	events, _ := dbDeliveryEvents(globalCtx.AppDB(), id)
 	httpJSON(w, map[string]any{"message": m, "events": events})
 }
@@ -5501,12 +5593,19 @@ func (a *App) handleTemplatesList(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	out, err := dbTemplateList(globalCtx.AppDB(), pid, r.URL.Query().Get("channel"), 200)
+	limit, offset := 200, 0
+	if n, e := strconv.Atoi(r.URL.Query().Get("limit")); e == nil && n > 0 {
+		limit = min(n, 200)
+	}
+	if n, e := strconv.Atoi(r.URL.Query().Get("offset")); e == nil && n > 0 {
+		offset = n
+	}
+	out, err := dbTemplateListOffset(globalCtx.AppDB(), pid, r.URL.Query().Get("channel"), limit, offset)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"templates": out})
+	httpJSON(w, map[string]any{"templates": out, "limit": limit, "offset": offset, "has_more": len(out) == limit})
 }
 
 func (a *App) handleInboundRoutesList(w http.ResponseWriter, r *http.Request) {
@@ -6175,12 +6274,13 @@ func dbMessageGet(db *sql.DB, pid string, id int64) (*Message, error) {
 	}
 	row := db.QueryRow(q, args...)
 	m, err := scanMessage(row)
-	if err != nil {
+	if err != nil || m == nil {
 		return nil, err
 	}
 	m.EventCounts = dbDeliveryEventCounts(db, m.ID)
 	m.Status = effectiveMessageStatus(m.Status, m.EventCounts)
 	m.Attachments = dbMessageAttachments(db, pid, m.ID)
+	m.RecipientStatuses = recipientStatuses(db, []int64{m.ID})[m.ID]
 	return m, nil
 }
 
@@ -6258,6 +6358,7 @@ func whatsAppRecipientsOutsideSession(db *sql.DB, pid, from string, recipients [
 }
 
 type messageListOpts struct {
+	Summary                                       bool
 	Q, Direction, Channel, Status, Since, Address string
 	Limit, Offset                                 int
 }
@@ -6287,13 +6388,15 @@ func dbMessageListPage(db *sql.DB, pid string, opts messageListOpts) ([]*Message
 		args = append(args, opts.Since)
 	}
 	if opts.Address != "" {
-		where = append(where, `(from_addr = ?
-			OR EXISTS (SELECT 1 FROM json_each(messages.to_addrs) WHERE json_each.value = ?)
-			OR EXISTS (SELECT 1 FROM json_each(messages.cc_addrs) WHERE json_each.value = ?)
-			OR EXISTS (SELECT 1 FROM json_each(messages.bcc_addrs) WHERE json_each.value = ?))`)
-		args = append(args, opts.Address, opts.Address, opts.Address, opts.Address)
+		where = append(where, `(from_canonical=? OR id IN (SELECT message_id FROM message_recipients WHERE address=?))`)
+		args = append(args, opts.Address, opts.Address)
 	}
+
 	if opts.Q != "" {
+		if len([]rune(opts.Q)) >= 3 {
+			where = append(where, `id IN (SELECT rowid FROM message_search WHERE message_search MATCH ?)`)
+			args = append(args, `"`+strings.ReplaceAll(opts.Q, `"`, `""`)+`"`)
+		}
 		pattern := messageSearchPattern(opts.Q)
 		where = append(where, `(LOWER(COALESCE(from_addr, '')) LIKE ? ESCAPE '\'
 			OR EXISTS (SELECT 1 FROM json_each(messages.to_addrs) WHERE LOWER(CAST(json_each.value AS TEXT)) LIKE ? ESCAPE '\')
@@ -6311,7 +6414,13 @@ func dbMessageListPage(db *sql.DB, pid string, opts messageListOpts) ([]*Message
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE `+whereSQL, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	q := `SELECT ` + messageSelectColumns + ` FROM messages WHERE ` + strings.Join(where, " AND ") +
+	columns := messageSelectColumns
+	if opts.Summary {
+		columns = strings.Replace(columns, "COALESCE(body_text,'')", "substr(COALESCE(body_text,''),1,300)", 1)
+		columns = strings.Replace(columns, "COALESCE(body_html,'')", "''", 1)
+		columns = strings.Replace(columns, "headers, attachment_storage_ids", "'{}', attachment_storage_ids", 1)
+	}
+	q := `SELECT ` + columns + ` FROM messages WHERE ` + strings.Join(where, " AND ") +
 		` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
 	args = append(args, opts.Limit, opts.Offset)
 	rows, err := db.Query(q, args...)
@@ -6333,9 +6442,11 @@ func dbMessageListPage(db *sql.DB, pid string, opts messageListOpts) ([]*Message
 		return nil, 0, err
 	}
 	eventCounts := dbDeliveryEventCountsBatch(db, ids)
+	recipientOutcomes := recipientStatuses(db, ids)
 	attachments := dbMessageAttachmentsBatch(db, pid, ids)
 	for _, message := range out {
 		message.EventCounts = eventCounts[message.ID]
+		message.RecipientStatuses = recipientOutcomes[message.ID]
 		message.Status = effectiveMessageStatus(message.Status, message.EventCounts)
 		message.Attachments = attachments[message.ID]
 	}
@@ -6538,16 +6649,19 @@ func dbTemplateGetByProviderID(db *sql.DB, pid, providerID string) (*Template, e
 }
 
 func dbTemplateList(db *sql.DB, pid, channel string, limit int) ([]*Template, error) {
+	return dbTemplateListOffset(db, pid, channel, limit, 0)
+}
+func dbTemplateListOffset(db *sql.DB, pid, channel string, limit, offset int) ([]*Template, error) {
 	where := []string{"project_id = ?", "deleted_at IS NULL"}
 	args := []any{pid}
 	if channel != "" {
 		where = append(where, "channel = ?")
 		args = append(args, channel)
 	}
-	args = append(args, limit)
+	args = append(args, limit, offset)
 	rows, err := db.Query(
 		`SELECT id FROM templates WHERE `+strings.Join(where, " AND ")+
-			` ORDER BY name LIMIT ?`, args...)
+			` ORDER BY name,id LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, err
 	}
