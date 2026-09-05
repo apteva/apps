@@ -6,6 +6,7 @@ package main
 // inline beyond the pre-trade checks in toolOrderPlace.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -37,6 +38,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"name"}),
 			Handler: a.toolPortfolioCreate},
 
+		{Name: "portfolio_broker_bind", Description: "Confirm a legacy portfolio's broker connection without redirecting an existing binding. Leaves live execution disarmed.", InputSchema: schemaObject(map[string]any{"portfolio_id": map[string]any{"type": "integer"}, "connection_id": map[string]any{"type": "integer"}, "confirmation": map[string]any{"type": "string"}}, []string{"portfolio_id", "connection_id", "confirmation"}), Handler: a.toolPortfolioBrokerBind},
 		{Name: "brokers_list", Description: "List broker adapters registered in this build and their currently-bound connections. Use before portfolio_create with mode=live to pick a broker_slug.",
 			InputSchema: schemaObject(nil, nil),
 			Handler:     a.toolBrokersList},
@@ -204,18 +206,33 @@ func (a *App) MCPTools() []sdk.Tool {
 		// ─── Writes ───────────────────────────────────────────────
 		{Name: "order_place", Description: "Place a paper order. Required rationale ≥ 30 chars; subject to mandate + size cap + daily-loss halt.",
 			InputSchema: schemaObject(map[string]any{
-				"portfolio_id": map[string]any{"type": "integer"},
-				"symbol":       map[string]any{"type": "string"},
-				"side":         map[string]any{"type": "string", "enum": []string{"buy", "sell", "yes", "no"}},
-				"outcome":      map[string]any{"type": "string", "enum": []string{"yes", "no"}, "description": "Polymarket outcome. Required when side=sell; inferred for side=yes|no."},
-				"type":         map[string]any{"type": "string", "enum": []string{"market", "limit", "stop"}},
-				"qty":          map[string]any{"type": "number"},
-				"limit_price":  map[string]any{"type": "number"},
-				"stop_price":   map[string]any{"type": "number"},
-				"tif":          map[string]any{"type": "string"},
-				"rationale":    map[string]any{"type": "string"},
+				"idempotency_key": map[string]any{"type": "string", "description": "Stable unique key for retrying this exact order intent"},
+				"portfolio_id":    map[string]any{"type": "integer"},
+				"symbol":          map[string]any{"type": "string"},
+				"side":            map[string]any{"type": "string", "enum": []string{"buy", "sell", "yes", "no"}},
+				"outcome":         map[string]any{"type": "string", "enum": []string{"yes", "no"}, "description": "Polymarket outcome. Required when side=sell; inferred for side=yes|no."},
+				"type":            map[string]any{"type": "string", "enum": []string{"market", "limit", "stop"}},
+				"qty":             map[string]any{"type": "number"},
+				"limit_price":     map[string]any{"type": "number"},
+				"stop_price":      map[string]any{"type": "number"},
+				"tif":             map[string]any{"type": "string"},
+				"rationale":       map[string]any{"type": "string"},
 			}, []string{"portfolio_id", "symbol", "side", "type", "qty", "rationale"}),
-			Handler: a.toolOrderPlace},
+			HandlerCtx: func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+				copy := map[string]any{}
+				for k, v := range args {
+					copy[k] = v
+				}
+				if caller := sdk.CallerFrom(call); caller != nil {
+					if caller.ProjectID != "" {
+						copy["_project_id"] = caller.ProjectID
+					}
+					if strArg(copy, "idempotency_key") == "" && caller.ToolCallID != "" {
+						copy["idempotency_key"] = "mcp:" + caller.ToolCallID
+					}
+				}
+				return a.toolOrderPlace(ctx, copy)
+			}},
 
 		{Name: "order_cancel", Description: "Cancel a working order. No-op on already-resolved orders.",
 			InputSchema: schemaObject(map[string]any{
@@ -389,14 +406,21 @@ func (a *App) MCPTools() []sdk.Tool {
 				"promotion_stage": map[string]any{"type": "string", "enum": []string{"research", "paper_candidate", "paper", "live_candidate", "live", "suspended"}},
 			}, []string{"portfolio_id", "strategy_id", "promotion_stage"}), Handler: a.toolStrategyPromotionUpdate},
 
-		{Name: "backtest_market_step", Description: "Internal runner tool: load replay prices into an isolated backtest environment.",
+		{Name: "backtest_market_step", Exposure: sdk.ToolExposureAppOnly, Description: "Internal runner tool: load replay prices into an isolated backtest environment.",
 			InputSchema: schemaObject(map[string]any{
 				"portfolio_id": map[string]any{"type": "integer"},
 				"run_id":       map[string]any{"type": "integer"},
+				"replay_at":    map[string]any{"type": "string"},
 				"step":         map[string]any{"type": "integer"},
 				"prices":       map[string]any{"type": "array"},
-			}, []string{"portfolio_id", "step", "prices"}),
-			Handler: a.toolBacktestMarketStep},
+			}, []string{"portfolio_id", "run_id", "step", "replay_at", "prices"}),
+			HandlerCtx: func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+				caller := sdk.CallerFrom(call)
+				if caller == nil || caller.AgentID != 0 || caller.AppName != "trading" || caller.AppInstallID == 0 {
+					return nil, errors.New("replay mutation requires authenticated trading runner")
+				}
+				return a.toolBacktestMarketStep(ctx, args)
+			}},
 	}
 }
 
@@ -526,7 +550,11 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 					for k, v := range holdings {
 						acct.Holdings[k] = v
 					}
+				} else {
+					return rejectStruct("broker_error", "could not parse broker holdings: "+herr.Error()), nil
 				}
+			} else {
+				return rejectStruct("broker_error", "could not read broker holdings; portfolio was not created"), nil
 			}
 		}
 		noteVenueCall(adapter.Slug(), nil)
@@ -537,6 +565,14 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 			Mode: "live", ExecutionEnvironment: executionEnvironment, BrokerSlug: brokerSlug,
 		})
 		if err != nil {
+			return nil, err
+		}
+		createdPF, err := dbGetPortfolio(ctx.AppDB(), pid, id)
+		if err != nil {
+			return nil, err
+		}
+		if err := pinBroker(ctx, createdPF, bb.ConnectionID); err != nil {
+			_, _ = ctx.AppDB().Exec(`DELETE FROM portfolios WHERE id=?`, id)
 			return nil, err
 		}
 		_, _ = ctx.AppDB().Exec(`UPDATE portfolios SET available_cash = ? WHERE id = ?`, acct.QuoteAvailable, id)
@@ -981,10 +1017,30 @@ func (a *App) toolExecutionCostsList(ctx *sdk.AppCtx, args map[string]any) (any,
 		return nil, err
 	}
 	totals := map[string]float64{}
-	for _, cost := range costs {
-		totals[cost.Kind] += cost.Amount
+	byCurrency := map[string]map[string]float64{}
+	rows, err := ctx.AppDB().Query(`SELECT kind,currency,SUM(amount) FROM execution_costs WHERE portfolio_id=? GROUP BY kind,currency`, portfolioID)
+	if err != nil {
+		return nil, err
 	}
-	return map[string]any{"costs": costs, "totals": totals, "count": len(costs)}, nil
+	defer rows.Close()
+	for rows.Next() {
+		var kind, currency string
+		var amount float64
+		if err := rows.Scan(&kind, &currency, &amount); err != nil {
+			return nil, err
+		}
+		if byCurrency[currency] == nil {
+			byCurrency[currency] = map[string]float64{}
+		}
+		byCurrency[currency][kind] = amount
+		if currency == "USD" {
+			totals[kind] = amount
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"costs": costs, "totals": totals, "totals_currency": "USD", "totals_by_currency": byCurrency, "count": len(costs)}, nil
 }
 
 func (a *App) toolFundingPaymentRecord(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1011,6 +1067,9 @@ func (a *App) toolFundingPaymentRecord(ctx *sdk.AppCtx, args map[string]any) (an
 	currency := strings.ToUpper(strings.TrimSpace(strArg(args, "currency")))
 	if currency == "" {
 		currency = profile.FeeCurrency
+	}
+	if currency != "USD" {
+		return nil, errors.New("funding must be converted to portfolio quote currency USD with conversion evidence before recording")
 	}
 	var rate *float64
 	if _, ok := args["rate_bps"]; ok {
@@ -1531,6 +1590,19 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, fmt.Errorf("portfolio %d not found", id)
 	}
 
+	requestKey := strings.TrimSpace(strArg(args, "idempotency_key"))
+	requestHash := orderIntentHash(args)
+	if requestKey != "" {
+		orderRequestMu.Lock()
+		defer orderRequestMu.Unlock()
+		previous, err := previousOrderRequest(ctx.AppDB(), pid, id, requestKey, requestHash)
+		if err != nil {
+			return nil, err
+		}
+		if previous != nil {
+			return previous, nil
+		}
+	}
 	// Pre-trade pipeline. Each rejection returns a structured status —
 	// the agent should reason about it, not raise.
 	rationale, _ := args["rationale"].(string)
@@ -1549,7 +1621,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	side := strings.ToLower(strings.TrimSpace(strArg(args, "side")))
 	otype := strings.ToLower(strings.TrimSpace(strArg(args, "type")))
 	qty := floatArg(args, "qty", 0)
-	if symbol == "" || side == "" || otype == "" || qty <= 0 {
+	if symbol == "" || side == "" || otype == "" || qty <= 0 || !finite(qty) {
 		return rejectStruct("invalid_args", "symbol, side, type, qty are required and qty > 0"), nil
 	}
 	class := inferAssetClass(symbol)
@@ -1588,6 +1660,18 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	tif, _ := args["tif"].(string)
 	if tif == "" {
 		tif = "day"
+	}
+	tif = strings.ToLower(strings.TrimSpace(tif))
+	if !oneOfString(otype, "market", "limit", "stop") || !oneOfString(tif, "day", "gtc", "ioc", "fok") {
+		return rejectStruct("invalid_args", "unsupported order type or time in force"), nil
+	}
+	for _, key := range []string{"limit_price", "stop_price"} {
+		if _, ok := args[key]; ok && (!finite(floatArg(args, key, 0)) || floatArg(args, key, 0) <= 0) {
+			return rejectStruct("invalid_args", key+" must be positive and finite"), nil
+		}
+	}
+	if otype == "stop" && oneOfString(tif, "ioc", "fok") {
+		return rejectStruct("invalid_args", "stop orders require day or gtc"), nil
 	}
 	var lp, sp *float64
 	if v := floatArg(args, "limit_price", 0); v > 0 {
@@ -1649,6 +1733,25 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// narrow critical section, concurrent callers could each pass against
 	// the same pre-order exposure and collectively exceed the limit.
 	orderPlacementMu.Lock()
+	pf, err = dbGetPortfolio(ctx.AppDB(), pid, id)
+	if err != nil {
+		orderPlacementMu.Unlock()
+		return nil, err
+	}
+	if pf.Status != "active" || (pf.ExecutionEnvironment == "broker_live" && !pf.LiveArmed) {
+		orderPlacementMu.Unlock()
+		return rejectStruct("portfolio_not_active", "portfolio changed during order preflight"), nil
+	}
+	if side == "sell" && !portfolioCanReducePosition(ctx.AppDB(), pf.ID, symbol, outcome, qty) {
+		orderPlacementMu.Unlock()
+		return rejectStruct("insufficient_position", "sell exceeds unreserved long holdings"), nil
+	}
+	if sid := int64Arg(args, "strategy_id", 0); sid > 0 {
+		if allowed, reason := scorecardAllowsExecution(ctx.AppDB(), pf, sid); !allowed {
+			orderPlacementMu.Unlock()
+			return rejectStruct("strategy_gate", reason), nil
+		}
+	}
 	if breach, checkErr := preTradeRiskCheck(ctx.AppDB(), pf, symbol, side, qty, riskPrice); checkErr != nil {
 		orderPlacementMu.Unlock()
 		return nil, checkErr
@@ -1697,11 +1800,30 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		LiquidityRole: orderLiquidityAtPlacement(mark, side, otype, lp),
 	}
 	o.VenueFeeBps = profileFeeBps(profile, o.LiquidityRole)
-	if err := dbInsertOrder(ctx.AppDB(), o, pid); err != nil {
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
 		orderPlacementMu.Unlock()
 		return nil, err
 	}
+	if err = dbInsertOrder(tx, o, pid); err == nil && requestKey != "" {
+		_, err = tx.Exec(`INSERT INTO order_requests(project_id,portfolio_id,request_key,intent_hash,order_id) VALUES(?,?,?,?,?)`, pid, id, requestKey, requestHash, o.ID)
+	}
+	if err == nil {
+		_, err = tx.Exec(`UPDATE orders SET placed_at=COALESCE((SELECT replay_at FROM replay_steps WHERE portfolio_id=?),placed_at) WHERE id=?`, pf.ID, o.ID)
+	}
+	if err == nil && strategyID > 0 {
+		_, err = tx.Exec(`UPDATE orders SET strategy_id=?,strategy_version=(SELECT version FROM strategies WHERE id=?) WHERE id=?`, strategyID, strategyID, o.ID)
+	}
+	if err != nil {
+		tx.Rollback()
+		orderPlacementMu.Unlock()
+		return nil, err
+	}
+	err = tx.Commit()
 	orderPlacementMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 
 	// ─── Live: forward to broker, apply response inline ─────────────
 	if pf.Mode == "live" {
@@ -1774,6 +1896,9 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			emit("order.rejected", map[string]any{"order_id": o.ID, "code": "translate_failed", "detail": terr.Error()})
 			return rejectStruct("translate_failed", terr.Error()), nil
 		}
+		if _, err := ctx.AppDB().Exec(`UPDATE orders SET broker_connection_id=?,reconciliation_required=1 WHERE id=?`, bb.ConnectionID, o.ID); err != nil {
+			return nil, err
+		}
 		res, callErr := ctx.PlatformAPI().ExecuteIntegrationTool(
 			bb.ConnectionID, bb.placeToolFor(o), brokerArgs,
 		)
@@ -1824,7 +1949,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				"uncertain": true,
 				"code":      code,
 				"detail":    detail,
-				"note":      "broker response was ambiguous; local order kept working — reconciler will poll by client_order_id",
+				"note":      "broker response was ambiguous; order remains supervised; adapters without client-ID recovery require account reconciliation",
 			}, nil
 		}
 		if callErr != nil || res == nil || !res.Success {
@@ -1836,6 +1961,9 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			return uncertain("broker_parse_failed", perr.Error())
 		}
 
+		if _, err := ctx.AppDB().Exec(`UPDATE orders SET broker_order_id=?,reconciliation_required=0 WHERE id=?`, br.BrokerOrderID, o.ID); err != nil {
+			return uncertain("broker_linkage_failed", err.Error())
+		}
 		// Persist broker linkage in the rationale journal row before any
 		// fill row lands, so an audit can join order → broker_order_id by
 		// kind='rationale' alone.
@@ -1953,6 +2081,9 @@ func (a *App) toolOrderCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	// "not found", we still flip locally — the reconciler would have
 	// caught it on the next tick anyway.
 	if pf.Mode == "live" {
+		if _, err := ctx.AppDB().Exec(`UPDATE orders SET cancel_requested=1 WHERE id=?`, id); err != nil {
+			return nil, err
+		}
 		bb, ferr := brokerFor(ctx, pf)
 		if ferr != nil {
 			return rejectStruct("broker_unbound",
@@ -1982,7 +2113,13 @@ func (a *App) toolOrderCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 				return rejectStruct("broker_cancel_unconfirmed", code+": "+detail), nil
 			}
 			noteVenueCall(adapter.Slug(), nil)
+			if progress, parseErr := adapter.ParseOrder(res.Data); parseErr == nil {
+				if _, err := applyBrokerProgress(ctx.AppDB(), pid, pf, o, progress); err != nil {
+					return nil, err
+				}
+			}
 		}
+		return map[string]any{"status": o.Status, "order_id": id, "cancel_requested": true}, nil
 	}
 
 	status, err := dbCancelOrder(ctx.AppDB(), pid, id, reason)

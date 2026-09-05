@@ -539,6 +539,11 @@ func streamedAlpacaMark(db *sql.DB, feed string, message alpacaMarketMessage) (*
 	if mark == nil {
 		mark = &Mark{Symbol: symbol, AssetClass: inferAssetClass(symbol)}
 	}
+	if incoming, err := time.Parse(time.RFC3339Nano, message.Time); err == nil {
+		if previous, err := time.Parse(time.RFC3339Nano, mark.MarkedAt); err == nil && incoming.Before(previous) {
+			return mark, nil
+		}
+	}
 	mark.Source = alpacaMarketDataSlug
 	mark.Feed = feed
 	mark.TimestampKind = "exchange"
@@ -552,6 +557,7 @@ func streamedAlpacaMark(db *sql.DB, feed string, message alpacaMarketMessage) (*
 	}
 	switch message.Type {
 	case "q":
+		mark.BidPrice, mark.AskPrice, mark.BidSize, mark.AskSize = nil, nil, nil, nil
 		if message.BidPrice > 0 {
 			mark.BidPrice = ptr(message.BidPrice)
 		}
@@ -565,7 +571,8 @@ func streamedAlpacaMark(db *sql.DB, feed string, message alpacaMarketMessage) (*
 			mark.AskSize = ptr(message.AskSize)
 		}
 		mark.QuoteAt = message.Time
-		if mark.Price <= 0 {
+		mark.Price = 0
+		{
 			switch {
 			case message.BidPrice > 0 && message.AskPrice > 0:
 				mark.Price = (message.BidPrice + message.AskPrice) / 2
@@ -696,13 +703,13 @@ func runAlpacaTradeStream(ctx context.Context, app *sdk.AppCtx, connID int64) er
 		}
 		health.LastEventAt = time.Now().UTC().Format(time.RFC3339Nano)
 		setAlpacaStreamHealth(app, "trade_updates", health)
-		if err := applyAlpacaTradePayload(app, env, payload); err != nil {
+		if err := applyAlpacaTradePayload(app, env, payload, connID); err != nil {
 			app.Logger().Warn("alpaca trade update rejected", "err", err)
 		}
 	}
 }
 
-func applyAlpacaTradePayload(app *sdk.AppCtx, environment string, payload []byte) error {
+func applyAlpacaTradePayload(app *sdk.AppCtx, environment string, payload []byte, connectionIDs ...int64) error {
 	var envelope struct {
 		Stream string `json:"stream"`
 		Data   struct {
@@ -732,6 +739,18 @@ func applyAlpacaTradePayload(app *sdk.AppCtx, environment string, payload []byte
 	portfolio, err := dbGetPortfolioAnyProject(app.AppDB(), order.PortfolioID)
 	if err != nil || portfolio.BrokerSlug != "alpaca-trading" {
 		return err
+	}
+	if normalizeExecutionEnvironment(portfolio.ExecutionEnvironment, portfolio.Mode, portfolio.BrokerSlug) != environment {
+		return errors.New("trade stream environment does not match portfolio")
+	}
+	if len(connectionIDs) > 0 {
+		var bound int64
+		if err := app.AppDB().QueryRow(`SELECT connection_id FROM broker_bindings WHERE portfolio_id=?`, portfolio.ID).Scan(&bound); err != nil {
+			return err
+		}
+		if bound != connectionIDs[0] {
+			return errors.New("trade stream connection does not match portfolio")
+		}
 	}
 	adapter := alpacaAdapter{}
 	brokerOrder, err := adapter.ParseOrder(envelope.Data.Order)

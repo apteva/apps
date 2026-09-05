@@ -203,7 +203,7 @@ func TestConcurrentPaperBuysCannotOverspend(t *testing.T) {
 		if order.Status == "filled" {
 			filled++
 		}
-		if order.Status == "rejected" {
+		if order.Status == "rejected" || order.Status == "cancelled" {
 			rejected++
 		}
 	}
@@ -277,15 +277,18 @@ func TestFinalAgentStepStaysRunningUntilFinalized(t *testing.T) {
 	platform := &hardeningPlatform{}
 	ctx := newHardeningCtx(t, platform)
 	pid := mustCreatePortfolio(t, ctx, "agent", []string{"crypto"})
-	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{ProjectID: "test-proj", PortfolioID: pid, SourceAgentID: 1, Name: "one step", Status: "running", Symbols: []string{"BTC-USD"}, StartAt: "2026-01-01", EndAt: "2026-01-01", Interval: "1h", StartingCash: 1000, TotalSteps: 1, EnvironmentID: "env", EnvironmentAgentID: 2, EnvironmentPortfolioID: 3, Summary: map[string]any{}})
+	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{ProjectID: "test-proj", PortfolioID: pid, SourceAgentID: 1, Name: "one step", Status: "queued", Symbols: []string{"BTC-USD"}, StartAt: "2026-01-01", EndAt: "2026-01-01", Interval: "1h", StartingCash: 1000, TotalSteps: 1, EnvironmentID: "env", EnvironmentAgentID: 2, EnvironmentPortfolioID: 3, Summary: map[string]any{}})
 	if err != nil {
+		t.Fatal(err)
+	}
+	barTime := time.Date(2026, 1, 1, 4, 0, 0, 0, time.UTC)
+	if err := dbReplaceBacktestMarketBars(ctx.AppDB(), runID, []*BacktestMarketBar{{RunID: runID, Step: 1, Symbol: "BTC-USD", AssetClass: "crypto", T: barTime.Unix(), O: 100, H: 100, L: 100, C: 100, Source: "test"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := dbUpdateBacktestEnvironment(ctx.AppDB(), runID, "env", 2, 3); err != nil {
 		t.Fatal(err)
 	}
-	barTime := time.Date(2026, 1, 1, 4, 0, 0, 0, time.UTC)
-	if err := dbReplaceBacktestMarketBars(ctx.AppDB(), runID, []*BacktestMarketBar{{RunID: runID, Step: 1, Symbol: "BTC-USD", AssetClass: "crypto", T: barTime.Unix(), O: 100, H: 100, L: 100, C: 100, Source: "test"}}); err != nil {
+	if err := dbSetBacktestStatus(ctx.AppDB(), runID, "running", ""); err != nil {
 		t.Fatal(err)
 	}
 	run, _ := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)

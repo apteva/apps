@@ -199,6 +199,15 @@ func normalizeMark(source string, mark *Mark, receivedAt time.Time) (*Mark, erro
 		mark.QuoteAt = quoteAt.UTC().Format(time.RFC3339Nano)
 	}
 
+	if mark.QuoteAt != "" {
+		qt, _ := time.Parse(time.RFC3339Nano, mark.QuoteAt)
+		if receivedAt.Sub(qt) > staleAfter {
+			mark.BidPrice = nil
+			mark.AskPrice = nil
+			mark.BidSize = nil
+			mark.AskSize = nil
+		}
+	}
 	mark.Source = strings.TrimSpace(source)
 	mark.ReceivedAt = receivedAt.Format(time.RFC3339Nano)
 	if strings.TrimSpace(mark.MarkedAt) == "" {

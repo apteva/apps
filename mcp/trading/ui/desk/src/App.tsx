@@ -91,7 +91,6 @@ export function App() {
             };
           });
         });
-        if (matchesSelected) positions.refresh();
         return;
       }
       case "portfolio.created":
@@ -227,7 +226,7 @@ export function App() {
               )}
               {symbol && allSyms.length > 0 && <SymbolPanel symbol={symbol} universe={allSyms} />}
               {portfolio.data && symbol && (
-                <OrderTicket symbol={symbol} portfolio={portfolio.data} universe={allSyms} positions={positions.data ?? []} />
+                <OrderTicket key={portfolio.data.id} symbol={symbol} portfolio={portfolio.data} universe={allSyms} positions={positions.data ?? []} />
               )}
             </div>
 
@@ -262,7 +261,7 @@ export function App() {
                   <AgentFeed portfolio={portfolio.data} entries={journal.data ?? []} />
                 )}
                 {bottomTab === "data" && <DataIntelligence status={reference.status.data} actions={reference.actions.data ?? []} issues={reference.issues.data ?? []} sessions={reference.sessions.data ?? []} symbol={symbol} />}
-                {bottomTab === "risk" && portfolio.data && <RiskObjectives portfolioId={portfolio.data.id} policy={risk.risk.data?.policy} state={risk.risk.data?.state} objectives={risk.objectives.data ?? []} universe={risk.universe.data?.policy} allowedClasses={risk.universe.data?.allowed_classes ?? portfolio.data.allowed_classes} onRefresh={() => { risk.risk.refresh(); risk.objectives.refresh(); risk.universe.refresh(); }} />}
+                {bottomTab === "risk" && portfolio.data && <RiskObjectives key={portfolio.data.id} portfolioId={portfolio.data.id} policy={risk.risk.data?.policy} state={risk.risk.data?.state} objectives={risk.objectives.data ?? []} universe={risk.universe.data?.policy} allowedClasses={risk.universe.data?.allowed_classes ?? portfolio.data.allowed_classes} onRefresh={() => { risk.risk.refresh(); risk.objectives.refresh(); risk.universe.refresh(); }} />}
                 {bottomTab === "execution" && <ExecutionIntelligence profiles={execution.profiles.data ?? []} costs={execution.costs.data?.costs ?? []} totals={execution.costs.data?.totals ?? {}} onRefresh={() => { execution.profiles.refresh(); execution.costs.refresh(); }} />}
               </div>
             </section>
