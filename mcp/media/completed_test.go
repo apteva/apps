@@ -6,6 +6,27 @@ import (
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
+func TestManualDescriptionEmitsUpdateAndCompletes(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithEmitter(rec))
+	if err := upsertMedia(ctx.AppDB(), testProj, "42", sampleVideoProbe(), "sha", "/", "source.mp4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertDerivation(ctx.AppDB(), testProj, "42", "thumbnail", 1001, 320, 180, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&App{}).toolSetDescription(ctx, map[string]any{"project_id": testProj, "file_id": "42", "description": "Manual prose"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, topic := range []string{"media.updated", "media.completed"} {
+		events := rec.EventsByTopic(topic)
+		if len(events) != 1 || events[0].ProjectID != testProj {
+			t.Fatalf("%s events=%+v", topic, events)
+		}
+	}
+}
+
 func TestMaybeEmitMediaCompleted_StorageFileOrigin(t *testing.T) {
 	rec := tk.NewEmitRecorder()
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithEmitter(rec))

@@ -1,0 +1,7 @@
+CREATE TABLE render_result_cache (
+ cache_key TEXT PRIMARY KEY,project_id TEXT NOT NULL,storage_file_id INTEGER NOT NULL,
+ sha256 TEXT NOT NULL,size_bytes INTEGER NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE smartcrop_cache (
+ cache_key TEXT PRIMARY KEY,params TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

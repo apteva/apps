@@ -10,7 +10,7 @@
 // Subscribes to media.transcribed so a still-pending transcript
 // auto-fills in once Deepgram finishes.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { AppCardHeader, Card } from "@apteva/ui-kit";
 
 interface TranscriptRow {
@@ -48,6 +48,8 @@ function useMediaEvents(
   projectId: string | undefined,
   onEvent: (ev: { topic: string; data: { file_id?: string | number } }) => void,
 ) {
+  const callback = useRef(onEvent);
+  callback.current = onEvent;
   useEffect(() => {
     if (!projectId) return;
 
@@ -67,13 +69,13 @@ function useMediaEvents(
       };
     }).__aptevaAppEvents;
     if (bridge) {
-      return bridge.subscribe("media", projectId, onEvent as any);
+      return bridge.subscribe("media", projectId, ((ev: any) => callback.current(ev)));
     }
     const url = `/api/app-events/media?project_id=${encodeURIComponent(projectId)}`;
     const es = new EventSource(url, { withCredentials: true });
     es.onmessage = (e) => {
       try {
-        onEvent(JSON.parse(e.data));
+        callback.current(JSON.parse(e.data));
       } catch {
         /* ignore */
       }
@@ -90,21 +92,28 @@ export default function TranscriptCard({ file_id, projectId, max_lines, preview 
   const [missing, setMissing] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
+  const request = useRef<AbortController | null>(null);
   const refetch = () => {
     if (preview || !projectId) return;
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
     const url =
       `/api/apps/media/media/${encodeURIComponent(fid)}/transcript` +
       `?project_id=${encodeURIComponent(projectId)}`;
-    fetch(url, { credentials: "same-origin" })
+    fetch(url, { credentials: "same-origin", signal: controller.signal })
       .then((r) => {
+        if (controller.signal.aborted) return null;
         if (r.status === 404) {
           setMissing(true);
           return null;
         }
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
       .then((data) => {
-        if (!data) return;
+        if (!data || controller.signal.aborted) return;
+        if (data.found === false) { setMissing(true); return; }
         const t: TranscriptRow | undefined =
           (data.transcript as TranscriptRow | undefined) ??
           (data.status ? (data as TranscriptRow) : undefined);
@@ -117,7 +126,11 @@ export default function TranscriptCard({ file_id, projectId, max_lines, preview 
   };
 
   useEffect(() => {
+    setRow(preview ? previewSample : null);
+    setMissing(false);
     refetch();
+    const poll = preview ? undefined : setInterval(refetch, 10000);
+    return () => { request.current?.abort(); clearInterval(poll); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fid, projectId]);
 
@@ -127,7 +140,7 @@ export default function TranscriptCard({ file_id, projectId, max_lines, preview 
       setMissing(true);
       return;
     }
-    if (ev.topic === "media.transcribed") refetch();
+    if (ev.topic === "media.transcribed" || ev.topic === "media.updated" || ev.topic === "media.completed") refetch();
   });
 
   if (missing) {

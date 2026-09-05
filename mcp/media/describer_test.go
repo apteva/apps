@@ -116,10 +116,11 @@ func TestBuildDescribePromptIncludesProjectContext(t *testing.T) {
 
 func TestDescribeCandidates_FiltersHumanSet(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
-	upsertMedia(ctx.AppDB(), testProj, "2", sampleAVProbe(3000), "sha", "", "test.mp4")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleImageProbe(), "sha", "", "test.mp4")
+	upsertMedia(ctx.AppDB(), testProj, "2", sampleImageProbe(), "sha", "", "test.mp4")
 
-	// File 2 has a human description — must be filtered out.
+	// File 2 has human prose and a completed rating — no model work remains.
+	_ = setAudienceRating(ctx.AppDB(), testProj, "2", "general", "manual")
 	d := "human prose"
 	if _, err := setDescription(ctx.AppDB(), testProj, "2", DescriptionFields{Description: &d}); err != nil {
 		t.Fatal(err)
@@ -136,7 +137,7 @@ func TestDescribeCandidates_FiltersHumanSet(t *testing.T) {
 
 func TestDescribeCandidates_RespectsCooldown(t *testing.T) {
 	ctx := newTestCtx(t)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "test.mp4")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleImageProbe(), "sha", "", "test.mp4")
 	if err := markDescribeAttempt(ctx.AppDB(), testProj, "1", "boom"); err != nil {
 		t.Fatal(err)
 	}

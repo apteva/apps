@@ -9,7 +9,7 @@
 // images live in storage and are fetched at
 // /api/apps/storage/files/<id>/content via same-origin cookies.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps install independently.
@@ -277,7 +277,9 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     [projectId],
   );
 
-  const load = useCallback(async (offset = 0) => {
+  const loadedCount = useRef(PAGE_LIMIT);
+  const refreshTimer = useRef<ReturnType<typeof setTimeout>>();
+  const load = useCallback(async (offset = 0, refresh = false) => {
     // Guard against empty projectId on first paint. The dashboard
     // host re-renders the panel a few times before its project
     // context is hydrated; without this guard the fetch goes out
@@ -327,17 +329,20 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
       }
       const requestInit = { credentials: "same-origin" as const, signal: request.controller.signal };
       const [mediaRes, foldersRes, facetsRes, statusRes] = await Promise.all([
-        fetch(`${API}/media?${withMediaParams(params)}`, requestInit),
+        Promise.all(Array.from({ length: refresh ? Math.max(1, Math.ceil(loadedCount.current / PAGE_LIMIT)) : 1 }, (_, page) =>
+          fetch(`${API}/media?${withMediaParams({ ...params, offset: String(offset + page * PAGE_LIMIT) })}`, requestInit)
+            .then(async res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json() as Promise<{ media: MediaRow[] }>; })
+        )),
         fetch(`${API}/folders?${withMediaParams(folderParams)}`, requestInit),
         fetch(`${API}/media/facets?${withMediaParams(facetParams)}`, requestInit),
         fetch(`${API}/status?${withMediaParams()}`, requestInit),
       ]);
-      if (!mediaRes.ok) throw new Error(`${mediaRes.status}: ${await mediaRes.text().catch(() => "")}`);
-      const data = (await mediaRes.json()) as { media: MediaRow[] };
       if (loadRequest.current !== request) return;
-      const nextRows = data.media || [];
-      setRows((prev) => offset > 0 ? [...prev, ...nextRows] : nextRows);
-      setHasMore(nextRows.length === PAGE_LIMIT);
+      const nextRows = mediaRes.flatMap(page => page.media || []);
+      loadedCount.current = offset > 0 ? offset + nextRows.length : nextRows.length;
+      setRows(prev => offset > 0 ? Array.from(new Map([...prev, ...nextRows].map(row => [row.file_id, row])).values()) : nextRows);
+      setSelected(prev => prev ? nextRows.find(row => row.file_id === prev.file_id) ?? prev : null);
+      setHasMore((mediaRes.at(-1)?.media?.length ?? 0) === PAGE_LIMIT);
       if (foldersRes.ok) {
         const fdata = (await foldersRes.json()) as { folders?: string[] };
         setChildFolders(fdata.folders || []);
@@ -362,14 +367,18 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
 
   useEffect(() => { load(); }, [load]);
 
-  useEffect(() => () => loadRequest.current?.controller.abort(), []);
+  useEffect(() => () => { loadRequest.current?.controller.abort(); clearTimeout(refreshTimer.current); }, []);
+  const refresh = useCallback(() => {
+    clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(() => load(0, true), 300);
+  }, [load]);
 
   // Poll while anything is mid-probe so the panel updates live.
   useEffect(() => {
     if (!rows.some((r) => r.probe_status === "pending")) return;
-    const id = setInterval(load, 4000);
+    const id = setInterval(refresh, 4000);
     return () => clearInterval(id);
-  }, [rows, load]);
+  }, [rows, refresh]);
 
   // Live refresh — single SSE subscription handling every event we
   // care about. Two separate useAppEvents calls used to open two
@@ -389,7 +398,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
       case "media.updated":
       case "media.completed":
       case "media.deleted":
-        load();
+        refresh();
         return;
     }
   });
@@ -570,6 +579,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     return (
       <button
         key={r.file_id}
+        style={{ contentVisibility: "auto", containIntrinsicSize: "auto 280px" }}
         type="button"
         onClick={() => setSelected(r)}
         className="text-left bg-bg-input/40 border border-border rounded overflow-hidden hover:border-accent/50 transition-colors flex flex-col"
@@ -591,6 +601,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           {previewURL ? (
             <img
               src={previewURL}
+              loading="lazy" decoding="async"
               alt=""
               style={{
                 position: "absolute",
@@ -616,7 +627,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         </div>
         <div className="p-2 flex flex-col gap-0.5">
           <div className="text-xs text-text font-medium truncate" title={r.file_id}>
-            {r.title || `#${r.file_id}`}
+            {r.title || r.name || `#${r.file_id}`}
           </div>
           {r.description ? (
             <div
@@ -1218,6 +1229,7 @@ function OperationsSection({
       {openOp && (
         <OperationModal
           op={openOp}
+          mediaQuery={mediaQuery}
           row={row}
           currentFolder={currentFolder}
           childFolders={childFolders}
@@ -1259,7 +1271,8 @@ interface RenderRow {
   output_file_id?: number;
   error?: string;
   started_at?: string;
-  finished_at?: string;
+  completed_at?: string;
+  metrics?: { stage?: string; result_cache_hit?: boolean };
 }
 
 // RenderStatusCard polls the backend every 2s for one render's state
@@ -1335,7 +1348,9 @@ function RenderStatusCard({
     : row.status === "cancelled" ? "bg-text-dim/20 text-text-dim border-border"
     : "bg-yellow/20 text-yellow border-yellow/40"; // pending | running
 
-  const elapsedS = Math.max(0, Math.floor((nowMs - cardMountedAt) / 1000));
+  const serverStart = row?.started_at ? Date.parse(row.started_at) : cardMountedAt;
+  const serverEnd = row?.completed_at ? Date.parse(row.completed_at) : nowMs;
+  const elapsedS = Math.max(0, Math.floor((serverEnd - serverStart) / 1000));
   const running = row.status === "pending" || row.status === "running";
   const pct = Math.max(0, Math.min(100, row.progress_pct ?? 0));
 
@@ -1363,7 +1378,7 @@ function RenderStatusCard({
             />
           </div>
           <div className="flex justify-between text-text-dim text-[10px]">
-            <span>{pct > 0 ? `${pct}%` : "Working…"}</span>
+            <span>{row.metrics?.stage ? `${row.metrics.stage}${pct > 0 ? ` · ${pct}%` : "…"}` : pct > 0 ? `${pct}%` : "Working…"}</span>
             <span>{elapsedS}s elapsed</span>
           </div>
         </>
@@ -1393,10 +1408,13 @@ function RenderStatusCard({
 // builds "<src>-<op>.<ext>" automatically; trim end_ms defaults to
 // source duration). Submit POSTs to /renders and bubbles the
 // render_id up so the section can start polling.
+const MediaQueryContext = createContext("");
+
 function OperationModal({
-  op, row, currentFolder, childFolders, folderSuggestions, apiBase, previewBase, storageQuery, onClose, onSubmitted, onError,
+  op, row, currentFolder, childFolders, folderSuggestions, apiBase, previewBase, mediaQuery, storageQuery, onClose, onSubmitted, onError,
 }: {
   op: OpName;
+  mediaQuery: string;
   row: MediaRow;
   currentFolder: string;
   childFolders: string[];
@@ -1424,7 +1442,7 @@ function OperationModal({
     setBusy(true);
     try {
       const params = buildParams(op, fields);
-      const r = await fetch(`${apiBase}/renders?project_id=${encodeURIComponent(row.project_id)}`, {
+      const r = await fetch(`${apiBase}/renders?${mediaQuery}`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -1500,7 +1518,7 @@ function OperationModal({
           style={bodyStyle}
         >
           <div className="min-w-0">
-            <OperationPreview
+            <MediaQueryContext.Provider value={mediaQuery}><OperationPreview
               op={op}
               row={row}
               fields={fields}
@@ -1510,7 +1528,7 @@ function OperationModal({
               apiBase={apiBase}
               previewBase={previewBase}
               storageQuery={storageQuery}
-            />
+            /></MediaQueryContext.Provider>
           </div>
           <div className="space-y-3 min-w-0">
             <OperationSummary op={op} row={row} fields={fields} />
@@ -1527,7 +1545,7 @@ function OperationModal({
               className="grid gap-3"
               style={{ gridTemplateColumns: isReel ? "1fr" : "repeat(2, minmax(0, 1fr))" }}
             >
-              {opFieldDefs(op).map((fd) => (
+              {opFieldDefs(op).filter((fd) => fd.key !== "encoder_profile" || (row.has_video && !row.is_image)).map((fd) => (
                 <OperationField key={fd.key} field={fd} value={fields[fd.key] || ""} onChange={(v) => set(fd.key, v)} />
               ))}
             </div>
@@ -1734,7 +1752,7 @@ function OperationField({
           className="w-full mt-1 bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
         >
           {field.options!.map((opt) => (
-            <option key={opt} value={opt}>{opt}</option>
+            <option key={opt} value={opt}>{field.optionLabels?.[opt] ?? opt}</option>
           ))}
         </select>
       ) : (
@@ -1931,6 +1949,7 @@ function TimelinePreview({
         <SmartCropCheck
           row={row}
           startMs={safeStart}
+          endMs={safeEnd}
           ratio={fields.target_ratio || "9:16"}
           apiBase={apiBase}
           previewBase={previewBase}
@@ -2120,6 +2139,7 @@ interface SmartCropPreviewResult {
 function SmartCropCheck({
   row,
   startMs,
+  endMs,
   ratio,
   apiBase,
   previewBase,
@@ -2128,25 +2148,31 @@ function SmartCropCheck({
 }: {
   row: MediaRow;
   startMs: number;
+  endMs: number;
   ratio: string;
   apiBase: string;
   previewBase: string;
   storageQuery: string;
   onUseSmart: () => void;
 }) {
+  const mediaQuery = useContext(MediaQueryContext);
   const frames = keyframesFor(row);
   const frame = nearestKeyframe(frames, startMs) ?? posterDerivation(row);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<SmartCropPreviewResult | null>(null);
+  const requestRef = useRef<AbortController | null>(null);
 
   const src = frame ? `${previewBase}/${frame.storage_file_id}/content?${storageQuery}` : "";
   useEffect(() => {
+    requestRef.current?.abort();
     setResult(null);
     setError("");
     setOpen(false);
-  }, [frame?.id, ratio]);
+    setBusy(false);
+    return () => requestRef.current?.abort();
+  }, [row.file_id, frame?.id, ratio, startMs, endMs]);
 
   if (!frame) {
     return (
@@ -2161,17 +2187,22 @@ function SmartCropCheck({
     : "thumbnail fallback";
 
   const run = async () => {
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
     onUseSmart();
     setOpen(true);
     setBusy(true);
     setError("");
     try {
-      setResult(await fetchSmartCropPreview(apiBase, row, startMs, ratio));
+      const next = await fetchSmartCropPreview(apiBase, row, startMs, ratio, mediaQuery, endMs, controller.signal);
+      if (!controller.signal.aborted) setResult(next);
     } catch (e) {
+      if (controller.signal.aborted) return;
       setResult(null);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      if (!controller.signal.aborted) setBusy(false);
     }
   };
 
@@ -2386,15 +2417,20 @@ async function fetchSmartCropPreview(
   row: MediaRow,
   startMs: number,
   ratio: string,
+  mediaQuery: string,
+  endMs: number,
+  signal?: AbortSignal,
 ): Promise<SmartCropPreviewResult> {
-  const r = await fetch(`${apiBase}/smartcrop?project_id=${encodeURIComponent(row.project_id)}`, {
+  const r = await fetch(`${apiBase}/smartcrop?${mediaQuery}`, {
     method: "POST",
     credentials: "same-origin",
+    signal,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       operation: "extract_reel",
       file_id: row.file_id,
       start_ms: Math.round(startMs),
+      end_ms: Math.round(endMs),
       target_ratio: ratio || "9:16",
       crop_mode: "smart",
     }),
@@ -2500,9 +2536,25 @@ interface FieldDef {
   placeholder?: string;
   hint?: string;
   options?: string[];
+  optionLabels?: Record<string, string>;
 }
 
 function opFieldDefs(op: OpName): FieldDef[] {
+  const fields = opFieldDefsBase(op);
+  if (["resize", "transcode", "crop", "extract_reel"].includes(op)) {
+    fields.push({
+      key: "encoder_profile", label: "Video quality", type: "select",
+      options: ["legacy", "low", "medium", "high"],
+      optionLabels: {
+        legacy: "Legacy (default)", low: "Low — smaller files",
+        medium: "Medium — balanced", high: "High — more detail",
+      },
+      hint: "Sets quality for the exported video. Legacy keeps existing settings. Higher quality generally means larger files and longer encoding. For H.264 MP4, MOV or MKV.",
+    });
+  }
+  return fields;
+}
+function opFieldDefsBase(op: OpName): FieldDef[] {
   switch (op) {
     case "trim":
       return [
@@ -2557,6 +2609,9 @@ function opFieldDefs(op: OpName): FieldDef[] {
 
 function defaultFields(op: OpName, row: MediaRow): Record<string, string> {
   const out: Record<string, string> = {};
+  if (["resize", "transcode", "crop", "extract_reel"].includes(op) && row.has_video && !row.is_image) {
+    out.encoder_profile = "legacy";
+  }
   switch (op) {
     case "trim":
       out.start_ms = "0";
@@ -3835,7 +3890,9 @@ function AudienceRatingSection({
   apiBase: string;
   query: string;
 }) {
-  const rating = row.audience_rating || "unrated";
+  const [savedRating, setSavedRating] = useState<string | null>(null);
+  useEffect(() => setSavedRating(null), [row.file_id, row.audience_rating]);
+  const rating = savedRating ?? row.audience_rating ?? "unrated";
   const reasoning = (row.audience_reasoning ?? "").trim();
   const [pending, setPending] = useState<string | null>(null);
   const [err, setErr] = useState<string>("");
@@ -3863,6 +3920,9 @@ function AudienceRatingSection({
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json();
+      if (body.error || body.result?.isError) throw new Error(body.error?.message || body.result?.content?.[0]?.text || "Rating update failed");
+      setSavedRating(next);
     } catch (e) {
       setErr(String(e));
     } finally {

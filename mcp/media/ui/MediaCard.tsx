@@ -11,7 +11,7 @@
 // indexer probes / the transcriber writes / the describer fills in
 // the LLM-generated description.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { AppCardHeader, Card, DataList } from "@apteva/ui-kit";
 
 interface DerivationRow {
@@ -72,6 +72,8 @@ function useMediaEvents(
   projectId: string | undefined,
   onEvent: (ev: { topic: string; data: { file_id?: string | number } }) => void,
 ) {
+  const callback = useRef(onEvent);
+  callback.current = onEvent;
   useEffect(() => {
     if (!projectId) return;
 
@@ -94,7 +96,7 @@ function useMediaEvents(
       dbg("subscribe via bridge", { project: projectId });
       const unsub = bridge.subscribe("media", projectId, ((ev: any) => {
         dbg("event via bridge", { topic: ev?.topic, file_id: ev?.data?.file_id });
-        onEvent(ev);
+        callback.current(ev);
       }) as any);
       return () => {
         dbg("unsubscribe (bridge)", { project: projectId });
@@ -110,7 +112,7 @@ function useMediaEvents(
       try {
         const ev = JSON.parse(e.data);
         dbg("event via direct ES", { topic: ev?.topic, file_id: ev?.data?.file_id });
-        onEvent(ev);
+        callback.current(ev);
       } catch {
         /* ignore */
       }
@@ -128,25 +130,32 @@ export default function MediaCard({ file_id, projectId, preview }: Props) {
   const [meta, setMeta] = useState<MediaMeta | null>(preview ? previewSample : null);
   const [missing, setMissing] = useState(false);
 
+  const request = useRef<AbortController | null>(null);
   const refetch = () => {
     if (preview || !projectId) return;
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
     const url =
       `/api/apps/media/media/${encodeURIComponent(fid)}` +
       `?project_id=${encodeURIComponent(projectId)}`;
     const t0 = (typeof performance !== "undefined" ? performance.now() : Date.now());
     dbg("refetch start", { fid, url });
-    fetch(url, { credentials: "same-origin" })
+    fetch(url, { credentials: "same-origin", signal: controller.signal })
       .then((r) => {
+        if (controller.signal.aborted) return null;
         const dt = ((typeof performance !== "undefined" ? performance.now() : Date.now()) - t0).toFixed(1);
         dbg("refetch response", { fid, status: r.status, ms: dt });
         if (r.status === 404) {
           setMissing(true);
           return null;
         }
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
       .then((data) => {
-        if (!data) return;
+        if (!data || controller.signal.aborted) return;
+        if (data.found === false) { setMissing(true); return; }
         // Server may return either {media: ...} or the row directly.
         const row: MediaMeta | undefined =
           (data.media as MediaMeta | undefined) ??
@@ -166,8 +175,10 @@ export default function MediaCard({ file_id, projectId, preview }: Props) {
 
   useEffect(() => {
     dbg("mount", { fid, projectId, preview });
+    setMeta(preview ? previewSample : null);
+    setMissing(false);
     refetch();
-    return () => dbg("unmount", { fid, projectId });
+    return () => { request.current?.abort(); dbg("unmount", { fid, projectId }); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fid, projectId]);
 
@@ -185,7 +196,7 @@ export default function MediaCard({ file_id, projectId, preview }: Props) {
   if (missing) {
     return (
       <Card>
-        <AppCardHeader title={`Media #${fid}`} status={{ label: "deleted", variant: "muted" }} />
+        <AppCardHeader title={`Media #${fid}`} status={{ label: "not indexed or unavailable", variant: "muted" }} />
       </Card>
     );
   }

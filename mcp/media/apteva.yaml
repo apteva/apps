@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.3
+version: 0.14.4
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -19,10 +19,10 @@ description: |
   by default, Cloudinary when bound. A wedged encode releases its
   slot without disturbing the indexer.
 
-  v0.14.3 keeps external-provider publishing data in arbitrary media metadata
-  and removes provider-specific URL resolution from Media itself. Read-only
-  media analysis continues to follow the configured remote instance and fail
-  closed when that executor is unavailable.
+  v0.14.4 fixes processing, worker lifecycle, catalog, and rendering issues.
+  Adds verified source and render-result caches, bounded processing and uploads,
+  and a general video quality setting with Legacy as the default. Improves
+  Smart Crop, derivative repair, transcription completion, and live UI updates.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media
@@ -474,6 +474,12 @@ provides:
         progress_pct: integer
         status: string                  # always "running"
 
+    - name: render.stage
+      description: A render entered a processing stage; stage timings are stored in its metrics.
+      payload:
+        render_id: integer
+        stage: string
+
     - name: render.completed
       description: A render finished successfully and produced an output_file_id in storage.
       payload:
@@ -501,7 +507,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.3
+    ref: media/v0.14.4
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -572,6 +578,16 @@ config_schema:
     description: Hard wall-clock cap for one read-only media_analyze call. Full analysis of long or high-resolution files may need a larger value.
 
   # Renders (new in v0.2)
+  - name: media_work_capacity
+    type: text
+    default: "4"
+    label: Media processing capacity
+    description: Shared per-host work budget. Video renders use two units; indexing and previews use one.
+  - name: render_encoder_threads
+    type: text
+    default: "2"
+    label: Encoder threads per FFmpeg render
+    description: Caps CPU use per encoder to keep simultaneous renders responsive.
   - name: render_pool_size
     type: text
     default: "4"
@@ -639,10 +655,10 @@ config_schema:
   - name: render_source_cache_max_bytes
     type: text
     default: "21474836480"
-    label: Remote source cache max bytes
+    label: Source cache max bytes
     description: |
       Maximum persistent cache size for source files downloaded on the
-      remote render host. Defaults to 20 GiB. Cached sources are keyed
+      local or remote render host. Defaults to 20 GiB. Cached sources are keyed
       by storage file_id and sha256 so repeated reel renders reuse the
       same remote bytes instead of downloading the source again.
 

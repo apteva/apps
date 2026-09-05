@@ -112,6 +112,7 @@ func deleteOwnedDerivationFiles(
 	if sc == nil || len(derivs) == 0 {
 		return
 	}
+	enqueueDerivationCleanup(app, projectID, derivs)
 	ids := derivationStorageIDs(derivs)
 	if len(ids) == 0 {
 		return
@@ -126,6 +127,20 @@ func deleteOwnedDerivationFiles(
 	deleted := make(map[int64]struct{}, len(derivs))
 	for _, d := range derivs {
 		f := resolved[d.StorageFileID]
+		if f == nil {
+			if app != nil {
+				_, _ = app.AppDB().Exec(`DELETE FROM derivation_cleanup_queue WHERE project_id=? AND storage_file_id=?`, projectID, d.StorageFileID)
+			}
+			continue
+		}
+		// A pointer still referenced by the catalog is not garbage.
+		var references int
+		if app != nil {
+			_ = app.AppDB().QueryRow(`SELECT COUNT(*) FROM derivations WHERE project_id=? AND storage_file_id=?`, projectID, d.StorageFileID).Scan(&references)
+		}
+		if references > 0 {
+			continue
+		}
 		if err := validateDerivationStorageFile(d, f); err != nil {
 			if app != nil {
 				app.Logger().Warn("skip unowned derivation storage id",
@@ -146,6 +161,9 @@ func deleteOwnedDerivationFiles(
 			continue
 		}
 		deleted[f.ID] = struct{}{}
+		if app != nil {
+			_, _ = app.AppDB().Exec(`DELETE FROM derivation_cleanup_queue WHERE project_id=? AND storage_file_id=?`, projectID, d.StorageFileID)
+		}
 	}
 }
 

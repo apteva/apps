@@ -67,7 +67,7 @@ func startRenderPool(app *sdk.AppCtx, size int) {
 		size = 1
 	}
 	for i := 0; i < size; i++ {
-		go renderWorker(app, i)
+		startMediaWorker(app, func() { renderWorker(app, i) })
 	}
 	app.Logger().Info("render pool started", "size", size)
 }
@@ -121,13 +121,14 @@ func renderWorker(app *sdk.AppCtx, id int) {
 		if err != nil {
 			log.Warn("render worker: remote backend disabled", "host_id", hostID, "err", err)
 		} else {
+			remote.encoderThreads = parseConfigIntFallback(cfg.Get("render_encoder_threads"), 2)
 			log.Info("render worker: remote backend enabled", "host_id", hostID, "source_cache_max_bytes", sourceCacheMaxBytes)
 		}
 	}
 
 	for {
 		select {
-		case <-app.Done():
+		case <-mediaDone(app):
 			log.Info("render worker stopping", "id", id)
 			return
 		default:
@@ -136,8 +137,10 @@ func renderWorker(app *sdk.AppCtx, id int) {
 		row, err := claimNextPending(db)
 		if errors.Is(err, sql.ErrNoRows) {
 			select {
-			case <-app.Done():
+			case <-mediaDone(app):
 				return
+			case <-renderQueueWake:
+				continue
 			case <-time.After(5 * time.Second):
 				continue
 			}
@@ -161,16 +164,59 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 
 	// Wall-clock cap. Combined with the per-render cancel func so
 	// either timeout OR explicit cancel terminates work promptly.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	parent, stop := mediaContext(context.Background(), app)
+	defer stop()
+	ctx, cancel := context.WithTimeout(parent, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 	registerCancel(row.ID, cancel)
 	defer deregisterCancel(row.ID)
 
+	waitDone := renderStage(app, row, "admission")
+	weight := 2
+	if row.Operation == "extract_frame" {
+		weight = 1
+	}
+	ctx, release, budgetErr := acquireMediaWork(ctx, app, weight)
+	waitDone()
+	if budgetErr != nil {
+		_ = renderMarkFailed(db, row.ID, budgetErr.Error())
+		return
+	}
+	defer release()
+	if created, err := time.Parse(time.RFC3339, row.CreatedAt); err == nil {
+		recordRenderMetric(app, row, "queue_wait_ms", time.Since(created).Milliseconds())
+	}
 	executor := selectExecutor(app, local, remote, row)
 	log.Info("render claimed", "id", row.ID, "op", row.Operation, "executor", executor.Name())
 	emitRenderStarted(app, row, executor.Name())
 
-	outputFileID, err := executor.Execute(ctx, app, row)
+	sc := newStorageClient()
+	cacheRequest := *row // Preserve requested params before Smart Crop resolves them.
+	cacheKey, cacheFolder, cacheName := requestRenderCacheKey(ctx, app, sc, row, executor)
+	var outputFileID int64
+	var err error
+	if cacheKey != "" {
+		release, lockErr := requestCacheLocks.acquire(ctx, cacheKey[0])
+		if lockErr != nil {
+			err = lockErr
+		} else {
+			defer release()
+			outputFileID = findCachedRender(ctx, app, sc, cacheKey, row.ProjectID, cacheFolder, cacheName)
+		}
+	}
+	if err == nil && outputFileID == 0 {
+		outputFileID, err = executor.Execute(ctx, app, row)
+		if err == nil {
+			// Do not associate new bytes with an old source/config identity if
+			// Storage or crop evidence changed while this job was running.
+			currentKey, _, _ := requestRenderCacheKey(ctx, app, sc, &cacheRequest, executor)
+			if currentKey == cacheKey {
+				saveCachedRender(ctx, app, sc, cacheKey, row.ProjectID, outputFileID)
+			}
+		}
+	} else if err == nil {
+		recordRenderMetric(app, row, "result_cache_hit", true)
+	}
 	if err != nil {
 		// Distinguish cancellation / timeout from a backend failure so
 		// the row reflects the right terminal state. We check ctx.Err()
@@ -196,9 +242,7 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 	deregisterCancel(row.ID)
 	if ctx.Err() != nil {
 		if outputFileID > 0 {
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			_ = newStorageClient().DeleteFile(cleanupCtx, row.ProjectID, outputFileID)
-			cleanupCancel()
+			retainUncommittedRenderOutput(app, row, outputFileID, ctx.Err().Error())
 		}
 		if ctx.Err() == context.Canceled {
 			_ = renderMarkCancelled(db, row.ID)
@@ -211,11 +255,11 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 		return
 	}
 
+	doneFinalize := renderStage(app, row, "finalize")
+	defer doneFinalize()
 	outputFileIDStr := strconv.FormatInt(outputFileID, 10)
 	if err := renderMarkOk(db, row.ID, outputFileIDStr); err != nil {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_ = newStorageClient().DeleteFile(cleanupCtx, row.ProjectID, outputFileID)
-		cleanupCancel()
+		retainUncommittedRenderOutput(app, row, outputFileID, err.Error())
 		log.Error("render mark ok", "id", row.ID, "err", err)
 		return
 	}
@@ -272,4 +316,19 @@ func resolveScratchRoot(app *sdk.AppCtx, override string) string {
 		return filepath.Join(dd, "renders")
 	}
 	return "/data/renders"
+}
+
+func retainUncommittedRenderOutput(app *sdk.AppCtx, row *RenderRow, fileID int64, reason string) {
+	if _, err := app.AppDB().Exec(`INSERT OR REPLACE INTO render_uncommitted_outputs(render_id,project_id,storage_file_id,reason) VALUES(?,?,?,?)`, row.ID, row.ProjectID, strconv.FormatInt(fileID, 10), reason); err != nil {
+		app.Logger().Error("record uncommitted output", "render_id", row.ID, "storage_file_id", fileID, "err", err)
+	}
+}
+
+var renderQueueWake = make(chan struct{}, 64)
+
+func signalRenderQueue() {
+	select {
+	case renderQueueWake <- struct{}{}:
+	default:
+	}
 }

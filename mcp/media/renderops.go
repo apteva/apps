@@ -41,7 +41,7 @@ type opPlan struct {
 // source would silently default to a ".mp4" output. Other ops own their
 // extension (transcode via `format`, audio_extract via `format`,
 // extract_frame/reel are always image/mp4) and ignore the hint.
-func buildPlan(op string, sources []string, params json.RawMessage, outputName, sourceExt string) (*opPlan, error) {
+func buildPlanBase(op string, sources []string, params json.RawMessage, outputName, sourceExt string) (*opPlan, error) {
 	if err := validateOutputName(outputName); err != nil {
 		return nil, err
 	}
@@ -72,6 +72,9 @@ func buildPlan(op string, sources []string, params json.RawMessage, outputName, 
 func validateOutputName(name string) error {
 	if name == "" {
 		return nil
+	}
+	if strings.ContainsAny(name, "\r\n") {
+		return errors.New("output_name must not contain line breaks")
 	}
 	if name == "." || name == ".." || strings.ContainsRune(name, '\x00') ||
 		strings.ContainsAny(name, `/\\`) || filepath.IsAbs(name) || filepath.Base(name) != name {

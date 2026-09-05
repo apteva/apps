@@ -22,6 +22,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -430,6 +431,22 @@ func (c *storageClient) DeleteFile(ctx context.Context, projectID string, id int
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("files_delete: %d: %s", resp.StatusCode, body)
 	}
+	var envelope struct {
+		Error  json.RawMessage `json:"error"`
+		Result struct {
+			IsError bool            `json:"isError"`
+			Content json.RawMessage `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&envelope); err != nil {
+		return fmt.Errorf("files_delete response: %w", err)
+	}
+	if len(envelope.Error) > 0 && string(envelope.Error) != "null" {
+		return fmt.Errorf("files_delete: %s", envelope.Error)
+	}
+	if envelope.Result.IsError {
+		return fmt.Errorf("files_delete: %s", envelope.Result.Content)
+	}
 	return nil
 }
 
@@ -529,10 +546,14 @@ func (c *storageClient) UploadRenderFile(ctx context.Context, projectID, folder,
 	if info.Size() <= 0 {
 		return 0, errors.New("render output is empty")
 	}
+	doneHash := traceRenderStage(ctx, "hash")
 	sha, err := sha256File(path)
+	doneHash()
 	if err != nil {
 		return 0, err
 	}
+	doneUpload := traceRenderStage(ctx, "transfer")
+	defer doneUpload()
 	file, err := c.uploadFileChunked(ctx, projectID, folder, filename, contentType, path, info.Size(), sha)
 	if err != nil {
 		return 0, err
@@ -602,6 +623,7 @@ func (c *storageClient) uploadFileChunked(ctx context.Context, projectID, folder
 		UploadID    string       `json:"upload_id"`
 		PartSize    int64        `json:"part_size"`
 		MaxParts    int          `json:"max_parts"`
+		MaxParallel int          `json:"max_parallel"`
 		WasExisting bool         `json:"was_existing"`
 		File        *StorageFile `json:"file"`
 	}
@@ -637,31 +659,67 @@ func (c *storageClient) uploadFileChunked(ctx context.Context, projectID, folder
 		return nil, err
 	}
 	defer f.Close()
-	buf := make([]byte, int(partSize))
-	for part := 1; ; part++ {
-		n, readErr := io.ReadFull(f, buf)
-		if readErr == io.EOF {
-			break
+	if partSize > 100*1024*1024 {
+		err = fmt.Errorf("storage part size exceeds 100 MiB")
+		return nil, err
+	}
+	uploadCtx, cancelParts := context.WithCancel(ctx)
+	defer cancelParts()
+	var workers sync.WaitGroup
+	var errMu sync.Mutex
+	var partErr error
+	parts := make(chan int)
+	parallel := 2
+	if initResp.MaxParallel > 0 && initResp.MaxParallel < parallel {
+		parallel = initResp.MaxParallel
+	}
+	for worker := 0; worker < parallel; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			buf := make([]byte, int(partSize))
+			for part := range parts {
+				if uploadCtx.Err() != nil {
+					continue
+				}
+				offset := int64(part-1) * partSize
+				length := partSize
+				if size-offset < length {
+					length = size - offset
+				}
+				n, readErr := f.ReadAt(buf[:length], offset)
+				if readErr == nil && int64(n) != length {
+					readErr = io.ErrUnexpectedEOF
+				}
+				if readErr == nil {
+					_, readErr = c.do(uploadCtx, http.MethodPut, fmt.Sprintf("/uploads/%s/parts/%d?%s", url.PathEscape(uploadID), part, q.Encode()), nil, "application/octet-stream", withBody(buf[:n]))
+				}
+				if readErr != nil {
+					errMu.Lock()
+					if partErr == nil {
+						partErr = fmt.Errorf("upload part %d/%d: %w", part, totalParts, readErr)
+					}
+					errMu.Unlock()
+					cancelParts()
+				}
+			}
+		}()
+	}
+	for part := 1; part <= totalParts; part++ {
+		select {
+		case parts <- part:
+		case <-uploadCtx.Done():
 		}
-		if readErr == io.ErrUnexpectedEOF {
-			readErr = nil
-		}
-		if readErr != nil {
-			err = fmt.Errorf("read render output part %d: %w", part, readErr)
-			return nil, err
-		}
-		if n == 0 {
-			break
-		}
-		if _, err = c.do(ctx, http.MethodPut,
-			fmt.Sprintf("/uploads/%s/parts/%d?%s", url.PathEscape(uploadID), part, q.Encode()),
-			nil, "application/octet-stream", withBody(buf[:n])); err != nil {
-			err = fmt.Errorf("upload part %d/%d: %w", part, totalParts, err)
-			return nil, err
-		}
-		if n < len(buf) {
-			break
-		}
+	}
+	close(parts)
+	workers.Wait()
+	if partErr != nil {
+		err = partErr
+		return nil, err
+	}
+	if ctx.Err() != nil {
+		err = ctx.Err()
+		return nil, err
 	}
 
 	respBody, err = c.do(ctx, http.MethodPost,

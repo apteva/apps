@@ -42,6 +42,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,7 +76,8 @@ type remoteExecutor struct {
 	// share the local executor's notion of "where renders land". We
 	// never invoke fallback.Execute — selectExecutor handles fallthrough
 	// when the remote one declines or fails.
-	fallback *localExecutor
+	fallback       *localExecutor
+	encoderThreads int
 }
 
 func (e *remoteExecutor) Name() string { return "remote-instance" }
@@ -114,6 +116,10 @@ func newRemoteExecutor(hostID int64, installer *remoteFFmpegInstaller, local *lo
 
 func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *RenderRow) (int64, error) {
 	log := app.Logger()
+	finish := renderStage(app, row, "remote_execution")
+	defer finish()
+	row.WorkDir = uniqueRemoteWorkDir(row.ID)
+	recordRenderMetric(app, row, "remote_work_dir", row.WorkDir)
 
 	publicURL, err := resolvePublicURL(app)
 	if err != nil {
@@ -194,13 +200,13 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 
 	// Per-render best-effort kill on ctx-cancel. Registered before the
 	// long-running call so a cancel mid-encode hits the remote PID.
-	registerRemoteKill(ctx, app, e.hostID, row.ID)
+	registerRemoteKill(ctx, app, e.hostID, row.ID, row.WorkDir)
 
 	// Live progress: poll the remote progress.log every few seconds
 	// while ffmpeg runs. Stops when Execute returns.
 	progressDone := make(chan struct{})
 	defer close(progressDone)
-	go pollRemoteProgress(ctx, progressDone, app, e.hostID, row.ID, row.ProjectID, expectedProgressDurationMs(app.AppDB(), row))
+	go pollRemoteProgress(ctx, progressDone, app, e.hostID, row.ID, row.ProjectID, expectedProgressDurationMs(app.AppDB(), row), row.WorkDir)
 
 	// timeout_s on the run-command call gets the row's wall-clock cap
 	// minus a small safety margin (the install-time pre-flight already
@@ -212,7 +218,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		}
 	}
 
-	out, exit, runErr := runRemote(ctx, app, e.hostID, script, timeoutS)
+	out, exit, runErr := runRemote(ctx, app, e.hostID, "setsid bash -c "+shellQuote(script), timeoutS)
 	if runErr != nil {
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
@@ -237,6 +243,8 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	if err != nil {
 		return 0, fmt.Errorf("parse remote result: %w (output=%s)", err, truncate(out, 500))
 	}
+	recordRenderMetric(app, row, "output_bytes", res.Size)
+	recordRenderMetric(app, row, "source_cache_hits", strings.Count(out, "REMOTE_SOURCE_CACHE_HIT "))
 	uploaded, err := sc.GetFile(ctx, row.ProjectID, res.FileID)
 	if err != nil {
 		return 0, fmt.Errorf("verify remote render destination: %w", err)
@@ -259,7 +267,10 @@ func (e *remoteExecutor) buildScript(
 	signedURLs []string, sourceNames []string, sourceSizes []int64, sourceSHA256s []string,
 	folder string, publicURL string,
 ) (string, error) {
-	workDir := remoteRenderWorkDir(row.ID)
+	workDir := row.WorkDir
+	if workDir == "" {
+		workDir = uniqueRemoteWorkDir(row.ID)
+	}
 	if len(sourceSHA256s) != len(signedURLs) {
 		return "", fmt.Errorf("source SHA count %d does not match URL count %d", len(sourceSHA256s), len(signedURLs))
 	}
@@ -279,7 +290,12 @@ func (e *remoteExecutor) buildScript(
 	if err != nil {
 		return "", err
 	}
-	args = append(args, plan.Filename)
+	threads := e.encoderThreads
+	if threads <= 0 {
+		threads = 2
+	}
+	args = append([]string{"-filter_threads", "1", "-filter_complex_threads", "1"}, args...)
+	args = append(args, "-threads", strconv.Itoa(threads), "./"+plan.Filename)
 
 	sourceCacheMaxBytes := e.sourceCacheMaxBytes
 	if sourceCacheMaxBytes <= 0 {
@@ -356,6 +372,13 @@ func (e *remoteExecutor) buildScript(
 	fmt.Fprintf(&b, "export FOLDER=%s\n", shellQuote(folder))
 	fmt.Fprintf(&b, "export NAME=%s\n", shellQuote(plan.Filename))
 	fmt.Fprintf(&b, "export CT=%s\n", shellQuote(plan.ContentType))
+	nameJSON, _ := json.Marshal(plan.Filename)
+	folderJSON, _ := json.Marshal(folder)
+	ctJSON, _ := json.Marshal(plan.ContentType)
+	fmt.Fprintf(&b, "NAME_JSON=%s\nFOLDER_JSON=%s\nCT_JSON=%s\n", shellQuote(string(nameJSON)), shellQuote(string(folderJSON)), shellQuote(string(ctJSON)))
+	// curl multipart quoting differs from JSON (notably HTML/unicode escapes).
+	curlName := `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(plan.Filename) + `"`
+	fmt.Fprintf(&b, "CURL_NAME=%s\n", shellQuote(curlName))
 	b.WriteString(uploadScriptFragment)
 
 	// Final marker — media's parser looks for the APTEVA_RESULT: prefix.
@@ -373,25 +396,18 @@ func (e *remoteExecutor) buildScript(
 // to the returned signed S3 URL, then POST /files/<id>/finalize.
 // Chunked fallback: POST /uploads, PUT fixed-size parts, complete
 // with sha256. Last resort: single POST /files for old storage.
-const uploadScriptFragment = `INIT_BODY_FILE=$(mktemp)
+const uploadScriptFragment = remoteJSONReader + `INIT_BODY_FILE=$(mktemp)
 INIT_CODE=$(curl_retry -o "$INIT_BODY_FILE" -w "%{http_code}" \
   -X POST \
   -H "Authorization: Bearer $STORAGE_TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"name\":\"$NAME\",\"folder\":\"$FOLDER\",\"content_type\":\"$CT\",\"size_bytes\":$SIZE,\"sha256\":\"$SHA\",\"visibility\":\"private\",\"source\":\"media-render\",\"tags\":[\"render\"]}" \
+  -d "{\"name\":$NAME_JSON,\"folder\":$FOLDER_JSON,\"content_type\":$CT_JSON,\"size_bytes\":$SIZE,\"sha256\":\"$SHA\",\"visibility\":\"private\",\"source\":\"media-render\",\"tags\":[\"render\"]}" \
   "$STORAGE_BASE/files/init?project_id=$PROJECT_ID" || echo 000)
 FILE_ID=""
 NEED_MULTIPART=1
 if [ "$INIT_CODE" = "200" ]; then
-  UPLOAD_URL=$(sed -n 's/.*"upload_url":[[:space:]]*"\([^"]*\)".*/\1/p' "$INIT_BODY_FILE")
-  # Decode JSON-escaped ampersands. Go's encoding/json escapes & as
-  # & by default ("safe" HTML output); our raw sed extraction
-  # keeps the literal "&" in the URL, which Hetzner / S3 sees
-  # as part of the query-string value, garbling the signature and
-  # 403'ing the PUT. One sed pass fixes it. < / > aren't
-  # used in S3 URLs but cost nothing to handle defensively.
-  UPLOAD_URL=$(printf '%s' "$UPLOAD_URL" | sed -e 's/\\u0026/\&/g' -e 's/\\u003c/</g' -e 's/\\u003e/>/g')
-  UPLOAD_ID=$(sed -n 's/.*"upload_id":[[:space:]]*"\([^"]*\)".*/\1/p' "$INIT_BODY_FILE")
+  UPLOAD_URL=$(json_get upload_url < "$INIT_BODY_FILE")
+  UPLOAD_ID=$(json_get upload_id < "$INIT_BODY_FILE")
   if [ -n "$UPLOAD_URL" ] && [ -n "$UPLOAD_ID" ]; then
     NEED_MULTIPART=0
     curl_retry --fail -o /dev/null -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"
@@ -400,8 +416,8 @@ if [ "$INIT_CODE" = "200" ]; then
       -H "Content-Type: application/json" \
       -d "{\"sha256\":\"$SHA\"}" \
       "$STORAGE_BASE/files/$UPLOAD_ID/finalize?project_id=$PROJECT_ID")
-    FILE_ID=$(echo "$FIN_BODY" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)
-  elif grep -q '"was_existing"[[:space:]]*:[[:space:]]*true' "$INIT_BODY_FILE"; then
+    FILE_ID=$(printf '%s' "$FIN_BODY" | json_file_id)
+  elif [ "$(json_get was_existing < "$INIT_BODY_FILE")" = "true" ]; then
     # Dedup hit: storage already stores these exact bytes (same sha256),
     # so /files/init returns the existing file instead of a presigned
     # URL: {"file":{"id":N,...},"mode":"deduplicated","was_existing":true}.
@@ -410,7 +426,7 @@ if [ "$INIT_CODE" = "200" ]; then
     # already-stored result (identical crop/resize params -> identical
     # bytes -> same sha). The local executor never hit it because the
     # storage Go client handles dedup; only this bash path was naive.
-    FILE_ID=$(sed -n 's/.*"file":[[:space:]]*{[[:space:]]*"id":[[:space:]]*\([0-9]*\).*/\1/p' "$INIT_BODY_FILE")
+    FILE_ID=$(json_file_id < "$INIT_BODY_FILE")
     if [ -n "$FILE_ID" ]; then
       NEED_MULTIPART=0
     else
@@ -433,41 +449,63 @@ if [ "$NEED_MULTIPART" = "1" ]; then
     -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     -H "Content-Type: application/json" \
-    -d "{\"filename\":\"$NAME\",\"folder\":\"$FOLDER\",\"content_type\":\"$CT\",\"size\":$SIZE,\"sha256\":\"$SHA\",\"visibility\":\"private\",\"source\":\"media-render\",\"tags\":[\"render\"]}" \
+    -d "{\"filename\":$NAME_JSON,\"folder\":$FOLDER_JSON,\"content_type\":$CT_JSON,\"size\":$SIZE,\"sha256\":\"$SHA\",\"visibility\":\"private\",\"source\":\"media-render\",\"tags\":[\"render\"]}" \
     "$STORAGE_BASE/uploads?project_id=$PROJECT_ID" || echo 000)
   if [ "$UPLOADS_INIT_CODE" = "200" ]; then
-    if grep -q '"was_existing"[[:space:]]*:[[:space:]]*true' "$UPLOADS_INIT_FILE"; then
-      FILE_ID=$(sed -n 's/.*"file":[[:space:]]*{[[:space:]]*"id":[[:space:]]*\([0-9]*\).*/\1/p' "$UPLOADS_INIT_FILE")
+    if [ "$(json_get was_existing < "$UPLOADS_INIT_FILE")" = "true" ]; then
+      FILE_ID=$(json_file_id < "$UPLOADS_INIT_FILE")
       if [ -n "$FILE_ID" ]; then
         NEED_MULTIPART=0
       else
         echo "STORAGE_UPLOADS_DEDUP_NO_ID body[0:200]=$(head -c 200 "$UPLOADS_INIT_FILE" | tr '\n\r\t' '   ')" >&2
       fi
     else
-      CHUNK_UPLOAD_ID=$(sed -n 's/.*"upload_id":[[:space:]]*"\([^"]*\)".*/\1/p' "$UPLOADS_INIT_FILE")
-      PART_SIZE=$(sed -n 's/.*"part_size":[[:space:]]*\([0-9]*\).*/\1/p' "$UPLOADS_INIT_FILE")
+      CHUNK_UPLOAD_ID=$(json_get upload_id < "$UPLOADS_INIT_FILE")
+      PART_SIZE=$(json_get part_size < "$UPLOADS_INIT_FILE")
       if [ -n "$CHUNK_UPLOAD_ID" ]; then
         NEED_MULTIPART=0
         PART_SIZE=${PART_SIZE:-5242880}
-        PART_FILE=$(mktemp)
+        case "$PART_SIZE" in ''|*[!0-9]*) echo "INVALID_PART_SIZE" >&2; exit 1;; esac
+        if [ "$PART_SIZE" -le 0 ] || [ "$PART_SIZE" -gt 104857600 ]; then echo "INVALID_PART_SIZE" >&2; exit 1; fi
+        MAX_PARALLEL=$(json_get max_parallel < "$UPLOADS_INIT_FILE")
+        case "$MAX_PARALLEL" in 1) MAX_PARALLEL=1;; *) MAX_PARALLEL=2;; esac
+        PART_DIR=$(mktemp -d ./upload-parts.XXXXXX)
         OFFSET=0
         PART=1
         while [ "$OFFSET" -lt "$SIZE" ]; do
-          dd if="$OUT" of="$PART_FILE" bs="$PART_SIZE" skip="$OFFSET" count="$PART_SIZE" iflag=skip_bytes,count_bytes status=none
-          curl_retry --fail -o /dev/null -X PUT \
-            -H "Content-Type: application/octet-stream" \
-            --data-binary "@$PART_FILE" \
-            "$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID"
-          OFFSET=$((OFFSET + PART_SIZE))
-          PART=$((PART + 1))
+          PIDS=""
+          ACTIVE=0
+          while [ "$OFFSET" -lt "$SIZE" ] && [ "$ACTIVE" -lt "$MAX_PARALLEL" ]; do
+            (
+              PART_FILE="$PART_DIR/$PART"
+              dd if="$OUT" of="$PART_FILE" bs="$PART_SIZE" skip="$((PART - 1))" count=1 2>/dev/null
+              curl_retry --fail -o /dev/null -X PUT \
+                -H "Authorization: Bearer $STORAGE_TOKEN" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary "@$PART_FILE" \
+                "$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID"
+              rm -f "$PART_FILE"
+            ) &
+            PIDS="$PIDS $!"
+            OFFSET=$((OFFSET + PART_SIZE))
+            PART=$((PART + 1))
+            ACTIVE=$((ACTIVE + 1))
+          done
+          PART_FAILED=0
+          for PID in $PIDS; do wait "$PID" || PART_FAILED=1; done
+          if [ "$PART_FAILED" = "1" ]; then
+            curl_retry -o /dev/null -X DELETE -H "Authorization: Bearer $STORAGE_TOKEN" "$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID?project_id=$PROJECT_ID" || true
+            rm -rf "$PART_DIR"
+            echo "STORAGE_PART_UPLOAD_FAILED" >&2; exit 1
+          fi
         done
-        rm -f "$PART_FILE"
+        rm -rf "$PART_DIR"
         COMPLETE_BODY=$(curl_retry --fail -X POST \
           -H "Authorization: Bearer $STORAGE_TOKEN" \
           -H "Content-Type: application/json" \
           -d "{\"sha256\":\"$SHA\"}" \
           "$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/complete?project_id=$PROJECT_ID")
-        FILE_ID=$(echo "$COMPLETE_BODY" | sed -n 's/.*"file":[[:space:]]*{[[:space:]]*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)
+        FILE_ID=$(printf '%s' "$COMPLETE_BODY" | json_file_id)
         if [ -z "$FILE_ID" ]; then
           echo "STORAGE_UPLOADS_COMPLETE_NO_ID body[0:200]=$(printf '%s' "$COMPLETE_BODY" | head -c 200 | tr '\n\r\t' '   ')" >&2
           exit 1
@@ -480,15 +518,15 @@ if [ "$NEED_MULTIPART" = "1" ]; then
   rm -f "$UPLOADS_INIT_FILE"
 fi
 if [ "$NEED_MULTIPART" = "1" ]; then
-  RESP=$(curl_retry --fail -X POST \
+  RESP=$(curl_retry --fail --form-escape -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
-    -F "folder=$FOLDER" \
+    --form-string "folder=$FOLDER" \
     -F "visibility=private" \
     -F "source=media-render" \
     -F "tags=render" \
-    -F "file=@$OUT;type=$CT;filename=$NAME" \
+    -F "file=@$OUT;type=$CT;filename=$CURL_NAME" \
     "$STORAGE_BASE/files?project_id=$PROJECT_ID")
-  FILE_ID=$(echo "$RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)
+  FILE_ID=$(printf '%s' "$RESP" | json_file_id)
 fi
 if [ -z "$FILE_ID" ]; then
   echo "STORAGE_UPLOAD_FAILED" >&2; exit 1
@@ -524,10 +562,19 @@ cache_valid() {
     return 1
   fi
   if [ -n "$expected_sha" ]; then
-    actual_sha=$(sha256sum "$path" | awk '{print $1}')
-    if [ "$actual_sha" != "$expected_sha" ]; then
-      return 1
+    fingerprint=$(stat -c '%s:%y:%z' "$path" 2>/dev/null || stat -f '%z:%m:%c' "$path")
+    now=$(date +%s)
+    stamp="$path.verified"
+    if [ -f "$stamp" ]; then
+      IFS='|' read -r verified_sha verified_fingerprint verified_at < "$stamp" || true
+      if [ "${verified_sha:-}" = "$expected_sha" ] && [ "${verified_fingerprint:-}" = "$fingerprint" ] && [ $((now - ${verified_at:-0})) -lt 86400 ]; then
+        return 0
+      fi
     fi
+    actual_sha=$(sha256sum "$path" | awk '{print $1}')
+    [ "$actual_sha" = "$expected_sha" ] || return 1
+    printf '%s|%s|%s\n' "$expected_sha" "$fingerprint" "$now" > "$stamp.tmp.$$"
+    mv -f "$stamp.tmp.$$" "$stamp"
   fi
   return 0
 }
@@ -548,7 +595,7 @@ prune_source_cache() {
   used=${used:-0}
   loops=0
   while [ $((used + incoming_size)) -gt "$SOURCE_CACHE_MAX_BYTES" ]; do
-    victim=$(find "$SOURCE_CACHE_ROOT" -maxdepth 1 -type f ! -name '*.tmp.*' -printf '%T@ %p\n' 2>/dev/null | sort -n | awk 'NR==1{$1=""; sub(/^ /,""); print; exit}')
+    victim=$(find "$SOURCE_CACHE_ROOT" -maxdepth 1 -type f ! -name '*.tmp.*' ! -name '*.verified' -printf '%T@ %p\n' 2>/dev/null | sort -n | awk 'NR==1{$1=""; sub(/^ /,""); print; exit}')
     if [ -z "$victim" ]; then
       break
     fi
@@ -563,7 +610,7 @@ prune_source_cache() {
       continue
     fi
     victim_size=$(file_size_bytes "$victim" 2>/dev/null || echo 0)
-    rm -f -- "$victim"
+    rm -f -- "$victim" "$victim.verified"
     echo "REMOTE_SOURCE_CACHE_PRUNE bytes=$victim_size path=$victim" >&2
     used=$(cache_used_bytes)
     used=${used:-0}
@@ -769,13 +816,13 @@ func parseAptevaResult(stdout string) (*remoteRenderResult, error) {
 //
 // Poll interval is intentionally coarse (5s). Faster would burn
 // SSH connections on every render with no user-visible benefit.
-func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppCtx, hostID, renderID int64, projectID string, expectedDurationMs int64) {
+func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppCtx, hostID, renderID int64, projectID string, expectedDurationMs int64, workDirs ...string) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	lastPct := 0
 	cmd := fmt.Sprintf(
 		`tail -n 20 %s 2>/dev/null | grep -F 'out_time_ms=' | tail -1`,
-		shellQuote(filepath.Join(remoteRenderWorkDir(renderID), remoteProgressFilename)))
+		shellQuote(filepath.Join(selectedRemoteWorkDir(renderID, workDirs), remoteProgressFilename)))
 	for {
 		select {
 		case <-ctx.Done():
@@ -811,14 +858,14 @@ func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppC
 // SSHing a SIGTERM. Fire-and-forget — the trap in the script cleans
 // the workdir; this just makes the abort prompt instead of waiting
 // for the run-command timeout.
-func registerRemoteKill(ctx context.Context, app *sdk.AppCtx, hostID, renderID int64) {
+func registerRemoteKill(ctx context.Context, app *sdk.AppCtx, hostID, renderID int64, workDirs ...string) {
 	go func() {
 		<-ctx.Done()
 		log := app.Logger()
 		killCmd := fmt.Sprintf(
 			`PID=$(cat %s 2>/dev/null || true); `+
-				`if [ -n "$PID" ]; then kill -TERM "$PID" 2>/dev/null || true; fi`,
-			shellQuote(filepath.Join(remoteRenderWorkDir(renderID), "pid")))
+				`if [ -n "$PID" ]; then kill -TERM -- "-$PID" 2>/dev/null || true; fi`,
+			shellQuote(filepath.Join(selectedRemoteWorkDir(renderID, workDirs), "pid")))
 		// Detached background; run with its own short timeout so a
 		// dead host doesn't pin this goroutine.
 		_, _, err := runRemote(context.Background(), app, hostID, killCmd, 10)
@@ -868,4 +915,18 @@ func resolvePublicURL(app *sdk.AppCtx) (string, error) {
 		return v, nil
 	}
 	return "", errors.New("APTEVA_PUBLIC_URL not set in platform settings or env")
+}
+
+func uniqueRemoteWorkDir(renderID int64) string {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("%s/render-%d-%x", remoteRenderRoot, renderID, token)
+}
+func selectedRemoteWorkDir(id int64, paths []string) string {
+	if len(paths) > 0 && paths[0] != "" {
+		return paths[0]
+	}
+	return remoteRenderWorkDir(id)
 }

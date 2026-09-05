@@ -1,0 +1,10 @@
+import React from 'react';
+import {createRoot} from 'react-dom/client';
+import MediaPanel from '../../ui/MediaPanel';
+import MediaCard from '../../ui/MediaCard';
+import TranscriptCard from '../../ui/TranscriptCard';
+const root=createRoot(document.getElementById('root')!);
+const listeners=new Set<(event:any)=>void>();
+(window as any).__aptevaAppEvents={subscribe:(_app:any,_project:any,cb:any)=>{listeners.add(cb);return()=>listeners.delete(cb)}};
+(window as any).emit=(event:any)=>listeners.forEach(cb=>cb(event));
+(window as any).mount=(kind:string,props:any)=>root.render(React.createElement(({panel:MediaPanel,media:MediaCard,transcript:TranscriptCard} as any)[kind],props));

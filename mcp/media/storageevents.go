@@ -38,9 +38,9 @@ import (
 )
 
 // startStorageEventSubscriber spawns the SSE reader. Returns
-// immediately — the goroutine runs until app.Done() fires.
+// immediately — the goroutine runs until mediaDone(app) fires.
 func startStorageEventSubscriber(app *sdk.AppCtx) {
-	go runStorageEventSubscriber(app)
+	startMediaWorker(app, func() { runStorageEventSubscriber(app) })
 	app.Logger().Info("storage event subscriber started")
 }
 
@@ -87,17 +87,17 @@ func runStorageEventSubscriber(app *sdk.AppCtx) {
 
 	for {
 		select {
-		case <-app.Done():
+		case <-mediaDone(app):
 			return
 		default:
 		}
 
 		err := connectAndStream(app, gatewayURL, projectID, token, &lastSeq)
-		if errors.Is(err, context.Canceled) || app.Done() == nil {
+		if errors.Is(err, context.Canceled) || mediaDone(app) == nil {
 			return
 		}
 		select {
-		case <-app.Done():
+		case <-mediaDone(app):
 			return
 		default:
 		}
@@ -108,7 +108,7 @@ func runStorageEventSubscriber(app *sdk.AppCtx) {
 		wait := backoff + jitter
 		log.Info("storage event subscriber disconnected; reconnecting", "after", wait, "err", err)
 		select {
-		case <-app.Done():
+		case <-mediaDone(app):
 			return
 		case <-time.After(wait):
 		}
@@ -139,7 +139,7 @@ func connectAndStream(app *sdk.AppCtx, gatewayURL, projectID, token string, sinc
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		<-app.Done()
+		<-mediaDone(app)
 		cancel()
 	}()
 
@@ -254,10 +254,11 @@ func updateFolderFromEvent(app *sdk.AppCtx, data map[string]any, projectID strin
 		return
 	}
 	folder, _ := data["folder"].(string)
-	if folder == "" {
+	name, _ := data["name"].(string)
+	if folder == "" && name == "" {
 		return
 	}
-	if err := updateFolder(app.AppDB(), projectID, fid, folder); err != nil {
+	if _, err := app.AppDB().Exec(`UPDATE media SET folder=CASE WHEN ?='' THEN folder ELSE ? END,name=CASE WHEN ?='' THEN name ELSE ? END WHERE project_id=? AND file_id=?`, folder, folder, name, name, projectID, fid); err != nil {
 		app.Logger().Warn("file.updated folder write failed", "file_id", fid, "err", err)
 		return
 	}
@@ -306,10 +307,14 @@ func indexFromEvent(app *sdk.AppCtx, data map[string]any, projectID string) {
 	// will pick this file up on its next sweep.
 	select {
 	case eventIndexSlots <- struct{}{}:
-		go func() {
+		if !startMediaWorker(app, func() {
 			defer func() { <-eventIndexSlots }()
-			indexOneFile(context.Background(), app, projectID, *f)
-		}()
+			ctx, cancel := mediaContext(context.Background(), app)
+			defer cancel()
+			indexOneFile(ctx, app, projectID, *f)
+		}) {
+			<-eventIndexSlots
+		}
 	default:
 		app.Logger().Info("event index pool saturated; deferring to scheduled sweep",
 			"project_id", projectID, "file_id", f.ID)

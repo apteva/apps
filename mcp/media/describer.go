@@ -72,13 +72,8 @@ func notifyDescriber(projectID, fileID string) {
 // auto_describe_enabled — when false, manual media_describe still
 // works but the sweep doesn't run.
 func startDescriber(app *sdk.AppCtx) {
-	cfg := app.Config()
-	if !configBool(cfg.Get("auto_describe_enabled"), true) {
-		app.Logger().Info("auto_describe_enabled=false — auto-describer disabled (manual still works)")
-		return
-	}
 	describerNotify = make(chan describerMsg, 100)
-	go describerLoop(app)
+	startMediaWorker(app, func() { describerLoop(app) })
 	app.Logger().Info("auto-describer started")
 }
 
@@ -93,7 +88,7 @@ func describerLoop(app *sdk.AppCtx) {
 
 	for {
 		select {
-		case <-app.Done():
+		case <-mediaDone(app):
 			log.Info("auto-describer stopping")
 			return
 		case <-tick.C:
@@ -170,14 +165,14 @@ func describerSweepOne(app *sdk.AppCtx) {
 	batch := parseConfigIntFallback(cfg.Get("describe_batch_size"), 5)
 	cooldown := parseConfigIntFallback(cfg.Get("describe_retry_cooldown_seconds"), 600)
 
-	candidates, err := describeCandidates(db, pid, batch, cooldown)
+	candidates, err := describeCandidatesMode(db, pid, batch, cooldown, !configBool(cfg.Get("auto_describe_enabled"), true))
 	if err != nil {
 		log.Error("describe candidates failed", "err", err)
 		return
 	}
 	for _, fid := range candidates {
 		select {
-		case <-app.Done():
+		case <-mediaDone(app):
 			return
 		default:
 		}
@@ -206,10 +201,17 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 	// without marking, regardless of source: any non-empty
 	// description (human, agent, ai-generated, imported) means
 	// someone has already filled this in and we don't overwrite.
-	if strings.TrimSpace(media.Description) != "" {
+	needsProse := strings.TrimSpace(media.Description) == "" && media.DescriptionSource != "human" && media.DescriptionSource != "agent"
+	needsRating := media.AudienceRating == "" || media.AudienceRating == "unrated"
+	if !needsProse && !needsRating {
 		return
 	}
-	if media.DescriptionSource == "human" || media.DescriptionSource == "agent" {
+	var proseRevision, audienceRevision int64
+	var requested int
+	if err := db.QueryRow(`SELECT prose_revision,audience_revision,describe_requested FROM media WHERE project_id=? AND file_id=?`, projectID, fileID).Scan(&proseRevision, &audienceRevision, &requested); err != nil {
+		return
+	}
+	if !configBool(cfg.Get("auto_describe_enabled"), true) && requested == 0 {
 		return
 	}
 
@@ -322,16 +324,16 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		// conservative bucket) so downstream filters don't accidentally
 		// treat refused content as general-audience-safe.
 		if looksLikeRefusal(rawContent) {
-			_ = setAudienceRating(db, projectID, fileID, "adult", "model declined to process — defaulting to most restrictive rating")
+			parsed.AudienceRating = "adult"
+			parsed.AudienceReasoning = "model declined to process — defaulting to most restrictive rating"
 		}
+		_, _ = commitAutoDescription(db, media, proseRevision, audienceRevision, parsed, false)
 		_ = markDescribeAttempt(db, projectID, fileID, "describe returned empty description (refusal or token budget)")
 		return
 	}
 
-	if _, err := setDescription(db, projectID, fileID, DescriptionFields{
-		Description: &desc,
-		Source:      "ai-generated",
-	}); err != nil {
+	changed, err := commitAutoDescription(db, media, proseRevision, audienceRevision, parsed, needsProse)
+	if err != nil {
 		log.Error("describe setDescription failed", "file_id", fileID, "err", err)
 		return
 	}
@@ -339,8 +341,8 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 	// omitted it (older prompt response, parse fallback) — in that
 	// case we leave the column at 'unrated' and the next describer
 	// pass re-evaluates.
-	if parsed.AudienceRating != "" {
-		_ = setAudienceRating(db, projectID, fileID, parsed.AudienceRating, parsed.AudienceReasoning)
+	if !changed {
+		return
 	}
 	log.Info("auto-described",
 		"file_id", fileID, "model", model,

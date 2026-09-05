@@ -75,16 +75,17 @@ type audioAnalysis struct {
 }
 
 type analysisCoverage struct {
-	Depth              string  `json:"depth"`
-	Executor           string  `json:"executor"`
-	HostID             int64   `json:"host_id,omitempty"`
-	StartMs            int64   `json:"start_ms"`
-	EndMs              int64   `json:"end_ms,omitempty"`
-	AnalyzedDurationMs int64   `json:"analyzed_duration_ms,omitempty"`
-	SourceDurationMs   int64   `json:"source_duration_ms,omitempty"`
-	Ratio              float64 `json:"ratio"`
-	Complete           bool    `json:"complete"`
-	ArtifactsCreated   bool    `json:"artifacts_created"`
+	Depth               string  `json:"depth"`
+	Executor            string  `json:"executor"`
+	HostID              int64   `json:"host_id,omitempty"`
+	StartMs             int64   `json:"start_ms"`
+	EndMs               int64   `json:"end_ms,omitempty"`
+	AnalyzedDurationMs  int64   `json:"analyzed_duration_ms,omitempty"`
+	SourceDurationMs    int64   `json:"source_duration_ms,omitempty"`
+	RequestedDurationMs int64   `json:"requested_duration_ms,omitempty"`
+	Ratio               float64 `json:"ratio"`
+	Complete            bool    `json:"complete"`
+	ArtifactsCreated    bool    `json:"artifacts_created"`
 }
 
 type mediaAnalysisResult struct {
@@ -142,6 +143,11 @@ func (a *App) toolAnalyze(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("read source for analysis: %w", err)
 	}
 	result := baseAnalysisResult(row, opts)
+	result.Analysis.RequestedDurationMs = opts.EndMs - opts.StartMs
+	if !row.IsImage && row.DurationMs == 0 {
+		result.Analysis.Ratio = 0
+		result.Analysis.AnalyzedDurationMs = 0
+	}
 	quality, err := mediaAnalysisRunner(ctx, source.URL, row, opts)
 	if err != nil {
 		return nil, err
@@ -150,6 +156,11 @@ func (a *App) toolAnalyze(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	result.Audio = quality.Audio
 	result.Issues = append(result.Issues, quality.Issues...)
 	result.Technical["decode_ok"] = quality.DecodeOK
+	if !quality.DecodeOK {
+		result.Analysis.Complete = false
+		result.Analysis.Ratio = 0
+		result.Analysis.AnalyzedDurationMs = 0
+	}
 	result.Analysis.Executor = quality.Executor
 	result.Analysis.HostID = quality.HostID
 	sort.SliceStable(result.Issues, func(i, j int) bool {
@@ -188,6 +199,9 @@ func parseAnalysisOptions(ctx *sdk.AppCtx, row *MediaRow, args map[string]any) (
 		if depth == "standard" && (end == 0 || end-start > standardAnalysisMaxMs) {
 			end = start + standardAnalysisMaxMs
 		}
+	}
+	if !row.IsImage && depth == "standard" && (end == 0 || end-start > standardAnalysisMaxMs) {
+		end = start + standardAnalysisMaxMs
 	}
 	if row.DurationMs > 0 && end > row.DurationMs {
 		end = row.DurationMs
@@ -249,7 +263,7 @@ func baseAnalysisResult(row *MediaRow, opts analysisOptions) mediaAnalysisResult
 	if row.IsImage {
 		analyzed = 0
 	}
-	complete := row.IsImage || row.DurationMs == 0 || (opts.StartMs == 0 && opts.EndMs >= row.DurationMs)
+	complete := row.IsImage || (row.DurationMs > 0 && opts.StartMs == 0 && opts.EndMs >= row.DurationMs)
 	ratio := 1.0
 	if row.DurationMs > 0 {
 		ratio = math.Min(1, math.Max(0, float64(analyzed)/float64(row.DurationMs)))
@@ -380,7 +394,15 @@ func analyzeExistingSource(app *sdk.AppCtx, sourceURL string, row *MediaRow, opt
 }
 
 func analyzeExistingSourceLocal(app *sdk.AppCtx, sourceURL string, row *MediaRow, opts analysisOptions) (qualityAnalysis, error) {
-	cctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+	parent, stop := mediaContext(context.Background(), app)
+	defer stop()
+	cctx, cancel := context.WithTimeout(parent, opts.Timeout)
+	cctx, release, budgetErr := acquireMediaWork(cctx, app, 1)
+	if budgetErr != nil {
+		cancel()
+		return qualityAnalysis{}, budgetErr
+	}
+	defer release()
 	defer cancel()
 	ffmpegPath := strings.TrimSpace(app.Config().Get("ffmpeg_path"))
 	if ffmpegPath == "" {

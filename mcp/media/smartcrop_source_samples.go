@@ -129,32 +129,32 @@ func analyzeSmartCropV2Source(
 	if ffmpegPath == "" {
 		ffmpegPath = "ffmpeg"
 	}
+	if paths, ok := ctx.Value(renderSourcesKey{}).(map[string]string); ok && paths[sourceFileID] != "" {
+		return analyzeSmartCropV2Input(ctx, ffmpegPath, paths[sourceFileID], positions, srcW, srcH, targetW, targetH)
+	}
 	var directFailed, remoteFailed bool
-	if signedURL, signedErr := sc.GetSignedURL(ctx, projectID, fileID, 900); signedErr == nil {
-		if samples, sampleErr := analyzeSmartCropV2Input(ctx, ffmpegPath, signedURL, positions, srcW, srcH, targetW, targetH); sampleErr == nil {
-			return samples, nil
-		} else {
-			directFailed = true
+	if hostID := remoteIndexerHostID(app); hostID > 0 {
+		signedURL, err := sc.GetSignedURL(ctx, projectID, fileID, 900)
+		if err != nil {
+			return nil, err
 		}
-
-		// A remote render installation can be perfectly healthy while the
-		// Media sidecar itself cannot decode the signed source (missing local
-		// codecs, constrained networking, or temporary disk pressure). In that
-		// case, run the same bounded low-resolution sampling pass on the FFmpeg
-		// host that will perform the final render. Returning the JPEGs inline is
-		// cheap (at most 32 bounded analysis/detail pairs, transferred in small
-		// batches) and avoids both a full source download and permanently storing a
-		// denser storyboard.
-		if hostID := remoteIndexerHostID(app); hostID > 0 {
-			if samples, sampleErr := analyzeSmartCropV2Remote(ctx, app, hostID, signedURL,
-				positions, srcW, srcH, targetW, targetH); sampleErr == nil {
-				app.Logger().Info("smartcrop v2 using remote source samples",
-					"file_id", sourceFileID, "host_id", hostID, "samples", len(samples))
-				return samples, nil
-			} else {
-				remoteFailed = true
+		// Warm renders already materialized a verified source on this host.
+		if meta, err := sc.GetFile(ctx, projectID, fileID); err == nil && len(meta.SHA256) == 64 {
+			cachePath := filepath.Join(remoteSourceCacheRoot, remoteSourceCacheName(sourceFileID, sanitizeFilename(meta.Name), meta.SHA256, meta.SizeBytes))
+			check := remoteSourceCacheScriptFragment + fmt.Sprintf("\nif cache_valid %s %d %s; then echo CACHE_READY; fi\n", shellQuote(cachePath), meta.SizeBytes, shellQuote(meta.SHA256))
+			if out, _, err := runRemote(ctx, app, hostID, check, 10); err == nil && strings.Contains(out, "CACHE_READY") {
+				if samples, err := analyzeSmartCropV2Remote(ctx, app, hostID, cachePath, positions, srcW, srcH, targetW, targetH); err == nil {
+					return samples, nil
+				}
 			}
 		}
+		return analyzeSmartCropV2Remote(ctx, app, hostID, signedURL, positions, srcW, srcH, targetW, targetH)
+	}
+	if signedURL, err := sc.GetSignedURL(ctx, projectID, fileID, 900); err == nil {
+		if samples, err := analyzeSmartCropV2Input(ctx, ffmpegPath, signedURL, positions, srcW, srcH, targetW, targetH); err == nil {
+			return samples, nil
+		}
+		directFailed = true
 	}
 
 	// A public URL is optional for local installations, and an otherwise valid
@@ -168,17 +168,12 @@ func analyzeSmartCropV2Source(
 	}
 	defer os.RemoveAll(dir)
 	localPath := filepath.Join(dir, "source")
-	f, err := os.Create(localPath)
+	meta, err := sc.GetFile(ctx, projectID, fileID)
 	if err != nil {
 		return nil, err
 	}
-	downloadErr := sc.DownloadContent(ctx, projectID, fileID, f)
-	closeErr := f.Close()
-	if downloadErr != nil {
-		return nil, fmt.Errorf("storage download: %w", downloadErr)
-	}
-	if closeErr != nil {
-		return nil, fmt.Errorf("close downloaded source: %w", closeErr)
+	if _, err := materializeLocalSource(ctx, app, sc, projectID, meta, localPath); err != nil {
+		return nil, err
 	}
 	samples, sampleErr := analyzeSmartCropV2Input(ctx, ffmpegPath, localPath, positions, srcW, srcH, targetW, targetH)
 	if sampleErr == nil {
@@ -381,7 +376,7 @@ func parseRemoteSmartCropSamples(
 			continue
 		}
 		byTime[position] = smartCropV2Sample{
-			point: cropPathPoint{AtMs: position, X: win.X}, img: pair.analysis,
+			point: cropPathPoint{AtMs: position, X: win.X, Y: win.Y}, img: pair.analysis,
 			face: face, detailedFace: detailedFace,
 		}
 	}
@@ -450,7 +445,7 @@ func analyzeSmartCropV2Input(
 				return
 			}
 			results[i] = &smartCropV2Sample{
-				point: cropPathPoint{AtMs: pos, X: win.X}, img: analysisImg,
+				point: cropPathPoint{AtMs: pos, X: win.X, Y: win.Y}, img: analysisImg,
 				face: face, detailedFace: detailedFace,
 			}
 		}()

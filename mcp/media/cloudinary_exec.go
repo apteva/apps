@@ -16,12 +16,6 @@ package main
 //	   sees both kinds of outputs identically.
 //
 // Cloudinary-specific quirks:
-//   - We always use resource_type=video. The video endpoint handles
-//     audio + still-frame extraction too; image-only sources also
-//     work (Cloudinary auto-detects the media type from the URL).
-//     Exception: image-only resize/crop could go through `image`,
-//     but the unified path keeps the executor simpler and Cloudinary
-//     bills identically.
 //   - eager strings are slash-separated transformation steps within a
 //     chain, pipe-separated across chains. We only ever produce one
 //     chain (one output per render), so no pipes here.
@@ -43,6 +37,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -71,6 +66,17 @@ func (e *cloudinaryExecutor) supports(op string) bool {
 
 func (e *cloudinaryExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *RenderRow) (int64, error) {
 	log := app.Logger()
+	finish := renderStage(app, row, "provider_execution")
+	defer finish()
+	var profile struct {
+		EncoderProfile string `json:"encoder_profile"`
+	}
+	if err := json.Unmarshal(row.Params, &profile); err != nil {
+		return 0, err
+	}
+	if profile.EncoderProfile != "" && profile.EncoderProfile != "legacy" {
+		return 0, errors.New("encoder_profile requires a local or remote FFmpeg executor; Cloudinary supports legacy only")
+	}
 	if e.bound == nil || e.bound.ConnectionID == 0 {
 		return 0, errors.New("cloudinary executor: integration not bound")
 	}
@@ -89,18 +95,17 @@ func (e *cloudinaryExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *
 		return 0, fmt.Errorf("store resolved params: %w", err)
 	}
 
-	// Build the eager transformation chain.
-	chain, err := buildCloudinaryChain(row.Operation, row.Params, row.OutputName)
-	if err != nil {
-		return 0, fmt.Errorf("cloudinary chain: %w", err)
-	}
-
 	// Reuse the local plan helpers for output filename + content type
 	// so storage uploads from either backend look identical to panels.
-	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName,
-		resolveSourceExt(ctx, sc, app.AppDB(), row.ProjectID, row.SourceFileIDs))
+	sourceExt := resolveSourceExt(ctx, sc, app.AppDB(), row.ProjectID, row.SourceFileIDs)
+	plan, err := buildPlan(row.Operation, row.SourceFileIDs, row.Params, row.OutputName, sourceExt)
 	if err != nil {
 		return 0, fmt.Errorf("plan: %w", err)
+	}
+	// Build the eager transformation chain.
+	chain, err := buildCloudinaryChain(row.Operation, row.Params, plan.Filename)
+	if err != nil {
+		return 0, fmt.Errorf("cloudinary chain: %w", err)
 	}
 
 	signedURL, err := sc.GetSignedURL(ctx, row.ProjectID, srcID, cloudinarySignedURLTTL)
@@ -108,8 +113,13 @@ func (e *cloudinaryExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *
 		return 0, fmt.Errorf("mint signed url: %w", err)
 	}
 
+	resourceType := "video"
+	switch strings.ToLower(sourceExt) {
+	case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff":
+		resourceType = "image"
+	}
 	args := map[string]any{
-		"resource_type": "video",
+		"resource_type": resourceType,
 		"file":          signedURL,
 		"eager":         chain,
 		// "eager_async":   false,  (default — synchronous eager)
@@ -117,8 +127,7 @@ func (e *cloudinaryExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *
 	log.Info("cloudinary upload",
 		"id", row.ID, "op", row.Operation, "eager", chain)
 
-	res, err := app.PlatformAPI().ExecuteIntegrationTool(
-		e.bound.ConnectionID, "upload", args)
+	res, err := executeIntegrationToolContext(ctx, app, "cloudinary-render", e.bound.ConnectionID, "upload", args, 30*time.Minute)
 	if err != nil {
 		// Use ctx-cancellation reporting; orchestrator distinguishes
 		// these from real failures via ctx.Err().
@@ -156,6 +165,10 @@ func (e *cloudinaryExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *
 	if httpResp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 512))
 		return 0, fmt.Errorf("download eager: HTTP %d: %s", httpResp.StatusCode, string(body))
+	}
+	actualType := strings.ToLower(strings.TrimSpace(strings.Split(httpResp.Header.Get("Content-Type"), ";")[0]))
+	if actualType != "" && actualType != "application/octet-stream" && actualType != plan.ContentType {
+		return 0, fmt.Errorf("Cloudinary output type %s disagrees with planned %s", actualType, plan.ContentType)
 	}
 
 	folder := row.OutputFolder
@@ -226,9 +239,9 @@ func buildCldResize(raw json.RawMessage, outputName string) (string, error) {
 	}
 	var step string
 	if p.KeepAspect {
-		// c_limit caps width while keeping aspect; height is ignored
+		// c_scale caps width while keeping aspect; height is ignored
 		// when omitted, which matches local ffmpeg's `-2` behaviour.
-		step = fmt.Sprintf("c_limit,w_%d", p.Width)
+		step = fmt.Sprintf("c_scale,w_%d", p.Width)
 	} else {
 		step = fmt.Sprintf("c_scale,w_%d,h_%d", p.Width, p.Height)
 	}

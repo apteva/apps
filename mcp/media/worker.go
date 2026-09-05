@@ -92,6 +92,7 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 		return nil
 	}
 	sc := newStorageClient()
+	retryDerivationCleanup(ctx, app, sc, projectID)
 
 	// Cascade-cleanup: any media row whose source file is no longer
 	// in storage (soft-deleted, re-uploaded under a new id, etc.)
@@ -147,7 +148,7 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 				}
 			}
 			candidates = append(candidates,
-				indexerCandidates(app.AppDB(), projectID, unselected, remaining)...)
+				indexerCandidates(app.AppDB(), projectID, unselected, remaining, keyframesEnabled(app))...)
 		}
 	}
 	if len(candidates) == 0 {
@@ -227,7 +228,7 @@ func indexOneFile(ctx context.Context, app *sdk.AppCtx, projectID string, f Stor
 	// the platform's ring buffer, and the sweep may have raced us.
 	fid := strconv.FormatInt(f.ID, 10)
 	if existing, err := getMedia(app.AppDB(), projectID, fid); err == nil &&
-		existing.SourceSHA256 == f.SHA256 && existing.ProbeStatus == "ok" {
+		existing.SourceSHA256 == f.SHA256 && existing.ProbeStatus == "ok" && !mediaNeedsDerivationRepair(app, existing) {
 		return
 	}
 
@@ -286,6 +287,14 @@ func processOne(
 	f StorageFile, ffmpegPath, ffprobePath string,
 	maxSizeMB, thumbSeek, thumbWidth, waveW, waveH any,
 ) {
+	ctx, stop := mediaContext(ctx, app)
+	defer stop()
+	ctx, release, budgetErr := acquireMediaWork(ctx, app, 1)
+	if budgetErr != nil {
+		return
+	}
+	defer release()
+
 	fid := strconv.FormatInt(f.ID, 10)
 	// Race guard. Concurrent attempts for the same file (periodic
 	// indexer tick + storage `file.added` event replay both firing,
@@ -333,7 +342,7 @@ func processOne(
 	// without touching the remote or local pipeline.
 	if forceProbe == 0 {
 		if existing, err := getMedia(app.AppDB(), projectID, fid); err == nil &&
-			existing.SourceSHA256 == f.SHA256 && existing.ProbeStatus == "ok" {
+			existing.SourceSHA256 == f.SHA256 && existing.ProbeStatus == "ok" && !mediaNeedsDerivationRepair(app, existing) {
 			return
 		}
 	}
@@ -355,7 +364,9 @@ func processOne(
 		if ok {
 			return
 		}
-		logger.Warn("remote indexing failed, falling back to local", "file_id", fid)
+		logger.Warn("configured remote indexing failed", "file_id", fid)
+		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "failed", "configured remote indexing failed")
+		return
 	}
 
 	if forceProbe == 0 && maxBytes > 0 && f.SizeBytes > maxBytes {
@@ -401,7 +412,9 @@ func processOne(
 		logger.Warn("upsert failed", "err", err)
 		return
 	}
-	clearExistingDerivations(ctx, app, sc, projectID, fid)
+	previous, _ := listDerivations(app.AppDB(), projectID, fid)
+	stage := &derivationStage{}
+	ctx = context.WithValue(ctx, derivationStageKey{}, stage)
 	logger.Info("indexed",
 		"duration_ms", probe.DurationMs,
 		"video", probe.HasVideo, "audio", probe.HasAudio, "image", probe.IsImage,
@@ -426,10 +439,10 @@ func processOne(
 		thumbPath := filepath.Join(tmpDir, "thumb.jpg")
 		if err := makeThumbnail(ctx, ffmpegPath, srcPath, thumbPath, toFloat(thumbSeek), toInt(thumbWidth), probe.IsImage, probe.DurationMs); err != nil {
 			logger.Warn("thumbnail failed", "err", err)
-			_ = upsertDerivationFailed(app.AppDB(), projectID, fid, "thumbnail", 0, err)
+			_ = stageDerivationFailure(ctx, app, projectID, fid, "thumbnail", 0, err)
 		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "thumbnail", thumbPath, "image/jpeg", toInt(thumbWidth), 0, 0); err != nil {
 			logger.Warn("thumbnail upload failed", "err", err)
-			_ = upsertDerivationFailed(app.AppDB(), projectID, fid, "thumbnail", 0, err)
+			_ = stageDerivationFailure(ctx, app, projectID, fid, "thumbnail", 0, err)
 		} else {
 			hasThumb = true
 		}
@@ -438,10 +451,10 @@ func processOne(
 		wavePath := filepath.Join(tmpDir, "waveform.png")
 		if err := makeWaveform(ctx, ffmpegPath, srcPath, wavePath, toInt(waveW), toInt(waveH)); err != nil {
 			logger.Warn("waveform failed", "err", err)
-			_ = upsertDerivationFailed(app.AppDB(), projectID, fid, "waveform", 0, err)
+			_ = stageDerivationFailure(ctx, app, projectID, fid, "waveform", 0, err)
 		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "waveform", wavePath, "image/png", toInt(waveW), toInt(waveH), 0); err != nil {
 			logger.Warn("waveform upload failed", "err", err)
-			_ = upsertDerivationFailed(app.AppDB(), projectID, fid, "waveform", 0, err)
+			_ = stageDerivationFailure(ctx, app, projectID, fid, "waveform", 0, err)
 		} else {
 			hasWave = true
 		}
@@ -456,16 +469,22 @@ func processOne(
 			framePath := filepath.Join(tmpDir, fmt.Sprintf("kf-%d.jpg", posMs))
 			if err := extractKeyframe(ctx, ffmpegPath, srcPath, framePath, float64(posMs)/1000.0, toInt(thumbWidth)); err != nil {
 				logger.Warn("keyframe failed", "position_ms", posMs, "err", err)
+				_ = stageDerivationFailure(ctx, app, projectID, fid, "keyframe", posMs, err)
 				continue
 			}
 			if err := uploadAndRecord(ctx, app, sc, projectID, fid, "keyframe", framePath, "image/jpeg", toInt(thumbWidth), 0, posMs); err != nil {
 				logger.Warn("keyframe upload failed", "position_ms", posMs, "err", err)
+				_ = stageDerivationFailure(ctx, app, projectID, fid, "keyframe", posMs, err)
 				continue
 			}
 			keyframeCount++
 		}
 	}
 
+	if err := commitDerivationStage(ctx, app, sc, projectID, fid, stage, previous); err != nil {
+		logger.Error("commit derivations", "file_id", fid, "err", err)
+		return
+	}
 	// media.derived — the canonical "indexer is done with this file"
 	// event. Fires REGARDLESS of whether Deepgram/LLM integrations are
 	// bound, so subscribers that want "file is ready for consumption"
@@ -708,6 +727,10 @@ func uploadAndRecord(
 	storageID, err := sc.UploadDerivation(ctx, projectID, name, folder, contentType, bytesData)
 	if err != nil {
 		return err
+	}
+	if stage, ok := ctx.Value(derivationStageKey{}).(*derivationStage); ok {
+		stage.rows = append(stage.rows, DerivationRow{FileID: fileID, Kind: kind, StorageFileID: strconv.FormatInt(storageID, 10), Width: w, Height: h, PositionMs: positionMs, Status: "ok"})
+		return nil
 	}
 	return upsertDerivation(app.AppDB(), projectID, fileID, kind, storageID, w, h, positionMs)
 }

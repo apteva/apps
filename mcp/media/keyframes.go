@@ -76,7 +76,7 @@ func keyframePositions(durationMs int64, app *sdk.AppCtx) []int64 {
 	intervalMs := int64(interval) * 1000
 	// Stretch interval if natural spacing exceeds the cap.
 	natural := (durationMs - firstKeyframeOffsetMs) / intervalMs
-	if natural <= 0 {
+	if natural <= 0 || maxCount == 1 {
 		// Source shorter than first-keyframe-offset + one interval — emit
 		// a single keyframe at the configured offset (capped if past
 		// duration).

@@ -207,10 +207,10 @@ func listChildFolders(db *sql.DB, projectID, parent string) ([]string, error) {
 	}
 	rows, err := db.Query(
 		`SELECT DISTINCT folder FROM media
-		 WHERE project_id = ? AND folder LIKE ? AND folder != ?
+		 WHERE project_id = ? AND substr(folder, 1, length(?)) = ? AND folder != ?
 		   AND probe_status = 'ok'
 		 ORDER BY folder`,
-		projectID, parent+"%", parent)
+		projectID, parent, parent, parent)
 	if err != nil {
 		return nil, err
 	}
@@ -465,6 +465,11 @@ func cascadeDeleteOne(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID,
 	); err != nil {
 		return fmt.Errorf("delete media: %w", err)
 	}
+	if app != nil && sc != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		retryDerivationCleanup(ctx, app, sc, projectID)
+		cancel()
+	}
 	return nil
 }
 
@@ -476,6 +481,7 @@ func deleteDerivationReferencesByStorageID(db *sql.DB, projectID, storageFileID 
 	if projectID == "" || storageFileID == "" {
 		return 0, nil
 	}
+	_, _ = db.Exec(`UPDATE media SET derivation_retry_at=CURRENT_TIMESTAMP WHERE project_id=? AND file_id IN (SELECT file_id FROM derivations WHERE project_id=? AND storage_file_id=?)`, projectID, projectID, storageFileID)
 	res, err := db.Exec(
 		`DELETE FROM derivations WHERE project_id = ? AND storage_file_id = ?`,
 		projectID, storageFileID,
@@ -643,6 +649,9 @@ func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID stri
 // no human/agent override, where the last attempt (if any) is older
 // than cooldownSeconds. Caller queues each one through the LLM.
 func describeCandidates(db *sql.DB, projectID string, limit int, cooldownSeconds int) ([]string, error) {
+	return describeCandidatesMode(db, projectID, limit, cooldownSeconds, false)
+}
+func describeCandidatesMode(db *sql.DB, projectID string, limit int, cooldownSeconds int, manualOnly bool) ([]string, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -652,12 +661,13 @@ func describeCandidates(db *sql.DB, projectID string, limit int, cooldownSeconds
 		  FROM media
 		 WHERE project_id = ?
 		   AND probe_status = 'ok'
-		   AND description = ''
-		   AND description_source NOT IN ('human','agent')
+		   AND ((description = '' AND description_source NOT IN ('human','agent')) OR audience_rating = 'unrated')
+		   AND (has_audio = 0 OR EXISTS (SELECT 1 FROM transcripts t WHERE t.project_id=media.project_id AND t.file_id=media.file_id AND t.status='ok'))
 		   AND (description_attempted_at IS NULL OR description_attempted_at <= ?)
-		 ORDER BY created_at DESC
+		   AND (? = 0 OR describe_requested = 1)
+		 ORDER BY describe_requested DESC, created_at ASC
 		 LIMIT ?`,
-		projectID, cutoff, limit,
+		projectID, cutoff, boolInt(manualOnly), limit,
 	)
 	if err != nil {
 		return nil, err
@@ -956,8 +966,8 @@ func buildMediaSearchWhere(projectID string, f SearchFilters) ([]string, []any) 
 	// won't match "/clips-archive/".
 	if f.Folder != "" {
 		if f.effectiveFolderScope() == folderScopeSubtree {
-			clauses = append(clauses, "m.folder LIKE ?")
-			args = append(args, f.Folder+"%")
+			clauses = append(clauses, "substr(m.folder, 1, length(?)) = ?")
+			args = append(args, f.Folder, f.Folder)
 		} else {
 			clauses = append(clauses, "m.folder = ?")
 			args = append(args, f.Folder)
@@ -986,8 +996,9 @@ func buildMediaSearchWhere(projectID string, f SearchFilters) ([]string, []any) 
 			clauses = append(clauses, "json_type(m.metadata, ?) = 'null'")
 			args = append(args, filter.JSONPath)
 		} else {
-			clauses = append(clauses, "json_extract(m.metadata, ?) = ?")
-			args = append(args, filter.JSONPath, filter.Value)
+			predicate, values := metadataScalarPredicate("m.metadata", filter)
+			clauses = append(clauses, predicate)
+			args = append(args, values...)
 		}
 	}
 	return clauses, args
@@ -1177,8 +1188,8 @@ func mediaFacetCounts(db *sql.DB, projectID string, f SearchFilters) (MediaFacet
 	whereArgs := []any{projectID}
 	if f.Folder != "" {
 		if f.effectiveFolderScope() == folderScopeSubtree {
-			clauses = append(clauses, "folder LIKE ?")
-			whereArgs = append(whereArgs, f.Folder+"%")
+			clauses = append(clauses, "substr(folder, 1, length(?)) = ?")
+			whereArgs = append(whereArgs, f.Folder, f.Folder)
 		} else {
 			clauses = append(clauses, "folder = ?")
 			whereArgs = append(whereArgs, f.Folder)
@@ -1301,50 +1312,55 @@ func listDerivationsByFiles(db *sql.DB, projectID string, fileIDs []string) (map
 // indexerCandidates returns file IDs from storage that need probing —
 // missing media row, or marked pending/failed (with an exponential
 // retry gate so we don't flap).
-func indexerCandidates(db *sql.DB, projectID string, all []StorageFile, limit int) []StorageFile {
-	if len(all) == 0 {
+func indexerCandidates(db *sql.DB, projectID string, all []StorageFile, limit int, withKeyframes ...bool) []StorageFile {
+	if len(all) == 0 || limit <= 0 {
 		return nil
 	}
-	known := map[string]struct {
-		status string
-		sha    string
-	}{}
-	rows, err := db.Query(
-		`SELECT file_id, probe_status, source_sha256 FROM media WHERE project_id=?`, projectID,
-	)
+	type knownRow struct {
+		status, sha, name, folder string
+		repair                    bool
+	}
+	known := map[string]knownRow{}
+	wantKeyframes := len(withKeyframes) > 0 && withKeyframes[0]
+	rows, err := db.Query(`SELECT file_id,probe_status,source_sha256,COALESCE(name,''),COALESCE(folder,''),
+ ((derivation_retry_at IS NOT NULL AND julianday(derivation_retry_at)<=julianday('now')) OR
+ (derivation_retry_at IS NULL AND (((has_video=1 OR is_image=1) AND NOT EXISTS(SELECT 1 FROM derivations d WHERE d.file_id=media.file_id AND d.project_id=media.project_id AND d.kind='thumbnail' AND d.status='ok')) OR
+ (has_audio=1 AND has_video=0 AND NOT EXISTS(SELECT 1 FROM derivations d WHERE d.file_id=media.file_id AND d.project_id=media.project_id AND d.kind='waveform' AND d.status='ok')) OR
+ (? AND has_video=1 AND is_image=0 AND duration_ms>0 AND NOT EXISTS(SELECT 1 FROM derivations d WHERE d.file_id=media.file_id AND d.project_id=media.project_id AND d.kind='keyframe' AND d.status='ok')))))
+ FROM media WHERE project_id=?`, wantKeyframes, projectID)
 	if err == nil {
 		for rows.Next() {
-			var id, st, sh string
-			if err := rows.Scan(&id, &st, &sh); err == nil {
-				known[id] = struct {
-					status string
-					sha    string
-				}{st, sh}
+			var id string
+			var k knownRow
+			if rows.Scan(&id, &k.status, &k.sha, &k.name, &k.folder, &k.repair) == nil {
+				known[id] = k
 			}
 		}
 		rows.Close()
 	}
 	out := []StorageFile{}
 	for _, f := range all {
-		fid := fmt.Sprintf("%d", f.ID)
+		fid := fmt.Sprint(f.ID)
 		k, ok := known[fid]
+		// Only changed inventory metadata writes to SQLite. Unchanged catalogs use
+		// one query regardless of size, including derivation repair eligibility.
+		if ok && (k.name != f.Name || k.folder != f.Folder) {
+			_, _ = db.Exec(`UPDATE media SET name=?,folder=? WHERE project_id=? AND file_id=?`, f.Name, f.Folder, projectID, fid)
+		}
+		if len(out) >= limit {
+			continue
+		}
 		if !ok {
 			out = append(out, f)
 			continue
 		}
 		switch k.status {
 		case "ok":
-			// Re-probe only if storage's sha has changed.
-			if f.SHA256 != k.sha && f.SHA256 != "" {
+			if k.repair || (f.SHA256 != "" && f.SHA256 != k.sha) {
 				out = append(out, f)
 			}
 		case "pending", "failed":
 			out = append(out, f)
-		case "skipped_size":
-			// Leave alone — only forced reindex retries skipped rows.
-		}
-		if len(out) >= limit {
-			break
 		}
 	}
 	return out

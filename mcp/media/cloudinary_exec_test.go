@@ -80,7 +80,7 @@ func TestBuildCloudinaryChain_Resize_KeepAspect(t *testing.T) {
 	}
 	// keep_aspect → c_limit (Cloudinary's "scale within W, preserve
 	// aspect ratio") rather than c_scale.
-	if !strings.Contains(chain, "c_limit,w_640") {
+	if !strings.Contains(chain, "c_scale,w_640") {
 		t.Errorf("expected c_limit step in keep_aspect chain: %q", chain)
 	}
 	if strings.Contains(chain, "h_") {

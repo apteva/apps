@@ -181,8 +181,9 @@ func patchMediaMetadata(db *sql.DB, projectID, fileID string, patchJSON []byte, 
 			clauses = append(clauses, "json_type(metadata, ?) = 'null'")
 			args = append(args, condition.JSONPath)
 		} else {
-			clauses = append(clauses, "json_extract(metadata, ?) = ?")
-			args = append(args, condition.JSONPath, condition.Value)
+			predicate, values := metadataScalarPredicate("metadata", condition)
+			clauses = append(clauses, predicate)
+			args = append(args, values...)
 		}
 	}
 	query := `UPDATE media
@@ -278,4 +279,19 @@ func metadataConditionsEcho(conditions []MetadataCondition) map[string]any {
 		out[condition.Path] = condition.Value
 	}
 	return out
+}
+
+// SQLite represents booleans as integers; guard the JSON type before equality.
+func metadataScalarPredicate(column string, c MetadataCondition) (string, []any) {
+	kind := "text"
+	switch v := c.Value.(type) {
+	case bool:
+		kind = "false"
+		if v {
+			kind = "true"
+		}
+	case float64:
+		return "(json_type(" + column + ", ?) IN ('integer','real') AND json_extract(" + column + ", ?) = ?)", []any{c.JSONPath, c.JSONPath, c.Value}
+	}
+	return "(json_type(" + column + ", ?) = ? AND json_extract(" + column + ", ?) = ?)", []any{c.JSONPath, kind, c.JSONPath, c.Value}
 }

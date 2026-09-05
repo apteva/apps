@@ -171,6 +171,7 @@ func TestTranscriptMarkOk_PersistsFields(t *testing.T) {
 	err := transcriptMarkOk(ctx.AppDB(), &TranscriptRow{
 		FileID:       "1",
 		ProjectID:    testProj,
+		StartedAt:    func() string { row, _ := getTranscript(ctx.AppDB(), testProj, "1"); return row.StartedAt }(),
 		SourceSHA256: "abc",
 		Language:     "en",
 		Text:         "Hello world. Second segment.",

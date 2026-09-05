@@ -1218,7 +1218,7 @@ func (b *imageBuffer) reset() { b.pos = 0 }
 // preprocessSmartCrop returns the (possibly rewritten) params bytes.
 // Original bytes are returned unchanged on any error or no-op path —
 // callers can safely overwrite row.Params with the result.
-func preprocessSmartCrop(
+func preprocessSmartCropUncached(
 	ctx context.Context,
 	app *sdk.AppCtx,
 	sc *storageClient,

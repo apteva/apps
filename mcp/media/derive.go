@@ -155,7 +155,7 @@ func candidateThumbnailSeeks(durationMs int64, fallbackSeek float64) []float64 {
 		out = append(out, s)
 	}
 	if len(out) == 0 {
-		out = []float64{math.Max(0.5, math.Min(fallbackSeek, dur*0.5))}
+		out = []float64{0}
 	}
 	return out
 }

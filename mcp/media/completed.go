@@ -53,6 +53,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -140,7 +141,8 @@ func maybeEmitMediaCompleted(app *sdk.AppCtx, projectID, fileID string) {
 	// Transcript stage. Only matters for audio-bearing files when
 	// the transcripts integration is bound; otherwise the file is
 	// transcript-not-applicable and that's terminal.
-	transcriptsBound := app.IntegrationFor("transcripts") != nil
+	existingTranscript, _ := getTranscript(db, projectID, fileID)
+	transcriptsBound := app.IntegrationFor("transcripts") != nil && (configBool(app.Config().Get("transcribe_auto"), true) || existingTranscript != nil)
 	var hasTranscript bool
 	if row.HasAudio && transcriptsBound {
 		t, _ := getTranscript(db, projectID, fileID)
@@ -169,7 +171,9 @@ func maybeEmitMediaCompleted(app *sdk.AppCtx, projectID, fileID string) {
 
 	// Description stage. Only matters when an LLM integration is
 	// bound; otherwise the file is description-not-applicable.
-	descriptionsBound := app.IntegrationFor("descriptions") != nil
+	var requested int
+	_ = db.QueryRow(`SELECT describe_requested FROM media WHERE project_id=? AND file_id=?`, projectID, fileID).Scan(&requested)
+	descriptionsBound := app.IntegrationFor("descriptions") != nil && (configBool(app.Config().Get("auto_describe_enabled"), true) || requested != 0)
 	var hasDescription bool
 	if descriptionsBound {
 		if strings.TrimSpace(row.Description) != "" {
@@ -205,16 +209,6 @@ func maybeEmitMediaCompleted(app *sdk.AppCtx, projectID, fileID string) {
 	// All applicable stages reached terminal state. Single UPDATE
 	// races safely — only one caller wins. emit on win.
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := db.Exec(
-		`UPDATE media SET completed_at = ? WHERE project_id = ? AND file_id = ? AND completed_at IS NULL`,
-		now, projectID, fileID)
-	if err != nil {
-		return
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return // another caller emitted first
-	}
 
 	payload := map[string]any{
 		"file_id":         fileID,
@@ -241,7 +235,38 @@ func maybeEmitMediaCompleted(app *sdk.AppCtx, projectID, fileID string) {
 			payload[k] = v
 		}
 	}
-	app.EmitWithProject("media.completed", projectID, payload)
+	payload["event_id"] = fmt.Sprintf("media.completed:%s:%s:%d", projectID, fileID, time.Now().UnixNano())
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE media SET completed_at=? WHERE project_id=? AND file_id=? AND completed_at IS NULL AND source_sha256=?`, now, projectID, fileID, row.SourceSHA256)
+	if err != nil {
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return
+	}
+	if _, err = tx.Exec(`INSERT INTO media_event_outbox(event_id,project_id,topic,payload) VALUES(?,?,'media.completed',?)`, payload["event_id"], projectID, string(encoded)); err != nil {
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		return
+	}
+	if _, mounted := mediaLifecycles.Load(db); mounted {
+		select {
+		case completionWake <- struct{}{}:
+		default:
+		}
+	} else {
+		app.EmitWithProject("media.completed", projectID, payload)
+	}
 }
 
 func renderOriginForOutput(db *sql.DB, projectID, fileID string) (map[string]any, bool) {

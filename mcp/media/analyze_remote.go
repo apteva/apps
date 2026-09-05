@@ -42,8 +42,15 @@ func analyzeExistingSourceRemote(app *sdk.AppCtx, sourceURL string, row *MediaRo
 		Executor: "remote-instance",
 		HostID:   hostID,
 	}
-	cctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+	parent, stop := mediaContext(context.Background(), app)
+	defer stop()
+	cctx, cancel := context.WithTimeout(parent, opts.Timeout)
 	defer cancel()
+	cctx, release, err := acquireMediaWork(cctx, app, 1)
+	if err != nil {
+		return result, err
+	}
+	defer release()
 
 	paths, err := ensureRemoteAnalysisFFmpeg(cctx, app, hostID)
 	if err != nil {

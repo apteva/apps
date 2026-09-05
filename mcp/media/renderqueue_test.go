@@ -32,6 +32,7 @@ func newRenderTestDB(t *testing.T) *sql.DB {
 		  source_file_ids TEXT    NOT NULL,
 		  params          TEXT    NOT NULL DEFAULT '{}',
 		  resolved_params TEXT,
+ metrics TEXT NOT NULL DEFAULT '{}',
 		  status          TEXT    NOT NULL DEFAULT 'pending',
 		  progress_pct    INTEGER NOT NULL DEFAULT 0,
 		  output_file_id  TEXT,
@@ -46,6 +47,7 @@ func newRenderTestDB(t *testing.T) *sql.DB {
 	`); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { db.Close() })
 	return db
 }
 

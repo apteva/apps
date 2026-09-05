@@ -42,6 +42,7 @@ const (
 type cropPathPoint struct {
 	AtMs int64 `json:"at_ms"`
 	X    int   `json:"x"`
+	Y    int   `json:"y,omitempty"`
 	Cut  bool  `json:"cut,omitempty"`
 }
 
@@ -298,7 +299,11 @@ func computeSmartCropStillV2(
 		"temporal_concentration", temporal.Concentration,
 		"temporal_mean_activity", temporal.MeanActivity,
 		"temporal_active_fraction", temporal.ActiveFraction)
-	return &cropWindow{W: cw, H: ch, X: x, Y: 0}, nil
+	y := 0
+	if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil {
+		y = clampInt(roundEven(sample.point.Y), 0, row.Height-ch)
+	}
+	return &cropWindow{W: cw, H: ch, X: x, Y: y}, nil
 }
 
 func selectSmartCropStillDerivations(derivs []DerivationRow, focusMs int64) []DerivationRow {
@@ -361,7 +366,7 @@ func analyzeSmartCropV2Derivations(
 				return
 			}
 			results[i] = &smartCropV2Sample{
-				point: cropPathPoint{AtMs: d.PositionMs, X: win.X},
+				point: cropPathPoint{AtMs: d.PositionMs, X: win.X, Y: win.Y},
 				img:   img,
 				face:  face,
 			}
@@ -517,6 +522,14 @@ func computeSmartCropReelV2(
 	backgroundCorrections += correctSmartCropBackgroundEdgeDeparturesFromFaces(samples, row.Width, cw)
 	unsupportedExcursions := correctSmartCropUnsupportedExcursions(samples, row.Width, cw)
 
+	// Horizontal tracking heuristics are unchanged. Vertical crops retain a
+	// stable median subject position instead of accidentally anchoring at the top.
+	ys := make([]int, 0, len(samples))
+	for _, sample := range samples {
+		ys = append(ys, sample.point.Y)
+	}
+	sort.Ints(ys)
+	y := clampInt(roundEven(ys[len(ys)/2]), 0, row.Height-ch)
 	path := make([]cropPathPoint, 0, len(samples)+2)
 	for _, sample := range samples {
 		path = append(path, sample.point)
@@ -542,7 +555,7 @@ func computeSmartCropReelV2(
 			"background_corrections", backgroundCorrections,
 			"unsupported_excursions", unsupportedExcursions,
 			"tracking_frames", trackingFrames)
-		return &cropWindow{W: cw, H: ch, X: x, Y: 0}, nil, nil
+		return &cropWindow{W: cw, H: ch, X: x, Y: y}, nil, nil
 	}
 
 	app.Logger().Info("smartcrop v2 resolved tracked reel",
@@ -558,7 +571,7 @@ func computeSmartCropReelV2(
 		"background_corrections", backgroundCorrections,
 		"unsupported_excursions", unsupportedExcursions,
 		"tracking_frames", trackingFrames)
-	return &cropWindow{W: cw, H: ch, X: path[0].X, Y: 0}, path, nil
+	return &cropWindow{W: cw, H: ch, X: path[0].X, Y: y}, path, nil
 }
 
 // smartCropStillBackgroundCorrectionSupported prevents a strong but

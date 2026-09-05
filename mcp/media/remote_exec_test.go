@@ -136,7 +136,7 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		"WORK_ROOT='/var/tmp/apteva-media-renders'",
 		"SOURCE_CACHE_ROOT='/var/tmp/apteva-media-cache/sources'",
 		"SOURCE_CACHE_MAX_BYTES=21474836480",
-		"WORK='/var/tmp/apteva-media-renders/render-55'",
+		"WORK='/var/tmp/apteva-media-renders/render-55-",
 		"REQUIRED_BYTES=536870912",
 		`AVAILABLE_BYTES=$(df -PB1 "$WORK_ROOT" | awk 'NR==2 {print $4}')`,
 		`REMOTE_SCRATCH_FULL root=$WORK_ROOT`,
@@ -152,7 +152,7 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		`REMOTE_SOURCE_CACHE_LOCK_TIMEOUT file_id=$fid`,
 		`curl_retry --fail -L -o "$tmp" "$url"`,
 		`materialize_source '100' 'https://signed.example.com/file/100?sig=abc' 'src-100.mp4' 'file-100-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4' 123456 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'`,
-		"'/root/.apteva-render/ffmpeg-7.0.2/ffmpeg' '-y' '-i' 'src-100.mp4'",
+		"'/root/.apteva-render/ffmpeg-7.0.2/ffmpeg' '-filter_threads' '1' '-filter_complex_threads' '1' '-y' '-i' 'src-100.mp4'",
 		`OUT='clip.mp4'`,
 		`file_size_bytes()`,
 		`stat -c '%s' "$1"`,
@@ -172,9 +172,9 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		`curl_retry --fail -o /dev/null -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"`,
 		`"$STORAGE_BASE/files/$UPLOAD_ID/finalize?project_id=$PROJECT_ID"`,
 		// Dedup-hit branch (storage already has these bytes).
-		`"was_existing"`,
+		`json_get was_existing`,
 		// Multipart fallback markers.
-		`"file=@$OUT;type=$CT;filename=$NAME"`,
+		`"file=@$OUT;type=$CT;filename=$CURL_NAME"`,
 		`"$STORAGE_BASE/files?project_id=$PROJECT_ID"`,
 		`APTEVA_RESULT:`,
 	}

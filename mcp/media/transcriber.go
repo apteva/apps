@@ -64,13 +64,8 @@ func notifyTranscriber(projectID, fileID string) {
 // the transcribe_auto config kill switch — when false, the worker
 // doesn't tick at all; manual media_transcribe still works.
 func startTranscriber(app *sdk.AppCtx) {
-	cfg := app.Config()
-	if !configBool(cfg.Get("transcribe_auto"), true) {
-		app.Logger().Info("transcribe_auto=false — auto-transcriber disabled (manual still works)")
-		return
-	}
 	transcriberNotify = make(chan transcriberMsg, 100)
-	go transcriberLoop(app)
+	startMediaWorker(app, func() { transcriberLoop(app) })
 	app.Logger().Info("transcriber started")
 }
 
@@ -87,7 +82,7 @@ func transcriberLoop(app *sdk.AppCtx) {
 
 	for {
 		select {
-		case <-app.Done():
+		case <-mediaDone(app):
 			log.Info("transcriber stopping")
 			return
 		case <-tick.C:
@@ -122,6 +117,10 @@ func transcriberOne(app *sdk.AppCtx, msg transcriberMsg) {
 	if bound == nil {
 		// No integration — fall through silently. Periodic sweep
 		// will mark candidates as skipped with a clearer message.
+		return
+	}
+	if !configBool(app.Config().Get("transcribe_auto"), true) {
+		transcriberSweepOne(app)
 		return
 	}
 	if err := insertPendingTranscript(app.AppDB(), msg.ProjectID, msg.FileID, "auto"); err != nil {
@@ -194,6 +193,9 @@ func transcriberSweepOne(app *sdk.AppCtx) {
 	if err != nil {
 		log.Error("transcribe_candidates failed", "err", err)
 	}
+	if !configBool(cfg.Get("transcribe_auto"), true) {
+		candidates = nil
+	}
 	for _, fid := range candidates {
 		if err := insertPendingTranscript(db, pid, fid, "auto"); err != nil {
 			log.Error("queue pending transcript failed", "file_id", fid, "err", err)
@@ -214,7 +216,7 @@ func transcriberSweepOne(app *sdk.AppCtx) {
 		}
 		runOneTranscription(app, bound, row)
 		select {
-		case <-app.Done():
+		case <-mediaDone(app):
 			return
 		default:
 		}
@@ -226,6 +228,17 @@ func transcriberSweepOne(app *sdk.AppCtx) {
 // persist. All terminal states write the DB; the worker never leaves
 // a row stuck in 'running'.
 func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *TranscriptRow) {
+	markFailure := func(message string) error {
+		return transcriptMarkFailed(app.AppDB(), row.ProjectID, row.FileID, message, row.StartedAt)
+	}
+	markSkipped := func(message string) error {
+		return transcriptMarkSkipped(app.AppDB(), row.ProjectID, row.FileID, message, row.StartedAt)
+	}
+
+	defer func() {
+		maybeEmitMediaCompleted(app, row.ProjectID, row.FileID)
+		app.EmitWithProject("media.updated", row.ProjectID, map[string]any{"file_id": row.FileID, "change": "transcript_status"})
+	}()
 	log := app.Logger()
 	db := app.AppDB()
 	cfg := app.Config()
@@ -234,11 +247,11 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	maxMinutes := parseConfigIntFallback(cfg.Get("transcribe_max_duration_minutes"), 120)
 	media, err := getMedia(db, row.ProjectID, row.FileID)
 	if err != nil {
-		_ = transcriptMarkFailed(db, row.ProjectID, row.FileID, "media row missing: "+err.Error())
+		_ = markFailure("media row missing: " + err.Error())
 		return
 	}
 	if media.DurationMs > int64(maxMinutes)*60_000 {
-		_ = transcriptMarkSkipped(db, row.ProjectID, row.FileID,
+		_ = markSkipped(
 			fmt.Sprintf("source duration %d ms exceeds cap of %d minutes", media.DurationMs, maxMinutes))
 		return
 	}
@@ -247,14 +260,16 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	// sources this first prepares/reuses a hidden, normalized audio
 	// proxy so Deepgram never has to fetch/decode multi-GB video
 	// containers.
-	ctx, cancel := context.WithTimeout(context.Background(),
+	parent, stop := mediaContext(context.Background(), app)
+	defer stop()
+	ctx, cancel := context.WithTimeout(parent,
 		time.Duration(parseConfigIntFallback(cfg.Get("transcribe_timeout_seconds"), 600))*time.Second)
 	defer cancel()
 
 	sc := newStorageClient()
 	signedURL, err := signedURLForDeepgram(ctx, app, sc, media)
 	if err != nil {
-		_ = transcriptMarkFailed(db, row.ProjectID, row.FileID, "prepare transcript audio: "+err.Error())
+		_ = markFailure("prepare transcript audio: " + err.Error())
 		return
 	}
 
@@ -292,7 +307,7 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		time.Duration(parseConfigIntFallback(cfg.Get("transcribe_timeout_seconds"), 600))*time.Second,
 	)
 	if err != nil {
-		_ = transcriptMarkFailed(db, row.ProjectID, row.FileID, "deepgram call: "+err.Error())
+		_ = markFailure("deepgram call: " + err.Error())
 		return
 	}
 	if res == nil || !res.Success {
@@ -300,29 +315,31 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		if res != nil {
 			body = string(res.Data)
 		}
-		_ = transcriptMarkFailed(db, row.ProjectID, row.FileID, "deepgram non-2xx: "+truncate(body, 500))
+		_ = markFailure("deepgram non-2xx: " + truncate(body, 500))
 		return
 	}
 
 	// Parse Deepgram's response into our TranscriptRow shape.
 	parsed, err := parseDeepgramResponse(res.Data)
 	if err != nil {
-		_ = transcriptMarkFailed(db, row.ProjectID, row.FileID, "parse deepgram: "+err.Error())
+		_ = markFailure("parse deepgram: " + err.Error())
 		return
 	}
 
 	// Persist.
 	final := &TranscriptRow{
-		FileID:       row.FileID,
-		ProjectID:    row.ProjectID,
-		SourceSHA256: media.SourceSHA256,
-		Status:       "ok",
-		Language:     parsed.Language,
-		Text:         parsed.Text,
-		Provider:     "deepgram",
-		Model:        model,
-		DurationMs:   media.DurationMs,
-		SourceKind:   row.SourceKind,
+		FileID:             row.FileID,
+		ProjectID:          row.ProjectID,
+		SourceSHA256:       media.SourceSHA256,
+		Status:             "ok",
+		Language:           parsed.Language,
+		Text:               parsed.Text,
+		Provider:           "deepgram",
+		Model:              model,
+		DurationMs:         media.DurationMs,
+		SourceKind:         row.SourceKind,
+		StartedAt:          row.StartedAt,
+		RequireSourceMatch: true,
 	}
 	if len(parsed.Segments) > 0 {
 		segsJSON, _ := formatSegments(parsed.Segments)

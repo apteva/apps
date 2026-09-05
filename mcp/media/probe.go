@@ -57,15 +57,18 @@ type ffprobeOut struct {
 }
 
 type ffprobeStream struct {
-	CodecType    string `json:"codec_type"` // video | audio | subtitle | data
-	CodecName    string `json:"codec_name"`
-	Width        int    `json:"width,omitempty"`
-	Height       int    `json:"height,omitempty"`
-	RFrameRate   string `json:"r_frame_rate,omitempty"`
-	Channels     int    `json:"channels,omitempty"`
-	SampleRate   string `json:"sample_rate,omitempty"`
-	NbFrames     string `json:"nb_frames,omitempty"`
-	Duration     string `json:"duration,omitempty"`
+	Disposition struct {
+		AttachedPic int `json:"attached_pic"`
+	} `json:"disposition"`
+	CodecType  string `json:"codec_type"` // video | audio | subtitle | data
+	CodecName  string `json:"codec_name"`
+	Width      int    `json:"width,omitempty"`
+	Height     int    `json:"height,omitempty"`
+	RFrameRate string `json:"r_frame_rate,omitempty"`
+	Channels   int    `json:"channels,omitempty"`
+	SampleRate string `json:"sample_rate,omitempty"`
+	NbFrames   string `json:"nb_frames,omitempty"`
+	Duration   string `json:"duration,omitempty"`
 	// SideDataList holds the display-matrix metadata that carries
 	// rotation. Only the "Display Matrix" side_data_type entry
 	// matters for our purposes; everything else is ignored.
@@ -126,6 +129,9 @@ func parseProbeBytes(out []byte) (*Probe, error) {
 	for _, s := range raw.Streams {
 		switch s.CodecType {
 		case "video":
+			if s.Disposition.AttachedPic != 0 {
+				continue
+			}
 			if !p.HasVideo {
 				p.HasVideo = true
 				p.Width = s.Width
@@ -146,7 +152,7 @@ func parseProbeBytes(out []byte) (*Probe, error) {
 				p.VideoCodec = s.CodecName
 				// Detect "image" — single-frame video stream,
 				// no audio, common image container codecs.
-				if isImageCodec(s.CodecName) || s.NbFrames == "1" {
+				if isStillImageStream(s, raw.Format.FormatName, p.DurationMs) {
 					p.IsImage = true
 				}
 			}
@@ -259,6 +265,18 @@ func normaliseRotation(deg float64) int {
 func isImageCodec(c string) bool {
 	switch c {
 	case "mjpeg", "png", "gif", "webp", "bmp", "tiff", "heif", "heic":
+		return true
+	}
+	return false
+}
+
+func isStillImageStream(stream ffprobeStream, format string, duration int64) bool {
+	for _, container := range strings.Split(format, ",") {
+		if container == "image2" || container == "image2pipe" || strings.HasSuffix(container, "_pipe") {
+			return isImageCodec(stream.CodecName)
+		}
+	}
+	if isImageCodec(stream.CodecName) && (duration == 0 || ((format == "gif" || format == "webp") && stream.NbFrames == "1")) {
 		return true
 	}
 	return false

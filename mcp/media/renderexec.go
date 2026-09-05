@@ -1,7 +1,7 @@
 package main
 
 // Pluggable backends for the render queue. The default is local
-// ffmpeg (preserved bit-for-bit from v0.5.x); a Cloudinary backend
+// ffmpeg; a Cloudinary backend
 // kicks in when an operator binds the cloudinary integration to the
 // optional `render_executor` role.
 //
@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -70,6 +71,9 @@ func selectExecutor(app *sdk.AppCtx, fallback *localExecutor, remote *remoteExec
 	if remote != nil {
 		return remote
 	}
+	if remoteIndexerHostID(app) > 0 {
+		return unavailableExecutor{reason: "configured remote renderer is unavailable"}
+	}
 	bound := app.IntegrationFor("render_executor")
 	if bound == nil {
 		return fallback
@@ -100,7 +104,7 @@ func selectExecutor(app *sdk.AppCtx, fallback *localExecutor, remote *remoteExec
 // Same logic that lived inline in runOneRender pre-v0.6: download
 // sources to scratch, build argv from the per-op planner, exec ffmpeg
 // under the supplied ctx, upload result back to storage. Behaviour is
-// identical — only the call site moved.
+// uses verified source/result caches and explicit thread budgets.
 
 type localExecutor struct {
 	ffmpegPath   string
@@ -112,14 +116,69 @@ func (e *localExecutor) Name() string { return "local" }
 
 func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *RenderRow) (int64, error) {
 	db := app.AppDB()
+	ctx = context.WithValue(ctx, renderTraceKey{}, renderTrace{app, row})
+	ctx = context.WithValue(ctx, localSourceCacheRootKey{}, filepath.Join(e.scratchRoot, "sources"))
 	sc := newStorageClient()
 
-	jobDir := filepath.Join(e.scratchRoot, fmt.Sprintf("render-%d", row.ID))
-	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+	jobDir, err := os.MkdirTemp(e.scratchRoot, fmt.Sprintf("render-%d-", row.ID))
+	if err != nil {
 		return 0, fmt.Errorf("scratch mkdir: %w", err)
 	}
 	defer os.RemoveAll(jobDir)
-
+	doneDownload := renderStage(app, row, "download")
+	srcPaths := make([]string, len(row.SourceFileIDs))
+	sourcePaths := make(map[string]string)
+	sourceMetadata := make(map[string]*StorageFile)
+	var downloadMu sync.Mutex
+	var downloadErr error
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, 2)
+	for i, fidStr := range row.SourceFileIDs {
+		wg.Add(1)
+		go func(i int, fidStr string) {
+			defer wg.Done()
+			select {
+			case slots <- struct{}{}:
+			case <-ctx.Done():
+				downloadMu.Lock()
+				downloadErr = ctx.Err()
+				downloadMu.Unlock()
+				return
+			}
+			defer func() { <-slots }()
+			fid, err := strconv.ParseInt(fidStr, 10, 64)
+			var f *StorageFile
+			if err == nil {
+				f, err = sc.GetFile(ctx, row.ProjectID, fid)
+			}
+			hit := false
+			if err == nil {
+				local := filepath.Join(jobDir, fmt.Sprintf("src-%d%s", i, filepath.Ext(f.Name)))
+				hit, err = materializeLocalSource(ctx, app, sc, row.ProjectID, f, local)
+				if err == nil {
+					downloadMu.Lock()
+					srcPaths[i] = local
+					sourcePaths[fidStr] = local
+					sourceMetadata[fidStr] = f
+					downloadMu.Unlock()
+				}
+			}
+			downloadMu.Lock()
+			defer downloadMu.Unlock()
+			if err != nil {
+				downloadErr = err
+			}
+			recordRenderMetric(app, row, fmt.Sprintf("source_%d_cache_hit", i), hit)
+		}(i, fidStr)
+	}
+	wg.Wait()
+	doneDownload()
+	if downloadErr != nil {
+		return 0, fmt.Errorf("source download: %w", downloadErr)
+	}
+	ctx = context.WithValue(ctx, renderSourcesKey{}, sourcePaths)
+	ctx = context.WithValue(ctx, renderSourceMetadataKey{}, sourceMetadata)
+	doneAnalysis := renderStage(app, row, "analysis")
 	// Resolve subject-aware crop window before planning, when the
 	// operation supports it. Mutates row.Params in place so buildPlan
 	// can see explicit crop_w/h/x/y. No-op for ops that don't crop.
@@ -145,37 +204,34 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 		plan.Args = applyRotation(plan.Args, rotation, row.Operation == "extract_reel")
 	}
 
-	// Download source(s) to scratch.
-	srcPaths := make([]string, 0, len(row.SourceFileIDs))
-	for _, fidStr := range row.SourceFileIDs {
-		fid, err := strconv.ParseInt(fidStr, 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("source file_id %q not numeric", fidStr)
-		}
-		f, err := sc.GetFile(ctx, row.ProjectID, fid)
-		if err != nil {
-			return 0, fmt.Errorf("source lookup: %w", err)
-		}
-		local := filepath.Join(jobDir, fmt.Sprintf("src-%s%s", fidStr, filepath.Ext(f.Name)))
-		fh, err := os.Create(local)
-		if err != nil {
-			return 0, fmt.Errorf("source create: %w", err)
-		}
-		dlErr := sc.DownloadContent(ctx, row.ProjectID, fid, fh)
-		fh.Close()
-		if dlErr != nil {
-			return 0, fmt.Errorf("source download: %w", dlErr)
-		}
-		srcPaths = append(srcPaths, local)
-	}
+	doneAnalysis()
 
+	folder := row.OutputFolder
+	if folder == "" {
+		folder = e.outputFolder
+	}
+	cacheKey := localRenderCacheKey(ctx, app, sc, row, plan, folder, e.ffmpegPath)
+	if cacheKey != "" {
+		release, err := resultCacheLocks.acquire(ctx, cacheKey[0])
+		if err != nil {
+			return 0, err
+		}
+		defer release()
+		if cached := findCachedRender(ctx, app, sc, cacheKey, row.ProjectID, folder, plan.Filename); cached > 0 {
+			recordRenderMetric(app, row, "result_cache_hit", true)
+			return cached, nil
+		}
+	}
+	recordRenderMetric(app, row, "result_cache_hit", false)
 	outputPath := filepath.Join(jobDir, plan.Filename)
 	args, err := materialiseArgs(plan.Args, srcPaths, jobDir)
 	if err != nil {
 		return 0, fmt.Errorf("materialise args: %w", err)
 	}
-	args = append(args, outputPath)
+	args = append(args, "-threads", strconv.Itoa(parseConfigIntFallback(app.Config().Get("render_encoder_threads"), 2)), outputPath)
+	args = append([]string{"-filter_threads", "1", "-filter_complex_threads", "1"}, args...)
 
+	doneEncode := renderStage(app, row, "encode")
 	cmd := exec.CommandContext(ctx, e.ffmpegPath, args...)
 	stdout, _ := cmd.StdoutPipe()
 	var stderrBuf strings.Builder
@@ -197,17 +253,21 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 		return 0, fmt.Errorf("ffmpeg: %s", msg)
 	}
 
+	doneEncode()
+	if info, err := os.Stat(outputPath); err == nil {
+		recordRenderMetric(app, row, "output_bytes", info.Size())
+	}
 	// Per-render output folder takes precedence over the install
 	// default. Renders submitted before this column existed (or
 	// without an explicit folder) fall back to e.outputFolder.
-	folder := row.OutputFolder
-	if folder == "" {
-		folder = e.outputFolder
-	}
+
+	doneUpload := renderStage(app, row, "upload")
+	defer doneUpload()
 	uploaded, err := sc.UploadRenderFile(ctx, row.ProjectID, folder, plan.Filename, plan.ContentType, outputPath)
 	if err != nil {
 		return 0, fmt.Errorf("upload: %w", err)
 	}
+	saveCachedRender(ctx, app, sc, cacheKey, row.ProjectID, uploaded)
 	return uploaded, nil
 }
 
@@ -334,3 +394,10 @@ func materialiseArgs(template, srcPaths []string, jobDir string) ([]string, erro
 // being treated as a hard failure. Reserved for future use — today's
 // declines happen earlier (selectExecutor.supports).
 var errExecutorDeclined = errors.New("executor declined this operation")
+
+type unavailableExecutor struct{ reason string }
+
+func (e unavailableExecutor) Name() string { return "unavailable" }
+func (e unavailableExecutor) Execute(context.Context, *sdk.AppCtx, *RenderRow) (int64, error) {
+	return 0, errors.New(e.reason)
+}

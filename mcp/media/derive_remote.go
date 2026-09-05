@@ -56,9 +56,9 @@ type remoteIndexParams struct {
 // the corresponding derivation was actually produced (the script
 // branches on probe).
 type remoteIndexResult struct {
-	ProbeBase64     string             `json:"probe_b64"`
-	ThumbnailFileID int64              `json:"thumbnail_file_id"`
-	WaveformFileID  int64              `json:"waveform_file_id"`
+	ProbeBase64     string `json:"probe_b64"`
+	ThumbnailFileID int64  `json:"thumbnail_file_id"`
+	WaveformFileID  int64  `json:"waveform_file_id"`
 	// Keyframes is the storyboard set produced by the remote shell.
 	// One entry per (position_ms, storage_file_id) pair that uploaded
 	// successfully. Failures inside the loop are skipped per-frame
@@ -102,20 +102,20 @@ func runRemoteIndexing(
 	}
 
 	script := buildRemoteIndexScript(remoteIndexScriptInputs{
-		FFmpeg:                 paths.FFmpeg,
-		FFprobe:                paths.FFprobe,
-		SignedURL:              params.SignedURL,
-		FileID:                 params.FileID,
-		ThumbSeek:              params.ThumbSeek,
-		ThumbWidth:             params.ThumbWidth,
-		WaveW:                  params.WaveW,
-		WaveH:                  params.WaveH,
-		KeyframeIntervalSecs:   params.KeyframeIntervalSecs,
-		KeyframeMaxCount:       params.KeyframeMaxCount,
-		KeyframesEnabled:       params.KeyframesEnabled,
-		PublicURL:              publicURL,
-		StorageToken:           storageToken,
-		ProjectID:              projectID,
+		FFmpeg:               paths.FFmpeg,
+		FFprobe:              paths.FFprobe,
+		SignedURL:            params.SignedURL,
+		FileID:               params.FileID,
+		ThumbSeek:            params.ThumbSeek,
+		ThumbWidth:           params.ThumbWidth,
+		WaveW:                params.WaveW,
+		WaveH:                params.WaveH,
+		KeyframeIntervalSecs: params.KeyframeIntervalSecs,
+		KeyframeMaxCount:     params.KeyframeMaxCount,
+		KeyframesEnabled:     params.KeyframesEnabled,
+		PublicURL:            publicURL,
+		StorageToken:         storageToken,
+		ProjectID:            projectID,
 	})
 
 	out, exit, err := runRemote(ctx, app, params.HostID, script, 600)
@@ -188,7 +188,7 @@ type remoteIndexScriptInputs struct {
 func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	var b strings.Builder
 	b.WriteString("set -euo pipefail\n")
-	fmt.Fprintf(&b, "WORK=%s\n", shellQuote(fmt.Sprintf("/tmp/apteva-media-index-%s", in.FileID)))
+	b.WriteString("WORK=$(mktemp -d /tmp/apteva-media-index-XXXXXXXXXXXX)\n")
 	b.WriteString(`mkdir -p "$WORK"; cd "$WORK"` + "\n")
 	b.WriteString(`trap 'cd /tmp && rm -rf "$WORK"' EXIT` + "\n")
 
@@ -210,7 +210,7 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 
 	// Probe — same flags as the local runProbe, against the signed URL.
 	b.WriteString(`"$FFPROBE" -v quiet -print_format json -show_format -show_streams "$SIGNED_URL" > probe.json` + "\n")
-	b.WriteString(`HAS_VIDEO=$(grep -c '"codec_type": *"video"' probe.json || true)` + "\n")
+	b.WriteString(`HAS_VIDEO=$("$FFPROBE" -v error -select_streams V -show_entries stream=index -of csv=p=0 "$SIGNED_URL" | awk 'NF{n++} END{print n+0}')` + "\n")
 	b.WriteString(`HAS_AUDIO=$(grep -c '"codec_type": *"audio"' probe.json || true)` + "\n")
 
 	// Initialise output ids — empty until we successfully upload.
@@ -228,7 +228,7 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	// container with no format.duration is treated as an image and gets
 	// no seek; everything else gets the seek.
 	b.WriteString(`IS_IMAGE=0` + "\n")
-	b.WriteString(`if grep -qE '"codec_name": *"(mjpeg|png|gif|webp|bmp|tiff)"' probe.json; then IS_IMAGE=1; fi` + "\n")
+	b.WriteString(`if ! grep -q '"duration":' probe.json && grep -qE '"codec_name": *"(mjpeg|png|gif|webp|bmp|tiff)"' probe.json; then IS_IMAGE=1; fi` + "\n")
 	b.WriteString(`if ! grep -q '"duration":' probe.json; then IS_IMAGE=1; fi` + "\n")
 
 	// Smart video thumbnailing — ports the local extractVideoThumbnail
@@ -272,7 +272,7 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	// Build seek list: configured THUMB_SEEK first, then 5/15/30/50/
 	// 75% of duration if duration is known. awk handles float math
 	// since busybox sh doesn't.
-	b.WriteString(`    SEEKS="$THUMB_SEEK"` + "\n")
+	b.WriteString(`    SEEKS=$(awk -v d="$DUR_SEC" -v s="$THUMB_SEEK" 'BEGIN{if(d>0 && s>=d)print 0;else print s}')` + "\n")
 	b.WriteString(`    if awk -v d="$DUR_SEC" 'BEGIN{exit !(d > 0)}'; then` + "\n")
 	b.WriteString(`      for PCT in 0.05 0.15 0.30 0.50 0.75; do` + "\n")
 	b.WriteString(`        CAND=$(awk -v d="$DUR_SEC" -v p="$PCT" 'BEGIN{printf "%.3f", d*p}')` + "\n")
@@ -357,14 +357,14 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 		// If natural+1 > max, stretch interval = (dur-1)/(max-1).
 		b.WriteString(`  EFFECTIVE_INTERVAL=$(awk -v d="$DUR_SEC" -v iv="$KEYFRAME_INTERVAL_SECS" -v mx="$KEYFRAME_MAX_COUNT" 'BEGIN{
     natural=int((d-1)/iv);
-    if (natural+1 > mx) {
+    if (mx <= 1) { printf "%.3f", d+1; } else if (natural+1 > mx) {
       printf "%.3f", (d-1)/(mx-1);
     } else {
       printf "%d", iv;
     }
   }')` + "\n")
 		b.WriteString(`  KF_INDEX=0` + "\n")
-		b.WriteString(`  POS_SEC=1` + "\n")
+		b.WriteString(`  POS_SEC=$(awk -v d="$DUR_SEC" 'BEGIN{if(d<=1)printf "%.3f",d/2;else print 1}')` + "\n")
 		// Loop until pos >= dur OR we hit the cap.
 		b.WriteString(`  while awk -v p="$POS_SEC" -v d="$DUR_SEC" -v c="$KF_INDEX" -v mx="$KEYFRAME_MAX_COUNT" 'BEGIN{exit !(p < d && c < mx)}'; do` + "\n")
 		// Position in milliseconds (integer, for filename + JSON).

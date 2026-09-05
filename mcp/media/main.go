@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.3
+version: 0.14.4
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,10 +31,10 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.14.3 keeps external-provider publishing data in
-  arbitrary media metadata and removes provider-specific URL resolution
-  from Media itself. Read-only media analysis continues to follow the
-  configured remote instance and fail closed when it is unavailable.
+  through storage. v0.14.4 fixes processing, worker lifecycle, catalog,
+  and rendering issues. Adds verified source and render-result caches,
+  bounded processing and uploads, and video quality levels with Legacy
+  as the default. Improves Smart Crop and reliable completion delivery.
 author: Apteva
 scopes: [project, global]
 min_apteva_version: "0.25.9"
@@ -285,7 +285,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.3
+    ref: media/v0.14.4
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -315,6 +315,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("media requires a db block")
 	}
 	globalCtx = ctx
+	initMediaLifecycle(ctx)
 	ctx.Logger().Info("media mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"gateway", os.Getenv("APTEVA_GATEWAY_URL"),
@@ -334,22 +335,22 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// is N hot goroutines.
 	poolSize := readConfigInt("render_pool_size", 4)
 	startRenderPool(ctx, poolSize)
-	// Auto-transcriber: separate goroutine, isolated from indexer +
-	// render pool. Skips itself if transcribe_auto=false; degrades
-	// gracefully when the deepgram integration isn't bound.
+	// Transcription workers consume manual requests even with automatic
+	// discovery disabled; provider availability gates execution.
 	startTranscriber(ctx)
 	// Auto-describer: another isolated goroutine. Reads transcripts
 	// + thumbnails when present, calls the bound LLM integration,
-	// writes the description back via setDescription.
+	// commits revision-guarded prose and rating updates.
 	startDescriber(ctx)
 	// Storage event subscriber — listens for storage.file.deleted
 	// over SSE and cascades cleanup immediately. Indexer's 30s
 	// orphan sweep stays as the safety net.
 	startStorageEventSubscriber(ctx)
+	startCompletionOutbox(ctx)
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(ctx *sdk.AppCtx) error   { stopMediaLifecycle(ctx.AppDB()); return nil }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
@@ -612,11 +613,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_trim",
 			Description: "Cut a clip from a video/audio file. Args: file_id (string), start_ms, end_ms (int), output_name (string, optional).",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":       map[string]any{"type": "string"},
-				"start_ms":      map[string]any{"type": "integer"},
-				"end_ms":        map[string]any{"type": "integer"},
-				"output_name":   map[string]any{"type": "string"},
-				"output_folder": map[string]any{"type": "string"},
+				"file_id":         map[string]any{"type": "string"},
+				"start_ms":        map[string]any{"type": "integer"},
+				"end_ms":          map[string]any{"type": "integer"},
+				"output_name":     map[string]any{"type": "string"},
+				"output_folder":   map[string]any{"type": "string"},
+				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id", "start_ms", "end_ms"}),
 			Handler: a.toolSubmitRender("trim", []string{"start_ms", "end_ms"}, []string{"file_id"}),
 		},
@@ -624,12 +626,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_resize",
 			Description: "Scale a video/image. Args: file_id, width (int), height (int, optional if keep_aspect), keep_aspect (bool, optional), output_name (string, optional).",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":       map[string]any{"type": "string"},
-				"width":         map[string]any{"type": "integer"},
-				"height":        map[string]any{"type": "integer"},
-				"keep_aspect":   map[string]any{"type": "boolean"},
-				"output_name":   map[string]any{"type": "string"},
-				"output_folder": map[string]any{"type": "string"},
+				"file_id":         map[string]any{"type": "string"},
+				"width":           map[string]any{"type": "integer"},
+				"height":          map[string]any{"type": "integer"},
+				"keep_aspect":     map[string]any{"type": "boolean"},
+				"output_name":     map[string]any{"type": "string"},
+				"output_folder":   map[string]any{"type": "string"},
+				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id", "width"}),
 			Handler: a.toolSubmitRender("resize", []string{"width", "height", "keep_aspect"}, []string{"file_id"}),
 		},
@@ -637,13 +640,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_transcode",
 			Description: "Re-encode to a new container/codec. Args: file_id, format (mp4|webm|mp3|...), video_codec (string, optional), audio_codec (string, optional), bitrate (string, optional, e.g. '2M').",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":       map[string]any{"type": "string"},
-				"format":        map[string]any{"type": "string"},
-				"video_codec":   map[string]any{"type": "string"},
-				"audio_codec":   map[string]any{"type": "string"},
-				"bitrate":       map[string]any{"type": "string"},
-				"output_name":   map[string]any{"type": "string"},
-				"output_folder": map[string]any{"type": "string"},
+				"file_id":         map[string]any{"type": "string"},
+				"format":          map[string]any{"type": "string"},
+				"video_codec":     map[string]any{"type": "string"},
+				"audio_codec":     map[string]any{"type": "string"},
+				"bitrate":         map[string]any{"type": "string"},
+				"output_name":     map[string]any{"type": "string"},
+				"output_folder":   map[string]any{"type": "string"},
+				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id", "format"}),
 			Handler: a.toolSubmitRender("transcode", []string{"format", "video_codec", "audio_codec", "bitrate"}, []string{"file_id"}),
 		},
@@ -651,9 +655,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_concat",
 			Description: "Join multiple sources end-to-end (must share container/codec). Args: file_ids (array of strings, 2+), output_name (string, required).",
 			InputSchema: schemaObject(map[string]any{
-				"file_ids":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"output_name":   map[string]any{"type": "string"},
-				"output_folder": map[string]any{"type": "string"},
+				"file_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"output_name":     map[string]any{"type": "string"},
+				"output_folder":   map[string]any{"type": "string"},
+				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_ids", "output_name"}),
 			Handler: a.toolSubmitRender("concat", nil, []string{"file_ids"}),
 		},
@@ -661,17 +666,18 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_crop",
 			Description: "Crop or reframe an existing video/image. Exact mode: file_id, x, y, width, height. With target_ratio, fit_mode='crop' (default) uses content-agnostic Smart Crop v2 evidence—saliency, foreground change, motion, shape and optional face geometry—while fit_mode='contain' preserves the complete source frame with black padding. Args: file_id, target_ratio, crop_mode? ('smart' default|'center'), fit_mode? ('crop' default|'contain'), output_width?. Use media_extract_frame for a video timestamp.",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":       map[string]any{"type": "string"},
-				"x":             map[string]any{"type": "integer", "description": "Exact crop left offset in pixels. Used with y, width, and height when target_ratio is not set."},
-				"y":             map[string]any{"type": "integer", "description": "Exact crop top offset in pixels. Used with x, width, and height when target_ratio is not set."},
-				"width":         map[string]any{"type": "integer", "description": "Exact crop width in pixels. Required for exact mode; optional fallback when target_ratio is set."},
-				"height":        map[string]any{"type": "integer", "description": "Exact crop height in pixels. Required for exact mode; optional fallback when target_ratio is set."},
-				"target_ratio":  map[string]any{"type": "string", "description": "When set, crop/reframe to this aspect ratio ('W:H'), e.g. '9:16', '1:1', '4:5'. Enables smart/center mode for existing images and full video clips."},
-				"output_width":  map[string]any{"type": "integer", "description": "Optional scale width after target_ratio crop. Omit to preserve the computed crop dimensions."},
-				"crop_mode":     map[string]any{"type": "string", "description": "'smart' (default) for subject-aware crop via the source's cached thumbnail/keyframe saliency, or 'center' for geometric center. Smart falls back to center when derivations are unavailable."},
-				"fit_mode":      map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas and may remove source edges; 'contain' preserves the complete frame and pads unused canvas area."},
-				"output_name":   map[string]any{"type": "string"},
-				"output_folder": map[string]any{"type": "string"},
+				"file_id":         map[string]any{"type": "string"},
+				"x":               map[string]any{"type": "integer", "description": "Exact crop left offset in pixels. Used with y, width, and height when target_ratio is not set."},
+				"y":               map[string]any{"type": "integer", "description": "Exact crop top offset in pixels. Used with x, width, and height when target_ratio is not set."},
+				"width":           map[string]any{"type": "integer", "description": "Exact crop width in pixels. Required for exact mode; optional fallback when target_ratio is set."},
+				"height":          map[string]any{"type": "integer", "description": "Exact crop height in pixels. Required for exact mode; optional fallback when target_ratio is set."},
+				"target_ratio":    map[string]any{"type": "string", "description": "When set, crop/reframe to this aspect ratio ('W:H'), e.g. '9:16', '1:1', '4:5'. Enables smart/center mode for existing images and full video clips."},
+				"output_width":    map[string]any{"type": "integer", "description": "Optional scale width after target_ratio crop. Omit to preserve the computed crop dimensions."},
+				"crop_mode":       map[string]any{"type": "string", "description": "'smart' (default) for subject-aware crop via the source's cached thumbnail/keyframe saliency, or 'center' for geometric center. Smart falls back to center when derivations are unavailable."},
+				"fit_mode":        map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas and may remove source edges; 'contain' preserves the complete frame and pads unused canvas area."},
+				"output_name":     map[string]any{"type": "string"},
+				"output_folder":   map[string]any{"type": "string"},
+				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id"}),
 			Handler: a.toolSubmitRender("crop", []string{"x", "y", "width", "height", "target_ratio", "output_width", "crop_mode", "fit_mode"}, []string{"file_id"}),
 		},
@@ -679,15 +685,16 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_extract_frame",
 			Description: "Save a video frame as PNG. With target_ratio, fit_mode='crop' uses generic cached/source visual evidence to reframe at at_ms; fit_mode='contain' preserves the complete frame with padding. Args: file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?, fit_mode?.",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":       map[string]any{"type": "string"},
-				"at_ms":         map[string]any{"type": "integer"},
-				"width":         map[string]any{"type": "integer", "description": "Output width when target_ratio is NOT set (pure scale, keeps aspect)."},
-				"target_ratio":  map[string]any{"type": "string", "description": "When set, crop + scale to this aspect ratio (\"W:H\"). E.g. \"1:1\", \"9:16\", \"4:5\"."},
-				"output_width":  map[string]any{"type": "integer", "description": "Output width when target_ratio is set. Default 1080; height derives from ratio."},
-				"crop_mode":     map[string]any{"type": "string", "description": "\"smart\" (default) for subject-aware crop via the nearest cached keyframe for timed operations, or \"center\" for geometric center. Smart falls back to thumbnail/center when keyframes are not ready."},
-				"fit_mode":      map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas; 'contain' preserves the complete frame with black padding."},
-				"output_name":   map[string]any{"type": "string"},
-				"output_folder": map[string]any{"type": "string"},
+				"file_id":         map[string]any{"type": "string"},
+				"at_ms":           map[string]any{"type": "integer"},
+				"width":           map[string]any{"type": "integer", "description": "Output width when target_ratio is NOT set (pure scale, keeps aspect)."},
+				"target_ratio":    map[string]any{"type": "string", "description": "When set, crop + scale to this aspect ratio (\"W:H\"). E.g. \"1:1\", \"9:16\", \"4:5\"."},
+				"output_width":    map[string]any{"type": "integer", "description": "Output width when target_ratio is set. Default 1080; height derives from ratio."},
+				"crop_mode":       map[string]any{"type": "string", "description": "\"smart\" (default) for subject-aware crop via the nearest cached keyframe for timed operations, or \"center\" for geometric center. Smart falls back to thumbnail/center when keyframes are not ready."},
+				"fit_mode":        map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas; 'contain' preserves the complete frame with black padding."},
+				"output_name":     map[string]any{"type": "string"},
+				"output_folder":   map[string]any{"type": "string"},
+				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id", "at_ms"}),
 			Handler: a.toolSubmitRender("extract_frame", []string{"at_ms", "width", "target_ratio", "output_width", "crop_mode", "fit_mode"}, []string{"file_id"}),
 		},
@@ -695,10 +702,11 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_audio_extract",
 			Description: "Pull the audio track from a video into a standalone file. Args: file_id, format (mp3|wav|m4a|opus|flac).",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":       map[string]any{"type": "string"},
-				"format":        map[string]any{"type": "string"},
-				"output_name":   map[string]any{"type": "string"},
-				"output_folder": map[string]any{"type": "string"},
+				"file_id":         map[string]any{"type": "string"},
+				"format":          map[string]any{"type": "string"},
+				"output_name":     map[string]any{"type": "string"},
+				"output_folder":   map[string]any{"type": "string"},
+				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id", "format"}),
 			Handler: a.toolSubmitRender("audio_extract", []string{"format"}, []string{"file_id"}),
 		},
@@ -706,12 +714,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_audio_filter",
 			Description: "Modify audio in an audio or video file. Normalization preserves the indexed source sample rate and applies a lossy-codec-safe peak limiter. For videos, copies the video stream unchanged and only filters/re-encodes audio. Args: file_id, mode ('normalize' default | 'speech_clean' | 'volume' | 'mute'), target_lufs (optional, default -16 for normalize/speech_clean), gain_db (for volume), output_name?, output_folder?. Audio-only inputs keep their audio container; video inputs keep their video container unless output_name has an audio extension.",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":       map[string]any{"type": "string"},
-				"mode":          map[string]any{"type": "string", "description": "'normalize' (default), 'speech_clean', 'volume', or 'mute'."},
-				"target_lufs":   map[string]any{"type": "number", "description": "Target integrated loudness for normalize/speech_clean. Default -16."},
-				"gain_db":       map[string]any{"type": "number", "description": "Gain in dB for mode='volume', e.g. 3 or -2."},
-				"output_name":   map[string]any{"type": "string"},
-				"output_folder": map[string]any{"type": "string"},
+				"file_id":         map[string]any{"type": "string"},
+				"mode":            map[string]any{"type": "string", "description": "'normalize' (default), 'speech_clean', 'volume', or 'mute'."},
+				"target_lufs":     map[string]any{"type": "number", "description": "Target integrated loudness for normalize/speech_clean. Default -16."},
+				"gain_db":         map[string]any{"type": "number", "description": "Gain in dB for mode='volume', e.g. 3 or -2."},
+				"output_name":     map[string]any{"type": "string"},
+				"output_folder":   map[string]any{"type": "string"},
+				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id"}),
 			Handler: a.toolSubmitRender("audio_filter", []string{"mode", "target_lufs", "gain_db"}, []string{"file_id"}),
 		},
@@ -990,6 +999,8 @@ func (a *App) toolSetDescription(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
+	ctx.EmitWithProject("media.updated", pid, map[string]any{"file_id": fid})
+	maybeEmitMediaCompleted(ctx, pid, fid)
 	// Always found:true now — setDescription upserts a stub when
 	// the row doesn't exist yet, so the description sticks even
 	// before the indexer has probed the file.
@@ -1027,7 +1038,7 @@ func (a *App) toolSetAudienceRating(ctx *sdk.AppCtx, args map[string]any) (any, 
 		// Reset path — clear reasoning + timestamp so the describer
 		// re-queues on its next sweep.
 		_, err := ctx.AppDB().Exec(
-			`UPDATE media SET audience_rating='unrated', audience_reasoning='', audience_updated_at=NULL
+			`UPDATE media SET audience_rating='unrated', audience_reasoning='', audience_updated_at=NULL, describe_requested=1, description_attempted_at=NULL
 			  WHERE project_id=? AND file_id=?`, pid, fid)
 		if err != nil {
 			return nil, err
@@ -1037,6 +1048,8 @@ func (a *App) toolSetAudienceRating(ctx *sdk.AppCtx, args map[string]any) (any, 
 			return nil, err
 		}
 	}
+	ctx.EmitWithProject("media.updated", pid, map[string]any{"file_id": fid, "change": "audience_rating"})
+	notifyDescriber(pid, fid)
 	return map[string]any{"file_id": fid, "rating": rating, "reasoning": reasoning}, nil
 }
 
@@ -1106,7 +1119,7 @@ func (a *App) toolDescribe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		return nil, err
 	}
-	if media.DescriptionSource == "human" || media.DescriptionSource == "agent" {
+	if (media.DescriptionSource == "human" || media.DescriptionSource == "agent") && strings.TrimSpace(media.Description) != "" {
 		return map[string]any{
 			"found":  true,
 			"queued": false,
@@ -1125,6 +1138,10 @@ func (a *App) toolDescribe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, err
 		}
 	}
+	if _, err := ctx.AppDB().Exec(`UPDATE media SET describe_requested=1 WHERE project_id=? AND file_id=?`, pid, fid); err != nil {
+		return nil, err
+	}
+	notifyDescriber(pid, fid)
 	return map[string]any{"found": true, "queued": true}, nil
 }
 
@@ -1146,14 +1163,19 @@ func (a *App) toolTranscribe(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		// as a fresh queue entry. The auto-policy uses ON CONFLICT to
 		// avoid disturbing in-flight rows; manual force is the explicit
 		// override.
-		if _, err := ctx.AppDB().Exec(`DELETE FROM transcripts WHERE project_id=? AND file_id=?`, pid, fid); err != nil {
+		if _, err := ctx.AppDB().Exec(`DELETE FROM transcripts WHERE project_id=? AND file_id=? AND status != 'running'`, pid, fid); err != nil {
 			return nil, err
 		}
 	}
 	if err := insertPendingTranscript(ctx.AppDB(), pid, fid, "manual"); err != nil {
 		return nil, err
 	}
-	return map[string]any{"file_id": fid, "status": "pending"}, nil
+	notifyTranscriber(pid, fid)
+	queued, err := getTranscript(ctx.AppDB(), pid, fid)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"file_id": fid, "status": queued.Status}, nil
 }
 
 func (a *App) toolGetTranscript(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1223,6 +1245,9 @@ func (a *App) toolSetTranscript(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err := upsertTranscript(ctx.AppDB(), t); err != nil {
 		return nil, err
 	}
+	ctx.EmitWithProject("media.transcribed", pid, map[string]any{"file_id": fid})
+	notifyDescriber(pid, fid)
+	maybeEmitMediaCompleted(ctx, pid, fid)
 	return map[string]any{"file_id": fid, "status": "ok"}, nil
 }
 
@@ -1616,6 +1641,12 @@ func (a *App) toolGetDerivation(kind string) sdk.ToolHandler {
 				}, nil
 			}
 		}
+		if media, err := getMedia(ctx.AppDB(), pid, fid); err == nil && ((kind == "thumbnail" && (media.HasVideo || media.IsImage)) || (kind == "waveform" && media.HasAudio && !media.HasVideo)) {
+			if err := queueMediaReindex(ctx.AppDB(), pid, fid, false); err != nil {
+				return nil, err
+			}
+			return map[string]any{"found": false, "kind": kind, "queued": true}, nil
+		}
 		return map[string]any{"found": false, "kind": kind}, nil
 	}
 }
@@ -1811,12 +1842,15 @@ func (a *App) handleMediaItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		globalCtx.EmitWithProject("media.transcribed", pid, map[string]any{"file_id": fid})
+		notifyDescriber(pid, fid)
+		maybeEmitMediaCompleted(globalCtx, pid, fid)
 		writeJSON(w, map[string]any{"file_id": fid, "status": "ok"})
 	case tail == "transcribe" && r.Method == http.MethodPost:
 		// Queue a transcript (or force-requeue when ?force=true).
 		// Mirrors the media_transcribe MCP tool.
 		if r.URL.Query().Get("force") == "true" {
-			if _, err := globalCtx.AppDB().Exec(`DELETE FROM transcripts WHERE project_id=? AND file_id=?`, pid, fid); err != nil {
+			if _, err := globalCtx.AppDB().Exec(`DELETE FROM transcripts WHERE project_id=? AND file_id=? AND status != 'running'`, pid, fid); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -1850,6 +1884,8 @@ func (a *App) handleMediaItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		globalCtx.EmitWithProject("media.updated", pid, map[string]any{"file_id": fid})
+		maybeEmitMediaCompleted(globalCtx, pid, fid)
 		resp := map[string]any{"file_id": fid, "updated": true}
 		if created {
 			resp["created"] = true
@@ -2082,6 +2118,7 @@ func (a *App) toolIndexStatus(ctx *sdk.AppCtx, args map[string]any) (any, error)
 // "file_id" in sourceKeys; concat lists "file_ids".
 
 func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string) sdk.ToolHandler {
+	paramKeys = append(append([]string{}, paramKeys...), "encoder_profile")
 	return func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		pid, err := resolveProjectFromArgs(args)
 		if err != nil {
@@ -2393,10 +2430,33 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 	target = target.Normalized()
 	var win *cropWindow
 	var cropPath []cropPathPoint
+	parent, cancel := mediaContext(r.Context(), globalCtx)
+	defer cancel()
+	cctx, release, budgetErr := acquireMediaWork(parent, globalCtx, 1)
+	if budgetErr != nil {
+		http.Error(w, budgetErr.Error(), http.StatusRequestTimeout)
+		return
+	}
+	defer release()
 	if op == "extract_reel" && mode == "smart" && target.HasRange() {
-		win, cropPath, err = computeSmartCropReelV2(r.Context(), globalCtx, newStorageClient(), pid, body.FileID, rw, rh, target)
+		params, _ := json.Marshal(map[string]any{"start_ms": body.StartMs, "end_ms": body.EndMs, "target_ratio": ratio, "crop_mode": mode})
+		resolved := preprocessSmartCrop(cctx, globalCtx, newStorageClient(), pid, op, []string{body.FileID}, params)
+		var crop struct {
+			W    int             `json:"crop_w"`
+			H    int             `json:"crop_h"`
+			X    int             `json:"crop_x"`
+			Y    int             `json:"crop_y"`
+			Path []cropPathPoint `json:"crop_path"`
+		}
+		err = json.Unmarshal(resolved, &crop)
+		if err == nil && crop.W > 0 && crop.H > 0 {
+			win = &cropWindow{W: crop.W, H: crop.H, X: crop.X, Y: crop.Y}
+			cropPath = crop.Path
+		} else {
+			err = errors.New("smart crop unavailable")
+		}
 	} else {
-		win, err = computeSmartCrop(r.Context(), globalCtx, newStorageClient(), pid, body.FileID, rw, rh, mode, target)
+		win, err = computeSmartCrop(cctx, globalCtx, newStorageClient(), pid, body.FileID, rw, rh, mode, target)
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

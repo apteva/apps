@@ -25,22 +25,23 @@ type TranscriptSegment struct {
 }
 
 type TranscriptRow struct {
-	FileID       string          `json:"file_id"`
-	ProjectID    string          `json:"project_id"`
-	SourceSHA256 string          `json:"source_sha256,omitempty"`
-	Status       string          `json:"status"`
-	Language     string          `json:"language,omitempty"`
-	Text         string          `json:"text,omitempty"`
-	Segments     json.RawMessage `json:"segments,omitempty"`
-	Provider     string          `json:"provider,omitempty"`
-	Model        string          `json:"model,omitempty"`
-	DurationMs   int64           `json:"duration_ms,omitempty"`
-	CostCents    float64         `json:"cost_cents,omitempty"`
-	Error        string          `json:"error,omitempty"`
-	SourceKind   string          `json:"source_kind,omitempty"`
-	CreatedAt    string          `json:"created_at,omitempty"`
-	StartedAt    string          `json:"started_at,omitempty"`
-	CompletedAt  string          `json:"completed_at,omitempty"`
+	RequireSourceMatch bool            `json:"-"`
+	FileID             string          `json:"file_id"`
+	ProjectID          string          `json:"project_id"`
+	SourceSHA256       string          `json:"source_sha256,omitempty"`
+	Status             string          `json:"status"`
+	Language           string          `json:"language,omitempty"`
+	Text               string          `json:"text,omitempty"`
+	Segments           json.RawMessage `json:"segments,omitempty"`
+	Provider           string          `json:"provider,omitempty"`
+	Model              string          `json:"model,omitempty"`
+	DurationMs         int64           `json:"duration_ms,omitempty"`
+	CostCents          float64         `json:"cost_cents,omitempty"`
+	Error              string          `json:"error,omitempty"`
+	SourceKind         string          `json:"source_kind,omitempty"`
+	CreatedAt          string          `json:"created_at,omitempty"`
+	StartedAt          string          `json:"started_at,omitempty"`
+	CompletedAt        string          `json:"completed_at,omitempty"`
 }
 
 // insertPendingTranscript creates a transcripts row in pending state.
@@ -77,7 +78,7 @@ func upsertTranscript(db *sql.DB, t *TranscriptRow) error {
 	if t.FileID == "" || t.ProjectID == "" {
 		return errors.New("file_id and project_id required")
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	segs := string(t.Segments)
 	if segs == "" {
 		segs = "[]"
@@ -115,7 +116,7 @@ func claimNextPendingTranscript(db *sql.DB, projectID string) (*TranscriptRow, e
 	if projectID == "" {
 		return nil, errors.New("project_id required")
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	row := db.QueryRow(`
 		UPDATE transcripts
 		   SET status = 'running', started_at = ?
@@ -142,12 +143,12 @@ func recoverInterruptedTranscripts(db *sql.DB) (int64, error) {
 }
 
 func transcriptMarkOk(db *sql.DB, t *TranscriptRow) error {
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	segs := string(t.Segments)
 	if segs == "" {
 		segs = "[]"
 	}
-	_, err := db.Exec(`
+	res, err := db.Exec(`
 		UPDATE transcripts
 		   SET status        = 'ok',
 		       source_sha256 = ?,
@@ -161,21 +162,32 @@ func transcriptMarkOk(db *sql.DB, t *TranscriptRow) error {
 		       raw           = ?,
 		       error         = '',
 		       completed_at  = ?
-		 WHERE project_id = ? AND file_id = ? AND status = 'running'`,
+		 WHERE project_id = ? AND file_id = ? AND status = 'running' AND started_at = ? AND (? = 0 OR EXISTS (SELECT 1 FROM media WHERE media.project_id=transcripts.project_id AND media.file_id=transcripts.file_id AND media.source_sha256=?))`,
 		t.SourceSHA256, t.Language, t.Text, segs,
 		t.Provider, t.Model, t.DurationMs, t.CostCents,
-		"", now, t.ProjectID, t.FileID,
+		"", now, t.ProjectID, t.FileID, t.StartedAt, boolInt(t.RequireSourceMatch), t.SourceSHA256,
 	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err == nil && n == 0 {
+		return errors.New("transcript attempt superseded")
+	}
 	return err
 }
 
-func transcriptMarkFailed(db *sql.DB, projectID, fileID, errMsg string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
+func transcriptMarkFailed(db *sql.DB, projectID, fileID, errMsg string, attempt ...string) error {
+	token := ""
+	if len(attempt) > 0 {
+		token = attempt[0]
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := db.Exec(`
 		UPDATE transcripts
 		   SET status = 'failed', error = ?, completed_at = ?
-		 WHERE project_id = ? AND file_id = ? AND status IN ('pending','running')`,
-		errMsg, now, projectID, fileID,
+		 WHERE project_id = ? AND file_id = ? AND status IN ('pending','running') AND (?='' OR started_at=?)`,
+		errMsg, now, projectID, fileID, token, token,
 	)
 	return err
 }
@@ -183,13 +195,17 @@ func transcriptMarkFailed(db *sql.DB, projectID, fileID, errMsg string) error {
 // transcriptMarkSkipped pulls a row out of the auto-transcribe rotation
 // without flagging it as a failure. Used when the file is too long,
 // or an auto-transcribe gate fails (e.g. integration absent).
-func transcriptMarkSkipped(db *sql.DB, projectID, fileID, reason string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
+func transcriptMarkSkipped(db *sql.DB, projectID, fileID, reason string, attempt ...string) error {
+	token := ""
+	if len(attempt) > 0 {
+		token = attempt[0]
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := db.Exec(`
 		UPDATE transcripts
 		   SET status = 'skipped', error = ?, completed_at = ?
-		 WHERE project_id = ? AND file_id = ? AND status IN ('pending','running')`,
-		reason, now, projectID, fileID,
+		 WHERE project_id = ? AND file_id = ? AND status IN ('pending','running') AND (?='' OR started_at=?)`,
+		reason, now, projectID, fileID, token, token,
 	)
 	return err
 }

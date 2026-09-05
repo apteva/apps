@@ -56,6 +56,9 @@ func parseDescribeJSON(raw string) parsedDescribe {
 	// Last-resort fallback: treat the whole thing as description.
 	// Audience stays empty → caller leaves the row at 'unrated' and
 	// the next sweep re-tries.
+	if looksLikeRefusal(raw) || strings.HasPrefix(strings.TrimSpace(raw), "{") {
+		return parsedDescribe{}
+	}
 	return parsedDescribe{Description: strings.TrimSpace(raw)}
 }
 
@@ -71,7 +74,7 @@ func tryParseDescribeJSON(s string) (parsedDescribe, bool) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(s)), &raw); err != nil {
 		return parsedDescribe{}, false
 	}
-	if strings.TrimSpace(raw.Description) == "" {
+	if strings.TrimSpace(raw.Description) == "" && raw.AudienceRating == "" && raw.AudienceReasoning == "" {
 		// JSON parsed but no description — counts as a failure.
 		// Caller's refusal-detection still gets a shot via the raw
 		// content path.
@@ -115,20 +118,13 @@ func stripCodeFence(s string) string {
 // detection fails (e.g. the model wrapped in single backticks or
 // used a custom delimiter).
 func firstJSONObject(s string) string {
-	depth := 0
-	start := -1
 	for i, r := range s {
-		switch r {
-		case '{':
-			if depth == 0 {
-				start = i
-			}
-			depth++
-		case '}':
-			depth--
-			if depth == 0 && start >= 0 {
-				return s[start : i+1]
-			}
+		if r != '{' {
+			continue
+		}
+		var raw json.RawMessage
+		if json.NewDecoder(strings.NewReader(s[i:])).Decode(&raw) == nil {
+			return string(raw)
 		}
 	}
 	return ""
@@ -164,6 +160,8 @@ func canonicaliseAudienceRating(s string) string {
 var refusalPhrases = []string{
 	"i can't describe",
 	"i cannot describe",
+	"i cannot assist",
+	"i can't assist",
 	"i can't analyze",
 	"i cannot analyze",
 	"i'm unable to",

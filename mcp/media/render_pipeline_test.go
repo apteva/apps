@@ -304,6 +304,17 @@ func TestSidecar_RenderPipeline_Trim(t *testing.T) {
 	if outputID == 0 {
 		t.Fatal("output_file_id not set")
 	}
+	// Repeat through the real sidecar, Storage and FFmpeg pipeline. The
+	// successful result must be reused before a second encode or download.
+	repeat := sc.MCP("media_trim", map[string]any{
+		"_project_id": "test-proj", "file_id": strconv.FormatInt(srcID, 10),
+		"start_ms": 1000, "end_ms": 3000, "output_name": "trimmed.mp4",
+	})
+	repeated := pollUntilOk(t, sc, "test-proj", int64(repeat["render_id"].(float64)), 25*time.Second)
+	metrics, _ := repeated["metrics"].(map[string]any)
+	if repeated["output_file_id"] != outputIDStr || metrics["result_cache_hit"] != true {
+		t.Fatalf("identical real render not reused: %+v", repeated)
+	}
 
 	// Validate the bytes are a real mp4 by ffprobe-ing them.
 	bytes := downloadFromStorage(t, sc, "test-proj", outputID)
