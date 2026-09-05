@@ -51,7 +51,7 @@ func validReferenceSetKey(key string) bool {
 	return true
 }
 
-func upsertReferenceSet(db *sql.DB, set ReferenceSet) (*ReferenceSet, error) {
+func upsertReferenceSet(db sqlRunner, set ReferenceSet) (*ReferenceSet, error) {
 	set.ProjectID = strings.TrimSpace(set.ProjectID)
 	set.Key = strings.TrimSpace(set.Key)
 	set.Label = strings.TrimSpace(set.Label)
@@ -75,7 +75,7 @@ func upsertReferenceSet(db *sql.DB, set ReferenceSet) (*ReferenceSet, error) {
 	return getReferenceSet(db, set.ProjectID, set.Key)
 }
 
-func getReferenceSet(db *sql.DB, projectID, key string) (*ReferenceSet, error) {
+func getReferenceSet(db sqlRunner, projectID, key string) (*ReferenceSet, error) {
 	var set ReferenceSet
 	err := db.QueryRow(`
 		SELECT id, project_id, key, label, description, created_at, updated_at
@@ -86,7 +86,7 @@ func getReferenceSet(db *sql.DB, projectID, key string) (*ReferenceSet, error) {
 	return &set, err
 }
 
-func upsertReferenceValue(db *sql.DB, projectID, setKey string, value ReferenceValue) (*ReferenceValue, error) {
+func upsertReferenceValue(db sqlRunner, projectID, setKey string, value ReferenceValue) (*ReferenceValue, error) {
 	set, err := getReferenceSet(db, projectID, setKey)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -99,6 +99,7 @@ func upsertReferenceValue(db *sql.DB, projectID, setKey string, value ReferenceV
 	if value.Value == "" {
 		return nil, errors.New("reference value required")
 	}
+	hasLabel, hasStatus, hasMetadata := value.Label != "", value.Status != "", len(value.Metadata) != 0
 	if value.Label == "" {
 		value.Label = value.Value
 	}
@@ -109,19 +110,23 @@ func upsertReferenceValue(db *sql.DB, projectID, setKey string, value ReferenceV
 	if value.Status != "active" && value.Status != "inactive" {
 		return nil, fmt.Errorf("invalid reference value status %q", value.Status)
 	}
-	if len(value.Metadata) == 0 || !json.Valid(value.Metadata) {
+	if len(value.Metadata) == 0 {
 		value.Metadata = json.RawMessage(`{}`)
+	}
+	var metadataObject map[string]any
+	if json.Unmarshal(value.Metadata, &metadataObject) != nil || metadataObject == nil {
+		return nil, errors.New("metadata must be a JSON object")
 	}
 	now := time.Now().UnixMilli()
 	if _, err := db.Exec(`
 		INSERT INTO reference_values (reference_set_id, value, label, status, metadata_json, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(reference_set_id, value) DO UPDATE SET
-			label=excluded.label,
-			status=excluded.status,
-			metadata_json=excluded.metadata_json,
+			label=CASE WHEN ? THEN excluded.label ELSE reference_values.label END,
+ status=CASE WHEN ? THEN excluded.status ELSE reference_values.status END,
+ metadata_json=CASE WHEN ? THEN excluded.metadata_json ELSE reference_values.metadata_json END,
 			updated_at=excluded.updated_at
-	`, set.ID, value.Value, value.Label, value.Status, string(value.Metadata), now, now); err != nil {
+	`, set.ID, value.Value, value.Label, value.Status, string(value.Metadata), now, now, hasLabel, hasStatus, hasMetadata); err != nil {
 		return nil, err
 	}
 	var saved ReferenceValue
@@ -136,7 +141,7 @@ func upsertReferenceValue(db *sql.DB, projectID, setKey string, value ReferenceV
 	return &saved, err
 }
 
-func listReferenceValues(db *sql.DB, projectID, setKey, status string, limit int) (*ReferenceSet, []ReferenceValue, error) {
+func listReferenceValues(db sqlRunner, projectID, setKey, status string, limit int) (*ReferenceSet, []ReferenceValue, error) {
 	set, err := getReferenceSet(db, projectID, setKey)
 	if err != nil {
 		return nil, nil, err
@@ -174,7 +179,7 @@ func listReferenceValues(db *sql.DB, projectID, setKey, status string, limit int
 	return set, values, rows.Err()
 }
 
-func activeReferenceOptions(db *sql.DB, projectID, setKey string, limit int) ([]ReferenceOption, error) {
+func activeReferenceOptions(db sqlRunner, projectID, setKey string, limit int) ([]ReferenceOption, error) {
 	_, values, err := listReferenceValues(db, projectID, setKey, "active", limit)
 	if err != nil {
 		return nil, err
@@ -186,7 +191,7 @@ func activeReferenceOptions(db *sql.DB, projectID, setKey string, limit int) ([]
 	return options, nil
 }
 
-func activeReferenceValueExists(db *sql.DB, projectID, setKey, value string) (bool, error) {
+func activeReferenceValueExists(db sqlRunner, projectID, setKey, value string) (bool, error) {
 	var found int
 	err := db.QueryRow(`
 		SELECT 1
@@ -200,7 +205,7 @@ func activeReferenceValueExists(db *sql.DB, projectID, setKey, value string) (bo
 	return err == nil, err
 }
 
-func hydrateEventSpecReferences(db *sql.DB, spec *EventSpec) error {
+func hydrateEventSpecReferences(db sqlRunner, spec *EventSpec) error {
 	for i := range spec.Properties {
 		setKey := spec.Properties[i].ReferenceSet
 		if setKey == "" {
@@ -211,6 +216,12 @@ func hydrateEventSpecReferences(db *sql.DB, spec *EventSpec) error {
 			return err
 		}
 		spec.Properties[i].AllowedValues = options
+		var total int64
+		if err := db.QueryRow(`SELECT COUNT(*) FROM reference_values v JOIN reference_sets s ON s.id=v.reference_set_id WHERE s.project_id=? AND s.key=? AND v.status='active'`, spec.ProjectID, setKey).Scan(&total); err != nil {
+			return err
+		}
+		spec.Properties[i].AllowedValuesTotal = total
+		spec.Properties[i].AllowedValuesHasMore = total > int64(len(options))
 	}
 	return nil
 }
@@ -220,7 +231,7 @@ func (a *App) toolReferenceSetUpsert(ctx *sdk.AppCtx, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
-	set, err := upsertReferenceSet(ctx.AppDB(), ReferenceSet{
+	set, err := upsertReferenceSet(toolWriter(ctx), ReferenceSet{
 		ProjectID: projectID,
 		Key:       stringArg(args, "key"), Label: stringArg(args, "label"), Description: stringArg(args, "description"),
 	})
@@ -235,7 +246,7 @@ func (a *App) toolReferenceValueUpsert(ctx *sdk.AppCtx, args map[string]any) (an
 	if err != nil {
 		return nil, err
 	}
-	metadata := json.RawMessage(`{}`)
+	var metadata json.RawMessage
 	if raw, ok := args["metadata"]; ok && raw != nil {
 		encoded, err := json.Marshal(raw)
 		if err != nil {
@@ -243,7 +254,7 @@ func (a *App) toolReferenceValueUpsert(ctx *sdk.AppCtx, args map[string]any) (an
 		}
 		metadata = encoded
 	}
-	value, err := upsertReferenceValue(ctx.AppDB(), projectID, stringArg(args, "reference_set"), ReferenceValue{
+	value, err := upsertReferenceValue(toolWriter(ctx), projectID, stringArg(args, "reference_set"), ReferenceValue{
 		Value: stringArg(args, "value"), Label: stringArg(args, "label"), Status: stringArg(args, "status"), Metadata: metadata,
 	})
 	if err != nil {
@@ -268,9 +279,5 @@ func (a *App) toolReferenceValuesList(ctx *sdk.AppCtx, args map[string]any) (any
 	if status != "active" && status != "inactive" {
 		return nil, fmt.Errorf("invalid reference value status %q", status)
 	}
-	set, values, err := listReferenceValues(ctx.AppDB(), projectID, setKey, status, intArg(args, "limit"))
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"reference_set": set, "values": values, "count": len(values)}, nil
+	return referencePage(toolReader(ctx), projectID, setKey, status, stringArg(args, "search"), int64Arg(args, "after"), intArg(args, "limit"))
 }

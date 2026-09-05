@@ -30,28 +30,30 @@ type EventRow struct {
 // EventInsert is what handlers hand to insertEvent. Empty-string fields
 // become NULL in the DB; zero InstallID becomes NULL.
 type EventInsert struct {
-	TS        int64
-	App       string
-	Topic     string
-	ProjectID string
-	InstallID int64
-	UserID    string
-	SessionID string
-	Source    string // "auto" | "track"
-	UpsertKey string
-	Props     string // JSON-encoded; "" → "{}"
+	DeliveryID string
+	TS         int64
+	App        string
+	Topic      string
+	ProjectID  string
+	InstallID  int64
+	UserID     string
+	SessionID  string
+	Source     string // "auto" | "track"
+	UpsertKey  string
+	Props      string // JSON-encoded; "" → "{}"
 }
 
 type sqlRunner interface {
+	Query(query string, args ...any) (*sql.Rows, error)
 	Exec(query string, args ...any) (sql.Result, error)
 	QueryRow(query string, args ...any) *sql.Row
 }
 
-func insertEvent(db *sql.DB, ev EventInsert) (int64, error) {
+func insertEvent(db sqlDatabase, ev EventInsert) (int64, error) {
 	return insertEventWithPolicy(db, ev)
 }
 
-func insertEventRaw(db *sql.DB, ev EventInsert, validate bool) (int64, error) {
+func insertEventRaw(db sqlRunner, ev EventInsert, validate bool) (int64, error) {
 	if ev.Props == "" {
 		ev.Props = "{}"
 	}
@@ -97,7 +99,7 @@ func insertEventRawValidated(db sqlRunner, ev EventInsert, validation validation
 			ev.ProjectID, ev.App, ev.Topic, ev.UpsertKey,
 		).Scan(&id)
 		if err == nil {
-			recordEventSpecViolations(db, id, validation.Violations)
+			err = recordEventSpecViolations(db, id, validation.Violations)
 		}
 		return id, err
 	}
@@ -115,7 +117,7 @@ func insertEventRawValidated(db sqlRunner, ev EventInsert, validation validation
 	}
 	id, err := res.LastInsertId()
 	if err == nil {
-		recordEventSpecViolations(db, id, validation.Violations)
+		err = recordEventSpecViolations(db, id, validation.Violations)
 	}
 	return id, err
 }
@@ -136,7 +138,7 @@ type Filter struct {
 
 // buildWhere returns the WHERE clause (no leading WHERE) and the
 // arg list. Empty conds → empty string.
-func (f Filter) buildWhere() (string, []any) {
+func (f Filter) buildWhere() (string, []any, error) {
 	var conds []string
 	var args []any
 	if f.App != "" {
@@ -166,15 +168,51 @@ func (f Filter) buildWhere() (string, []any) {
 	for k, v := range f.Where {
 		expr, ok := propsExtract(k)
 		if !ok {
-			continue
+			return "", nil, fmt.Errorf("invalid filter path %q", k)
 		}
-		conds = append(conds, expr+" = ?")
-		args = append(args, fmt.Sprint(v))
+		path, _ := propsJSONPath(k)
+		values := []any{v}
+		if list, ok := v.([]any); ok {
+			values = list
+		}
+		if len(values) > 100 {
+			return "", nil, fmt.Errorf("filter %q exceeds 100 values", k)
+		}
+		parts := []string{}
+		for _, value := range values {
+			switch x := value.(type) {
+			case nil:
+				parts = append(parts, "json_type(props, '"+path+"') = 'null'")
+			case bool:
+				kind := "false"
+				if x {
+					kind = "true"
+				}
+				parts = append(parts, "json_type(props, '"+path+"') = '"+kind+"'")
+			case string:
+				parts = append(parts, "(json_type(props, '"+path+"') = 'text' AND "+expr+" = ?)")
+				args = append(args, x)
+			case float64, float32, int, int64, json.Number:
+				n, valid := numericValue(x)
+				if !valid {
+					return "", nil, fmt.Errorf("non-finite filter %q", k)
+				}
+				parts = append(parts, "(json_type(props, '"+path+"') IN ('integer','real') AND "+expr+" = ?)")
+				args = append(args, n)
+			default:
+				return "", nil, fmt.Errorf("filter %q requires a scalar or scalar list", k)
+			}
+		}
+		if len(parts) == 0 {
+			conds = append(conds, "0")
+		} else {
+			conds = append(conds, "("+strings.Join(parts, " OR ")+")")
+		}
 	}
 	if len(conds) == 0 {
-		return "", nil
+		return "", nil, nil
 	}
-	return strings.Join(conds, " AND "), args
+	return strings.Join(conds, " AND "), args, nil
 }
 
 // propsExtract returns a json_extract expression for a "props.<key>"
@@ -187,7 +225,7 @@ func propsExtract(key string) (string, bool) {
 		return "", false
 	}
 	path := strings.TrimPrefix(key, "props.")
-	if path == "" || len(path) > 128 {
+	if path == "" || len(path) > 128 || strings.HasPrefix(path, ".") || strings.HasSuffix(path, ".") || strings.Contains(path, "..") {
 		return "", false
 	}
 	for _, r := range path {
@@ -200,8 +238,11 @@ func propsExtract(key string) (string, bool) {
 	return "json_extract(props, '$." + path + "')", true
 }
 
-func queryRows(db *sql.DB, f Filter, limit int) ([]EventRow, error) {
-	where, args := f.buildWhere()
+func queryRows(db sqlRunner, f Filter, limit int) ([]EventRow, error) {
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return nil, filterErr
+	}
 	if limit <= 0 {
 		limit = 100
 	}
@@ -222,7 +263,7 @@ func queryRows(db *sql.DB, f Filter, limit int) ([]EventRow, error) {
 	}
 	defer rows.Close()
 
-	var out []EventRow
+	out := []EventRow{}
 	for rows.Next() {
 		var r EventRow
 		var pid, uid, sid sql.NullString
@@ -246,7 +287,7 @@ func queryRows(db *sql.DB, f Filter, limit int) ([]EventRow, error) {
 // queryGrouped runs a GROUP BY over one or more "props.X" keys, plus
 // optionally app/topic. Returns one row per bucket: {<key>: value, ...,
 // count: N}. Limited to 1000 buckets.
-func queryGrouped(db *sql.DB, f Filter, groupBy []string, limit int) ([]map[string]any, error) {
+func queryGrouped(db sqlRunner, f Filter, groupBy []string, limit int) ([]map[string]any, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -277,7 +318,10 @@ func queryGrouped(db *sql.DB, f Filter, groupBy []string, limit int) ([]map[stri
 		return nil, fmt.Errorf("group_by required for grouped query")
 	}
 
-	where, args := f.buildWhere()
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return nil, filterErr
+	}
 	q := "SELECT " + strings.Join(selectExprs, ", ") + ", COUNT(*) AS count FROM events"
 	if where != "" {
 		q += " WHERE " + where
@@ -291,7 +335,7 @@ func queryGrouped(db *sql.DB, f Filter, groupBy []string, limit int) ([]map[stri
 	}
 	defer rows.Close()
 
-	var out []map[string]any
+	out := []map[string]any{}
 	for rows.Next() {
 		vals := make([]any, len(labels)+1)
 		for i := range vals {
@@ -319,8 +363,11 @@ func queryGrouped(db *sql.DB, f Filter, groupBy []string, limit int) ([]map[stri
 	return out, rows.Err()
 }
 
-func countEvents(db *sql.DB, f Filter) (int64, error) {
-	where, args := f.buildWhere()
+func countEvents(db sqlRunner, f Filter) (int64, error) {
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return 0, filterErr
+	}
 	q := "SELECT COUNT(*) FROM events"
 	if where != "" {
 		q += " WHERE " + where
@@ -335,7 +382,7 @@ func countEvents(db *sql.DB, f Filter) (int64, error) {
 // topByPropsKey returns top-N values for a single "props.<key>" path,
 // optionally filtered. NULL extraction (key absent in the JSON) is
 // dropped from results.
-func topByPropsKey(db *sql.DB, f Filter, by string, limit int) ([]map[string]any, error) {
+func topByPropsKey(db sqlRunner, f Filter, by string, limit int) ([]map[string]any, error) {
 	expr, ok := propsExtract(by)
 	if !ok {
 		return nil, fmt.Errorf("by must be props.X with alnum/underscore/dot, got %q", by)
@@ -346,7 +393,10 @@ func topByPropsKey(db *sql.DB, f Filter, by string, limit int) ([]map[string]any
 	if limit > 200 {
 		limit = 200
 	}
-	where, args := f.buildWhere()
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return nil, filterErr
+	}
 	q := "SELECT " + expr + " AS value, COUNT(*) AS count FROM events"
 	if where != "" {
 		q += " WHERE " + where + " AND " + expr + " IS NOT NULL"
@@ -362,7 +412,7 @@ func topByPropsKey(db *sql.DB, f Filter, by string, limit int) ([]map[string]any
 	}
 	defer rows.Close()
 
-	var out []map[string]any
+	out := []map[string]any{}
 	for rows.Next() {
 		var v sql.NullString
 		var c int64
@@ -385,7 +435,7 @@ func topByPropsKey(db *sql.DB, f Filter, by string, limit int) ([]map[string]any
 // returns a single bucket with only sum/count. Intended for aggregate-
 // observation events such as "post_views_daily_observed" where the
 // value lives in props.views.
-func sumByValue(db *sql.DB, f Filter, valueKey string, groupBy []string, limit int) ([]map[string]any, error) {
+func sumByValue(db sqlRunner, f Filter, valueKey string, groupBy []string, limit int) ([]map[string]any, error) {
 	valueExpr, numericPredicate, ok := numericValueExtract(valueKey)
 	if !ok {
 		return nil, fmt.Errorf("value must be a numeric column or props.X, got %q", valueKey)
@@ -417,7 +467,10 @@ func sumByValue(db *sql.DB, f Filter, valueKey string, groupBy []string, limit i
 		}
 	}
 
-	where, args := f.buildWhere()
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return nil, filterErr
+	}
 	selectSQL := ""
 	if len(selectExprs) > 0 {
 		selectSQL = strings.Join(selectExprs, ", ") + ", "
@@ -439,7 +492,7 @@ func sumByValue(db *sql.DB, f Filter, valueKey string, groupBy []string, limit i
 	}
 	defer rows.Close()
 
-	var out []map[string]any
+	out := []map[string]any{}
 	for rows.Next() {
 		vals := make([]any, len(labels)+3)
 		for i := range labels {
@@ -506,7 +559,7 @@ func propsJSONPath(key string) (string, bool) {
 // listTopics returns one row per (app, topic) seen in a project, with
 // last_ts and count. Optionally filtered by app. Useful for dashboard
 // pickers and agent discovery.
-func listTopics(db *sql.DB, projectID, app string) ([]map[string]any, error) {
+func listTopics(db sqlRunner, projectID, app string) ([]map[string]any, error) {
 	q := `SELECT app, topic, MAX(ts) AS last_ts, COUNT(*) AS count
 	      FROM events`
 	var args []any
@@ -530,7 +583,7 @@ func listTopics(db *sql.DB, projectID, app string) ([]map[string]any, error) {
 	}
 	defer rows.Close()
 
-	var out []map[string]any
+	out := []map[string]any{}
 	for rows.Next() {
 		var a, t string
 		var lastTS, count int64
@@ -551,8 +604,11 @@ func listTopics(db *sql.DB, projectID, app string) ([]map[string]any, error) {
 // events, distinct apps, and distinct (app, topic) pairs. Backs the
 // panel's stat tiles. char(31) is the unit-separator — a delimiter that
 // can't appear in app/topic, so the concat distinct-count is exact.
-func overview(db *sql.DB, f Filter) (map[string]any, error) {
-	where, args := f.buildWhere()
+func overview(db sqlRunner, f Filter) (map[string]any, error) {
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return nil, filterErr
+	}
 	q := "SELECT COUNT(*), COUNT(DISTINCT app), COUNT(DISTINCT app || char(31) || topic) FROM events"
 	if where != "" {
 		q += " WHERE " + where
@@ -566,38 +622,31 @@ func overview(db *sql.DB, f Filter) (map[string]any, error) {
 
 // dailySeries returns event counts bucketed by UTC day within the
 // window, oldest first: [{day:"2026-05-21", count:N}]. Days with zero
-// events are absent — the panel fills gaps for the chart if it wants.
-func dailySeries(db *sql.DB, f Filter) ([]map[string]any, error) {
-	where, args := f.buildWhere()
-	q := "SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*) AS count FROM events"
-	if where != "" {
-		q += " WHERE " + where
-	}
-	q += " GROUP BY day ORDER BY day"
-
-	rows, err := db.Query(q, args...)
+// events are absent, with adaptive intervals limiting output to 1000 points.
+func dailySeries(db sqlRunner, f Filter) ([]map[string]any, error) {
+	rows, err := seriesForWidget(db, f, "day", "", "", "count")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []map[string]any
-	for rows.Next() {
-		var day string
-		var count int64
-		if err := rows.Scan(&day, &count); err != nil {
-			return nil, err
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		bucket, _ := row["bucket"].(string)
+		if len(bucket) > 10 {
+			bucket = bucket[:10]
 		}
-		out = append(out, map[string]any{"day": day, "count": count})
+		out = append(out, map[string]any{"day": bucket, "count": row["count"], "ts": row["ts"], "interval_ms": row["interval_ms"]})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // topicsWindowed is listTopics constrained to the filter window and
 // ordered by volume — the panel's topics table. listTopics stays the
 // MCP-tool path (all-time, ordered by name).
-func topicsWindowed(db *sql.DB, f Filter, limit int) ([]map[string]any, error) {
-	where, args := f.buildWhere()
+func topicsWindowed(db sqlRunner, f Filter, limit int) ([]map[string]any, error) {
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return nil, filterErr
+	}
 	q := `SELECT app, topic, MAX(ts) AS last_ts, COUNT(*) AS count
 	      FROM events`
 	if where != "" {
@@ -612,7 +661,7 @@ func topicsWindowed(db *sql.DB, f Filter, limit int) ([]map[string]any, error) {
 	}
 	defer rows.Close()
 
-	var out []map[string]any
+	out := []map[string]any{}
 	for rows.Next() {
 		var app, topic string
 		var lastTS, count int64
@@ -631,7 +680,7 @@ func topicsWindowed(db *sql.DB, f Filter, limit int) ([]map[string]any, error) {
 
 // distinctDimensions returns the set of app and topic values seen for a
 // project (or all when projectID == ""), for the panel's filter dropdowns.
-func distinctDimensions(db *sql.DB, projectID string) (apps, topics []string, err error) {
+func distinctDimensions(db sqlRunner, projectID string) (apps, topics []string, err error) {
 	if apps, err = distinctColumn(db, "app", projectID); err != nil {
 		return nil, nil, err
 	}
@@ -642,7 +691,7 @@ func distinctDimensions(db *sql.DB, projectID string) (apps, topics []string, er
 // distinctColumn lists distinct non-null values of one column, optionally
 // scoped to a project. col is a fixed identifier from a closed set (never
 // user input) — guarded here so it can never become an injection vector.
-func distinctColumn(db *sql.DB, col, projectID string) ([]string, error) {
+func distinctColumn(db sqlRunner, col, projectID string) ([]string, error) {
 	switch col {
 	case "app", "topic":
 	default:
@@ -660,7 +709,7 @@ func distinctColumn(db *sql.DB, col, projectID string) ([]string, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	out := []string{}
 	for rows.Next() {
 		var v string
 		if err := rows.Scan(&v); err != nil {

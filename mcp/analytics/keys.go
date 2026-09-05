@@ -33,7 +33,7 @@ func newWriteKeyValue() string {
 	return "wk_live_" + hex.EncodeToString(b)
 }
 
-func createWriteKey(db *sql.DB, site, projectID string, origins []string) (*WriteKey, error) {
+func createWriteKey(db sqlRunner, site, projectID string, origins []string) (*WriteKey, error) {
 	wk := &WriteKey{
 		Key:            newWriteKeyValue(),
 		Site:           site,
@@ -76,7 +76,7 @@ func scanWriteKey(rows interface{ Scan(...any) error }) (*WriteKey, error) {
 const writeKeyCols = `id, key, site, project_id, allowed_origins, created_at, revoked_at, last_used_ts, event_count`
 
 // listWriteKeys returns keys for a project (or all when projectID == "").
-func listWriteKeys(db *sql.DB, projectID string) ([]*WriteKey, error) {
+func listWriteKeys(db sqlRunner, projectID string) ([]*WriteKey, error) {
 	q := `SELECT ` + writeKeyCols + ` FROM write_keys`
 	var args []any
 	if projectID != "" {
@@ -101,7 +101,7 @@ func listWriteKeys(db *sql.DB, projectID string) ([]*WriteKey, error) {
 }
 
 // lookupActiveWriteKey resolves a key value to its active row, or nil.
-func lookupActiveWriteKey(db *sql.DB, key string) *WriteKey {
+func lookupActiveWriteKey(db sqlRunner, key string) *WriteKey {
 	if key == "" {
 		return nil
 	}
@@ -113,7 +113,7 @@ func lookupActiveWriteKey(db *sql.DB, key string) *WriteKey {
 	return wk
 }
 
-func revokeWriteKey(db *sql.DB, id int64, projectID string) error {
+func revokeWriteKey(db sqlRunner, id int64, projectID string) error {
 	_, err := db.Exec(
 		`UPDATE write_keys SET revoked_at = ? WHERE id = ? AND project_id = ? AND revoked_at IS NULL`,
 		time.Now().UnixMilli(), id, projectID,
@@ -121,7 +121,7 @@ func revokeWriteKey(db *sql.DB, id int64, projectID string) error {
 	return err
 }
 
-func touchWriteKey(db *sql.DB, id int64) {
+func touchWriteKey(db sqlRunner, id int64) {
 	_, _ = db.Exec(
 		`UPDATE write_keys SET last_used_ts = ?, event_count = event_count + 1 WHERE id = ?`,
 		time.Now().UnixMilli(), id,
@@ -150,7 +150,7 @@ func (a *App) handleKeysList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	keys, err := listWriteKeys(globalCtx.AppDB(), projectID)
+	keys, err := listWriteKeys(requestReadDB(r), projectID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -186,7 +186,7 @@ func (a *App) handleKeysCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	wk, err := createWriteKey(globalCtx.AppDB(), body.Site, projectID, body.AllowedOrigins)
+	wk, err := createWriteKey(requestWriteDB(r), body.Site, projectID, body.AllowedOrigins)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -216,9 +216,31 @@ func (a *App) handleKeysRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	if err := revokeWriteKey(globalCtx.AppDB(), body.ID, projectID); err != nil {
+	if err := revokeWriteKey(requestWriteDB(r), body.ID, projectID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+func touchWriteKeyEvent(db sqlDatabase, keyID, eventID int64) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT OR IGNORE INTO collected_key_events VALUES(?,?)`, keyID, eventID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		if _, err = tx.Exec(`UPDATE write_keys SET last_used_ts=?,event_count=event_count+1 WHERE id=?`, time.Now().UnixMilli(), keyID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

@@ -77,7 +77,7 @@ func (a *App) handleSummary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	db := globalCtx.AppDB()
+	db := requestReadDB(r)
 	f, err := scopedFilterFromRequest(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
@@ -108,7 +108,7 @@ func (a *App) handleSeries(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	series, err := dailySeries(globalCtx.AppDB(), f)
+	series, err := dailySeries(requestReadDB(r), f)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -131,7 +131,7 @@ func (a *App) handleTop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	rows, err := topByPropsKey(globalCtx.AppDB(), f, by, queryLimit(r, 10, 200))
+	rows, err := topByPropsKey(requestReadDB(r), f, by, queryLimit(r, 10, 200))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -152,7 +152,7 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	rows, err := queryRows(globalCtx.AppDB(), f, queryLimit(r, 50, 500))
+	rows, err := queryRows(requestReadDB(r), f, queryLimit(r, 50, 500))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -172,7 +172,7 @@ func (a *App) handleDimensions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	apps, topics, err := distinctDimensions(globalCtx.AppDB(), projectID)
+	apps, topics, err := distinctDimensions(requestReadDB(r), projectID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
