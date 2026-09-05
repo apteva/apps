@@ -42,6 +42,12 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 	pdf := fpdf.New("P", "mm", "A4", "")
 	pdf.SetMargins(20, 20, 20)
 	pdf.SetAutoPageBreak(true, 20)
+	pdf.SetFooterFunc(func() {
+		pdf.SetY(-14)
+		pdf.SetFont("Helvetica", "", 8)
+		pdf.SetTextColor(120, 120, 120)
+		pdf.CellFormat(0, 5, fmt.Sprintf("Page %d", pdf.PageNo()), "", 0, "R", false, 0, "")
+	})
 	pdf.AddPage()
 
 	// CP-1252 translator — see the file header. Every Cell/MultiCell
@@ -168,27 +174,65 @@ func renderInvoicePDF(inv *Invoice, customer *Customer, issuer *Issuer) ([]byte,
 		// row height). Matches Stripe/QBO line-item conventions.
 		const lineH = 5.0
 		const leftX = 20.0
-		for _, li := range inv.LineItems {
-			yStart := pdf.GetY()
-			pdf.SetX(leftX)
-			pdf.MultiCell(descW, lineH, e(li.Description), "", "L", false)
-			descEndY := pdf.GetY()
-			// Numeric columns at row 1
-			pdf.SetXY(leftX+descW, yStart)
-			pdf.CellFormat(20, lineH, e(formatQty(li.Quantity)), "", 0, "R", false, 0, "")
-			pdf.CellFormat(30, lineH, e(formatMoneyPDF(li.UnitPriceCents, inv.Currency)), "", 0, "R", false, 0, "")
-			pdf.CellFormat(20, lineH, e(fmt.Sprintf("%.2f%%", float64(li.TaxRateBps)/100)), "", 0, "R", false, 0, "")
-			pdf.CellFormat(30, lineH, e(formatMoneyPDF(li.AmountCents, inv.Currency)), "", 0, "R", false, 0, "")
-			// Advance to the bottom of whichever side is taller.
-			bottomY := descEndY
-			if yStart+lineH > bottomY {
-				bottomY = yStart + lineH
+		tableHeader := func() {
+			pdf.SetFont("Helvetica", "B", 8)
+			for _, c := range []struct {
+				w float64
+				s string
+			}{{descW, "DESCRIPTION"}, {20, "QTY"}, {30, "UNIT"}, {20, "TAX"}, {30, "AMOUNT"}} {
+				pdf.CellFormat(c.w, 7, e(c.s), "", 0, "L", false, 0, "")
 			}
-			pdf.SetXY(leftX, bottomY+1) // +1mm row gutter
+			pdf.Ln(9)
+			pdf.SetFont("Helvetica", "", 10)
 		}
+		for _, li := range inv.LineItems {
+			lines := pdf.SplitLines([]byte(e(li.Description)), descW)
+			if len(lines) == 0 {
+				lines = [][]byte{[]byte("")}
+			}
+			// Keep ordinary rows together; split very long descriptions across pages.
+			height := float64(len(lines))*lineH + 1
+			if height < 240 && pdf.GetY()+height > 272 {
+				pdf.AddPage()
+				tableHeader()
+			}
+			first := true
+			for len(lines) > 0 {
+				if pdf.GetY()+lineH > 272 {
+					pdf.AddPage()
+					tableHeader()
+				}
+				available := int((272 - pdf.GetY()) / lineH)
+				if available < 1 {
+					available = 1
+				}
+				n := min(len(lines), available)
+				y := pdf.GetY()
+				for _, line := range lines[:n] {
+					pdf.SetX(leftX)
+					pdf.CellFormat(descW, lineH, string(line), "", 1, "L", false, 0, "")
+				}
+				endY := pdf.GetY()
+				if first {
+					pdf.SetXY(leftX+descW, y)
+					pdf.CellFormat(20, lineH, e(formatQty(li.Quantity)), "", 0, "R", false, 0, "")
+					pdf.CellFormat(30, lineH, e(formatMoneyPDF(li.UnitPriceCents, inv.Currency)), "", 0, "R", false, 0, "")
+					pdf.CellFormat(20, lineH, e(fmt.Sprintf("%.2f%%", float64(li.TaxRateBps)/100)), "", 0, "R", false, 0, "")
+					pdf.CellFormat(30, lineH, e(formatMoneyPDF(li.AmountCents, inv.Currency)), "", 0, "R", false, 0, "")
+					first = false
+				}
+				pdf.SetXY(leftX, endY)
+				lines = lines[n:]
+			}
+			pdf.Ln(1)
+		}
+
 	}
 
 	// ── Totals box on the right ──
+	if pdf.GetY()+50 > 272 {
+		pdf.AddPage()
+	}
 	pdf.Ln(4)
 	pdf.SetDrawColor(220, 220, 220)
 	pdf.Line(20, pdf.GetY(), pageWidth-20, pdf.GetY())

@@ -92,6 +92,9 @@ func (s *stripePlatformStub) ExecuteIntegrationTool(connectionID int64, tool str
 		}
 		return &sdk.ExecuteResult{Success: true, Status: http.StatusOK, Data: data}, nil
 	case "get_payment_intent":
+		if strArg(input, "payment_intent_id") == "pi_refund_tool" {
+			return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"id":"pi_refund_tool","amount":2400,"currency":"usd","status":"succeeded"}`)}, nil
+		}
 		return &sdk.ExecuteResult{
 			Success: true, Status: http.StatusOK,
 			Data: json.RawMessage(`{"id":"pi_collect_123","client_secret":"pi_collect_123_secret_abc","status":"requires_payment_method","amount":1200,"currency":"usd","customer":"cus_test_123","payment_method":"pm_test_123"}`),
@@ -101,7 +104,7 @@ func (s *stripePlatformStub) ExecuteIntegrationTool(connectionID int64, tool str
 			Success: true, Status: http.StatusOK,
 			Data: json.RawMessage(`{"id":"pm_test_123","type":"card","customer":"cus_test_123","card":{"brand":"visa","last4":"4242","exp_month":12,"exp_year":2030,"country":"US"}}`),
 		}, nil
-	case "create_refund":
+	case "create_refund", "get_refund":
 		return &sdk.ExecuteResult{
 			Success: true, Status: http.StatusOK,
 			Data: json.RawMessage(`{"id":"re_test_123","status":"pending"}`),
@@ -397,8 +400,8 @@ func TestInvoicesCollectIsDurablyIdempotent(t *testing.T) {
 		ProjectID:               "test-proj",
 		CustomerID:              cust.ID,
 		Provider:                "stripe",
-		ProviderCustomerID:      "cus_collect",
-		ProviderPaymentMethodID: "pm_collect",
+		ProviderCustomerID:      "cus_test_123",
+		ProviderPaymentMethodID: "pm_test_123",
 		Type:                    "card",
 		Status:                  "active",
 		IsDefault:               true,

@@ -592,21 +592,7 @@ func hasVATID(raw []byte) bool {
 // Same-country EU B2B uses domestic VAT, not reverse charge, so we
 // require issuer.country != customer.country.
 func qualifiesForEUReverseCharge(issuer *Issuer, customer *Customer, inv *Invoice) bool {
-	if inv == nil || inv.TaxCents != 0 {
-		return false
-	}
-	if issuer == nil || !issuer.Configured || customer == nil {
-		return false
-	}
-	ic := addressCountry(issuer.Address)
-	cc := addressCountry(customer.BillingAddress)
-	if ic == "" || cc == "" || ic == cc {
-		return false
-	}
-	if !isEUMember(ic) || !isEUMember(cc) {
-		return false
-	}
-	return hasVATID(issuer.TaxIDs) && hasVATID(customer.TaxIDs)
+	return inv != nil && inv.TaxTreatment == "reverse_charge"
 }
 
 const reverseChargeNotice = "Reverse charge — VAT to be accounted for by the recipient. Article 196 of Council Directive 2006/112/EC."
