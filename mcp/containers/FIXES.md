@@ -1,6 +1,6 @@
 Audit fixes against Containers v0.4.0
 
-Base: `containers/v0.4.0` / `f04ae9c59d127b168e30ec7e14300387e80f0d4f`. Work was isolated on branch `fix/containers-v040-audit`. No deployment, release tag, production database operation, or remote VPS mutation was performed.
+Base: `containers/v0.4.0` / `f04ae9c59d127b168e30ec7e14300387e80f0d4f`. Work was isolated on branch `fix/containers-v040-audit`. The audit itself performed no deployment, release tag, production database operation, or remote VPS mutation. These fixes are included in the subsequent Containers 0.5.0 release; see RELEASE-0.5.0.md.
 
 | Audit finding | Implemented change | Main regression evidence |
 |---|---|---|

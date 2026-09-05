@@ -119,7 +119,7 @@
   },
   "scope_limits": [
     "Disposable local Docker and stubbed remote/platform tests; no live VPS smoke test.",
-    "No production mutation, deployment, release tag or push.",
+    "Audit-time validation performed no production mutation, deployment, release tag or push; subsequent release validation is recorded in release-validation-0.5.0.json.",
     "Repository-wide panel import scan flags pre-existing TradingPanel development-JSX import; Containers passes its scoped check."
   ]
 }
