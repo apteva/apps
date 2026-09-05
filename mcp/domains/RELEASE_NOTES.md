@@ -30,7 +30,7 @@ Based on `domains/v0.5.2` (`78c844b486eb32c7d56f01d0e05838b511d0ee5d`). This rel
 - Add searchable, paginated inventory/record tables; display account/unmanaged state, disabled records and warnings. Add metadata editing and Porkbun expiry refresh.
 - Trap and restore confirmation-dialog focus, reset cancelled edits, show the actual purchase account/term/price/privacy/renewal/expiry, and expose pending-purchase and DNS-recovery status.
 - Split the backend into inventory, database, HTTP, registration, validation, and provider modules. The entry file is now 208 lines. Add reproducible Bun dependencies, UI tests, type checking and a panel-only build command.
-- Pin app-sdk v0.73.0 after checking tag ancestry, require Go 1.26.6, and update golang.org/x/sys to v0.44.0. Tests use `GOWORK=off` so they verify the released SDK dependency.
+- Pin app-sdk v0.75.0 after checking tag ancestry (including atomic migrations), require Go 1.26.6, and update golang.org/x/sys to v0.44.0. Tests use `GOWORK=off` so they verify the released SDK dependency.
 
 ## Validation
 

@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/domains
 go 1.26.6
 
 require (
-	github.com/apteva/app-sdk v0.73.0
+	github.com/apteva/app-sdk v0.75.0
 	modernc.org/sqlite v1.50.0
 )
 
