@@ -1,11 +1,17 @@
 name: Social checks
 on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Social source ref to verify
+        type: string
+        default: main
   pull_request:
-    paths: ['mcp/social/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', 'package.json', 'bun.lock', '.github/workflows/social-checks.yml']
+    paths: ['mcp/social/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', 'scripts/verify-social-artifacts*', 'package.json', 'bun.lock', '.github/workflows/social-checks.yml']
   push:
     branches: [main]
     tags: ['social/v*']
-    paths: ['mcp/social/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', 'package.json', 'bun.lock', '.github/workflows/social-checks.yml']
+    paths: ['mcp/social/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', 'scripts/verify-social-artifacts*', 'package.json', 'bun.lock', '.github/workflows/social-checks.yml']
 permissions:
   contents: read
 concurrency:
@@ -19,6 +25,8 @@ jobs:
       GOWORK: 'off'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: mcp/social/go.mod
@@ -27,11 +35,17 @@ jobs:
         with:
           bun-version: '1.3.13'
       - run: bun install --frozen-lockfile --ignore-scripts
-      - run: bun test mcp/social/ui
+      - name: Load current artifact verifier for a release-tag checkout
+        if: inputs.ref != ''
+        run: |
+          git fetch --no-tags origin main
+          git show origin/main:scripts/verify-social-artifacts.ts > scripts/verify-social-artifacts.ts
+          git show origin/main:scripts/verify-social-artifacts.test.ts > scripts/verify-social-artifacts.test.ts
+      - run: bun test mcp/social/ui scripts/verify-social-artifacts.test.ts
       - run: bunx -p typescript@7.0.2 tsc --noEmit --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 --skipLibCheck --allowImportingTsExtensions mcp/social/ui/SocialPanel.tsx mcp/social/ui/SocialCharts.tsx
       - run: bun run scripts/build-panels.ts --app social
       - name: Verify committed frontend artifacts
-        run: git diff --exit-code -- mcp/social/ui
+        run: bun run scripts/verify-social-artifacts.ts
       - run: bun audit
       - run: go test -count=1 -timeout 180s ./...
         working-directory: mcp/social
