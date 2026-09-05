@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/instances
 go 1.27.1
 
 require (
-	github.com/apteva/app-sdk v0.73.0
+	github.com/apteva/app-sdk v0.75.0
 	github.com/shirou/gopsutil/v4 v4.26.4
 	golang.org/x/crypto v0.56.0
 	modernc.org/sqlite v1.50.0
