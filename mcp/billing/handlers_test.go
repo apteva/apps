@@ -183,6 +183,9 @@ func TestStripeSetupIntentSucceededStoresPaymentMethod(t *testing.T) {
 	ctx := newTestCtx(t, tk.WithEmitter(rec))
 	app := &App{}
 	customer := mustCustomer(t, ctx, "setup@example.com", "Setup Co")
+	if _, err := dbSetupSessionCreate(ctx.AppDB(), &SetupSession{ProjectID: "test-proj", CustomerID: customer.ID, Provider: "stripe", ProviderCustomerID: "cus_123", ProviderSessionID: "cs_setup", ProviderSetupIntentID: "seti_123", Status: "pending"}); err != nil {
+		t.Fatal(err)
+	}
 
 	payload := []byte(`{
 		"id": "seti_123",
@@ -803,12 +806,12 @@ func TestPayments_HistoricalReceivedAtDrivesPaidAtAndEvent(t *testing.T) {
 	inv := out.(map[string]any)["invoice"].(*Invoice)
 	inv = mustFinalize(t, ctx, inv.ID)
 
-	const receivedAt = "2025-01-03T14:30:00+01:00"
+	const receivedAt = "2025-01-03T13:30:00Z"
 	paidOut, err := app.toolPaymentsRecord(ctx, map[string]any{
 		"invoice_id":   inv.ID,
 		"amount_cents": int64(2500),
 		"method":       "wire",
-		"received_at":  receivedAt,
+		"received_at":  "2025-01-03T14:30:00+01:00",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -837,11 +840,11 @@ func TestPayments_HistoricalReceivedAtDrivesPaidAtAndEvent(t *testing.T) {
 		"due_date":             "2025-01-15T00:00:00Z",
 		"created_at":           paid.CreatedAt,
 		"finalized_at":         paid.FinalizedAt,
-		"amount_paid_cents":    int64(2500),
+		"amount_paid_cents":    float64(2500),
 		"provider":             "local",
-		"payment_id":           payment.ID,
+		"payment_id":           float64(payment.ID),
 		"payment_method":       "wire",
-		"payment_amount_cents": int64(2500),
+		"payment_amount_cents": float64(2500),
 	}
 	for key, expected := range want {
 		if got := payload[key]; got != expected {

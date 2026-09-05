@@ -33,14 +33,16 @@ type CollectionAttempt struct {
 }
 
 type stripePaymentIntent struct {
-	ID            string          `json:"id"`
-	ClientSecret  string          `json:"client_secret"`
-	Status        string          `json:"status"`
-	Amount        int64           `json:"amount"`
-	Currency      string          `json:"currency"`
-	Customer      string          `json:"customer"`
-	PaymentMethod string          `json:"payment_method"`
-	NextAction    json.RawMessage `json:"next_action"`
+	Metadata      map[string]string `json:"metadata"`
+	EventCreated  int64             `json:"_billing_event_created"`
+	ID            string            `json:"id"`
+	ClientSecret  string            `json:"client_secret"`
+	Status        string            `json:"status"`
+	Amount        int64             `json:"amount"`
+	Currency      string            `json:"currency"`
+	Customer      string            `json:"customer"`
+	PaymentMethod string            `json:"payment_method"`
+	NextAction    json.RawMessage   `json:"next_action"`
 	LastError     struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
@@ -63,13 +65,20 @@ func (a *App) toolInvoicesCollect(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if len(idempotencyKey) > 255 {
 		return nil, errors.New("idempotency_key must be at most 255 characters")
 	}
+	var prior *CollectionAttempt
 	if existing, err := dbCollectionAttemptByKey(ctx.AppDB(), pid, idempotencyKey); err != nil {
 		return nil, err
 	} else if existing != nil {
 		if existing.InvoiceID != invoiceID {
 			return nil, errors.New("idempotency_key was already used for a different invoice")
 		}
-		return map[string]any{"collection_attempt": existing, "replayed": true}, nil
+		if supplied := int64Arg(args, "payment_method_id"); supplied != 0 && supplied != existing.PaymentMethodID {
+			return nil, errors.New("idempotency key reused with different payment method")
+		}
+		if existing.Status == "succeeded" || existing.Status == "failed" {
+			return map[string]any{"collection_attempt": existing, "replayed": true}, nil
+		}
+		prior = existing
 	}
 
 	inv, cust, err := loadInvoiceForRender(ctx.AppDB(), pid, invoiceID)
@@ -79,10 +88,14 @@ func (a *App) toolInvoicesCollect(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if inv == nil {
 		return nil, fmt.Errorf("invoice %d not found", invoiceID)
 	}
-	if inv.Status != "open" && inv.Status != "uncollectible" {
+	if prior == nil && inv.Status != "open" && inv.Status != "uncollectible" {
 		return nil, fmt.Errorf("cannot collect %s invoice", inv.Status)
 	}
 	amountDue := inv.TotalCents - inv.AmountPaidCents
+	if prior != nil {
+		amountDue = prior.AmountCents
+		args = mergeMaps(args, map[string]any{"payment_method_id": prior.PaymentMethodID})
+	}
 	if amountDue <= 0 {
 		return nil, errors.New("invoice has no outstanding balance")
 	}
@@ -109,13 +122,13 @@ func (a *App) toolInvoicesCollect(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, errors.New("automatic collection currently requires a Stripe payment method")
 	}
 
-	attempt, created, err := dbCollectionAttemptClaim(
+	attempt, _, err := dbCollectionAttemptClaim(
 		ctx.AppDB(), pid, invoiceID, pm.ID, idempotencyKey, amountDue, inv.Currency,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if !created || attempt.Status != "pending" {
+	if attempt.Status == "succeeded" || attempt.Status == "failed" {
 		return map[string]any{"collection_attempt": attempt, "replayed": true}, nil
 	}
 
@@ -127,6 +140,9 @@ func (a *App) toolInvoicesCollect(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err := ensureStripeWebhook(ctx, bound); err != nil {
 		_ = dbCollectionAttemptFail(ctx.AppDB(), attempt.ID, "webhook_unavailable", err.Error(), nil)
 		return nil, fmt.Errorf("stripe webhook setup: %w", err)
+	}
+	if err = requireMethodConnection(ctx, bound, pm); err != nil {
+		return nil, err
 	}
 	stripeCustomerID := pm.ProviderCustomerID
 	if stripeCustomerID == "" {
@@ -159,9 +175,9 @@ func (a *App) toolInvoicesCollect(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	var intent stripePaymentIntent
 	if err := executeStripe(ctx, bound, "create_payment_intent", input, &intent); err != nil {
-		_ = dbCollectionAttemptFail(ctx.AppDB(), attempt.ID, "processor_error", err.Error(), nil)
+		_ = dbCollectionAttemptUpdate(ctx.AppDB(), attempt.ID, "", "pending", "processor_unknown", err.Error(), nil, false)
 		failed, _ := dbCollectionAttemptGet(ctx.AppDB(), pid, attempt.ID)
-		emitCollectionFailure(ctx, "invoice.payment_failed", inv, failed)
+		emitCollectionFailure(ctx, "invoice.payment_pending", inv, failed)
 		return map[string]any{"collection_attempt": failed}, nil
 	}
 	if intent.ID == "" {
@@ -187,23 +203,52 @@ func (a *App) applyCollectionIntent(ctx *sdk.AppCtx, pid string, inv *Invoice, a
 	if intent == nil {
 		return nil, errors.New("payment intent required")
 	}
+	attempt, err := dbCollectionAttemptGet(ctx.AppDB(), pid, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	if attempt == nil || attempt.InvoiceID != inv.ID {
+		return nil, errors.New("collection attempt not found")
+	}
+	if intent.ID == "" || intent.Amount != attempt.AmountCents || !strings.EqualFold(intent.Currency, attempt.Currency) {
+		return nil, errors.New("provider collection amount/currency does not match persisted attempt")
+	}
+	if attempt.ProviderPaymentIntentID != "" && attempt.ProviderPaymentIntentID != intent.ID {
+		return nil, errors.New("provider intent does not match attempt")
+	}
+	pm, err := dbPaymentMethodGet(ctx.AppDB(), pid, attempt.PaymentMethodID)
+	if err != nil {
+		return nil, err
+	}
+	if pm != nil && intent.Customer != "" && pm.ProviderCustomerID != "" && intent.Customer != pm.ProviderCustomerID {
+		return nil, errors.New("provider customer does not match collection")
+	}
+	if attempt.Status == "succeeded" && intent.Status != "succeeded" {
+		return attempt, nil
+	}
 	switch intent.Status {
 	case "succeeded":
 		payment, paid, err := dbPaymentRecord(
-			ctx.AppDB(), pid, inv.ID, inv.TotalCents-inv.AmountPaidCents,
-			"stripe", intent.ID, nowRFC3339(),
+			ctx.AppDB(), pid, inv.ID, attempt.AmountCents,
+			"stripe", intent.ID, providerReceivedAt(intent.EventCreated),
 			"Automatic Stripe collection", "system:stripe-collection",
 		)
 		if err != nil {
 			return nil, err
 		}
+		if err := persistPaymentConnection(ctx, payment); err != nil {
+			return nil, err
+		}
 		if err := dbCollectionAttemptSucceed(ctx.AppDB(), attemptID, intent.ID); err != nil {
+			return nil, err
+		}
+		if err := finishProviderOperation(ctx.AppDB(), intent.ID); err != nil {
 			return nil, err
 		}
 		emitInvoicePaid(ctx, paid, payment)
 	case "requires_action":
 		if err := dbCollectionAttemptUpdate(
-			ctx.AppDB(), attemptID, intent.ID, "failed",
+			ctx.AppDB(), attemptID, intent.ID, "requires_action",
 			firstString(intent.LastError.Code, "authentication_required"),
 			firstString(intent.LastError.Message, "customer authentication is required"),
 			intent.NextAction, true,
@@ -220,6 +265,11 @@ func (a *App) applyCollectionIntent(ctx *sdk.AppCtx, pid string, inv *Invoice, a
 			intent.NextAction, true,
 		); err != nil {
 			return nil, err
+		}
+		if intent.Status == "canceled" {
+			if err := finishProviderOperation(ctx.AppDB(), intent.ID); err != nil {
+				return nil, err
+			}
 		}
 		current, _ := dbCollectionAttemptGet(ctx.AppDB(), pid, attemptID)
 		emitCollectionFailure(ctx, "invoice.payment_failed", inv, current)
@@ -338,7 +388,7 @@ func dbCollectionAttemptUpdate(db *sql.DB, id int64, intentID, status, errorCode
 		     status = ?, error_code = NULLIF(?, ''), error_message = NULLIF(?, ''),
 		     next_action = ?, updated_at = ?,
 		     completed_at = CASE WHEN ? = 1 THEN COALESCE(completed_at, ?) ELSE completed_at END
-		 WHERE id = ?`,
+		 WHERE id = ? AND status<>'succeeded'`,
 		intentID, status, errorCode, errorMessage, jsonOrEmpty(nextAction, "{}"),
 		nowRFC3339(), boolInt(completed), nowRFC3339(), id,
 	)

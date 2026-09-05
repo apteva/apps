@@ -212,12 +212,12 @@ func TestRenderInvoice_IncludesConfiguredIssuer(t *testing.T) {
 	}
 	html := renderInvoiceHTML(sampleInvoice(), sampleCustomer(), issuer)
 	for _, frag := range []string{
-		"Acme Co",                  // display_name in BILL FROM
-		"Acme Holdings Ltd",        // legal_name
-		"1 Test Way",               // address
-		"VAT ZZ123456789",          // tax ID with friendly label
-		"Reg 9999999",              // company reg label
-		"Pay by bank transfer",     // bank section heading
+		"Acme Co",                     // display_name in BILL FROM
+		"Acme Holdings Ltd",           // legal_name
+		"1 Test Way",                  // address
+		"VAT ZZ123456789",             // tax ID with friendly label
+		"Reg 9999999",                 // company reg label
+		"Pay by bank transfer",        // bank section heading
 		"XX00 BANK 0000 0000 0000 00", // IBAN spaced every 4
 		"TESTBIC0XXX",
 		"Bank code 000",
@@ -272,6 +272,7 @@ func TestRenderInvoice_EUReverseChargeNotice(t *testing.T) {
 
 	// Make every line zero-tax so inv.TaxCents == 0.
 	inv := sampleInvoice()
+	inv.TaxTreatment = "reverse_charge"
 	for i := range inv.LineItems {
 		inv.LineItems[i].TaxRateBps = 0
 	}
@@ -301,6 +302,7 @@ func TestRenderInvoice_EUReverseChargeNotice(t *testing.T) {
 		ID: 3, Name: "ES Buyer", BillingAddress: domesticAddr,
 		TaxIDs: domesticTax,
 	}
+	inv.TaxTreatment = "standard"
 	htmlDomestic := renderInvoiceHTML(inv, domestic, issuer)
 	if strings.Contains(htmlDomestic, "Reverse charge") {
 		t.Error("domestic B2B EU sale must NOT include reverse-charge notice")
@@ -349,14 +351,14 @@ func TestFormatMoney_AllSupportedCurrencies(t *testing.T) {
 		currency string
 		want     string
 	}{
-		"USD":             {150000, "USD", "$1500.00"},
-		"USD negative":    {-100, "USD", "-$1.00"},
-		"EUR":             {99, "EUR", "€0.99"},
-		"GBP":             {1234, "GBP", "£12.34"},
-		"JPY no fraction": {15000, "JPY", "¥150"}, // yen drops cents
-		"CAD shares $":    {500, "CAD", "$5.00"},
-		"unknown 3-letter": {2500, "XYZ", "XYZ 25.00"},
-		"zero":             {0, "USD", "$0.00"},
+		"USD":                  {150000, "USD", "$1500.00"},
+		"USD negative":         {-100, "USD", "-$1.00"},
+		"EUR":                  {99, "EUR", "€0.99"},
+		"GBP":                  {1234, "GBP", "£12.34"},
+		"JPY no fraction":      {15000, "JPY", "¥150"}, // yen drops cents
+		"CAD shares $":         {500, "CAD", "$5.00"},
+		"unknown 3-letter":     {2500, "XYZ", "XYZ 25.00"},
+		"zero":                 {0, "USD", "$0.00"},
 		"lowercase normalised": {100, "usd", "$1.00"},
 	}
 	for name, c := range cases {
@@ -377,12 +379,12 @@ func TestFormatMoneyPDF_NonASCIICurrenciesUseISO(t *testing.T) {
 		currency string
 		want     string
 	}{
-		"USD keeps $":   {150000, "USD", "$1500.00"},
-		"CAD keeps $":   {500, "CAD", "$5.00"},
-		"EUR uses ISO":  {99, "EUR", "EUR 0.99"},
-		"GBP uses ISO":  {1234, "GBP", "GBP 12.34"},
-		"JPY uses ISO":  {15000, "JPY", "JPY 150"},
-		"negative EUR":  {-150, "EUR", "-EUR 1.50"},
+		"USD keeps $":      {150000, "USD", "$1500.00"},
+		"CAD keeps $":      {500, "CAD", "$5.00"},
+		"EUR uses ISO":     {99, "EUR", "EUR 0.99"},
+		"GBP uses ISO":     {1234, "GBP", "GBP 12.34"},
+		"JPY uses ISO":     {15000, "JPY", "JPY 150"},
+		"negative EUR":     {-150, "EUR", "-EUR 1.50"},
 		"unknown 3-letter": {2500, "XYZ", "XYZ 25.00"},
 	}
 	for name, c := range cases {
