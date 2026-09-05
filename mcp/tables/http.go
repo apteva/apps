@@ -45,7 +45,7 @@ func (a *App) handleTablesCollection(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.toolTablesList(requestAppCtx(r), injectProject(r, nil))
+		out, err := a.toolTablesList(requestAppCtx(r), injectProject(r, listQueryArgs(r)))
 		writeToolResult(w, out, err)
 	case http.MethodPost:
 		body, err := readJSONBody(r)
@@ -145,6 +145,7 @@ func (a *App) handleRowsCollection(w http.ResponseWriter, r *http.Request, table
 			"offset":   parseIntQuery(r, "offset", 0),
 			"order_by": r.URL.Query().Get("order_by"),
 		}
+		mergeReadQueryArgs(r, args)
 		out, err := a.toolRowsSearch(requestAppCtx(r), injectProject(r, args))
 		writeToolResult(w, out, err)
 	case http.MethodPost:
@@ -189,7 +190,8 @@ func (a *App) handleRowsItem(w http.ResponseWriter, r *http.Request, tableName s
 		out, err := a.toolRowsGet(requestAppCtx(r), injectProject(r, map[string]any{
 			"table":         tableName,
 			"id":            id,
-			"hydrate_files": r.URL.Query().Get("hydrate_files") == "true",
+			"hydrate_files": boolQuery(r, "hydrate_files"),
+			"select":        selectQuery(r),
 		}))
 		writeToolResult(w, out, err)
 	case http.MethodPatch:
@@ -202,11 +204,23 @@ func (a *App) handleRowsItem(w http.ResponseWriter, r *http.Request, tableName s
 			"table":  tableName,
 			"id":     id,
 			"fields": body,
+			"select": selectQuery(r),
 		})
+		for _, key := range []string{"expected_revision", "expected_table_id"} {
+			if v := r.URL.Query().Get(key); v != "" {
+				args[key] = v
+			}
+		}
 		out, err := a.toolRowsUpdate(requestAppCtx(r), args)
 		writeToolResult(w, out, err)
 	case http.MethodDelete:
-		out, err := a.toolRowsDelete(requestAppCtx(r), injectProject(r, map[string]any{"table": tableName, "id": id}))
+		args := map[string]any{"table": tableName, "id": id}
+		for _, key := range []string{"expected_revision", "expected_table_id"} {
+			if v := r.URL.Query().Get(key); v != "" {
+				args[key] = v
+			}
+		}
+		out, err := a.toolRowsDelete(requestAppCtx(r), injectProject(r, args))
 		writeToolResult(w, out, err)
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "GET, PATCH, or DELETE")
@@ -236,6 +250,9 @@ func readJSONBody(r *http.Request) (map[string]any, error) {
 	if err := dec.Decode(&trailing); err != io.EOF {
 		return nil, errf("body must contain one JSON object")
 	}
+	if lr.N <= 0 {
+		return nil, &statusError{413, "body exceeds maximum size"}
+	}
 	if m, ok := raw.(map[string]any); ok {
 		return m, nil
 	}
@@ -260,6 +277,7 @@ func injectProject(r *http.Request, args map[string]any) map[string]any {
 	if args == nil {
 		args = map[string]any{}
 	}
+	args["_request_context"] = r.Context()
 	if v := r.URL.Query().Get("project_id"); v != "" {
 		args["_project_id"] = v
 	}
@@ -280,8 +298,66 @@ func parseIntQuery(r *http.Request, key string, def int) int {
 
 func writeToolResult(w http.ResponseWriter, out any, err error) {
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		httpErr(w, errorStatus(err), err.Error())
 		return
 	}
 	httpJSON(w, out)
+}
+
+func selectQuery(r *http.Request) any {
+	v := r.URL.Query().Get("select")
+	if v == "" {
+		return nil
+	}
+	values := []any{}
+	for _, col := range strings.Split(v, ",") {
+		values = append(values, strings.TrimSpace(col))
+	}
+	return values
+}
+func mergeReadQueryArgs(r *http.Request, args map[string]any) {
+	q := r.URL.Query()
+	if v := q.Get("cursor"); v != "" {
+		args["cursor"] = v
+	}
+	if v := q.Get("include_total"); v != "" {
+		if v == "true" || v == "false" {
+			args["include_total"] = v == "true"
+		} else {
+			args["include_total"] = v
+		}
+	}
+	if s := selectQuery(r); s != nil {
+		args["select"] = s
+	}
+	for _, k := range []string{"limit", "offset"} {
+		if v := q.Get(k); v != "" {
+			args[k] = v
+		}
+	}
+}
+func listQueryArgs(r *http.Request) map[string]any {
+	args := map[string]any{}
+	for _, k := range []string{"limit", "offset"} {
+		if v := r.URL.Query().Get(k); v != "" {
+			args[k] = v
+		}
+	}
+	if v := r.URL.Query().Get("summary"); v != "" {
+		args["summary"] = boolQuery(r, "summary")
+	}
+	return args
+}
+
+// Keep malformed booleans visible to argument validation instead of silently
+// converting them to false.
+func boolQuery(r *http.Request, key string) any {
+	v := r.URL.Query().Get(key)
+	if v == "" || v == "false" {
+		return false
+	}
+	if v == "true" {
+		return true
+	}
+	return v
 }

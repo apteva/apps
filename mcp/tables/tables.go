@@ -13,8 +13,11 @@ import (
 // ─── tables_create ─────────────────────────────────────────────────
 
 func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.Lock()
-	defer a.schemaMu.Unlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "tables_create", true)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -35,6 +38,9 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if len(rawCols) == 0 {
 		return nil, errf("at least one column is required")
 	}
+	if err := checkBatchBytes(ctx, rawCols); err != nil {
+		return nil, err
+	}
 	cols, err := parseColumnDefs(rawCols)
 	if err != nil {
 		return nil, err
@@ -49,8 +55,7 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 		}
 	}
 
-	db := ctx.AppDB()
-	tx, err := db.Begin()
+	tx, err := beginWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +68,18 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 
-	res, err := tx.Exec(`INSERT INTO tables_meta(project_id, scope, name, physical_name, row_count) VALUES (?, 'project', ?, '', 0)`, pid, name)
+	var tableCount int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM tables_meta WHERE project_id=?", pid).Scan(&tableCount); err != nil {
+		return nil, err
+	}
+	if int64(tableCount) >= cfgInt64Range(ctx, "max_tables_per_project", 1000, 1, 100000) {
+		return nil, errf("max_tables_per_project exceeded")
+	}
+	var nextID int64
+	if err := tx.QueryRow("UPDATE table_identity SET last_id=MAX(last_id,COALESCE((SELECT MAX(id) FROM tables_meta),0))+1 RETURNING last_id").Scan(&nextID); err != nil {
+		return nil, err
+	}
+	res, err := tx.Exec(`INSERT INTO tables_meta(id,project_id, scope, name, physical_name, row_count, storage_version) VALUES (?, ?, 'project', ?, '', 0, 1)`, nextID, pid, name)
 	if err != nil {
 		return nil, err
 	}
@@ -172,9 +188,9 @@ func buildCreateTableSQL(physical string, cols []Column) (string, error) {
 	b.WriteString("CREATE TABLE ")
 	b.WriteString(quote(physical))
 	b.WriteString(" (")
-	b.WriteString(`"id" INTEGER PRIMARY KEY, `)
-	b.WriteString(`"created_at" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, `)
-	b.WriteString(`"updated_at" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`)
+	b.WriteString(`"id" INTEGER PRIMARY KEY AUTOINCREMENT, `)
+	b.WriteString(`"created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), `)
+	b.WriteString(`"updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), "_revision" INTEGER NOT NULL DEFAULT 1`)
 	for _, c := range cols {
 		st, err := sqliteType(c.Type)
 		if err != nil {
@@ -199,17 +215,32 @@ func buildCreateTableSQL(physical string, cols []Column) (string, error) {
 // ─── tables_list ───────────────────────────────────────────────────
 
 func (a *App) toolTablesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.RLock()
-	defer a.schemaMu.RUnlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "tables_list", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
-	tables, err := loadTablesContext(qctx, ctx.AppReadDB(), pid)
+	if boolArg(args, "summary") {
+		return listTableSummaries(ctx, pid, args)
+	}
+	limit := intArg(args, "limit", 100)
+	if limit < 1 || limit > 1000 {
+		return nil, errf("limit must be 1..1000")
+	}
+	offset := intArg(args, "offset", 0)
+	tables, err := loadTablesPage(qctx, ctx.AppReadDB(), pid, limit+1, offset, maxQueryBytes(ctx))
 	if err != nil {
 		return nil, queryStageErr("metadata", "<tables>", err)
+	}
+	more := len(tables) > limit
+	if more {
+		tables = tables[:limit]
 	}
 	for i := range tables {
 		if !tables[i].RowCountKnown {
@@ -220,7 +251,7 @@ func (a *App) toolTablesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			tables[i].RowCount = count
 			tables[i].RowCountKnown = true
 		}
-		a.cache.put(ctx.AppDBGeneration(), schemaCacheKey{projectID: pid, tableName: tables[i].Name}, &tables[i])
+
 	}
 	out := make([]map[string]any, 0, len(tables))
 	for _, t := range tables {
@@ -233,14 +264,17 @@ func (a *App) toolTablesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			"created_at": t.CreatedAt,
 		})
 	}
-	return map[string]any{"tables": out}, nil
+	return map[string]any{"tables": out, "has_more": more, "next_offset": offset + len(out)}, nil
 }
 
 // ─── tables_describe ───────────────────────────────────────────────
 
 func (a *App) toolTablesDescribe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.RLock()
-	defer a.schemaMu.RUnlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "tables_describe", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -266,8 +300,11 @@ func (a *App) toolTablesDescribe(ctx *sdk.AppCtx, args map[string]any) (any, err
 // ─── tables_alter ──────────────────────────────────────────────────
 
 func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.Lock()
-	defer a.schemaMu.Unlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "tables_alter", true)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -298,8 +335,7 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, errf("exactly one of add / rename / drop must be supplied")
 	}
 
-	db := ctx.AppDB()
-	tx, err := db.Begin()
+	tx, err := beginWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -353,11 +389,15 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if err != nil {
 			return nil, err
 		}
-		nextPos := len(t.Columns)
+		var nextPos int
+		if err := tx.QueryRow("SELECT COALESCE(MAX(position),-1)+1 FROM columns_meta WHERE table_id=?", t.ID).Scan(&nextPos); err != nil {
+			return nil, err
+		}
 		if _, err := tx.Exec(`INSERT INTO columns_meta(table_id, name, type, nullable, default_value, position) VALUES (?, ?, ?, ?, ?, ?)`,
 			t.ID, c.Name, c.Type, boolToInt(c.Nullable), dv, nextPos); err != nil {
 			return nil, err
 		}
+		t.Columns = append(t.Columns, c)
 		changeKind, changeCol = "add", c.Name
 
 	case rename != nil:
@@ -389,6 +429,7 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			WHERE column_name = ? AND index_id IN (SELECT id FROM indexes_meta WHERE table_id = ?)`, to, from, t.ID); err != nil {
 			return nil, err
 		}
+		t.Columns[columnIndex(t.Columns, from)].Name = to
 		changeKind, changeCol = "rename", to
 
 	case drop != "":
@@ -411,6 +452,8 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if _, err := tx.Exec(`DELETE FROM columns_meta WHERE table_id = ? AND name = ?`, t.ID, drop); err != nil {
 			return nil, err
 		}
+		i := columnIndex(t.Columns, drop)
+		t.Columns = append(t.Columns[:i], t.Columns[i+1:]...)
 		changeKind, changeCol = "drop", drop
 	}
 
@@ -422,15 +465,13 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	a.cache.invalidate(pid, name)
 
-	updated, err := a.loadTableWithCount(ctx, pid, name)
-	if err != nil {
-		return nil, err
-	}
+	updated := t
 	emit(ctx, topicTableAltered, map[string]any{
-		"id":     updated.ID,
-		"name":   updated.Name,
-		"change": changeKind,
-		"column": changeCol,
+		"id":      updated.ID,
+		"name":    updated.Name,
+		"change":  changeKind,
+		"column":  changeCol,
+		"columns": updated.Columns,
 	})
 	return map[string]any{
 		"id":        updated.ID,
@@ -441,7 +482,10 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}, nil
 }
 
-func prepareIndexesForColumnDrop(tx *sql.Tx, table *Table, column string) error {
+func prepareIndexesForColumnDrop(tx *writeTx, table *Table, column string) error {
+	if err := reconcileIndexes(tx, table); err != nil {
+		return err
+	}
 	rows, err := tx.Query(`SELECT i.id, i.name, i.physical_name, i.managed
 		FROM indexes_meta i
 		JOIN index_columns c ON c.index_id = i.id
@@ -472,6 +516,10 @@ func prepareIndexesForColumnDrop(tx *sql.Tx, table *Table, column string) error 
 			userNames = append(userNames, ref.name)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
@@ -498,7 +546,13 @@ func sqlLiteral(t string, v any) (string, error) {
 		return "NULL", nil
 	}
 	switch t {
-	case "text", "datetime":
+	case "datetime":
+		value, err := coerceForStorage(Column{Name: "default", Type: "datetime", Nullable: true}, v)
+		if err != nil {
+			return "", err
+		}
+		return sqlLiteral("text", value)
+	case "text":
 		s, ok := v.(string)
 		if !ok {
 			return "", errf("default for %s must be string", t)
@@ -557,8 +611,11 @@ func sqlLiteral(t string, v any) (string, error) {
 // ─── tables_drop ───────────────────────────────────────────────────
 
 func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.Lock()
-	defer a.schemaMu.Unlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "tables_drop", true)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -572,10 +629,13 @@ func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	t, err := a.loadTableSchema(ctx, pid, name)
 	if err != nil {
+		if errorStatus(err) == 404 {
+			return map[string]any{"dropped": name}, nil
+		}
 		return nil, err
 	}
 
-	tx, err := ctx.AppDB().Begin()
+	tx, err := beginWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -610,7 +670,7 @@ func loadTable(db *sql.DB, projectID, name string) (*Table, error) {
 		LIMIT 1`, name, projectID).
 		Scan(&t.ID, &t.Scope, &t.PhysicalName, &t.CreatedAt, &rowCount)
 	if err == sql.ErrNoRows {
-		return nil, errf("table %q not found", name)
+		return nil, notFound("table %q not found", name)
 	}
 	if err != nil {
 		return nil, err
@@ -634,68 +694,56 @@ func loadTables(db *sql.DB, projectID string) ([]Table, error) {
 }
 
 func loadTablesContext(ctx context.Context, db *sql.DB, projectID string) ([]Table, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, name, scope, physical_name, created_at, row_count
-		FROM tables_meta
-		WHERE project_id = ?
-		ORDER BY name`, projectID)
+	return loadTablesPage(ctx, db, projectID, -1, 0, 0)
+}
+
+// One statement gives the table list and its columns the same SQLite snapshot.
+func loadTablesPage(ctx context.Context, db *sql.DB, projectID string, limit, offset int, byteCap int64) ([]Table, error) {
+	rows, err := db.QueryContext(ctx, `WITH chosen AS (
+ SELECT * FROM tables_meta WHERE project_id=? ORDER BY name LIMIT ? OFFSET ?)
+ SELECT t.id,t.name,t.scope,t.physical_name,t.created_at,t.row_count,c.name,c.type,c.nullable,c.default_value
+ FROM chosen t LEFT JOIN columns_meta c ON c.table_id=t.id ORDER BY t.name,c.position`, projectID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Table
+	out := []Table{}
+	var used int64
 	for rows.Next() {
-		var t Table
-		var rowCount sql.NullInt64
-		if err := rows.Scan(&t.ID, &t.Name, &t.Scope, &t.PhysicalName, &t.CreatedAt, &rowCount); err != nil {
+		var id int64
+		var name, scope, physical, created string
+		var count, nullable sql.NullInt64
+		var colName, colType, def sql.NullString
+		if err := rows.Scan(&id, &name, &scope, &physical, &created, &count, &colName, &colType, &nullable, &def); err != nil {
 			return nil, err
 		}
-		if rowCount.Valid {
-			t.RowCount = rowCount.Int64
-			t.RowCountKnown = true
+		if len(out) == 0 || out[len(out)-1].ID != id {
+			out = append(out, Table{ID: id, Name: name, Scope: scope, PhysicalName: physical, CreatedAt: created, RowCount: count.Int64, RowCountKnown: count.Valid, Columns: []Column{}})
+			if byteCap > 0 && limit > 0 && len(out) == limit {
+				break
+			} // final table only signals another page
+			used += int64(len(name) + len(scope) + len(created) + 128)
 		}
-		out = append(out, t)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	indexByID := make(map[int64]int, len(out))
-	for i := range out {
-		indexByID[out[i].ID] = i
-	}
-	colRows, err := db.QueryContext(ctx, `SELECT c.table_id, c.name, c.type, c.nullable, c.default_value
-		FROM columns_meta c
-		JOIN tables_meta t ON t.id = c.table_id
-		WHERE t.project_id = ?
-		ORDER BY c.table_id, c.position`, projectID)
-	if err != nil {
-		return nil, err
-	}
-	for colRows.Next() {
-		var tableID int64
-		var c Column
-		var nullable int
-		var defaultRaw sql.NullString
-		if err := colRows.Scan(&tableID, &c.Name, &c.Type, &nullable, &defaultRaw); err != nil {
-			return nil, err
+		if colName.Valid {
+			col := Column{Name: colName.String, Type: colType.String, Nullable: nullable.Int64 != 0}
+			if def.Valid && def.String != "" {
+				col.Default, err = jsonParse(def.String)
+				if err != nil {
+					return nil, err
+				}
+			}
+			encoded, err := json.Marshal(col)
+			if err != nil {
+				return nil, err
+			}
+			used += int64(len(encoded) + 1)
+			out[len(out)-1].Columns = append(out[len(out)-1].Columns, col)
 		}
-		i, ok := indexByID[tableID]
-		if !ok {
-			continue
+		if byteCap > 0 && used > byteCap {
+			return nil, &statusError{413, "schema page exceeds max_query_bytes; use summary=true and tables_describe, or a smaller limit"}
 		}
-		c.Nullable = nullable != 0
-		if defaultRaw.Valid && defaultRaw.String != "" {
-			c.Default, _ = jsonParse(defaultRaw.String)
-		}
-		out[i].Columns = append(out[i].Columns, c)
 	}
-	if err := colRows.Err(); err != nil {
-		colRows.Close()
-		return nil, err
-	}
-	if err := colRows.Close(); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func initialiseRowCount(db *sql.DB, t *Table) error {
@@ -713,7 +761,7 @@ func loadColumns(db *sql.DB, tableID int64) ([]Column, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Column
+	out := []Column{}
 	for rows.Next() {
 		var c Column
 		var nullable int
@@ -724,9 +772,10 @@ func loadColumns(db *sql.DB, tableID int64) ([]Column, error) {
 		c.Nullable = nullable != 0
 		if defaultRaw.Valid && defaultRaw.String != "" {
 			v, err := jsonParse(defaultRaw.String)
-			if err == nil {
-				c.Default = v
+			if err != nil {
+				return nil, err
 			}
+			c.Default = v
 		}
 		out = append(out, c)
 	}
@@ -747,4 +796,36 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+func listTableSummaries(ctx *sdk.AppCtx, pid string, args map[string]any) (any, error) {
+	limit := intArg(args, "limit", 100)
+	if limit < 1 || limit > 1000 {
+		return nil, errf("limit must be 1..1000")
+	}
+	offset := intArg(args, "offset", 0)
+	qctx, cancel := queryTimeoutContext(ctx)
+	defer cancel()
+	rows, err := ctx.AppReadDB().QueryContext(qctx, `SELECT id,name,scope,COALESCE(row_count,0),created_at FROM tables_meta WHERE project_id=? ORDER BY name LIMIT ? OFFSET ?`, pid, limit+1, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var id, count int64
+		var name, scope, created string
+		if err := rows.Scan(&id, &name, &scope, &count, &created); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{"id": id, "name": name, "scope": scope, "row_count": count, "created_at": created})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	more := len(out) > limit
+	if more {
+		out = out[:limit]
+	}
+	return map[string]any{"tables": out, "has_more": more, "next_offset": offset + len(out)}, nil
 }

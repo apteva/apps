@@ -1,0 +1,12 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/tables
+cpu: Apple M1 Pro
+BenchmarkReviewInsert1000-10    	      68	   8579944 ns/op	 1397298 B/op	   36038 allocs/op
+BenchmarkReviewInsert1000-10    	      68	   9897158 ns/op	 1397117 B/op	   36038 allocs/op
+BenchmarkReviewInsert1000-10    	      46	  14060609 ns/op	 1396945 B/op	   36040 allocs/op
+BenchmarkReviewUpsert500-10     	      62	   8699713 ns/op	  726456 B/op	   22064 allocs/op
+BenchmarkReviewUpsert500-10     	      62	   8345924 ns/op	  724740 B/op	   22059 allocs/op
+BenchmarkReviewUpsert500-10     	      66	   8379413 ns/op	  724298 B/op	   22061 allocs/op
+PASS
+ok  	github.com/apteva/apps/mcp/tables	5.907s

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.14
+version: 0.1.15
 description: |
   Typed-row database for Apteva agents and human teams. The row-shaped
   sibling to the storage app: define typed tables, insert rows, query
@@ -24,6 +24,14 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
+    - platform.apps.call
+  integrations:
+    - role: storage
+      kind: app
+      compatible_app_names: [storage]
+      required: false
+      label: Storage
+      hint: Bind Storage to resolve file_id attachments to signed URLs.
 
 provides:
   http_routes:
@@ -32,7 +40,7 @@ provides:
     - name: tables_create
       description: 'Create a project-confined table with typed columns. Args: name, columns (array of {name, type, nullable?, default?}). Returns the created table''s id + name.'
     - name: tables_list
-      description: 'List tables visible to this install. No args. Returns [{id, name, scope, columns, row_count, created_at}].'
+      description: 'List tables visible to this install. Args: summary?, limit? (default 100, max 1000), offset?. Returns {tables, has_more, next_offset}.'
     - name: tables_describe
       description: 'Full schema + row count for one table. Args: name. Returns {id, name, scope, columns, row_count}.'
     - name: tables_alter
@@ -44,7 +52,7 @@ provides:
     - name: indexes_list
       description: 'List user and rows_upsert-managed indexes for a table. Args: table.'
     - name: indexes_drop
-      description: 'Drop a user-managed index. Args: table, name, confirm=true. Managed upsert indexes cannot be dropped.'
+      description: 'Drop a user-managed index. Args: table, name, confirm=true. Pass release_managed=true to deliberately remove a managed uniqueness guarantee.'
     - name: rows_insert
       description: 'Insert one or many rows. Args: table, rows (array of objects keyed by column name). Atomic — first failing row aborts the whole call. Returns {ids, inserted}.'
     - name: rows_upsert
@@ -52,11 +60,11 @@ provides:
     - name: rows_get
       description: 'Fetch one row by id. Args: table, id, hydrate_files? (resolve file_id columns to signed URLs via the storage app). Returns {row, found}.'
     - name: rows_update
-      description: 'Patch fields on a row. Args: table, id, fields (object). Touches updated_at. Returns the new row.'
+      description: 'Patch fields on a row. Args: table, id, fields (object). Touches updated_at and increments _revision. Optional expected_revision rejects stale edits. Returns the new row.'
     - name: rows_delete
-      description: 'Delete by id, or by filter when filter is supplied + confirm=true. Returns {deleted}.'
+      description: 'Delete by id, or by filter when where is supplied + confirm=true. Returns {deleted}.'
     - name: rows_search
-      description: 'Filter, sort, paginate. Args: table, where?, order_by?, limit?, offset?, include_total? (default true). Set include_total=false to skip COUNT and return has_more. Ops: eq, neq, lt, lte, gt, gte, contains, in, between, is_null, is_not_null.'
+      description: 'Filter, sort, paginate. Args: table, where?, order_by?, limit?, offset?, cursor?, select?, include_total? (default true). Set include_total=false to skip COUNT and return has_more. Ops: eq, neq, lt, lte, gt, gte, contains (literal), like (pattern), in, between, is_null, is_not_null.'
     - name: rows_count
       description: 'Count rows matching a filter. Args: table, where?. Returns {count}.'
     - name: rows_aggregate
@@ -104,11 +112,12 @@ provides:
         ids: array
         count: integer
     - name: row.updated
-      description: Rows were updated in a table. Single-row updates include the changed fields and current row.
+      description: Rows were updated in a table. Single-row updates include the changed fields and current row; upserts include ids.
       payload:
         table: string
         id: integer
         count: integer
+        ids: array
         fields: object
         row: object
     - name: row.deleted
@@ -133,6 +142,10 @@ db:
   migrations: migrations/
 
 config_schema:
+  - { name: migration_timeout_ms, type: text, default: "300000", label: Startup migration timeout (ms) }
+  - { name: max_write_ms, type: text, default: "30000", label: Write and schema operation timeout (ms) }
+  - { name: max_batch_bytes, type: text, default: "8388608", label: Maximum write batch bytes }
+  - { name: max_tables_per_project, type: text, default: "1000", label: Maximum tables per project }
   - name: max_rows_per_table
     type: text
     default: "1000000"
@@ -167,7 +180,7 @@ config_schema:
     type: text
     default: "4194304"
     label: Max query result bytes
-    description: Approximate serialized result budget for query, search, and aggregate responses.
+    description: Serialized row budget for reads and update responses, including JSON escaping; envelope and cursor overhead are additional.
   - name: max_value_bytes
     type: text
     default: "1048576"

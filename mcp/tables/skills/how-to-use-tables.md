@@ -26,7 +26,7 @@ value), `file_id` (foreign key into `storage`).
 
 ## Reserved columns
 
-Every table gets `id`, `created_at`, `updated_at` for free. Don't
+Every table gets `id`, `created_at`, `updated_at`, `_revision` for free. Don't
 declare them, don't supply them on insert, don't try to update them.
 
 ## Identifier rules
@@ -81,3 +81,30 @@ automatically.
 Set `hydrate_files: true` on `rows_get` to swap each `file_id` integer
 for `{id, url, expires_at}` — the URL is a signed time-limited link
 the user can open in a browser.
+
+
+## Safe editing and bounded results (0.1.15)
+
+Fetch `_revision` before editing and pass it as `expected_revision`; pass the
+schema's table ID as `expected_table_id` to protect against a dropped/recreated
+table with the same name. Patch only changed fields. A 409 means reload and
+reconcile; do not blindly retry a stale write. Omitted fields keep their value;
+explicit null requires a nullable column. Defaults apply to omitted inserts.
+
+Use `next_cursor` as `cursor` for the next search page, keeping filters and
+ordering unchanged. `next_offset` is also available and advances by rows
+actually returned. Never advance a byte-truncated page by the requested limit.
+Select fewer columns if a row exceeds the byte budget. Cursor results are not
+frozen snapshots; sort-key edits may move records between pages.
+
+`tables_list` defaults to pages of 100 tables. Follow `has_more` / `next_offset`.
+Use `summary: true` to omit schema/default payloads and describe tables on demand.
+
+`contains` is literal; `like` explicitly accepts SQL wildcard patterns.
+For integers beyond 2^53-1 use decimal strings in ID/file_id inputs. JSON numeric
+literals remain exact; the `number` column type is a floating-point double.
+
+File hydration needs the optional Storage binding and app-call permission.
+Inspect `file_hydration` for per-column errors; an unresolved integer is not a
+successful URL resolution. Upsert uniqueness indexes count toward the shared
+64-index cap. Removing one requires `release_managed: true` and `confirm: true`.

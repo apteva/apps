@@ -15,10 +15,8 @@ const (
 	topicRowDeleted   = "row.deleted"
 )
 
-// emit is the one indirection every mutation path uses. ctx.Emit is
-// fire-and-forget: a missed event is recoverable via the dashboard's
-// since-cursor reconnect, so we never bubble errors back into the
-// handler.
+// Emissions are best-effort UI invalidations. The panel reloads authoritative
+// state after reconnect; consumers must not treat these as a durable job queue.
 func emit(ctx *sdk.AppCtx, topic string, data map[string]any) {
 	if ctx == nil {
 		return

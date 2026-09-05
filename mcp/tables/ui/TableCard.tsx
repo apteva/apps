@@ -10,8 +10,12 @@
 
 import { Avatar, Card, CardHeader, DataList, StatusPill } from "@apteva/ui-kit";
 import {
-  columnTone, parseColumns, scopePillVariant, tablePanelUrl,
-  tablesVendor, timeAgo,
+  columnTone,
+  parseColumns,
+  scopePillVariant,
+  tablePanelUrl,
+  tablesVendor,
+  timeAgo,
 } from "./lib/tables";
 
 interface Props {
@@ -67,12 +71,18 @@ export default function TableCard(props: Props) {
       <CardHeader
         vendor={tablesVendor}
         title={<span className="font-mono">{p.name}</span>}
-        subtitle={p.description || `${cols.length} column${cols.length === 1 ? "" : "s"}`}
+        subtitle={
+          p.description ||
+          `${cols.length} column${cols.length === 1 ? "" : "s"}`
+        }
         status={{
           label: p.scope,
           variant: scopePillVariant(p.scope) === "warn" ? "warn" : "muted",
         }}
-        action={{ label: "Open table", href: tablePanelUrl(p.name) }}
+        action={{
+          label: "Open table",
+          href: tablePanelUrl(p.name, props.projectId),
+        }}
       />
 
       <div className="px-4 py-3 flex flex-col gap-3">
@@ -80,36 +90,46 @@ export default function TableCard(props: Props) {
           items={[
             {
               label: "Rows",
-              value: <span className="tabular-nums">{p.row_count.toLocaleString()}</span>,
+              value: (
+                <span className="tabular-nums">
+                  {p.row_count.toLocaleString()}
+                </span>
+              ),
             },
             ...(cols.length > 0
-              ? [{
-                  label: "Schema",
-                  value: (
-                    <span className="inline-flex flex-wrap gap-1">
-                      {cols.map((c) => (
-                        <span
-                          key={c.name}
-                          className={`text-[11px] font-mono px-1.5 py-0.5 rounded-md ${columnTone(c.type)}`}
-                        >
-                          {c.name}
-                          <span className="opacity-60 ml-1">{c.type}</span>
-                        </span>
-                      ))}
-                    </span>
-                  ),
-                }]
+              ? [
+                  {
+                    label: "Schema",
+                    value: (
+                      <span className="inline-flex flex-wrap gap-1">
+                        {cols.map((c) => (
+                          <span
+                            key={c.name}
+                            className={`text-[11px] font-mono px-1.5 py-0.5 rounded-md ${columnTone(c.type)}`}
+                          >
+                            {c.name}
+                            <span className="opacity-60 ml-1">{c.type}</span>
+                          </span>
+                        ))}
+                      </span>
+                    ),
+                  },
+                ]
               : []),
             ...(p.scope === "global"
-              ? [{
-                  label: "Scope",
-                  value: (
-                    <span className="inline-flex items-center gap-2">
-                      <StatusPill variant="warn">global</StatusPill>
-                      <span className="text-text-dim">visible to every project in the workspace</span>
-                    </span>
-                  ),
-                }]
+              ? [
+                  {
+                    label: "Scope",
+                    value: (
+                      <span className="inline-flex items-center gap-2">
+                        <StatusPill variant="warn">global</StatusPill>
+                        <span className="text-text-dim">
+                          visible to every project in the workspace
+                        </span>
+                      </span>
+                    ),
+                  },
+                ]
               : []),
           ]}
         />

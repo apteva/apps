@@ -1,0 +1,24 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/tables
+cpu: Apple M1 Pro
+BenchmarkReviewInsert1000-10    	      85	  10226293 ns/op	 1572446 B/op	   28129 allocs/op
+BenchmarkReviewInsert1000-10    	      90	   6537003 ns/op	 1568886 B/op	   28121 allocs/op
+BenchmarkReviewInsert1000-10    	     100	   5407353 ns/op	 1568896 B/op	   28121 allocs/op
+BenchmarkReviewUpsert500-10     	     121	   4904642 ns/op	 1102144 B/op	   26672 allocs/op
+BenchmarkReviewUpsert500-10     	     100	   5047570 ns/op	 1102281 B/op	   26674 allocs/op
+BenchmarkReviewUpsert500-10     	     120	   5354690 ns/op	 1102180 B/op	   26674 allocs/op
+BenchmarkReviewDeepPage/offset190000-10         	     201	   3926163 ns/op	   44015 B/op	    1111 allocs/op
+BenchmarkReviewDeepPage/offset190000-10         	      70	   7945367 ns/op	   44015 B/op	    1111 allocs/op
+BenchmarkReviewDeepPage/offset190000-10         	     162	   3226521 ns/op	   44037 B/op	    1111 allocs/op
+BenchmarkReviewDeepPage/cursor-10               	    4825	    221973 ns/op	   46015 B/op	    1140 allocs/op
+BenchmarkReviewDeepPage/cursor-10               	    5197	    168767 ns/op	   45999 B/op	    1140 allocs/op
+BenchmarkReviewDeepPage/cursor-10               	    5122	    167171 ns/op	   45996 B/op	    1140 allocs/op
+BenchmarkReviewProjection/all20Columns-10       	     146	   7908840 ns/op	 2277753 B/op	    5083 allocs/op
+BenchmarkReviewProjection/all20Columns-10       	     100	   5820248 ns/op	 2277519 B/op	    5082 allocs/op
+BenchmarkReviewProjection/all20Columns-10       	     144	   4488991 ns/op	 2277727 B/op	    5083 allocs/op
+BenchmarkReviewProjection/twoColumns-10         	    1012	    822705 ns/op	  242978 B/op	     709 allocs/op
+BenchmarkReviewProjection/twoColumns-10         	     924	    557627 ns/op	  243025 B/op	     709 allocs/op
+BenchmarkReviewProjection/twoColumns-10         	     663	   1052617 ns/op	  243064 B/op	     709 allocs/op
+PASS
+ok  	github.com/apteva/apps/mcp/tables	19.145s

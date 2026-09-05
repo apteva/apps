@@ -7,8 +7,12 @@
 
 import { Card, CardHeader, DataList, StatusPill } from "@apteva/ui-kit";
 import {
-  CellTone, cellToneClass, parseFields, rowPanelUrl,
-  rowStatusVariant, tablesVendor,
+  CellTone,
+  cellToneClass,
+  parseFields,
+  rowPanelUrl,
+  rowStatusVariant,
+  tablesVendor,
 } from "./lib/tables";
 
 /** Structured field — same as the legacy "key=value" form, plus an
@@ -23,7 +27,7 @@ export interface FieldEntry {
 
 interface Props {
   /** Numeric row id — what the agent gets back from `tables_insert`. */
-  row_id: number;
+  row_id: number | string;
   /** The parent table's name, e.g. "invoices". */
   table_name: string;
   /** Optional title for the card — defaults to "#<row_id>". */
@@ -39,19 +43,25 @@ interface Props {
 }
 
 const previewSample: {
-  row_id: number; table_name: string; title: string;
-  fields: FieldEntry[]; status_field: string;
+  row_id: number | string;
+  table_name: string;
+  title: string;
+  fields: FieldEntry[];
+  status_field: string;
 } = {
   row_id: 1042,
   table_name: "invoices",
   title: "invoice #1042",
   fields: [
-    { key: "customer",  value: "Acme Logistics" },
-    { key: "amount",    value: "$48,000.00", tone: "warn" }, // big invoice — highlight
-    { key: "status",    value: "paid" },                     // moves to header
-    { key: "due",       value: "May 11" },
-    { key: "contract",  value: "contract-acme-q4.pdf" },
-    { key: "notes",     value: "Extended via signed renewal addendum, expedited approval." },
+    { key: "customer", value: "Acme Logistics" },
+    { key: "amount", value: "$48,000.00", tone: "warn" }, // big invoice — highlight
+    { key: "status", value: "paid" }, // moves to header
+    { key: "due", value: "May 11" },
+    { key: "contract", value: "contract-acme-q4.pdf" },
+    {
+      key: "notes",
+      value: "Extended via signed renewal addendum, expedited approval.",
+    },
   ],
   status_field: "status",
 };
@@ -68,12 +78,16 @@ export default function RowCard(props: Props) {
       };
 
   const fields = normaliseFields(p.fields);
-  const statusField = fields.find((f) => f.key.toLowerCase() === p.status_field.toLowerCase());
+  const statusField = fields.find(
+    (f) => f.key.toLowerCase() === p.status_field.toLowerCase(),
+  );
   const status = statusField?.value;
 
   // Filter the status field out of the body — it's surfaced in the
   // header's status slot already, no need to repeat it inline.
-  const bodyFields = fields.filter((f) => f.key.toLowerCase() !== p.status_field.toLowerCase());
+  const bodyFields = fields.filter(
+    (f) => f.key.toLowerCase() !== p.status_field.toLowerCase(),
+  );
 
   return (
     <Card>
@@ -89,10 +103,25 @@ export default function RowCard(props: Props) {
         }
         status={
           status
-            ? { label: status, variant: rowStatusVariant(status) === "success" ? "live" : rowStatusVariant(status) === "error" ? "error" : rowStatusVariant(status) === "info" ? "active" : rowStatusVariant(status) === "warn" ? "warn" : "muted" }
+            ? {
+                label: status,
+                variant:
+                  rowStatusVariant(status) === "success"
+                    ? "live"
+                    : rowStatusVariant(status) === "error"
+                      ? "error"
+                      : rowStatusVariant(status) === "info"
+                        ? "active"
+                        : rowStatusVariant(status) === "warn"
+                          ? "warn"
+                          : "muted",
+              }
             : undefined
         }
-        action={{ label: "View row", href: rowPanelUrl(p.table_name, p.row_id) }}
+        action={{
+          label: "View row",
+          href: rowPanelUrl(p.table_name, p.row_id, props.projectId),
+        }}
       />
 
       <div className="px-4 py-3">
@@ -133,25 +162,41 @@ function normaliseFields(raw: string | FieldEntry[] | undefined): FieldEntry[] {
 // status-pill branch still applies (a status field with a status-y
 // value remains a StatusPill regardless of tone) because that's the
 // dedicated channel for that signal.
-function renderFieldValue(key: string, value: string, tone?: CellTone): React.ReactNode {
+function renderFieldValue(
+  key: string,
+  value: string,
+  tone?: CellTone,
+): React.ReactNode {
   if (!value) return <span className="text-text-dim">—</span>;
   // Status-like value — render as a pill (header status takes precedence
   // over agent-supplied tone for the canonical "status" field).
-  if (/^[a-z][a-z _-]{0,20}$/i.test(value) && key.toLowerCase().includes("status")) {
-    return <StatusPill variant={mapToPill(rowStatusVariant(value))}>{value}</StatusPill>;
+  if (
+    /^[a-z][a-z _-]{0,20}$/i.test(value) &&
+    key.toLowerCase().includes("status")
+  ) {
+    return (
+      <StatusPill variant={mapToPill(rowStatusVariant(value))}>
+        {value}
+      </StatusPill>
+    );
   }
   // Agent-supplied tone takes precedence over filename/number formatting:
   // if the agent flagged a cell, that's a deliberate signal we shouldn't
   // bury under generic styling.
   if (tone && tone !== "neutral") {
     return (
-      <span className={`inline-block px-1.5 py-0.5 rounded text-sm tabular-nums ${cellToneClass(tone)}`}>
+      <span
+        className={`inline-block px-1.5 py-0.5 rounded text-sm tabular-nums ${cellToneClass(tone)}`}
+      >
         {value}
       </span>
     );
   }
   // File chip — match a value that looks like a filename with a real extension
-  if (/\.[a-z0-9]{2,5}$/i.test(value) && key.toLowerCase().match(/file|attach|contract|invoice|doc/)) {
+  if (
+    /\.[a-z0-9]{2,5}$/i.test(value) &&
+    key.toLowerCase().match(/file|attach|contract|invoice|doc/)
+  ) {
     return (
       <span className="inline-flex items-center gap-1.5 text-sm">
         <FileChip />
@@ -166,15 +211,26 @@ function renderFieldValue(key: string, value: string, tone?: CellTone): React.Re
   return <span className="text-sm">{value}</span>;
 }
 
-function mapToPill(v: string): "success" | "error" | "info" | "warn" | "neutral" {
-  if (v === "success" || v === "error" || v === "info" || v === "warn") return v;
+function mapToPill(
+  v: string,
+): "success" | "error" | "info" | "warn" | "neutral" {
+  if (v === "success" || v === "error" || v === "info" || v === "warn")
+    return v;
   return "neutral";
 }
 
 function FileChip() {
   return (
     <span className="inline-flex items-center justify-center w-4 h-4 rounded-sm bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">
-      <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <svg
+        viewBox="0 0 24 24"
+        width="10"
+        height="10"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        aria-hidden
+      >
         <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5z" />
         <path d="M14 3v5h5" />
       </svg>

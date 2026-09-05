@@ -263,7 +263,7 @@ func TestMigration004_UpgradesV013DataAndRegistersExistingUpsertIndex(t *testing
 	if _, err := db.Exec("CREATE UNIQUE INDEX " + quote(legacyPhysical) + " ON t_1(title)"); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"002_row_count.sql", "003_project_gate_tables.sql", "004_indexes.sql"} {
+	for _, name := range []string{"002_row_count.sql", "003_project_gate_tables.sql", "004_indexes.sql", "005_storage_version.sql"} {
 		execTableMigration(t, db, name)
 	}
 	if _, err := db.Exec(`UPDATE tables_meta SET row_count = 1 WHERE id = 1`); err != nil {
@@ -422,7 +422,12 @@ func TestSchemaChangeWaitsForActiveReadsAndInvalidatesCache(t *testing.T) {
 	})
 	mustCall(t, app, ctx, "tables_describe", map[string]any{"name": "records"})
 
-	app.schemaMu.RLock()
+	app.locksMu.Lock()
+	key := schemaCacheKey{"ddl-project", "records"}
+	ref := &tableLockRef{users: 1}
+	app.tableLocks[key] = ref
+	app.locksMu.Unlock()
+	ref.lock.RLock()
 	done := make(chan error, 1)
 	go func() {
 		_, err := callTool(app, ctx, "tables_alter", map[string]any{
@@ -432,11 +437,11 @@ func TestSchemaChangeWaitsForActiveReadsAndInvalidatesCache(t *testing.T) {
 	}()
 	select {
 	case err := <-done:
-		app.schemaMu.RUnlock()
+		ref.lock.RUnlock()
 		t.Fatalf("schema change bypassed active-read barrier: %v", err)
 	case <-time.After(25 * time.Millisecond):
 	}
-	app.schemaMu.RUnlock()
+	ref.lock.RUnlock()
 	if err := <-done; err != nil {
 		t.Fatalf("schema change after readers drained: %v", err)
 	}
