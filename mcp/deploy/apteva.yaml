@@ -160,6 +160,8 @@ provides:
       icon: rocket
       entry: /ui/DeployPanel.mjs
   workers:
+    - name: ingress_sync
+      schedule: "@every 15s"
     - name: mobile_release_sync
       schedule: "@every 1m"
     - name: cloud_build_sync
