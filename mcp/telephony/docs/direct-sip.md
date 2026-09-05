@@ -106,6 +106,38 @@ Transport changes are blocked while the route has an active call.
 - Direct SIP routes do not currently record calls. Telephony forces recording
   off for this transport because provider-cloud call control is bypassed.
 
+## Dialog and media recovery
+
+Established calls accept re-INVITE and UPDATE refreshes with unchanged media.
+Requests must match the dialog tags and advance its remote CSeq. Session timers
+support both carrier-initiated and Telephony-initiated refreshes. An unsupported
+media change receives `488` while the existing call remains active. Native
+hold, transfer, codec changes, and changing media endpoints are not implemented.
+
+Initial answers and re-INVITE answers have a fixed ACK deadline. Missing ACKs,
+expired session timers, and failures connecting an answered call's audio bridge
+terminate the SIP leg. A hangup interrupts an outstanding local refresh rather
+than waiting for its response timeout. Shutdown drains signaling and media work
+before releasing the app context, and call admission reserves capacity atomically.
+
+SRTP answers echo the selected SDES crypto tag and enable a 128-packet replay
+window, including sequence-number rollover. Codec name, rate, and channel count
+are validated exactly. Unsupported SDES lifetime, MKI, and session parameters are
+rejected instead of being silently ignored.
+
+The receive jitter buffer starts after its 60 ms target or three playback ticks,
+so shorter speech bursts drain too. It retains recent audio under congestion and
+caps queued audio age at 120 ms. Caller audio uses the bounded WebSocket audio
+queue. RTP timestamps follow the monotonic media clock across silence, and the
+first packet of a new talkspurt is marked. Inbound loss, dropped audio, queue age,
+and jitter estimates are included in the selected call's carrier diagnostics.
+
+TLS handshakes load renewed certificate files without restarting the listener.
+Invalid or partially written renewals retain the last valid certificate, but an
+expired certificate is not served. The direct-SIP number status includes the
+certificate expiry, readiness, and renewal error. RTP port allocation rotates
+through the configured range to avoid repeatedly trying the same occupied ports.
+
 ## Rollback
 
 Telephony stores only provider resource IDs and previous routing IDs, not

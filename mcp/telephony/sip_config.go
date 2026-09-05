@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -53,6 +52,7 @@ type sipGatewayConfig struct {
 	RTPPortMax    int
 	SRTPMode      string
 	MaxSessions   int
+	certificate   *sipTLSCertificate
 }
 
 type sipConfigOptions struct {
@@ -203,28 +203,14 @@ func (c sipGatewayConfig) tlsConfig() (*tls.Config, error) {
 	if c.Transport != "tls" {
 		return nil, nil
 	}
-	cert, err := tls.LoadX509KeyPair(c.TLSCertFile, c.TLSKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load direct SIP TLS certificate: %w", err)
+	loader := c.certificate
+	if loader == nil {
+		loader = &sipTLSCertificate{cfg: c}
 	}
-	if len(cert.Certificate) == 0 {
-		return nil, errors.New("direct SIP TLS certificate has no leaf certificate")
+	if _, err := loader.getCertificate(nil); err != nil {
+		return nil, err
 	}
-	leaf, err := x509.ParseCertificate(cert.Certificate[0])
-	if err != nil {
-		return nil, fmt.Errorf("parse direct SIP TLS certificate: %w", err)
-	}
-	if err := leaf.VerifyHostname(c.PublicHost); err != nil {
-		return nil, fmt.Errorf("direct SIP TLS certificate does not cover %s: %w", c.PublicHost, err)
-	}
-	now := time.Now()
-	if now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
-		return nil, fmt.Errorf("direct SIP TLS certificate for %s is not currently valid", c.PublicHost)
-	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-	}, nil
+	return &tls.Config{GetCertificate: loader.getCertificate, MinVersion: tls.VersionTLS12}, nil
 }
 
 func (c sipGatewayConfig) sourceAllowed(address string) bool {

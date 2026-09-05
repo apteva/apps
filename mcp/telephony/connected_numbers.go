@@ -347,6 +347,14 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
 			"supported": true, "enabled": true, "ready": true, "available": true, "managed": true,
 			"endpoint": gateway.cfg.endpointURI(), "transport": gateway.cfg.Transport, "srtp": gateway.cfg.SRTPMode,
 		}
+		if gateway.cfg.Transport == "tls" && gateway.cfg.certificate != nil {
+			state := gateway.cfg.certificate.status()
+			directSIP["tls"] = state
+			if state["ready"] != true {
+				directSIP["ready"] = false
+				directSIP["reason"] = state["error"]
+			}
+		}
 	} else if provider.Slug == "twilio" || provider.Slug == "telnyx" {
 		cfg, configErr := a.resolveSIPGatewayConfig(ctx, true)
 		if configErr != nil {

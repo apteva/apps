@@ -23,6 +23,7 @@ type sipMediaOffer struct {
 	PacketSamples int
 	Secure        bool
 	RemoteKey     []byte
+	CryptoTag     string
 }
 
 type sipMediaSecurity struct {
@@ -57,11 +58,17 @@ func parseSIPMediaOffer(body []byte, cfg sipGatewayConfig) (sipMediaOffer, error
 		if cfg.SRTPMode == sipSRTPDisabled && secure {
 			return sipMediaOffer{}, errors.New("carrier offered SRTP but direct SIP SRTP is disabled")
 		}
-		for _, attribute := range media.Attributes {
-			switch strings.ToLower(attribute.Key) {
-			case "inactive", "recvonly":
-				return sipMediaOffer{}, errors.New("SDP offer does not allow bidirectional audio")
+		direction := "sendrecv"
+		for _, attributes := range [][]sdp.Attribute{description.Attributes, media.Attributes} {
+			for _, attribute := range attributes {
+				switch strings.ToLower(attribute.Key) {
+				case "sendrecv", "sendonly", "recvonly", "inactive":
+					direction = strings.ToLower(attribute.Key)
+				}
 			}
+		}
+		if direction != "sendrecv" {
+			return sipMediaOffer{}, errors.New("SDP offer does not allow bidirectional audio")
 		}
 
 		address := mediaConnectionAddress(media, &description)
@@ -89,7 +96,7 @@ func parseSIPMediaOffer(body []byte, cfg sipGatewayConfig) (sipMediaOffer, error
 			Secure:        secure,
 		}
 		if secure {
-			offer.RemoteKey, err = parseSDESCryptoKey(media.Attributes)
+			offer.CryptoTag, offer.RemoteKey, err = parseSDESCrypto(media.Attributes)
 			if err != nil {
 				return sipMediaOffer{}, err
 			}
@@ -145,7 +152,7 @@ func negotiatedG711Codec(media *sdp.MediaDescription) (uint8, string, error) {
 	} {
 		for _, format := range media.MediaName.Formats {
 			codec := rtpmap[format]
-			if format == preferred.static || strings.HasPrefix(codec, preferred.name+"/8000") {
+			if (format == preferred.static && (codec == "" || codec == preferred.name+"/8000" || codec == preferred.name+"/8000/1")) || ((codec == preferred.name+"/8000" || codec == preferred.name+"/8000/1") && format != "0" && format != "8") {
 				value, err := strconv.ParseUint(format, 10, 8)
 				if err != nil || value > 127 {
 					continue
@@ -157,26 +164,32 @@ func negotiatedG711Codec(media *sdp.MediaDescription) (uint8, string, error) {
 	return 0, "", errors.New("carrier must offer G.711 PCMU or PCMA at 8 kHz")
 }
 
-func parseSDESCryptoKey(attributes []sdp.Attribute) ([]byte, error) {
+func parseSDESCrypto(attributes []sdp.Attribute) (string, []byte, error) {
 	for _, attribute := range attributes {
 		if !strings.EqualFold(attribute.Key, "crypto") {
 			continue
 		}
 		parts := strings.Fields(attribute.Value)
-		if len(parts) < 3 || !strings.EqualFold(parts[1], sipSDESCryptoSuite) || !strings.HasPrefix(parts[2], "inline:") {
+		if len(parts) != 3 || !strings.EqualFold(parts[1], sipSDESCryptoSuite) || !strings.HasPrefix(parts[2], "inline:") {
+			continue
+		}
+		tag, err := strconv.ParseUint(parts[0], 10, 32)
+		if err != nil || tag == 0 || tag > 999999999 || strconv.FormatUint(tag, 10) != parts[0] {
 			continue
 		}
 		encoded := strings.TrimPrefix(parts[2], "inline:")
-		if index := strings.IndexByte(encoded, '|'); index >= 0 {
-			encoded = encoded[:index]
+		// Lifetime, MKI and session parameters need explicit cryptographic
+		// support. Do not silently negotiate them and then ignore them.
+		if strings.ContainsAny(encoded, "|;") {
+			continue
 		}
 		key, err := base64.StdEncoding.DecodeString(encoded)
 		if err != nil || len(key) != 30 {
-			return nil, errors.New("SDES SRTP key must contain 30 bytes of key and salt material")
+			return "", nil, errors.New("SDES SRTP key must contain 30 bytes of key and salt material")
 		}
-		return key, nil
+		return parts[0], key, nil
 	}
-	return nil, errors.New("SRTP offer has no supported SDES AES_CM_128_HMAC_SHA1_80 crypto attribute")
+	return "", nil, errors.New("SRTP offer has no supported SDES AES_CM_128_HMAC_SHA1_80 crypto attribute")
 }
 
 func newSIPMediaSecurity(offer sipMediaOffer) (*sipMediaSecurity, error) {
@@ -187,7 +200,10 @@ func newSIPMediaSecurity(offer sipMediaOffer) (*sipMediaSecurity, error) {
 	if _, err := rand.Read(localKey); err != nil {
 		return nil, fmt.Errorf("generate SRTP key: %w", err)
 	}
-	remoteContext, err := srtp.CreateContext(offer.RemoteKey[:16], offer.RemoteKey[16:], srtp.ProtectionProfileAes128CmHmacSha1_80)
+	if len(offer.RemoteKey) != 30 {
+		return nil, errors.New("invalid remote SRTP key length")
+	}
+	remoteContext, err := srtp.CreateContext(offer.RemoteKey[:16], offer.RemoteKey[16:], srtp.ProtectionProfileAes128CmHmacSha1_80, srtp.SRTPReplayProtection(128))
 	if err != nil {
 		return nil, fmt.Errorf("create inbound SRTP context: %w", err)
 	}
@@ -211,7 +227,7 @@ func buildSIPMediaAnswer(cfg sipGatewayConfig, offer sipMediaOffer, localPort in
 		}
 		protocol = []string{"RTP", "SAVP"}
 		attributes = append(attributes, sdp.NewAttribute("crypto",
-			"1 "+sipSDESCryptoSuite+" inline:"+base64.StdEncoding.EncodeToString(security.LocalKey)))
+			offer.CryptoTag+" "+sipSDESCryptoSuite+" inline:"+base64.StdEncoding.EncodeToString(security.LocalKey)))
 	}
 	sessionIDBytes := make([]byte, 8)
 	if _, err := rand.Read(sessionIDBytes); err != nil {

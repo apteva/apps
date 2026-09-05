@@ -33,6 +33,11 @@ type sipGateway struct {
 	mu             sync.RWMutex
 	byProviderCall map[string]*sipSession
 	byCall         map[string]*sipSession
+	reserved       map[string]bool
+	ackTimeout     time.Duration
+	work           sync.WaitGroup
+	stopping       bool
+	stopDeadline   time.Time
 }
 
 type sipSession struct {
@@ -45,9 +50,22 @@ type sipSession struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 
-	answerMu  sync.Mutex
-	ended     atomic.Bool
-	mediaOnce sync.Once
+	answerMu      sync.Mutex
+	ended         atomic.Bool
+	mediaOnce     sync.Once
+	inviteTx      sip.ServerTransaction
+	initialACK    chan struct{}
+	ackOnce       sync.Once
+	signalMu      sync.Mutex
+	refreshMu     sync.Mutex
+	refreshACK    chan struct{}
+	refreshCSeq   uint32
+	remoteSeq     atomic.Uint32
+	localSDP      []byte
+	remoteTarget  sip.Uri
+	timer         sipSessionTimer
+	timerUpdated  time.Time
+	refreshCancel context.CancelFunc
 }
 
 func (a *App) startSIPGateway(ctx *sdk.AppCtx) error {
@@ -125,6 +143,7 @@ func (a *App) directSIPGateway() *sipGateway {
 }
 
 func newSIPGateway(app *App, appCtx *sdk.AppCtx, cfg sipGatewayConfig) (*sipGateway, error) {
+	cfg.certificate = &sipTLSCertificate{cfg: cfg}
 	tlsConfig, err := cfg.tlsConfig()
 	if err != nil {
 		return nil, err
@@ -162,7 +181,7 @@ func newSIPGateway(app *App, appCtx *sdk.AppCtx, cfg sipGatewayConfig) (*sipGate
 	gateway := &sipGateway{
 		app: app, appCtx: appCtx, cfg: cfg, ua: ua, client: client, server: server, dialogs: dialogs,
 		ctx: gatewayCtx, cancel: cancel,
-		byProviderCall: make(map[string]*sipSession), byCall: make(map[string]*sipSession),
+		byProviderCall: make(map[string]*sipSession), byCall: make(map[string]*sipSession), reserved: make(map[string]bool), ackTimeout: 32 * time.Second,
 	}
 	gateway.registerHandlers()
 	return gateway, nil
@@ -203,6 +222,10 @@ func (g *sipGateway) Stop() {
 	if g == nil {
 		return
 	}
+	g.mu.Lock()
+	g.stopping = true
+	g.stopDeadline = time.Now().Add(5 * time.Second)
+	g.mu.Unlock()
 	g.cancel()
 	g.mu.RLock()
 	sessions := make([]*sipSession, 0, len(g.byCall))
@@ -210,23 +233,43 @@ func (g *sipGateway) Stop() {
 		sessions = append(sessions, session)
 	}
 	g.mu.RUnlock()
-	for _, session := range sessions {
-		session.finish("local_error", errors.New("direct SIP gateway stopped"))
+	jobs := make(chan *sipSession, len(sessions))
+	for _, s := range sessions {
+		jobs <- s
 	}
+	close(jobs)
+	var finishing sync.WaitGroup
+	for i := 0; i < min(16, len(sessions)); i++ {
+		finishing.Add(1)
+		go func() {
+			defer finishing.Done()
+			for session := range jobs {
+				session.finish("local_error", errors.New("direct SIP gateway stopped"))
+			}
+		}()
+	}
+	finishing.Wait()
 	if g.ua != nil {
 		_ = g.ua.Close()
 	}
+	g.work.Wait()
 }
 
 func (g *sipGateway) registerHandlers() {
-	g.server.OnInvite(g.handleInvite)
-	g.server.OnAck(func(request *sip.Request, transaction sip.ServerTransaction) {
-		if err := g.dialogs.ReadAck(request, transaction); err != nil {
-			g.appCtx.Logger().Warn("direct SIP ACK rejected", "source", request.Source(), "err", err)
+	g.server.OnInvite(g.trackHandler(g.handleInvite))
+	g.server.OnAck(g.trackHandler(g.handleACK))
+	g.server.OnUpdate(g.trackHandler(g.handleRefresh))
+	g.server.OnBye(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
+		if !g.cfg.sourceAllowed(request.Source()) {
+			_ = transaction.Respond(sip.NewResponseFromRequest(request, 403, "Forbidden", nil))
+			return
 		}
-	})
-	g.server.OnBye(func(request *sip.Request, transaction sip.ServerTransaction) {
 		providerCallID := sipCallID(request)
+		session := g.sessionByProviderCall(providerCallID)
+		if session == nil || request.CSeq() == nil || request.CSeq().SeqNo <= session.remoteSeq.Load() {
+			_ = transaction.Respond(sip.NewResponseFromRequest(request, 481, "Call Does Not Exist", nil))
+			return
+		}
 		if err := g.dialogs.ReadBye(request, transaction); err != nil {
 			_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusCallTransactionDoesNotExists, "Call Does Not Exist", nil))
 			return
@@ -234,21 +277,25 @@ func (g *sipGateway) registerHandlers() {
 		if session := g.sessionByProviderCall(providerCallID); session != nil {
 			session.finish("carrier", nil)
 		}
-	})
-	g.server.OnCancel(func(request *sip.Request, _ sip.ServerTransaction) {
-		if session := g.sessionByProviderCall(sipCallID(request)); session != nil {
-			session.finish("carrier", context.Canceled)
+	}))
+	g.server.OnCancel(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
+		// Matched CANCEL is handled by sipgo's INVITE transaction. An
+		// unmatched CANCEL must never end a dialog using Call-ID alone.
+		status := 481
+		if !g.cfg.sourceAllowed(request.Source()) {
+			status = 403
 		}
-	})
-	g.server.OnOptions(func(request *sip.Request, transaction sip.ServerTransaction) {
+		_ = transaction.Respond(sip.NewResponseFromRequest(request, status, "No Matching Transaction", nil))
+	}))
+	g.server.OnOptions(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
 		if !g.cfg.sourceAllowed(request.Source()) {
 			_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusForbidden, "Forbidden", nil))
 			return
 		}
 		response := sip.NewResponseFromRequest(request, sip.StatusOK, "OK", nil)
-		response.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, OPTIONS"))
+		response.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE"))
 		_ = transaction.Respond(response)
-	})
+	}))
 }
 
 func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTransaction) {
@@ -259,8 +306,8 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		respond(sip.StatusForbidden, "Forbidden")
 		return
 	}
-	if g.sessionCount() >= g.cfg.MaxSessions {
-		respond(sip.StatusServiceUnavailable, "Capacity Reached")
+	if request.To() != nil && request.To().Params.Has("tag") {
+		g.handleRefresh(request, transaction)
 		return
 	}
 	providerCallID := sipCallID(request)
@@ -268,8 +315,18 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		respond(sip.StatusBadRequest, "Missing Dialog Headers")
 		return
 	}
-	if g.sessionByProviderCall(providerCallID) != nil {
-		respond(sip.StatusLoopDetected, "Duplicate Dialog")
+	if status := g.reserveSession(providerCallID); status != 0 {
+		respond(status, "Call Admission Rejected")
+		return
+	}
+	defer g.releaseReservation(providerCallID)
+	timer, status, err := parseSIPSessionTimer(request, sipSessionTimer{})
+	if err != nil {
+		res := sip.NewResponseFromRequest(request, status, err.Error(), nil)
+		if status == 422 {
+			res.AppendHeader(sip.NewHeader("Min-SE", "90"))
+		}
+		_ = transaction.Respond(res)
 		return
 	}
 	offer, err := parseSIPMediaOffer(request.Body(), g.cfg)
@@ -314,14 +371,21 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	sessionCtx, cancel := context.WithCancel(g.ctx)
 	session := &sipSession{
 		gateway: g, dialog: dialog, route: &routeForCall, call: call, offer: offer,
-		ctx: sessionCtx, cancel: cancel,
+		ctx: sessionCtx, cancel: cancel, inviteTx: transaction, initialACK: make(chan struct{}), remoteTarget: request.Contact().Address, timer: timer,
 	}
+	session.remoteSeq.Store(request.CSeq().SeqNo)
 	dialog.OnState(func(state sip.DialogState) {
 		if state == sip.DialogStateEnded {
-			session.finish("carrier", nil)
+			g.runTask(func() { session.finish("carrier", nil) })
+		}
+		if state == sip.DialogStateEstablished {
+			g.runTask(session.watchInitialACK)
 		}
 	})
-	g.addSession(session)
+	if !g.addSession(session) {
+		session.finish("local_error", errors.New("SIP gateway stopping"))
+		return
+	}
 	if err := dialog.Respond(sip.StatusTrying, "Trying", nil); err != nil {
 		session.finish("carrier", err)
 		return
@@ -359,6 +423,10 @@ func (g *sipGateway) findRouteForInvite(request *sip.Request) (*routeRow, string
 }
 
 func (g *sipGateway) Answer(row *callRow) error {
+	if !g.startWork() {
+		return errors.New("SIP gateway stopping")
+	}
+	defer g.work.Done()
 	session := g.sessionByCall(row.ID)
 	if session == nil {
 		return errors.New("direct SIP dialog is no longer active")
@@ -375,6 +443,10 @@ func (g *sipGateway) StartMedia(row *callRow) error {
 }
 
 func (g *sipGateway) Reject(row *callRow) error {
+	if !g.startWork() {
+		return errors.New("SIP gateway stopping")
+	}
+	defer g.work.Done()
 	session := g.sessionByCall(row.ID)
 	if session == nil {
 		return errors.New("direct SIP dialog is no longer active")
@@ -422,50 +494,76 @@ func (s *sipSession) answer() error {
 		return err
 	}
 	s.media = media
+	s.localSDP = answer
 	s.answerMu.Unlock()
 	// Dialog state callbacks may synchronously finish the session.
-	if err := s.dialog.RespondSDP(answer); err != nil {
+	response := sip.NewSDPResponseFromRequest(s.dialog.InviteRequest, answer)
+	addSIPTimerHeaders(response, s.timer)
+	if err := s.dialog.WriteResponse(response); err != nil {
 		s.finish("local_error", err)
 		return err
 	}
+	s.answerMu.Lock()
+	s.timerUpdated = time.Now()
+	s.answerMu.Unlock()
+	s.gateway.runTask(s.runSessionTimer)
 	return nil
 }
 
 func (s *sipSession) startMedia() error {
 	s.answerMu.Lock()
-	answered := s.media != nil
+	answered := s.media != nil && !s.ended.Load()
 	s.answerMu.Unlock()
 	if !answered {
 		return errors.New("direct SIP call has not been answered")
 	}
+	var launchErr error
 	s.mediaOnce.Do(func() {
-		go s.gateway.app.bridgeDirectSIPMedia(s)
+		if !s.gateway.runTask(func() { s.gateway.app.bridgeDirectSIPMedia(s) }) {
+			launchErr = errors.New("SIP gateway stopping")
+		}
 	})
-	return nil
+	return launchErr
 }
 
-func (s *sipSession) hangup() error {
-	s.answerMu.Lock()
-	dialog := s.dialog
-	answered := s.media != nil
-	s.answerMu.Unlock()
-	if answered {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		err := dialog.Bye(ctx)
-		cancel()
-		s.finish("local_error", nil)
-		return err
-	}
-	err := dialog.Respond(sip.StatusRequestTerminated, "Request Terminated", nil)
-	s.finish("local_error", nil)
-	return err
-}
+func (s *sipSession) hangup() error { return s.finishWithSignaling("local_error", nil) }
 
-func (s *sipSession) finish(leg string, cause error) {
+func (s *sipSession) finish(leg string, cause error) { _ = s.finishWithSignaling(leg, cause) }
+func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 	if !s.ended.CompareAndSwap(false, true) {
-		return
+		return nil
+	}
+	s.answerMu.Lock()
+	refreshCancel := s.refreshCancel
+	s.answerMu.Unlock()
+	if refreshCancel != nil {
+		refreshCancel()
+	}
+	var signalingErr error
+	if leg != "carrier" && s.dialog != nil {
+		if s.dialog.LoadState() >= sip.DialogStateEstablished && s.dialog.LoadState() != sip.DialogStateEnded {
+			s.signalMu.Lock()
+			deadline := time.Now().Add(3 * time.Second)
+			s.gateway.mu.RLock()
+			stopDeadline := s.gateway.stopDeadline
+			s.gateway.mu.RUnlock()
+			if !stopDeadline.IsZero() && stopDeadline.Before(deadline) {
+				deadline = stopDeadline
+			}
+			ctx, cancel := context.WithDeadline(context.Background(), deadline)
+			s.answerMu.Lock()
+			target := s.remoteTarget
+			s.answerMu.Unlock()
+			signalingErr = s.dialog.WriteBye(ctx, sip.NewRequest(sip.BYE, target))
+			cancel()
+			s.signalMu.Unlock()
+		} else if s.inviteTx != nil && s.dialog.LoadState() != sip.DialogStateEnded {
+			signalingErr = s.inviteTx.Respond(sip.NewResponseFromRequest(s.dialog.InviteRequest, 487, "Request Terminated", nil))
+		}
 	}
 	func() {
+		defer s.gateway.removeSession(s)
+		defer s.dialog.Close()
 		s.cancel()
 		s.answerMu.Lock()
 		media := s.media
@@ -473,7 +571,6 @@ func (s *sipSession) finish(leg string, cause error) {
 		if media != nil {
 			media.Close()
 		}
-		s.gateway.removeSession(s)
 		row, err := s.gateway.app.db().findCall(s.call.ID)
 		if err != nil || row == nil {
 			return
@@ -486,6 +583,9 @@ func (s *sipSession) finish(leg string, cause error) {
 				status = "canceled"
 			}
 			if cause != nil {
+				if leg != "carrier" && row.Status != "pending" {
+					status = "failed"
+				}
 				message = cause.Error()
 			}
 			_ = s.gateway.app.db().updateStatus(row.ID, status, message)
@@ -493,15 +593,20 @@ func (s *sipSession) finish(leg string, cause error) {
 		if err := s.gateway.app.killCallThread(projectCtx, row); err != nil {
 			projectCtx.Logger().Warn("kill direct SIP call thread", "call", row.ID, "leg", leg, "err", err)
 		}
-		_ = s.dialog.Close()
 	}()
+	return signalingErr
 }
 
-func (g *sipGateway) addSession(session *sipSession) {
+func (g *sipGateway) addSession(session *sipSession) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.stopping || session.ended.Load() {
+		return false
+	}
+	delete(g.reserved, session.call.CarrierSID)
 	g.byProviderCall[session.call.CarrierSID] = session
 	g.byCall[session.call.ID] = session
+	return true
 }
 
 func (g *sipGateway) removeSession(session *sipSession) {

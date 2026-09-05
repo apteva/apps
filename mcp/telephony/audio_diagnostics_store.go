@@ -75,6 +75,9 @@ type audioDropEvent struct {
 }
 
 type carrierAudioDiagnostics struct {
+	InboundDroppedMS             int              `json:"inbound_dropped_ms,omitempty"`
+	InboundMaxQueueAgeMS         int              `json:"inbound_max_queue_age_ms,omitempty"`
+	InboundJitterMS              float64          `json:"inbound_jitter_ms,omitempty"`
 	UpdatedAt                    string           `json:"updated_at"`
 	Provider                     string           `json:"provider"`
 	Codec                        string           `json:"codec"`
@@ -173,6 +176,12 @@ func (c *callsDB) updateCarrierAudioDiagnostics(id string, value carrierAudioDia
 	value.MaxQueuedMS = clampDiagnosticInt(value.MaxQueuedMS, 60000)
 	value.DroppedStaleMS = clampDiagnosticInt(value.DroppedStaleMS, 24*60*60*1000)
 	value.SequenceGaps = clampDiagnosticInt(value.SequenceGaps, 1000000000)
+	value.InboundDroppedMS = clampDiagnosticInt(value.InboundDroppedMS, 24*60*60*1000)
+	value.InboundMaxQueueAgeMS = clampDiagnosticInt(value.InboundMaxQueueAgeMS, 60000)
+	if math.IsNaN(value.InboundJitterMS) || math.IsInf(value.InboundJitterMS, 0) {
+		value.InboundJitterMS = 0
+	}
+	value.InboundJitterMS = math.Max(0, math.Min(value.InboundJitterMS, 60000))
 	value.DropEvents = normalizeAudioDropEvents(value.DropEvents)
 	if value.PreAnswerMicrophoneDroppedMS < 0 {
 		value.PreAnswerMicrophoneDroppedMS = 0

@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gobwas/ws"
@@ -37,13 +38,14 @@ type websocketWriteRequest struct {
 // websocketWriterPump is the sole writer for a WebSocket connection. Data,
 // control, and close frames all pass through the same queue.
 type websocketWriterPump struct {
-	conn     net.Conn
-	state    ws.State
-	requests chan websocketWriteRequest
-	audio    chan websocketWriteRequest
-	stop     chan struct{}
-	done     chan struct{}
-	stopOnce sync.Once
+	audioDropped atomic.Int64
+	conn         net.Conn
+	state        ws.State
+	requests     chan websocketWriteRequest
+	audio        chan websocketWriteRequest
+	stop         chan struct{}
+	done         chan struct{}
+	stopOnce     sync.Once
 
 	enqueueMu sync.Mutex
 	stateMu   sync.Mutex
@@ -173,6 +175,7 @@ func (p *websocketWriterPump) QueueAudio(data []byte) {
 	}
 	select {
 	case <-p.audio:
+		p.audioDropped.Add(1)
 	default:
 	}
 	select {

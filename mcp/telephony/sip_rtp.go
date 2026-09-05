@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +26,11 @@ const (
 	sipRTPInactivity    = 30 * time.Second
 )
 
+var sipRTPPorts = struct {
+	sync.Mutex
+	next map[string]int
+}{next: make(map[string]int)}
+
 type sipRTPMedia struct {
 	conn       *net.UDPConn
 	offer      sipMediaOffer
@@ -40,7 +47,16 @@ func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, e
 		return nil, err
 	}
 	remote := net.UDPAddrFromAddrPort(netip.AddrPortFrom(offer.RemoteAddress, uint16(offer.RemotePort)))
-	for port := cfg.RTPPortMin; port <= cfg.RTPPortMax; port += 2 {
+	sipRTPPorts.Lock()
+	defer sipRTPPorts.Unlock()
+	pool := fmt.Sprintf("%s:%d-%d", cfg.RTPBindIP, cfg.RTPPortMin, cfg.RTPPortMax)
+	start := sipRTPPorts.next[pool]
+	if start < cfg.RTPPortMin || start > cfg.RTPPortMax {
+		start = cfg.RTPPortMin
+	}
+	count := (cfg.RTPPortMax-cfg.RTPPortMin)/2 + 1
+	for offset := 0; offset < count; offset++ {
+		port := cfg.RTPPortMin + ((start-cfg.RTPPortMin)/2+offset)%count*2
 		local := net.UDPAddrFromAddrPort(netip.AddrPortFrom(cfg.RTPBindIP, uint16(port)))
 		conn, err := net.ListenUDP("udp4", local)
 		if err != nil {
@@ -49,6 +65,7 @@ func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, e
 		media := &sipRTPMedia{
 			conn: conn, offer: offer, security: security, remote: remote, localPort: port,
 		}
+		sipRTPPorts.next[pool] = cfg.RTPPortMin + ((port-cfg.RTPPortMin)/2+1)%count*2
 		media.lastPacket.Store(time.Now().UnixNano())
 		return media, nil
 	}
@@ -106,20 +123,32 @@ func (m *sipRTPMedia) writePacket(packet *rtp.Packet) error {
 }
 
 type rtpJitterBuffer struct {
-	mu       sync.Mutex
-	packets  map[uint16][]byte
-	expected uint16
-	started  bool
-	primed   bool
-	buffered int
-	missing  int
+	mu             sync.Mutex
+	packets        map[uint16][]byte
+	expected       uint16
+	started        bool
+	primed         bool
+	buffered       int
+	missing        int
+	primeTicks     int
+	arrivals       map[uint16]time.Time
+	lost           int
+	droppedSamples int
+	maxAgeMS       int
+	jitterMS       float64
+	lastArrival    time.Time
+	lastTimestamp  uint32
 }
 
 func newRTPJitterBuffer() *rtpJitterBuffer {
-	return &rtpJitterBuffer{packets: make(map[uint16][]byte)}
+	return &rtpJitterBuffer{packets: make(map[uint16][]byte), arrivals: make(map[uint16]time.Time)}
 }
 
 func (b *rtpJitterBuffer) push(sequence uint16, payload []byte) {
+	b.pushRTP(sequence, payload, 0, time.Now())
+}
+
+func (b *rtpJitterBuffer) pushRTP(sequence uint16, payload []byte, timestamp uint32, now time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.started {
@@ -127,7 +156,13 @@ func (b *rtpJitterBuffer) push(sequence uint16, payload []byte) {
 		b.expected = sequence
 	}
 	if b.primed && rtpSequenceBefore(sequence, b.expected) {
-		return
+		if len(b.packets) != 0 || timestamp == 0 || int32(timestamp-b.lastTimestamp) <= 0 || now.Sub(b.lastArrival) < 60*time.Millisecond {
+			return
+		}
+		b.expected = sequence
+		b.primed = false
+		b.primeTicks = 0
+		b.missing = 0
 	}
 	if !b.primed && rtpSequenceBefore(sequence, b.expected) {
 		b.expected = sequence
@@ -135,16 +170,47 @@ func (b *rtpJitterBuffer) push(sequence uint16, payload []byte) {
 	if _, exists := b.packets[sequence]; exists {
 		return
 	}
-	if len(b.packets) >= 32 {
+	if !b.lastArrival.IsZero() && timestamp != 0 {
+		variation := now.Sub(b.lastArrival).Seconds()*1000 - float64(int32(timestamp-b.lastTimestamp))/8
+		if variation < 0 {
+			variation = -variation
+		}
+		b.jitterMS += (variation - b.jitterMS) / 16
+	}
+	b.lastArrival, b.lastTimestamp = now, timestamp
+	if len(payload) > 960 {
+		b.droppedSamples += len(payload)
 		return
 	}
+	// Keep recent speech, not an old backlog, under overload or a clock jump.
+	for len(b.packets) > 0 && (b.buffered+len(payload) > 960 || len(b.packets) >= 12) {
+		oldest := b.oldest()
+		b.droppedSamples += len(b.packets[oldest])
+		b.buffered -= len(b.packets[oldest])
+		delete(b.packets, oldest)
+		delete(b.arrivals, oldest)
+		b.expected = oldest + 1
+	}
 	b.packets[sequence] = append([]byte(nil), payload...)
+	b.arrivals[sequence] = now
 	b.buffered += len(payload)
 	if b.buffered >= sipRTPPrimeSamples {
 		b.primed = true
 	}
 }
 
+// Caller holds b.mu.
+func (b *rtpJitterBuffer) oldest() uint16 {
+	var oldest uint16
+	first := true
+	for seq := range b.packets {
+		if first || rtpSequenceBefore(seq, oldest) {
+			oldest = seq
+			first = false
+		}
+	}
+	return oldest
+}
 func rtpSequenceBefore(left, right uint16) bool {
 	return int16(left-right) < 0
 }
@@ -153,16 +219,41 @@ func (b *rtpJitterBuffer) pop() ([]byte, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.primed {
-		return nil, false
+		if len(b.packets) == 0 {
+			return nil, false
+		}
+		b.primeTicks++
+		if b.primeTicks < 3 {
+			return nil, false
+		}
+		b.primed = true
+	}
+	now := time.Now()
+	for len(b.packets) > 0 {
+		oldest := b.oldest()
+		age := now.Sub(b.arrivals[oldest])
+		if int(age/time.Millisecond) > b.maxAgeMS {
+			b.maxAgeMS = int(age / time.Millisecond)
+		}
+		if age <= 120*time.Millisecond {
+			break
+		}
+		b.droppedSamples += len(b.packets[oldest])
+		b.buffered -= len(b.packets[oldest])
+		delete(b.packets, oldest)
+		delete(b.arrivals, oldest)
+		b.expected = oldest + 1
 	}
 	payload, ok := b.packets[b.expected]
 	delete(b.packets, b.expected)
+	delete(b.arrivals, b.expected)
 	b.buffered -= len(payload)
 	b.expected++
 	if ok {
 		b.missing = 0
 	} else {
 		b.missing++
+		b.lost++
 	}
 	// After sustained silence, re-prime from the next packet instead of
 	// inventing sequence numbers indefinitely (RTP DTX advances timestamps only).
@@ -170,6 +261,7 @@ func (b *rtpJitterBuffer) pop() ([]byte, bool) {
 		b.started = false
 		b.primed = false
 		b.missing = 0
+		b.primeTicks = 0
 	}
 	if ok {
 		return payload, true
@@ -263,12 +355,16 @@ func newSIPRTPPacerWithPolicy(
 	if policy.dropStale {
 		queuePackets = max(1, policy.maxQueueMS/int(sipRTPPacketTime/time.Millisecond))
 	}
+	var seed [10]byte
+	if _, err := rand.Read(seed[:]); err != nil {
+		panic("SIP RTP random source unavailable: " + err.Error())
+	}
 	pacer := &sipRTPPacer{
 		ctx: ctx, media: media, playback: playback, onProgress: onProgress,
 		queue:   make(chan sipRTPOutboundPacket, queuePackets),
 		clearCh: make(chan chan int), errCh: make(chan error, 1), done: make(chan struct{}),
-		sequence: uint16(time.Now().UnixNano()), timestamp: uint32(time.Now().UnixNano()),
-		ssrc:          uint32(time.Now().UnixNano() >> 16),
+		sequence: binary.BigEndian.Uint16(seed[:2]), timestamp: binary.BigEndian.Uint32(seed[2:6]),
+		ssrc:          binary.BigEndian.Uint32(seed[6:]),
 		dropStale:     policy.dropStale,
 		trimToPackets: max(1, policy.trimToMS/int(sipRTPPacketTime/time.Millisecond)),
 	}
@@ -278,6 +374,10 @@ func newSIPRTPPacerWithPolicy(
 
 func (p *sipRTPPacer) run() {
 	defer close(p.done)
+	clockStart := time.Now()
+	baseTimestamp := p.timestamp
+	var lastSent time.Time
+	var lastFrame time.Duration
 	ticker := time.NewTicker(sipRTPPacketTime)
 	defer ticker.Stop()
 	for {
@@ -288,6 +388,11 @@ func (p *sipRTPPacer) run() {
 			cleared := p.drain()
 			reply <- cleared * int(sipRTPPacketTime/time.Millisecond)
 		case <-ticker.C:
+			now := time.Now()
+			frame := now.Sub(clockStart) / sipRTPPacketTime
+			if !lastSent.IsZero() && frame <= lastFrame {
+				continue
+			}
 			select {
 			case packet := <-p.queue:
 				p.playback.pending.Add(-1)
@@ -297,12 +402,14 @@ func (p *sipRTPPacer) run() {
 					packet.payload = encodeSIPG711(pcm, p.media.offer.Codec)
 				}
 				p.lastSentPCM = decodeSIPG711(packet.payload, p.media.offer.Codec)
+				p.timestamp = baseTimestamp + uint32(frame)*sipRTPPacketSamples
 				wire := &rtp.Packet{Header: rtp.Header{
-					Version: 2, PayloadType: p.media.offer.PayloadType,
+					Version: 2, PayloadType: p.media.offer.PayloadType, Marker: lastSent.IsZero() || now.Sub(lastSent) > 30*time.Millisecond,
 					SequenceNumber: p.sequence, Timestamp: p.timestamp, SSRC: p.ssrc,
 				}, Payload: packet.payload}
 				p.sequence++
-				p.timestamp += sipRTPPacketSamples
+				lastSent = now
+				lastFrame = frame
 				if err := p.media.writePacket(wire); err != nil {
 					select {
 					case p.errCh <- err:
@@ -481,14 +588,26 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 		})
 		return coreWriter.Write(ws.OpText, control)
 	})
+	var workers sync.WaitGroup
+	defer func() {
+		cancel()
+		media.Close()
+		coreCloser.Close(ws.StatusGoingAway, "SIP media drained")
+		workers.Wait()
+		<-pacer.done
+	}()
 	jitter := newRTPJitterBuffer()
 	framer := newRTPAudioFramer(jitter, media.offer)
 	maxQueuedMS := 0
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		<-ctx.Done()
 		coreCloser.Close(ws.StatusGoingAway, "direct SIP media stopped")
 	}()
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		select {
 		case err := <-pacer.Err():
 			closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "write direct SIP RTP: "+err.Error())
@@ -497,7 +616,9 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 		}
 	}()
 
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		defer cancel()
 		buffer := make([]byte, 4096)
 		for {
@@ -525,11 +646,13 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 				continue
 			}
 			media.lastPacket.Store(time.Now().UnixNano())
-			jitter.push(packet.SequenceNumber, packet.Payload)
+			jitter.pushRTP(packet.SequenceNumber, packet.Payload, packet.Timestamp, time.Now())
 		}
 	}()
 
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		defer cancel()
 		ticker := time.NewTicker(sipRTPPacketTime)
 		defer ticker.Stop()
@@ -552,10 +675,7 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 				if len(pcm24) == 0 {
 					continue
 				}
-				if err := coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24)); err != nil {
-					closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "write caller audio to realtime bridge")
-					return
-				}
+				coreWriter.QueueAudio(pcm16ToBytes(pcm24))
 				if localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
 					if err := coreWriter.Write(ws.OpText, control); err != nil {
@@ -573,6 +693,9 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 		a.finishMediaBridge(row.ID, leg, code, reason)
 		droppedStaleMS := pacer.droppedMS()
 		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "sip_direct", carrierCodecPCMU8, maxQueuedMS, droppedStaleMS)
+		jitter.mu.Lock()
+		lost, inboundDroppedMS, maxAge, jitterMS := jitter.lost, jitter.droppedSamples/8, jitter.maxAgeMS, jitter.jitterMS
+		jitter.mu.Unlock()
 		var preAnswerDroppedMS int64
 		if hub := a.softphones.lookup(row.ID); hub != nil {
 			preAnswerDroppedMS = hub.preAnswerDroppedMS()
@@ -582,6 +705,7 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 			PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
 			DropEvents:                   pacer.dropEvents(),
+			SequenceGaps:                 lost, InboundDroppedMS: inboundDroppedMS + int(coreWriter.audioDropped.Load())*20, InboundMaxQueueAgeMS: maxAge, InboundJitterMS: jitterMS,
 		})
 		if session.ctx.Err() == nil {
 			_ = session.hangup()
