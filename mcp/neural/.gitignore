@@ -1,0 +1,4 @@
+neural
+*.db
+*.db-shm
+*.db-wal

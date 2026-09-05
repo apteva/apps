@@ -1,0 +1,50 @@
+schema: apteva-app/v1
+name: neural
+display_name: Neural Studio
+version: 0.1.0
+description: Train small neural networks on your CPU. Watch neuron activations and spike encoding, explore decision boundaries, save model versions, and serve predictions.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/neural
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [ai, neural, training, visualization]
+scopes: [project]
+min_apteva_version: "0.10.0"
+requires:
+  permissions: [db.write.app]
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: experiments_list, description: List neural experiments in this project. }
+    - { name: experiments_create, description: Create a reproducible CPU experiment with a synthetic dataset and small dense network. }
+    - { name: experiments_get, description: "Inspect saved weights, metrics, training and validation samples." }
+    - { name: experiments_control, description: "Start, pause, or step one training epoch." }
+    - { name: model_versions_create, description: Save an immutable inference snapshot of a trained experiment. }
+    - { name: model_versions_list, description: List saved model versions. }
+    - { name: deployments_create, description: Create a project-authenticated prediction endpoint pinned to a saved version. }
+    - { name: deployments_list, description: List prediction endpoints. }
+    - { name: predictions_create, description: Predict from an experiment or deployment and return neuron activations. }
+  ui_panels:
+    - slot: project.page
+      label: Neural
+      icon: network
+      entry: /ui/NeuralPanel.mjs
+  workers:
+    - { name: trainer, schedule: "@every 1s" }
+  publishes:
+    - { name: neural.experiment.created, description: An experiment was created. }
+    - { name: neural.experiment.updated, description: "An experiment was started, paused, or stepped." }
+    - { name: neural.experiment.completed, description: Training completed. }
+    - { name: neural.model.version.created, description: A model version was saved. }
+    - { name: neural.deployment.ready, description: An inference endpoint is ready. }
+runtime:
+  kind: source
+  source: { repo: github.com/apteva/apps, ref: neural/v0.1.0, entry: mcp/neural }
+  port: 8080
+  health_check: /health
+db:
+  driver: sqlite
+  path: /data/neural.db
+  migrations: migrations/
+upgrade_policy: auto-patch
