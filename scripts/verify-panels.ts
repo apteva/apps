@@ -27,6 +27,8 @@ const DASHBOARD_VENDOR = join(
   "react.entry.ts",
 );
 const MCP_DIR = join(ROOT, "mcp");
+const appFlag = Bun.argv.indexOf("--app");
+const requestedApp = appFlag >= 0 ? Bun.argv[appFlag + 1] : "";
 
 async function vendorExports(): Promise<Set<string>> {
   if (!existsSync(DASHBOARD_VENDOR)) {
@@ -129,6 +131,7 @@ async function main() {
   let checked = 0;
   for (const a of apps) {
     if (!a.isDirectory()) continue;
+    if (requestedApp && a.name !== requestedApp) continue;
     const uiDir = join(MCP_DIR, a.name, "ui");
     if (!existsSync(uiDir)) continue;
     const entries = await readdir(uiDir);

@@ -1,0 +1,12 @@
+=== RUN   TestSidecar_BootsAndHealthOK
+--- PASS: TestSidecar_BootsAndHealthOK (1.54s)
+=== RUN   TestSidecar_FullToolFlow
+--- PASS: TestSidecar_FullToolFlow (0.12s)
+=== RUN   TestSidecar_ProjectScopeIsolation
+--- PASS: TestSidecar_ProjectScopeIsolation (0.22s)
+=== RUN   TestSidecar_GlobalScope_RequiresProjectIDPerCall
+--- PASS: TestSidecar_GlobalScope_RequiresProjectIDPerCall (0.11s)
+=== RUN   TestSidecar_RealMessagingBindingAndRouting
+--- PASS: TestSidecar_RealMessagingBindingAndRouting (1.26s)
+PASS
+ok  	github.com/apteva/apps/mcp/crm	3.910s

@@ -94,7 +94,7 @@ func TestGetConversation_EnrichesMessageStatusFromMessaging(t *testing.T) {
 			 source_detail, conversation_id, message_id_header)
 		 VALUES (?, ?, 'email_sent', 'hello', ?, 'messaging', ?, ?, ?)`,
 		"test-proj", c.ID, "2026-06-09T09:00:00Z",
-		`{"messaging_id":123,"provider_message_id":"provider-123"}`,
+		`{"messaging_id":123,"source_install_id":42,"provider_message_id":"provider-123"}`,
 		convoID, "provider-123",
 	); err != nil {
 		t.Fatal(err)
@@ -564,7 +564,7 @@ func TestMessagingInboundReceiveTool_AttachesInbound(t *testing.T) {
 	if payload["activity_id"] == nil || payload["conversation_id"] == nil {
 		t.Fatalf("event missing activity/conversation ids: %#v", payload)
 	}
-	if payload["conversation_id"].(int64) != res["conversation_id"].(int64) {
+	if int64FromAny(payload["conversation_id"]) != res["conversation_id"].(int64) {
 		t.Fatalf("event conversation_id=%#v, want %#v", payload["conversation_id"], res["conversation_id"])
 	}
 	messageEvents := rec.EventsByTopic("conversation.message.received")
@@ -578,7 +578,7 @@ func TestMessagingInboundReceiveTool_AttachesInbound(t *testing.T) {
 	if msgPayload["thread_state"] != "new" || msgPayload["thread_created"] != true {
 		t.Fatalf("thread state payload=%#v", msgPayload)
 	}
-	if msgPayload["conversation_id"].(int64) != res["conversation_id"].(int64) {
+	if int64FromAny(msgPayload["conversation_id"]) != res["conversation_id"].(int64) {
 		t.Fatalf("message event conversation_id=%#v, want %#v", msgPayload["conversation_id"], res["conversation_id"])
 	}
 }

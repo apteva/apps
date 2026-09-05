@@ -73,7 +73,7 @@ func dbListCreate(db *sql.DB, pid string, l *List) (*List, error) {
 	return dbListGet(db, pid, id)
 }
 
-func dbListGet(db *sql.DB, pid string, id int64) (*List, error) {
+func dbListGet(db sqlQueryExecer, pid string, id int64) (*List, error) {
 	row := db.QueryRow(
 		`SELECT id, slug, name, COALESCE(description,''),
 				COALESCE(default_sender_email,''), COALESCE(default_sender_phone,''),
@@ -118,7 +118,7 @@ func dbListBySlug(db *sql.DB, pid, slug string) (*List, error) {
 // dbListByInboundPattern returns the (active) list whose inbound
 // pattern matches verbatim. Used by the inbound webhook to derive
 // list_id from the messaging payload's matched_pattern.
-func dbListByInboundPattern(db *sql.DB, pid, pattern string) (*List, error) {
+func dbListByInboundPattern(db sqlQueryExecer, pid, pattern string) (*List, error) {
 	if pattern == "" {
 		return nil, nil
 	}
@@ -169,11 +169,15 @@ func dbListsAll(db *sql.DB, pid string, includeArchived bool) ([]*List, error) {
 		l := &List{}
 		if err := rows.Scan(&l.ID, &l.Slug, &l.Name, &l.Description,
 			&l.DefaultSenderEmail, &l.DefaultSenderPhone, &l.InboundRoutePattern,
-			&l.ArchivedAt, &l.CreatedAt, &l.UpdatedAt, &l.MemberCount); err == nil {
+			&l.ArchivedAt, &l.CreatedAt, &l.UpdatedAt, &l.MemberCount); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		{
 			out = append(out, l)
 		}
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func dbListUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*List, error) {
@@ -224,7 +228,7 @@ func dbListArchive(db *sql.DB, pid string, id int64) error {
 // dbListAddContact is idempotent — re-adding the same contact is a
 // no-op (INSERT OR IGNORE). The caller decides whether "already a
 // member" should be a soft success or a separate signal.
-func dbListAddContact(db *sql.DB, pid string, listID, contactID int64, source string) error {
+func dbListAddContactChanged(db sqlQueryExecer, pid string, listID, contactID int64, source string) (bool, error) {
 	if source == "" {
 		source = "human"
 	}
@@ -237,29 +241,46 @@ func dbListAddContact(db *sql.DB, pid string, listID, contactID int64, source st
 			       WHERE id = ? AND project_id = ? AND deleted_at IS NULL AND status != 'merged')`,
 		listID, pid, contactID, pid,
 	).Scan(&listExists, &contactExists); err != nil {
-		return err
+		return false, err
 	}
 	if listExists == 0 {
-		return errors.New("list not found in this project")
+		return false, errors.New("list not found in this project")
 	}
 	if contactExists == 0 {
-		return errors.New("contact not found in this project")
+		return false, errors.New("contact not found in this project")
 	}
-	_, err := db.Exec(
+	result, err := db.Exec(
 		`INSERT OR IGNORE INTO contact_list_members
 			(list_id, contact_id, project_id, source)
 		 VALUES (?, ?, ?, ?)`,
 		listID, contactID, pid, source,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n > 0, err
 }
 
-func dbListRemoveContact(db *sql.DB, pid string, listID, contactID int64) error {
-	_, err := db.Exec(
+func dbListRemoveContactChanged(db *sql.DB, pid string, listID, contactID int64) (bool, error) {
+	result, err := db.Exec(
 		`DELETE FROM contact_list_members
 		 WHERE list_id = ? AND contact_id = ? AND project_id = ?`,
 		listID, contactID, pid,
 	)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n > 0, err
+}
+
+func dbListAddContact(db *sql.DB, pid string, listID, contactID int64, source string) error {
+	_, err := dbListAddContactChanged(db, pid, listID, contactID, source)
+	return err
+}
+func dbListRemoveContact(db *sql.DB, pid string, listID, contactID int64) error {
+	_, err := dbListRemoveContactChanged(db, pid, listID, contactID)
 	return err
 }
 
@@ -287,15 +308,22 @@ func dbListsForContact(db *sql.DB, pid string, contactID int64) ([]*List, error)
 		l := &List{}
 		if err := rows.Scan(&l.ID, &l.Slug, &l.Name, &l.Description,
 			&l.DefaultSenderEmail, &l.DefaultSenderPhone, &l.InboundRoutePattern,
-			&l.ArchivedAt, &l.CreatedAt, &l.UpdatedAt); err == nil {
+			&l.ArchivedAt, &l.CreatedAt, &l.UpdatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		{
 			out = append(out, l)
 		}
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // dbListMembers returns paginated members of a list.
 func dbListMembers(db *sql.DB, pid string, listID int64, limit int) ([]*Contact, error) {
+	return dbListMembersPage(db, pid, listID, limit, 0)
+}
+func dbListMembersPage(db *sql.DB, pid string, listID int64, limit int, afterID int64) ([]*Contact, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -312,8 +340,8 @@ func dbListMembers(db *sql.DB, pid string, listID int64, limit int) ([]*Contact,
 		 WHERE m.list_id = ? AND m.project_id = ?
 		   AND c.project_id = ? AND c.deleted_at IS NULL AND c.status != 'merged'
 		   AND l.archived_at IS NULL
-		 ORDER BY m.added_at DESC LIMIT ?`,
-		listID, pid, pid, limit,
+		 AND c.id > ? ORDER BY c.id LIMIT ?`,
+		listID, pid, pid, afterID, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -323,11 +351,15 @@ func dbListMembers(db *sql.DB, pid string, listID int64, limit int) ([]*Contact,
 	for rows.Next() {
 		c := &Contact{}
 		if err := rows.Scan(&c.ID, &c.FirstName, &c.LastName, &c.DisplayName,
-			&c.PrimaryEmail, &c.PrimaryPhone, &c.Company, &c.JobTitle, &c.Status); err == nil {
+			&c.PrimaryEmail, &c.PrimaryPhone, &c.Company, &c.JobTitle, &c.Status); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		{
 			out = append(out, c)
 		}
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // ─── MCP tools ────────────────────────────────────────────────────
@@ -352,7 +384,7 @@ func (a *App) toolListsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("list.created", map[string]any{"id": out.ID, "slug": out.Slug, "name": out.Name})
+	emitCRMEvent(ctx, pid, "list.created", map[string]any{"id": out.ID, "slug": out.Slug, "name": out.Name})
 	return map[string]any{"list": out}, nil
 }
 
@@ -410,7 +442,7 @@ func (a *App) toolListsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("list.updated", map[string]any{"id": id})
+	emitCRMEvent(ctx, pid, "list.updated", map[string]any{"id": id})
 	return map[string]any{"list": out}, nil
 }
 
@@ -426,7 +458,7 @@ func (a *App) toolListsArchive(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err := dbListArchive(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
-	ctx.Emit("list.archived", map[string]any{"id": id})
+	emitCRMEvent(ctx, pid, "list.archived", map[string]any{"id": id})
 	return map[string]any{"archived": true, "id": id}, nil
 }
 
@@ -441,10 +473,13 @@ func (a *App) toolListsAddContact(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, errors.New("list_id and contact_id required")
 	}
 	source := strArg(args, "source")
-	if err := dbListAddContact(ctx.AppDB(), pid, listID, cid, source); err != nil {
+	changed, err := dbListAddContactChanged(ctx.AppDB(), pid, listID, cid, source)
+	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("list.member.added", map[string]any{"list_id": listID, "contact_id": cid})
+	if changed {
+		emitCRMEvent(ctx, pid, "list.member.added", map[string]any{"list_id": listID, "contact_id": cid})
+	}
 	return map[string]any{"added": true, "list_id": listID, "contact_id": cid}, nil
 }
 
@@ -458,10 +493,13 @@ func (a *App) toolListsRemoveContact(ctx *sdk.AppCtx, args map[string]any) (any,
 	if listID == 0 || cid == 0 {
 		return nil, errors.New("list_id and contact_id required")
 	}
-	if err := dbListRemoveContact(ctx.AppDB(), pid, listID, cid); err != nil {
+	changed, err := dbListRemoveContactChanged(ctx.AppDB(), pid, listID, cid)
+	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("list.member.removed", map[string]any{"list_id": listID, "contact_id": cid})
+	if changed {
+		emitCRMEvent(ctx, pid, "list.member.removed", map[string]any{"list_id": listID, "contact_id": cid})
+	}
 	return map[string]any{"removed": true, "list_id": listID, "contact_id": cid}, nil
 }
 
@@ -482,7 +520,7 @@ func (a *App) toolListsEval(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("id required")
 	}
 	limit := intArg(args, "limit", 5000)
-	if limit <= 0 || limit > 50000 {
+	if limit <= 0 || limit > 5000 {
 		limit = 5000
 	}
 	// Hot-path: single JOIN against contacts to filter out soft-
@@ -492,8 +530,8 @@ func (a *App) toolListsEval(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		 JOIN contacts c ON c.id = m.contact_id
 		 WHERE m.list_id = ? AND m.project_id = ?
 		   AND c.deleted_at IS NULL AND (c.status IS NULL OR c.status = 'active')
-		 ORDER BY c.id LIMIT ?`,
-		listID, pid, limit,
+		 AND c.id>? ORDER BY c.id LIMIT ?`,
+		listID, pid, int64Arg(args, "after_contact_id"), limit,
 	)
 	if err != nil {
 		return nil, err
@@ -502,10 +540,15 @@ func (a *App) toolListsEval(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out := []int64{}
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err == nil {
-			out = append(out, id)
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
 		}
+		out = append(out, id)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
 	// Total count (independent of limit) — same JOIN.
 	var total int64
 	totalRow := ctx.AppDB().QueryRow(
@@ -515,8 +558,10 @@ func (a *App) toolListsEval(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		   AND c.deleted_at IS NULL AND (c.status IS NULL OR c.status = 'active')`,
 		listID, pid,
 	)
-	_ = totalRow.Scan(&total)
-	return map[string]any{"contact_ids": out, "count": total}, nil
+	if err := totalRow.Scan(&total); err != nil {
+		return nil, err
+	}
+	return map[string]any{"contact_ids": out, "count": total, "next_after_contact_id": lastContactID(out)}, nil
 }
 
 func (a *App) toolListsMembership(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -631,7 +676,7 @@ func (a *App) handleHTTPListsCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	globalCtx.Emit("list.created", map[string]any{"id": out.ID, "slug": out.Slug, "name": out.Name})
+	emitCRMEvent(globalCtx, pid, "list.created", map[string]any{"id": out.ID, "slug": out.Slug, "name": out.Name})
 	httpJSON(w, map[string]any{"list": out})
 }
 
@@ -669,7 +714,7 @@ func (a *App) handleHTTPListUpdate(w http.ResponseWriter, r *http.Request, id in
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	globalCtx.Emit("list.updated", map[string]any{"id": id})
+	emitCRMEvent(globalCtx, pid, "list.updated", map[string]any{"id": id})
 	httpJSON(w, map[string]any{"list": out})
 }
 
@@ -683,7 +728,7 @@ func (a *App) handleHTTPListArchive(w http.ResponseWriter, r *http.Request, id i
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	globalCtx.Emit("list.archived", map[string]any{"id": id})
+	emitCRMEvent(globalCtx, pid, "list.archived", map[string]any{"id": id})
 	httpJSON(w, map[string]any{"archived": true, "id": id})
 }
 
@@ -694,7 +739,8 @@ func (a *App) handleHTTPListMembers(w http.ResponseWriter, r *http.Request, id i
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	out, err := dbListMembers(globalCtx.AppDB(), pid, id, limit)
+	afterID, _ := strconv.ParseInt(r.URL.Query().Get("after_contact_id"), 10, 64)
+	out, err := dbListMembersPage(globalCtx.AppDB(), pid, id, limit, afterID)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -719,11 +765,14 @@ func (a *App) handleHTTPListAddMember(w http.ResponseWriter, r *http.Request, li
 		return
 	}
 	source := strArg(body, "source")
-	if err := dbListAddContact(globalCtx.AppDB(), pid, listID, cid, source); err != nil {
+	changed, err := dbListAddContactChanged(globalCtx.AppDB(), pid, listID, cid, source)
+	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	globalCtx.Emit("list.member.added", map[string]any{"list_id": listID, "contact_id": cid})
+	if changed {
+		emitCRMEvent(globalCtx, pid, "list.member.added", map[string]any{"list_id": listID, "contact_id": cid})
+	}
 	httpJSON(w, map[string]any{"added": true, "list_id": listID, "contact_id": cid})
 }
 
@@ -764,11 +813,14 @@ func (a *App) handleHTTPContactLists(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, "list_id required")
 			return
 		}
-		if err := dbListAddContact(globalCtx.AppDB(), pid, listID, cid, strArg(body, "source")); err != nil {
+		changed, err := dbListAddContactChanged(globalCtx.AppDB(), pid, listID, cid, strArg(body, "source"))
+		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		globalCtx.Emit("list.member.added", map[string]any{"list_id": listID, "contact_id": cid})
+		if changed {
+			emitCRMEvent(globalCtx, pid, "list.member.added", map[string]any{"list_id": listID, "contact_id": cid})
+		}
 		httpJSON(w, map[string]any{"added": true, "list_id": listID, "contact_id": cid})
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -781,11 +833,14 @@ func (a *App) handleHTTPListRemoveMember(w http.ResponseWriter, r *http.Request,
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := dbListRemoveContact(globalCtx.AppDB(), pid, listID, contactID); err != nil {
+	changed, err := dbListRemoveContactChanged(globalCtx.AppDB(), pid, listID, contactID)
+	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	globalCtx.Emit("list.member.removed", map[string]any{"list_id": listID, "contact_id": contactID})
+	if changed {
+		emitCRMEvent(globalCtx, pid, "list.member.removed", map[string]any{"list_id": listID, "contact_id": contactID})
+	}
 	httpJSON(w, map[string]any{"removed": true, "list_id": listID, "contact_id": contactID})
 }
 

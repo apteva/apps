@@ -1,0 +1,3 @@
+{"issue":"typed segment edit","before":{"predicate":"attribute","key":"example","op":"eq","value":42},"after":{"predicate":"attribute","key":"example","op":"eq","value":"42"}}
+{"issue":"typed segment edit","before":{"predicate":"attribute","key":"example","op":"eq","value":true},"after":{"predicate":"attribute","key":"example","op":"eq","value":"true"}}
+{"issue":"out-of-order contact loads","selected":"B","displayed":{"id":"A"}}

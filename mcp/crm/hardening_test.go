@@ -30,6 +30,10 @@ func TestListMembershipRejectsCrossProjectContact(t *testing.T) {
 		t.Fatal("cross-project contact was added to list")
 	}
 
+	// Simulate a row that predates the new ownership trigger.
+	if _, err := db.Exec(`DROP TRIGGER crm_membership_owner_insert`); err != nil {
+		t.Fatal(err)
+	}
 	// Defense in depth: a legacy or manually-corrupted membership row must
 	// not disclose the foreign project's contact through list reads.
 	if _, err := db.Exec(

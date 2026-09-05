@@ -87,6 +87,7 @@ func TestEmbeddedManifest_PublishesCRMEvents(t *testing.T) {
 
 func TestContactAddedManifestDeclaresEmittedPayload(t *testing.T) {
 	want := map[string]string{
+		"event_id":     "string",
 		"id":           "integer",
 		"display_name": "string",
 		"first_name":   "string",
