@@ -164,6 +164,18 @@ func (f *sipDialogFixture) waitEnded(t *testing.T) {
 	}
 	t.Fatal("SIP call did not end")
 }
+func (f *sipDialogFixture) waitRefreshIdle(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.session.refreshMu.TryLock() {
+			f.session.refreshMu.Unlock()
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("SIP refresh handler did not finish")
+}
 func TestSIPAnsweredDialogRefreshAndBidirectionalMedia(t *testing.T) {
 	for _, secure := range []bool{false, true} {
 		t.Run(fmt.Sprint("SRTP=", secure), func(t *testing.T) {
@@ -252,21 +264,15 @@ func TestSIPAnsweredDialogRefreshAndBidirectionalMedia(t *testing.T) {
 				t.Fatal("refresh timer not negotiated")
 			}
 			f.send(t, "ACK", 2, "", "")
-			// Let ACK release the active offer/answer transaction before UPDATE.
-			deadline := time.Now().Add(time.Second)
-			for time.Now().Before(deadline) {
-				f.session.answerMu.Lock()
-				ready := f.session.timer.interval == 180*time.Second
-				f.session.answerMu.Unlock()
-				if ready {
-					break
-				}
-				time.Sleep(time.Millisecond)
-			}
+			// A response can reach this socket before the handler releases its
+			// offer/answer lock. Keep these sequential checks free of glare.
+			f.waitRefreshIdle(t)
 			f.send(t, "UPDATE", 3, "", "")
 			readSIPResponseContaining(t, f.signaling, "200 OK")
+			f.waitRefreshIdle(t)
 			f.send(t, "UPDATE", 2, "", "")
 			readSIPResponseContaining(t, f.signaling, "500 Invalid CSeq")
+			f.waitRefreshIdle(t)
 			f.send(t, "INVITE", 4, strings.Replace(f.body, "m=audio ", "m=audio 1", 1), "")
 			readSIPResponseContaining(t, f.signaling, "488 Media Change Not Supported")
 			f.send(t, "BYE", 5, "", "")
