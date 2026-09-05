@@ -9,7 +9,10 @@ package main
 // Run with:  go test -tags integration ./...
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,7 +91,7 @@ func TestSidecar_RandomPreview(t *testing.T) {
 func TestSidecar_GlobalScope_RequiresProjectIDPerCall(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".") // no project_id = global scope
 	_, err := sc.MCPRaw("tools/call", map[string]any{
-		"name": "jobs_list",
+		"name":      "jobs_list",
 		"arguments": map[string]any{},
 	})
 	if err == nil {
@@ -110,11 +113,24 @@ func TestSidecar_GlobalScope_RequiresProjectIDPerCall(t *testing.T) {
 // runs the worker every 5s; the test just waits a bit and verifies a
 // run row appeared.
 func TestSidecar_DispatcherPicksUpDueJob(t *testing.T) {
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	var delivered atomic.Int32
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/apps/callback/agents/7" {
+			w.Write([]byte(`{"id":7,"project_id":"test-proj"}`))
+			return
+		}
+		if r.URL.Path == "/api/apps/callback/agents/7/event" {
+			delivered.Add(1)
+			w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		w.Write([]byte(`[]`))
+	}))
+	defer gateway.Close()
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
 
-	// Event target with a no-op platform — our test SDK doesn't wire
-	// PlatformAPI through, so the sidecar takes the test-mode path
-	// and records the run as ok.
+	// Assert the callback is delivered and finalized successfully.
 	r := sc.MCP("jobs_schedule", map[string]any{
 		"name":     "imminent",
 		"schedule": map[string]any{"kind": "once", "run_at": time.Now().Add(-1 * time.Second).UTC().Format(time.RFC3339)},
@@ -126,7 +142,7 @@ func TestSidecar_DispatcherPicksUpDueJob(t *testing.T) {
 	for time.Now().Before(deadline) {
 		out := sc.MCP("jobs_runs", map[string]any{"id": id})
 		runs := out["runs"].([]any)
-		if len(runs) >= 1 {
+		if len(runs) >= 1 && runs[0].(map[string]any)["status"] == "ok" && delivered.Load() == 1 {
 			return
 		}
 		time.Sleep(500 * time.Millisecond)

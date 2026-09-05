@@ -19,10 +19,12 @@ const (
 	statusCanceled  = "canceled"
 
 	stageQueued         = "queued"
+	stageProbing        = "probing"
 	stageDownloading    = "downloading"
 	stagePostprocessing = "postprocessing"
 	stagePreparing      = "preparing"
 	stageUploading      = "uploading"
+	stageTranscribing   = "transcribing"
 	stageCompleted      = "completed"
 	stageFailed         = "failed"
 	stageCanceled       = "canceled"

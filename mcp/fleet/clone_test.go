@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -50,7 +51,6 @@ func TestToolClone_CopiesLocalTenantWithoutTouchingSource(t *testing.T) {
 	out, err := app.toolClone(ctx, map[string]any{
 		"source_tenant_id": sourceID,
 		"slug":             "source-copy",
-		"start":            false,
 	})
 	if err != nil {
 		t.Fatalf("toolClone: %v", err)
@@ -102,6 +102,16 @@ func TestToolClone_CopiesLocalTenantWithoutTouchingSource(t *testing.T) {
 	if clone.Status != StatusStopped {
 		t.Fatalf("clone status = %q, want stopped", clone.Status)
 	}
+	if got, _ := m["requires_quarantine"].(bool); !got {
+		t.Fatalf("clone response requires_quarantine = %v, want true", m["requires_quarantine"])
+	}
+	needsQuarantine, err := app.cloneRequiresQuarantine(cloneID)
+	if err != nil {
+		t.Fatalf("cloneRequiresQuarantine: %v", err)
+	}
+	if !needsQuarantine {
+		t.Fatal("stopped clone did not require quarantine before first activation")
+	}
 	if clone.Domain != "" || clone.DomainRecordID != "" || clone.DomainAttachedAt != nil {
 		t.Fatalf("clone copied domain fields: %+v", clone)
 	}
@@ -142,5 +152,24 @@ func TestToolClone_CopiesLocalTenantWithoutTouchingSource(t *testing.T) {
 	}
 	if string(cloneKey) != "sk-fake" {
 		t.Fatalf("clone api key = %q", string(cloneKey))
+	}
+}
+
+func TestToolStartRoutesUnvalidatedCloneThroughQuarantine(t *testing.T) {
+	app, ctx := newTestApp(t)
+	cloneID := seedTenant(t, app, "unvalidated-copy", StatusStopped)
+	if _, err := app.store.db.Exec(`UPDATE fleet_tenants SET current_version = ? WHERE id = ?`, "0.25.3", cloneID); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.recordEvent(cloneID, "cloned", "user", map[string]any{"source_tenant_id": "source"}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := app.toolStart(ctx, map[string]any{"tenant_id": cloneID})
+	if err == nil || !strings.Contains(err.Error(), "quarantine rehearsal requires 0.25.4 or newer") {
+		t.Fatalf("tenant_start did not enforce clone quarantine: %v", err)
+	}
+	if event, eventErr := app.store.hasEvent(cloneID, "started"); eventErr != nil || event {
+		t.Fatalf("unvalidated clone was started normally: started=%v err=%v", event, eventErr)
 	}
 }

@@ -1,7 +1,7 @@
 name: edit-recurring-task-definition
 description: |
   An existing recurring task is paused, then renamed, re-described, and
-  rescheduled atomically through tasks_update. The edit preserves the paused
+  rescheduled atomically through tasks_edit. The edit preserves the paused
   state and does not create a placeholder or replacement task.
 
 timeout: 2m
@@ -29,7 +29,7 @@ setup:
 directive: |
   Edit the existing recurring lead-review task; never create a replacement or
   placeholder task. First call tasks_list and identify the exact task named
-  "Old recurring lead review". Pause that schedule. Then call tasks_update
+  "Old recurring lead review". Pause that schedule. Then call tasks_edit
   exactly once for the same task ID and atomically make these definition edits:
 
   - title: "Madrid recurring lead review"
@@ -37,10 +37,9 @@ directive: |
   - interval: every 30 minutes
   - timezone: Europe/Madrid
 
-  Do not send execution state, progress, current_step, or any unchanged task
-  field in the update. Afterward call tasks_get once to verify the authoritative
-  record. The schedule must remain paused. Do not resume, run, complete, cancel,
-  or create any task. Stop after verification.
+  Afterward call tasks_get once to verify the authoritative record. The schedule
+  must remain paused. Do not resume, run, complete, cancel, or create any task.
+  Stop after verification.
 
 assert:
   - tool_called_with:
@@ -52,7 +51,7 @@ assert:
       thread_id: main
       count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_edit
       thread_id: main
       args:
         title: Madrid recurring lead review
@@ -62,7 +61,7 @@ assert:
       tool: tasks_get
       thread_id: main
       count: 1
-  - tool_not_called: tasks_create | tasks_resume | tasks_run_now | tasks_complete | tasks_cancel
+  - tool_not_called: tasks_update | tasks_create | tasks_resume | tasks_run_now | tasks_complete | tasks_cancel
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_status: 200
     expect_count_at: tasks

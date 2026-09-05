@@ -50,6 +50,8 @@ func TestTenantSpawnEnvStripsParentAppIdentity(t *testing.T) {
 	t.Setenv("APTEVA_GATEWAY_URL", "http://parent.invalid")
 	t.Setenv("APTEVA_PUBLIC_URL", "https://parent.invalid")
 	t.Setenv("DB_PATH", "/tmp/parent-app.db")
+	t.Setenv("APTEVA_SERVER_BIN", "/parent/apteva-server")
+	t.Setenv("APTEVA_CORE_BIN", "/parent/apteva-core")
 
 	env := tenantSpawnEnv("/tmp/apteva-tenant", 43559, "tnt_test")
 	got := map[string]string{}
@@ -62,18 +64,15 @@ func TestTenantSpawnEnvStripsParentAppIdentity(t *testing.T) {
 		"APTEVA_APP_TOKEN", "APTEVA_OUTBOUND_TOKEN", "APTEVA_INSTALL_ID",
 		"APTEVA_PROJECT_ID", "APTEVA_APP_CONFIG", "APTEVA_APP_PORT",
 		"APTEVA_GATEWAY_URL", "APTEVA_PUBLIC_URL", "DB_PATH",
+		"APTEVA_SERVER_BIN", "APTEVA_CORE_BIN",
 	} {
 		if value, exists := got[key]; exists {
 			t.Fatalf("%s leaked into tenant environment as %q", key, value)
 		}
 	}
-	if got["APTEVA_DELEGATED_DNS_FLEET_URL"] != "http://127.0.0.1:5555" {
-		t.Fatalf("delegated Fleet URL = %q", got["APTEVA_DELEGATED_DNS_FLEET_URL"])
-	}
-	if got["APTEVA_DELEGATED_DNS_TOKEN"] != "parent-app-token" {
-		t.Fatalf("delegated token was not copied explicitly")
-	}
-	if got["APTEVA_DELEGATED_DNS_PROJECT_ID"] != "parent-project" {
-		t.Fatalf("delegated project was not copied explicitly")
+	for _, key := range []string{"APTEVA_DELEGATED_DNS_FLEET_URL", "APTEVA_DELEGATED_DNS_TOKEN", "APTEVA_DELEGATED_DNS_PROJECT_ID", "FLEET_MASTER_KEY"} {
+		if got[key] != "" {
+			t.Fatalf("parent credential leaked: %s", key)
+		}
 	}
 }

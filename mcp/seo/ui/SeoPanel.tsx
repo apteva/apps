@@ -53,6 +53,66 @@ interface DomainMetrics {
   referring_domains_count?: number;
 }
 
+interface Backlink {
+  id: number;
+  provider: string;
+  source_url: string;
+  dest_url: string;
+  anchor: string;
+  is_dofollow?: number;
+  is_nofollow?: number;
+  is_ugc?: number;
+  is_sponsored?: number;
+  source_authority?: number;
+  first_seen?: number;
+  last_seen?: number;
+  is_lost: number;
+}
+
+type BacklinkStatus = "all" | "active" | "lost";
+type BacklinkFollowFilter = "all" | "follow" | "nofollow";
+
+interface BacklinkBrowseArgs {
+  status: BacklinkStatus;
+  query?: string;
+  dofollow?: boolean;
+  limit: number;
+  offset: number;
+}
+
+interface BacklinkPage {
+  rows: Backlink[];
+  total: number;
+  limit: number;
+  offset: number;
+  status: BacklinkStatus;
+  provider: string;
+  query?: string;
+}
+
+interface BacklinkMovementPoint {
+  date: string;
+  gained: number;
+  lost: number;
+}
+
+interface BacklinkMovement {
+  domain_id: number;
+  provider: string;
+  days: number;
+  from_date: string;
+  to_date: string;
+  active_links: number;
+  lost_links: number;
+  gained_in_range: number;
+  lost_in_range: number;
+  net_change: number;
+  known_first_seen: number;
+  known_lost_date: number;
+  points: BacklinkMovementPoint[];
+  data_basis: string;
+}
+
 interface KeywordMetrics {
   id: number;
   location_id: number;
@@ -128,6 +188,43 @@ interface SearchRanking {
   published_at?: string;
 }
 
+interface RankTracker {
+  id: number;
+  keyword_id: number;
+  entity_id: number;
+  entity_type: string;
+  entity_identifier: string;
+  entity_label?: string;
+  provider: string;
+  device: string;
+  frequency: RefreshFrequency;
+  enabled: boolean;
+  daily_depth: number;
+  weekly_depth: number;
+  next_run_at: number;
+  last_success_at?: number;
+  last_error?: string;
+}
+
+interface RankObservation {
+  id: number;
+  tracker_id: number;
+  observed_date: string;
+  ts: number;
+  found: boolean;
+  rank?: number;
+  rank_url?: string;
+  checked_depth: number;
+  provider: string;
+}
+
+interface RankTrackingSettings {
+  enabled: boolean;
+  monthly_budget_usd: number;
+  daily_depth: number;
+  weekly_depth: number;
+}
+
 interface KeywordIdea {
   keyword: string;
   source_keyword?: string;
@@ -160,7 +257,9 @@ interface PageRankingSummary {
 
 type SearchEngine = "google" | "youtube";
 type SEOProvider = "dataforseo" | "yepapi";
-type View = "seed" | "domains" | "keywords" | "discover" | "entities" | "locations";
+type RefreshFrequency = "daily" | "weekly" | "monthly";
+type View = "overview" | "domains" | "keywords" | "explorer" | "settings";
+type ExplorerMode = "research" | "entities";
 
 interface ProviderStatus {
   default: string;
@@ -171,6 +270,13 @@ const API = "/api/apps/seo";
 const engines: { id: SearchEngine; label: string }[] = [
   { id: "google", label: "Google" },
   { id: "youtube", label: "YouTube" },
+];
+const navigation: { id: View; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "domains", label: "Domains" },
+  { id: "keywords", label: "Keywords" },
+  { id: "explorer", label: "Explorer" },
+  { id: "settings", label: "Settings" },
 ];
 const inputCls =
   "w-full bg-surface-2 text-text border border-border rounded px-3 py-1.5 " +
@@ -243,17 +349,12 @@ function pageSummaries(rankings: Ranking[]): PageRankingSummary[] {
   return Array.from(map.values()).sort((a, b) => (a.bestRank || 9999) - (b.bestRank || 9999));
 }
 
-function engineViews(engine: SearchEngine): View[] {
-  return engine === "google"
-    ? ["seed", "domains", "keywords", "discover", "entities", "locations"]
-    : ["discover", "entities", "keywords", "locations"];
-}
-
 export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const [searchEngine, setSearchEngine] = useState<SearchEngine>("google");
   const [provider, setProvider] = useState<SEOProvider | "">("");
   const [providers, setProviders] = useState<string[]>([]);
-  const [view, setView] = useState<View>("seed");
+  const [view, setView] = useState<View>("overview");
+  const [explorerMode, setExplorerMode] = useState<ExplorerMode>("research");
   const [locations, setLocations] = useState<SEOLocation[]>([]);
   const [domains, setDomains] = useState<Domain[]>([]);
   const [keywords, setKeywords] = useState<Keyword[]>([]);
@@ -262,6 +363,9 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const [selectedKeyword, setSelectedKeyword] = useState<Keyword | null>(null);
   const [selectedEntity, setSelectedEntity] = useState<SearchEntity | null>(null);
   const [domainMetrics, setDomainMetrics] = useState<DomainMetrics | null>(null);
+  const [backlinkMovement, setBacklinkMovement] = useState<BacklinkMovement | null>(null);
+  const [activeBacklinks, setActiveBacklinks] = useState<Backlink[]>([]);
+  const [lostBacklinks, setLostBacklinks] = useState<Backlink[]>([]);
   const [keywordMetrics, setKeywordMetrics] = useState<KeywordMetrics | null>(null);
   const [domainRankings, setDomainRankings] = useState<Ranking[]>([]);
   const [entityRankings, setEntityRankings] = useState<SearchRanking[]>([]);
@@ -271,6 +375,14 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const [keywordIdeas, setKeywordIdeas] = useState<KeywordIdea[]>([]);
   const [opportunities, setOpportunities] = useState<ContentOpportunity[]>([]);
   const [metricJobs, setMetricJobs] = useState<KeywordMetricJob[]>([]);
+  const [rankTrackers, setRankTrackers] = useState<RankTracker[]>([]);
+  const [rankHistory, setRankHistory] = useState<Record<number, RankObservation[]>>({});
+  const [trackingSettings, setTrackingSettings] = useState<RankTrackingSettings>({
+    enabled: true,
+    monthly_budget_usd: 5,
+    daily_depth: 20,
+    weekly_depth: 100,
+  });
   const [activity, setActivity] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -322,8 +434,31 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const reloadDomains = useCallback(async () => {
     const rows = await callTool<Domain[]>("domains_list");
     setDomains(rows || []);
-    setSelectedDomain((cur) => cur || rows?.[0] || null);
+    setSelectedDomain((current) => {
+      if (current && rows?.some((domain) => domain.id === current.id)) return current;
+      return rows?.find((domain) => !isCompetitorDomain(domain)) || rows?.[0] || null;
+    });
   }, [callTool]);
+
+  const reloadBacklinkInsights = useCallback(async (domainId: number) => {
+    const providerArgs = provider ? { provider } : {};
+    const [movement, active, lost] = await Promise.all([
+      callTool<BacklinkMovement>("backlink_movement", { domain_id: domainId, ...providerArgs, days: 90 }),
+      callTool<Backlink[]>("backlinks_list", { domain_id: domainId, ...providerArgs, lost: false, limit: 20 }),
+      callTool<Backlink[]>("backlinks_list", { domain_id: domainId, ...providerArgs, lost: true, limit: 20 }),
+    ]);
+    setBacklinkMovement(movement);
+    setActiveBacklinks(active || []);
+    setLostBacklinks(lost || []);
+  }, [callTool, provider]);
+
+  const browseBacklinks = useCallback(async (domainId: number, args: BacklinkBrowseArgs) => {
+    return callTool<BacklinkPage>("backlinks_browse", {
+      domain_id: domainId,
+      ...(provider ? { provider } : {}),
+      ...args,
+    });
+  }, [callTool, provider]);
 
   const reloadKeywords = useCallback(async () => {
     const rows = await callTool<Keyword[]>("keywords_list", {
@@ -363,28 +498,47 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setMetricJobs(response.jobs || []);
   }, [api]);
 
+  const reloadTrackingSettings = useCallback(async () => {
+    const settings = await api<RankTrackingSettings>("GET", "/rank-tracking/settings");
+    setTrackingSettings(settings);
+  }, [api]);
+
+  const reloadRankTracking = useCallback(async (keywordId: number) => {
+    const response = await api<{ trackers: RankTracker[] }>("GET", "/rank-tracking", { keyword_id: String(keywordId) });
+    const trackers = response.trackers || [];
+    setRankTrackers(trackers);
+    const entries = await Promise.all(trackers.map(async (tracker) => {
+      const result = await api<{ history: RankObservation[] }>("GET", "/rank-history", {
+        tracker_id: String(tracker.id),
+        limit: "400",
+      });
+      return [tracker.id, result.history || []] as const;
+    }));
+    setRankHistory(Object.fromEntries(entries));
+  }, [api]);
+
   const reloadAll = useCallback(async () => {
     setBusy(true);
     setErr("");
     try {
-      await Promise.all([reloadProviders(), reloadLocations(), reloadDomains(), reloadKeywords(), reloadEntities(), reloadOpportunities(), reloadMetricJobs()]);
+      await Promise.all([
+        reloadProviders(), reloadLocations(), reloadDomains(), reloadKeywords(),
+        reloadEntities(), reloadOpportunities(), reloadMetricJobs(), reloadTrackingSettings(),
+      ]);
       setStatus("Updated");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
-  }, [reloadDomains, reloadEntities, reloadKeywords, reloadLocations, reloadMetricJobs, reloadOpportunities, reloadProviders]);
+  }, [reloadDomains, reloadEntities, reloadKeywords, reloadLocations, reloadMetricJobs, reloadOpportunities, reloadProviders, reloadTrackingSettings]);
 
   useEffect(() => {
-    if (!engineViews(searchEngine).includes(view)) {
-      setView(searchEngine === "youtube" ? "discover" : "seed");
-    }
     setSelectedKeyword(null);
     setSelectedEntity(null);
     setSerpResults([]);
     setKeywordIdeas([]);
-  }, [provider, searchEngine, view]);
+  }, [provider, searchEngine]);
 
   useEffect(() => {
     reloadAll();
@@ -394,6 +548,9 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     if (!selectedDomain) {
       setDomainMetrics(null);
       setDomainRankings([]);
+      setBacklinkMovement(null);
+      setActiveBacklinks([]);
+      setLostBacklinks([]);
       setSelectedRankURL(null);
       return;
     }
@@ -406,7 +563,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
         setSelectedRankURL(null);
       })
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, provider, selectedDomain]);
+    reloadBacklinkInsights(selectedDomain.id).catch((e) => setErr((e as Error).message));
+  }, [callTool, provider, reloadBacklinkInsights, selectedDomain]);
 
   useEffect(() => {
     if (!selectedRankURL && domainRankings.length > 0) {
@@ -436,6 +594,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     if (!selectedKeyword) {
       setKeywordMetrics(null);
       setSerpResults([]);
+      setRankTrackers([]);
+      setRankHistory({});
       return;
     }
     callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: selectedKeyword.id, ...(provider ? { provider } : {}) })
@@ -444,7 +604,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     callTool<SearchRanking[]>("rankings_for_keyword", { keyword_id: selectedKeyword.id, ...(provider ? { provider } : {}), limit: 100 })
       .then((rows) => setSerpResults(rows || []))
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, provider, searchEngine, selectedKeyword]);
+    reloadRankTracking(selectedKeyword.id).catch((e) => setErr((e as Error).message));
+  }, [callTool, provider, reloadRankTracking, searchEngine, selectedKeyword]);
 
   useEffect(() => {
     if (!selectedEntity) {
@@ -513,6 +674,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
         ]);
         setDomainMetrics(detail.metrics || null);
         setDomainRankings(rows || []);
+      } else {
+        await reloadBacklinkInsights(domain.id);
       }
       setStatus(backlinks ? "Backlinks refreshed" : "Domain metrics refreshed");
       pushActivity(`${backlinks ? "Backlinks" : "Domain metrics"} refreshed for ${domain.host}`);
@@ -646,6 +809,74 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     }
   }
 
+  async function enableRankTracking(keyword: Keyword, target: string, frequency: RefreshFrequency) {
+    setBusy(true);
+    setErr("");
+    try {
+      const [kind, rawId] = target.split(":");
+      const id = Number(rawId);
+      await api("POST", "/rank-tracking", {}, {
+        keyword_id: keyword.id,
+        ...(kind === "domain" ? { domain_id: id } : { entity_id: id }),
+        provider: "dataforseo",
+        device: "desktop",
+        frequency,
+        daily_depth: trackingSettings.daily_depth,
+        weekly_depth: trackingSettings.weekly_depth,
+      });
+      await reloadRankTracking(keyword.id);
+      setStatus(`${frequency[0].toUpperCase()}${frequency.slice(1)} rank tracking enabled`);
+      pushActivity(`Enabled ${frequency} DataForSEO rank tracking: ${keyword.text}`);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeRankTrackingFrequency(keyword: Keyword, trackerId: number, frequency: RefreshFrequency) {
+    setBusy(true);
+    setErr("");
+    try {
+      await api("PATCH", `/rank-tracking/${trackerId}`, {}, { frequency });
+      await reloadRankTracking(keyword.id);
+      setStatus(`Rank tracking changed to ${frequency}`);
+      pushActivity(`Changed rank tracking to ${frequency}: ${keyword.text}`);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disableRankTracking(keyword: Keyword, trackerId: number) {
+    setBusy(true);
+    setErr("");
+    try {
+      await api("DELETE", `/rank-tracking/${trackerId}`);
+      await reloadRankTracking(keyword.id);
+      setStatus("Rank tracking disabled; history retained");
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveTrackingSettings(settings: RankTrackingSettings) {
+    setBusy(true);
+    setErr("");
+    try {
+      const saved = await api<RankTrackingSettings>("PATCH", "/rank-tracking/settings", {}, settings);
+      setTrackingSettings(saved);
+      setStatus("Rank tracking budget saved");
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runSerp(keyword: string, locationId: number, depth: number) {
     setBusy(true);
     setErr("");
@@ -693,50 +924,30 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
 
   return (
     <div className="h-full min-h-0 flex flex-col text-text bg-bg">
-      <div className="px-6 pt-5 pb-3 border-b border-border flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-wrap items-center gap-4 min-w-0">
-          <h1 className="text-lg font-semibold shrink-0">SEO</h1>
-          <div className="flex rounded border border-border overflow-hidden text-xs">
-            {engines.map((engine) => (
+      <div className="px-6 border-b border-border flex flex-wrap items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-6 min-w-0">
+          <div className="py-4 shrink-0">
+            <h1 className="text-lg font-semibold leading-none">SEO</h1>
+            <div className="mt-1 text-xs text-text-dim">Search performance</div>
+          </div>
+          <nav className="flex items-stretch self-stretch" aria-label="SEO workspace">
+            {navigation.map((item) => (
               <button
-                key={engine.id}
+                key={item.id}
                 type="button"
-                onClick={() => setSearchEngine(engine.id)}
-                className={`px-3 py-1.5 ${searchEngine === engine.id ? "bg-surface-2 text-text" : "text-text-dim hover:text-text"}`}
+                onClick={() => setView(item.id)}
+                className={`px-4 border-b-2 text-sm ${view === item.id ? "border-accent text-text" : "border-transparent text-text-dim hover:text-text"}`}
               >
-                {engine.label}
+                {item.label}
               </button>
             ))}
-          </div>
-          <select
-            className="bg-surface-2 text-text border border-border rounded px-2 py-1.5 text-xs"
-            value={provider}
-            onChange={(event) => setProvider(event.target.value as SEOProvider)}
-            aria-label="SEO data provider"
-          >
-            {providers.length === 0 && <option value="">No provider bound</option>}
-            {providers.map((value) => (
-              <option key={value} value={value}>{value === "dataforseo" ? "DataForSEO" : "YepAPI"}</option>
-            ))}
-          </select>
-          <div className="flex rounded border border-border overflow-hidden text-xs">
-            {engineViews(searchEngine).map((v) => (
-              <button
-                key={v}
-                type="button"
-                onClick={() => setView(v)}
-                className={`px-3 py-1.5 capitalize ${view === v ? "bg-surface-2 text-text" : "text-text-dim hover:text-text"}`}
-              >
-                {v}
-              </button>
-            ))}
-          </div>
+          </nav>
         </div>
         <div className="flex items-center gap-2 text-xs text-text-dim">
           {busy && <span>loading...</span>}
           {status && !busy && <span>{status}</span>}
           <button type="button" className={buttonCls} onClick={reloadAll} disabled={busy}>
-            Refresh
+            Reload cached data
           </button>
         </div>
       </div>
@@ -747,59 +958,31 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
         </div>
       )}
 
-      {view === "seed" && searchEngine === "google" && (
-        <SeedView
-          locations={filteredLocations}
+      {view === "overview" && (
+        <OverviewView
+          domains={domains}
+          keywords={keywords}
+          opportunities={opportunities}
           activity={activity}
-          metricJobs={metricJobs}
-          busy={busy}
-          onSync={syncLocations}
-          onResume={resumeMetricJob}
-          onSeed={async (payload) => {
-            setBusy(true);
-            setErr("");
-            try {
-              let domain: Domain | null = null;
-              if (payload.host.trim()) {
-                domain = await callTool<Domain>("domains_add", {
-                  ...(provider ? { provider } : {}),
-                  host: payload.host,
-                  label: payload.label,
-                  location_id: payload.locationId,
-                  search_engine: "google",
-                });
-              }
-              const keywordRows: Keyword[] = [];
-              for (const text of payload.keywords) {
-                keywordRows.push(await callTool<Keyword>("keywords_add", {
-                  ...(provider ? { provider } : {}),
-                  text,
-                  location_id: payload.locationId,
-                  search_engine: "google",
-                }));
-              }
-              await Promise.all([reloadDomains(), reloadKeywords()]);
-              if (domain) setSelectedDomain(domain);
-              if (keywordRows[0]) setSelectedKeyword(keywordRows[0]);
-              if (payload.refresh && domain) await refreshDomain(domain);
-              if (payload.refresh) await refreshKeywordMetricsBulk(keywordRows);
-              if (!payload.refresh) setStatus(`Seeded ${domain ? 1 : 0} domain, ${keywordRows.length} keywords`);
-              pushActivity(`Seeded ${domain ? 1 : 0} domain and ${keywordRows.length} keywords`);
-            } catch (e) {
-              setErr((e as Error).message);
-            } finally {
-              setBusy(false);
-            }
+          onOpenDomain={(domain) => {
+            setSelectedDomain(domain);
+            setView("domains");
           }}
+          onGoToDomains={() => setView("domains")}
+          onGoToKeywords={() => setView("keywords")}
+          onGoToExplorer={() => setView("explorer")}
         />
       )}
 
-      {view === "domains" && searchEngine === "google" && (
+      {view === "domains" && (
         <DomainsView
           domains={domains}
           locations={filteredLocations}
           selected={selectedDomain}
           metrics={domainMetrics}
+          backlinkMovement={backlinkMovement}
+          activeBacklinks={activeBacklinks}
+          lostBacklinks={lostBacklinks}
           rankings={domainRankings}
           pageSerpRows={pageSerpRows}
           selectedRankURL={selectedRankURL}
@@ -817,63 +1000,90 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
             await reloadDomains();
           }}
           onRefresh={refreshDomain}
+          onBrowseBacklinks={browseBacklinks}
           locationById={locationById}
           busy={busy}
         />
       )}
 
-      {view === "discover" && (
-        <DiscoverView
-          searchEngine={searchEngine}
-          locations={filteredLocations}
-          busy={busy}
-          serpResults={serpResults}
-          keywordIdeas={keywordIdeas}
-          opportunities={opportunities}
-          onSync={syncLocations}
-          onSearch={runSerp}
-          onIdeas={findIdeas}
-        />
-      )}
-
-      {view === "entities" && (
-        <EntitiesView
-          searchEngine={searchEngine}
-          entities={entities}
-          selected={selectedEntity}
-          rankings={entityRankings}
-          locations={filteredLocations}
-          locationById={locationById}
-          busy={busy}
-          onSelect={setSelectedEntity}
-          onAdd={async (payload) => {
-            const entity = await callTool<SearchEntity>("entities_add", {
-              ...(provider ? { provider } : {}),
-              search_engine: searchEngine,
-              entity_type: payload.entityType,
-              identifier: payload.identifier,
-              label: payload.label,
-              url: payload.url,
-              location_id: payload.locationId,
-            });
-            await reloadEntities();
-            setSelectedEntity(entity);
-          }}
-          onRemove={async (id) => {
-            await callTool("entities_remove", { id });
-            setSelectedEntity(null);
-            await reloadEntities();
-          }}
-        />
+      {view === "explorer" && (
+        <div className="flex-1 min-h-0 flex flex-col">
+          <WorkspaceToolbar
+            title="Explorer"
+            description="Research live search results, content opportunities, and tracked competitors."
+            searchEngine={searchEngine}
+            onSearchEngine={setSearchEngine}
+            modes={[
+              { id: "research", label: "Research" },
+              { id: "entities", label: "Tracked results" },
+            ]}
+            mode={explorerMode}
+            onMode={(mode) => setExplorerMode(mode as ExplorerMode)}
+          />
+          {explorerMode === "research" ? (
+            <DiscoverView
+              searchEngine={searchEngine}
+              locations={filteredLocations}
+              busy={busy}
+              serpResults={serpResults}
+              keywordIdeas={keywordIdeas}
+              opportunities={opportunities}
+              onSync={syncLocations}
+              onSearch={runSerp}
+              onIdeas={findIdeas}
+            />
+          ) : (
+            <EntitiesView
+              searchEngine={searchEngine}
+              entities={entities}
+              selected={selectedEntity}
+              rankings={entityRankings}
+              locations={filteredLocations}
+              locationById={locationById}
+              busy={busy}
+              onSelect={setSelectedEntity}
+              onAdd={async (payload) => {
+                const entity = await callTool<SearchEntity>("entities_add", {
+                  ...(provider ? { provider } : {}),
+                  search_engine: searchEngine,
+                  entity_type: payload.entityType,
+                  identifier: payload.identifier,
+                  label: payload.label,
+                  url: payload.url,
+                  location_id: payload.locationId,
+                });
+                await reloadEntities();
+                setSelectedEntity(entity);
+              }}
+              onRemove={async (id) => {
+                await callTool("entities_remove", { id });
+                setSelectedEntity(null);
+                await reloadEntities();
+              }}
+            />
+          )}
+        </div>
       )}
 
       {view === "keywords" && (
+        <div className="flex-1 min-h-0 flex flex-col">
+        <WorkspaceToolbar
+          title="Keywords"
+          description="Track search demand, rankings, and refresh schedules."
+          searchEngine={searchEngine}
+          onSearchEngine={setSearchEngine}
+        />
         <KeywordsView
           keywords={keywords}
           locations={filteredLocations}
           selected={selectedKeyword}
           metrics={keywordMetrics}
           serpResults={serpResults}
+          domains={domains}
+          entities={entities}
+          rankTrackers={rankTrackers}
+          rankHistory={rankHistory}
+          trackingSettings={trackingSettings}
           searchEngine={searchEngine}
           onSelect={setSelectedKeyword}
           onAdd={async (text, locationId) => {
@@ -889,20 +1099,242 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           onRefresh={refreshKeyword}
           onRefreshAll={refreshAllKeywordMetrics}
           onRefreshSERP={refreshKeywordSERP}
+          onEnableTracking={enableRankTracking}
+          onChangeTrackingFrequency={changeRankTrackingFrequency}
+          onDisableTracking={disableRankTracking}
+          onSaveTrackingSettings={saveTrackingSettings}
           locationById={locationById}
           busy={busy}
         />
+        </div>
       )}
 
-      {view === "locations" && (
-        <LocationsView
+      {view === "settings" && (
+        <SettingsView
+          providers={providers}
+          defaultProvider={provider}
           locations={locations}
-          searchEngine={searchEngine}
           activity={activity}
           onSync={syncLocations}
           busy={busy}
         />
       )}
+    </div>
+  );
+}
+
+function isCompetitorDomain(domain: Domain): boolean {
+  return (domain.label || "").toLowerCase().includes("competitor");
+}
+
+function OverviewView(props: {
+  domains: Domain[];
+  keywords: Keyword[];
+  opportunities: ContentOpportunity[];
+  activity: string[];
+  onOpenDomain(domain: Domain): void;
+  onGoToDomains(): void;
+  onGoToKeywords(): void;
+  onGoToExplorer(): void;
+}) {
+  const sites = props.domains.filter((domain) => !isCompetitorDomain(domain));
+  const competitors = props.domains.filter(isCompetitorDomain);
+  return (
+    <div className="flex-1 min-h-0 overflow-auto">
+      <div className="max-w-7xl mx-auto p-6 space-y-6">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h2 className="text-2xl font-semibold">Overview</h2>
+            <p className="mt-1 text-sm text-text-dim">Your sites, tracked search demand, and recent SEO work in one place.</p>
+          </div>
+          <button type="button" className={primaryBtn} onClick={props.onGoToDomains}>Add or find a domain</button>
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {[
+            ["Your sites", sites.length, "Domains you added"],
+            ["Competitors", competitors.length, "Discovered from search results"],
+            ["Keywords", props.keywords.length, "Across Google and YouTube"],
+            ["Opportunities", props.opportunities.length, "From cached search research"],
+          ].map(([label, value, hint]) => (
+            <div key={String(label)} className="border border-border rounded p-4 bg-surface-1">
+              <div className="text-xs text-text-dim">{label}</div>
+              <div className="mt-2 text-3xl font-semibold tabular-nums">{fmt(Number(value))}</div>
+              <div className="mt-1 text-xs text-text-dim">{hint}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-5">
+          <section className="border border-border rounded overflow-hidden">
+            <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
+              <div>
+                <h3 className="font-semibold">Your sites</h3>
+                <div className="text-xs text-text-dim">Open a site to inspect rankings and backlinks.</div>
+              </div>
+              <button type="button" className={buttonCls} onClick={props.onGoToDomains}>Browse all domains</button>
+            </div>
+            {sites.length === 0 ? (
+              <div className="p-8 text-center">
+                <div className="font-medium">No site added yet</div>
+                <div className="mt-1 text-sm text-text-dim">Add your main domain first. Competitors will stay separate.</div>
+                <button type="button" className={`${primaryBtn} mt-4`} onClick={props.onGoToDomains}>Add a domain</button>
+              </div>
+            ) : (
+              <div className="divide-y divide-border">
+                {sites.slice(0, 8).map((domain) => (
+                  <button key={domain.id} type="button" onClick={() => props.onOpenDomain(domain)} className="w-full px-4 py-3 text-left hover:bg-surface-2 flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="font-medium truncate">{domain.host}</div>
+                      <div className="text-xs text-text-dim truncate">{domain.label || "Tracked site"}</div>
+                    </div>
+                    <span className="text-sm text-text-dim">Open →</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <div className="space-y-5">
+            <section className="border border-border rounded p-4 space-y-3">
+              <div>
+                <h3 className="font-semibold">Start here</h3>
+                <div className="text-xs text-text-dim">Common SEO workflows</div>
+              </div>
+              <button type="button" className="w-full border border-border rounded p-3 text-left hover:bg-surface-2" onClick={props.onGoToDomains}>
+                <div className="text-sm font-medium">Inspect a domain</div>
+                <div className="text-xs text-text-dim">Metrics, ranked pages, and backlinks</div>
+              </button>
+              <button type="button" className="w-full border border-border rounded p-3 text-left hover:bg-surface-2" onClick={props.onGoToKeywords}>
+                <div className="text-sm font-medium">Track a keyword</div>
+                <div className="text-xs text-text-dim">Volumes, SERPs, and rank history</div>
+              </button>
+              <button type="button" className="w-full border border-border rounded p-3 text-left hover:bg-surface-2" onClick={props.onGoToExplorer}>
+                <div className="text-sm font-medium">Research search results</div>
+                <div className="text-xs text-text-dim">Explore Google or YouTube</div>
+              </button>
+            </section>
+            <section className="border border-border rounded overflow-hidden">
+              <div className="px-4 py-3 border-b border-border font-semibold">Recent activity</div>
+              <div className="max-h-64 overflow-auto">
+                <ActivityFeed rows={props.activity.slice(0, 8)} />
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WorkspaceToolbar(props: {
+  title: string;
+  description: string;
+  searchEngine: SearchEngine;
+  onSearchEngine(engine: SearchEngine): void;
+  modes?: { id: string; label: string }[];
+  mode?: string;
+  onMode?(mode: string): void;
+}) {
+  return (
+    <div className="px-6 py-3 border-b border-border flex flex-wrap items-center justify-between gap-4">
+      <div>
+        <h2 className="font-semibold">{props.title}</h2>
+        <div className="text-xs text-text-dim">{props.description}</div>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        {props.modes && props.onMode && (
+          <div className="flex rounded border border-border overflow-hidden text-xs">
+            {props.modes.map((item) => (
+              <button key={item.id} type="button" onClick={() => props.onMode!(item.id)} className={`px-3 py-1.5 ${props.mode === item.id ? "bg-surface-2 text-text" : "text-text-dim hover:text-text"}`}>
+                {item.label}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="flex rounded border border-border overflow-hidden text-xs" aria-label="Search engine">
+          {engines.map((engine) => (
+            <button key={engine.id} type="button" onClick={() => props.onSearchEngine(engine.id)} className={`px-3 py-1.5 ${props.searchEngine === engine.id ? "bg-surface-2 text-text" : "text-text-dim hover:text-text"}`}>
+              {engine.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsView(props: {
+  providers: string[];
+  defaultProvider: string;
+  locations: SEOLocation[];
+  activity: string[];
+  onSync(): Promise<void>;
+  busy: boolean;
+}) {
+  const [section, setSection] = useState<"sources" | "locations" | "activity">("sources");
+  const [filter, setFilter] = useState("");
+  const rows = props.locations.filter((location) => localeLabel(location).toLowerCase().includes(filter.toLowerCase())).slice(0, 500);
+  const providerName = (value: string) => value === "dataforseo" ? "DataForSEO" : value === "yepapi" ? "YepAPI" : value;
+  return (
+    <div className="flex-1 min-h-0 flex">
+      <aside className="w-64 border-r border-border p-4 space-y-1">
+        <div className="px-2 pb-3">
+          <h2 className="font-semibold">Settings</h2>
+          <div className="text-xs text-text-dim">Data refresh and workspace setup</div>
+        </div>
+        {([
+          ["sources", "Data sources"],
+          ["locations", "Search locations"],
+          ["activity", "Activity"],
+        ] as const).map(([id, label]) => (
+          <button key={id} type="button" onClick={() => setSection(id)} className={`w-full text-left px-3 py-2 rounded text-sm ${section === id ? "bg-surface-2 text-text" : "text-text-dim hover:text-text"}`}>{label}</button>
+        ))}
+      </aside>
+      <div className="flex-1 min-w-0 overflow-auto p-6">
+        {section === "sources" && (
+          <div className="max-w-3xl space-y-5">
+            <div>
+              <h3 className="text-xl font-semibold">Data sources</h3>
+              <p className="mt-1 text-sm text-text-dim">These integrations power explicit refresh actions. Cached browsing never calls them.</p>
+            </div>
+            <div className="space-y-3">
+              {props.providers.length === 0 ? (
+                <div className="border border-dashed border-border rounded p-5 text-sm text-text-dim">No SEO data source connected.</div>
+              ) : props.providers.map((source) => (
+                <div key={source} className="border border-border rounded p-4 flex items-center justify-between gap-4">
+                  <div>
+                    <div className="font-medium">{providerName(source)}</div>
+                    <div className="text-xs text-text-dim">Used for paid domain, keyword, SERP, or backlink refreshes.</div>
+                  </div>
+                  <span className={`text-xs px-2 py-1 rounded border ${source === props.defaultProvider ? "border-accent/50 text-accent" : "border-border text-text-dim"}`}>
+                    {source === props.defaultProvider ? "Default refresh source" : "Connected"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {section === "locations" && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-end justify-between gap-4">
+              <div>
+                <h3 className="text-xl font-semibold">Search locations</h3>
+                <p className="mt-1 text-sm text-text-dim">Locales available when adding keywords or running research.</p>
+              </div>
+              <button type="button" className={buttonCls} disabled={props.busy} onClick={props.onSync}>Sync locations</button>
+            </div>
+            <input className={`${inputCls} max-w-md`} value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Search country or language" />
+            <div className="border border-border rounded overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-surface-2 text-text-dim"><tr><th className="text-left font-medium px-3 py-2">Location</th><th className="text-left font-medium px-3 py-2">Language</th><th className="text-left font-medium px-3 py-2">Engine</th><th className="text-left font-medium px-3 py-2">Source</th></tr></thead>
+                <tbody>{rows.map((location) => <tr key={location.id} className="border-t border-border"><td className="px-3 py-2">{location.location_name} <span className="text-text-dim">{location.country_iso || ""}</span></td><td className="px-3 py-2 text-text-dim">{location.language_name || location.language_code}</td><td className="px-3 py-2 text-text-dim">{location.search_engine}</td><td className="px-3 py-2 text-text-dim">{providerName(location.provider)}</td></tr>)}</tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        {section === "activity" && <div className="max-w-3xl border border-border rounded overflow-hidden"><ActivityFeed rows={props.activity} /></div>}
+      </div>
     </div>
   );
 }
@@ -1225,6 +1657,9 @@ function DomainsView(props: {
   locations: SEOLocation[];
   selected: Domain | null;
   metrics: DomainMetrics | null;
+  backlinkMovement: BacklinkMovement | null;
+  activeBacklinks: Backlink[];
+  lostBacklinks: Backlink[];
   rankings: Ranking[];
   pageSerpRows: SearchRanking[];
   selectedRankURL: string | null;
@@ -1233,89 +1668,448 @@ function DomainsView(props: {
   onAdd(host: string, label: string, locationId?: number): Promise<void>;
   onRemove(id: number): Promise<void>;
   onRefresh(d: Domain, backlinks?: boolean): Promise<void>;
+  onBrowseBacklinks(domainId: number, args: BacklinkBrowseArgs): Promise<BacklinkPage>;
   locationById: Map<number, SEOLocation>;
   busy: boolean;
 }) {
   const [host, setHost] = useState("");
   const [label, setLabel] = useState("");
   const [locationId, setLocationId] = useState<number | "">("");
+  const [query, setQuery] = useState("");
+  const [domainFilter, setDomainFilter] = useState<"sites" | "competitors" | "all">("sites");
+  const [showAdd, setShowAdd] = useState(false);
+  const [detailTab, setDetailTab] = useState<"overview" | "rankings" | "backlinks">("overview");
+  const [showAllBacklinks, setShowAllBacklinks] = useState(false);
   const selectedLoc = props.selected?.default_location_id
     ? props.locationById.get(props.selected.default_location_id)
     : undefined;
   const keywordById = useMemo(() => new Map(props.keywords.map((k) => [k.id, k])), [props.keywords]);
+  const visibleDomains = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    return props.domains
+      .filter((domain) => domainFilter === "all" || (domainFilter === "competitors" ? isCompetitorDomain(domain) : !isCompetitorDomain(domain)))
+      .filter((domain) => !normalized || domain.host.toLowerCase().includes(normalized) || (domain.label || "").toLowerCase().includes(normalized))
+      .sort((a, b) => a.host.localeCompare(b.host));
+  }, [domainFilter, props.domains, query]);
+  const siteCount = props.domains.filter((domain) => !isCompetitorDomain(domain)).length;
+  const competitorCount = props.domains.length - siteCount;
+  useEffect(() => {
+    setDetailTab("overview");
+    setShowAllBacklinks(false);
+  }, [props.selected?.id]);
   return (
     <div className="flex-1 min-h-0 flex">
-      <div className="w-80 border-r border-border flex flex-col min-h-0">
-        <form
-          className="p-4 border-b border-border space-y-2"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            await props.onAdd(host, label, locationId === "" ? undefined : Number(locationId));
-            setHost("");
-            setLabel("");
-          }}
-        >
-          <input className={inputCls} value={host} onChange={(e) => setHost(e.target.value)} placeholder="domain.com" />
-          <input className={inputCls} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label" />
-          <select className={inputCls} value={locationId} onChange={(e) => setLocationId(e.target.value ? Number(e.target.value) : "")}>
-            <option value="">No default locale</option>
-            {props.locations.map((l) => (
-              <option key={l.id} value={l.id}>{localeLabel(l)}</option>
+      <aside className="w-96 border-r border-border flex flex-col min-h-0">
+        <div className="p-4 border-b border-border space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="font-semibold">Domain explorer</h2>
+              <div className="text-xs text-text-dim">{fmt(props.domains.length)} cached domains</div>
+            </div>
+            <button type="button" className={primaryBtn} onClick={() => setShowAdd((value) => !value)}>{showAdd ? "Cancel" : "Add domain"}</button>
+          </div>
+          <input className={inputCls} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find a domain" autoFocus />
+          <div className="grid grid-cols-3 rounded border border-border overflow-hidden text-xs">
+            {([
+              ["sites", `Sites ${siteCount}`],
+              ["competitors", `Competitors ${competitorCount}`],
+              ["all", `All ${props.domains.length}`],
+            ] as const).map(([value, text]) => (
+              <button key={value} type="button" onClick={() => setDomainFilter(value)} className={`px-2 py-2 ${domainFilter === value ? "bg-surface-2 text-text" : "text-text-dim hover:text-text"}`}>{text}</button>
             ))}
-          </select>
-          <button type="submit" className={primaryBtn} disabled={props.busy || !host.trim()}>Add Domain</button>
-        </form>
+          </div>
+        </div>
+        {showAdd && (
+          <form
+            className="p-4 border-b border-border space-y-3 bg-surface-1"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              await props.onAdd(host, label, locationId === "" ? undefined : Number(locationId));
+              setHost("");
+              setLabel("");
+              setShowAdd(false);
+              setDomainFilter("sites");
+            }}
+          >
+            <div className="text-sm font-medium">Track a site</div>
+            <input className={inputCls} value={host} onChange={(event) => setHost(event.target.value)} placeholder="example.com" />
+            <input className={inputCls} value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Site name (optional)" />
+            <select className={inputCls} value={locationId} onChange={(event) => setLocationId(event.target.value ? Number(event.target.value) : "")}>
+              <option value="">Choose location later</option>
+              {props.locations.map((location) => <option key={location.id} value={location.id}>{localeLabel(location)}</option>)}
+            </select>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs text-text-dim">Adding does not refresh paid data.</span>
+              <button type="submit" className={primaryBtn} disabled={props.busy || !host.trim()}>Add site</button>
+            </div>
+          </form>
+        )}
         <div className="flex-1 overflow-auto">
-          {props.domains.map((d) => (
+          {visibleDomains.length === 0 && <div className="p-6 text-center text-sm text-text-dim">No domains match this view.</div>}
+          {visibleDomains.map((domain) => (
             <button
-              key={d.id}
+              key={domain.id}
               type="button"
-              onClick={() => props.onSelect(d)}
-              className={`w-full text-left px-4 py-3 border-b border-border hover:bg-surface-2 ${props.selected?.id === d.id ? "bg-surface-2" : ""}`}
+              onClick={() => props.onSelect(domain)}
+              className={`w-full text-left px-4 py-3 border-b border-border hover:bg-surface-2 ${props.selected?.id === domain.id ? "bg-surface-2" : ""}`}
             >
-              <div className="font-medium truncate">{d.host}</div>
-              <div className="text-xs text-text-dim truncate">{d.label || localeLabel(d.default_location_id ? props.locationById.get(d.default_location_id) : undefined)}</div>
+              <div className="flex items-center justify-between gap-3">
+                <div className="font-medium truncate">{domain.host}</div>
+                <span className="text-[10px] uppercase tracking-wide text-text-dim">{isCompetitorDomain(domain) ? "Competitor" : "Site"}</span>
+              </div>
+              <div className="mt-1 text-xs text-text-dim truncate">{domain.label || localeLabel(domain.default_location_id ? props.locationById.get(domain.default_location_id) : undefined)}</div>
             </button>
           ))}
         </div>
-      </div>
+      </aside>
       <div className="flex-1 min-w-0 p-6 overflow-auto">
         {props.selected ? (
+          showAllBacklinks ? (
+            <BacklinkDetail
+              domain={props.selected}
+              movement={props.backlinkMovement}
+              busy={props.busy}
+              onBack={() => setShowAllBacklinks(false)}
+              onRefresh={() => props.onRefresh(props.selected!, true)}
+              onLoad={props.onBrowseBacklinks}
+            />
+          ) : (
           <div className="space-y-6">
-            <div className="flex items-start justify-between gap-4">
+            <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <h2 className="text-xl font-semibold">{props.selected.host}</h2>
-                <div className="text-sm text-text-dim">{localeLabel(selectedLoc)}</div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-xl font-semibold">{props.selected.host}</h2>
+                  <span className="text-[10px] uppercase tracking-wide border border-border rounded px-2 py-0.5 text-text-dim">{isCompetitorDomain(props.selected) ? "Competitor" : "Site"}</span>
+                </div>
+                <div className="mt-1 text-sm text-text-dim">{props.selected.label || "Tracked domain"} · {localeLabel(selectedLoc)}</div>
               </div>
-              <div className="flex gap-2">
-                <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefresh(props.selected!)}>Refresh Metrics</button>
-                <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefresh(props.selected!, true)}>Refresh Links</button>
+              <div className="flex flex-wrap gap-2">
+                <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefresh(props.selected!)}>Refresh metrics</button>
+                <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefresh(props.selected!, true)}>Refresh backlinks</button>
                 <button className={buttonCls} disabled={props.busy} onClick={() => props.onRemove(props.selected!.id)}>Remove</button>
               </div>
             </div>
-            <MetricGrid
-              rows={[
-                ["Organic traffic", fmt(props.metrics?.organic_traffic)],
-                ["Organic keywords", fmt(props.metrics?.organic_keywords)],
-                ["Paid traffic", fmt(props.metrics?.paid_traffic)],
-                ["Paid keywords", fmt(props.metrics?.paid_keywords)],
-                ["Backlinks", fmt(props.metrics?.backlinks_count)],
-                ["Referring domains", fmt(props.metrics?.referring_domains_count)],
-              ]}
-            />
-            <div className="text-xs text-text-dim">Last refresh: {date(props.metrics?.ts)}</div>
-            <RankingExplorer
-              rankings={props.rankings}
-              selectedURL={props.selectedRankURL}
-              pageSerpRows={props.pageSerpRows}
-              onSelectURL={props.onSelectRankURL}
-              keywordById={keywordById}
-            />
+            <div className="border-b border-border flex gap-5">
+              {([
+                ["overview", "Overview"],
+                ["rankings", "Rankings"],
+                ["backlinks", "Backlinks"],
+              ] as const).map(([value, text]) => (
+                <button key={value} type="button" onClick={() => setDetailTab(value)} className={`pb-2 border-b-2 text-sm ${detailTab === value ? "border-accent text-text" : "border-transparent text-text-dim hover:text-text"}`}>{text}</button>
+              ))}
+            </div>
+
+            {detailTab === "overview" && (
+              <div className="space-y-5">
+                <div className="grid grid-cols-2 xl:grid-cols-4 gap-px border border-border bg-border">
+                  {([
+                    ["Organic traffic", fmt(props.metrics?.organic_traffic)],
+                    ["Organic keywords", fmt(props.metrics?.organic_keywords)],
+                    ["Ranked pages", fmt(pageSummaries(props.rankings).length)],
+                    ["Cached backlinks", fmt(props.backlinkMovement?.active_links)],
+                  ] as [string, string][]).map(([label, value]) => (
+                    <div key={label} className="bg-bg p-4 min-w-0">
+                      <div className="text-xs text-text-dim truncate">{label}</div>
+                      <div className="mt-1 text-xl font-semibold truncate">{value}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="text-xs text-text-dim">Metrics last refreshed {date(props.metrics?.ts)} · Refresh buttons may use provider credit.</div>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <button type="button" onClick={() => setDetailTab("rankings")} className="border border-border rounded p-4 text-left hover:bg-surface-2">
+                    <div className="text-sm font-medium">Search visibility</div>
+                    <div className="mt-2 text-2xl font-semibold">{fmt(props.rankings.length)}</div>
+                    <div className="text-xs text-text-dim">cached ranking rows across {fmt(pageSummaries(props.rankings).length)} pages</div>
+                    <div className="mt-3 text-sm">Explore ranked pages →</div>
+                  </button>
+                  <button type="button" onClick={() => setDetailTab("backlinks")} className="border border-border rounded p-4 text-left hover:bg-surface-2">
+                    <div className="text-sm font-medium">Link profile</div>
+                    <div className="mt-2 text-2xl font-semibold">{fmt(props.backlinkMovement?.active_links)}</div>
+                    <div className="text-xs text-text-dim">active links · {fmt(props.backlinkMovement?.lost_links)} lost · net {props.backlinkMovement ? `${props.backlinkMovement.net_change >= 0 ? "+" : ""}${fmt(props.backlinkMovement.net_change)}` : "-"}</div>
+                    <div className="mt-3 text-sm">Explore backlinks →</div>
+                  </button>
+                </div>
+              </div>
+            )}
+            {detailTab === "rankings" && <RankingExplorer rankings={props.rankings} selectedURL={props.selectedRankURL} pageSerpRows={props.pageSerpRows} onSelectURL={props.onSelectRankURL} keywordById={keywordById} />}
+            {detailTab === "backlinks" && <BacklinkInsights movement={props.backlinkMovement} active={props.activeBacklinks} lost={props.lostBacklinks} onViewAll={() => setShowAllBacklinks(true)} />}
           </div>
+          )
         ) : (
-          <div className="text-sm text-text-dim">No domain selected.</div>
+          <div className="h-full flex items-center justify-center text-center">
+            <div>
+              <div className="font-medium">Select a domain</div>
+              <div className="mt-1 text-sm text-text-dim">Search or filter the domain explorer on the left.</div>
+            </div>
+          </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function BacklinkInsights(props: { movement: BacklinkMovement | null; active: Backlink[]; lost: Backlink[]; onViewAll(): void }) {
+  const movement = props.movement;
+  if (!movement) {
+    return (
+      <section className="border border-border rounded p-4">
+        <h3 className="text-sm font-semibold">Backlink Movement</h3>
+        <div className="mt-2 text-sm text-text-dim">No cached backlink history yet. Use Refresh Links to import provider history.</div>
+      </section>
+    );
+  }
+  const chart = movement.points.slice(-30);
+  const maxDaily = Math.max(1, ...chart.flatMap((point) => [point.gained, point.lost]));
+  const totalLinks = movement.active_links + movement.lost_links;
+  return (
+    <section className="border border-border rounded overflow-hidden">
+      <div className="px-4 py-3 border-b border-border flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold">Backlink Movement</h3>
+          <div className="text-xs text-text-dim">Cached provider history · {movement.from_date} to {movement.to_date} · no extra provider request</div>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="text-xs text-text-dim">{movement.provider}</div>
+          <button type="button" className={buttonCls} onClick={props.onViewAll}>View all links</button>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-px bg-border border-b border-border">
+        {[
+          ["Cached active", fmt(movement.active_links), "text-text"],
+          ["Cached lost", fmt(movement.lost_links), "text-red-300"],
+          [`Gained ${movement.days}d`, `+${fmt(movement.gained_in_range)}`, "text-emerald-300"],
+          [`Lost ${movement.days}d`, `-${fmt(movement.lost_in_range)}`, "text-red-300"],
+          ["Net", `${movement.net_change >= 0 ? "+" : ""}${fmt(movement.net_change)}`, movement.net_change >= 0 ? "text-emerald-300" : "text-red-300"],
+        ].map(([label, value, tone]) => (
+          <div key={label} className="bg-bg p-3">
+            <div className="text-xs text-text-dim">{label}</div>
+            <div className={`mt-1 text-lg font-semibold tabular-nums ${tone}`}>{value}</div>
+          </div>
+        ))}
+      </div>
+      <div className="p-4 border-b border-border">
+        <div className="flex items-center justify-between gap-3 mb-3">
+          <div className="text-sm font-medium">Last 30 days</div>
+          <div className="flex gap-3 text-xs text-text-dim">
+            <span><span className="inline-block w-2 h-2 bg-emerald-400 mr-1" />Gained</span>
+            <span><span className="inline-block w-2 h-2 bg-red-400 mr-1" />Lost</span>
+          </div>
+        </div>
+        <div className="h-24 flex items-end gap-1">
+          {chart.map((point) => (
+            <div key={point.date} className="flex-1 min-w-0 h-full flex items-end gap-px" title={`${point.date}: +${point.gained} / -${point.lost}`}>
+              <div className="flex-1 bg-emerald-400/80 min-h-px" style={{ height: `${(point.gained / maxDaily) * 100}%` }} />
+              <div className="flex-1 bg-red-400/80 min-h-px" style={{ height: `${(point.lost / maxDaily) * 100}%` }} />
+            </div>
+          ))}
+        </div>
+        <div className="mt-2 text-xs text-text-dim">
+          Timestamp coverage: first seen {fmt(movement.known_first_seen)}/{fmt(totalLinks)} · lost date {fmt(movement.known_lost_date)}/{fmt(movement.lost_links)}
+        </div>
+      </div>
+      <div className="grid grid-cols-1 xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-border">
+        <BacklinkRows title="Recent active links" rows={props.active} empty="No cached active links." />
+        <BacklinkRows title="Recently lost links" rows={props.lost} empty="No cached lost links." />
+      </div>
+    </section>
+  );
+}
+
+function BacklinkDetail(props: {
+  domain: Domain;
+  movement: BacklinkMovement | null;
+  busy: boolean;
+  onBack(): void;
+  onRefresh(): Promise<void>;
+  onLoad(domainId: number, args: BacklinkBrowseArgs): Promise<BacklinkPage>;
+}) {
+  const pageSize = 25;
+  const [status, setStatus] = useState<BacklinkStatus>("all");
+  const [follow, setFollow] = useState<BacklinkFollowFilter>("all");
+  const [query, setQuery] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState<BacklinkPage | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [reloadToken, setReloadToken] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    const args: BacklinkBrowseArgs = { status, query: query.trim(), limit: pageSize, offset };
+    if (follow !== "all") args.dofollow = follow === "follow";
+    props.onLoad(props.domain.id, args)
+      .then((result) => {
+        if (!cancelled) setPage(result);
+      })
+      .catch((reason) => {
+        if (!cancelled) setError((reason as Error).message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [follow, offset, props.domain.id, props.onLoad, query, reloadToken, status]);
+
+  const total = page?.total || 0;
+  const rows = page?.rows || [];
+  const first = total === 0 ? 0 : offset + 1;
+  const last = Math.min(offset + rows.length, total);
+  const setFilter = (nextStatus: BacklinkStatus) => {
+    setStatus(nextStatus);
+    setOffset(0);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <button type="button" className="text-sm text-text-dim hover:text-text" onClick={props.onBack}>← Back to domain</button>
+          <h2 className="mt-2 text-xl font-semibold">Backlinks for {props.domain.host}</h2>
+          <div className="text-sm text-text-dim">Cached links only · browsing does not call the provider</div>
+        </div>
+        <button
+          type="button"
+          className={buttonCls}
+          disabled={props.busy}
+          onClick={async () => {
+            await props.onRefresh();
+            setOffset(0);
+            setReloadToken((value) => value + 1);
+          }}
+        >
+          Refresh Links
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-border border border-border rounded overflow-hidden">
+        {[
+          ["All cached", props.movement ? props.movement.active_links + props.movement.lost_links : total],
+          ["Active", props.movement?.active_links],
+          ["Lost", props.movement?.lost_links],
+          ["Provider", props.movement?.provider || page?.provider || "-"],
+        ].map(([label, value]) => (
+          <div key={String(label)} className="bg-bg p-3">
+            <div className="text-xs text-text-dim">{label}</div>
+            <div className="mt-1 text-lg font-semibold tabular-nums">{typeof value === "number" ? fmt(value) : value || "-"}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="border border-border rounded overflow-hidden">
+        <div className="p-3 border-b border-border flex flex-wrap items-center gap-2">
+          <div className="flex rounded border border-border overflow-hidden">
+            {(["all", "active", "lost"] as BacklinkStatus[]).map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={`px-3 py-2 text-sm capitalize ${status === value ? "bg-surface-2 text-text" : "text-text-dim hover:text-text"}`}
+                onClick={() => setFilter(value)}
+              >
+                {value}
+              </button>
+            ))}
+          </div>
+          <select
+            className={`${inputCls} w-auto min-w-36`}
+            value={follow}
+            onChange={(event) => { setFollow(event.target.value as BacklinkFollowFilter); setOffset(0); }}
+          >
+            <option value="all">All link types</option>
+            <option value="follow">Follow only</option>
+            <option value="nofollow">Nofollow only</option>
+          </select>
+          <input
+            className={`${inputCls} min-w-64 flex-1`}
+            value={query}
+            onChange={(event) => { setQuery(event.target.value); setOffset(0); }}
+            placeholder="Search source, target, or anchor"
+          />
+          <div className="ml-auto text-xs text-text-dim">{first}-{last} of {fmt(total)}</div>
+        </div>
+
+        {error ? (
+          <div className="p-4 text-sm text-red-300">{error}</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1100px] text-sm">
+              <thead className="bg-surface-2 text-text-dim">
+                <tr>
+                  <th className="text-left font-medium px-3 py-2">Source page</th>
+                  <th className="text-left font-medium px-3 py-2">Target</th>
+                  <th className="text-left font-medium px-3 py-2">Anchor</th>
+                  <th className="text-left font-medium px-3 py-2 w-32">Attributes</th>
+                  <th className="text-left font-medium px-3 py-2 w-24">Authority</th>
+                  <th className="text-left font-medium px-3 py-2 w-28">First seen</th>
+                  <th className="text-left font-medium px-3 py-2 w-28">Last seen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading && rows.length === 0 ? (
+                  <tr><td colSpan={7} className="px-3 py-8 text-center text-text-dim">Loading cached backlinks…</td></tr>
+                ) : rows.length === 0 ? (
+                  <tr><td colSpan={7} className="px-3 py-8 text-center text-text-dim">No cached backlinks match these filters.</td></tr>
+                ) : rows.map((row) => (
+                  <tr key={`${row.provider}-${row.id}`} className="border-t border-border align-top">
+                    <td className="px-3 py-3 max-w-72">
+                      <a href={row.source_url} target="_blank" rel="noreferrer" className="font-medium hover:underline block truncate" title={row.source_url}>
+                        {hostFromURL(row.source_url) || row.source_url}
+                      </a>
+                      <div className="mt-1 text-xs text-text-dim truncate" title={row.source_url}>{row.source_url}</div>
+                      <div className="mt-1 text-xs text-text-dim">{row.provider} · {row.is_lost ? <span className="text-red-300">lost</span> : <span className="text-emerald-300">active</span>}</div>
+                    </td>
+                    <td className="px-3 py-3 max-w-64">
+                      <a href={row.dest_url} target="_blank" rel="noreferrer" className="hover:underline block truncate" title={row.dest_url}>{row.dest_url}</a>
+                    </td>
+                    <td className="px-3 py-3 max-w-80 text-text-dim" title={row.anchor || ""}>{row.anchor || "No anchor"}</td>
+                    <td className="px-3 py-3 text-xs">
+                      <div>{row.is_dofollow ? "follow" : "nofollow"}</div>
+                      {row.is_ugc ? <div className="text-text-dim">ugc</div> : null}
+                      {row.is_sponsored ? <div className="text-text-dim">sponsored</div> : null}
+                    </td>
+                    <td className="px-3 py-3 tabular-nums">{fmt(row.source_authority)}</td>
+                    <td className="px-3 py-3 text-text-dim whitespace-nowrap">{date(row.first_seen)}</td>
+                    <td className="px-3 py-3 text-text-dim whitespace-nowrap">{date(row.last_seen)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="px-3 py-3 border-t border-border flex items-center justify-between gap-3">
+          <div className="text-xs text-text-dim">{loading ? "Loading…" : `${first}-${last} of ${fmt(total)} cached links`}</div>
+          <div className="flex gap-2">
+            <button type="button" className={buttonCls} disabled={loading || offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))}>Previous</button>
+            <button type="button" className={buttonCls} disabled={loading || offset + rows.length >= total} onClick={() => setOffset(offset + pageSize)}>Next</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BacklinkRows(props: { title: string; rows: Backlink[]; empty: string }) {
+  return (
+    <div className="min-w-0">
+      <div className="px-4 py-2 text-sm font-medium border-b border-border">{props.title}</div>
+      {props.rows.length === 0 ? (
+        <div className="p-4 text-sm text-text-dim">{props.empty}</div>
+      ) : (
+        <div className="divide-y divide-border">
+          {props.rows.slice(0, 10).map((row) => (
+            <div key={row.id} className="px-4 py-3 min-w-0">
+              <div className="flex items-center justify-between gap-3">
+                <a href={row.source_url} target="_blank" rel="noreferrer" className="text-sm font-medium truncate hover:underline">{hostFromURL(row.source_url) || row.source_url}</a>
+                <span className="text-xs text-text-dim shrink-0">{row.is_dofollow ? "follow" : "nofollow"}</span>
+              </div>
+              <div className="mt-1 text-xs text-text-dim truncate">{row.anchor || "No anchor"} · authority {fmt(row.source_authority)}</div>
+              <div className="mt-1 text-xs text-text-dim">First {date(row.first_seen)} · Last {date(row.last_seen)}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1547,9 +2341,14 @@ function SeedView(props: {
 function KeywordsView(props: {
   keywords: Keyword[];
   locations: SEOLocation[];
+  domains: Domain[];
+  entities: SearchEntity[];
   selected: Keyword | null;
   metrics: KeywordMetrics | null;
   serpResults: SearchRanking[];
+  rankTrackers: RankTracker[];
+  rankHistory: Record<number, RankObservation[]>;
+  trackingSettings: RankTrackingSettings;
   searchEngine: SearchEngine;
   onSelect(k: Keyword): void;
   onAdd(text: string, locationId: number): Promise<void>;
@@ -1557,12 +2356,19 @@ function KeywordsView(props: {
   onRefresh(k: Keyword): Promise<void>;
   onRefreshAll(): Promise<void>;
   onRefreshSERP(k: Keyword): Promise<void>;
+  onEnableTracking(k: Keyword, target: string, frequency: RefreshFrequency): Promise<void>;
+  onChangeTrackingFrequency(k: Keyword, trackerId: number, frequency: RefreshFrequency): Promise<void>;
+  onDisableTracking(k: Keyword, trackerId: number): Promise<void>;
+  onSaveTrackingSettings(settings: RankTrackingSettings): Promise<void>;
   locationById: Map<number, SEOLocation>;
   busy: boolean;
 }) {
   const [text, setText] = useState("");
   const [locationId, setLocationId] = useState<number | "">("");
+  const [filter, setFilter] = useState("");
+  const [showAdd, setShowAdd] = useState(false);
   const selectedLoc = props.selected ? props.locationById.get(props.selected.location_id) : undefined;
+  const visibleKeywords = props.keywords.filter((keyword) => keyword.text.toLowerCase().includes(filter.trim().toLowerCase()));
   const selectedSerpRows = props.selected
     ? props.serpResults.filter((r) => r.keyword_text === props.selected!.text)
     : [];
@@ -1579,14 +2385,23 @@ function KeywordsView(props: {
 
   return (
     <div className="flex-1 min-h-0 flex">
-      <div className="w-80 border-r border-border flex flex-col min-h-0">
+      <div className="w-96 border-r border-border flex flex-col min-h-0">
+        <div className="p-4 border-b border-border space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div><div className="font-medium">Tracked keywords</div><div className="text-xs text-text-dim">{fmt(props.keywords.length)} {props.searchEngine} keywords</div></div>
+            <button type="button" className={primaryBtn} onClick={() => setShowAdd((value) => !value)}>{showAdd ? "Cancel" : "Add keyword"}</button>
+          </div>
+          <input className={inputCls} value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Find a keyword" />
+        </div>
+        {showAdd && (
         <form
-          className="p-4 border-b border-border space-y-2"
+          className="p-4 border-b border-border space-y-2 bg-surface-1"
           onSubmit={async (e) => {
             e.preventDefault();
             if (locationId === "") return;
             await props.onAdd(text, Number(locationId));
             setText("");
+            setShowAdd(false);
           }}
         >
           <input className={inputCls} value={text} onChange={(e) => setText(e.target.value)} placeholder={`${props.searchEngine} keyword`} />
@@ -1595,14 +2410,17 @@ function KeywordsView(props: {
             {props.locations.map((l) => <option key={l.id} value={l.id}>{localeLabel(l)}</option>)}
           </select>
           <button type="submit" className={primaryBtn} disabled={props.busy || !text.trim() || locationId === ""}>Add Keyword</button>
-          {props.searchEngine === "google" && props.keywords.length > 0 && (
-            <button type="button" className={`${buttonCls} w-full`} disabled={props.busy} onClick={props.onRefreshAll}>
-              Refresh All Metrics
-            </button>
-          )}
         </form>
+        )}
+        {props.searchEngine === "google" && props.keywords.length > 0 && (
+          <div className="px-4 py-2 border-b border-border flex items-center justify-between gap-3">
+            <span className="text-xs text-text-dim">Bulk action may use provider credit.</span>
+            <button type="button" className={buttonCls} disabled={props.busy} onClick={props.onRefreshAll}>Refresh metrics</button>
+          </div>
+        )}
         <div className="flex-1 overflow-auto">
-          {props.keywords.map((k) => (
+          {visibleKeywords.length === 0 && <div className="p-6 text-center text-sm text-text-dim">No keywords match.</div>}
+          {visibleKeywords.map((k) => (
             <button
               key={k.id}
               type="button"
@@ -1638,10 +2456,23 @@ function KeywordsView(props: {
                     ["Volume", fmt(props.metrics?.volume)],
                     ["Difficulty", fmt(props.metrics?.difficulty)],
                     ["CPC", props.metrics?.cpc_usd === undefined ? "-" : `$${props.metrics.cpc_usd.toFixed(2)}`],
-                    ["Provider", props.metrics?.provider || "-"],
+                    ["Rank trackers", fmt(props.rankTrackers.filter((tracker) => tracker.enabled).length)],
                   ]}
                 />
                 <div className="text-xs text-text-dim">Last metrics refresh: {date(props.metrics?.ts)}</div>
+                <RankTrackingPanel
+                  keyword={props.selected}
+                  domains={props.domains}
+                  entities={props.entities.filter((entity) => entity.search_engine === props.searchEngine)}
+                  trackers={props.rankTrackers}
+                  history={props.rankHistory}
+                  settings={props.trackingSettings}
+                  busy={props.busy}
+                  onEnable={props.onEnableTracking}
+                  onChangeFrequency={props.onChangeTrackingFrequency}
+                  onDisable={props.onDisableTracking}
+                  onSaveSettings={props.onSaveTrackingSettings}
+                />
                 <SERPResultsTable rows={selectedSerpRows} />
               </>
             ) : (
@@ -1653,6 +2484,137 @@ function KeywordsView(props: {
         )}
       </div>
     </div>
+  );
+}
+
+function RankTrackingPanel(props: {
+  keyword: Keyword;
+  domains: Domain[];
+  entities: SearchEntity[];
+  trackers: RankTracker[];
+  history: Record<number, RankObservation[]>;
+  settings: RankTrackingSettings;
+  busy: boolean;
+  onEnable(keyword: Keyword, target: string, frequency: RefreshFrequency): Promise<void>;
+  onChangeFrequency(keyword: Keyword, trackerId: number, frequency: RefreshFrequency): Promise<void>;
+  onDisable(keyword: Keyword, trackerId: number): Promise<void>;
+  onSaveSettings(settings: RankTrackingSettings): Promise<void>;
+}) {
+  const [target, setTarget] = useState("");
+  const [frequency, setFrequency] = useState<RefreshFrequency>("daily");
+  const [budget, setBudget] = useState(props.settings.monthly_budget_usd);
+  const targets = [
+    ...props.domains.map((domain) => ({ value: `domain:${domain.id}`, label: domain.label || domain.host })),
+    ...props.entities.map((entity) => ({ value: `entity:${entity.id}`, label: entity.label || entity.identifier })),
+  ];
+
+  useEffect(() => {
+    setBudget(props.settings.monthly_budget_usd);
+  }, [props.settings.monthly_budget_usd]);
+
+  useEffect(() => {
+    if (target && !targets.some((item) => item.value === target)) setTarget("");
+  }, [target, targets]);
+
+  return (
+    <section className="border border-border rounded overflow-hidden">
+      <div className="px-4 py-3 border-b border-border flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold">Rank History</h3>
+          <div className="text-xs text-text-dim">Automatic checks scan the top {props.settings.daily_depth}; daily trackers scan the top {props.settings.weekly_depth} on Sundays.</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-text-dim">Monthly cap $</label>
+          <input
+            className={`${inputCls} w-24`}
+            type="number"
+            min="0"
+            step="0.5"
+            value={budget}
+            onChange={(event) => setBudget(Math.max(0, Number(event.target.value) || 0))}
+          />
+          <button
+            type="button"
+            className={buttonCls}
+            disabled={props.busy || budget === props.settings.monthly_budget_usd}
+            onClick={() => props.onSaveSettings({ ...props.settings, monthly_budget_usd: budget })}
+          >Save cap</button>
+        </div>
+      </div>
+      <div className="p-4 border-b border-border flex flex-wrap gap-2">
+        <select className={`${inputCls} max-w-md`} value={target} onChange={(event) => setTarget(event.target.value)}>
+          <option value="">Choose a domain or entity</option>
+          {targets.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+        </select>
+        <select className={`${inputCls} w-32`} value={frequency} onChange={(event) => setFrequency(event.target.value as RefreshFrequency)}>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+        </select>
+        <button
+          type="button"
+          className={primaryBtn}
+          disabled={props.busy || !target}
+          onClick={async () => { await props.onEnable(props.keyword, target, frequency); setTarget(""); }}
+        >Track</button>
+      </div>
+      {props.trackers.length === 0 ? (
+        <div className="p-4 text-sm text-text-dim">No automatic target tracking for this keyword.</div>
+      ) : (
+        <div className="divide-y divide-border">
+          {props.trackers.map((tracker) => {
+            const observations = props.history[tracker.id] || [];
+            const latest = observations[0];
+            return (
+              <div key={tracker.id} className="p-4 space-y-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium">{tracker.entity_label || tracker.entity_identifier}</div>
+                    <div className="text-xs text-text-dim">
+                      {tracker.enabled ? `Next check ${date(tracker.next_run_at)}` : "Disabled · history retained"}
+                      {tracker.last_error ? ` · ${tracker.last_error}` : ""}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <select
+                      className={`${inputCls} w-28 text-xs`}
+                      value={tracker.frequency}
+                      disabled={props.busy || !tracker.enabled}
+                      aria-label={`Refresh frequency for ${tracker.entity_label || tracker.entity_identifier}`}
+                      onChange={(event) => props.onChangeFrequency(props.keyword, tracker.id, event.target.value as RefreshFrequency)}
+                    >
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="monthly">Monthly</option>
+                    </select>
+                    <span className="text-sm font-semibold tabular-nums">
+                      {!latest ? "No checks yet" : latest.found ? `#${latest.rank}` : `Not in top ${latest.checked_depth}`}
+                    </span>
+                    {tracker.enabled && (
+                      <button type="button" className={buttonCls} disabled={props.busy} onClick={() => props.onDisable(props.keyword, tracker.id)}>Disable</button>
+                    )}
+                  </div>
+                </div>
+                {observations.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {observations.slice(0, 31).reverse().map((observation) => (
+                      <span
+                        key={observation.id}
+                        title={`${observation.observed_date}: ${observation.found ? `#${observation.rank}` : `not found in top ${observation.checked_depth}`}`}
+                        className={`px-2 py-1 rounded text-xs tabular-nums ${observation.found ? "bg-surface-2 text-text" : "bg-red-500/10 text-red-300"}`}
+                      >{observation.found ? `#${observation.rank}` : "—"}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="px-4 py-2 border-t border-border text-xs text-text-dim">
+        Trackers are opt-in and keep history when disabled or rescheduled. One provider query is shared by every target using the same keyword, locale, device, and day.
+      </div>
+    </section>
   );
 }
 

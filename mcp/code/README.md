@@ -1,11 +1,11 @@
-# Apteva Code (v0.1)
+# Apteva Code
 
 Repositories — code workspaces scoped to Apteva projects, with
 first-class editing tools modelled on Claude Code.
 
 ## Surfaces
 
-- **36 MCP tools** — repository lifecycle (`repos_list`, `repos_create`,
+- **55 MCP tools** — repository lifecycle (`repos_list`, `repos_create`,
   `repos_get`, `repos_archive`, `repos_set_deploy_hints`) and the
   editing surface (`code_list_files`, `code_glob`, `code_grep`,
   `code_read_file`, `code_read_excerpt`, `code_file_outline`,
@@ -47,6 +47,29 @@ v0.1 stores file bytes on local disk under
 `StorageAppFileStore` once the SDK gains cross-app RPC and Storage
 adds `files_replace`. The editing engine and the MCP surface stay
 unchanged.
+
+## Isolated command execution
+
+`repos_run_command` keeps its existing local runner and adds
+`runtime=workspace`. When the optional Workspaces >=0.5.0 dependency is
+installed, Code creates or reuses one durable isolated environment per
+repository, transfers a source-only snapshot, installs dependencies when the
+dependency inputs change, and runs the requested finite command there.
+
+Code remains the repository and Git authority. Use `repos_workspace_changes`
+to preview formatter, generator, or other command-produced source changes. It
+returns a workspace digest and reports whether Code changed concurrently. Pass
+that exact digest to `repos_workspace_apply`; the apply is rejected if either
+side changed after the preview. Git metadata, dependency caches, and common
+build outputs are never transferred back. Commit and push only through Code's
+Git tools after reviewing the applied files.
+
+For monorepos, pass `workspace_paths` with editable doublestar globs and
+`support_paths` with read-only build inputs. Code transfers only their union,
+persists the scope with the linked workspace, detects concurrent changes within
+that scope, and refuses to apply workspace modifications to support or
+out-of-scope files. Changing a scope provisions a new workspace only after the
+old workspace is confirmed free of unapplied source changes.
 
 Repository metadata lives in `code.db` (SQLite, migrations under
 `migrations/`). Files are **not** shadowed in the DB — the FileStore
@@ -95,10 +118,13 @@ REST tree), path-traversal
 rejection, project-scope isolation between sidecars, and the
 global-scope `_project_id` fallback. Catches SDK-wiring drift.
 
-**Tier 3 (scenarios).** Five YAML scenarios under `scenarios/`
+**Tier 3 (scenarios).** Six YAML scenarios under `scenarios/`
 exercising create-from-template, write-and-read, unique-match edit,
-grep-then-edit, and multi-edit refactor — each driven by a real LLM
-through the apteva-server harness.
+grep-then-edit, multi-edit refactor, and the full Code → Workspaces → Code
+source round trip — each driven by a real LLM through the apteva-server
+harness. The workspace scenario recursively installs Containers and Workspaces,
+binds Code explicitly, and destroys its durable execution workspace during
+test cleanup.
 
 ## Out of scope for v0.1
 

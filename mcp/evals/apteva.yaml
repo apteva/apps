@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.5.4
-description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments. v0.5.4 omits model-specific temperature parameters so judges such as Claude Fable 5 can complete normally.
+version: 0.5.9
+description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments. v0.5.9 preserves declared collaborators in multi-agent simulations and records their executions.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
 icon: /ui/icon.svg
@@ -17,7 +17,7 @@ requires:
     - platform.runtime_catalog.read
     - platform.agents.directive.write
   apps:
-    - { name: environments, version: ">=0.6.4" }
+    - { name: environments, version: ">=0.7.3" }
     - { name: llm, version: ">=0.3.0" }
 provides:
   http_routes:
@@ -25,20 +25,20 @@ provides:
   mcp_tools:
     - { name: eval_suite_list, description: "List evaluation suites and their cases." }
     - { name: eval_suite_get, description: "Get one evaluation suite and its cases." }
-    - { name: eval_suite_create, description: "Create an evaluation suite." }
+    - { name: eval_suite_create, description: "Create an evaluation suite. Add cases with eval_case_create, then execute them with eval_experiment_create." }
     - { name: eval_suite_update, description: "Update an evaluation suite." }
     - { name: eval_suite_delete, description: "Delete an evaluation suite." }
-    - { name: eval_case_create, description: "Add a behavioral case to a suite." }
+    - { name: eval_case_create, description: "Add a behavioral case to a suite. Execute cases with eval_experiment_create; do not call environment_run_create once per case." }
     - { name: eval_case_update, description: "Update a behavioral case." }
     - { name: eval_case_delete, description: "Delete a behavioral case." }
-    - { name: eval_experiment_create, description: "Queue a suite against one or more agent and model targets." }
+    - { name: eval_experiment_create, description: "Execute a suite's enabled cases against agent/model targets. Create cases first, and select judge_model from eval_catalog.models[].gateway_model; Evals creates and stops the isolated runtimes." }
     - { name: eval_experiment_list, description: "List evaluation experiments." }
     - { name: eval_experiment_get, description: "Get an experiment with its individual runs." }
     - { name: eval_experiment_cancel, description: "Cancel queued runs in an experiment." }
-    - { name: eval_run_get, description: "Inspect one run, including trace, metrics, assertions, and judge verdict." }
+    - { name: eval_run_get, description: "Inspect one run, including target and collaborator traces, metrics, assertions, and judge verdict." }
     - { name: eval_run_retry, description: "Queue a fresh retry of one run." }
     - { name: eval_compare, description: "Compare target performance within an experiment." }
-    - { name: eval_catalog, description: "List available agents, models, and Environments." }
+    - { name: eval_catalog, description: "List available agents, models, Environments, and supported assertion types." }
     - { name: eval_suggestion_apply, description: "Apply an accepted directive suggestion with optimistic concurrency." }
   publishes:
     - { name: eval.experiment.created, description: "An evaluation experiment was queued." }
@@ -59,7 +59,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.5.4
+    ref: evals/v0.5.9
     entry: mcp/evals
   port: 8080
   health_check: /health

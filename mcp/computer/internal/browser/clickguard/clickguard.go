@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"strings"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
@@ -17,6 +18,7 @@ import (
 )
 
 type Options struct {
+	TargetID                   string
 	ExpectedText               string
 	ExpectedEffect             string
 	ConfirmConsequence         string
@@ -52,13 +54,21 @@ func (e *ConsequenceError) Error() string {
 }
 
 type Target struct {
+	ID                string `json:"id,omitempty"`
+	X                 int    `json:"x,omitempty"`
+	Y                 int    `json:"y,omitempty"`
 	Tag               string `json:"tag"`
 	Role              string `json:"role,omitempty"`
 	Text              string `json:"text,omitempty"`
 	AccessibleName    string `json:"accessible_name,omitempty"`
 	Disabled          bool   `json:"disabled"`
 	Loading           bool   `json:"loading"`
+	TargetLoading     bool   `json:"target_loading"`
+	ContainerLoading  bool   `json:"container_loading"`
+	PageLoadingCount  int    `json:"page_loading_indicators"`
+	Stale             bool   `json:"stale,omitempty"`
 	Dangerous         bool   `json:"dangerous"`
+	Effect            string `json:"effect,omitempty"`
 	DestructiveEffect string `json:"destructive_effect,omitempty"`
 	OpaqueFrame       bool   `json:"opaque_frame,omitempty"`
 }
@@ -70,8 +80,8 @@ func Click(ctx context.Context, x, y, clickCount int, options Options) (Target, 
 		clickCount = 1
 	}
 	var target Target
-	err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		result, exception, err := cdpruntime.Evaluate(inspectScript(x, y)).WithReturnByValue(true).Do(ctx)
+	err := cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		result, exception, err := cdpruntime.Evaluate(inspectScript(x, y, options.TargetID)).WithReturnByValue(true).Do(ctx)
 		if err != nil {
 			return fmt.Errorf("inspect click target: %w", err)
 		}
@@ -87,12 +97,16 @@ func Click(ctx context.Context, x, y, clickCount int, options Options) (Target, 
 		if err := Validate(target, options); err != nil {
 			return err
 		}
+		dispatchX, dispatchY := x, y
+		if options.TargetID != "" {
+			dispatchX, dispatchY = target.X, target.Y
+		}
 		button := input.Left
-		if err := input.DispatchMouseEvent(input.MousePressed, float64(x), float64(y)).
+		if err := input.DispatchMouseEvent(input.MousePressed, float64(dispatchX), float64(dispatchY)).
 			WithButton(button).WithClickCount(int64(clickCount)).Do(ctx); err != nil {
 			return err
 		}
-		return input.DispatchMouseEvent(input.MouseReleased, float64(x), float64(y)).
+		return input.DispatchMouseEvent(input.MouseReleased, float64(dispatchX), float64(dispatchY)).
 			WithButton(button).WithClickCount(int64(clickCount)).Do(ctx)
 	}))
 	return target, err
@@ -103,7 +117,10 @@ func Validate(target Target, options Options) error {
 	if actual == "" {
 		actual = strings.TrimSpace(target.Text)
 	}
-	if target.Loading {
+	if target.Stale {
+		return fmt.Errorf("click rejected: stale_target: target_id %q no longer identifies the same live DOM element; take a fresh semantic screenshot", options.TargetID)
+	}
+	if target.TargetLoading || target.Loading {
 		return fmt.Errorf("click rejected: target %s is loading; wait for a stable screenshot", describe(target, actual))
 	}
 	if target.Disabled {
@@ -210,7 +227,8 @@ func describe(target Target, name string) string {
 	return fmt.Sprintf("<%s> without an accessible name", target.Tag)
 }
 
-func inspectScript(x, y int) string {
+func inspectScript(x, y int, targetID string) string {
+	targetJSON, _ := json.Marshal(targetID)
 	return fmt.Sprintf(`(function(){
   var opaqueFrame=false;
   function deepElementFromPoint(doc, px, py) {
@@ -235,7 +253,13 @@ func inspectScript(x, y int) string {
     }
     return leaf;
   }
-  var leaf = deepElementFromPoint(document, %d, %d);
+  var requestedID=%s, saved=null;
+  if(requestedID){
+    var state=window.__aptevaComputerSOM;
+    saved=state&&state.targets&&state.targets[requestedID];
+    if(!saved||!saved.element||!saved.element.isConnected)return {id:requestedID,tag:'unknown',stale:true,disabled:false,loading:false,target_loading:false,dangerous:false};
+  }
+  var leaf = saved?saved.element:deepElementFromPoint(document, %d, %d);
   if (!leaf) return {tag:'unknown',disabled:false,loading:false,dangerous:false};
   var interactive = 'button,a[href],input,select,textarea,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[role="checkbox"],[role="radio"],[role="switch"],[role="gridcell"],[onclick],[tabindex]:not([tabindex="-1"])';
   function interactiveAncestor(node) {
@@ -247,7 +271,7 @@ func inspectScript(x, y int) string {
     }
     return node;
   }
-  var el = interactiveAncestor(leaf);
+  var el = saved?saved.element:interactiveAncestor(leaf);
   function clean(v){ return String(v || '').replace(/\s+/g,' ').trim(); }
   function labelledBy(node){
     var ids = clean(node.getAttribute && node.getAttribute('aria-labelledby'));
@@ -265,9 +289,19 @@ func inspectScript(x, y int) string {
     var closest=node.closest&&node.closest('label');
     return closest?clean(closest.innerText||closest.textContent):'';
   }
+  function adjacentRowLabel(node){
+    if(!node||!node.matches||!node.matches('input[type="checkbox"],input[type="radio"],[role="checkbox"],[role="radio"],[role="switch"],[aria-checked]'))return '';
+    var selector='input[type="checkbox"],input[type="radio"],[role="checkbox"],[role="radio"],[role="switch"],[aria-checked]';
+    for(var row=node.parentElement,depth=0;row&&depth<5;row=row.parentElement,depth++){
+      var rect=row.getBoundingClientRect();if(rect.height>140||rect.width>Math.min(window.innerWidth,1200))break;
+      var controls=row.querySelectorAll(selector),label=clean(row.innerText||row.textContent||'');
+      if(controls.length===1&&controls[0]===node&&label&&label.length<=180)return label;
+    }
+    return '';
+  }
   function name(node){
     var result=clean((node.getAttribute && node.getAttribute('aria-label')) || labelledBy(node) ||
-      associatedLabel(node) || (node.getAttribute && node.getAttribute('title')) || node.innerText || node.textContent ||
+      associatedLabel(node) || adjacentRowLabel(node) || (node.getAttribute && node.getAttribute('title')) || node.innerText || node.textContent ||
       node.value || (node.getAttribute && node.getAttribute('alt')) ||
       (node.getAttribute && node.getAttribute('aria-placeholder')) ||
       (node.getAttribute && node.getAttribute('placeholder')) ||
@@ -285,30 +319,42 @@ func inspectScript(x, y int) string {
   }
   function visible(node){
     if (!node || !node.getBoundingClientRect) return false;
-    var r=node.getBoundingClientRect(),view=node.ownerDocument&&node.ownerDocument.defaultView,s=(view||window).getComputedStyle(node);
-    return r.width>=2&&r.height>=2&&s.display!=='none'&&s.visibility!=='hidden'&&parseFloat(s.opacity||'1')>=0.1;
+    var r=node.getBoundingClientRect(),view=node.ownerDocument&&node.ownerDocument.defaultView;
+    if(r.width<2||r.height<2)return false;
+    try{if(node.checkVisibility&&!node.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}))return false;}catch(e){}
+    for(var n=node;n&&n.nodeType===1;n=n.parentElement){var s=(view||window).getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden'||parseFloat(s.opacity||'1')<0.1)return false;}
+    return true;
   }
-  function loading(node){
-    for (var n=node;n&&n!==document.documentElement;n=n.parentElement) {
-      if (n.getAttribute && (n.getAttribute('aria-busy')==='true'||n.getAttribute('data-loading')==='true'||n.getAttribute('data-state')==='loading')) return true;
-      var cls=clean(n.className).toLowerCase();
-      if (/(^|[-_\s])(loading|is-loading|pending)([-_\s]|$)/.test(cls)) return true;
-    }
+  function loadingMarker(n){
+    if(!n||!n.getAttribute)return false;
+    if(n.getAttribute('aria-busy')==='true'||n.getAttribute('data-loading')==='true'||n.getAttribute('data-state')==='loading')return true;
+    return /(^|[-_\s])(loading|is-loading|pending)([-_\s]|$)/.test(clean(n.className).toLowerCase());
+  }
+  function targetLoading(node){
+    if(loadingMarker(node))return true;
     var indicators=node.querySelectorAll?node.querySelectorAll('[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i],[data-loading="true"]'):[];
     for(var i=0;i<indicators.length;i++) if(visible(indicators[i])) return true;
+    var selector='button,input,select,textarea,[role="button"],[role="checkbox"],[role="radio"],[role="switch"],[aria-checked]';
+    for(var row=node.parentElement,depth=0;row&&depth<3;row=row.parentElement,depth++){var rect=row.getBoundingClientRect();if(rect.height>140||rect.width>Math.min(window.innerWidth,1200))break;var controls=row.querySelectorAll(selector);if(controls.length!==1||controls[0]!==node)continue;if(loadingMarker(row))return true;var rowIndicators=row.querySelectorAll('[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i],[data-loading="true"]');for(var j=0;j<rowIndicators.length;j++)if(visible(rowIndicators[j]))return true;break;}
     return false;
   }
+  function containerLoading(node){for(var n=node&&node.parentElement;n&&n!==n.ownerDocument.documentElement;n=n.parentElement)if(loadingMarker(n))return true;return false;}
+  function pageLoadingCount(){var nodes=document.querySelectorAll('[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i],[data-loading="true"],[aria-busy="true"]'),count=0;for(var i=0;i<nodes.length;i++)if(visible(nodes[i]))count++;return count;}
   var disabled=!!(el.disabled||(el.matches&&el.matches(':disabled'))||(el.getAttribute&&el.getAttribute('aria-disabled')==='true')||(el.closest&&el.closest('[inert]')));
   var accessible=name(el), text=clean(el.innerText||el.textContent||'');
-  var semantic=clean(accessible+' '+text).toLowerCase(), effect='';
-	  if(/\b(set|choose|select|edit|change)\s+(the\s+)?(publish\s+)?(date|time)\b/.test(semantic)) effect='';
-	  else if(/\b(schedule (post|publication|publish)|confirm schedule|publish later)\b/.test(semantic)||/^schedule(?:\s+schedule)?$/.test(semantic)) effect='schedule_publish';
-	  else if(/\bpublish\b/.test(semantic)) effect='immediate_publish';
-	  else if(/\b(delete|destroy|erase)\b/.test(semantic)) effect='destructive_delete';
-	  else if(/\b(send|post)\b/.test(semantic)) effect='immediate_send';
-	  else if(/\b(pay|payout|purchase|buy|checkout|place order|withdraw|withdrawal)\b/.test(semantic)) effect='financial_action';
-	  else if(/\b(grant access|revoke access|change permissions|make admin|remove admin)\b/.test(semantic)) effect='permission_change';
-	  else if(/\b(deactivate account|close account|transfer account)\b/.test(semantic)) effect='account_change';
-  return {tag:(el.tagName||'unknown').toLowerCase(),role:(el.getAttribute&&el.getAttribute('role'))||'',text:text.slice(0,120),accessible_name:accessible.slice(0,120),disabled:disabled,loading:loading(el),dangerous:effect!=='',destructive_effect:effect,opaque_frame:opaqueFrame};
-})()`, x, y)
+  var semantic=clean(accessible).toLowerCase(), effect='';
+  if(/^(create|new|edit|view|open)\s+(a\s+)?post\b/.test(semantic)||/^(publish|schedule)\s+(date|time)\b/.test(semantic))effect='';
+  else if(/^(schedule|confirm schedule|schedule post|schedule publication|publish later)(\b|$)/.test(semantic))effect='schedule_publish';
+  else if(/^(publish|publish now|post now)(\b|$)/.test(semantic))effect='immediate_publish';
+  else if(/^(delete|destroy|erase|remove permanently)(\b|$)/.test(semantic))effect='destructive_delete';
+  else if(/^(send|send now)(\b|$)/.test(semantic))effect='immediate_send';
+  else if(/^(pay|payout|purchase|buy|checkout|place order|withdraw)(\b|$)/.test(semantic))effect='financial_action';
+  else if(/^(grant access|revoke access|change permissions|make admin|remove admin)(\b|$)/.test(semantic))effect='permission_change';
+  else if(/^(deactivate account|close account|transfer account)(\b|$)/.test(semantic))effect='account_change';
+  var busy=targetLoading(el),rect=el.getBoundingClientRect(),dx=rect.left+rect.width/2,dy=rect.top+rect.height/2;
+  try{var view=el.ownerDocument&&el.ownerDocument.defaultView;while(view&&view!==window){var frame=view.frameElement,frameRect=frame.getBoundingClientRect();dx+=frameRect.left;dy+=frameRect.top;view=frame.ownerDocument&&frame.ownerDocument.defaultView;}}catch(e){if(saved){dx=saved.x;dy=saved.y;}}
+  dx=Math.round(dx);dy=Math.round(dy);
+  var semanticEffect=effect;if(!semanticEffect){if(el.isContentEditable||((el.getAttribute&&el.getAttribute('role'))==='textbox'))semanticEffect='edit_draft';else if((el.getAttribute&&((el.getAttribute('aria-haspopup'))||(el.getAttribute('aria-controls'))))||/^(free access|paid access|more options|action menu)\b/.test(semantic))semanticEffect='open_configuration';else semanticEffect='navigation_only';}
+  return {id:requestedID||'',x:dx,y:dy,tag:(el.tagName||'unknown').toLowerCase(),role:(el.getAttribute&&el.getAttribute('role'))||'',text:text.slice(0,120),accessible_name:accessible,disabled:disabled,loading:busy,target_loading:busy,container_loading:containerLoading(el),page_loading_indicators:pageLoadingCount(),dangerous:effect!=='',effect:semanticEffect,destructive_effect:effect,opaque_frame:opaqueFrame};
+})()`, string(targetJSON), x, y)
 }

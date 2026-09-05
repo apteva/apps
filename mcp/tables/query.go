@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"regexp"
 	"strings"
 	"time"
@@ -23,8 +22,11 @@ import (
 // Cross-table joins use {table_name} placeholders, which are resolved
 // strictly against the current project.
 func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.RLock()
-	defer a.schemaMu.RUnlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "tables_query", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -82,6 +84,9 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 
 	started := time.Now()
+	if err := authorizeQuery(qctx, conn, ctx, a, pid, rawSQL, resolved, bound); err != nil {
+		return nil, err
+	}
 	rows, err := conn.QueryContext(qctx, resolved, bound...)
 	if err != nil {
 		elapsed := time.Since(started)
@@ -93,6 +98,13 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, err
+	}
+	seenColumns := map[string]bool{}
+	for _, col := range cols {
+		if seenColumns[col] {
+			return nil, errf("duplicate output column %q; use unique aliases", col)
+		}
+		seenColumns[col] = true
 	}
 	if len(cols) > 256 {
 		return nil, errf("query result exceeds maximum of 256 columns")
@@ -118,14 +130,21 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		row := map[string]any{}
 		for i, c := range cols {
 			v := normaliseScanValue(dest[i])
-			usedBytes += int64(len(c)) + valueSize(v)
-			if usedBytes > byteCap {
-				truncated = true
-				break
+			if err := finiteResult(v); err != nil {
+				return nil, err
 			}
 			row[c] = v
 		}
-		if truncated {
+		size, err := jsonSize(row, byteCap)
+		if err != nil {
+			return nil, err
+		}
+		usedBytes += size + 1
+		if usedBytes > byteCap {
+			if len(out) == 0 {
+				return nil, oversized()
+			}
+			truncated = true
 			break
 		}
 		out = append(out, row)
@@ -144,58 +163,56 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 var (
 	queryPlaceholderRe = regexp.MustCompile(`\{[a-z][a-z0-9_]*\}`)
-	internalSQLNameRe  = regexp.MustCompile(`(?i)(?:\b(?:t_[0-9]+|tables_meta|columns_meta|sqlite_[a-z0-9_]*|pragma_[a-z0-9_]*|dbstat)\b|\b_migrations\b)`)
+	internalSQLNameRe  = regexp.MustCompile(`(?i)(?:\b(?:t_[0-9]+|tables_meta|columns_meta|indexes_meta|index_columns|table_identity|sqlite_[a-z0-9_]*|pragma_[a-z0-9_]*|dbstat)\b|\b_migrations\b)`)
 )
 
 // validateReadOnlySQL rejects anything but a single SELECT or WITH
 // statement. It does not try to defend against truly hostile input —
 // the agent operates inside the install's permission scope already.
 func validateReadOnlySQL(s string) error {
-	stripped := strings.TrimRight(s, " \t\n\r;")
-	if strings.Contains(stripped, ";") {
-		return errf("multi-statement queries not allowed")
+	tokens, err := sqlTokens(s)
+	if err != nil {
+		return err
 	}
-	lower := strings.ToLower(strings.TrimSpace(s))
-	switch {
-	case strings.HasPrefix(lower, "select"), strings.HasPrefix(lower, "with"):
-		withoutPlaceholders := queryPlaceholderRe.ReplaceAllString(lower, "")
-		if name := internalSQLNameRe.FindString(withoutPlaceholders); name != "" {
-			return errf("direct access to internal or physical table %q is not allowed; use {table_name}", name)
-		}
-		return nil
+	if len(tokens) == 0 || tokens[0].kind != "identifier" || (strings.ToLower(tokens[0].value) != "select" && strings.ToLower(tokens[0].value) != "with") {
+		return errf("only SELECT and WITH statements allowed")
 	}
-	return errf("only SELECT and WITH (CTE) statements allowed")
-}
-
-// substitutePlaceholders resolves {table_name} → physical table name
-// for every user-table the project owns, leaving anything else alone.
-// This is the only mechanism the agent has to reach into user-tables
-// from raw SQL; we never expose physical names directly.
-func (a *App) substitutePlaceholders(ctx *sdk.AppCtx, projectID, query string) (string, error) {
-	if !strings.ContainsAny(query, "{}") {
-		return query, nil
-	}
-	out := query
-	seen := map[string]bool{}
-	for _, placeholder := range queryPlaceholderRe.FindAllString(query, -1) {
-		name := strings.TrimSuffix(strings.TrimPrefix(placeholder, "{"), "}")
-		if seen[name] {
+	terminated := false
+	for _, t := range tokens {
+		if t.kind == "symbol" && t.value == ";" {
+			terminated = true
 			continue
 		}
-		seen[name] = true
-		table, err := a.loadTableSchema(ctx, projectID, name)
+		if terminated {
+			return errf("multi-statement queries not allowed")
+		}
+		if t.kind == "identifier" && internalSQLNameRe.MatchString(t.value) {
+			return errf("direct access to internal or physical table %q is not allowed; use {table_name}", t.value)
+		}
+	}
+	return nil
+}
+func (a *App) substitutePlaceholders(ctx *sdk.AppCtx, projectID, query string) (string, error) {
+	tokens, err := sqlTokens(query)
+	if err != nil {
+		return "", err
+	}
+	var out strings.Builder
+	last := 0
+	for _, token := range tokens {
+		if token.kind != "placeholder" {
+			continue
+		}
+		table, err := a.loadTableSchema(ctx, projectID, token.value)
 		if err != nil {
 			return "", err
 		}
-		out = strings.ReplaceAll(out, placeholder, quote(table.PhysicalName))
+		out.WriteString(query[last:token.start])
+		out.WriteString(quote(table.PhysicalName))
+		last = token.end
 	}
-	if strings.ContainsAny(out, "{}") {
-		// Any unresolved placeholder is almost certainly a typo — fail
-		// loud rather than passing literal "{foo}" into sqlite which
-		// produces a confusing parse error.
-		return "", errf("unresolved {placeholder} in sql — check table names")
-	}
-	return out, nil
+	out.WriteString(query[last:])
+	return out.String(), nil
 }
 
 func normaliseScanValue(v any) any {
@@ -203,8 +220,8 @@ func normaliseScanValue(v any) any {
 	case []byte:
 		// sqlite returns BLOB and TEXT both as []byte. Try to parse as
 		// JSON first (round-trips json columns); fall back to string.
-		var j any
-		if err := json.Unmarshal(n, &j); err == nil {
+		j, err := jsonParse(string(n))
+		if err == nil {
 			switch j.(type) {
 			case map[string]any, []any:
 				return j

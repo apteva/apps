@@ -1,0 +1,13 @@
+{
+  "name": "@apteva/jobs-panel",
+  "private": true,
+  "scripts": {
+    "build:ui": "bun build ui/JobsPanel.tsx --outdir ui --entry-naming JobsPanel.mjs --target browser --format esm --external react --external react/jsx-runtime --sourcemap=external --minify",
+    "test:ui": "bun test ui/JobsPanel.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/react": "19.2.14"
+  }
+}

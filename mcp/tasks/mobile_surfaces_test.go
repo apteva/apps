@@ -42,7 +42,7 @@ func TestNativeTaskSurfacesMatchManifest(t *testing.T) {
 	if err := sdk.ValidateNativeSurfaceForDescriptor(panel, manifest.Provides.UISurfaces[0]); err != nil {
 		t.Fatalf("tasks surface descriptor mismatch: %v", err)
 	}
-	if panel.ID != "tasks" || len(panel.Sections) != 1 || len(panel.Destinations) != 1 || len(panel.Actions) != 5 {
+	if panel.ID != "tasks" || len(panel.Sections) != 3 || len(panel.Destinations) != 3 || len(panel.Actions) != 8 {
 		t.Fatalf("full Tasks surface is incomplete: %+v", panel)
 	}
 
@@ -193,6 +193,13 @@ func TestTaskMutationsEmitDeclaredRefreshTopics(t *testing.T) {
 		"task.occurrence_redispatched",
 		"task.occurrence_accepted",
 		"task.occurrence_skipped_overlap",
+		"task.terminalization_requested",
+		"task.terminalization_execution_claimed",
+		"task.terminalization_execution_active",
+		"task.terminalization_execution_settled",
+		"task.agent_execution_active",
+		"task.agent_execution_settled",
+		"task.agent_execution_error",
 	}
 	for _, componentIndex := range []int{0, 1} {
 		if got := manifest.Provides.UIComponents[componentIndex].RefreshTopics; !reflect.DeepEqual(got, wantTopics) {
@@ -211,7 +218,14 @@ func TestTaskMutationsEmitDeclaredRefreshTopics(t *testing.T) {
 		if err := mutate(); err != nil {
 			t.Fatal(err)
 		}
-		if len(events) != before+1 {
+		want := 1
+		if eventType == "schedule_run_requested" {
+			want = 2
+			if events[before].EventType != "created" {
+				t.Fatal("manual run did not emit child creation")
+			}
+		}
+		if len(events) != before+want {
 			t.Fatalf("mutation %q emitted %d events, want 1", eventType, len(events)-before)
 		}
 		got := events[len(events)-1].EventType
@@ -271,7 +285,7 @@ func TestTaskMutationsEmitDeclaredRefreshTopics(t *testing.T) {
 	})
 	task, _ = app.store.Get(task.ID)
 	assertOne(t, "occurrence_skipped_overlap", func() error {
-		return app.scheduler.Tick(task.NextRunAt.Add(time.Second), "project-a")
+		return app.scheduler.tickState(task.NextRunAt.Add(time.Second), "project-a")
 	})
 
 	var cancellable *Task

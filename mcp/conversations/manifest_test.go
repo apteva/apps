@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -75,6 +76,15 @@ func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 			component.Visibility != sdk.UIComponentVisibilityAttached ||
 			component.DefaultSize != "full" {
 			t.Fatalf("agent-conversations component=%+v", component)
+		}
+		schema, err := json.Marshal(component.SettingsSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range []string{`"display_mode"`, `"browser"`, `"single"`, `"show_new_conversation"`} {
+			if !strings.Contains(string(schema), required) {
+				t.Fatalf("agent-conversations settings schema missing %s: %s", required, schema)
+			}
 		}
 		if _, err := os.Stat("ui/AgentConversationsWidget.mjs"); err != nil {
 			t.Fatalf("widget bundle: %v", err)

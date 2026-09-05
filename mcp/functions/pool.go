@@ -2,103 +2,244 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	sdk "github.com/apteva/app-sdk"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
-
-	sdk "github.com/apteva/app-sdk"
 )
 
 const (
-	// workersPerFunction caps concurrent invocations — and therefore
-	// live worker processes — for a single function.
 	workersPerFunction = 8
-	// idleWorkerTTL: a warm worker unused for this long is reaped to
-	// give its memory back.
-	idleWorkerTTL = 5 * time.Minute
-	reaperEvery   = 30 * time.Second
+	idleWorkerTTL      = 5 * time.Minute
+	reaperEvery        = 30 * time.Second
 )
 
-// globalPool is the process-wide worker pool, created in OnMount.
-var globalPool *pool
+var poolRef atomic.Pointer[pool]
 
-// pool owns every warm worker. One fnPool per function id; within it
-// a counting semaphore caps concurrency and an idle freelist hands
-// warm workers back out. Workers are keyed by version id — a deploy
-// makes the previous version's idle workers stale, and the next
-// acquire drains them.
-type pool struct {
-	ctx *sdk.AppCtx
+func currentPool() *pool { return poolRef.Load() }
 
-	stageDir  string // <tmp>/apteva-functions-XXXX — the build-base fallback root
-	buildBase string // root for version artifact dirs
+type poolContextKey struct{}
 
-	mu          sync.Mutex
-	byFn        map[int64]*fnPool
-	globalSem   chan struct{}
-	globalQueue chan struct{}
-	buildSem    chan struct{}
-	versions    sync.Map // version id -> *FunctionVersion
-
-	stop          chan struct{}
-	lastRetention time.Time
-}
-
-// fnPool is the per-function concurrency gate + warm-worker freelist.
-type fnPool struct {
-	sem   chan struct{} // cap = workersPerFunction
-	idle  chan *worker  // cap = workersPerFunction
-	queue chan struct{}
+func poolFrom(ctx context.Context) *pool {
+	if p, ok := ctx.Value(poolContextKey{}).(*pool); ok {
+		return p
+	}
+	return currentPool()
 }
 
 var errFunctionBusy = errors.New("function capacity exhausted; retry later")
 
-// newPool picks the build-artifact root and starts the idle reaper.
-// Harnesses aren't staged here — ensureBuilt writes the right one
-// into each version's build dir at build time.
+type pool struct {
+	versionRefs                                              map[string]int
+	collecting                                               map[string]bool
+	goCacheMu                                                sync.Mutex
+	goCache                                                  string
+	lastArtifactRetention                                    time.Time
+	ctx                                                      *sdk.AppCtx
+	stageDir, buildBase                                      string
+	mu                                                       sync.Mutex
+	byFn                                                     map[int64]*fnPool
+	all                                                      map[*worker]*fnPool
+	globalSem, globalQueue, buildSem, buildQueue, downstream chan struct{}
+	liveMB                                                   int
+	versions                                                 sync.Map
+	artifacts                                                sync.Map
+	functions                                                sync.Map
+	stop                                                     chan struct{}
+	wake                                                     chan struct{}
+	cancel                                                   context.CancelFunc
+	life                                                     context.Context
+	closed                                                   bool
+	deleted                                                  map[string]bool
+	lastRetention                                            time.Time
+}
+type fnPool struct {
+	sem                 chan struct{}
+	idle                chan *worker
+	queue               chan struct{}
+	closed              bool
+	signature, identity string
+}
+
+func configHash(fn *Function) string {
+	b, _ := json.Marshal(struct {
+		Env    map[string]string
+		Memory int
+		Access *FunctionAccess
+	}{fn.Env, fn.MaxMemoryMB, fn.Access})
+	return hashSource(b)
+}
 func newPool(ctx *sdk.AppCtx) (*pool, error) {
-	stageDir, err := os.MkdirTemp("", "apteva-functions-")
+	stage, err := os.MkdirTemp("", "apteva-functions-")
 	if err != nil {
 		return nil, err
 	}
-
-	// Build artifacts: persistent under APTEVA_DATA_DIR when set (so
-	// built dependency trees / compiled workers survive a restart),
-	// otherwise under the per-boot stage dir — ensureBuilt rebuilds
-	// lazily either way.
-	buildBase := filepath.Join(stageDir, "build")
+	base := filepath.Join(stage, "build")
 	if d := strings.TrimSpace(os.Getenv("APTEVA_DATA_DIR")); d != "" {
-		buildBase = filepath.Join(d, "functions-build")
+		base = filepath.Join(d, "functions-build")
 	}
-	if err := os.MkdirAll(buildBase, 0o700); err != nil {
+	if err = os.MkdirAll(base, 0700); err != nil {
+		os.RemoveAll(stage)
 		return nil, err
 	}
-
-	p := &pool{
-		ctx:         ctx,
-		stageDir:    stageDir,
-		buildBase:   buildBase,
-		byFn:        map[int64]*fnPool{},
-		globalSem:   make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_WORKERS", 32, 1, 1024)),
-		globalQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000)),
-		buildSem:    make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)),
-		stop:        make(chan struct{}),
+	life, cancel := context.WithCancel(context.Background())
+	p := &pool{ctx: ctx, stageDir: stage, buildBase: base, versionRefs: map[string]int{}, collecting: map[string]bool{}, deleted: map[string]bool{}, byFn: map[int64]*fnPool{}, all: map[*worker]*fnPool{}, globalSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_WORKERS", 32, 1, 1024)), globalQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000)), buildSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)), buildQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILD_QUEUE", 16, 1, 256)), downstream: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_DOWNSTREAM_TOTAL", 64, 1, 1024)), stop: make(chan struct{}), wake: make(chan struct{}, 1), life: life, cancel: cancel}
+	_, err = ctx.AppDB().Exec(`UPDATE function_versions SET build_status='failed',build_log='Build interrupted by restart' WHERE build_status IN ('pending','building')`)
+	if err != nil {
+		cancel()
+		removeTree(stage)
+		return nil, err
+	}
+	_, _ = ctx.AppDB().Exec(`UPDATE function_invocations SET status='error',error='Invocation interrupted by restart' WHERE status='running'`)
+	if err := p.recoverLegacySnapshots(); err != nil {
+		cancel()
+		removeTree(stage)
+		return nil, err
 	}
 	go p.reapLoop()
 	return p, nil
 }
-
-// invoke runs one event against ver through the warm pool: reuse a
-// current idle worker if there is one, otherwise cold-start one
-// against the version's already-built artifact dir. ctx is threaded
-// to the worker so cross-app context.call frames can be serviced via
-// its PlatformAPI. The worker goes back to the freelist afterwards
-// unless it died or its version is no longer active.
-func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, ver *FunctionVersion, spec runtimeSpec, buildDir string, event any, timeout time.Duration, stream invocationStream) (*invokeResult, error) {
+func (p *pool) poolFor(id int64) *fnPool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.poolForLocked(id)
+}
+func (p *pool) poolForLocked(id int64) *fnPool {
+	fp := p.byFn[id]
+	if fp == nil {
+		fp = &fnPool{sem: make(chan struct{}, workersPerFunction), idle: make(chan *worker, workersPerFunction), queue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_QUEUE_PER_FUNCTION", 64, 1, 10000))}
+		p.byFn[id] = fp
+	}
+	return fp
+}
+func (p *pool) signal() {
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
+}
+func (p *pool) discard(w *worker) {
+	p.mu.Lock()
+	_, exists := p.all[w]
+	if exists {
+		delete(p.all, w)
+		p.liveMB -= w.memoryMB
+	}
+	p.mu.Unlock()
+	w.shutdown()
+	if exists {
+		<-p.globalSem
+	}
+	p.signal()
+}
+func (p *pool) evictIdle() bool {
+	p.mu.Lock()
+	var victim *worker
+	for _, fp := range p.byFn {
+		select {
+		case victim = <-fp.idle:
+		default:
+		}
+		if victim != nil {
+			break
+		}
+	}
+	p.mu.Unlock()
+	if victim != nil {
+		p.discard(victim)
+		return true
+	}
+	return false
+}
+func (p *pool) start(parent context.Context, fn *Function, v *FunctionVersion, spec runtimeSpec, dir string) (*worker, error) {
+	memory := clampInt(fn.MaxMemoryMB, defaultMemoryMB, 16, maxMemoryMB)
+	for {
+		p.mu.Lock()
+		closed := p.closed || p.deleted[fn.InstanceKey]
+		p.mu.Unlock()
+		if closed {
+			return nil, errors.New("worker pool closed")
+		}
+		select {
+		case p.globalSem <- struct{}{}:
+			p.mu.Lock()
+			fits := p.liveMB+memory <= envInt("APTEVA_FUNCTIONS_TOTAL_MEMORY_MB", 4096, 16, 1048576)
+			if fits {
+				p.liveMB += memory
+			}
+			p.mu.Unlock()
+			if !fits {
+				<-p.globalSem
+				if p.evictIdle() {
+					continue
+				}
+				return nil, errFunctionBusy
+			}
+			w, err := startWorkerContext(parent, spec, dir, fn, v.ID)
+			if err != nil {
+				p.mu.Lock()
+				p.liveMB -= memory
+				p.mu.Unlock()
+				<-p.globalSem
+				p.signal()
+				return nil, err
+			}
+			w.owner = p
+			w.memoryMB = memory
+			w.signature = configHash(fn)
+			w.identity = fn.InstanceKey
+			p.mu.Lock()
+			fp := p.poolForLocked(fn.ID)
+			p.all[w] = fp
+			closed = p.closed || fp.closed || p.deleted[fn.InstanceKey]
+			p.mu.Unlock()
+			if closed {
+				p.discard(w)
+				return nil, errors.New("function deleted or pool closed")
+			}
+			return w, nil
+		default:
+		}
+		if p.evictIdle() {
+			continue
+		}
+		select {
+		case <-parent.Done():
+			return nil, parent.Err()
+		case <-p.stop:
+			return nil, errors.New("worker pool closed")
+		case <-p.wake:
+		}
+	}
+}
+func (p *pool) put(fn *Function, fp *fnPool, w *worker) {
+	p.mu.Lock()
+	keep := !p.closed && !fp.closed && fp.identity == fn.InstanceKey && fp.signature == w.signature
+	if current := p.cachedFunction(fn.ProjectID, fn.ID, ""); current != nil {
+		keep = keep && current.ActiveVersionID != nil && *current.ActiveVersionID == w.versionID && current.Status == "active"
+	}
+	if keep {
+		select {
+		case fp.idle <- w:
+		default:
+			keep = false
+		}
+	}
+	p.mu.Unlock()
+	if !keep {
+		p.discard(w)
+	}
+	p.signal()
+}
+func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *FunctionVersion, spec runtimeSpec, dir string, event any, timeout time.Duration, stream invocationStream) (*invokeResult, error) {
+	t := timingsFrom(parent)
+	queueStart := time.Now()
 	fp := p.poolFor(fn.ID)
 	select {
 	case p.globalQueue <- struct{}{}:
@@ -112,190 +253,279 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, ver
 	default:
 		return nil, errFunctionBusy
 	}
-
-	// Acquire a concurrency slot (blocks at the cap).
 	select {
 	case fp.sem <- struct{}{}:
+		defer func() { <-fp.sem }()
 	case <-parent.Done():
 		return nil, parent.Err()
+	case <-p.stop:
+		return nil, errors.New("worker pool closed")
 	}
-	defer func() { <-fp.sem }()
-	select {
-	case p.globalSem <- struct{}{}:
-	case <-parent.Done():
-		return nil, parent.Err()
+	p.mu.Lock()
+	if fp.identity == "" {
+		fp.identity = fn.InstanceKey
+		fp.signature = configHash(fn)
 	}
-	defer func() { <-p.globalSem }()
-
-	// Reuse a warm worker on the current version; drain stale/dead.
+	valid := !fp.closed && !p.closed && !p.deleted[fn.InstanceKey] && fp.identity == fn.InstanceKey && fp.signature == configHash(fn)
+	p.mu.Unlock()
+	if !valid {
+		return nil, errors.New("function deleted or configuration changed; retry")
+	}
+	t.queue = time.Since(queueStart)
 	var w *worker
-	for {
+	for w == nil {
 		select {
-		case cand := <-fp.idle:
-			if cand.alive() && !cand.stale(ver.ID) {
-				w = cand
+		case candidate := <-fp.idle:
+			if candidate.alive() && !candidate.stale(v.ID) && candidate.signature == configHash(fn) {
+				w = candidate
 			} else {
-				cand.shutdown()
+				p.discard(candidate)
 				continue
 			}
 		default:
-			// freelist empty — fall through to cold start
 		}
 		break
 	}
-
 	if w == nil {
-		started, err := startWorker(spec, buildDir, fn, ver.ID)
+		var err error
+		coldStart := time.Now()
+		w, err = p.start(parent, fn, v, spec, dir)
+		t.cold = time.Since(coldStart)
 		if err != nil {
 			return nil, fmt.Errorf("cold start: %w", err)
 		}
-		w = started
-		select {
-		case <-parent.Done():
-			w.shutdown()
-			return &invokeResult{Status: "timeout", ExitCode: -1, DurationMS: timeout.Milliseconds(), Error: "deadline exceeded"}, nil
-		default:
-		}
 	}
-
+	executionStart := time.Now()
 	res, err := w.call(ctx, parent, event, timeout, stream)
-
-	// Return the worker to the freelist if it's still healthy and on
-	// the active version; otherwise let it go.
-	if err == nil && w.alive() && !w.stale(ver.ID) {
-		select {
-		case fp.idle <- w:
-		default:
-			w.shutdown() // freelist full — shouldn't happen under the sem cap
-		}
+	t.execution = time.Since(executionStart)
+	if err == nil && w.alive() {
+		p.put(fn, fp, w)
 	} else {
-		w.shutdown()
+		p.discard(w)
 	}
 	return res, err
 }
-
-// poolFor returns (creating on first use) the per-function gate.
-func (p *pool) poolFor(fnID int64) *fnPool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	fp, ok := p.byFn[fnID]
-	if !ok {
-		fp = &fnPool{
-			sem:   make(chan struct{}, workersPerFunction),
-			idle:  make(chan *worker, workersPerFunction),
-			queue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_QUEUE_PER_FUNCTION", 64, 1, 10000)),
-		}
-		p.byFn[fnID] = fp
-	}
-	return fp
-}
-
 func (p *pool) acquireBuild(ctx context.Context) error {
+	select {
+	case p.buildQueue <- struct{}{}:
+	default:
+		return errFunctionBusy
+	}
 	select {
 	case p.buildSem <- struct{}{}:
 		return nil
 	case <-ctx.Done():
+		<-p.buildQueue
 		return ctx.Err()
+	case <-p.stop:
+		<-p.buildQueue
+		return errors.New("pool closed")
 	}
 }
-
-func (p *pool) releaseBuild() { <-p.buildSem }
-
+func (p *pool) releaseBuild() { <-p.buildSem; <-p.buildQueue }
 func (p *pool) cachedVersion(id int64) *FunctionVersion {
-	if raw, ok := p.versions.Load(id); ok {
-		copy := *(raw.(*FunctionVersion))
-		return &copy
+	if v, ok := p.versions.Load(id); ok {
+		c := *v.(*FunctionVersion)
+		return &c
 	}
 	return nil
 }
-
 func (p *pool) cacheVersion(v *FunctionVersion) {
-	if v == nil {
+	if v != nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.deleted[v.ArtifactKey] {
+			return
+		}
+		c := *v
+		p.versions.Store(v.ID, &c)
+	}
+}
+func functionCacheKey(pid string, id int64, name string) string {
+	if id != 0 {
+		return fmt.Sprintf("%s/id/%d", pid, id)
+	}
+	return pid + "/name/" + name
+}
+func (p *pool) cachedFunction(pid string, id int64, name string) *Function {
+	if v, ok := p.functions.Load(functionCacheKey(pid, id, name)); ok {
+		c := *v.(*Function)
+		return &c
+	}
+	return nil
+}
+func (p *pool) cacheFunction(fn *Function) {
+	if fn == nil {
 		return
 	}
-	copy := *v
-	p.versions.Store(v.ID, &copy)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.deleted[fn.InstanceKey] {
+		return
+	}
+	c := *fn
+	p.functions.Store(functionCacheKey(fn.ProjectID, fn.ID, ""), &c)
+	p.functions.Store(functionCacheKey(fn.ProjectID, 0, fn.Name), &c)
 }
-
-// activateVersion eagerly drops idle workers from older versions instead of
-// retaining them until the next invocation or the five-minute reaper pass.
+func executionFunction(ctx *sdk.AppCtx, pid string, id int64, name string) (*Function, error) {
+	p := currentPool()
+	if p != nil {
+		if f := p.cachedFunction(pid, id, name); f != nil {
+			return f, nil
+		}
+	}
+	f, err := dbGetFunction(ctx.AppDB(), pid, id, name)
+	if err == nil && p != nil {
+		p.cacheFunction(f)
+	}
+	return f, err
+}
+func (p *pool) refreshFunction(fn *Function) {
+	if fn == nil {
+		return
+	}
+	p.cacheFunction(fn)
+	p.mu.Lock()
+	if p.closed || p.deleted[fn.InstanceKey] {
+		p.mu.Unlock()
+		return
+	}
+	fp := p.poolForLocked(fn.ID)
+	fp.identity = fn.InstanceKey
+	fp.signature = configHash(fn)
+	p.mu.Unlock()
+	p.activateVersion(fn.ID, func() int64 {
+		if fn.Status == "active" && fn.ActiveVersionID != nil {
+			return *fn.ActiveVersionID
+		}
+		return -1
+	}())
+}
 func (p *pool) activateVersion(fnID, versionID int64) {
 	p.mu.Lock()
 	fp := p.byFn[fnID]
-	p.mu.Unlock()
-	if fp == nil {
-		return
-	}
-	n := len(fp.idle)
-	for i := 0; i < n; i++ {
-		select {
-		case w := <-fp.idle:
-			if w.stale(versionID) {
-				w.shutdown()
-			} else {
-				select {
-				case fp.idle <- w:
-				default:
-					w.shutdown()
+	var stale []*worker
+	if fp != nil {
+		n := len(fp.idle)
+		for i := 0; i < n; i++ {
+			select {
+			case w := <-fp.idle:
+				if w.stale(versionID) || w.signature != fp.signature {
+					stale = append(stale, w)
+				} else {
+					fp.idle <- w
 				}
+			default:
 			}
-		default:
-			return
 		}
 	}
+	p.mu.Unlock()
+	for _, w := range stale {
+		p.discard(w)
+	}
 }
-
-// removeFunction detaches its pool immediately, kills idle workers, and waits
-// for in-flight calls before deleting persistent artifacts.
-func (p *pool) removeFunction(fnID int64) {
-	p.versions.Range(func(key, value any) bool {
-		if v, ok := value.(*FunctionVersion); ok && v.FunctionID == fnID {
-			p.versions.Delete(key)
+func (p *pool) removeFunction(fn *Function) {
+	p.functions.Delete(functionCacheKey(fn.ProjectID, fn.ID, ""))
+	p.functions.Delete(functionCacheKey(fn.ProjectID, 0, fn.Name))
+	p.versions.Range(func(k, v any) bool {
+		if v.(*FunctionVersion).ArtifactKey == fn.InstanceKey {
+			p.versions.Delete(k)
 		}
 		return true
 	})
-	sourceCache.clear()
 	p.mu.Lock()
-	fp := p.byFn[fnID]
-	delete(p.byFn, fnID)
-	p.mu.Unlock()
-	if fp == nil {
-		_ = removeTree(filepath.Join(p.buildBase, fmt.Sprintf("fn-%d", fnID)))
-		return
+	p.deleted[fn.InstanceKey] = true
+	p.artifacts.Range(func(key, value any) bool {
+		if strings.HasPrefix(key.(string), filepath.Join(p.buildBase, fn.InstanceKey)+string(os.PathSeparator)) {
+			p.artifacts.Delete(key)
+		}
+		return true
+	})
+	fp := p.byFn[fn.ID]
+	if fp != nil && fp.identity == fn.InstanceKey {
+		fp.closed = true
+		delete(p.byFn, fn.ID)
 	}
-	for {
-		select {
-		case w := <-fp.idle:
-			w.shutdown()
-		default:
-			go func() {
-				for i := 0; i < cap(fp.sem); i++ {
-					fp.sem <- struct{}{}
-				}
-				_ = removeTree(filepath.Join(p.buildBase, fmt.Sprintf("fn-%d", fnID)))
-				for i := 0; i < cap(fp.sem); i++ {
-					<-fp.sem
-				}
-			}()
-			return
+	var workers []*worker
+	for w, owner := range p.all {
+		if owner == fp {
+			workers = append(workers, w)
 		}
 	}
+	p.mu.Unlock()
+	// Closing the socket interrupts active calls without waiting on their call mutex.
+	for _, w := range workers {
+		w.abort()
+	}
+	for _, w := range workers {
+		p.discard(w)
+	}
+	if fn.InstanceKey != "" {
+		_ = removeTree(filepath.Join(p.buildBase, fn.InstanceKey))
+	}
+	p.signal()
 }
-
 func (p *pool) reapLoop() {
-	t := time.NewTicker(reaperEvery)
-	defer t.Stop()
+	ticker := time.NewTicker(reaperEvery)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-p.stop:
 			return
-		case <-t.C:
+		case <-ticker.C:
 			p.reapIdle()
 			p.retainInvocations()
+			p.retainArtifacts()
 		}
 	}
 }
-
+func (p *pool) reapIdle() {
+	p.mu.Lock()
+	var victims []*worker
+	for _, fp := range p.byFn {
+		n := len(fp.idle)
+		for i := 0; i < n; i++ {
+			select {
+			case w := <-fp.idle:
+				if !w.alive() || time.Since(w.idleSince()) > idleWorkerTTL {
+					victims = append(victims, w)
+				} else {
+					fp.idle <- w
+				}
+			default:
+			}
+		}
+	}
+	p.mu.Unlock()
+	for _, w := range victims {
+		p.discard(w)
+	}
+}
+func (p *pool) shutdown() {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.closed = true
+	close(p.stop)
+	p.cancel()
+	var workers []*worker
+	for w := range p.all {
+		workers = append(workers, w)
+	}
+	for _, fp := range p.byFn {
+		fp.closed = true
+	}
+	p.mu.Unlock()
+	for _, w := range workers {
+		w.abort()
+	}
+	for _, w := range workers {
+		p.discard(w)
+	}
+	_ = removeTree(p.stageDir)
+}
 func (p *pool) retainInvocations() {
 	days := envInt("APTEVA_FUNCTIONS_INVOCATION_RETENTION_DAYS", 30, 1, 3650)
 	p.mu.Lock()
@@ -311,61 +541,20 @@ func (p *pool) retainInvocations() {
 	}
 }
 
-// reapIdle culls workers idle past idleWorkerTTL. It opportunistically
-// drains each freelist and re-pushes the keepers — a concurrent
-// invoke may grab a worker mid-pass, which is harmless.
-func (p *pool) reapIdle() {
+func (p *pool) leaseVersion(dir string) (func(), error) {
 	p.mu.Lock()
-	pools := make([]*fnPool, 0, len(p.byFn))
-	for _, fp := range p.byFn {
-		pools = append(pools, fp)
+	if p.collecting[dir] {
+		p.mu.Unlock()
+		return nil, errors.New("version retired; retry with current function")
 	}
+	p.versionRefs[dir]++
 	p.mu.Unlock()
-
-	cutoff := time.Now().Add(-idleWorkerTTL)
-	for _, fp := range pools {
-		n := len(fp.idle)
-		for i := 0; i < n; i++ {
-			select {
-			case w := <-fp.idle:
-				if !w.alive() || w.idleSince().Before(cutoff) {
-					w.shutdown()
-				} else {
-					select {
-					case fp.idle <- w:
-					default:
-						w.shutdown()
-					}
-				}
-			default:
-				i = n // freelist drained
-			}
+	return func() {
+		p.mu.Lock()
+		p.versionRefs[dir]--
+		if p.versionRefs[dir] == 0 {
+			delete(p.versionRefs, dir)
 		}
-	}
-}
-
-// shutdown stops the reaper and kills every warm worker. Called from
-// OnUnmount.
-func (p *pool) shutdown() {
-	close(p.stop)
-	p.mu.Lock()
-	pools := make([]*fnPool, 0, len(p.byFn))
-	for _, fp := range p.byFn {
-		pools = append(pools, fp)
-	}
-	p.byFn = map[int64]*fnPool{}
-	p.mu.Unlock()
-
-	for _, fp := range pools {
-		draining := true
-		for draining {
-			select {
-			case w := <-fp.idle:
-				w.shutdown()
-			default:
-				draining = false
-			}
-		}
-	}
-	_ = removeTree(p.stageDir)
+		p.mu.Unlock()
+	}, nil
 }

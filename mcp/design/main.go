@@ -100,6 +100,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/revisions/", Handler: a.handleRevision},
 		{Pattern: "/api/artifacts/", Handler: a.handleArtifact},
 		{Pattern: "/api/examples", Handler: a.handleExamples},
+		{Pattern: "/api/pcb-source", Handler: a.handlePCBSource},
+		{Pattern: "/api/pcb-enclosures", Handler: a.handlePCBEnclosures},
+		{Pattern: "/api/assemblies", Handler: a.handleAssemblies},
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -115,6 +116,95 @@ func TestMetaCode190IsStructuredAndNotRetried(t *testing.T) {
 	}
 	if result["code"] != "provider_auth_error" || result["provider_code"] != 190 || result["retryable"] != false || result["fbtrace_id"] != "trace-190" {
 		t.Fatalf("credential error was not structured: %#v", result)
+	}
+}
+
+func TestMetaBillingFailurePreservesActionableDetails(t *testing.T) {
+	result := classifyProviderFailure(&adAccount{Platform: "meta"}, "adset_create", &sdk.ExecuteResult{
+		Success: false,
+		Status:  400,
+		Data: json.RawMessage(`{
+			"error": {
+				"code": 100,
+				"error_subcode": 2446404,
+				"type": "OAuthException",
+				"message": "Invalid parameter",
+				"error_user_title": "Billing option not available",
+				"error_user_msg": "This business is not yet eligible for that billing option.",
+				"error_data": {"blame_field_specs": [["billing_event"]]},
+				"fbtrace_id": "trace-billing"
+			}
+		}`),
+	})
+
+	if result["code"] != "provider_billing_option_unavailable" || result["provider_subcode"] != 2446404 {
+		t.Fatalf("billing failure was not classified: %#v", result)
+	}
+	if result["provider_user_title"] != "Billing option not available" ||
+		result["provider_user_message"] != "This business is not yet eligible for that billing option." {
+		t.Fatalf("actionable Meta details were lost: %#v", result)
+	}
+	if result["suggestion"] != "Use billing_event=impressions. For Meta video views, keep optimization_goal=thruplay." {
+		t.Fatalf("billing remediation missing: %#v", result)
+	}
+	content := result["content"].([]map[string]any)
+	text := content[0]["text"].(string)
+	if !strings.Contains(text, "Billing option not available") || !strings.Contains(text, "not yet eligible") {
+		t.Fatalf("user-facing error is not actionable: %q", text)
+	}
+	if summary := providerFailureText(result); !strings.Contains(summary, "Billing option not available") || !strings.Contains(summary, "not yet eligible") {
+		t.Fatalf("nested operation summary is not actionable: %q", summary)
+	}
+}
+
+func TestMetaOptimizationFailureIncludesSafeRequestContext(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponder = func(_ int64, tool string, _ map[string]any) (*sdk.ExecuteResult, error) {
+		if tool != "adset_create" {
+			t.Fatalf("unexpected tool %s", tool)
+		}
+		return &sdk.ExecuteResult{
+			Success: false,
+			Status:  400,
+			Data: json.RawMessage(`{
+				"error": {
+					"code": 100,
+					"error_subcode": 2490408,
+					"type": "OAuthException",
+					"message": "Invalid parameter",
+					"error_user_title": "Performance goal isn't available",
+					"error_user_msg": "You can't use the selected performance goal with your campaign objective.",
+					"error_data": {"blame_field_specs": [["optimization_goal"]]}
+				}
+			}`),
+		}, nil
+	}
+	ctx := newAdsCtx(t, pf)
+	input := map[string]any{
+		"campaign_id":       "campaign_1",
+		"optimization_goal": "THRUPLAY",
+		"billing_event":     "IMPRESSIONS",
+		"status":            "PAUSED",
+		"targeting": map[string]any{
+			"geo_locations": map[string]any{"countries": []any{"AU"}},
+			"age_min":       30,
+		},
+		"dsa_beneficiary": "private value",
+	}
+
+	_, result := (&App{}).execIntegrationToolOnce(ctx, &adAccount{Platform: "meta", ConnectionID: 7}, "adset_create", input)
+	if result["code"] != "provider_optimization_goal_unavailable" || result["provider_subcode"] != 2490408 {
+		t.Fatalf("optimization failure was not classified: %#v", result)
+	}
+	requestContext := asMap(result["request_context"])
+	if requestContext["campaign_id"] != "campaign_1" || requestContext["optimization_goal"] != "THRUPLAY" || requestContext["billing_event"] != "IMPRESSIONS" {
+		t.Fatalf("safe request context is incomplete: %#v", requestContext)
+	}
+	if _, leaked := requestContext["targeting"]; leaked {
+		t.Fatalf("full targeting leaked into request context: %#v", requestContext)
+	}
+	if _, leaked := requestContext["dsa_beneficiary"]; leaked {
+		t.Fatalf("DSA identity leaked into request context: %#v", requestContext)
 	}
 }
 

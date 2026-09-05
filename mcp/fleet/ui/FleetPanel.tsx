@@ -13,7 +13,12 @@
 // (e.g. tenant.spawned, tenant.status_changed) drop in the standard
 // useAppEvents hook from tables/crm and remove the timer.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createSelectionGate,
+  decodeToolResult,
+  requestedUpdateVersion,
+} from "./fleet-state";
 import type { ReactNode } from "react";
 
 // Local theme-token StatusPill — mirrors CRM/storage's vocabulary so
@@ -32,7 +37,13 @@ const PILL_CLASSES: Record<PillVariant, string> = {
   neutral: "bg-bg-input text-text-dim",
 };
 
-function StatusPill({ variant = "neutral", children }: { variant?: PillVariant; children: ReactNode }) {
+function StatusPill({
+  variant = "neutral",
+  children,
+}: {
+  variant?: PillVariant;
+  children: ReactNode;
+}) {
   return (
     <span
       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap ${PILL_CLASSES[variant]}`}
@@ -45,9 +56,17 @@ function StatusPill({ variant = "neutral", children }: { variant?: PillVariant; 
 // Local shape for a card surface — matches CRM/storage's two-pane
 // rounded panel style. Drops ui-kit's Card (which carried `text-blue-700`
 // / `text-amber-700` in its descendants and dropped fleet off-theme).
-function Card({ className, children }: { className?: string; children: ReactNode }) {
+function Card({
+  className,
+  children,
+}: {
+  className?: string;
+  children: ReactNode;
+}) {
   return (
-    <div className={`flex flex-col overflow-hidden rounded-md border border-border bg-bg-card ${className ?? ""}`}>
+    <div
+      className={`flex flex-col overflow-hidden rounded-md border border-border bg-bg-card ${className ?? ""}`}
+    >
       {children}
     </div>
   );
@@ -65,12 +84,18 @@ function CardHeader({
   return (
     <header className="flex items-center gap-3 px-4 py-3 border-b border-border">
       <div className="min-w-0 flex-1 flex flex-col">
-        <div className="text-text text-sm font-semibold truncate leading-tight">{title}</div>
+        <div className="text-text text-sm font-semibold truncate leading-tight">
+          {title}
+        </div>
         {subtitle && (
-          <div className="text-text-dim text-xs truncate mt-0.5 leading-tight">{subtitle}</div>
+          <div className="text-text-dim text-xs truncate mt-0.5 leading-tight">
+            {subtitle}
+          </div>
         )}
       </div>
-      {status && <StatusPill variant={status.variant}>{status.label}</StatusPill>}
+      {status && (
+        <StatusPill variant={status.variant}>{status.label}</StatusPill>
+      )}
     </header>
   );
 }
@@ -94,16 +119,24 @@ function Row({
   const inner = (
     <>
       {leading !== undefined && (
-        <span className="flex-shrink-0 flex items-center justify-center">{leading}</span>
+        <span className="flex-shrink-0 flex items-center justify-center">
+          {leading}
+        </span>
       )}
       <div className="min-w-0 flex-1 flex flex-col">
-        <div className="text-text text-sm font-medium truncate leading-tight">{title}</div>
+        <div className="text-text text-sm font-medium truncate leading-tight">
+          {title}
+        </div>
         {subtitle !== undefined && (
-          <div className="text-text-dim text-xs truncate mt-0.5 leading-tight">{subtitle}</div>
+          <div className="text-text-dim text-xs truncate mt-0.5 leading-tight">
+            {subtitle}
+          </div>
         )}
       </div>
       {trailing !== undefined && (
-        <span className="flex-shrink-0 text-xs text-text-dim tabular-nums">{trailing}</span>
+        <span className="flex-shrink-0 text-xs text-text-dim tabular-nums">
+          {trailing}
+        </span>
       )}
     </>
   );
@@ -124,7 +157,10 @@ interface NativePanelProps {
   instanceId?: number;
 }
 
-type ToolCaller = <T>(tool: string, args: Record<string, unknown>) => Promise<T>;
+type ToolCaller = <T>(
+  tool: string,
+  args: Record<string, unknown>,
+) => Promise<T>;
 
 interface ProjectTemplateSummary {
   id: string;
@@ -270,6 +306,8 @@ interface CredentialsReveal {
 }
 
 interface GetResp {
+  operation?: { id: string; operation: string; phase: string };
+  setup_complete?: boolean;
   tenant: Tenant;
   events: FleetEvent[] | null;
   hosts?: TenantHost[];
@@ -308,15 +346,24 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<GetResp | null>(null);
+  const selectionGate = useRef(createSelectionGate());
+  selectionGate.current.select(selectedId);
+  const detailRequest = useRef<{
+    id: string;
+    controller: AbortController;
+  } | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string>("");
   const [showCreate, setShowCreate] = useState(false);
+  const [showStorage, setShowStorage] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
   // Credentials returned by a successful auto-setup. Held in panel
   // state because tenant_create is the only chance to see the admin
   // password and api_key — fleet doesn't store the plaintext anywhere
   // after this. Cleared when the operator clicks "I've saved them".
-  const [credentialsReveal, setCredentialsReveal] = useState<CredentialsReveal | null>(null);
+  const [credentialsReveal, setCredentialsReveal] =
+    useState<CredentialsReveal | null>(null);
   // /api/_meta snapshot. Populated on mount + every refresh tick. The
   // panel uses it to decide whether to render attach/update controls,
   // and to seed picker lists. Null until first fetch — the detail pane
@@ -328,7 +375,9 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   const [showUpdate, setShowUpdate] = useState<Tenant | null>(null);
   const [showMigrate, setShowMigrate] = useState<Tenant | null>(null);
   const [showClone, setShowClone] = useState<Tenant | null>(null);
-  const [showApplyTemplate, setShowApplyTemplate] = useState<Tenant | null>(null);
+  const [showApplyTemplate, setShowApplyTemplate] = useState<Tenant | null>(
+    null,
+  );
   // Held in panel state because both fleet endpoints return sensitive
   // material the operator gets to see once and copy — same pattern as
   // the post-create credentialsReveal.
@@ -357,10 +406,14 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   );
 
   const httpGet = useCallback(
-    async <T,>(path: string): Promise<T> => {
-      const res = await fetch(`${API}${path}?${withParams()}`, {
-        credentials: "same-origin",
-      });
+    async <T,>(path: string, signal?: AbortSignal): Promise<T> => {
+      const res = await fetch(
+        `${API}${path}${path.includes("?") ? "&" : "?"}${withParams()}`,
+        {
+          credentials: "same-origin",
+          signal,
+        },
+      );
       if (!res.ok) {
         throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
       }
@@ -374,6 +427,34 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   // see apps/mcp/ads/ui/AdsPanel.tsx for the canonical version.
   const callTool = useCallback(
     async <T,>(tool: string, args: Record<string, unknown>): Promise<T> => {
+      if (tool === "fleet_storage_list" || tool === "fleet_storage_cleanup") {
+        const res = await fetch(`${API}/maintenance?${withParams()}`, {
+          method: tool === "fleet_storage_list" ? "GET" : "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          ...(tool === "fleet_storage_cleanup"
+            ? { body: JSON.stringify(args) }
+            : {}),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        return res.json();
+      }
+      if (tool === "fleet_resume_setup" || tool === "fleet_recover_operation") {
+        const action =
+          tool === "fleet_resume_setup" ? "resume-setup" : "recover-operation";
+        const res = await fetch(
+          `${API}/tenants/${encodeURIComponent(String(args.tenant_id))}/${action}?${withParams()}`,
+          {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(args),
+          },
+        );
+        if (!res.ok) throw new Error(await res.text());
+        return res.json();
+      }
+
       const res = await fetch(`${API}/mcp?${withParams()}`, {
         method: "POST",
         credentials: "same-origin",
@@ -386,48 +467,88 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
         }),
       });
       if (!res.ok) {
-        throw new Error(`${tool}: ${res.status} ${await res.text().catch(() => "")}`);
+        throw new Error(
+          `${tool}: ${res.status} ${await res.text().catch(() => "")}`,
+        );
       }
       const j = await res.json();
-      if (j.error) throw new Error(j.error.message || tool);
-      const text = j.result?.content?.[0]?.text;
-      if (!text) return j.result as T;
-      return JSON.parse(text) as T;
+      return decodeToolResult<T>(j);
     },
     [withParams],
   );
 
+  const [page, setPage] = useState(0);
+  const [search, setSearch] = useState("");
+  const [hasMore, setHasMore] = useState(false);
+  const listRequest = useRef<{
+    key: string;
+    controller: AbortController;
+  } | null>(null);
   const refreshList = useCallback(
     async (opts: { quiet?: boolean } = {}) => {
+      const key = `${page}:${search}`;
+      if (listRequest.current?.key === key) return;
+      listRequest.current?.controller.abort();
+      const controller = new AbortController();
+      listRequest.current = { key, controller };
       if (!opts.quiet) setLoading(true);
       try {
-        const r = await httpGet<ListResp>("/tenants");
-        const list = r.tenants || [];
-        setTenants(list);
-        setStatus(`${list.length} tenant${list.length !== 1 ? "s" : ""}`);
+        const r = await httpGet<ListResp & { has_more: boolean }>(
+          `/tenants?limit=50&offset=${page * 50}&search=${encodeURIComponent(search)}`,
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
+        setTenants(r.tenants || []);
+        setHasMore(r.has_more);
+        setStatus(`Page ${page + 1} · ${(r.tenants || []).length} tenants`);
       } catch (e) {
-        setStatus(`Error: ${(e as Error).message}`);
+        if (!controller.signal.aborted)
+          setStatus(`Error: ${(e as Error).message}`);
       } finally {
-        if (!opts.quiet) setLoading(false);
+        if (listRequest.current?.controller === controller) {
+          listRequest.current = null;
+          setLoading(false);
+        }
       }
     },
-    [httpGet],
+    [httpGet, page, search],
+  );
+  useEffect(
+    () => () => listRequest.current?.controller.abort(),
+    [page, search],
   );
 
   const refreshDetail = useCallback(
     async (id: string) => {
+      if (detailRequest.current?.id === id) return;
+      detailRequest.current?.controller.abort();
+      const controller = new AbortController();
+      detailRequest.current = { id, controller };
+      const accepts = selectionGate.current.request(id);
       try {
-        const r = await httpGet<GetResp>(`/tenants/${encodeURIComponent(id)}`);
-        setDetail(r);
-      } catch (e) {
-        setStatus(`Error: ${(e as Error).message}`);
-        setDetail(null);
+        const result = await httpGet<GetResp>(
+          `/tenants/${encodeURIComponent(id)}`,
+          controller.signal,
+        );
+        if (accepts()) setDetail(result);
+      } catch (error) {
+        if (!controller.signal.aborted && accepts()) {
+          setStatus(`Error: ${(error as Error).message}`);
+          setDetail(null);
+        }
+      } finally {
+        if (detailRequest.current?.controller === controller)
+          detailRequest.current = null;
       }
     },
     [httpGet],
   );
+  useEffect(() => () => detailRequest.current?.controller.abort(), []);
 
+  const metaBusy = useRef(false);
   const refreshMeta = useCallback(async () => {
+    if (metaBusy.current) return;
+    metaBusy.current = true;
     try {
       const r = await httpGet<MetaResp>("/_meta");
       setMeta(r);
@@ -435,6 +556,8 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
       // _meta is opportunistic — a transient failure shouldn't toast
       // an error in the list status bar. The UI degrades to "no
       // integrations visible" until the next tick succeeds.
+    } finally {
+      metaBusy.current = false;
     }
   }, [httpGet]);
 
@@ -448,6 +571,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
       setDetail(null);
       return;
     }
+    setDetail(null);
     refreshDetail(selectedId);
   }, [selectedId, refreshDetail]);
 
@@ -467,15 +591,31 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
     return () => window.clearInterval(t);
   }, [refreshMeta]);
 
+  const visibleDetail = detail?.tenant.id === selectedId ? detail : null;
   const selected = useMemo(
-    () => tenants.find((t) => t.id === selectedId) || detail?.tenant || null,
+    () =>
+      tenants.find((t) => t.id === selectedId) ||
+      (detail?.tenant.id === selectedId ? detail.tenant : null),
     [tenants, selectedId, detail],
   );
 
   return (
     <div className="grid grid-cols-[340px_1fr] gap-3 h-full p-3 bg-bg">
       <TenantList
+        onStorage={() => setShowStorage(true)}
         tenants={tenants}
+        page={page}
+        hasMore={hasMore}
+        search={search}
+        onSearch={(value) => {
+          setSearch(value);
+          setPage(0);
+          setTenants([]);
+        }}
+        onPage={(value) => {
+          setPage(value);
+          setTenants([]);
+        }}
         selectedId={selectedId}
         loading={loading}
         status={status}
@@ -489,12 +629,15 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
         }}
       />
       <TenantDetail
+        key={selectedId}
+        operation={visibleDetail?.operation}
+        setupComplete={visibleDetail?.setup_complete}
         tenant={selected}
-        events={detail?.events ?? null}
-        hosts={detail?.hosts ?? []}
-        retainedSource={detail?.retained_source ?? null}
-        setupToken={detail?.setup_token ?? null}
-        setupURL={detail?.setup_url ?? null}
+        events={visibleDetail?.events ?? null}
+        hosts={visibleDetail?.hosts ?? []}
+        retainedSource={visibleDetail?.retained_source ?? null}
+        setupToken={visibleDetail?.setup_token ?? null}
+        setupURL={visibleDetail?.setup_url ?? null}
         meta={meta}
         callTool={callTool}
         onOpenAttachDomain={(t) => setShowAttachDomain(t)}
@@ -503,6 +646,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
         onOpenMigrate={(t) => setShowMigrate(t)}
         onOpenClone={(t) => setShowClone(t)}
         onOpenApplyTemplate={(t) => setShowApplyTemplate(t)}
+        onSetupRecovered={setCredentialsReveal}
         onRevealAPIKey={setRevealedAPIKey}
         onResetPassword={setResetPassword}
         onAfterAction={async (after) => {
@@ -515,12 +659,25 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
           }
         }}
       />
+      {showStorage && (
+        <StorageDialog
+          callTool={callTool}
+          onClose={() => setShowStorage(false)}
+        />
+      )}
       {showCreate && (
         <CreateTenantDialog
           meta={meta}
           callTool={callTool}
           onClose={() => setShowCreate(false)}
-          onSubmit={async ({ slug, owner_email, instance_id, port, template_id, project_description }) => {
+          onSubmit={async ({
+            slug,
+            owner_email,
+            instance_id,
+            port,
+            template_id,
+            project_description,
+          }) => {
             try {
               const r = await callTool<CreateResp>("tenant_create", {
                 slug,
@@ -534,11 +691,17 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
               if (r.tenant_id) setSelectedId(r.tenant_id);
               setShowCreate(false);
               if (r.template?.status === "failed") {
-                setStatus(`Tenant created; template failed: ${r.template.error || "unknown error"}`);
+                setStatus(
+                  `Tenant created; template failed: ${r.template.error || "unknown error"}`,
+                );
               } else if (r.template?.status === "pending") {
-                setStatus("Tenant created; template will apply after setup is completed");
+                setStatus(
+                  "Tenant created; template will apply after setup is completed",
+                );
               } else if (r.template?.apply_result?.warnings?.length) {
-                setStatus(`Tenant created with template warnings: ${r.template.apply_result.warnings.join("; ")}`);
+                setStatus(
+                  `Tenant created with template warnings: ${r.template.apply_result.warnings.join("; ")}`,
+                );
               }
               // Auto-setup happy path returns admin_password + api_key.
               // Surface them in a one-shot modal — fleet stores the
@@ -571,7 +734,10 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
           onClose={() => setShowConnect(false)}
           onSubmit={async (args) => {
             try {
-              const r = await callTool<{ tenant_id: string }>("tenant_connect", args);
+              const r = await callTool<{ tenant_id: string }>(
+                "tenant_connect",
+                args,
+              );
               await refreshList({ quiet: true });
               if (r.tenant_id) setSelectedId(r.tenant_id);
               setShowConnect(false);
@@ -697,17 +863,29 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
           tenant={showApplyTemplate}
           callTool={callTool}
           onClose={() => setShowApplyTemplate(null)}
-          onSubmit={async ({ template_id, project_description }) => {
+          onSubmit={async ({
+            template_id,
+            project_description,
+            target_project_id,
+          }) => {
             try {
-              const result = await callTool<TemplateApplyResult>("tenant_apply_template", {
-                tenant_id: showApplyTemplate.id,
-                template_id,
-                ...(project_description ? { project_description } : {}),
-              });
+              const result = await callTool<TemplateApplyResult>(
+                "tenant_apply_template",
+                {
+                  tenant_id: showApplyTemplate.id,
+                  template_id,
+                  ...(target_project_id ? { target_project_id } : {}),
+                  ...(project_description ? { project_description } : {}),
+                },
+              );
               setShowApplyTemplate(null);
               await refreshDetail(showApplyTemplate.id);
               const warnings = result.apply_result?.warnings ?? [];
-              setStatus(warnings.length ? `Template applied with warnings: ${warnings.join("; ")}` : "Template applied");
+              setStatus(
+                warnings.length
+                  ? `Template applied with warnings: ${warnings.join("; ")}`
+                  : "Template applied",
+              );
               return { ok: true };
             } catch (e) {
               return { ok: false, error: (e as Error).message };
@@ -734,6 +912,12 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
 // ─── List pane ──────────────────────────────────────────────────────
 
 function TenantList({
+  page,
+  hasMore,
+  search,
+  onSearch,
+  onPage,
+  onStorage,
   tenants,
   selectedId,
   loading,
@@ -744,6 +928,12 @@ function TenantList({
   onConnect,
   onRefresh,
 }: {
+  page: number;
+  hasMore: boolean;
+  search: string;
+  onSearch: (v: string) => void;
+  onPage: (v: number) => void;
+  onStorage: () => void;
   tenants: Tenant[];
   selectedId: string | null;
   loading: boolean;
@@ -786,6 +976,35 @@ function TenantList({
           ↻
         </button>
       </div>
+      <div className="px-4 py-2 flex gap-2">
+        <input
+          aria-label="Search tenants"
+          placeholder="Search tenants…"
+          value={search}
+          onChange={(e) => onSearch(e.target.value)}
+          className="w-full min-w-0 bg-bg-input rounded p-1 text-xs"
+        />
+        <button
+          aria-label="Previous page"
+          disabled={page === 0 || loading}
+          onClick={() => onPage(page - 1)}
+        >
+          ←
+        </button>
+        <button
+          aria-label="Next page"
+          disabled={!hasMore || loading}
+          onClick={() => onPage(page + 1)}
+        >
+          →
+        </button>
+      </div>
+      <button
+        onClick={onStorage}
+        className="px-4 py-1 text-xs text-left text-text-dim"
+      >
+        Local storage and cleanup…
+      </button>
       <div className="flex-1 overflow-y-auto">
         {tenants.length === 0 && !loading && (
           <p className="text-xs text-text-dim px-4 py-6 text-center">
@@ -800,7 +1019,9 @@ function TenantList({
             leading={<KindGlyph kind={t.kind} />}
             title={
               <span
-                className={t.id === selectedId ? "text-accent font-semibold" : ""}
+                className={
+                  t.id === selectedId ? "text-accent font-semibold" : ""
+                }
               >
                 {t.slug}
               </span>
@@ -813,9 +1034,7 @@ function TenantList({
                 <span className="text-text-dim">·</span>
                 <span
                   className={
-                    t.current_version
-                      ? "text-text-dim"
-                      : "text-text-dim italic"
+                    t.current_version ? "text-text-dim" : "text-text-dim italic"
                   }
                 >
                   {t.current_version ? `v${t.current_version}` : "v—"}
@@ -823,10 +1042,7 @@ function TenantList({
                 {latest &&
                   t.current_version &&
                   t.current_version !== latest && (
-                    <span
-                      title={`npm latest: ${latest}`}
-                      className="text-warn"
-                    >
+                    <span title={`npm latest: ${latest}`} className="text-warn">
                       ↑
                     </span>
                   )}
@@ -842,7 +1058,9 @@ function TenantList({
                     ↻{t.respawn_attempts}
                   </span>
                 )}
-                <StatusPill variant={STATUS_VARIANT[t.status]}>{t.status}</StatusPill>
+                <StatusPill variant={STATUS_VARIANT[t.status]}>
+                  {t.status}
+                </StatusPill>
               </div>
             }
           />
@@ -899,6 +1117,8 @@ function KindGlyph({ kind }: { kind: Tenant["kind"] }) {
 // ─── Detail pane ────────────────────────────────────────────────────
 
 function TenantDetail({
+  setupComplete,
+  operation,
   tenant,
   events,
   hosts,
@@ -913,10 +1133,13 @@ function TenantDetail({
   onOpenMigrate,
   onOpenClone,
   onOpenApplyTemplate,
+  onSetupRecovered,
   onRevealAPIKey,
   onResetPassword,
   onAfterAction,
 }: {
+  setupComplete?: boolean;
+  operation?: GetResp["operation"];
   tenant: Tenant | null;
   events: FleetEvent[] | null;
   hosts: TenantHost[];
@@ -931,15 +1154,29 @@ function TenantDetail({
   onOpenMigrate: (t: Tenant) => void;
   onOpenClone: (t: Tenant) => void;
   onOpenApplyTemplate: (t: Tenant) => void;
-  onRevealAPIKey: (r: { slug: string; base_url: string; api_key: string }) => void;
-  onResetPassword: (r: { slug: string; base_url: string; admin_email: string; admin_password: string }) => void;
+  onSetupRecovered: (r: CredentialsReveal) => void;
+  onRevealAPIKey: (r: {
+    slug: string;
+    base_url: string;
+    api_key: string;
+  }) => void;
+  onResetPassword: (r: {
+    slug: string;
+    base_url: string;
+    admin_email: string;
+    admin_password: string;
+  }) => void;
   onAfterAction: (after?: "deselect") => Promise<void>;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmFinalize, setConfirmFinalize] = useState(false);
-  const [supportURL, setSupportURL] = useState<{ url: string; expires_at?: string } | null>(null);
+  const [supportURL, setSupportURL] = useState<{
+    url: string;
+    expires_at?: string;
+  } | null>(null);
   const [supportDialog, setSupportDialog] = useState(false);
   const [supportReason, setSupportReason] = useState("");
   const [resetDialog, setResetDialog] = useState(false);
@@ -973,7 +1210,26 @@ function TenantDetail({
     setBusy(label);
     setErr(null);
     try {
-      await callTool(tool, args);
+      const result = await callTool<{
+        next_step?: string;
+        next_steps?: string;
+        note?: string;
+        admin_password?: string;
+        api_key?: string;
+      }>(tool, args);
+      if (result.admin_password && result.api_key) {
+        onSetupRecovered({
+          slug: tenant.slug,
+          base_url: tenant.base_url,
+          admin_email: tenant.owner_email,
+          admin_password: result.admin_password,
+          api_key: result.api_key,
+        });
+      }
+
+      setNotice(
+        result.next_step || result.next_steps || result.note || "Completed",
+      );
       await onAfterAction(after);
     } catch (e) {
       setErr((e as Error).message);
@@ -984,403 +1240,528 @@ function TenantDetail({
 
   const isLocal = tenant.kind === "local";
   const isRunning = tenant.status === "active" || tenant.status === "starting";
-  const isSetupPending = tenant.status === "setup_pending";
+  const isSetupPending =
+    setupComplete === false || tenant.status === "setup_pending";
   // Host placement: instance_id 0/undefined = parent host; >0 = a VPS.
   const onParentHost = (tenant.instance_id ?? 0) === 0;
-  const hostInstance = meta?.instances?.find((i) => i.id === tenant.instance_id);
+  const hostInstance = meta?.instances?.find(
+    (i) => i.id === tenant.instance_id,
+  );
   const canMigrate = isLocal && !isSetupPending;
   const canClone = isLocal;
 
   return (
     <>
-    <Card className="h-full">
-      <CardHeader
-        title={tenant.slug}
-        subtitle={
-          <span className="font-mono text-[11px]">
-            {tenant.base_url}
-            {" · "}
-            {onParentHost
-              ? "local"
-              : hostInstance
-                ? `on ${hostInstance.name}`
-                : `on instance ${tenant.instance_id}`}
-            {tenant.current_version ? ` · v${tenant.current_version}` : ""}
-          </span>
-        }
-        status={{ label: tenant.status, variant: STATUS_VARIANT[tenant.status] }}
-      />
-
-      {/* Action bar. When setup_pending we hide the normal lifecycle
-          buttons — the operator still needs to complete admin
-          registration before Start/Stop/Support make sense. */}
-      <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-border">
-        {!isSetupPending && isLocal && !isRunning && (
-          <ActionButton
-            label="Start"
-            busy={busy === "start"}
-            onClick={() => run("start", "tenant_start", { tenant_id: tenant.id })}
-          />
-        )}
-        {!isSetupPending && isLocal && isRunning && (
-          <ActionButton
-            label="Stop"
-            busy={busy === "stop"}
-            onClick={() => run("stop", "tenant_stop", { tenant_id: tenant.id })}
-          />
-        )}
-        {!isSetupPending && !isLocal && tenant.status !== "suspended" && (
-          <ActionButton
-            label="Suspend"
-            busy={busy === "stop"}
-            onClick={() => run("stop", "tenant_stop", { tenant_id: tenant.id })}
-          />
-        )}
-        {!isSetupPending && (
-          <ActionButton
-            label={supportURL ? "Open support URL" : "Support login"}
-            busy={busy === "support"}
-            onClick={async () => {
-              if (supportURL) {
-                window.open(supportURL.url, "_blank", "noopener");
-                return;
-              }
-              setSupportDialog(true);
-            }}
-          />
-        )}
-        {!isSetupPending && (
-          <ActionButton
-            label="Apply template…"
-            onClick={() => onOpenApplyTemplate(tenant)}
-          />
-        )}
-        {canMigrate && (
-          <ActionButton
-            label="Move…"
-            onClick={() => onOpenMigrate(tenant)}
-          />
-        )}
-        {canClone && (
-          <ActionButton
-            label="Clone…"
-            onClick={() => onOpenClone(tenant)}
-          />
-        )}
-        <span className="flex-1" />
-        {confirmDelete ? (
-          <>
-            <span className="text-xs text-error">
-              {isLocal
-                ? "Stop process and wipe data dir?"
-                : "Remove from registry?"}
+      <Card className="h-full">
+        <CardHeader
+          title={tenant.slug}
+          subtitle={
+            <span className="font-mono text-[11px]">
+              {tenant.base_url}
+              {" · "}
+              {onParentHost
+                ? "local"
+                : hostInstance
+                  ? `on ${hostInstance.name}`
+                  : `on instance ${tenant.instance_id}`}
+              {tenant.current_version ? ` · v${tenant.current_version}` : ""}
             </span>
-            <ActionButton
-              label="Confirm delete"
-              tone="danger"
-              busy={busy === "delete"}
-              onClick={() =>
-                run(
-                  "delete",
-                  "tenant_delete",
-                  { tenant_id: tenant.id, confirm: true },
-                  "deselect",
-                )
-              }
-            />
-            <ActionButton label="Cancel" onClick={() => setConfirmDelete(false)} />
-          </>
-        ) : (
-          <ActionButton
-            label="Delete"
-            tone="danger"
-            onClick={() => setConfirmDelete(true)}
-          />
+          }
+          status={{
+            label: tenant.status,
+            variant: STATUS_VARIANT[tenant.status],
+          }}
+        />
+
+        {notice && (
+          <p role="status" className="px-4 py-2 text-sm">
+            {notice}
+          </p>
         )}
-      </div>
-
-      {err && (
-        <div className="px-4 py-2 text-xs text-error border-b border-border bg-error/5">
-          {err}
-        </div>
-      )}
-
-      {supportURL && (
-        <div className="px-4 py-2 text-xs border-b border-border bg-accent/5 flex items-center gap-2">
-          <span className="text-text-dim">Support session active</span>
-          <a
-            href={supportURL.url}
-            target="_blank"
-            rel="noopener"
-            className="font-mono truncate text-accent underline"
-          >
-            {supportURL.url}
-          </a>
-          {supportURL.expires_at && (
-            <span className="text-text-dim ml-auto">expires {formatTime(supportURL.expires_at)}</span>
-          )}
-        </div>
-      )}
-
-      {retainedSource && (
-        <div className="px-4 py-2 text-xs border-b border-border bg-warn/5 flex flex-wrap items-center gap-2">
-          <span className="text-text-dim">Stopped migration source retained</span>
-          <span className="font-mono text-text">
-            instance {retainedSource.source_instance_id} · {retainedSource.source_config_dir}
-          </span>
-          <span className="flex-1" />
-          {confirmFinalize ? (
-            <>
-              <span className="text-error">Permanently remove retained source?</span>
-              <ActionButton
-                label="Confirm removal"
-                tone="danger"
-                busy={busy === "finalize"}
-                onClick={async () => {
-                  await run("finalize", "tenant_migrate_finalize", {
+        {operation && (
+          <div className="px-4 py-2 text-sm border-b border-border">
+            <p>
+              {operation.operation}: {operation.phase}
+            </p>
+            <p className="text-xs text-text-dim">
+              Operation {operation.id}. Progress survives closing this panel.
+            </p>
+            <ActionButton
+              label="Recover interrupted operation"
+              busy={!!busy}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Stop all runtimes recorded by this operation and preserve their data? Recovery is rejected while an operation is still executing.",
+                  )
+                )
+                  run("recovery", "fleet_recover_operation", {
                     tenant_id: tenant.id,
                     confirm: true,
                   });
-                  setConfirmFinalize(false);
+              }}
+            />
+          </div>
+        )}
+        <fieldset disabled={!!busy || !!operation} className="contents">
+          {isSetupPending && (
+            <ActionButton
+              label="Resume setup"
+              busy={!!busy}
+              onClick={() =>
+                run("setup", "fleet_resume_setup", { tenant_id: tenant.id })
+              }
+            />
+          )}
+          {!isLocal && tenant.status === "suspended" && (
+            <ActionButton
+              label="Resume monitoring"
+              busy={!!busy}
+              onClick={() =>
+                run("resume", "tenant_start", { tenant_id: tenant.id })
+              }
+            />
+          )}
+          {/* Action bar. When setup_pending we hide the normal lifecycle
+          buttons — the operator still needs to complete admin
+          registration before Start/Stop/Support make sense. */}
+          <div
+            inert={!!busy || !!operation}
+            className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-border"
+          >
+            {!isSetupPending && isLocal && !isRunning && (
+              <ActionButton
+                label="Start"
+                busy={busy === "start"}
+                onClick={() =>
+                  run("start", "tenant_start", { tenant_id: tenant.id })
+                }
+              />
+            )}
+            {!isSetupPending && isLocal && isRunning && (
+              <ActionButton
+                label="Stop"
+                busy={busy === "stop"}
+                onClick={() =>
+                  run("stop", "tenant_stop", { tenant_id: tenant.id })
+                }
+              />
+            )}
+            {!isSetupPending && !isLocal && tenant.status !== "suspended" && (
+              <ActionButton
+                label="Suspend"
+                busy={busy === "stop"}
+                onClick={() =>
+                  run("stop", "tenant_stop", { tenant_id: tenant.id })
+                }
+              />
+            )}
+            {!isSetupPending && (
+              <ActionButton
+                label={supportURL ? "Open support URL" : "Support login"}
+                busy={busy === "support"}
+                onClick={async () => {
+                  if (supportURL) {
+                    window.open(supportURL.url, "_blank", "noopener");
+                    return;
+                  }
+                  setSupportDialog(true);
                 }}
               />
-              <ActionButton label="Cancel" onClick={() => setConfirmFinalize(false)} />
-            </>
-          ) : (
-            <ActionButton label="Finalize source" onClick={() => setConfirmFinalize(true)} />
-          )}
-        </div>
-      )}
-
-      {isSetupPending && (
-        <SetupPendingBanner
-          tenantId={tenant.id}
-          baseURL={tenant.base_url}
-          setupToken={setupToken}
-          setupURL={setupURL}
-          busy={busy === "attach"}
-          onAttach={async (apiKey) => {
-            setBusy("attach");
-            setErr(null);
-            try {
-              await callTool("tenant_attach_key", {
-                tenant_id: tenant.id,
-                api_key: apiKey,
-              });
-              await onAfterAction();
-            } catch (e) {
-              setErr((e as Error).message);
-              throw e;
-            } finally {
-              setBusy(null);
-            }
-          }}
-        />
-      )}
-
-      {!isSetupPending && (
-        <DomainBlock
-          tenant={tenant}
-          meta={meta}
-          busy={busy === "detach-domain"}
-          onAttach={() => onOpenAttachDomain(tenant)}
-          onDetach={() =>
-            run("detach-domain", "tenant_detach_domain", { tenant_id: tenant.id })
-          }
-        />
-      )}
-
-      {!isSetupPending && !onParentHost && (
-        <HostedIngressBlock
-          tenant={tenant}
-          instance={hostInstance}
-          busy={busy}
-          onPrepare={() => run("ingress-prepare", "tenant_ingress_prepare_direct", { tenant_id: tenant.id })}
-          onVerify={() => run("ingress-verify", "tenant_ingress_verify", { tenant_id: tenant.id })}
-          onFinalize={() => run("ingress-finalize", "tenant_ingress_finalize", { tenant_id: tenant.id })}
-          onRestore={() => run("ingress-restore", "tenant_ingress_rollback", { tenant_id: tenant.id })}
-          onDisable={() => run("ingress-disable", "tenant_ingress_rollback", {
-            tenant_id: tenant.id,
-            confirm_disable: true,
-          })}
-        />
-      )}
-
-      {!isSetupPending && (
-        <TenantHostsBlock
-          hosts={hosts}
-          busyHostname={busy?.startsWith("remove-host:") ? busy.slice("remove-host:".length) : null}
-          onAttach={() => onOpenAttachHost(tenant)}
-          onRemove={(hostname) =>
-            run(`remove-host:${hostname}`, "tenant_host_remove", {
-              tenant_id: tenant.id,
-              hostname,
-            })
-          }
-        />
-      )}
-
-      {!isSetupPending && isLocal && (
-        <VersionBlock
-          tenant={tenant}
-          latest={meta?.apteva_latest}
-          onUpdate={() => onOpenUpdate(tenant)}
-        />
-      )}
-
-      {!isSetupPending && (
-        <CredentialsBlock
-          tenantId={tenant.id}
-          busyReveal={busy === "reveal-api-key"}
-          busyReset={busy === "reset-password"}
-          onReveal={async () => {
-            setBusy("reveal-api-key");
-            setErr(null);
-            try {
-              const r = await callTool<{
-                slug: string;
-                base_url: string;
-                api_key: string;
-              }>("tenant_reveal_api_key", { tenant_id: tenant.id });
-              onRevealAPIKey(r);
-            } catch (e) {
-              setErr((e as Error).message);
-            } finally {
-              setBusy(null);
-            }
-          }}
-          onReset={async () => {
-            setResetDialog(true);
-          }}
-        />
-      )}
-
-      <div className="grid grid-cols-2 gap-0 border-b border-border">
-        <Field label="Owner">{tenant.owner_email}</Field>
-        <Field label="Kind">{tenant.kind}</Field>
-        <Field label="Status">
-          <StatusPill variant={STATUS_VARIANT[tenant.status]}>{tenant.status}</StatusPill>
-        </Field>
-        <Field label="Base URL" mono>
-          <a
-            href={tenant.base_url}
-            target="_blank"
-            rel="noopener"
-            className="text-accent hover:underline"
-          >
-            {tenant.base_url}
-          </a>
-        </Field>
-        <Field label="Last seen">{formatTime(tenant.last_seen_at)}</Field>
-        {tenant.config_dir && (
-          <Field label="Data dir" mono>
-            {tenant.config_dir}
-          </Field>
-        )}
-        <Field label="Created">{formatTime(tenant.created_at)}</Field>
-        {(tenant.respawn_attempts ?? 0) > 0 && (
-          <Field label="Auto-respawns">
-            <span className="text-warn font-medium">
-              {tenant.respawn_attempts}
-            </span>
-            {tenant.last_respawn_at && (
-              <span className="text-text-dim"> · last {formatTime(tenant.last_respawn_at)}</span>
             )}
-          </Field>
-        )}
-      </div>
+            {!isSetupPending && (
+              <ActionButton
+                label="Apply template…"
+                onClick={() => onOpenApplyTemplate(tenant)}
+              />
+            )}
+            {canMigrate && (
+              <ActionButton
+                label="Move…"
+                onClick={() => onOpenMigrate(tenant)}
+              />
+            )}
+            {canClone && (
+              <ActionButton
+                label="Clone…"
+                onClick={() => onOpenClone(tenant)}
+              />
+            )}
+            <span className="flex-1" />
+            {confirmDelete ? (
+              <>
+                <span className="text-xs text-error">
+                  {isLocal
+                    ? "Stop process and wipe data dir?"
+                    : "Remove from registry?"}
+                </span>
+                <ActionButton
+                  label="Confirm delete"
+                  tone="danger"
+                  busy={busy === "delete"}
+                  onClick={() =>
+                    run(
+                      "delete",
+                      "tenant_delete",
+                      { tenant_id: tenant.id, confirm: true },
+                      "deselect",
+                    )
+                  }
+                />
+                <ActionButton
+                  label="Cancel"
+                  onClick={() => setConfirmDelete(false)}
+                />
+              </>
+            ) : (
+              <ActionButton
+                label="Delete"
+                tone="danger"
+                onClick={() => setConfirmDelete(true)}
+              />
+            )}
+          </div>
 
-      <div className="flex-1 overflow-y-auto">
-        <div className="px-4 pt-3 pb-1 text-[11px] uppercase tracking-wider text-text-dim font-medium">
-          Recent events
-        </div>
-        {!events || events.length === 0 ? (
-          <p className="text-xs text-text-dim px-4 py-3">No events yet.</p>
-        ) : (
-          <ul className="px-4 pb-4">
-            {events.map((e) => (
-              <EventRow key={e.id} ev={e} />
-            ))}
-          </ul>
-        )}
-      </div>
-    </Card>
-    {supportDialog && (
-      <DialogFrame title={`Support login for ${tenant.slug}`} onClose={() => setSupportDialog(false)}>
-        <p className="text-xs text-text-dim">The reason is written to the tenant audit trail.</p>
-        <Label text="Reason">
-          <textarea
-            value={supportReason}
-            onChange={(e) => setSupportReason(e.target.value)}
-            rows={3}
-            autoFocus
-            className="w-full resize-none px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
-          />
-        </Label>
-        <DialogActions>
-          <ActionButton label="Cancel" onClick={() => setSupportDialog(false)} />
-          <ActionButton
-            label="Create support login"
-            busy={busy === "support"}
-            onClick={async () => {
-              const reason = supportReason.trim();
-              if (!reason) return;
-              setBusy("support");
-              setErr(null);
-              try {
-                const r = await callTool<{ url: string; expires_at?: string }>(
-                  "tenant_support_login",
-                  { tenant_id: tenant.id, reason },
-                );
-                setSupportURL(r);
-                setSupportDialog(false);
-                setSupportReason("");
-                if (r?.url) window.open(r.url, "_blank", "noopener");
-                await onAfterAction();
-              } catch (e) {
-                setErr((e as Error).message);
-              } finally {
-                setBusy(null);
+          {err && (
+            <div className="px-4 py-2 text-xs text-error border-b border-border bg-error/5">
+              {err}
+            </div>
+          )}
+
+          {supportURL && (
+            <div className="px-4 py-2 text-xs border-b border-border bg-accent/5 flex items-center gap-2">
+              <span className="text-text-dim">Support session active</span>
+              <a
+                href={supportURL.url}
+                target="_blank"
+                rel="noopener"
+                className="font-mono truncate text-accent underline"
+              >
+                {supportURL.url}
+              </a>
+              {supportURL.expires_at && (
+                <span className="text-text-dim ml-auto">
+                  expires {formatTime(supportURL.expires_at)}
+                </span>
+              )}
+            </div>
+          )}
+
+          {retainedSource && (
+            <div className="px-4 py-2 text-xs border-b border-border bg-warn/5 flex flex-wrap items-center gap-2">
+              <span className="text-text-dim">
+                Stopped migration source retained
+              </span>
+              <span className="font-mono text-text">
+                instance {retainedSource.source_instance_id} ·{" "}
+                {retainedSource.source_config_dir}
+              </span>
+              <span className="flex-1" />
+              {confirmFinalize ? (
+                <>
+                  <span className="text-error">
+                    Permanently remove retained source?
+                  </span>
+                  <ActionButton
+                    label="Confirm removal"
+                    tone="danger"
+                    busy={busy === "finalize"}
+                    onClick={async () => {
+                      await run("finalize", "tenant_migrate_finalize", {
+                        tenant_id: tenant.id,
+                        confirm: true,
+                      });
+                      setConfirmFinalize(false);
+                    }}
+                  />
+                  <ActionButton
+                    label="Cancel"
+                    onClick={() => setConfirmFinalize(false)}
+                  />
+                </>
+              ) : (
+                <ActionButton
+                  label="Finalize source"
+                  onClick={() => setConfirmFinalize(true)}
+                />
+              )}
+            </div>
+          )}
+
+          {isSetupPending && (
+            <SetupPendingBanner
+              tenantId={tenant.id}
+              baseURL={tenant.base_url}
+              setupToken={setupToken}
+              setupURL={setupURL}
+              busy={busy === "attach"}
+              onAttach={async (apiKey) => {
+                setBusy("attach");
+                setErr(null);
+                try {
+                  await callTool("tenant_attach_key", {
+                    tenant_id: tenant.id,
+                    api_key: apiKey,
+                  });
+                  await onAfterAction();
+                } catch (e) {
+                  setErr((e as Error).message);
+                  throw e;
+                } finally {
+                  setBusy(null);
+                }
+              }}
+            />
+          )}
+
+          {!isSetupPending && (
+            <DomainBlock
+              tenant={tenant}
+              meta={meta}
+              busy={busy === "detach-domain"}
+              onAttach={() => onOpenAttachDomain(tenant)}
+              onDetach={() =>
+                run("detach-domain", "tenant_detach_domain", {
+                  tenant_id: tenant.id,
+                })
               }
-            }}
-          />
-        </DialogActions>
-      </DialogFrame>
-    )}
-    {resetDialog && (
-      <DialogFrame title={`Reset password for ${tenant.slug}`} onClose={() => setResetDialog(false)}>
-        <p className="text-xs text-text-dim">
-          This revokes every active session for the admin. The replacement password is shown once.
-        </p>
-        <DialogActions>
-          <ActionButton label="Cancel" onClick={() => setResetDialog(false)} />
-          <ActionButton
-            label="Reset password"
-            tone="danger"
-            busy={busy === "reset-password"}
-            onClick={async () => {
-              setBusy("reset-password");
-              setErr(null);
-              try {
-                const r = await callTool<{
-                  slug: string;
-                  base_url: string;
-                  admin_email: string;
-                  admin_password: string;
-                }>("tenant_reset_admin_password", { tenant_id: tenant.id });
-                setResetDialog(false);
-                onResetPassword(r);
-                await onAfterAction();
-              } catch (e) {
-                setErr((e as Error).message);
-              } finally {
-                setBusy(null);
+            />
+          )}
+
+          {!isSetupPending && !onParentHost && (
+            <HostedIngressBlock
+              tenant={tenant}
+              instance={hostInstance}
+              busy={busy}
+              onPrepare={() =>
+                run("ingress-prepare", "tenant_ingress_prepare_direct", {
+                  tenant_id: tenant.id,
+                })
               }
-            }}
-          />
-        </DialogActions>
-      </DialogFrame>
-    )}
+              onVerify={() =>
+                run("ingress-verify", "tenant_ingress_verify", {
+                  tenant_id: tenant.id,
+                })
+              }
+              onFinalize={() =>
+                run("ingress-finalize", "tenant_ingress_finalize", {
+                  tenant_id: tenant.id,
+                })
+              }
+              onRestore={() =>
+                run("ingress-restore", "tenant_ingress_rollback", {
+                  tenant_id: tenant.id,
+                })
+              }
+              onDisable={() =>
+                run("ingress-disable", "tenant_ingress_rollback", {
+                  tenant_id: tenant.id,
+                  confirm_disable: true,
+                })
+              }
+            />
+          )}
+
+          {!isSetupPending && (
+            <TenantHostsBlock
+              hosts={hosts}
+              busyHostname={
+                busy?.startsWith("remove-host:")
+                  ? busy.slice("remove-host:".length)
+                  : null
+              }
+              onAttach={() => onOpenAttachHost(tenant)}
+              onRemove={(hostname) =>
+                run(`remove-host:${hostname}`, "tenant_host_remove", {
+                  tenant_id: tenant.id,
+                  hostname,
+                })
+              }
+            />
+          )}
+
+          {!isSetupPending && isLocal && (
+            <VersionBlock
+              tenant={tenant}
+              latest={meta?.apteva_latest}
+              onUpdate={() => onOpenUpdate(tenant)}
+            />
+          )}
+
+          {!isSetupPending && (
+            <CredentialsBlock
+              tenantId={tenant.id}
+              busyReveal={busy === "reveal-api-key"}
+              busyReset={busy === "reset-password"}
+              onReveal={async () => {
+                setBusy("reveal-api-key");
+                setErr(null);
+                try {
+                  const r = await callTool<{
+                    slug: string;
+                    base_url: string;
+                    api_key: string;
+                  }>("tenant_reveal_api_key", { tenant_id: tenant.id });
+                  onRevealAPIKey(r);
+                } catch (e) {
+                  setErr((e as Error).message);
+                } finally {
+                  setBusy(null);
+                }
+              }}
+              onReset={async () => {
+                setResetDialog(true);
+              }}
+            />
+          )}
+
+          <div className="grid grid-cols-2 gap-0 border-b border-border">
+            <Field label="Owner">{tenant.owner_email}</Field>
+            <Field label="Kind">{tenant.kind}</Field>
+            <Field label="Status">
+              <StatusPill variant={STATUS_VARIANT[tenant.status]}>
+                {tenant.status}
+              </StatusPill>
+            </Field>
+            <Field label="Base URL" mono>
+              <a
+                href={tenant.base_url}
+                target="_blank"
+                rel="noopener"
+                className="text-accent hover:underline"
+              >
+                {tenant.base_url}
+              </a>
+            </Field>
+            <Field label="Last seen">{formatTime(tenant.last_seen_at)}</Field>
+            {tenant.config_dir && (
+              <Field label="Data dir" mono>
+                {tenant.config_dir}
+              </Field>
+            )}
+            <Field label="Created">{formatTime(tenant.created_at)}</Field>
+            {(tenant.respawn_attempts ?? 0) > 0 && (
+              <Field label="Auto-respawns">
+                <span className="text-warn font-medium">
+                  {tenant.respawn_attempts}
+                </span>
+                {tenant.last_respawn_at && (
+                  <span className="text-text-dim">
+                    {" "}
+                    · last {formatTime(tenant.last_respawn_at)}
+                  </span>
+                )}
+              </Field>
+            )}
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            <div className="px-4 pt-3 pb-1 text-[11px] uppercase tracking-wider text-text-dim font-medium">
+              Recent events
+            </div>
+            {!events || events.length === 0 ? (
+              <p className="text-xs text-text-dim px-4 py-3">No events yet.</p>
+            ) : (
+              <ul className="px-4 pb-4">
+                {events.map((e) => (
+                  <EventRow key={e.id} ev={e} />
+                ))}
+              </ul>
+            )}
+          </div>
+        </fieldset>
+      </Card>
+      {supportDialog && (
+        <DialogFrame
+          title={`Support login for ${tenant.slug}`}
+          onClose={() => setSupportDialog(false)}
+        >
+          <p className="text-xs text-text-dim">
+            The reason is written to the tenant audit trail.
+          </p>
+          <Label text="Reason">
+            <textarea
+              value={supportReason}
+              onChange={(e) => setSupportReason(e.target.value)}
+              rows={3}
+              autoFocus
+              className="w-full resize-none px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
+            />
+          </Label>
+          <DialogActions>
+            <ActionButton
+              label="Cancel"
+              onClick={() => setSupportDialog(false)}
+            />
+            <ActionButton
+              label="Create support login"
+              busy={busy === "support"}
+              onClick={async () => {
+                const reason = supportReason.trim();
+                if (!reason) return;
+                setBusy("support");
+                setErr(null);
+                try {
+                  const r = await callTool<{
+                    url: string;
+                    expires_at?: string;
+                  }>("tenant_support_login", { tenant_id: tenant.id, reason });
+                  setSupportURL(r);
+                  setSupportDialog(false);
+                  setSupportReason("");
+                  if (r?.url) window.open(r.url, "_blank", "noopener");
+                  await onAfterAction();
+                } catch (e) {
+                  setErr((e as Error).message);
+                } finally {
+                  setBusy(null);
+                }
+              }}
+            />
+          </DialogActions>
+        </DialogFrame>
+      )}
+      {resetDialog && (
+        <DialogFrame
+          title={`Reset password for ${tenant.slug}`}
+          onClose={() => setResetDialog(false)}
+        >
+          <p className="text-xs text-text-dim">
+            This revokes every active session for the admin. The replacement
+            password is shown once.
+          </p>
+          <DialogActions>
+            <ActionButton
+              label="Cancel"
+              onClick={() => setResetDialog(false)}
+            />
+            <ActionButton
+              label="Reset password"
+              tone="danger"
+              busy={busy === "reset-password"}
+              onClick={async () => {
+                setBusy("reset-password");
+                setErr(null);
+                try {
+                  const r = await callTool<{
+                    slug: string;
+                    base_url: string;
+                    admin_email: string;
+                    admin_password: string;
+                  }>("tenant_reset_admin_password", { tenant_id: tenant.id });
+                  setResetDialog(false);
+                  onResetPassword(r);
+                  await onAfterAction();
+                } catch (e) {
+                  setErr((e as Error).message);
+                } finally {
+                  setBusy(null);
+                }
+              }}
+            />
+          </DialogActions>
+        </DialogFrame>
+      )}
     </>
   );
 }
@@ -1435,13 +1816,20 @@ function SetupPendingBanner({
         >
           {url}
         </a>
-        <ActionButton label="Open ↗" onClick={() => window.open(url, "_blank", "noopener")} />
+        <ActionButton
+          label="Open ↗"
+          onClick={() => window.open(url, "_blank", "noopener")}
+        />
       </div>
 
       <div className="flex items-center gap-2 text-xs">
         <span className="text-text-dim w-20 flex-shrink-0">Setup token</span>
         <code className="font-mono text-text bg-bg-hover px-2 py-0.5 rounded truncate flex-1">
-          {setupToken || <span className="text-text-dim italic">unavailable — recreate the tenant</span>}
+          {setupToken || (
+            <span className="text-text-dim italic">
+              unavailable — recreate the tenant
+            </span>
+          )}
         </code>
         {setupToken && (
           <ActionButton
@@ -1579,11 +1967,13 @@ function ActionButton({
   label,
   onClick,
   busy,
+  disabled,
   tone,
 }: {
   label: string;
   onClick: () => void;
   busy?: boolean;
+  disabled?: boolean;
   tone?: "danger";
 }) {
   const cls =
@@ -1594,7 +1984,7 @@ function ActionButton({
     <button
       type="button"
       onClick={onClick}
-      disabled={busy}
+      disabled={busy || disabled}
       className={`px-2.5 py-1 rounded-md text-xs font-medium ${cls} disabled:opacity-50 disabled:cursor-not-allowed`}
     >
       {busy ? "…" : label}
@@ -1614,16 +2004,23 @@ function CredentialsRevealDialog({
   onClose: () => void;
 }) {
   return (
-    <DialogFrame title={`Tenant ${creds.slug} ready — save these credentials`} onClose={onClose}>
+    <DialogFrame
+      title={`Tenant ${creds.slug} ready — save these credentials`}
+      onClose={onClose}
+    >
       <div className="bg-warn/10 border border-warn/30 rounded-md px-3 py-2 mb-3 text-xs text-warn">
         These are shown only once. The admin password and API key are not
-        recoverable from the fleet registry — copy them somewhere safe
-        before dismissing.
+        recoverable from the fleet registry — copy them somewhere safe before
+        dismissing.
       </div>
 
       <CredentialRow label="Tenant URL" value={creds.base_url} />
       <CredentialRow label="Admin email" value={creds.admin_email} />
-      <CredentialRow label="Admin password" value={creds.admin_password} sensitive />
+      <CredentialRow
+        label="Admin password"
+        value={creds.admin_password}
+        sensitive
+      />
       <CredentialRow label="API key (fleet)" value={creds.api_key} sensitive />
 
       <DialogActions>
@@ -1741,11 +2138,11 @@ function CreateTenantDialog({
   return (
     <DialogFrame title="Create tenant" onClose={onClose}>
       <p className="text-xs text-text-dim mb-3">
-        Spawns a fresh apteva process with its own data dir and port,
-        registers an admin using <code className="font-mono">owner_email</code>,
-        and returns a one-shot password + api_key. Slug must be{" "}
-        <code className="font-mono">[a-z0-9_-]</code>. May take 15-45s
-        the first time (server + core boot).
+        Spawns a fresh apteva process with its own data dir and port, registers
+        an admin using <code className="font-mono">owner_email</code>, and
+        returns a one-shot password + api_key. Slug must be{" "}
+        <code className="font-mono">[a-z0-9_-]</code>. May take 15-45s the first
+        time (server + core boot).
       </p>
       <Label text="Slug">
         <input
@@ -1867,7 +2264,9 @@ function TemplatePicker({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    callTool<ProjectTemplateListResp>("tenant_template_list", { include_system: true })
+    callTool<ProjectTemplateListResp>("tenant_template_list", {
+      include_system: true,
+    })
       .then((result) => {
         if (cancelled) return;
         setTemplates(result.templates ?? []);
@@ -1887,7 +2286,9 @@ function TemplatePicker({
 
   return (
     <>
-      <Label text={optional ? "Project template (optional)" : "Project template"}>
+      <Label
+        text={optional ? "Project template (optional)" : "Project template"}
+      >
         <select
           value={value}
           disabled={loading || !!error}
@@ -1899,17 +2300,25 @@ function TemplatePicker({
           }}
           className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text disabled:opacity-60"
         >
-          <option value="">{loading ? "Loading templates…" : optional ? "No template" : "Select a template"}</option>
+          <option value="">
+            {loading
+              ? "Loading templates…"
+              : optional
+                ? "No template"
+                : "Select a template"}
+          </option>
           {templates.map((template) => (
             <option key={template.id} value={template.id}>
-              {template.name} · {template.source}{template.revision ? ` r${template.revision}` : ""}
+              {template.name} · {template.source}
+              {template.revision ? ` r${template.revision}` : ""}
             </option>
           ))}
         </select>
       </Label>
       {error && (
         <p className="text-xs text-error -mt-1">
-          Template catalog unavailable: {error}. Refresh Fleet's approved permissions after upgrading.
+          Template catalog unavailable: {error}. Refresh Fleet's approved
+          permissions after upgrading.
         </p>
       )}
       {value && (
@@ -1936,8 +2345,37 @@ function ApplyTemplateDialog({
   tenant: Tenant;
   callTool: ToolCaller;
   onClose: () => void;
-  onSubmit: (args: { template_id: string; project_description?: string }) => Promise<{ ok: boolean; error?: string }>;
+  onSubmit: (args: {
+    template_id: string;
+    project_description?: string;
+    target_project_id?: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
 }) {
+  const [targetProject, setTargetProject] = useState("");
+  const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+    let active = true;
+    callTool<{ result: { id: string; name: string }[] }>(
+      "tenant_platform_call",
+      { tenant_id: tenant.id, resource: "projects", action: "list" },
+    )
+      .then((r) => {
+        if (!active) return;
+        setProjects(r.result);
+        const choice =
+          r.result.length === 1
+            ? r.result[0]
+            : r.result.find((p) => p.name.toLowerCase() === "default");
+        if (choice) setTargetProject(choice.id);
+      })
+      .catch((e) => {
+        if (active) setErr(String(e));
+      });
+    return () => {
+      active = false;
+    };
+  }, [tenant.id, callTool]);
+
   const [templateID, setTemplateID] = useState("");
   const [projectDescription, setProjectDescription] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1946,9 +2384,25 @@ function ApplyTemplateDialog({
   return (
     <DialogFrame title={`Apply template to ${tenant.slug}`} onClose={onClose}>
       <p className="text-xs text-text-dim mb-3">
-        Copies an exact snapshot from this parent project, then lets the tenant install required apps,
-        create missing agents, and merge dashboard widgets. Existing agents with the same names are preserved.
+        Copies an exact snapshot from this parent project, then lets the tenant
+        install required apps, create missing agents, and merge dashboard
+        widgets. Existing agents with the same names are preserved.
       </p>
+      <Label text="Target project">
+        <select
+          aria-label="Target project"
+          value={targetProject}
+          onChange={(e) => setTargetProject(e.target.value)}
+          className="w-full border border-border rounded p-2"
+        >
+          <option value="">Select a project</option>
+          {projects.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+      </Label>
       <TemplatePicker
         callTool={callTool}
         value={templateID}
@@ -1963,15 +2417,20 @@ function ApplyTemplateDialog({
           label={busy ? "Applying…" : "Apply"}
           busy={busy}
           onClick={async () => {
-            if (!templateID) {
-              setErr("Select a project template");
+            if (!templateID || !targetProject) {
+              setErr("Select a project template and target project");
               return;
             }
             setBusy(true);
             setErr(null);
             const result = await onSubmit({
               template_id: templateID,
-              ...(projectDescription.trim() ? { project_description: projectDescription.trim() } : {}),
+              ...(targetProject.trim()
+                ? { target_project_id: targetProject.trim() }
+                : {}),
+              ...(projectDescription.trim()
+                ? { project_description: projectDescription.trim() }
+                : {}),
             });
             setBusy(false);
             if (!result.ok) setErr(result.error || "failed");
@@ -2007,7 +2466,7 @@ function CloneTenantDialog({
   );
   const [instanceID, setInstanceID] = useState(tenant.instance_id ?? 0);
   const [port, setPort] = useState("");
-  const [start, setStart] = useState(true);
+  const [start, setStart] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const target = hostOptions.find((i) => i.id === instanceID);
@@ -2015,9 +2474,8 @@ function CloneTenantDialog({
   return (
     <DialogFrame title={`Clone ${tenant.slug}`} onClose={onClose}>
       <p className="text-xs text-text-dim mb-3">
-        Creates a new tenant from the current data dir. The source tenant
-        is not stopped, restarted, or changed. Domains are not copied to
-        the clone.
+        Creates a new tenant from the current data dir. The source tenant is not
+        stopped, restarted, or changed. Domains are not copied to the clone.
       </p>
       <Label text="New slug">
         <input
@@ -2068,7 +2526,8 @@ function CloneTenantDialog({
           onChange={(e) => setStart(e.target.checked)}
           className="h-3.5 w-3.5"
         />
-        Start clone after copy
+        Run the clone quarantine rehearsal after copy (the clone remains
+        stopped)
       </label>
       {tenant.domain && (
         <div className="text-xs text-text-dim font-mono">
@@ -2077,7 +2536,10 @@ function CloneTenantDialog({
       )}
       {target && (
         <div className="text-xs text-text-dim font-mono">
-          Clone target: {target.id === 0 ? "local server" : `${target.name} (${target.public_ipv4})`}
+          Clone target:{" "}
+          {target.id === 0
+            ? "local server"
+            : `${target.name} (${target.public_ipv4})`}
         </div>
       )}
       {err && <p className="text-xs text-error mt-2">{err}</p>}
@@ -2095,7 +2557,9 @@ function CloneTenantDialog({
             setErr(null);
             const r = await onSubmit({
               slug: slug.trim(),
-              ...(email.trim() && email.trim() !== tenant.owner_email ? { owner_email: email.trim() } : {}),
+              ...(email.trim() && email.trim() !== tenant.owner_email
+                ? { owner_email: email.trim() }
+                : {}),
               instance_id: instanceID,
               ...(port.trim() ? { port: Number(port) } : {}),
               start,
@@ -2124,11 +2588,16 @@ function MoveTenantDialog({
   tenant: Tenant;
   meta: MetaResp;
   onClose: () => void;
-  onSubmit: (args: { instance_id: number; port?: number; retain_source: boolean }) => Promise<{ ok: boolean; error?: string }>;
+  onSubmit: (args: {
+    instance_id: number;
+    port?: number;
+    retain_source: boolean;
+  }) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const currentID = tenant.instance_id ?? 0;
   const hostOptions = hostPickerOptions(meta, currentID);
-  const defaultTarget = hostOptions.find((i) => i.id !== currentID)?.id ?? currentID;
+  const defaultTarget =
+    hostOptions.find((i) => i.id !== currentID)?.id ?? currentID;
   const [instanceID, setInstanceID] = useState(defaultTarget);
   const [port, setPort] = useState("");
   const [retainSource, setRetainSource] = useState(true);
@@ -2141,10 +2610,10 @@ function MoveTenantDialog({
   return (
     <DialogFrame title={`Move ${tenant.slug}`} onClose={onClose}>
       <p className="text-xs text-text-dim mb-3">
-        Relocates this tenant to another host. Fleet stops the source,
-        transfers its data dir, starts the target, and re-points ingress.
-        The tenant is briefly <span className="text-text">down</span>.
-        If anything fails before commit, the source is restarted.
+        Relocates this tenant to another host. Fleet stops the source, transfers
+        its data dir, starts the target, and re-points ingress. The tenant is
+        briefly <span className="text-text">down</span>. If anything fails
+        before commit, the source is restarted.
       </p>
       <Label text="Target host">
         <select
@@ -2165,7 +2634,9 @@ function MoveTenantDialog({
           type="number"
           value={port}
           onChange={(e) => setPort(e.target.value)}
-          placeholder={instanceID === 0 ? "auto" : "auto (7100 + tenants on this instance)"}
+          placeholder={
+            instanceID === 0 ? "auto" : "auto (7100 + tenants on this instance)"
+          }
           className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
         />
       </Label>
@@ -2182,7 +2653,10 @@ function MoveTenantDialog({
       )}
       {target && (
         <div className="text-xs text-text-dim font-mono">
-          {tenant.base_url} → {target.id === 0 ? "local server" : `${target.name} (${target.public_ipv4})`}
+          {tenant.base_url} →{" "}
+          {target.id === 0
+            ? "local server"
+            : `${target.name} (${target.public_ipv4})`}
         </div>
       )}
       {sameHost && !port.trim() && (
@@ -2319,7 +2793,12 @@ function DialogFrame({
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-[min(100%,26rem)] max-h-[calc(100vh-2rem)] overflow-y-auto rounded-md border border-border bg-bg-card shadow-xl">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="w-[min(100%,26rem)] max-h-[calc(100vh-2rem)] overflow-y-auto rounded-md border border-border bg-bg-card shadow-xl"
+      >
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
           <h2 className="text-sm font-semibold text-text">{title}</h2>
           <button
@@ -2338,10 +2817,18 @@ function DialogFrame({
 }
 
 function DialogActions({ children }: { children: React.ReactNode }) {
-  return <div className="flex items-center justify-end gap-2 pt-2">{children}</div>;
+  return (
+    <div className="flex items-center justify-end gap-2 pt-2">{children}</div>
+  );
 }
 
-function Label({ text, children }: { text: string; children: React.ReactNode }) {
+function Label({
+  text,
+  children,
+}: {
+  text: string;
+  children: React.ReactNode;
+}) {
   return (
     <label className="block">
       <span className="block text-[10px] uppercase tracking-wider text-text-dim font-medium mb-1">
@@ -2372,8 +2859,8 @@ function DomainBlock({
   if (!tenant.domain && !meta) {
     return (
       <div className="px-4 py-2 border-b border-border text-[11px] text-text-dim">
-        <span className="font-medium">Public hostname</span> ·{" "}
-        Loading hostname controls…
+        <span className="font-medium">Public hostname</span> · Loading hostname
+        controls…
       </div>
     );
   }
@@ -2391,9 +2878,10 @@ function DomainBlock({
   const clientManagedDNS = !tenant.domain_record_id;
   const directIngress = tenant.ingress_mode === "direct";
   const transitioningIngress = tenant.ingress_mode === "direct_pending";
-  const cert = clientManagedDNS || directIngress || transitioningIngress
-    ? undefined
-    : meta?.certs?.[tenant.domain];
+  const cert =
+    clientManagedDNS || directIngress || transitioningIngress
+      ? undefined
+      : meta?.certs?.[tenant.domain];
   const certVariant: PillVariant = !cert
     ? "neutral"
     : cert.status === "live"
@@ -2418,17 +2906,39 @@ function DomainBlock({
       </a>
       {cert && (
         <span title={cert.error || cert.expires_at || ""}>
-          <StatusPill variant={certVariant}>{`cert · ${cert.status}`}</StatusPill>
+          <StatusPill
+            variant={certVariant}
+          >{`cert · ${cert.status}`}</StatusPill>
         </span>
       )}
       {clientManagedDNS && (
-        <StatusPill variant={directIngress ? "success" : transitioningIngress ? "warn" : "success"}>
-          {directIngress ? "instance HTTPS" : transitioningIngress ? "transitioning" : "server ingress"}
+        <StatusPill
+          variant={
+            directIngress
+              ? "success"
+              : transitioningIngress
+                ? "warn"
+                : "success"
+          }
+        >
+          {directIngress
+            ? "instance HTTPS"
+            : transitioningIngress
+              ? "transitioning"
+              : "server ingress"}
         </StatusPill>
       )}
       {!cert && tenant.domain && !clientManagedDNS && (
-        <StatusPill variant={directIngress ? "success" : transitioningIngress ? "warn" : "info"}>
-          {directIngress ? "instance HTTPS" : transitioningIngress ? "transitioning" : "server ingress"}
+        <StatusPill
+          variant={
+            directIngress ? "success" : transitioningIngress ? "warn" : "info"
+          }
+        >
+          {directIngress
+            ? "instance HTTPS"
+            : transitioningIngress
+              ? "transitioning"
+              : "server ingress"}
         </StatusPill>
       )}
       <span className="flex-1" />
@@ -2462,8 +2972,18 @@ function HostedIngressBlock({
   onDisable: () => void;
 }) {
   const mode = tenant.ingress_mode || "parent";
-  const variant: PillVariant = mode === "direct" ? "success" : mode === "direct_pending" ? "warn" : "neutral";
-  const label = mode === "direct" ? "direct" : mode === "direct_pending" ? "transitioning" : "via parent";
+  const variant: PillVariant =
+    mode === "direct"
+      ? "success"
+      : mode === "direct_pending"
+        ? "warn"
+        : "neutral";
+  const label =
+    mode === "direct"
+      ? "direct"
+      : mode === "direct_pending"
+        ? "transitioning"
+        : "via parent";
   return (
     <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-border">
       <span className="text-[11px] uppercase tracking-wider text-text-dim font-semibold">
@@ -2471,10 +2991,15 @@ function HostedIngressBlock({
       </span>
       <StatusPill variant={variant}>{label}</StatusPill>
       {instance?.public_ipv4 && (
-        <span className="font-mono text-xs text-text-dim">{instance.public_ipv4}</span>
+        <span className="font-mono text-xs text-text-dim">
+          {instance.public_ipv4}
+        </span>
       )}
       {tenant.ingress_error && (
-        <span className="basis-full text-xs text-error" title={tenant.ingress_error}>
+        <span
+          className="basis-full text-xs text-error"
+          title={tenant.ingress_error}
+        >
           {tenant.ingress_error}
         </span>
       )}
@@ -2488,14 +3013,35 @@ function HostedIngressBlock({
       )}
       {mode === "direct_pending" && (
         <>
-          <ActionButton label="Verify" busy={busy === "ingress-verify"} onClick={onVerify} />
-          <ActionButton label="Finalize" busy={busy === "ingress-finalize"} onClick={onFinalize} />
-          <ActionButton label="Restore parent" busy={busy === "ingress-restore"} onClick={onRestore} />
-          <ActionButton label="Disable direct" busy={busy === "ingress-disable"} tone="danger" onClick={onDisable} />
+          <ActionButton
+            label="Verify"
+            busy={busy === "ingress-verify"}
+            onClick={onVerify}
+          />
+          <ActionButton
+            label="Finalize"
+            busy={busy === "ingress-finalize"}
+            onClick={onFinalize}
+          />
+          <ActionButton
+            label="Restore parent"
+            busy={busy === "ingress-restore"}
+            onClick={onRestore}
+          />
+          <ActionButton
+            label="Disable direct"
+            busy={busy === "ingress-disable"}
+            tone="danger"
+            onClick={onDisable}
+          />
         </>
       )}
       {mode === "direct" && (
-        <ActionButton label="Restore parent" busy={busy === "ingress-restore"} onClick={onRestore} />
+        <ActionButton
+          label="Restore parent"
+          busy={busy === "ingress-restore"}
+          onClick={onRestore}
+        />
       )}
     </div>
   );
@@ -2524,7 +3070,11 @@ function TenantHostsBlock({
       </div>
       {hosts.map((host) => {
         const variant: PillVariant =
-          host.status === "active" ? "success" : host.status === "error" ? "error" : "info";
+          host.status === "active"
+            ? "success"
+            : host.status === "error"
+              ? "error"
+              : "info";
         return (
           <div
             key={host.id}
@@ -2558,7 +3108,9 @@ function TenantHostsBlock({
         );
       })}
       {hosts.length === 0 && (
-        <div className="px-4 pb-2 text-xs text-text-dim">No application hostnames assigned.</div>
+        <div className="px-4 pb-2 text-xs text-text-dim">
+          No application hostnames assigned.
+        </div>
       )}
     </div>
   );
@@ -2618,7 +3170,9 @@ function VersionBlock({
       )}
       <span className="flex-1" />
       {latest && (
-        <span className="text-[11px] text-text-dim font-mono">npm: {latest}</span>
+        <span className="text-[11px] text-text-dim font-mono">
+          npm: {latest}
+        </span>
       )}
       {showButton && <ActionButton label={buttonLabel} onClick={onUpdate} />}
     </div>
@@ -2736,7 +3290,9 @@ function AttachDomainDialog({
               type="text"
               value={target}
               onChange={(e) => setTarget(e.target.value)}
-              placeholder={meta.public_host || "default: parent host's public IP"}
+              placeholder={
+                meta.public_host || "default: parent host's public IP"
+              }
               className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
             />
           </Label>
@@ -2754,7 +3310,9 @@ function AttachDomainDialog({
             />
           </Label>
           <div className="text-xs text-text-dim border border-border rounded-md px-3 py-2 bg-bg-input/50 space-y-1">
-            <div className="font-medium text-text">Before submitting, verify:</div>
+            <div className="font-medium text-text">
+              Before submitting, verify:
+            </div>
             <div>
               · client's DNS for{" "}
               <span className="font-mono text-text">{externalFqdn || "…"}</span>{" "}
@@ -2828,7 +3386,8 @@ function AttachTenantHostDialog({
         />
       </Label>
       <p className="text-xs text-text-dim">
-        Fleet registers this exact hostname and keeps its tunnel target current. DNS is not changed.
+        Fleet registers this exact hostname and keeps its tunnel target current.
+        DNS is not changed.
       </p>
       {err && <p className="text-xs text-error">{err}</p>}
       <DialogActions>
@@ -2867,7 +3426,9 @@ function UpdateVersionDialog({
   onClose: () => void;
   onSubmit: (version: string) => Promise<{ ok: boolean; error?: string }>;
 }) {
-  const [version, setVersion] = useState("");
+  const [version, setVersion] = useState(
+    requestedUpdateVersion(tenant, latest),
+  );
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -2876,14 +3437,14 @@ function UpdateVersionDialog({
   return (
     <DialogFrame title={`Update ${tenant.slug}`} onClose={onClose}>
       <p className="text-xs text-text-dim mb-3">
-        Installs the requested apteva version into a fleet-owned npm prefix
-        at <code className="font-mono">~/.apteva-fleet/versions/&lt;v&gt;/</code>,
-        stops the tenant, and respawns it. Other tenants are unaffected.
-        Leave empty to track npm latest.
+        Installs and validates the requested Apteva binaries in Fleet&apos;s
+        version cache. Running tenants restart; stopped tenants remain stopped.
+        Other tenants are unaffected. Leave empty to track npm latest.
       </p>
       <div className="text-xs text-text-dim font-mono mb-2 space-y-0.5">
         <div>
-          current: <span className="text-text">{tenant.current_version || "—"}</span>
+          current:{" "}
+          <span className="text-text">{tenant.current_version || "—"}</span>
         </div>
         {tenant.target_version && (
           <div>
@@ -2907,7 +3468,7 @@ function UpdateVersionDialog({
         />
       </Label>
       <div className="text-[11px] text-text-dim font-mono">
-        Will install + respawn at: <span className="text-text">{resolved}</span>
+        Will install and validate: <span className="text-text">{resolved}</span>
       </div>
       {err && <p className="text-xs text-error mt-2">{err}</p>}
       <DialogActions>
@@ -2975,9 +3536,9 @@ function RevealAPIKeyDialog({
   return (
     <DialogFrame title={`API key — ${data.slug}`} onClose={onClose}>
       <div className="bg-accent/5 border border-border rounded-md px-3 py-2 mb-3 text-xs text-text-dim">
-        The api_key authenticates machine-to-machine calls against this
-        tenant (Bearer auth). Fleet keeps it sealed in its keyring; revealing
-        records an event but doesn't rotate it. Use{" "}
+        The api_key authenticates machine-to-machine calls against this tenant
+        (Bearer auth). Fleet keeps it sealed in its keyring; revealing records
+        an event but doesn't rotate it. Use{" "}
         <span className="font-medium text-text">Reset admin password</span> to
         get a fresh human-login credential.
       </div>
@@ -3005,12 +3566,16 @@ function ResetPasswordDialog({
   return (
     <DialogFrame title={`New admin password — ${data.slug}`} onClose={onClose}>
       <div className="bg-warn/10 border border-warn/30 rounded-md px-3 py-2 mb-3 text-xs text-warn">
-        Shown only once. Every existing session for this admin has been
-        revoked — give the operator the new password before dismissing.
+        Shown only once. Every existing session for this admin has been revoked
+        — give the operator the new password before dismissing.
       </div>
       <CredentialRow label="Tenant URL" value={data.base_url} />
       <CredentialRow label="Admin email" value={data.admin_email} />
-      <CredentialRow label="New password" value={data.admin_password} sensitive />
+      <CredentialRow
+        label="New password"
+        value={data.admin_password}
+        sensitive
+      />
       <DialogActions>
         <ActionButton label="I've saved it" onClick={onClose} />
       </DialogActions>
@@ -3035,4 +3600,100 @@ function formatTime(iso?: string): string {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return d.toLocaleString();
+}
+
+function StorageDialog({
+  callTool,
+  onClose,
+}: {
+  callTool: ToolCaller;
+  onClose: () => void;
+}) {
+  const [data, setData] = useState<{
+    free_bytes: number;
+    candidates: { path: string; kind: string }[];
+  } | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let active = true;
+    callTool<{
+      free_bytes: number;
+      candidates: { path: string; kind: string }[];
+    }>("fleet_storage_list", {})
+      .then((r) => {
+        if (active) setData(r);
+      })
+      .catch((e) => {
+        if (active) setError(String(e));
+      });
+    return () => {
+      active = false;
+    };
+  }, [callTool]);
+  return (
+    <DialogFrame title="Local storage and cleanup" onClose={onClose}>
+      <p>
+        {data
+          ? `${(data.free_bytes / 2 ** 30).toFixed(1)} GiB available`
+          : "Loading storage…"}
+      </p>
+      <p className="text-xs text-text-dim">
+        Unused runtime versions and restore copies become eligible after 30
+        days. Select only copies you no longer need. Active runtimes and pending
+        operations are protected.
+      </p>
+      {data?.candidates.map((item) => (
+        <label key={item.path} className="block my-2 text-xs">
+          <input
+            type="checkbox"
+            checked={selected.includes(item.path)}
+            onChange={(e) =>
+              setSelected(
+                e.target.checked
+                  ? [...selected, item.path]
+                  : selected.filter((p) => p !== item.path),
+              )
+            }
+          />
+          {item.kind}: {item.path}
+        </label>
+      ))}
+      {data?.candidates.length === 0 && <p>No eligible files to remove.</p>}
+      {error && <p role="alert">{error}</p>}
+      <DialogActions>
+        <ActionButton label="Close" onClick={onClose} />
+        <ActionButton
+          label="Delete selected copies"
+          busy={busy}
+          disabled={!selected.length || busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await callTool("fleet_storage_cleanup", {
+                paths: selected,
+                confirm: true,
+              });
+              setData((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      candidates: prev.candidates.filter(
+                        (c) => !selected.includes(c.path),
+                      ),
+                    }
+                  : prev,
+              );
+              setSelected([]);
+            } catch (e) {
+              setError(String(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
+      </DialogActions>
+    </DialogFrame>
+  );
 }

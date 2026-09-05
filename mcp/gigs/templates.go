@@ -27,21 +27,27 @@ type template struct {
 }
 
 type templateVersion struct {
-	ID                     int64               `json:"id"`
-	TemplateID             int64               `json:"template_id"`
-	Version                int                 `json:"version"`
-	Status                 string              `json:"status"`
-	TitleTemplate          string              `json:"title_template"`
-	DefaultDueHours        int                 `json:"default_due_hours,omitempty"`
-	DefaultDeadlineHours   int                 `json:"default_deadline_hours,omitempty"` // deprecated alias
-	DefaultAccessGraceDays int                 `json:"default_access_grace_days,omitempty"`
-	DefaultSkillIDs        []int64             `json:"default_skill_ids,omitempty"`
-	DefaultPriority        string              `json:"default_priority,omitempty"`
-	VariableOverrides      map[string]any      `json:"variable_overrides,omitempty"`
-	CreatedBy              string              `json:"created_by,omitempty"`
-	CreatedAt              string              `json:"created_at"`
-	Composition            []compositionItem   `json:"composition,omitempty"`
-	Derived                *derivedComposition `json:"derived,omitempty"`
+	ID                     int64                  `json:"id"`
+	TemplateID             int64                  `json:"template_id"`
+	Version                int                    `json:"version"`
+	Status                 string                 `json:"status"`
+	TitleTemplate          string                 `json:"title_template"`
+	DefaultDueHours        int                    `json:"default_due_hours,omitempty"`
+	DefaultDeadlineHours   int                    `json:"default_deadline_hours,omitempty"` // deprecated alias
+	DefaultAccessGraceDays int                    `json:"default_access_grace_days,omitempty"`
+	DefaultSkillIDs        []int64                `json:"default_skill_ids,omitempty"`
+	DefaultPriority        string                 `json:"default_priority,omitempty"`
+	VariableOverrides      map[string]any         `json:"variable_overrides,omitempty"`
+	ResponseRules          []templateResponseRule `json:"response_rules,omitempty"`
+	CreatedBy              string                 `json:"created_by,omitempty"`
+	CreatedAt              string                 `json:"created_at"`
+	Composition            []compositionItem      `json:"composition,omitempty"`
+	Derived                *derivedComposition    `json:"derived,omitempty"`
+}
+
+type templateResponseRule struct {
+	InstructionKind string         `json:"instruction_kind"`
+	Response        map[string]any `json:"response"`
 }
 
 // ─── Tool registry ──────────────────────────────────────────────────
@@ -50,7 +56,7 @@ func (a *App) templateTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "templates_create",
-			Description: "Create a new template (empty composition, draft). default_due_hours is an optional soft due offset; default_access_grace_days optionally ends worker access that many days later. default_deadline_hours remains a deprecated due alias. Returns {template}.",
+			Description: "Create a new template (empty composition, draft). response_rules optionally enforce worker response contracts by instruction kind. default_due_hours is an optional soft due offset; default_access_grace_days optionally ends worker access that many days later. default_deadline_hours remains a deprecated due alias. Returns {template}.",
 			InputSchema: schemaObject(map[string]any{
 				"name":                      map[string]any{"type": "string"},
 				"kind":                      map[string]any{"type": "string"},
@@ -60,6 +66,7 @@ func (a *App) templateTools() []sdk.Tool {
 				"default_deadline_hours":    map[string]any{"type": "integer"},
 				"default_access_grace_days": map[string]any{"type": "integer", "minimum": 1},
 				"default_priority":          map[string]any{"type": "string"},
+				"response_rules":            map[string]any{"type": "array"},
 			}, []string{"name", "title_template"}),
 			Handler: a.toolTemplatesCreate,
 		},
@@ -84,12 +91,22 @@ func (a *App) templateTools() []sdk.Tool {
 		},
 		{
 			Name:        "templates_set_instructions",
-			Description: "Replace the composition on the current draft version (auto-forks a draft if the current version is active). overrides is shallow-merged into the instruction body and may replace body.response for this template use. Args: id, instructions ([{instruction_id, instruction_version_id?, result_key?, overrides?}]). Returns {template, derived}.",
+			Description: "Replace the composition on the current draft version (auto-forks a draft if the current version is active). overrides is shallow-merged into the instruction body and may replace body.response for this template use. Optional response_rules atomically replaces generic response policies on the same draft. Args: id, instructions ([{instruction_id, instruction_version_id?, result_key?, overrides?}]), response_rules?. Returns {template, derived}.",
 			InputSchema: schemaObject(map[string]any{
-				"id":           map[string]any{"type": "integer"},
-				"instructions": map[string]any{"type": "array"},
+				"id":             map[string]any{"type": "integer"},
+				"instructions":   map[string]any{"type": "array"},
+				"response_rules": map[string]any{"type": "array"},
 			}, []string{"id", "instructions"}),
 			Handler: a.toolTemplatesSetInstructions,
+		},
+		{
+			Name:        "templates_set_response_rules",
+			Description: "Replace the current draft template's generic worker-response rules (auto-forks a draft when current is active). Each rule matches instruction_kind and replaces body.response at dispatch, including for dynamic instruction gigs that name this template. Args: id, response_rules ([{instruction_kind, response}]). Returns {template}.",
+			InputSchema: schemaObject(map[string]any{
+				"id":             map[string]any{"type": "integer"},
+				"response_rules": map[string]any{"type": "array"},
+			}, []string{"id", "response_rules"}),
+			Handler: a.toolTemplatesSetResponseRules,
 		},
 		{
 			Name:        "templates_insert_instruction",
@@ -178,6 +195,10 @@ func (a *App) toolTemplatesCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if defaultDueHours == 0 {
 		defaultDueHours = legacyDeadlineHours
 	}
+	responseRules, err := templateResponseRulesArg(args)
+	if err != nil {
+		return nil, err
+	}
 	kind := strArg(args, "kind")
 	if kind == "" {
 		kind = "action"
@@ -204,12 +225,14 @@ func (a *App) toolTemplatesCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	vRes, err := tx.Exec(
 		`INSERT INTO template_versions
 		   (template_id, version, status, title_template,
-		    default_deadline_hours, default_access_grace_days, default_priority)
-		 VALUES (?, 1, 'draft', ?, ?, ?, ?)`,
+		    default_deadline_hours, default_access_grace_days, default_priority,
+		    response_rules_json)
+		 VALUES (?, 1, 'draft', ?, ?, ?, ?, ?)`,
 		id, title,
 		nullInt64(int64(defaultDueHours)),
 		nullInt64(int64(intArg(args, "default_access_grace_days", 0))),
 		nullStr(strArg(args, "default_priority")),
+		nullJSON(responseRules),
 	)
 	if err != nil {
 		return nil, err
@@ -230,6 +253,112 @@ func (a *App) toolTemplatesCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	return map[string]any{"template": tpl}, nil
+}
+
+func (a *App) toolTemplatesSetResponseRules(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	rules, err := templateResponseRulesArg(args)
+	if err != nil {
+		return nil, err
+	}
+	draftVID, err := ensureDraft(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE template_versions SET response_rules_json=? WHERE id=?`, nullJSON(rules), draftVID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE templates SET updated_at=CURRENT_TIMESTAMP WHERE id=?`, id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	tpl, err := getTemplate(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"template": tpl}, nil
+}
+
+func templateResponseRulesArg(args map[string]any) ([]templateResponseRule, error) {
+	rawRules := sliceArg(args, "response_rules")
+	rules := make([]templateResponseRule, 0, len(rawRules))
+	seen := map[string]bool{}
+	for i, raw := range rawRules {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("response_rules[%d] must be an object", i)
+		}
+		kind := strings.TrimSpace(strOf(item["instruction_kind"]))
+		if !knownKinds[kind] {
+			return nil, fmt.Errorf("response_rules[%d] has unknown instruction_kind %q", i, kind)
+		}
+		if seen[kind] {
+			return nil, fmt.Errorf("response_rules has more than one rule for instruction_kind %q", kind)
+		}
+		response, ok := item["response"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("response_rules[%d].response must be an object", i)
+		}
+		body := map[string]any{"response": response}
+		if err := validateResponseSpec(kind, body); err != nil {
+			return nil, fmt.Errorf("response_rules[%d]: %w", i, err)
+		}
+		spec := responseSpecFromBody(body)
+		if !spec.Note.Enabled && !spec.Files.Enabled {
+			return nil, fmt.Errorf("response_rules[%d] must enable a note or files response", i)
+		}
+		seen[kind] = true
+		rules = append(rules, templateResponseRule{InstructionKind: kind, Response: response})
+	}
+	return rules, nil
+}
+
+func applyTemplateResponseRules(items []compositionItem, rules []templateResponseRule) ([]compositionItem, error) {
+	if len(rules) == 0 {
+		return items, nil
+	}
+	byKind := make(map[string]map[string]any, len(rules))
+	for _, rule := range rules {
+		byKind[rule.InstructionKind] = rule.Response
+	}
+	out := make([]compositionItem, len(items))
+	copy(out, items)
+	for i := range out {
+		response, ok := byKind[out[i].Kind]
+		if !ok {
+			continue
+		}
+		body := mergeMaps(out[i].Body, map[string]any{"response": response})
+		if err := validateBody(out[i].Kind, body); err != nil {
+			return nil, fmt.Errorf("template response rule for %s on instruction %d: %w", out[i].Kind, out[i].InstructionID, err)
+		}
+		out[i].Body = body
+	}
+	return out, nil
+}
+
+func nullJSON(value any) sql.NullString {
+	if value == nil {
+		return sql.NullString{}
+	}
+	if rules, ok := value.([]templateResponseRule); ok && len(rules) == 0 {
+		return sql.NullString{}
+	}
+	return sql.NullString{Valid: true, String: mustJSON(value)}
 }
 
 func (a *App) toolTemplatesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -284,6 +413,13 @@ func (a *App) toolTemplatesSetInstructions(ctx *sdk.AppCtx, args map[string]any)
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	responseRules, responseRulesSupplied := []templateResponseRule(nil), false
+	if _, responseRulesSupplied = args["response_rules"]; responseRulesSupplied {
+		responseRules, err = templateResponseRulesArg(args)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	draftVID, err := ensureDraft(ctx.AppDB(), pid, id)
 	if err != nil {
@@ -305,6 +441,11 @@ func (a *App) toolTemplatesSetInstructions(ctx *sdk.AppCtx, args map[string]any)
 		}
 		if err := insertCompositionRowTx(tx, pid, draftVID, i, m); err != nil {
 			return nil, fmt.Errorf("instructions[%d]: %w", i, err)
+		}
+	}
+	if responseRulesSupplied {
+		if _, err := tx.Exec(`UPDATE template_versions SET response_rules_json=? WHERE id=?`, nullJSON(responseRules), draftVID); err != nil {
+			return nil, err
 		}
 	}
 	if _, err := tx.Exec(`UPDATE templates SET updated_at=CURRENT_TIMESTAMP WHERE id=?`, id); err != nil {
@@ -677,21 +818,21 @@ func ensureDraft(db *sql.DB, pid string, templateID int64) (int64, error) {
 	}
 	var titleTpl, defPriority sql.NullString
 	var defDeadlineHours, defAccessGraceDays sql.NullInt64
-	var skillsJSON, overridesJSON sql.NullString
+	var skillsJSON, overridesJSON, responseRulesJSON sql.NullString
 	_ = tx.QueryRow(
 		`SELECT title_template, default_deadline_hours, default_access_grace_days, default_skill_ids_json,
-		        default_priority, variable_overrides_json
+		        default_priority, variable_overrides_json, response_rules_json
 		 FROM template_versions WHERE id=?`,
 		currentVID.Int64,
-	).Scan(&titleTpl, &defDeadlineHours, &defAccessGraceDays, &skillsJSON, &defPriority, &overridesJSON)
+	).Scan(&titleTpl, &defDeadlineHours, &defAccessGraceDays, &skillsJSON, &defPriority, &overridesJSON, &responseRulesJSON)
 	res, err := tx.Exec(
 		`INSERT INTO template_versions
 		   (template_id, version, status, title_template,
 		    default_deadline_hours, default_access_grace_days, default_skill_ids_json,
-		    default_priority, variable_overrides_json)
-		 VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?)`,
+		    default_priority, variable_overrides_json, response_rules_json)
+		 VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?)`,
 		templateID, maxVersion+1, titleTpl, defDeadlineHours,
-		defAccessGraceDays, skillsJSON, defPriority, overridesJSON,
+		defAccessGraceDays, skillsJSON, defPriority, overridesJSON, responseRulesJSON,
 	)
 	if err != nil {
 		return 0, err
@@ -749,6 +890,10 @@ func getTemplate(db *sql.DB, pid string, id int64) (*template, error) {
 		if err != nil {
 			return nil, err
 		}
+		items, err = applyTemplateResponseRules(items, v.ResponseRules)
+		if err != nil {
+			return nil, err
+		}
 		v.Composition = items
 		derived := deriveFromComposition(items)
 		v.Derived = &derived
@@ -760,15 +905,15 @@ func getTemplate(db *sql.DB, pid string, id int64) (*template, error) {
 func getTemplateVersion(db *sql.DB, id int64) (*templateVersion, error) {
 	v := &templateVersion{}
 	var defDeadline, defAccessGrace sql.NullInt64
-	var skillsJSON, overridesJSON, defPriority, createdBy sql.NullString
+	var skillsJSON, overridesJSON, responseRulesJSON, defPriority, createdBy sql.NullString
 	err := db.QueryRow(
 		`SELECT id, template_id, version, status, title_template,
 		        default_deadline_hours, default_access_grace_days, default_skill_ids_json,
-		        default_priority, variable_overrides_json, created_by, created_at
+		        default_priority, variable_overrides_json, response_rules_json, created_by, created_at
 		 FROM template_versions WHERE id=?`,
 		id,
 	).Scan(&v.ID, &v.TemplateID, &v.Version, &v.Status, &v.TitleTemplate,
-		&defDeadline, &defAccessGrace, &skillsJSON, &defPriority, &overridesJSON, &createdBy, &v.CreatedAt)
+		&defDeadline, &defAccessGrace, &skillsJSON, &defPriority, &overridesJSON, &responseRulesJSON, &createdBy, &v.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -784,6 +929,7 @@ func getTemplateVersion(db *sql.DB, id int64) (*templateVersion, error) {
 	}
 	_ = parseJSON(skillsJSON.String, &v.DefaultSkillIDs)
 	_ = parseJSON(overridesJSON.String, &v.VariableOverrides)
+	_ = parseJSON(responseRulesJSON.String, &v.ResponseRules)
 	v.DefaultPriority = defPriority.String
 	v.CreatedBy = createdBy.String
 	return v, nil
@@ -957,16 +1103,44 @@ func (a *App) handleHTTPTemplateItem(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var body struct {
-				Instructions []map[string]any `json:"instructions"`
+				Instructions  []map[string]any  `json:"instructions"`
+				ResponseRules *[]map[string]any `json:"response_rules"`
 			}
 			if err := httpDecode(r, &body); err != nil {
 				httpErr(w, http.StatusBadRequest, "invalid json")
 				return
 			}
-			out, err := a.toolTemplatesSetInstructions(ctx, map[string]any{
+			toolArgs := map[string]any{
 				"_project_id":  pid,
 				"id":           id,
 				"instructions": toAnySlice(body.Instructions),
+			}
+			if body.ResponseRules != nil {
+				toolArgs["response_rules"] = toAnySlice(*body.ResponseRules)
+			}
+			out, err := a.toolTemplatesSetInstructions(ctx, toolArgs)
+			if err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			httpJSON(w, out)
+			return
+		case "response-rules":
+			if r.Method != http.MethodPut {
+				httpErr(w, http.StatusMethodNotAllowed, "PUT only")
+				return
+			}
+			var body struct {
+				ResponseRules []map[string]any `json:"response_rules"`
+			}
+			if err := httpDecode(r, &body); err != nil {
+				httpErr(w, http.StatusBadRequest, "invalid json")
+				return
+			}
+			out, err := a.toolTemplatesSetResponseRules(ctx, map[string]any{
+				"_project_id":    pid,
+				"id":             id,
+				"response_rules": toAnySlice(body.ResponseRules),
 			})
 			if err != nil {
 				httpErr(w, http.StatusBadRequest, err.Error())

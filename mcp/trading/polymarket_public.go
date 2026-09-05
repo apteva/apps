@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -70,7 +69,7 @@ func (p *polymarketPublic) ActiveMarkets(limit int) ([]*Mark, error) {
 	q := url.Values{}
 	q.Set("active", "true")
 	q.Set("closed", "false")
-	q.Set("order", "volume_24hr")
+	q.Set("order", "volume24hr")
 	q.Set("ascending", "false")
 	q.Set("limit", strconv.Itoa(limit))
 	raw, err := p.fetch(p.base + "/markets?" + q.Encode())
@@ -95,21 +94,9 @@ func (p *polymarketPublic) ActiveMarkets(limit int) ([]*Mark, error) {
 }
 
 func (p *polymarketPublic) fetch(u string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "apteva-trading/0.2")
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("polymarketPublic: HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return publicGET(context.Background(), p.client, "polymarketPublic", u, 1<<20, map[string]string{
+		"Accept": "application/json", "User-Agent": "apteva-trading/0.4",
+	})
 }
 
 // gammaMarket — the subset of gamma-api's market object we read.
@@ -125,6 +112,7 @@ type gammaMarket struct {
 	Active        bool            `json:"active"`
 	Closed        bool            `json:"closed"`
 	EndDate       string          `json:"endDate"`
+	UpdatedAt     string          `json:"updatedAt"`
 }
 
 func (m gammaMarket) toMark(internalSymbol string) (*Mark, error) {
@@ -148,13 +136,29 @@ func (m gammaMarket) toMark(internalSymbol string) (*Mark, error) {
 	if err != nil {
 		return nil, fmt.Errorf("polymarketPublic: no price: %w", err)
 	}
-	mk := &Mark{
-		Symbol:     internalSymbol,
-		AssetClass: "polymarket",
-		Price:      yes,
-		NoPrice:    &no,
-		MarkedAt:   time.Now().UTC().Format(time.RFC3339),
+	receivedAt := time.Now().UTC()
+	markedAt := receivedAt
+	timestampKind := "received"
+	if updatedAt, err := time.Parse(time.RFC3339Nano, m.UpdatedAt); err == nil {
+		markedAt = updatedAt.UTC()
+		timestampKind = "exchange"
 	}
+	mk := &Mark{
+		Symbol:        internalSymbol,
+		AssetClass:    "polymarket",
+		Price:         yes,
+		NoPrice:       &no,
+		MarkedAt:      markedAt.Format(time.RFC3339Nano),
+		TimestampKind: timestampKind,
+		Source:        "polymarket-public",
+		VolumeUnit:    "quote_currency",
+	}
+	mk.Instrument = defaultInstrument(internalSymbol, "polymarket", "polymarket-public", receivedAt)
+	mk.Instrument.ProviderSymbol = m.Slug
+	mk.Instrument.Name = m.Question
+	mk.Instrument.Active = m.Active && !m.Closed
+	mk.Instrument.ExpiresAt = m.EndDate
+	mk.Instrument.QuoteCurrency = "USDC"
 	if v, err := parseGammaNumber(m.Volume24Hr); err == nil && v > 0 {
 		mk.Volume24h = &v
 	}

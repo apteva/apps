@@ -40,12 +40,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.25
+version: 0.4.41
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
   integrations: Hetzner Cloud, DigitalOcean, Contabo, Vultr, AWS EC2,
-  Scaleway (virtual instances and Apple silicon Mac minis), Huawei Cloud,
+  Scaleway (virtual instances, Elastic Metal, Dedibox, and Apple silicon Mac minis), Huawei Cloud,
   Linode, OVHcloud, and RunPod. Foundation layer
   consumed by Live Link, Deploy, Backup, Containers via cross-app
   calls.
@@ -58,27 +58,53 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.execute
+    - platform.connections.read_public_config
   integrations:
     - role: provider
       kind: integration
+      mode: multiple
       required: false
       compatible_slugs: [hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
-      label: VPS provider
+      label: VPS providers
       hint: |
-        Optional — local instance always available. Bind a VPS integration
+        Optional — local instance always available. Bind one or more VPS integrations
         to provision remote instances through the generic Instances interface.
         Every compatible provider has catalog, provisioning, readiness, and
         recovery adapters. Immediate destroy is available except on Contabo,
-        whose API only schedules contract cancellation. Scaleway macOS hosts
-        have a mandatory 24-hour minimum allocation before Destroy is enabled.
+        whose API only schedules contract cancellation. Scaleway Dedibox orders
+        physical hardware and installs Linux after delivery; macOS hosts have a
+        mandatory 24-hour minimum allocation before Destroy is enabled.
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: instance_create,       description: "Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Contabo, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Args: name, provider?, region?, size?, image?, tags?." }
+    - { name: instance_list_providers, description: "List bound VPS provider connections and identify the configured default provider." }
+    - { name: instance_create,       description: "Provision a new instance via a bound VPS provider. Args: name, provider? (configured default when omitted), region?, size?, image?, tags?." }
+    - { name: instance_storage_capabilities, description: "Describe boot and data-volume capabilities for a bound provider." }
+    - { name: instance_list_storage_types, description: "List provider-neutral storage classes and tiers with native mappings." }
+    - { name: instance_volume_create, description: "Create a managed data volume and optionally attach and prepare it inside the guest." }
+    - { name: instance_volume_get, description: "Fetch one managed volume." }
+    - { name: instance_volume_list, description: "List managed volumes." }
+    - { name: instance_volume_attach, description: "Attach an available managed volume to an instance and optionally prepare it inside the guest." }
+    - { name: instance_volume_prepare, description: "Safely format-if-blank, persist, mount, and verify an attached Linux data volume over SSH." }
+    - { name: instance_volume_detach, description: "Detach a managed data volume without deleting it." }
+    - { name: instance_volume_resize, description: "Increase the size of a managed volume." }
+    - { name: instance_volume_delete, description: "Permanently delete a detached managed data volume with explicit confirmation." }
+    - { name: object_storage_list_providers, description: "List bound providers capable of provisioning object storage." }
+    - { name: object_storage_list_plans, description: "List object-storage regions/clusters and plans/tiers." }
+    - { name: object_storage_preflight, description: "Read-only credential, project, IAM, region, and optional bucket-name availability checks before object-storage creation." }
+    - { name: object_storage_create, description: "Provision object storage and return its S3 credentials once without creating a Connection." }
+    - { name: object_storage_get, description: "Fetch one object-storage resource without its secret." }
+    - { name: object_storage_list, description: "List object-storage resources tracked by Instances." }
+    - { name: object_storage_rotate_credentials, description: "Rotate credentials and return the new secret once." }
+    - { name: object_storage_destroy, description: "Permanently delete an object-storage resource with explicit confirmation." }
+    - { name: instance_register,     description: "Register an externally managed SSH host such as a Mac. Generates a dedicated SSH key. Args: name, ssh_host, ssh_user, ssh_port?, tags_json?." }
     - { name: instance_get,          description: "Fetch one instance by id." }
     - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
-    - { name: instance_destroy,      description: "Terminate the provider-managed instance and remove its row where supported (refused for local id 0 and Contabo). Args: id." }
+    - { name: instance_destroy,      description: "Terminate a managed instance and remove its row, or forget an external host without modifying it (refused for local id 0 and Contabo). Args: id." }
+    - { name: instance_compare_provider, description: "Read provider state and compare it with the tracked server, IP, and volume inventory without making changes." }
+    - { name: instance_provider_inventory, description: "Read full provider resource inventory, including Scaleway Instances, Elastic Metal servers, Flexible IPs, and tracked storage." }
+    - { name: instance_storage_benchmark, description: "Run an optional bounded 256 MiB post-provision write benchmark and save its result. Args: id, target_path?." }
     - { name: instance_upgrade,      description: "In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today. Args: id, size, upgrade_disk?. Always waits for SSH readiness." }
     - { name: instance_run_command,  description: "Execute a shell command. Local: exec; remote: SSH. Args: id, cmd, timeout_s?." }
     - { name: instance_upload_file,  description: "Write a file. Local: filesystem (path-allowlisted); remote: SCP. Args: id, path, content_b64." }
@@ -159,7 +185,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.25
+    ref: instances/v0.4.41
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -212,6 +238,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	go reconcileAPIProviderProvisioning(ctx)
 	go reconcileHetznerUpgrading(ctx)
 	go reconcileDestroying(ctx)
+	go reconcileTrackedProviderState(ctx)
 
 	return nil
 }
@@ -233,12 +260,20 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/api/instances", Handler: a.handleInstancesCollection},
 		{Pattern: "/api/instances/", Handler: a.handleInstanceItem},
+		{Pattern: "/api/instances-providers", Handler: a.handleListProviders},
 		// Live provider catalog. Sister surface to the MCP tools so the
 		// panel doesn't need an MCP client; ?provider= defaults to
 		// the bound provider. Returns the same shape as the MCP tools wrap.
 		{Pattern: "/api/instances-server-types", Handler: a.handleListServerTypes},
 		{Pattern: "/api/instances-locations", Handler: a.handleListLocations},
 		{Pattern: "/api/instances-images", Handler: a.handleListImages},
+		{Pattern: "/api/instances-storage-capabilities", Handler: a.handleStorageCapabilities},
+		{Pattern: "/api/instance-volumes", Handler: a.handleVolumesCollection},
+		{Pattern: "/api/instance-volumes/", Handler: a.handleVolumeItem},
+		{Pattern: "/api/object-storage-providers", Handler: a.handleObjectStorageProviders},
+		{Pattern: "/api/object-storage-plans", Handler: a.handleObjectStoragePlans},
+		{Pattern: "/api/object-storage", Handler: a.handleObjectStoragesCollection},
+		{Pattern: "/api/object-storage/", Handler: a.handleObjectStorageItem},
 	}
 }
 

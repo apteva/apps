@@ -420,7 +420,7 @@ func rmsDBFS(rms float64) float64 {
 func logAudioFrontendDiagnostics(logger audioDiagnosticsLogger, frontend *carrierAudioFrontend, row *callRow, provider, codec string, maxQueuedMS, droppedStaleMS int) {
 	snapshot := frontend.snapshot()
 	processing := "voice_frontend"
-	if row.PeerKind == peerKindHuman {
+	if row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal {
 		processing = "passthrough"
 	}
 	logger.Info("carrier audio diagnostics",

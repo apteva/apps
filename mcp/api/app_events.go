@@ -2,11 +2,13 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -26,31 +28,40 @@ const (
 )
 
 type appEventsConfig struct {
-	Topics     []string       `json:"topics"`
-	Match      map[string]any `json:"match,omitempty"`
-	Output     map[string]any `json:"output"`
-	CoalesceMS int            `json:"coalesce_ms,omitempty"`
+	Topics       []string       `json:"topics"`
+	Match        map[string]any `json:"match,omitempty"`
+	Output       map[string]any `json:"output"`
+	CoalesceMS   int            `json:"coalesce_ms"`
+	cacheKey     string
+	staticOutput []byte
 }
 
 type appBusEvent struct {
-	Topic     string          `json:"topic"`
-	App       string          `json:"app"`
-	ProjectID string          `json:"project_id"`
-	InstallID int64           `json:"install_id"`
-	Seq       uint64          `json:"seq"`
-	Time      string          `json:"time"`
-	Data      json.RawMessage `json:"data"`
+	Topic      string          `json:"topic"`
+	App        string          `json:"app"`
+	ProjectID  string          `json:"project_id"`
+	InstallID  int64           `json:"install_id"`
+	Seq        uint64          `json:"seq"`
+	Time       string          `json:"time"`
+	Data       json.RawMessage `json:"data"`
+	projection *eventProjectionMemo
 }
 
 func parseAppEventsConfig(raw string) (*appEventsConfig, error) {
+	if len(raw) > maxPolicyBytes || !json.Valid([]byte(defaultJSON(raw))) {
+		return nil, errors.New("events must be valid JSON within 64 KiB")
+	}
 	var cfg appEventsConfig
-	if err := json.Unmarshal([]byte(defaultJSON(raw)), &cfg); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(defaultJSON(raw)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&cfg); err != nil {
 		return nil, errors.New("events must be a JSON object")
 	}
 	if len(cfg.Topics) == 0 || len(cfg.Topics) > 32 {
 		return nil, errors.New("events.topics must contain 1 to 32 topic patterns")
 	}
-	for _, topic := range cfg.Topics {
+	for i, topic := range cfg.Topics {
+		cfg.Topics[i] = strings.TrimSpace(topic)
 		if !validEventTopicPattern(topic) {
 			return nil, fmt.Errorf("invalid event topic pattern %q", topic)
 		}
@@ -75,11 +86,17 @@ func parseAppEventsConfig(raw string) (*appEventsConfig, error) {
 	if err := validateEventOutput(cfg.Output, cfg.Match, nil); err != nil {
 		return nil, err
 	}
-	if cfg.CoalesceMS == 0 {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(raw), &fields)
+	if _, provided := fields["coalesce_ms"]; !provided {
 		cfg.CoalesceMS = int(defaultEventCoalesce / time.Millisecond)
 	}
 	if cfg.CoalesceMS < 0 || cfg.CoalesceMS > 5000 {
 		return nil, errors.New("events.coalesce_ms must be between 0 and 5000")
+	}
+	cfg.cacheKey = raw
+	if !outputHasProjection(cfg.Output) {
+		cfg.staticOutput, _ = json.Marshal(cfg.Output)
 	}
 	return &cfg, nil
 }
@@ -165,7 +182,7 @@ func validEventTopicPattern(topic string) bool {
 
 func isJSONScalar(v any) bool {
 	switch v.(type) {
-	case nil, bool, float64, string:
+	case nil, bool, float64, json.Number, string:
 		return true
 	default:
 		return false
@@ -177,7 +194,35 @@ func eventMatches(cfg *appEventsConfig, ev appBusEvent) bool {
 	return ok
 }
 
+type eventProjectionResult struct {
+	data    []byte
+	matches bool
+}
+type eventProjectionMemo struct {
+	mu      sync.Mutex
+	results map[string]eventProjectionResult
+}
+
 func projectAppEvent(cfg *appEventsConfig, ev appBusEvent) ([]byte, bool) {
+	if ev.projection == nil {
+		return renderAppEvent(cfg, ev)
+	}
+	m := ev.projection
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if found, ok := m.results[cfg.cacheKey]; ok {
+		return found.data, found.matches
+	}
+	data, ok := renderAppEvent(cfg, ev)
+	if m.results == nil {
+		m.results = make(map[string]eventProjectionResult)
+	}
+	if len(m.results) < 128 {
+		m.results[cfg.cacheKey] = eventProjectionResult{data, ok}
+	}
+	return data, ok
+}
+func renderAppEvent(cfg *appEventsConfig, ev appBusEvent) ([]byte, bool) {
 	topicOK := false
 	for _, pattern := range cfg.Topics {
 		if pattern == "*" || pattern == ev.Topic ||
@@ -191,7 +236,9 @@ func projectAppEvent(cfg *appEventsConfig, ev appBusEvent) ([]byte, bool) {
 	}
 	var data any
 	if len(cfg.Match) > 0 || outputHasProjection(cfg.Output) {
-		if json.Unmarshal(ev.Data, &data) != nil {
+		decoder := json.NewDecoder(bytes.NewReader(ev.Data))
+		decoder.UseNumber()
+		if decoder.Decode(&data) != nil {
 			return nil, false
 		}
 	}
@@ -200,6 +247,9 @@ func projectAppEvent(cfg *appEventsConfig, ev appBusEvent) ([]byte, bool) {
 		if !ok || !eventMatchConditionMatches(got, want) {
 			return nil, false
 		}
+	}
+	if cfg.staticOutput != nil {
+		return cfg.staticOutput, true
 	}
 	projected, ok := projectEventOutput(cfg.Output, data)
 	if !ok {
@@ -214,7 +264,7 @@ func projectAppEvent(cfg *appEventsConfig, ev appBusEvent) ([]byte, bool) {
 
 func eventMatchConditionMatches(got, condition any) bool {
 	if isJSONScalar(condition) {
-		return reflect.DeepEqual(got, condition)
+		return equalEventScalar(got, condition)
 	}
 	operator, ok := condition.(map[string]any)
 	if !ok {
@@ -225,7 +275,7 @@ func eventMatchConditionMatches(got, condition any) bool {
 		return false
 	}
 	for _, want := range values {
-		if reflect.DeepEqual(got, want) {
+		if equalEventScalar(got, want) {
 			return true
 		}
 	}
@@ -301,6 +351,18 @@ func lookupJSONPath(value any, path []string) (any, bool) {
 	return cur, true
 }
 
+func equalEventScalar(a, b any) bool {
+	if x, ok := a.(json.Number); ok {
+		if y, ok := b.(json.Number); ok {
+			// big.Rat preserves exact integer identifiers while making 1 and 1.0 equal.
+			xr, xok := new(big.Rat).SetString(string(x))
+			yr, yok := new(big.Rat).SetString(string(y))
+			return xok && yok && xr.Cmp(yr) == 0
+		}
+	}
+	return reflect.DeepEqual(a, b)
+}
+
 type appEventHubManager struct {
 	mu     sync.Mutex
 	hubs   map[string]*appEventHub
@@ -323,8 +385,9 @@ type appEventHub struct {
 	nextSubID   uint64
 	ring        []appBusEvent
 	lastSeq     uint64
-	firstResult chan error
-	firstOnce   sync.Once
+	ringHead    int
+	ready       chan struct{}
+	firstErr    error
 }
 
 func newAppEventHubManager(base, token string, client *http.Client) *appEventHubManager {
@@ -338,7 +401,7 @@ func newAppEventHubManager(base, token string, client *http.Client) *appEventHub
 
 func (m *appEventHubManager) subscribe(ctx context.Context, projectID, sourceApp string, since uint64) (<-chan appBusEvent, []appBusEvent, func(), error) {
 	if m == nil || m.base == "" || m.token == "" {
-		return nil, nil, nil, errors.New("APTEVA_GATEWAY_URL/APTEVA_OUTBOUND_TOKEN required for app_events targets")
+		return nil, nil, nil, errors.New("gateway configuration required for app_events")
 	}
 	key := projectID + "\x00" + sourceApp
 	m.mu.Lock()
@@ -347,25 +410,21 @@ func (m *appEventHubManager) subscribe(ctx context.Context, projectID, sourceApp
 		return nil, nil, nil, errors.New("app event hub is closed")
 	}
 	h := m.hubs[key]
-	created := false
-	if h == nil {
+	created := h == nil
+	if created {
 		hubCtx, cancel := context.WithCancel(context.Background())
-		h = &appEventHub{
-			manager: m, key: key, projectID: projectID, sourceApp: sourceApp,
-			ctx: hubCtx, cancel: cancel, subscribers: make(map[uint64]chan appBusEvent),
-			firstResult: make(chan error, 1), lastSeq: since,
-		}
+		h = &appEventHub{manager: m, key: key, projectID: projectID, sourceApp: sourceApp, ctx: hubCtx, cancel: cancel, subscribers: make(map[uint64]chan appBusEvent), ready: make(chan struct{})}
 		m.hubs[key] = h
-		created = true
 	}
 	h.mu.Lock()
 	h.nextSubID++
-	subID := h.nextSubID
+	id := h.nextSubID
 	ch := make(chan appBusEvent, 64)
-	h.subscribers[subID] = ch
-	replay := make([]appBusEvent, 0)
-	if since > 0 {
-		for _, ev := range h.ring {
+	h.subscribers[id] = ch
+	var replay []appBusEvent
+	if since > 0 && since <= h.lastSeq {
+		for i := 0; i < len(h.ring); i++ {
+			ev := h.ring[(h.ringHead+i)%len(h.ring)]
 			if ev.Seq > since {
 				replay = append(replay, ev)
 			}
@@ -373,22 +432,21 @@ func (m *appEventHubManager) subscribe(ctx context.Context, projectID, sourceApp
 	}
 	h.mu.Unlock()
 	m.mu.Unlock()
-
 	if created {
 		go h.run()
-		select {
-		case err := <-h.firstResult:
-			if err != nil {
-				h.unsubscribe(subID)
-				return nil, nil, nil, err
-			}
-		case <-ctx.Done():
-			h.unsubscribe(subID)
-			return nil, nil, nil, ctx.Err()
+	}
+	select {
+	case <-h.ready:
+		if h.firstErr != nil {
+			h.unsubscribe(id)
+			return nil, nil, nil, h.firstErr
 		}
+	case <-ctx.Done():
+		h.unsubscribe(id)
+		return nil, nil, nil, ctx.Err()
 	}
 	var once sync.Once
-	return ch, replay, func() { once.Do(func() { h.unsubscribe(subID) }) }, nil
+	return ch, replay, func() { once.Do(func() { h.unsubscribe(id) }) }, nil
 }
 
 func (m *appEventHubManager) close() {
@@ -419,48 +477,52 @@ func (h *appEventHub) shutdown() {
 }
 
 func (h *appEventHub) unsubscribe(id uint64) {
+	// Do not hold hub.mu while acquiring manager.mu. Membership is rechecked
+	// while both locks are held, closing the last-leaver/new-joiner gap.
 	h.mu.Lock()
-	ch, ok := h.subscribers[id]
-	if ok {
+	if ch, ok := h.subscribers[id]; ok {
 		delete(h.subscribers, id)
 		close(ch)
 	}
-	empty := len(h.subscribers) == 0
 	h.mu.Unlock()
-	if !empty {
-		return
-	}
 	h.manager.mu.Lock()
-	if h.manager.hubs[h.key] == h {
+	h.mu.Lock()
+	if len(h.subscribers) == 0 && h.manager.hubs[h.key] == h {
 		delete(h.manager.hubs, h.key)
 		h.cancel()
 	}
+	h.mu.Unlock()
 	h.manager.mu.Unlock()
 }
-
-func (h *appEventHub) run() {
-	first := true
-	for {
-		resp, err := h.openStream()
-		if first {
-			h.firstOnce.Do(func() { h.firstResult <- err })
-			first = false
+func (h *appEventHub) invalidate() {
+	if h.manager != nil {
+		h.manager.mu.Lock()
+		if h.manager.hubs[h.key] == h {
+			delete(h.manager.hubs, h.key)
 		}
-		if err == nil {
-			err = h.readStream(resp.Body)
-			_ = resp.Body.Close()
-		}
-		if h.ctx.Err() != nil {
-			return
-		}
-		timer := time.NewTimer(time.Second)
-		select {
-		case <-h.ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-		}
+		h.manager.mu.Unlock()
 	}
+	if h.cancel != nil {
+		h.cancel()
+	}
+	h.mu.Lock()
+	for id, ch := range h.subscribers {
+		delete(h.subscribers, id)
+		close(ch)
+	}
+	h.mu.Unlock()
+}
+func (h *appEventHub) run() {
+	resp, err := h.openStream()
+	h.firstErr = err
+	close(h.ready)
+	if err == nil {
+		_ = h.readStream(resp.Body)
+		_ = resp.Body.Close()
+	}
+	// An internal gap must not look like a continuous stream. Clients reconnect
+	// and receive ready/revalidate before consuming fresh events.
+	h.invalidate()
 }
 
 func (h *appEventHub) openStream() (*http.Response, error) {
@@ -478,14 +540,21 @@ func (h *appEventHub) openStream() (*http.Response, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+h.manager.token)
 	req.Header.Set("Accept", "text/event-stream")
-	resp, err := h.manager.client.Do(req)
+	client := *h.manager.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	deadline := time.AfterFunc(10*time.Second, h.cancel)
+	resp, err := client.Do(req)
+	deadline.Stop()
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("AppBus subscription rejected: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("AppBus subscription rejected: HTTP %d", resp.StatusCode)
+	}
+	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		resp.Body.Close()
+		return nil, errors.New("AppBus did not return an event stream")
 	}
 	return resp, nil
 }
@@ -510,7 +579,10 @@ func (h *appEventHub) readStream(body io.Reader) error {
 			if data.Len() > 0 {
 				data.WriteByte('\n')
 			}
-			data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			if data.Len()+len(line) > 512*1024 {
+				return errors.New("AppBus frame too large")
+			}
+			data.WriteString(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
 		}
 	}
 	return scanner.Err()
@@ -518,24 +590,36 @@ func (h *appEventHub) readStream(body io.Reader) error {
 
 func (h *appEventHub) broadcast(ev appBusEvent) {
 	h.mu.Lock()
-	if ev.Seq <= h.lastSeq {
+	if ev.Seq < h.lastSeq {
+		h.mu.Unlock()
+		h.invalidate()
+		return
+	}
+	if ev.Seq == h.lastSeq {
 		h.mu.Unlock()
 		return
 	}
 	h.lastSeq = ev.Seq
-	h.ring = append(h.ring, ev)
-	if len(h.ring) > eventReplayCapacity {
-		h.ring = append([]appBusEvent(nil), h.ring[len(h.ring)-eventReplayCapacity:]...)
+	ev.projection = &eventProjectionMemo{}
+	if len(h.ring) < eventReplayCapacity {
+		h.ring = append(h.ring, ev)
+	} else {
+		h.ring[h.ringHead] = ev
+		h.ringHead = (h.ringHead + 1) % eventReplayCapacity
 	}
-	for _, ch := range h.subscribers {
+	for id, ch := range h.subscribers {
 		select {
 		case ch <- ev:
 		default:
-			// Invalidations are level-triggered. A slow consumer will still
-			// receive a later event or reconnect and perform its initial reload.
+			delete(h.subscribers, id)
+			close(ch)
 		}
 	}
+	empty := len(h.subscribers) == 0
 	h.mu.Unlock()
+	if empty && h.manager != nil {
+		h.unsubscribe(0)
+	}
 }
 
 func (a *App) dispatchAppEvents(w http.ResponseWriter, r *http.Request, api *API, route *APIRoute) (int, error) {
@@ -565,8 +649,13 @@ func (a *App) dispatchAppEvents(w http.ResponseWriter, r *http.Request, api *API
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(15 * time.Second))
+	defer http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, "event: ready\ndata: {\"type\":\"ready\",\"revalidate\":true}\n\n")
+	_, readyErr := io.WriteString(w, "event: ready\ndata: {\"type\":\"ready\",\"revalidate\":true}\n\n")
+	if readyErr != nil {
+		return http.StatusOK, readyErr
+	}
 	flusher.Flush()
 
 	eventName := "invalidate"
@@ -643,6 +732,7 @@ func (a *App) dispatchAppEvents(w http.ResponseWriter, r *http.Request, api *API
 		case <-r.Context().Done():
 			return http.StatusOK, nil
 		case <-heartbeat.C:
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(15 * time.Second))
 			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
 				return http.StatusOK, err
 			}
@@ -686,6 +776,9 @@ func validSSEEventName(name string) bool {
 }
 
 func writeProjectedEvent(w io.Writer, flusher http.Flusher, eventName string, output []byte, seq uint64) error {
+	if writer, ok := w.(http.ResponseWriter); ok {
+		_ = http.NewResponseController(writer).SetWriteDeadline(time.Now().Add(15 * time.Second))
+	}
 	if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", seq, eventName, output); err != nil {
 		return err
 	}

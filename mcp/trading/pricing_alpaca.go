@@ -11,6 +11,7 @@ package main
 // If neither real provider succeeds, the quote remains unavailable.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -33,13 +34,19 @@ type alpacaMarketData struct {
 	connID  int64
 	connAt  time.Time
 	connTTL time.Duration
+	feed    string
 }
 
-func newAlpacaMarketData(platform sdk.PlatformClient, logger sdk.Logger) *alpacaMarketData {
+func newAlpacaMarketData(platform sdk.PlatformClient, logger sdk.Logger, feed string) *alpacaMarketData {
+	feed = strings.ToLower(strings.TrimSpace(feed))
+	if feed == "" {
+		feed = "auto"
+	}
 	return &alpacaMarketData{
 		platform: platform,
 		logger:   logger,
 		connTTL:  60 * time.Second,
+		feed:     feed,
 	}
 }
 
@@ -95,14 +102,24 @@ func (a *alpacaMarketData) UniverseBatch(symbols []string) ([]*Mark, error) {
 	args := map[string]any{
 		"symbols": strings.Join(symbols, ","),
 	}
-	res, err := a.platform.ExecuteIntegrationTool(connID, "stock_snapshots", args)
+	if a.feed != "auto" {
+		args["feed"] = a.feed
+	}
+	res, err := executeAlpacaToolWithRetry(context.Background(), a.platform, connID, "stock_snapshots", args)
 	if err != nil {
 		return nil, err
 	}
 	if res == nil || !res.Success {
 		return nil, fmt.Errorf("stock_snapshots failed: %s", string(safeBytes(res)))
 	}
-	return parseAlpacaSnapshots(res.Data)
+	marks, err := parseAlpacaSnapshots(res.Data)
+	if err != nil {
+		return nil, err
+	}
+	for _, mark := range marks {
+		mark.Feed = a.feed
+	}
+	return marks, nil
 }
 
 // Quote — single-symbol convenience over UniverseBatch.
@@ -133,7 +150,15 @@ func parseAlpacaSnapshots(raw json.RawMessage) ([]*Mark, error) {
 	}
 	type alpacaTrade struct {
 		Price float64 `json:"p"`
+		Size  float64 `json:"s"`
 		Time  string  `json:"t"`
+	}
+	type alpacaQuote struct {
+		BidPrice float64 `json:"bp"`
+		AskPrice float64 `json:"ap"`
+		BidSize  float64 `json:"bs"`
+		AskSize  float64 `json:"as"`
+		Time     string  `json:"t"`
 	}
 	type alpacaBar struct {
 		Open   float64 `json:"o"`
@@ -145,6 +170,7 @@ func parseAlpacaSnapshots(raw json.RawMessage) ([]*Mark, error) {
 	}
 	type alpacaSnap struct {
 		LatestTrade  *alpacaTrade `json:"latestTrade"`
+		LatestQuote  *alpacaQuote `json:"latestQuote"`
 		MinuteBar    *alpacaBar   `json:"minuteBar"`
 		DailyBar     *alpacaBar   `json:"dailyBar"`
 		PrevDailyBar *alpacaBar   `json:"prevDailyBar"`
@@ -182,11 +208,41 @@ func parseAlpacaSnapshots(raw json.RawMessage) ([]*Mark, error) {
 			continue
 		}
 		mk := &Mark{
-			Symbol:     strings.ToUpper(sym),
-			AssetClass: inferAssetClass(sym),
-			Price:      price,
-			MarkedAt:   markedAt,
+			Symbol:        strings.ToUpper(sym),
+			AssetClass:    inferAssetClass(sym),
+			Price:         price,
+			MarkedAt:      markedAt,
+			TimestampKind: "exchange",
+			Source:        alpacaMarketDataSlug,
+			VolumeUnit:    "shares",
+			Feed:          "auto",
 		}
+		if s.LatestTrade != nil {
+			if s.LatestTrade.Price > 0 {
+				mk.LastTradePrice = ptr(s.LatestTrade.Price)
+			}
+			if s.LatestTrade.Size > 0 {
+				mk.LastTradeSize = ptr(s.LatestTrade.Size)
+			}
+		}
+		if s.LatestQuote != nil {
+			if s.LatestQuote.BidPrice > 0 {
+				mk.BidPrice = ptr(s.LatestQuote.BidPrice)
+			}
+			if s.LatestQuote.AskPrice > 0 {
+				mk.AskPrice = ptr(s.LatestQuote.AskPrice)
+			}
+			if s.LatestQuote.BidSize > 0 {
+				mk.BidSize = ptr(s.LatestQuote.BidSize)
+			}
+			if s.LatestQuote.AskSize > 0 {
+				mk.AskSize = ptr(s.LatestQuote.AskSize)
+			}
+			mk.QuoteAt = s.LatestQuote.Time
+		}
+		mk.Instrument = defaultInstrument(sym, mk.AssetClass, alpacaMarketDataSlug, time.Now().UTC())
+		mk.Instrument.ProviderSymbol = strings.ToUpper(sym)
+		mk.Instrument.Exchange = "ALPACA_US"
 		if s.PrevDailyBar != nil && s.PrevDailyBar.Close > 0 {
 			pc := s.PrevDailyBar.Close
 			mk.PrevClose = &pc
@@ -198,6 +254,181 @@ func parseAlpacaSnapshots(raw json.RawMessage) ([]*Mark, error) {
 		out = append(out, mk)
 	}
 	return out, nil
+}
+
+type alpacaBarsEnvelope struct {
+	Bars          map[string][]alpacaWireBar `json:"bars"`
+	NextPageToken string                     `json:"next_page_token"`
+}
+
+type alpacaWireBar struct {
+	Time       string  `json:"t"`
+	Open       float64 `json:"o"`
+	High       float64 `json:"h"`
+	Low        float64 `json:"l"`
+	Close      float64 `json:"c"`
+	Volume     float64 `json:"v"`
+	TradeCount int64   `json:"n"`
+	VWAP       float64 `json:"vw"`
+}
+
+func (a *alpacaMarketData) Bars(symbol, rng string) ([]Bar, error) {
+	timeframe, start := alpacaRange(strings.ToUpper(strings.TrimSpace(rng)), time.Now().UTC())
+	return a.BacktestBarsContext(context.Background(), symbol, timeframe, start, time.Now().UTC(), 10000)
+}
+
+func alpacaRange(rng string, now time.Time) (string, time.Time) {
+	switch rng {
+	case "5D":
+		return "30m", now.AddDate(0, 0, -7)
+	case "1M":
+		return "4h", now.AddDate(0, -1, 0)
+	case "3M":
+		return "4h", now.AddDate(0, -3, 0)
+	case "1Y":
+		return "1d", now.AddDate(-1, 0, 0)
+	case "ALL":
+		return "1w", now.AddDate(-10, 0, 0)
+	default:
+		return "5m", now.AddDate(0, 0, -1)
+	}
+}
+
+func alpacaTimeframe(interval string) (string, bool, error) {
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "5m":
+		return "5Min", false, nil
+	case "15m":
+		return "15Min", false, nil
+	case "30m":
+		return "30Min", false, nil
+	case "1h":
+		return "1Hour", false, nil
+	case "4h":
+		return "1Hour", true, nil
+	case "1d":
+		return "1Day", false, nil
+	case "1w":
+		return "1Week", false, nil
+	default:
+		return "", false, fmt.Errorf("alpaca: unsupported interval %q", interval)
+	}
+}
+
+func (a *alpacaMarketData) BacktestBarsContext(ctx context.Context, symbol, interval string, start, end time.Time, limit int) ([]Bar, error) {
+	return a.BacktestBarsContextAdjustment(ctx, symbol, interval, start, end, limit, "provider_adjusted")
+}
+
+func (a *alpacaMarketData) BacktestBarsContextAdjustment(ctx context.Context, symbol, interval string, start, end time.Time, limit int, adjustmentMode string) ([]Bar, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	connID, ok := a.resolveConnection()
+	if !ok {
+		return nil, fmt.Errorf("alpaca-market-data not bound")
+	}
+	timeframe, aggregateFourHour, err := alpacaTimeframe(interval)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 500000 {
+		return nil, fmt.Errorf("alpaca: invalid bar limit %d", limit)
+	}
+	canonical := strings.ToUpper(strings.TrimSpace(symbol))
+	pageToken := ""
+	rawLimit := limit
+	if aggregateFourHour {
+		rawLimit = min(limit*4, 500000)
+	}
+	out := make([]Bar, 0, min(rawLimit, 10000))
+	for len(out) < rawLimit {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		pageLimit := min(10000, rawLimit-len(out))
+		adjustment := "all"
+		switch strings.ToLower(strings.TrimSpace(adjustmentMode)) {
+		case "raw":
+			adjustment = "raw"
+		case "split_adjusted", "price_return":
+			adjustment = "split"
+		case "total_return", "provider_adjusted", "":
+			adjustment = "all"
+		default:
+			return nil, fmt.Errorf("alpaca: unsupported adjustment mode %q", adjustmentMode)
+		}
+		args := map[string]any{
+			"symbols": canonical, "timeframe": timeframe,
+			"start": start.UTC().Format(time.RFC3339), "end": end.UTC().Format(time.RFC3339),
+			"limit": pageLimit, "adjustment": adjustment, "sort": "asc",
+		}
+		if a.feed != "auto" {
+			args["feed"] = a.feed
+		}
+		if pageToken != "" {
+			args["page_token"] = pageToken
+		}
+		res, callErr := executeAlpacaToolWithRetry(ctx, a.platform, connID, "stock_bars", args)
+		if callErr != nil {
+			return nil, callErr
+		}
+		if res == nil || !res.Success {
+			return nil, fmt.Errorf("stock_bars failed: %s", string(safeBytes(res)))
+		}
+		var envelope alpacaBarsEnvelope
+		if err := json.Unmarshal(res.Data, &envelope); err != nil {
+			return nil, fmt.Errorf("decode alpaca bars: %w", err)
+		}
+		for _, raw := range envelope.Bars[canonical] {
+			at, err := time.Parse(time.RFC3339Nano, raw.Time)
+			if err != nil {
+				return nil, fmt.Errorf("alpaca bar timestamp: %w", err)
+			}
+			out = append(out, Bar{T: at.Unix(), O: raw.Open, H: raw.High, L: raw.Low, C: raw.Close, V: raw.Volume})
+		}
+		if envelope.NextPageToken == "" || envelope.NextPageToken == pageToken {
+			break
+		}
+		pageToken = envelope.NextPageToken
+	}
+	normalized, err := normalizeBars(canonical, alpacaMarketDataSlug, out)
+	if err != nil {
+		return nil, err
+	}
+	if aggregateFourHour {
+		normalized = aggregateYahooFourHourBars(normalized)
+	}
+	if len(normalized) > limit {
+		normalized = normalized[len(normalized)-limit:]
+	}
+	return normalized, nil
+}
+
+func executeAlpacaToolWithRetry(ctx context.Context, platform sdk.PlatformClient, connID int64, tool string, args map[string]any) (*sdk.ExecuteResult, error) {
+	var lastResult *sdk.ExecuteResult
+	var lastErr error
+	backoff := 150 * time.Millisecond
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		lastResult, lastErr = platform.ExecuteIntegrationTool(connID, tool, args)
+		if lastErr == nil && lastResult != nil && (lastResult.Success || (lastResult.Status != 429 && lastResult.Status < 500)) {
+			return lastResult, nil
+		}
+		if attempt == 2 {
+			break
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		backoff *= 2
+	}
+	return lastResult, lastErr
 }
 
 func safeBytes(res *sdk.ExecuteResult) []byte {

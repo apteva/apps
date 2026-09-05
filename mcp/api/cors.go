@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -30,6 +31,12 @@ func browserOriginRegistrationKey(apiID int64) string {
 }
 
 func parseEffectiveCORSPolicy(apiJSON, routeJSON string) (gatewayCORSPolicy, error) {
+	if _, err := policyObject(apiJSON); err != nil {
+		return gatewayCORSPolicy{}, err
+	}
+	if _, err := policyObject(routeJSON); err != nil {
+		return gatewayCORSPolicy{}, err
+	}
 	return parseGatewayCORSPolicy(effectiveJSON(apiJSON, routeJSON))
 }
 
@@ -121,7 +128,14 @@ func normalizeBrowserOrigin(raw string) (string, error) {
 		u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return "", fmt.Errorf("invalid CORS origin %q", raw)
 	}
-	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host), nil
+	host := strings.ToLower(u.Host)
+	if u.Scheme == "http" && u.Port() == "80" || u.Scheme == "https" && u.Port() == "443" {
+		host = u.Hostname()
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(host), nil
 }
 
 func firstValue(raw map[string]any, keys ...string) any {
@@ -150,6 +164,9 @@ func boolValue(value any) (bool, bool, error) {
 
 func intValue(value any) (int, bool) {
 	switch v := value.(type) {
+	case json.Number:
+		n, err := v.Int64()
+		return int(n), err == nil
 	case int:
 		return v, true
 	case int64:
@@ -230,7 +247,7 @@ func normalizedHeaders(value any) ([]string, error) {
 	var out []string
 	for _, item := range items {
 		header := strings.ToLower(strings.TrimSpace(item))
-		if header == "" || strings.ContainsAny(header, "()<>@,;:\\\"/[]?={} \t\r\n") {
+		if !validHTTPToken(header) {
 			return nil, fmt.Errorf("invalid header name %q", item)
 		}
 		if !seen[header] {
@@ -420,19 +437,29 @@ func effectiveAPIBrowserPolicy(db *sql.DB, api *API) (sdk.BrowserOriginPolicy, e
 }
 
 func syncAPIBrowserOriginPolicy(ctx *sdk.AppCtx, api *API) (bool, error) {
-	if ctx == nil || api == nil || ctx.BrowserOriginsAPI() == nil || ctx.BrowserOriginPolicyAPI() == nil {
+	if ctx == nil || api == nil {
 		return false, nil
 	}
-	key := browserOriginRegistrationKey(api.ID)
-	policy, err := effectiveAPIBrowserPolicy(ctx.AppDB(), api)
+	_, err := ctx.AppDB().Exec(`INSERT INTO api_policy_sync(api_id,project_id,pending) VALUES(?,?,1) ON CONFLICT(api_id) DO UPDATE SET pending=1,delete_requested=0`, api.ID, api.ProjectID)
 	if err != nil {
 		return true, err
 	}
-	if api.Status != "active" || len(policy.Origins) == 0 {
-		return true, ctx.DeleteBrowserOrigins(key)
+	policy, err := effectiveAPIBrowserPolicy(ctx.AppDB(), api)
+	if err == nil {
+		if ctx.BrowserOriginsAPI() == nil || ctx.BrowserOriginPolicyAPI() == nil {
+			err = errors.New("platform browser-origin API unavailable")
+		} else if api.Status != "active" || len(policy.Origins) == 0 {
+			err = ctx.DeleteBrowserOrigins(browserOriginRegistrationKey(api.ID))
+		} else {
+			_, err = ctx.ReplaceBrowserOriginPolicy(browserOriginRegistrationKey(api.ID), policy)
+		}
 	}
-	_, err = ctx.ReplaceBrowserOriginPolicy(key, policy)
-	return true, err
+	message := ""
+	if err != nil {
+		message = safeUpstreamError(err)
+	}
+	_, dbErr := ctx.AppDB().Exec(`UPDATE api_policy_sync SET pending=?,error=? WHERE api_id=?`, err != nil, message, api.ID)
+	return true, errors.Join(err, dbErr)
 }
 
 func reconcileBrowserOriginPolicies(ctx *sdk.AppCtx) error {
@@ -460,7 +487,7 @@ func reconcileBrowserOriginPolicies(ctx *sdk.AppCtx) error {
 		}
 		key := browserOriginRegistrationKey(api.ID)
 		desired[key] = true
-		if _, err := ctx.ReplaceBrowserOriginPolicy(key, policy); err != nil {
+		if _, err := syncAPIBrowserOriginPolicy(ctx.WithProject(api.ProjectID), api); err != nil {
 			errs = append(errs, fmt.Errorf("replace %s: %w", key, err))
 		}
 	}

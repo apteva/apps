@@ -1,6 +1,93 @@
 package main
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+type MarketSession struct {
+	Calendar    string `json:"calendar"`
+	Timezone    string `json:"timezone"`
+	EvaluatedAt string `json:"evaluated_at"`
+	OpenDay     bool   `json:"open_day"`
+	IsOpen      bool   `json:"is_open"`
+	OpenAt      string `json:"open_at,omitempty"`
+	CloseAt     string `json:"close_at,omitempty"`
+	NextOpenAt  string `json:"next_open_at,omitempty"`
+	Reason      string `json:"reason"`
+}
+
+func marketSessionAt(calendar string, at time.Time) (*MarketSession, error) {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	at = at.UTC()
+	switch strings.ToUpper(strings.TrimSpace(calendar)) {
+	case calendarAlwaysOpen:
+		open := time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC)
+		return &MarketSession{
+			Calendar: calendarAlwaysOpen, Timezone: "UTC", EvaluatedAt: at.Format(time.RFC3339Nano),
+			OpenDay: true, IsOpen: true, OpenAt: open.Format(time.RFC3339),
+			CloseAt: open.Add(24 * time.Hour).Format(time.RFC3339), Reason: "continuous_session",
+		}, nil
+	case calendarUSEquity:
+		if stored := storedUSEquitySessionAt(at); stored != nil {
+			return stored, nil
+		}
+		session := usEquitySessionAt(at)
+		out := &MarketSession{
+			Calendar: calendarUSEquity, Timezone: "America/New_York",
+			EvaluatedAt: at.Format(time.RFC3339Nano), OpenDay: session.OpenDay, Reason: session.Reason,
+		}
+		if session.OpenDay {
+			out.OpenAt = session.Open.UTC().Format(time.RFC3339)
+			out.CloseAt = session.Close.UTC().Format(time.RFC3339)
+			out.IsOpen = !at.Before(session.Open) && at.Before(session.Close)
+		}
+		if !out.IsOpen {
+			if next := nextUSEquityOpen(at); !next.IsZero() {
+				out.NextOpenAt = next.UTC().Format(time.RFC3339)
+			}
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("unsupported exchange calendar %q", calendar)
+	}
+}
+
+// storedUSEquitySessionAt prefers provider-published sessions. The rules engine
+// below remains an explicit degraded-mode fallback for unbound/fresh installs.
+func storedUSEquitySessionAt(at time.Time) *MarketSession {
+	if globalCtx == nil || globalCtx.AppDB() == nil {
+		return nil
+	}
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return nil
+	}
+	date := at.In(location).Format("2006-01-02")
+	var openAt, closeAt, status string
+	err = globalCtx.AppDB().QueryRow(`SELECT open_at,close_at,status FROM exchange_sessions WHERE venue='US_EQUITY' AND session_date=? AND session_type='regular' ORDER BY CASE source WHEN 'alpaca' THEN 0 ELSE 1 END LIMIT 1`, date).Scan(&openAt, &closeAt, &status)
+	if err != nil {
+		return nil
+	}
+	out := &MarketSession{Calendar: calendarUSEquity, Timezone: "America/New_York", EvaluatedAt: at.UTC().Format(time.RFC3339Nano), OpenDay: status == "open", Reason: "authoritative_session"}
+	open, openErr := time.Parse(time.RFC3339, openAt)
+	closeAtTime, closeErr := time.Parse(time.RFC3339, closeAt)
+	if out.OpenDay && openErr == nil && closeErr == nil {
+		out.OpenAt = open.UTC().Format(time.RFC3339)
+		out.CloseAt = closeAtTime.UTC().Format(time.RFC3339)
+		out.IsOpen = !at.Before(open) && at.Before(closeAtTime)
+	}
+	if !out.IsOpen {
+		var next string
+		if globalCtx.AppDB().QueryRow(`SELECT open_at FROM exchange_sessions WHERE venue='US_EQUITY' AND status='open' AND open_at>? ORDER BY open_at LIMIT 1`, at.UTC().Format(time.RFC3339)).Scan(&next) == nil {
+			out.NextOpenAt = next
+		}
+	}
+	return out
+}
 
 type usEquitySession struct {
 	Open    time.Time

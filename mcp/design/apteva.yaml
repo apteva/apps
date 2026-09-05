@@ -2,12 +2,15 @@ schema: apteva-app/v1
 
 name: design
 display_name: Design Studio
-version: 0.1.1
+version: 0.4.0
 description: |
   Agent-native parametric 2D/3D design. Designs are immutable revisions of
   a safe, declarative operation graph rendered by Replicad and OpenCascade.
   Build exact solids, inspect dimensions and topology, preview meshes, export
-  STEP/STL/3MF, and create traceable manufacturing packages. Direct mesh
+  STEP/STL/3MF, create traceable open-hardware manufacturing packages, model
+  named-part assemblies with interfaces and joints, reference immutable component
+  revisions across design documents, export every unique part, and generate linked
+  enclosures from validated PCB Studio mechanical envelopes. Direct mesh
   imports and external text-to-geometry providers fit the same revision and
   artifact model without making generated meshes pretend to be parametric CAD.
 
@@ -15,7 +18,7 @@ author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/design
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [design, cad, 2d, 3d, manufacturing, printing]
+tags: [design, cad, 2d, 3d, manufacturing, printing, open-hardware, robotics, assemblies]
 
 scopes: [project]
 min_apteva_version: "0.11.0"
@@ -25,11 +28,25 @@ requires:
     - db.write.app
     - net.egress
     - platform.apps.call
-  apps:
-    - name: storage
-      version: ">=0.10.0"
-      reason: Design source packages and derived CAD/manufacturing artifacts are durable Storage files.
-  integrations: []
+  integrations:
+    - role: storage
+      kind: app
+      compatible_app_names: [storage]
+      capabilities: [files.write]
+      tools:
+        files.write: files_upload
+      required: true
+      label: Storage
+      hint: Stores Design source packages and derived CAD/manufacturing artifacts.
+    - role: pcb_source
+      kind: app
+      compatible_app_names: [pcb]
+      capabilities: [pcb.mechanical.read]
+      tools:
+        pcb.mechanical.read: pcb_mechanical_get
+      required: false
+      label: PCB Studio source
+      hint: Optional. Bind PCB Studio to generate revision-linked enclosures from validated mechanical envelopes.
 
 provides:
   http_routes:
@@ -51,19 +68,24 @@ provides:
       resource: design
       description: Export CAD files and manufacturing packages.
   mcp_tools:
-    - { name: design_examples, description: "Return canonical apteva-design/v1 examples and supported operations.", requires: designs.read }
+    - { name: design_examples, description: "Return canonical apteva-design/v1 examples, assembly/open-hardware contracts, supported operations, and the printable Open Rover reference design.", requires: designs.read }
+    - { name: design_pcb_source_status, description: "Report whether the optional PCB Studio mechanical source is bound.", requires: designs.read }
+    - { name: design_enclosure_from_pcb, description: "Create a parametric enclosure from a validated PCB Studio mechanical envelope.", requires: designs.write }
+    - { name: design_enclosure_refresh_from_pcb, description: "Create an immutable enclosure revision from a newer PCB mechanical revision.", requires: designs.write, resource_from: "design/{arg.design_id}" }
     - { name: designs_create, description: "Create a design and immutable first revision from an apteva-design/v1 operation graph.", requires: designs.write }
+    - { name: assembly_create, description: "Create an assembly from immutable revision-linked Design Studio components.", requires: designs.write }
+    - { name: assembly_sources_refresh, description: "Create a new assembly revision with links advanced to current component revisions.", requires: designs.write, resource_from: "design/{arg.design_id}" }
     - { name: designs_list, description: "List project designs. Args: q?, kind?, status?, limit?.", requires: designs.read }
     - { name: designs_get, description: "Fetch a design, its current revision, validation, measurements, and artifacts. Args: id.", requires: designs.read, resource_from: "design/{arg.id}" }
     - { name: designs_archive, description: "Archive or restore a design. Args: id, archived? (default true).", requires: designs.write, resource_from: "design/{arg.id}" }
     - { name: revisions_create, description: "Create a child revision with optimistic concurrency. Args: design_id, expected_parent_id, definition?, parameters?, note?.", requires: designs.write, resource_from: "design/{arg.design_id}" }
     - { name: revisions_get, description: "Fetch one immutable revision. Args: id.", requires: designs.read }
     - { name: revisions_diff, description: "Compare source, parameters, and geometry reports between two revisions.", requires: designs.read }
-    - { name: design_validate, description: "Build and validate one revision. Args: design_id, revision_id?. Returns exact measurements and check results.", requires: designs.write, resource_from: "design/{arg.design_id}" }
+    - { name: design_validate, description: "Build and validate one revision. Returns exact geometry, per-part mass properties, assembly clearances, print checks, and open-hardware checks.", requires: designs.write, resource_from: "design/{arg.design_id}" }
     - { name: design_render, description: "Build a browser-ready mesh preview for one revision. Args: design_id, revision_id?.", requires: designs.write, resource_from: "design/{arg.design_id}" }
-    - { name: design_export, description: "Build and persist STEP, STL, or 3MF artifacts in Storage. Args: design_id, revision_id?, formats?.", requires: designs.export, resource_from: "design/{arg.design_id}" }
+    - { name: design_export, description: "Build and persist assembly plus per-part STEP, STL, or 3MF artifacts in Storage. Args: design_id, revision_id?, formats?.", requires: designs.export, resource_from: "design/{arg.design_id}" }
     - { name: design_artifacts, description: "List derived artifacts for a design or revision.", requires: designs.read, resource_from: "design/{arg.design_id}" }
-    - { name: manufacturing_package_create, description: "Create a traceable ZIP containing CAD/print files, source, hashes, measurements, and validation.", requires: designs.export, resource_from: "design/{arg.design_id}" }
+    - { name: manufacturing_package_create, description: "Create a traceable open-hardware ZIP containing source, per-part CAD/print files, BOM, SPDX license, assembly guide, print profiles, hashes, measurements, and validation.", requires: designs.export, resource_from: "design/{arg.design_id}" }
   ui_panels:
     - slot: project.page
       label: Design
@@ -96,6 +118,10 @@ provides:
     - { name: design.build.completed, description: A revision built and validated successfully. }
     - { name: design.build.failed, description: A revision build or validation failed. }
     - { name: design.artifact.created, description: "A derived CAD, mesh, or manufacturing artifact was persisted." }
+    - { name: design.pcb_enclosure.created, description: "A Design enclosure was created from an immutable PCB mechanical revision." }
+    - { name: design.pcb_enclosure.refreshed, description: "A linked enclosure was refreshed into a new immutable Design revision." }
+    - { name: design.assembly.created, description: "An assembly was created from revision-linked component designs." }
+    - { name: design.assembly.sources_refreshed, description: "An assembly revision advanced one or more component revision pins." }
 
 runtime:
   kind: source

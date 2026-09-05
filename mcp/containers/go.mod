@@ -3,7 +3,8 @@ module github.com/apteva/apps/mcp/containers
 go 1.25.12
 
 require (
-	github.com/apteva/app-sdk v0.43.0
+	github.com/apteva/app-sdk v0.73.0
+	github.com/creack/pty v1.1.24
 	modernc.org/sqlite v1.50.0
 )
 

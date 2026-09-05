@@ -27,14 +27,16 @@ func TestRepoCardDataDoesNotSerializeRuntimeSecrets(t *testing.T) {
 
 func TestIssueCardDataBoundsBody(t *testing.T) {
 	issue := &Issue{
-		RepoSlug: "repo",
-		Number:   7,
-		Title:    "Large issue",
-		Body:     strings.Repeat("\u00e9", 1200),
-		Type:     "bug",
-		Status:   "todo",
-		State:    "open",
-		Priority: "medium",
+		RepoSlug:   "repo",
+		Number:     7,
+		Title:      "Large issue",
+		Body:       strings.Repeat("\u00e9", 1200),
+		Type:       "bug",
+		Status:     "todo",
+		State:      "open",
+		Priority:   "medium",
+		ClaimOwner: "agent:7",
+		ClaimLabel: "Coder",
 	}
 	card := issueCardData(issue)
 	if got := len([]rune(card.Body)); got != 1000 {
@@ -42,5 +44,8 @@ func TestIssueCardDataBoundsBody(t *testing.T) {
 	}
 	if !strings.HasSuffix(card.Body, "\u2026") {
 		t.Fatalf("truncated body has no ellipsis: %q", card.Body[len(card.Body)-8:])
+	}
+	if card.ClaimOwner != "agent:7" || card.ClaimLabel != "Coder" {
+		t.Fatalf("claim missing from card: %+v", card)
 	}
 }

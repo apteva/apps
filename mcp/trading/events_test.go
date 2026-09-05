@@ -125,7 +125,7 @@ func TestEvents_OrderRejected_NoEventForPretradeRejection(t *testing.T) {
 	out, _ := (&App{}).toolOrderPlace(ctx, map[string]any{
 		"portfolio_id": float64(id),
 		"symbol":       "AAPL", "side": "buy", "type": "market", "qty": 1.0,
-		"rationale":    "too short",
+		"rationale": "too short",
 	})
 	if out.(map[string]any)["status"] != "rejected" {
 		t.Fatal("expected rejected")
@@ -167,8 +167,8 @@ func TestEvents_FillEmitsThreeTopics(t *testing.T) {
 	out, _ := (&App{}).toolOrderPlace(ctx, map[string]any{
 		"portfolio_id": float64(id),
 		"symbol":       "BTC-USD", "side": "buy", "type": "market",
-		"qty":          0.01,
-		"rationale":    "starter — fill should produce three downstream events.",
+		"qty":       0.01,
+		"rationale": "starter — fill should produce three downstream events.",
 	})
 	if out.(map[string]any)["status"] != "working" {
 		t.Fatal("expected working")

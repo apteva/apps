@@ -60,7 +60,7 @@ func TestLLMControlledMaskedDateRangeLive(t *testing.T) {
 	if os.Getenv("RUN_COMPUTER_LLM_TESTS") == "" {
 		t.Skip("set RUN_COMPUTER_LLM_TESTS=1")
 	}
-	if _, err := exec.LookPath("codex"); err != nil {
+	if _, err := exec.LookPath(computerLLMBinary()); err != nil {
 		t.Skip("codex CLI is required for the authenticated LLM regression")
 	}
 	backend := strings.TrimSpace(os.Getenv("COMPUTER_LLM_BROWSER_BACKEND"))
@@ -84,7 +84,7 @@ func runControlledMaskedDateRange(t *testing.T, backend string, withLLM bool) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session id: %v", opened)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	shot := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID, "action": "screenshot", "include_som": true,

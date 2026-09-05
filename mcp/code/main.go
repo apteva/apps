@@ -34,14 +34,25 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.5.25
+version: 0.8.2
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
   imports repositories from GitHub when a github connection is bound,
   imports ZIP archives through the UI,
   renders live repository, source-file, and issue chat cards,
+  synchronizes standard HTTPS Git repositories using optional bound
+  GitHub, GitLab, or Bitbucket connections,
+  renders source with theme-aware syntax highlighting and line numbers,
   manages native repo issues for bugs, feature requests, and tasks,
+  atomically claims issues for human and agent collaborators,
+  optionally executes finite commands in isolated durable Workspaces,
+  previews workspace-generated source changes and safely applies an explicitly
+  reviewed revision without transferring Git metadata,
+  explicitly tears down linked execution workspaces while retaining Code files,
+  stores per-repository workspace image preferences and forwards allowlisted
+  per-command image overrides without replacing workspaces that have unapplied changes,
+  scopes monorepo workspaces to editable paths plus read-only build inputs,
   makes grep/read/patch tools more compact for agents with reusable
   patch previews, targeted rejected-hunk context, and stale-hunk recovery,
   isolates global repository storage and hardens command/import boundaries,
@@ -64,9 +75,29 @@ requires:
   permissions:
     - db.write.app
     - platform.connections.execute
+    - platform.connections.read_credentials
     - platform.apps.call
     - platform.ingress.write
+  apps:
+    - name: workspaces
+      version: ">=0.5.0"
+      optional: true
+      reason: Provides isolated, durable command execution and generic source transfer while Code remains the repository and Git authority.
+  binaries:
+    - name: git
+      executables: [git]
+      required: true
+      hint: Git 2.23 or newer is required for provider-neutral repository synchronization.
+      sources: {}
   integrations:
+    - role: git
+      kind: integration
+      mode: multiple
+      required: false
+      compatible_slugs: [github, gitlab, bitbucket]
+      label: Git provider
+      hint: Connect a Git provider to clone and synchronize private repositories. Public HTTPS remotes work without one.
+      capabilities: [git.clone, git.fetch, git.push]
     - role: github
       kind: integration
       required: false
@@ -94,6 +125,7 @@ provides:
     - { name: repos_get,              description: "Repository metadata + tree summary." }
     - { name: repos_archive,          description: "Archive (or hard-delete) a repository." }
     - { name: repos_set_deploy_hints, description: "Set build_cmd / start_cmd / port / env_json." }
+    - { name: repos_set_workspace_image, description: "Set or clear a repository's preferred workspace image." }
     - { name: repos_export,           description: "Export a repo as a zip; returns base64 bytes for cross-app calls." }
     - { name: code_list_files,        description: "List files in a repository." }
     - { name: code_glob,              description: "Find files by glob pattern." }
@@ -112,14 +144,31 @@ provides:
     - { name: templates_list,         description: "List user templates visible to this project + embedded ones." }
     - { name: repos_fork,             description: "Create a new repo by snapshot-copying a template or another repo." }
     - { name: repos_import_github,    description: "Import a GitHub repo as a local repository (gzip tarball snapshot)." }
+    - { name: repos_git_import,       description: "Clone a standard HTTPS Git remote with history and upstream tracking." }
+    - { name: repos_git_connect,      description: "Safely connect an existing Code repository to a Git remote." }
+    - { name: repos_git_status,       description: "Get branch, upstream, ahead/behind, and working-tree changes." }
+    - { name: repos_git_fetch,        description: "Fetch origin refs without changing checked-out files." }
+    - { name: repos_git_pull,         description: "Fetch and fast-forward the current clean branch." }
+    - { name: repos_git_commit,       description: "Commit selected or all visible Code changes." }
+    - { name: repos_git_push,         description: "Push the current branch without force." }
+    - { name: repos_git_diff,         description: "Return a bounded unified diff." }
+    - { name: repos_git_log,          description: "List recent Git commits." }
+    - { name: repos_git_branches,     description: "List local and origin-tracking branches." }
+    - { name: repos_git_branch_create, description: "Create a local branch without switching to it." }
+    - { name: repos_git_switch,       description: "Switch to an existing clean local branch." }
     - { name: repos_dev_start,        description: "Start a long-running dev preview server for a repo." }
-    - { name: repos_run_command,      description: "Run a finite repo command such as build, test, lint, typecheck, or generator and return exit-code semantics." }
+    - { name: repos_run_command,      description: "Run a finite repo command locally or in an isolated workspace with optional editable and read-only monorepo path scopes." }
+    - { name: repos_workspace_changes, description: "Preview source changes produced in the linked execution workspace, including revision conflicts." }
+    - { name: repos_workspace_apply, description: "Safely apply an explicitly previewed workspace source revision back to Code." }
+    - { name: repos_workspace_destroy, description: "Permanently destroy and unlink a repository's execution workspace while retaining Code files." }
     - { name: repos_dev_stop,         description: "Stop the dev process for a repo." }
     - { name: repos_dev_status,       description: "Get the current dev run state (port, pid, status, framework)." }
     - { name: repos_dev_logs,         description: "Tail the dev run's stdout/stderr log file." }
-    - { name: issues_list,            description: "List native Code issues for a repository." }
-    - { name: issues_search,          description: "Search native Code issues across all repositories in a project." }
+    - { name: issues_list,            description: "List native Code issues for a repository, including their current claims. Claim an unclaimed issue before starting work." }
+    - { name: issues_search,          description: "Search native Code issues and their current claims across all repositories in a project." }
     - { name: issues_get,             description: "Get a native Code issue with comments, links, and activity." }
+    - { name: issues_claim,           description: "Atomically claim an open issue for the authenticated agent or user before starting work." }
+    - { name: issues_release,         description: "Release the authenticated caller's issue claim; closing an issue releases it automatically." }
     - { name: issues_create,          description: "Create a native Code issue." }
     - { name: issues_update,          description: "Update native Code issue fields." }
     - { name: issues_comment,         description: "Add a comment to a native Code issue." }
@@ -183,6 +232,8 @@ type App struct {
 	dataDir  string
 	dev      *devSupervisor
 	commands commandCoordinator
+	git      *gitService
+	locks    *repoLockSet
 }
 
 var globalCtx *sdk.AppCtx
@@ -223,7 +274,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := migrateLegacyRepoStorage(ctx.AppDB(), localStore); err != nil {
 		return fmt.Errorf("migrate repository storage: %w", err)
 	}
-	a.store = localStore
+	a.locks = newRepoLockSet()
+	a.store = &lockedFileStore{inner: localStore, locks: a.locks}
 
 	// Dev runtime — live "Run" surface for repos. Lives inside this
 	// sidecar process; one supervised child per (project, repo). The
@@ -235,6 +287,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		dataDir = filepath.Dir(root)
 	}
 	a.dataDir = dataDir
+	gitService, err := newGitService(dataDir, localStore, a.locks)
+	if err != nil {
+		return fmt.Errorf("initialize Git service: %w", err)
+	}
+	a.git = gitService
 	portStart := atoiOr(os.Getenv("CODE_DEV_PORT_RANGE_START"), 6100)
 	portEnd := atoiOr(os.Getenv("CODE_DEV_PORT_RANGE_END"), 6199)
 	a.dev = newDevSupervisor(dataDir, a.store, a, portStart, portEnd)
@@ -308,6 +365,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/templates", Handler: a.handleTemplatesList},
 		{Pattern: "/api/github/import", Handler: a.handleGithubImport},
 		{Pattern: "/api/github/repos", Handler: a.handleGithubReposList},
+		{Pattern: "/api/git/import", Handler: a.handleGitImport},
+		{Pattern: "/api/git/connections", Handler: a.handleGitConnections},
 	}
 }
 
@@ -364,7 +423,7 @@ func zipRepo(w io.Writer, store FileStore, slug string) error {
 // well-known dev artifact dir.
 func shouldSkipForExport(rel string) bool {
 	for _, seg := range strings.Split(rel, "/") {
-		switch seg {
+		switch strings.ToLower(seg) {
 		case "node_modules", ".next", ".git", "dist", "build", ".cache":
 			return true
 		}

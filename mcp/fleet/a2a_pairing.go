@@ -518,7 +518,12 @@ func (a *App) runA2AReconciler(ctx context.Context, app *sdk.AppCtx) error {
 		// quick succession. The scheduled pass deliberately bypasses it so Fleet
 		// also repairs operator drift, missing attachments, and removed peers.
 		a.clearA2AFingerprint(tenant.ID)
+		done, lockErr := a.beginTenantOperation(tenant.ID, "A2A reconciliation")
+		if lockErr != nil {
+			continue
+		}
 		result := a.reconcileTenantA2AWithNode(app, tenant.ID, node)
+		done()
 		if result.Status == "error" {
 			_ = a.store.recordEvent(tenant.ID, "a2a_pair_failed", "worker:a2a_reconcile", result)
 			app.Logger().Warn("fleet: A2A reconciliation failed", "tenant", tenant.ID, "err", result.Reason)

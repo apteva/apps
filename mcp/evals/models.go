@@ -89,6 +89,7 @@ type AssertionResult struct {
 	Passed  bool   `json:"passed"`
 	Actual  any    `json:"actual,omitempty"`
 	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
 	Gating  bool   `json:"gating,omitempty"`
 }
 
@@ -134,6 +135,7 @@ type Run struct {
 	TargetSnapshot    Target                     `json:"target"`
 	EnvironmentRunID  string                     `json:"environment_run_id,omitempty"`
 	Execution         *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
+	Collaborators     []CollaboratorExecution    `json:"collaborator_executions,omitempty"`
 	VoiceCall         *EnvironmentVoiceCall      `json:"voice_call,omitempty"`
 	Assertions        []AssertionResult          `json:"assertions"`
 	Judge             *JudgeVerdict              `json:"judge,omitempty"`
@@ -145,6 +147,14 @@ type Run struct {
 	Error             string                     `json:"error,omitempty"`
 	CreatedAt         time.Time                  `json:"created_at"`
 	Suggestions       []Suggestion               `json:"suggestions,omitempty"`
+}
+
+type CollaboratorExecution struct {
+	Alias         string                     `json:"alias"`
+	SourceAgentID int64                      `json:"source_agent_id,omitempty"`
+	Participated  bool                       `json:"participated"`
+	Execution     *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
+	Error         string                     `json:"error,omitempty"`
 }
 
 type EnvironmentVoiceCall struct {
@@ -263,6 +273,16 @@ type EnvironmentDefinition struct {
 	Spec map[string]any `json:"spec"`
 }
 
+type EnvironmentAgentSpec struct {
+	SourceAgentID int64                  `json:"source_agent_id,omitempty"`
+	Draft         *sdk.RuntimeAgentDraft `json:"draft,omitempty"`
+	Directive     string                 `json:"directive,omitempty"`
+	Alias         string                 `json:"alias,omitempty"`
+	StartPaused   bool                   `json:"start_paused,omitempty"`
+	Provider      string                 `json:"provider,omitempty"`
+	Model         string                 `json:"model,omitempty"`
+}
+
 type EnvironmentRun struct {
 	ID          string                  `json:"id"`
 	RuntimeID   string                  `json:"runtime_id"`
@@ -277,7 +297,14 @@ type EnvironmentWebFixture struct {
 }
 
 type LLMModels struct {
-	Models []map[string]any `json:"models"`
+	Models []LLMModel `json:"models"`
+}
+
+type LLMModel struct {
+	Provider     string `json:"provider"`
+	ModelID      string `json:"model_id"`
+	DisplayName  string `json:"display_name,omitempty"`
+	GatewayModel string `json:"gateway_model"`
 }
 
 func encodeJSON(value any) string {

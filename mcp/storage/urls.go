@@ -14,8 +14,8 @@ package main
 //
 //   public  → anyone can fetch (no session, no signature)
 //   signed  → requires ?sig=…&exp=… (added by files_get_url)
-//   private → requires an authenticated request — dashboard cookie,
-//             API key, or app-install bearer
+//   private → requires a valid share signature on the public route;
+//             authenticated reads use the protected /files route
 //
 // Resolution chain for the absolute base:
 //
@@ -79,13 +79,13 @@ func envPublicURL() string {
 // publicBase because the cdn edge doesn't carry HMAC or auth state
 // in v0.1.
 func absoluteContentURL(ctx *sdk.AppCtx, f *File) string {
-	rel := buildContentURL(f) // "/files/<id>/content"
+	rel := scopedURL(ctx, buildContentURL(f), f) // "/files/<id>/content"
 	if f != nil && f.Visibility == "public" {
 		rel = withContentVersion(rel, f)
-		if u := cdnURLFor(ctx, rel, f.ProjectID); u != "" {
+		if u := cdnURLFor(ctx, scopedURL(ctx, withContentVersion(buildPublicContentURL(f), f), f), f.ProjectID); u != "" {
 			return u
 		}
-		rel = withContentVersion(buildPublicContentURL(f), f)
+		rel = scopedURL(ctx, withContentVersion(buildPublicContentURL(f), f), f)
 	}
 	base := publicBase(ctx)
 	if base == "" {
@@ -135,10 +135,16 @@ type cdnBaseEntry struct {
 	expiresAt time.Time
 }
 
+type cdnBaseFlight struct {
+	done chan struct{}
+	base string
+}
+
 var cdnBases = struct {
 	sync.Mutex
 	entries map[string]cdnBaseEntry
-}{entries: map[string]cdnBaseEntry{}}
+	flights map[string]*cdnBaseFlight
+}{entries: map[string]cdnBaseEntry{}, flights: map[string]*cdnBaseFlight{}}
 
 // cdnURLFor resolves the zone once, then assembles file URLs locally. The CDN
 // tool itself performs a DB lookup per call even though every file in a zone
@@ -159,14 +165,24 @@ func cdnURLFor(ctx *sdk.AppCtx, rel, projectID string) string {
 	cacheKey := fmt.Sprintf("%d\x00%s", zoneID, pid)
 	now := time.Now()
 	cdnBases.Lock()
-	defer cdnBases.Unlock()
 	if cached, ok := cdnBases.entries[cacheKey]; ok && now.Before(cached.expiresAt) {
+		cdnBases.Unlock()
 		if cached.base == "" {
 			return ""
 		}
 		return cached.base + rel
 	}
-
+	if flight := cdnBases.flights[cacheKey]; flight != nil {
+		cdnBases.Unlock()
+		<-flight.done
+		if flight.base == "" {
+			return ""
+		}
+		return flight.base + rel
+	}
+	flight := &cdnBaseFlight{done: make(chan struct{})}
+	cdnBases.flights[cacheKey] = flight
+	cdnBases.Unlock()
 	args := map[string]any{
 		"zone_id":     zoneID,
 		"origin_path": "/",
@@ -177,16 +193,26 @@ func cdnURLFor(ctx *sdk.AppCtx, rel, projectID string) string {
 	var out struct {
 		URL string `json:"url"`
 	}
-	if err := ctx.PlatformAPI().CallAppResult("cdn", "cdn_url_for", args, &out); err != nil {
-		cdnBases.entries[cacheKey] = cdnBaseEntry{expiresAt: now.Add(5 * time.Second)}
-		return ""
+	base := ""
+	if err := ctx.PlatformAPI().CallAppResult("cdn", "cdn_url_for", args, &out); err == nil {
+		base = strings.TrimRight(out.URL, "/")
 	}
-	base := strings.TrimRight(out.URL, "/")
+	cdnBases.Lock()
+	defer cdnBases.Unlock()
+	if len(cdnBases.entries) >= 128 {
+		cdnBases.entries = map[string]cdnBaseEntry{}
+	}
+	ttl := time.Minute
 	if base == "" {
-		cdnBases.entries[cacheKey] = cdnBaseEntry{expiresAt: now.Add(5 * time.Second)}
+		ttl = 5 * time.Second
+	}
+	cdnBases.entries[cacheKey] = cdnBaseEntry{base: base, expiresAt: time.Now().Add(ttl)}
+	flight.base = base
+	delete(cdnBases.flights, cacheKey)
+	close(flight.done)
+	if base == "" {
 		return ""
 	}
-	cdnBases.entries[cacheKey] = cdnBaseEntry{base: base, expiresAt: now.Add(time.Minute)}
 	return base + rel
 }
 
@@ -247,9 +273,9 @@ func signedAbsoluteURLWithDisposition(ctx *sdk.AppCtx, f *File, sig string, exp 
 	}
 	base := publicBase(ctx)
 	if base == "" {
-		return "/api/apps/storage" + rel + q
+		return scopedURL(ctx, "/api/apps/storage"+rel+q, f)
 	}
-	return base + "/api/apps/storage" + rel + q
+	return scopedURL(ctx, base+"/api/apps/storage"+rel+q, f)
 }
 
 func signedAbsoluteProxyURL(ctx *sdk.AppCtx, f *File, sig string, exp int64, disposition ContentDisposition) string {
@@ -263,7 +289,29 @@ func signedAbsoluteProxyURL(ctx *sdk.AppCtx, f *File, sig string, exp int64, dis
 	}
 	base := publicBase(ctx)
 	if base == "" {
-		return "/api/apps/storage" + rel + q
+		return scopedURL(ctx, "/api/apps/storage"+rel+q, f)
 	}
-	return base + "/api/apps/storage" + rel + q
+	return scopedURL(ctx, base+"/api/apps/storage"+rel+q, f)
+}
+
+func scopedURL(ctx *sdk.AppCtx, raw string, f *File) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	if f != nil && f.ProjectID != "" {
+		q.Set("project_id", f.ProjectID)
+	}
+	install := os.Getenv("APTEVA_INSTALL_ID")
+	if install == "" && ctx != nil && ctx.PlatformAPI() != nil {
+		if identity, e := ctx.PlatformAPI().WhoAmI(); e == nil && identity != nil && identity.InstallID > 0 {
+			install = strconv.FormatInt(identity.InstallID, 10)
+		}
+	}
+	if install != "" {
+		q.Set("install_id", install)
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
 }

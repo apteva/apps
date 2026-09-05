@@ -1,14 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
-
-const defaultProviderSlug = "hetzner"
 
 var compatibleProviderSlugs = []string{
 	"hetzner",
@@ -36,15 +35,97 @@ func isCompatibleProvider(p string) bool {
 	return false
 }
 
+type InstanceProviderBinding struct {
+	Provider     string `json:"provider"`
+	ConnectionID int64  `json:"connection_id"`
+	Default      bool   `json:"default"`
+}
+
+func providerSlugForBinding(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) string {
+	if bound == nil {
+		return ""
+	}
+	slug := normalizeProvider(bound.AppSlug)
+	if slug == "" && ctx != nil && ctx.PlatformAPI() != nil && bound.ConnectionID > 0 {
+		if conn, err := ctx.PlatformAPI().GetConnection(bound.ConnectionID); err == nil && conn != nil {
+			slug = normalizeProvider(conn.AppSlug)
+		}
+	}
+	return slug
+}
+
+func boundInstanceProviders(ctx *sdk.AppCtx) []InstanceProviderBinding {
+	if ctx == nil {
+		return nil
+	}
+	out := make([]InstanceProviderBinding, 0)
+	for _, bound := range ctx.IntegrationsFor("provider") {
+		if bound == nil || bound.ConnectionID <= 0 {
+			continue
+		}
+		slug := providerSlugForBinding(ctx, bound)
+		if !isCompatibleProvider(slug) {
+			continue
+		}
+		out = append(out, InstanceProviderBinding{
+			Provider: slug, ConnectionID: bound.ConnectionID, Default: bound.IsDefault,
+		})
+	}
+	return out
+}
+
+func instanceProviderBinding(ctx *sdk.AppCtx, provider string) (*sdk.BoundIntegration, error) {
+	provider = normalizeProvider(provider)
+	if !isCompatibleProvider(provider) {
+		return nil, fmt.Errorf("provider %q is not a compatible Instances VPS provider; compatible providers: %s", provider, strings.Join(compatibleProviderSlugs, ", "))
+	}
+	if ctx == nil {
+		return nil, errors.New("Instances app context is unavailable")
+	}
+	var first *sdk.BoundIntegration
+	for _, bound := range ctx.IntegrationsFor("provider") {
+		if bound == nil || bound.ConnectionID <= 0 || providerSlugForBinding(ctx, bound) != provider {
+			continue
+		}
+		if first == nil {
+			first = bound
+		}
+		if bound.IsDefault {
+			return bound, nil
+		}
+	}
+	if first != nil {
+		return first, nil
+	}
+	bindings := boundInstanceProviders(ctx)
+	if len(bindings) == 0 {
+		return nil, fmt.Errorf("provider %q requested but no VPS provider is bound to this Instances install", provider)
+	}
+	boundSlugs := make([]string, 0, len(bindings))
+	seen := map[string]bool{}
+	for _, binding := range bindings {
+		if !seen[binding.Provider] {
+			boundSlugs = append(boundSlugs, binding.Provider)
+			seen[binding.Provider] = true
+		}
+	}
+	if len(boundSlugs) == 1 {
+		return nil, fmt.Errorf("provider %q requested but this Instances install is bound to %q", provider, boundSlugs[0])
+	}
+	return nil, fmt.Errorf("provider %q requested but is not bound to this Instances install; bound providers: %s", provider, strings.Join(boundSlugs, ", "))
+}
+
 func resolveInstanceProvider(ctx *sdk.AppCtx, explicit string) (string, error) {
 	provider := normalizeProvider(explicit)
-	bound := ctx.IntegrationFor("provider")
-
-	if provider == "" && bound != nil {
-		provider = normalizeProvider(bound.AppSlug)
-	}
 	if provider == "" {
-		provider = defaultProviderSlug
+		if ctx == nil {
+			return "", errors.New("Instances app context is unavailable")
+		}
+		bound := ctx.IntegrationFor("provider")
+		if bound == nil || bound.ConnectionID <= 0 {
+			return "", errors.New("no VPS provider bound to this Instances install")
+		}
+		provider = providerSlugForBinding(ctx, bound)
 	}
 	if provider == "local" {
 		return "", ErrLocalInstanceImmutable
@@ -52,11 +133,8 @@ func resolveInstanceProvider(ctx *sdk.AppCtx, explicit string) (string, error) {
 	if !isCompatibleProvider(provider) {
 		return "", fmt.Errorf("provider %q is not a compatible Instances VPS provider; compatible providers: %s", provider, strings.Join(compatibleProviderSlugs, ", "))
 	}
-	if bound != nil {
-		boundSlug := normalizeProvider(bound.AppSlug)
-		if boundSlug != "" && boundSlug != provider {
-			return "", fmt.Errorf("provider %q requested but this Instances install is bound to %q", provider, boundSlug)
-		}
+	if _, err := instanceProviderBinding(ctx, provider); err != nil {
+		return "", err
 	}
 	return provider, nil
 }
@@ -72,11 +150,11 @@ func instanceCapabilities(inst *Instance) InstanceCapabilities {
 	if inst.IsLocal() {
 		return InstanceCapabilities{Run: true, Upload: true, Download: true, Metrics: true}
 	}
-	if !isCompatibleProvider(normalizeProvider(inst.Provider)) {
-		return InstanceCapabilities{}
-	}
 	cap := InstanceCapabilities{Run: true, Upload: true, Download: true, Metrics: true, Tunnel: true}
 	switch normalizeProvider(inst.Provider) {
+	case "external":
+		cap.Metrics = false // the current remote collector is Linux-/proc-specific
+		cap.Destroy = true  // forget the inventory row; never destroys the host
 	case "hetzner":
 		cap.Destroy, cap.Upgrade = true, true
 	case "digitalocean", "runpod":
@@ -99,6 +177,14 @@ func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, erro
 		return nil, err
 	}
 	in.Provider = provider
+	bound, err := storageBinding(ctx, provider, in.ProviderConnectionID)
+	if err != nil {
+		return nil, err
+	}
+	in.ProviderConnectionID = bound.ConnectionID
+	if err := validateStorageRequest(provider, in.Storage); err != nil {
+		return nil, fmt.Errorf("invalid storage request: %w", err)
+	}
 	switch provider {
 	case "hetzner":
 		return hetznerProvision(ctx, in)
@@ -116,6 +202,8 @@ func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, erro
 
 func destroyProviderInstance(ctx *sdk.AppCtx, inst *Instance) error {
 	switch normalizeProvider(inst.Provider) {
+	case "external":
+		return nil
 	case "hetzner":
 		return hetznerDestroy(ctx, inst)
 	case "digitalocean":
@@ -130,7 +218,17 @@ func destroyProviderInstance(ctx *sdk.AppCtx, inst *Instance) error {
 	}
 }
 
+type DestroyOptions struct {
+	Force             bool
+	RetainVolumes     *bool
+	RetainFlexibleIPs bool
+}
+
 func destroyManagedInstance(ctx *sdk.AppCtx, inst *Instance) error {
+	return destroyManagedInstanceWithOptions(ctx, inst, DestroyOptions{})
+}
+
+func destroyManagedInstanceWithOptions(ctx *sdk.AppCtx, inst *Instance, options DestroyOptions) error {
 	if inst == nil {
 		return ErrInstanceNotFound
 	}
@@ -139,7 +237,7 @@ func destroyManagedInstance(ctx *sdk.AppCtx, inst *Instance) error {
 	}
 	previous := inst.Status
 	_, claimed, err := transitionInstanceAndEmit(ctx, inst.ID,
-		[]string{"pending", "provisioning", "ready", "error"}, "destroying", nil)
+		[]string{"pending", "provisioning", "ready", "error"}, "destroying", map[string]any{"lifecycle_stage": "Delete", "cleanup_error": ""})
 	if err != nil {
 		return err
 	}
@@ -150,8 +248,27 @@ func destroyManagedInstance(ctx *sdk.AppCtx, inst *Instance) error {
 	if err != nil {
 		return err
 	}
-	if err := destroyProviderInstance(ctx, claimedInst); err != nil {
-		_, _, _ = transitionInstanceAndEmit(ctx, inst.ID, []string{"destroying"}, previous, map[string]any{"error_message": err.Error()})
+	if options.RetainVolumes != nil {
+		policy := "with_instance"
+		if *options.RetainVolumes {
+			policy = "retain"
+		}
+		if _, err = ctx.AppDB().Exec(`UPDATE instance_volumes SET delete_policy=? WHERE instance_id=? AND managed=1`, policy, inst.ID); err != nil {
+			return err
+		}
+	}
+	if err := prepareVolumesForInstanceDestroy(ctx, inst.ID, options.Force); err != nil {
+		_, _, _ = transitionInstanceAndEmit(ctx, inst.ID, []string{"destroying"}, previous, map[string]any{"cleanup_error": err.Error(), "lifecycle_stage": "Delete"})
+		return err
+	}
+	var providerErr error
+	if isScalewayElasticMetalInstance(claimedInst) {
+		providerErr = scalewayElasticMetalDestroyWithOptions(ctx, claimedInst, options.RetainFlexibleIPs)
+	} else {
+		providerErr = destroyProviderInstance(ctx, claimedInst)
+	}
+	if err := providerErr; err != nil {
+		_, _, _ = transitionInstanceAndEmit(ctx, inst.ID, []string{"destroying"}, previous, map[string]any{"cleanup_error": err.Error(), "lifecycle_stage": "Delete"})
 		return err
 	}
 	if err := deleteInstanceAndEmit(ctx, claimedInst); err != nil {

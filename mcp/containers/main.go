@@ -68,22 +68,37 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	} else {
 		_ = updateHostProbe(ctx.AppDB(), true, "")
 	}
+	if err := reconcileExecutions(context.Background(), ctx, a); err != nil {
+		ctx.Logger().Warn("execution reconciliation failed", "err", err)
+	}
 	ctx.Logger().Info("containers mounted", "data_dir", ctx.DataDir())
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	persistentShells.CloseAll()
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{
-		Name:     "health-poll",
-		Schedule: "@every 30s",
-		Run: func(ctx context.Context, app *sdk.AppCtx) error {
-			return a.pollHealth(ctx, app, app.AppDB())
+	return []sdk.Worker{
+		{
+			Name:     "health-poll",
+			Schedule: "@every 30s",
+			Run: func(ctx context.Context, app *sdk.AppCtx) error {
+				return a.pollHealth(ctx, app, app.AppDB())
+			},
 		},
-	}}
+		{
+			Name:     "execution-retention",
+			Schedule: "@every 1h",
+			Run: func(ctx context.Context, app *sdk.AppCtx) error {
+				return retainExecutionLogs(ctx, app, a)
+			},
+		},
+	}
 }
 
 func (a *App) HTTPRoutes() []sdk.Route {
@@ -97,25 +112,35 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
-		{Name: "containers_run", Description: "Run a Docker image as a managed workload.", InputSchema: runSchema(), Handler: a.toolRun},
-		{Name: "containers_create", Description: "Alias of containers_run.", InputSchema: runSchema(), Handler: a.toolRun},
-		{Name: "containers_get", Description: "Fetch one workload.", InputSchema: idSchema(), Handler: a.toolGet},
-		{Name: "containers_list", Description: "List workloads.", InputSchema: schemaObject(map[string]any{"status": map[string]any{"type": "string"}}, nil), Handler: a.toolList},
-		{Name: "containers_start", Description: "Start a stopped workload.", InputSchema: idSchema(), Handler: a.toolStart},
-		{Name: "containers_stop", Description: "Stop a running workload.", InputSchema: idSchema(), Handler: a.toolStop},
-		{Name: "containers_restart", Description: "Restart a workload.", InputSchema: idSchema(), Handler: a.toolRestart},
-		{Name: "containers_destroy", Description: "Destroy a workload.", InputSchema: workloadIDSchema(map[string]any{"delete_volumes": map[string]any{"type": "boolean"}}), Handler: a.toolDestroy},
-		{Name: "containers_logs", Description: "Tail workload logs.", InputSchema: workloadIDSchema(map[string]any{"tail": map[string]any{"type": "integer"}}), Handler: a.toolLogs},
-		{Name: "containers_health", Description: "Probe workload health.", InputSchema: idSchema(), Handler: a.toolHealth},
-		{Name: "containers_usage_get", Description: "Measure generic workload usage metrics such as container volume storage bytes.", InputSchema: idSchema(), Handler: a.toolUsageGet},
+		{Name: "containers_run", Description: "Run a Docker image as a managed workload.", InputSchema: runSchema(), HandlerCtx: a.toolRunCtx},
+		{Name: "containers_create", Description: "Alias of containers_run.", InputSchema: runSchema(), HandlerCtx: a.toolRunCtx},
+		{Name: "containers_get", Description: "Fetch one workload.", InputSchema: idSchema(), HandlerCtx: a.toolGetCtx},
+		{Name: "containers_list", Description: "List workloads visible to the caller.", InputSchema: schemaObject(map[string]any{"status": map[string]any{"type": "string"}}, nil), HandlerCtx: a.toolListCtx},
+		{Name: "containers_start", Description: "Start a stopped workload.", InputSchema: idSchema(), HandlerCtx: a.toolStartCtx},
+		{Name: "containers_stop", Description: "Stop a running workload.", InputSchema: idSchema(), HandlerCtx: a.toolStopCtx},
+		{Name: "containers_restart", Description: "Restart a workload.", InputSchema: idSchema(), HandlerCtx: a.toolRestartCtx},
+		{Name: "containers_destroy", Description: "Destroy a workload.", InputSchema: workloadIDSchema(map[string]any{"delete_volumes": map[string]any{"type": "boolean"}}), HandlerCtx: a.toolDestroyCtx},
+		{Name: "containers_logs", Description: "Tail workload logs.", InputSchema: workloadIDSchema(map[string]any{"tail": map[string]any{"type": "integer"}}), HandlerCtx: a.toolLogsCtx},
+		{Name: "containers_health", Description: "Probe workload health.", InputSchema: idSchema(), HandlerCtx: a.toolHealthCtx},
+		{Name: "containers_usage_get", Description: "Measure generic workload usage metrics such as container volume storage bytes.", InputSchema: idSchema(), HandlerCtx: a.toolUsageGetCtx},
 		{Name: "containers_blueprints_list", Description: "List blueprints.", InputSchema: schemaObject(nil, nil), Handler: a.toolBlueprints},
+		{Name: "containers_exec_start", Description: "Start an asynchronous command inside an owned workload container. Set session_key to reuse a stateful PTY shell across commands.", InputSchema: executionStartSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionStart},
+		{Name: "containers_exec_get", Description: "Fetch one owned execution.", InputSchema: executionIDSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionGet},
+		{Name: "containers_exec_logs", Description: "Tail bounded logs for one owned execution.", InputSchema: executionLogsSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionLogs},
+		{Name: "containers_exec_cancel", Description: "Cancel one owned queued or running execution.", InputSchema: executionIDSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolExecutionCancel},
+		{Name: "containers_volume_import", Description: "Import a bounded tar.gz archive into an attached named volume owned by the caller.", InputSchema: volumeImportSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolVolumeImport},
+		{Name: "containers_volume_export", Description: "Export a bounded tar.gz archive from an attached named volume owned by the caller.", InputSchema: volumeExportSchema(), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolVolumeExport},
 	}
 }
 
 func main() { sdk.Run(&App{}) }
 
 func (a *App) createWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Workload, error) {
-	w, spec, err := a.prepareWorkload(appCtx, db, in)
+	return a.createOwnedWorkload(ctx, appCtx, db, in, ownerIdentity{})
+}
+
+func (a *App) createOwnedWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, in RunSpec, owner ownerIdentity) (*Workload, error) {
+	w, spec, err := a.prepareOwnedWorkload(appCtx, db, in, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +155,7 @@ func (a *App) createWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB
 }
 
 func (a *App) queueWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Workload, error) {
-	w, spec, err := a.prepareWorkload(appCtx, db, in)
+	w, spec, err := a.prepareOwnedWorkload(appCtx, db, in, ownerIdentity{})
 	if err != nil {
 		return nil, err
 	}
@@ -149,6 +174,10 @@ func (a *App) queueWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Worklo
 }
 
 func (a *App) prepareWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Workload, RunSpec, error) {
+	return a.prepareOwnedWorkload(appCtx, db, in, ownerIdentity{})
+}
+
+func (a *App) prepareOwnedWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec, owner ownerIdentity) (*Workload, RunSpec, error) {
 	log.Printf("[containers] prepare begin name=%q image=%q blueprint=%q ports=%s volumes=%s env_keys=%s",
 		in.Name, in.Image, in.BlueprintSlug, describePorts(in.Ports), describeVolumes(in.Volumes), describeEnvKeys(in.Env))
 	spec, err := a.expandBlueprint(db, in)
@@ -181,7 +210,11 @@ func (a *App) prepareWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Work
 	}
 	id := newWorkloadID()
 	spec.runtimeWorkloadID = id
-	containerName := "containers-" + dockerSafeName(spec.Name)
+	runtimeSuffix := strings.TrimPrefix(id, "wrk_")
+	if len(runtimeSuffix) > 8 {
+		runtimeSuffix = runtimeSuffix[:8]
+	}
+	containerName := "containers-" + dockerSafeName(spec.Name) + "-" + runtimeSuffix
 	networkName := containerName
 	for i := range spec.Volumes {
 		spec.Volumes[i].DockerVolumeName = containerName + "-" + spec.Volumes[i].Name
@@ -191,9 +224,11 @@ func (a *App) prepareWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Work
 		ID: id, Name: spec.Name, BlueprintSlug: spec.BlueprintSlug, HostID: targetID, InstanceID: targetID,
 		Kind: "container", Image: spec.Image, Status: StatusCreating, DesiredStatus: StatusRunning,
 		ContainerName: containerName, NetworkName: networkName, HealthStatus: "unknown",
-		HealthPath: spec.HealthPath, ConfigJSON: encodeJSON(sanitizeRunSpecForStorage(spec)), Env: redactEnvironment(spec.Env),
+		HealthPath: spec.HealthPath, ConfigJSON: encodeJSON(sanitizeRunSpecForStorage(spec)), Env: redactEnvironment(spec.Env), EnvKeys: envKeys(spec.Env),
 		EnvJSON: encodeJSON(redactEnvironment(spec.Env)), Resources: spec.Resources, ResourcesJSON: encodeJSON(spec.Resources),
-		RestartPolicy: spec.RestartPolicy,
+		RestartPolicy: spec.RestartPolicy, Command: spec.Command,
+		WorkingDirectory: spec.WorkingDirectory, User: spec.User,
+		OwnerAppInstallID: owner.InstallID, OwnerAppName: owner.AppName, ProjectID: owner.ProjectID,
 	}
 	if len(spec.Ports) > 0 {
 		p := spec.Ports[0]
@@ -366,6 +401,15 @@ func (a *App) expandBlueprint(db *sql.DB, in RunSpec) (RunSpec, error) {
 	if in.RestartPolicy != "" {
 		base.RestartPolicy = in.RestartPolicy
 	}
+	if in.Command != nil {
+		base.Command = in.Command
+	}
+	if in.WorkingDirectory != "" {
+		base.WorkingDirectory = in.WorkingDirectory
+	}
+	if in.User != "" {
+		base.User = in.User
+	}
 	return base, nil
 }
 
@@ -430,11 +474,15 @@ func (a *App) destroyWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.D
 	if err != nil {
 		return err
 	}
+	if err := a.cancelWorkloadExecutions(appCtx, w.ID); err != nil {
+		return fmt.Errorf("cancel active executions: %w", err)
+	}
 	backend, err := a.backendForWorkload(appCtx, w)
 	if err != nil {
 		return err
 	}
 	var cleanupErrs []error
+	cleanupErrs = append(cleanupErrs, removeWorkloadExecutionRuntime(ctx, db, backend, w.ID)...)
 	if err := backend.Remove(ctx, w.ContainerName, true); err != nil && !isDockerMissingResourceError(err, "container") {
 		cleanupErrs = append(cleanupErrs, err)
 	}
@@ -648,12 +696,9 @@ func isDockerMissingResourceError(err error, resource string) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	switch resource {
-	case "container":
-		return strings.Contains(msg, "no such container")
-	case "network":
-		return strings.Contains(msg, "no such network")
-	case "volume":
-		return strings.Contains(msg, "no such volume")
+	case "container", "network", "volume":
+		return strings.Contains(msg, "no such "+resource) ||
+			(strings.Contains(msg, resource+" ") && strings.Contains(msg, "not found"))
 	default:
 		return false
 	}
@@ -1100,19 +1145,63 @@ func workloadIDArg(args map[string]any) string {
 
 func runSchema() map[string]any {
 	return schemaObject(map[string]any{
-		"name":           map[string]any{"type": "string"},
-		"image":          map[string]any{"type": "string"},
-		"blueprint_slug": map[string]any{"type": "string"},
-		"host_id":        map[string]any{"type": "integer"},
-		"instance_id":    map[string]any{"type": "integer"},
-		"use_local":      map[string]any{"type": "boolean"},
-		"ports":          map[string]any{"type": "array"},
-		"env":            map[string]any{"type": "object"},
-		"volumes":        map[string]any{"type": "array"},
-		"files":          map[string]any{"type": "array", "items": schemaObject(map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "content_base64": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string"}, "secret": map[string]any{"type": "boolean"}}, []string{"path"})},
-		"pull_policy":    map[string]any{"type": "string", "enum": []string{"missing", "always", "never"}},
-		"health_path":    map[string]any{"type": "string"},
-		"resources":      map[string]any{"type": "object"},
-		"restart_policy": map[string]any{"type": "string"},
+		"name":              map[string]any{"type": "string"},
+		"image":             map[string]any{"type": "string"},
+		"blueprint_slug":    map[string]any{"type": "string"},
+		"host_id":           map[string]any{"type": "integer"},
+		"instance_id":       map[string]any{"type": "integer"},
+		"use_local":         map[string]any{"type": "boolean"},
+		"ports":             map[string]any{"type": "array"},
+		"env":               map[string]any{"type": "object"},
+		"volumes":           map[string]any{"type": "array"},
+		"files":             map[string]any{"type": "array", "items": schemaObject(map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "content_base64": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string"}, "secret": map[string]any{"type": "boolean"}}, []string{"path"})},
+		"pull_policy":       map[string]any{"type": "string", "enum": []string{"missing", "always", "never"}},
+		"health_path":       map[string]any{"type": "string"},
+		"resources":         map[string]any{"type": "object"},
+		"restart_policy":    map[string]any{"type": "string"},
+		"command":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"working_directory": map[string]any{"type": "string"},
+		"user":              map[string]any{"type": "string"},
 	}, []string{"name"})
+}
+
+func executionIDSchema() map[string]any {
+	return schemaObject(map[string]any{"execution_id": map[string]any{"type": "string"}}, []string{"execution_id"})
+}
+
+func executionStartSchema() map[string]any {
+	return schemaObject(map[string]any{
+		"workload_id":       map[string]any{"type": "string"},
+		"argv":              map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"shell_command":     map[string]any{"type": "string"},
+		"working_directory": map[string]any{"type": "string"},
+		"env":               map[string]any{"type": "object"},
+		"timeout_s":         map[string]any{"type": "integer", "minimum": 1, "maximum": 86400},
+		"idempotency_key":   map[string]any{"type": "string"},
+		"session_key":       map[string]any{"type": "string", "maxLength": 64},
+	}, []string{"workload_id"})
+}
+
+func executionLogsSchema() map[string]any {
+	return schemaObject(map[string]any{
+		"execution_id": map[string]any{"type": "string"},
+		"tail":         map[string]any{"type": "integer", "minimum": 1, "maximum": 2000},
+	}, []string{"execution_id"})
+}
+
+func volumeImportSchema() map[string]any {
+	return schemaObject(map[string]any{
+		"workload_id":    map[string]any{"type": "string"},
+		"volume":         map[string]any{"type": "string"},
+		"path":           map[string]any{"type": "string"},
+		"archive_base64": map[string]any{"type": "string"},
+	}, []string{"workload_id", "volume", "archive_base64"})
+}
+
+func volumeExportSchema() map[string]any {
+	return schemaObject(map[string]any{
+		"workload_id": map[string]any{"type": "string"},
+		"volume":      map[string]any{"type": "string"},
+		"path":        map[string]any{"type": "string"},
+	}, []string{"workload_id", "volume"})
 }

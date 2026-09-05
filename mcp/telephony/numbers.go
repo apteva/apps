@@ -826,8 +826,33 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 	if intent.Status == "succeeded" {
 		return numberPurchaseResult(intent, true), nil
 	}
+	if intent.Status == "purchasing" || intent.Status == "unknown" {
+		provider, err := a.numberProviderFor(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if provider.ConnID != intent.CarrierConnectionID || provider.Slug != intent.Provider {
+			return nil, errors.New("carrier changed; reconcile the original carrier account before retrying")
+		}
+		owned, err := listOwnedCarrierNumbers(ctx, provider)
+		if err != nil {
+			return nil, fmt.Errorf("purchase outcome unknown; could not reconcile inventory: %w", err)
+		}
+		for _, number := range owned {
+			if compactPhoneNumber(number.PhoneNumber) == compactPhoneNumber(intent.PhoneNumber) {
+				raw, _ := json.Marshal(map[string]any{"reconciled": true, "phone_number": number.PhoneNumber, "provider_number_id": number.ProviderNumberID})
+				if err := dbNumberPurchaseIntentStatus(ctx.AppDB(), token, "succeeded", raw, ""); err != nil {
+					return nil, err
+				}
+				intent.Status = "succeeded"
+				intent.ResponseJSON = string(raw)
+				return numberPurchaseResult(intent, true), nil
+			}
+		}
+		return nil, errors.New("purchase outcome remains unknown; the carrier has not listed the number yet. Retry this same confirmation token to reconcile without buying again")
+	}
 	if intent.Status != "quoted" {
-		return nil, fmt.Errorf("number purchase intent is %s; search again before retrying", intent.Status)
+		return nil, fmt.Errorf("number purchase intent is %s", intent.Status)
 	}
 	if time.Now().UTC().After(intent.ExpiresAt) {
 		_ = dbNumberPurchaseIntentStatus(ctx.AppDB(), token, "expired", nil, "confirmation token expired")
@@ -921,7 +946,7 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 		err = fmt.Errorf("number purchase is unsupported for provider %s", intent.Provider)
 	}
 	if err != nil {
-		_ = dbNumberPurchaseIntentStatus(ctx.AppDB(), token, "failed", nil, err.Error())
+		_ = dbNumberPurchaseIntentStatus(ctx.AppDB(), token, "unknown", nil, err.Error())
 		return nil, fmt.Errorf("provider purchase failed; do not retry automatically: %w", err)
 	}
 	if intent.Provider == "vonage" {
@@ -1120,7 +1145,7 @@ func dbNumberPurchaseIntentGet(db *sql.DB, projectID, token string) (*numberPurc
 func dbNumberPurchaseIntentClaim(db *sql.DB, projectID, token, addressSID, bundleSID string) (bool, error) {
 	result, err := db.Exec(`UPDATE number_purchase_intents
         SET status = 'purchasing', selected_address_sid = ?, selected_bundle_sid = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE project_id = ? AND token = ? AND status = 'quoted'`, addressSID, bundleSID, projectID, token)
+        WHERE project_id = ? AND token = ? AND status = 'quoted' AND NOT EXISTS (SELECT 1 FROM number_purchase_intents other WHERE other.carrier_connection_id=number_purchase_intents.carrier_connection_id AND other.phone_number=number_purchase_intents.phone_number AND other.token<>number_purchase_intents.token AND other.status IN ('purchasing','unknown','succeeded'))`, addressSID, bundleSID, projectID, token)
 	if err != nil {
 		return false, err
 	}

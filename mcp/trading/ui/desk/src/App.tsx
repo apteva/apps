@@ -12,11 +12,19 @@ import { usePortfolios, usePortfolio, usePositions, useOrders, useJournal } from
 import { useUniverse } from "./hooks/useUniverse.ts";
 import { useHealth } from "./hooks/useHealth.ts";
 import { useAppEvents } from "./hooks/useAppEvents.ts";
+import { setLiveArmed } from "./api/portfolios.ts";
+import { useReferenceData } from "./hooks/useReferenceData.ts";
+import { DataIntelligence } from "./components/DataIntelligence.tsx";
+import { useRisk } from "./hooks/useRisk.ts";
+import { RiskObjectives } from "./components/RiskObjectives.tsx";
+import { useExecution } from "./hooks/useExecution.ts";
+import { ExecutionIntelligence } from "./components/ExecutionIntelligence.tsx";
 
 export function App() {
   const [dark, setDark] = useState(true);
   const [portfolioId, setPortfolioId] = useState<number | null>(null);
-  const [bottomTab, setBottomTab] = useState<"positions" | "orders" | "feed">("positions");
+  const [bottomTab, setBottomTab] = useState<"positions" | "orders" | "feed" | "data" | "risk" | "execution">("positions");
+  const [symbol, setSymbol] = useState<string>("");
 
   useEffect(() => { document.body.classList.toggle("dark", dark); }, [dark]);
 
@@ -27,6 +35,9 @@ export function App() {
   const orders = useOrders(portfolioId);
   const journal = useJournal(portfolioId);
   const health = useHealth();
+  const reference = useReferenceData(symbol);
+  const risk = useRisk(portfolioId);
+  const execution = useExecution(portfolioId);
 
   // Event-driven cache invalidation. Each app-event from the sidecar
   // (order.placed, fill, journal.appended, tick, etc.) bumps the
@@ -37,16 +48,68 @@ export function App() {
     const matchesSelected = portfolioId == null || pid == null || pid === portfolioId;
     switch (ev.topic) {
       case "tick":
-        // Marks moved → universe + health surfaces refresh.
-        universe.refresh();
         health.refresh();
-        // Positions re-mark too (their market_value depends on marks).
+        return;
+      case "market.heartbeat":
+      case "provider.health.changed":
+        health.refresh();
+        return;
+      case "venue.health.changed":
+      case "venue.profile.changed":
+        execution.profiles.refresh(); health.refresh();
+        return;
+      case "funding.applied":
+        if (!matchesSelected) return;
+        execution.costs.refresh(); portfolio.refresh(); journal.refresh();
+        return;
+      case "reference.sync.completed":
+      case "reference.security.changed":
+      case "corporate_action.received":
+      case "corporate_action.corrected":
+      case "calendar.session.changed":
+      case "data_quality.issue.changed":
+        reference.status.refresh(); reference.actions.refresh(); reference.issues.refresh(); reference.sessions.refresh(); health.refresh();
+        return;
+      case "corporate_action.applied":
+        reference.actions.refresh();
+        if (matchesSelected) { portfolio.refresh(); positions.refresh(); journal.refresh(); }
+        return;
+      case "market.quotes.updated": {
+        const marks = Array.isArray(ev.data?.marks) ? ev.data.marks : [];
+        universe.updateData((current) => {
+          if (!current) return current;
+          const updates = new Map(marks.map((mark: any) => [String(mark.symbol), mark]));
+          return current.map((row) => {
+            const mark: any = updates.get(row.symbol);
+            if (!mark) return row;
+            const price = Number(mark.price || row.price);
+            return {
+              ...row, ...mark, price,
+              change_abs: row.prev_close ? price - row.prev_close : row.change_abs,
+              change_pct: row.prev_close ? (price / row.prev_close - 1) * 100 : row.change_pct,
+              spark: [...row.spark.slice(-29), price],
+            };
+          });
+        });
         if (matchesSelected) positions.refresh();
         return;
+      }
       case "portfolio.created":
       case "portfolio.status.changed":
+      case "portfolio.live_armed.changed":
         portfolios.refresh();
         if (matchesSelected) portfolio.refresh();
+        return;
+      case "risk.policy.changed":
+      case "risk.limit.breached":
+      case "portfolio.objective.changed":
+      case "portfolio.performance.updated":
+        if (!matchesSelected) return;
+        risk.risk.refresh(); risk.objectives.refresh(); portfolio.refresh();
+        return;
+      case "portfolio.universe.changed":
+        if (!matchesSelected) return;
+        risk.universe.refresh(); portfolio.refresh();
         return;
       case "order.placed":
       case "order.filled":
@@ -56,6 +119,7 @@ export function App() {
         orders.refresh();
         portfolio.refresh();   // cash/equity drift
         positions.refresh();   // potential new/removed position
+        execution.costs.refresh();
         return;
       case "position.changed":
         if (!matchesSelected) return;
@@ -87,7 +151,6 @@ export function App() {
   }, [portfolios.data, portfolioId]);
 
   // Default symbol = first watched symbol on the selected portfolio.
-  const [symbol, setSymbol] = useState<string>("");
   useEffect(() => {
     if (portfolio.data && portfolio.data.watchlist && portfolio.data.watchlist.length > 0) {
       setSymbol(portfolio.data.watchlist[0]!);
@@ -141,7 +204,14 @@ export function App() {
           />
 
           <div className="flex flex-col gap-4 min-h-0">
-            {portfolio.data && <PortfolioHeader p={portfolio.data} />}
+            {portfolio.data && <PortfolioHeader
+              p={portfolio.data}
+              onSetLiveArmed={async (armed) => {
+                await setLiveArmed(portfolio.data!.id, armed);
+                portfolio.refresh();
+                portfolios.refresh();
+              }}
+            />}
 
             <div
               className="grid gap-4"
@@ -168,6 +238,9 @@ export function App() {
                     { k: "positions", label: "Positions", count: positions.data?.length ?? 0 },
                     { k: "orders",    label: "Orders",    count: orders.data?.length ?? 0 },
                     { k: "feed",      label: "Agent",     count: journal.data?.length ?? 0 },
+                    { k: "data",      label: "Data",      count: reference.actions.data?.length ?? 0 },
+                    { k: "risk",      label: "Risk & goals", count: risk.objectives.data?.length ?? 0 },
+                    { k: "execution", label: "Execution", count: execution.costs.data?.costs.length ?? 0 },
                   ] as const
                 ).map((t) => (
                   <button
@@ -179,7 +252,7 @@ export function App() {
                     <span className="text-[10px] t-tertiary mono">{t.count}</span>
                   </button>
                 ))}
-                <span className="ml-auto pr-2 text-[10px] t-tertiary mono">v0.1 · paper</span>
+                <span className="ml-auto pr-2 text-[10px] t-tertiary mono">v0.9.0 · event driven</span>
               </div>
 
               <div className="flex-1 min-h-0 mt-1.5">
@@ -188,6 +261,9 @@ export function App() {
                 {bottomTab === "feed"      && portfolio.data && (
                   <AgentFeed portfolio={portfolio.data} entries={journal.data ?? []} />
                 )}
+                {bottomTab === "data" && <DataIntelligence status={reference.status.data} actions={reference.actions.data ?? []} issues={reference.issues.data ?? []} sessions={reference.sessions.data ?? []} symbol={symbol} />}
+                {bottomTab === "risk" && portfolio.data && <RiskObjectives portfolioId={portfolio.data.id} policy={risk.risk.data?.policy} state={risk.risk.data?.state} objectives={risk.objectives.data ?? []} universe={risk.universe.data?.policy} allowedClasses={risk.universe.data?.allowed_classes ?? portfolio.data.allowed_classes} onRefresh={() => { risk.risk.refresh(); risk.objectives.refresh(); risk.universe.refresh(); }} />}
+                {bottomTab === "execution" && <ExecutionIntelligence profiles={execution.profiles.data ?? []} costs={execution.costs.data?.costs ?? []} totals={execution.costs.data?.totals ?? {}} onRefresh={() => { execution.profiles.refresh(); execution.costs.refresh(); }} />}
               </div>
             </section>
           </div>
@@ -196,7 +272,7 @@ export function App() {
         <footer className="flex items-center justify-center gap-3 text-[11px] t-tertiary py-1">
           <span>Apteva · Trading</span>
           <span>·</span>
-          <span>Paper mode — no broker connected.</span>
+          <span>Simulation, Alpaca paper, and explicitly armed live execution.</span>
         </footer>
       </div>
     </div>

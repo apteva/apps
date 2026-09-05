@@ -1,0 +1,187 @@
+schema: apteva-app/v1
+
+name: games
+display_name: Games
+version: 0.1.0
+description: |
+  Game backend for Apteva: players and progression, run by an agent.
+  v0.1 ships guest and custom-ID login through the Auth app, player
+  profiles and bans, versioned player data (cloud save), server-authoritative
+  statistics with last, max, min, and sum aggregation, leaderboards with
+  daily, weekly, monthly, and season periods, and achievements evaluated
+  from statistics. Game clients use the /v1 player API with Auth-issued
+  JWTs; agents use the MCP tools; the dashboard panel shows players,
+  leaderboards, and definitions.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/games
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [games, players, progression, leaderboards, liveops, backend]
+
+scopes: [project]
+min_apteva_version: "0.14.1"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: auth
+      version: ">=0.10.0"
+      reason: Owns player accounts, sessions, and tokens. Games logs players in by device or custom ID through Auth and verifies Auth-issued JWTs on every player request.
+    - name: analytics
+      optional: true
+      reason: Records session_start, stat, and achievement events for retention queries. Without it, telemetry is skipped.
+
+provides:
+  http_routes:
+    - prefix: /v1/
+      no_auth: true
+    - prefix: /admin/
+  mcp_tools:
+    - name: players_search
+      description: Search players by display name, player id, or auth user id; filter by status (active | banned). Paged.
+    - name: players_get
+      description: Fetch one player by id, auth_user_id, device_id, or custom_id (device and custom ids are resolved through Auth).
+    - name: players_get_context
+      description: Player plus statistics, every data key (including server-only), achievements, bans, and recent audit events.
+    - name: players_update
+      description: Update a player's display_name, avatar_url, region, locale, or public metadata.
+    - name: players_ban
+      description: Ban a player with a reason and optional expires_at (RFC3339). Disables the Auth user and revokes sessions.
+    - name: players_unban
+      description: Lift a player's active bans and re-enable the Auth user.
+    - name: players_export
+      description: Export everything stored about one player as JSON (data-subject access request).
+    - name: players_erase
+      description: Delete a player's rows and disable the Auth user. Requires confirm=true. Irreversible.
+    - name: data_get
+      description: Read a player's data keys (all visibilities), or one key.
+    - name: data_set
+      description: Write a player data key with an optional expected version (optimistic) and visibility (public | private | server).
+    - name: data_delete
+      description: Delete a player data key.
+    - name: stats_define
+      description: Define or update a statistic (aggregation last | max | min | sum, client_writable, description). Stats feeding leaderboards or the economy should stay server-only.
+    - name: stats_list
+      description: List statistic definitions.
+    - name: stats_get
+      description: Read one player's statistics.
+    - name: stats_update
+      description: Server-authoritative statistic update for a player; applies aggregation, leaderboards, and achievement rules. Undefined stats are auto-defined as server-only last-value stats.
+    - name: leaderboards_create
+      description: Create a leaderboard over a statistic with sort (desc | asc) and reset (none | daily | weekly | monthly | season) plus season_days.
+    - name: leaderboards_list
+      description: List leaderboards with their current period.
+    - name: leaderboards_get
+      description: Read a leaderboard page (current or past period) with ranks and display names.
+    - name: leaderboards_around_player
+      description: Entries around one player in a leaderboard, with the player's rank.
+    - name: leaderboards_reset_now
+      description: Start a fresh period on a leaderboard immediately; previous entries stay readable by period.
+    - name: achievements_define
+      description: Define or update an achievement unlocked when a statistic meets a threshold (op gte | gt | lte | lt | eq), or granted manually.
+    - name: achievements_list
+      description: List achievement definitions.
+    - name: achievements_grant
+      description: Manually unlock an achievement for a player.
+  ui_panels:
+    - slot: project.page
+      label: Games
+      icon: gamepad
+      entry: /ui/GamesPanel.mjs
+  skills:
+    - name: games
+      description: Use Games tools for players, bans, player data, statistics, leaderboards, and achievements. Activate when the user asks about players, scores, rankings, saves, or a game's backend.
+      body_file: skills/games/SKILL.md
+      metadata:
+        category: games
+        agent_plugins: "1.0.0"
+  workers:
+    - name: leaderboard-rollover
+      schedule: "@every 1m"
+  publishes:
+    - name: player.created
+      description: A player row was created on first login.
+      payload:
+        player_id: integer
+        auth_user_id: integer
+        provider: string
+        kind: string
+        display_name: string
+    - name: player.linked
+      description: A player linked an additional device or custom identity.
+      payload:
+        player_id: integer
+        provider: string
+    - name: player.banned
+      description: A player was banned; the Auth user is disabled.
+      payload:
+        player_id: integer
+        reason: string
+        expires_at: string
+        source: string
+    - name: player.unbanned
+      description: A player's bans were lifted; the Auth user is re-enabled.
+      payload:
+        player_id: integer
+        source: string
+    - name: player.erased
+      description: A player's data was deleted and the Auth user disabled.
+      payload:
+        player_id: integer
+        auth_user_id: integer
+    - name: stat.updated
+      description: A player's statistic changed after aggregation.
+      payload:
+        player_id: integer
+        stat: string
+        value: number
+        previous: number
+        source: string
+    - name: leaderboard.reset
+      description: A leaderboard started a new period, by schedule or by hand.
+      payload:
+        leaderboard: string
+        previous_period: string
+        period: string
+        manual: boolean
+    - name: achievement.unlocked
+      description: A player unlocked an achievement.
+      payload:
+        player_id: integer
+        key: string
+        source: string
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/games
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/games.db
+  migrations: migrations/
+
+config_schema:
+  - name: auth_organization_slug
+    type: text
+    default: "default"
+    label: Auth organization
+    description: Auth organization that holds this title's players. Games registers its own native OAuth client in it on first login.
+  - name: analytics_enabled
+    type: text
+    default: "true"
+    label: Send telemetry to Analytics
+    description: When true and the Analytics app is installed, logins, stat updates, and achievement unlocks are tracked. true | false.
+  - name: default_display_name_prefix
+    type: text
+    default: "Player"
+    label: Default display name prefix
+    description: New players without a display name are called "<prefix> <id>".
+
+upgrade_policy: auto-patch

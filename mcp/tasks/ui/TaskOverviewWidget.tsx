@@ -13,7 +13,12 @@ import {
 } from "./taskShared";
 
 export default function TaskOverviewWidget(props: HostProps) {
-  const { tasks, loading, error, reload } = useTasks(props, { limit: "200" });
+  const operational = useTasks(props, { limit: "100", view: "operational" });
+  const recent = useTasks(props, { limit: "12", view: "recent", include_runs: "true" });
+  const tasks = useMemo(() => [...operational.tasks, ...recent.tasks.filter(task => !operational.tasks.some(existing => existing.id === task.id))], [operational.tasks, recent.tasks]);
+  const loading = operational.loading || recent.loading;
+  const error = operational.error || recent.error;
+  const reload = () => { void operational.reload(); void recent.reload(); };
   const names = useAgentNames(props.projectId);
   const preferences = taskOverviewPreferences(props.widgetSettings);
   const filterStorageKey = `apteva:tasks:overview-filters:${props.widgetId || `${props.projectId || "global"}:${props.installId || 0}`}`;
@@ -96,6 +101,7 @@ export default function TaskOverviewWidget(props: HostProps) {
               onOpen={() => setSelected(task)}
             />
           ))}
+          {operational.hasMore && <button disabled={loading} onClick={() => void operational.loadMore()} className="w-full p-3 text-xs text-accent">Load more work</button>}
           {queue.length === 0 && (
             <div className="flex h-full min-h-28 items-center px-4 text-xs text-text-dim">
               {filters.length > 0

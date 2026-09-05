@@ -24,6 +24,7 @@ apteva test ./scenarios/01-create-from-template.yaml -v
 | `03-edit-with-uniqueness.yaml` | `code_edit_file` with non-unique target → must include context |
 | `04-grep-then-edit.yaml` | `code_grep` → `code_edit_file` — the realistic find-then-fix loop |
 | `05-multi-edit-refactor.yaml` | `code_multi_edit` — atomic batched edits |
+| `06-workspace-round-trip.yaml` | Real Containers + Workspaces execution, revision preview, exact-digest apply, and source verification |
 
 ## Adding a scenario
 
@@ -31,3 +32,7 @@ Each scenario is one self-contained YAML with `directive` (the
 prompt), `assert` (post-conditions checked against tool calls and
 HTTP), and `budget` (token + cost ceiling). Keep one capability per
 file — combos make failures hard to diagnose.
+
+Scenarios that exercise optional app dependencies opt in explicitly with
+`setup.app.bindings.<name>: app`. Use `setup.cleanup_mcp_calls` for durable
+resources that must be removed even when an assertion fails.

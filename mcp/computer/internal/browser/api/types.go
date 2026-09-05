@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -91,6 +92,7 @@ type WaitCondition struct {
 	TargetID      string `json:"target_id,omitempty"`
 	Name          string `json:"name,omitempty"`
 	Role          string `json:"role,omitempty"`
+	State         string `json:"state,omitempty"`
 	CaseSensitive bool   `json:"case_sensitive,omitempty"`
 }
 
@@ -99,6 +101,26 @@ type WaitConditionResult struct {
 	Type     string `json:"type"`
 	Matched  bool   `json:"matched"`
 	TargetID string `json:"target_id,omitempty"`
+}
+
+// MediaObservation is a provider-neutral projection of the media/embed and
+// draft-save state visible in the active document. It reports browser evidence
+// only; callers remain responsible for deciding whether the rendered media is
+// the intended asset.
+type MediaObservation struct {
+	EmbedStatus          string  `json:"media_embed_status"`
+	PlayerVisible        bool    `json:"media_player_visible"`
+	IframeVisible        bool    `json:"media_iframe_visible"`
+	ThumbnailVisible     bool    `json:"media_thumbnail_visible"`
+	ThumbnailURL         string  `json:"media_thumbnail_url,omitempty"`
+	DurationText         string  `json:"media_duration_text,omitempty"`
+	DurationSeconds      float64 `json:"media_duration_seconds,omitempty"`
+	ConfigurationPresent bool    `json:"media_configuration_present"`
+	ErrorText            string  `json:"media_error_text,omitempty"`
+	IframeSrc            string  `json:"media_iframe_src,omitempty"`
+	Provider             string  `json:"media_provider,omitempty"`
+	DraftSaveState       string  `json:"draft_save_state"`
+	DraftSaveText        string  `json:"draft_save_text,omitempty"`
 }
 
 // WaitResult separates what was observed from whether the wait exhausted its
@@ -115,6 +137,7 @@ type WaitResult struct {
 	LoadingIndicators int                   `json:"loading_indicators,omitempty"`
 	InflightRequests  int                   `json:"inflight_requests,omitempty"`
 	LoadingFrames     int                   `json:"loading_frames,omitempty"`
+	Media             *MediaObservation     `json:"media,omitempty"`
 }
 
 // PresentationOptions makes browser actions legible in live views and hosted
@@ -238,14 +261,20 @@ type SetOfMarkTarget struct {
 	AccessibleName    string         `json:"accessible_name,omitempty"`
 	Type              string         `json:"type,omitempty"`
 	Placeholder       string         `json:"placeholder,omitempty"`
+	Checked           *bool          `json:"checked,omitempty"`
+	Indeterminate     bool           `json:"indeterminate,omitempty"`
 	CurrentValue      *string        `json:"current_value,omitempty"`
 	Pattern           string         `json:"pattern,omitempty"`
 	FormatHint        string         `json:"format_hint,omitempty"`
 	DateLike          bool           `json:"date_like,omitempty"`
 	Validity          *FieldValidity `json:"validity,omitempty"`
 	Disabled          bool           `json:"disabled"`
-	Loading           bool           `json:"loading"`
+	Loading           bool           `json:"loading"` // compatibility alias for target_loading
+	TargetLoading     bool           `json:"target_loading"`
+	ContainerLoading  bool           `json:"container_loading"`
+	PageLoadingCount  int            `json:"page_loading_indicators"`
 	Dangerous         bool           `json:"dangerous"`
+	Effect            string         `json:"effect,omitempty"`
 	DestructiveEffect string         `json:"destructive_effect,omitempty"`
 }
 
@@ -267,22 +296,23 @@ type FieldValidity struct {
 // ScrollRegion is one independently scrollable viewport or DOM container.
 // IDs are stable for the current document and are accepted by scroll actions.
 type ScrollRegion struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Role       string `json:"role"`
-	X          int    `json:"x"`
-	Y          int    `json:"y"`
-	W          int    `json:"w"`
-	H          int    `json:"h"`
-	ScrollLeft int    `json:"scroll_left"`
-	ScrollTop  int    `json:"scroll_top"`
-	MaxScrollX int    `json:"max_scroll_x"`
-	MaxScrollY int    `json:"max_scroll_y"`
-	CanScrollX bool   `json:"can_scroll_x"`
-	CanScrollY bool   `json:"can_scroll_y"`
-	ParentID   string `json:"parent_id,omitempty"`
-	OpenedBy   string `json:"opened_by,omitempty"`
-	Document   bool   `json:"document"`
+	ContentHints []string `json:"content_hints,omitempty"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Role         string   `json:"role"`
+	X            int      `json:"x"`
+	Y            int      `json:"y"`
+	W            int      `json:"w"`
+	H            int      `json:"h"`
+	ScrollLeft   int      `json:"scroll_left"`
+	ScrollTop    int      `json:"scroll_top"`
+	MaxScrollX   int      `json:"max_scroll_x"`
+	MaxScrollY   int      `json:"max_scroll_y"`
+	CanScrollX   bool     `json:"can_scroll_x"`
+	CanScrollY   bool     `json:"can_scroll_y"`
+	ParentID     string   `json:"parent_id,omitempty"`
+	OpenedBy     string   `json:"opened_by,omitempty"`
+	Document     bool     `json:"document"`
 }
 
 // ScrollResult reports observed movement, not merely wheel-event delivery.
@@ -385,6 +415,54 @@ type ActionOnlyExecutor interface {
 type StabilityWaiter interface {
 	WaitForStable(quietMS, timeoutMS int) (WaitResult, error)
 	WaitForOutcome(conditions []WaitCondition, match string, quietMS, timeoutMS int) (WaitResult, error)
+}
+
+// MediaObserver is implemented by CDP-backed providers that can inspect the
+// active document for rendered media and draft-save state.
+type MediaObserver interface {
+	ObserveMedia() (MediaObservation, error)
+}
+
+type DownloadStatus string
+
+const (
+	DownloadInProgress DownloadStatus = "in_progress"
+	DownloadCompleted  DownloadStatus = "completed"
+	DownloadFailed     DownloadStatus = "failed"
+	DownloadCancelled  DownloadStatus = "cancelled"
+)
+
+// Download is safe browser-visible metadata. Provider identifiers, local
+// paths, signed URLs, and downloaded bytes are deliberately excluded.
+type Download struct {
+	OriginalFilename string         `json:"-"` // Provider identity; never use as a filesystem path.
+	ID               string         `json:"id"`
+	Filename         string         `json:"filename"`
+	MIMEType         string         `json:"mime_type,omitempty"`
+	Size             int64          `json:"size,omitempty"`
+	ReceivedBytes    int64          `json:"received_bytes,omitempty"`
+	SHA256           string         `json:"sha256,omitempty"`
+	Status           DownloadStatus `json:"status"`
+	ErrorCode        string         `json:"error_code,omitempty"`
+	SourceOrigin     string         `json:"source_origin,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	CompletedAt      *time.Time     `json:"completed_at,omitempty"`
+}
+
+// DownloadManager is an optional, session-bound backend capability. IDs are
+// opaque within one browser session and never represent filesystem paths.
+type DownloadManager interface {
+	ListDownloads(ctx context.Context) ([]Download, error)
+	WaitForDownload(ctx context.Context, id string) (Download, error)
+	OpenDownload(ctx context.Context, id string) (io.ReadCloser, Download, error)
+}
+
+// DownloadEventSource lets computer_use include compact downloads_started
+// metadata without waiting for completion. Absence is harmless: callers can
+// always discover downloads through browser_download(action=list).
+type DownloadEventSource interface {
+	DownloadEventCursor() uint64
+	DownloadsStartedSince(cursor uint64) []Download
 }
 
 // TabInfo describes one browser page target inside a provider session.
@@ -528,6 +606,32 @@ type EnvironmentOptions struct {
 	Mobile            *bool               `json:"mobile,omitempty"`
 	Touch             *bool               `json:"touch,omitempty"`
 	MaxTouchPoints    *int                `json:"max_touch_points,omitempty"`
+}
+
+type EffectiveEnvironment struct {
+	Locale    string   `json:"locale,omitempty"`
+	Languages []string `json:"languages,omitempty"`
+	Timezone  string   `json:"timezone,omitempty"`
+	UserAgent string   `json:"user_agent,omitempty"`
+	Verified  bool     `json:"verified"`
+}
+
+type EnvironmentReporter interface {
+	EffectiveEnvironment() (EffectiveEnvironment, error)
+}
+
+// ProviderSessionState is lifecycle evidence from a hosted browser provider.
+// It lets the app distinguish an expired provider lease from a generic CDP
+// disconnect without attempting to replay the interrupted action.
+type ProviderSessionState struct {
+	Status      string `json:"status,omitempty"`
+	StartedAt   string `json:"started_at,omitempty"`
+	ExpiresAt   string `json:"expires_at,omitempty"`
+	CloseReason string `json:"close_reason,omitempty"`
+}
+
+type ProviderSessionStateReporter interface {
+	ProviderSessionState(context.Context) (ProviderSessionState, error)
 }
 
 // IsEmpty reports whether applying the environment would be a no-op.

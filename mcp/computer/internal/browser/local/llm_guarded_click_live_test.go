@@ -124,14 +124,15 @@ func askBrowserModel(t *testing.T, frame []byte, targets []computer.SetOfMarkTar
 	prompt := fmt.Sprintf("You are a cautious browser agent. Inspect the attached current frame and this current structured SoM: %s\nGoal: %s\nReturn only the required decision object. A label is valid only if it appears in the current SoM. loading=true means do not click it.", targetJSON, goal)
 	model := strings.TrimSpace(os.Getenv("COMPUTER_LLM_TEST_MODEL"))
 	if model == "" {
-		model = "gpt-5.5"
+		model = "gpt-5.6-terra"
 	}
+	t.Logf("LLM regression model: %s", model)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "codex", "exec", "--ephemeral", "--ignore-rules", "--skip-git-repo-check", "-s", "read-only", "-m", model, "--image", imagePath, "--output-schema", schemaPath, "--output-last-message", resultPath, prompt)
+	cmd := exec.CommandContext(ctx, computerLLMBinary(), "exec", "--ephemeral", "--ignore-rules", "--skip-git-repo-check", "-s", "read-only", "-m", model, "--image", imagePath, "--output-schema", schemaPath, "--output-last-message", resultPath, prompt)
 	cmd.Dir = tmp
 	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("LLM browser decision failed: %v\n%s", err, output)
+		t.Fatalf("LLM browser decision failed: %v\n%s", err, conciseLLMLog(output))
 	}
 	var decision llmBrowserDecision
 	raw, err := os.ReadFile(resultPath)
@@ -143,4 +144,26 @@ func askBrowserModel(t *testing.T, frame []byte, targets []computer.SetOfMarkTar
 	}
 	t.Logf("LLM decision: %+v", decision)
 	return decision
+}
+
+func computerLLMBinary() string {
+	if binary := strings.TrimSpace(os.Getenv("COMPUTER_LLM_CODEX_BIN")); binary != "" {
+		return binary
+	}
+	return "codex"
+}
+
+func conciseLLMLog(raw []byte) string {
+	lines := strings.Split(string(raw), "\n")
+	var out []string
+	for _, line := range lines {
+		if len(line) > 1000 {
+			line = line[:1000] + " [truncated]"
+		}
+		out = append(out, line)
+	}
+	if len(out) > 50 {
+		out = out[len(out)-50:]
+	}
+	return strings.Join(out, "\n")
 }

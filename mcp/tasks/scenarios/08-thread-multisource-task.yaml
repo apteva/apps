@@ -19,7 +19,10 @@ setup:
       create exactly one task named "Review CRM health snapshot". Then call
       each of the three crm-snapshot tools exactly once, synthesize their
       authoritative values, and complete the same task with a concrete result.
-      Do not delegate. Report the final counts in your response and stop.
+      This is immediate work: omit the schedule argument entirely and set
+      assigned_thread_id exactly to "request-review". Call tasks_create only
+      once; retain the returned task ID. Do not delegate. Report the final
+      counts in your response and stop.
   app:
     path: ./
   fake_mcp_servers:

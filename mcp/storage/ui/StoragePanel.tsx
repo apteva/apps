@@ -119,7 +119,7 @@ interface FolderRow {
 }
 
 interface FoldersResp { folders?: string[]; folder_details?: FolderRow[] }
-interface FilesResp { files?: FileRow[] }
+interface FilesResp { files?: FileRow[]; has_more?: boolean; next_offset?: number }
 interface RenameFolderResp { from: string; to: string; updated: number }
 
 const API = "/api/apps/storage";
@@ -176,18 +176,28 @@ interface UploadJob {
   serverUploadId?: string;
 }
 
-export default function StoragePanel({ projectId, installId }: NativePanelProps) {
+export default function StoragePanel(props: NativePanelProps) { return <StoragePanelContent key={`${props.projectId}:${props.installId}`} {...props} />; }
+function StoragePanelContent({ projectId, installId }: NativePanelProps) {
   const [folder, setFolder] = useState("/");
   const [folders, setFolders] = useState<FolderRow[]>([]);
   const [files, setFiles] = useState<FileRow[]>([]);
   const [status, setStatus] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const busy = loading || uploading;
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const loadGeneration = useRef(0);
+  const loadAbort = useRef<AbortController | null>(null);
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [newFolder, setNewFolder] = useState("");
   const [renameFolder, setRenameFolder] = useState<string | null>(null);
   const [renameName, setRenameName] = useState("");
   const [renameError, setRenameError] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
-  const [selected, setSelected] = useState<FileRow | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = files.find(f => String(f.id) === selectedId) || null;
+  const setSelected = (f: FileRow | null) => setSelectedId(f ? String(f.id) : null);
   const [uploads, setUploads] = useState<UploadJob[]>([]);
   const uploadRef = useRef<HTMLInputElement | null>(null);
 
@@ -196,8 +206,8 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
     return u.toString();
   }, [projectId, installId]);
 
-  const api = useCallback(async <T,>(method: string, path: string, params?: Record<string, string>, body?: any): Promise<T> => {
-    const opts: RequestInit = { method, credentials: "same-origin", headers: {} };
+  const api = useCallback(async <T,>(method: string, path: string, params?: Record<string, string>, body?: any, signal?: AbortSignal): Promise<T> => {
+    const opts: RequestInit = { method, signal, credentials: "same-origin", headers: {} };
     if (body && !(body instanceof FormData)) {
       (opts.headers as Record<string, string>)["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
@@ -210,41 +220,43 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
     return res.json();
   }, [withParams]);
 
+  const listingScope = `${folder}:${offset}:${projectId}:${installId}`;
+  const currentListingScope = useRef(listingScope); currentListingScope.current = listingScope;
   const load = useCallback(async () => {
-    setBusy(true);
+    if (currentListingScope.current !== listingScope) return;
+    const generation = ++loadGeneration.current;
+    loadAbort.current?.abort();
+    const controller = new AbortController(); loadAbort.current = controller;
+    setLoading(true);
     try {
       const [foldersResp, filesResp] = await Promise.all([
-        api<FoldersResp>("GET", "/folders", { parent: folder }),
-        api<FilesResp>("GET", "/files", { folder }),
+        api<FoldersResp>("GET", "/folders", { parent: folder }, undefined, controller.signal),
+        api<FilesResp>("GET", "/files", { folder, limit: "200", offset: String(offset) }, undefined, controller.signal),
       ]);
+      if (generation !== loadGeneration.current) return;
       const nextFolders = folderRows(foldersResp, folder);
-      setFolders(nextFolders);
-      setFiles(filesResp.files || []);
-      const total = (filesResp.files || []).length;
-      const subs = nextFolders.length;
-      setStatus(`${total} file${total !== 1 ? "s" : ""} · ${subs} folder${subs !== 1 ? "s" : ""}`);
+      setFolders(nextFolders); setFiles(filesResp.files || []); setHasMore(!!filesResp.has_more);
+      setStatus(`${(filesResp.files || []).length} files · ${nextFolders.length} folders`);
     } catch (e) {
-      setStatus("Error: " + (e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }, [folder, api]);
+      if (generation === loadGeneration.current && !controller.signal.aborted) setStatus("Error: " + (e as Error).message);
+    } finally { if (generation === loadGeneration.current) setLoading(false); }
+  }, [folder, offset, api, listingScope]);
 
-  useEffect(() => { load(); }, [load]);
-
-  // Live refresh: reload the listing whenever a file event lands for
-  // this project. Topic filter keeps us off unrelated chatter; the
-  // re-fetch is cheap (<100ms for /folders + /files combined).
-  useAppEvents("storage", projectId, (ev) => {
-    if (ev.topic === "file.added" || ev.topic === "file.deleted" || ev.topic === "file.updated") {
-      load();
+  useEffect(() => { setSelectedId(null); setFiles([]); setFolders([]); setFolder("/"); setOffset(0); }, [projectId, installId]);
+  useEffect(() => { setSelectedId(null); setOffset(0); }, [folder]);
+  useEffect(() => { void load(); return () => { loadGeneration.current++; loadAbort.current?.abort(); if (refreshTimer.current) clearTimeout(refreshTimer.current); }; }, [load]);
+  useAppEvents("storage", projectId, ev => {
+    if (ev.install_id && ev.install_id !== installId) return;
+    if (["file.added", "file.deleted", "file.updated"].includes(ev.topic)) {
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+      refreshTimer.current = setTimeout(() => { void load(); }, 100);
     }
   });
 
   const handleUpload = async (ev: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = Array.from(ev.target.files || []);
     if (fileList.length === 0) return;
-    setBusy(true);
+    setUploading(true);
     // Seed one job per selected file. Preserve insertion order — the
     // strip renders top-to-bottom matching what the user picked.
     const baseId = Date.now();
@@ -298,14 +310,15 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
             // the rest of a multi-file selection.
             continue;
           }
-          throw e;
+          setStatus("Upload failed: " + (e as Error).message);
+          continue;
         }
       }
     } catch (e) {
       setStatus("Upload failed: " + (e as Error).message);
     } finally {
       ev.target.value = "";
-      setBusy(false);
+      setUploading(false);
       load();
       // Auto-clear terminal jobs that don't need user action.
       // Errors and cancels stick around — user dismisses them.
@@ -346,9 +359,10 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
     fd.append("file", new Blob([""], { type: "text/plain" }), ".placeholder");
     fd.append("folder", folder + name + "/");
     try {
-      await fetch(`${API}/files?${withParams({})}`, {
+      const response = await fetch(`${API}/files?${withParams({})}`, {
         method: "POST", credentials: "same-origin", body: fd,
       });
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`);
       setNewFolder("");
       load();
     } catch (e) {
@@ -420,7 +434,7 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
           alert("This file is public but storage didn't return an absolute URL — check Settings → Server → public_url.");
           return;
         }
-        await navigator.clipboard.writeText(url).catch(() => {});
+        await navigator.clipboard.writeText(url);
         alert(`Public link copied:\n${url}\n\nAnyone with this URL can fetch the file.`);
         return;
       }
@@ -433,14 +447,9 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
       }
       // signed or just-confirmed-private → mint a fresh signed URL.
       const resp = await api<{ url: string; expires_at: number }>(
-        "POST", `/files/${f.id}/url`, undefined, { ttl_seconds: 86400 },
+        "POST", `/files/${f.id}/url`, undefined, { ttl_seconds: 86400, delivery: "proxy" },
       );
-      // If the file was private, also flip its visibility flag so
-      // future Share clicks recognize the intent.
-      if (f.visibility === "private") {
-        await api("PATCH", `/files/${f.id}`, undefined, { visibility: "signed" });
-      }
-      await navigator.clipboard.writeText(resp.url).catch(() => {});
+      await navigator.clipboard.writeText(resp.url);
       alert(`Signed link copied (expires in 24h):\n${resp.url}`);
       load();
     } catch (e) {
@@ -470,7 +479,6 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
   // handleMakePrivate revokes both public and signed access. Used by
   // the detail pane to undo a Make-public click.
   const handleMakePrivate = async (f: FileRow) => {
-    if (f.visibility === "private") return;
     try {
       await api("PATCH", `/files/${f.id}`, undefined, { visibility: "private" });
       load();
@@ -643,6 +651,11 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
       </div>
 
       <div className="text-xs text-text-dim">{status}</div>
+    <div className="flex items-center gap-3 p-3">
+      <button type="button" disabled={loading || offset === 0} onClick={() => setOffset(v => Math.max(0, v - 200))}>Previous</button>
+      <span>Page {Math.floor(offset / 200) + 1}</span>
+      <button type="button" disabled={loading || !hasMore} onClick={() => setOffset(v => v + 200)}>Next</button>
+    </div>
     </div>
     {selected && (
       <FileDetail
@@ -832,12 +845,12 @@ function FileDetail({
             className="px-2 py-1 border border-border rounded hover:bg-bg-input text-green"
           >Make public</button>
         )}
-        {file.visibility !== "private" && (
+        {true && (
           <button
             type="button"
             onClick={onMakePrivate}
             className="px-2 py-1 border border-border rounded hover:bg-bg-input"
-          >Make private</button>
+          >{file.visibility === "private" ? "Revoke links" : "Make private"}</button>
         )}
       </div>
 
@@ -1068,11 +1081,12 @@ function TextPreview({ contentURL }: { contentURL: string }) {
   const [err, setErr] = useState("");
   useEffect(() => {
     let alive = true;
-    fetch(contentURL, { credentials: "same-origin" })
+    const controller = new AbortController(); setText(null); setErr("");
+    fetch(contentURL, { credentials: "same-origin", signal: controller.signal })
       .then((r) => r.ok ? r.text() : Promise.reject(new Error(`${r.status}`)))
       .then((t) => { if (alive) setText(t); })
       .catch((e) => { if (alive) setErr(e.message); });
-    return () => { alive = false; };
+    return () => { alive = false; controller.abort(); };
   }, [contentURL]);
   if (err) {
     return <div className="bg-bg-input border-b border-border p-3 text-xs text-red">Preview failed: {err}</div>;

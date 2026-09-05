@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -30,8 +32,10 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 }
 
 type httpInvocationStream struct {
-	w       http.ResponseWriter
-	started bool
+	w            http.ResponseWriter
+	started      bool
+	ctx          context.Context
+	invocationID int64
 }
 
 func (s *httpInvocationStream) Start(statusCode int, headers map[string]string) error {
@@ -42,13 +46,21 @@ func (s *httpInvocationStream) Start(statusCode int, headers map[string]string) 
 		statusCode = http.StatusOK
 	}
 	for key, value := range headers {
-		if streamResponseHeaderAllowed(key) {
+		if streamResponseHeaderAllowed(key) && !strings.ContainsAny(value, "\r\n") {
 			s.w.Header().Set(key, value)
 		}
 	}
 	if s.w.Header().Get("Content-Type") == "" {
 		s.w.Header().Set("Content-Type", "application/octet-stream")
 	}
+	if s.ctx != nil {
+		if d, ok := s.ctx.Deadline(); ok {
+			if err := http.NewResponseController(s.w).SetWriteDeadline(d); err != nil && !errors.Is(err, http.ErrNotSupported) {
+				return err
+			}
+		}
+	}
+	s.w.Header().Add("Trailer", "X-Apteva-Function-Status")
 	s.w.Header().Set("X-Apteva-Function-Stream", "true")
 	s.w.WriteHeader(statusCode)
 	s.started = true
@@ -76,6 +88,14 @@ func flushHTTPResponse(w http.ResponseWriter) error {
 }
 
 func streamResponseHeaderAllowed(key string) bool {
+	if strings.HasPrefix(strings.ToLower(key), "x-apteva-function-") {
+		return false
+	}
+	for _, r := range key {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", r)) {
+			return false
+		}
+	}
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "", "connection", "proxy-connection", "keep-alive", "proxy-authenticate",
 		"proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",
@@ -181,6 +201,7 @@ func (a *App) handleHTTPListFunctions(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	out, err := dbListFunctions(globalCtx.AppDB(), pid, FunctionFilter{
+		Cursor:  q.Get("cursor"),
 		Runtime: q.Get("runtime"),
 		Status:  q.Get("status"),
 		Limit:   atoiDefault(q.Get("limit"), 100, 500),
@@ -189,7 +210,7 @@ func (a *App) handleHTTPListFunctions(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"functions": out})
+	httpJSON(w, functionPage(out, atoiDefault(q.Get("limit"), 100, 500)))
 }
 
 func (a *App) handleHTTPCreateFunction(w http.ResponseWriter, r *http.Request) {
@@ -198,12 +219,12 @@ func (a *App) handleHTTPCreateFunction(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpErr(w, http.StatusBadRequest, "invalid json")
+	body, err := decodeObjectBody(w, r)
+	if err != nil {
+		httpErr(w, requestErrorStatus(err), err.Error())
 		return
 	}
-	fn, err := buildAndCreateFunction(globalCtx.WithProject(pid), pid, body)
+	fn, err := buildAndCreateFunctionContext(r.Context(), globalCtx.WithProject(pid), pid, body)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -226,6 +247,9 @@ func (a *App) handleHTTPGetFunction(w http.ResponseWriter, r *http.Request, id i
 		httpErr(w, http.StatusNotFound, "not found")
 		return
 	}
+	if r.URL.Query().Get("include_secrets") != "1" {
+		fn = maskFunction(fn)
+	}
 	httpJSON(w, map[string]any{"function": fn})
 }
 
@@ -235,9 +259,9 @@ func (a *App) handleHTTPUpdateFunction(w http.ResponseWriter, r *http.Request, i
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var patch map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		httpErr(w, http.StatusBadRequest, "invalid json")
+	patch, err := decodeObjectBody(w, r)
+	if err != nil {
+		httpErr(w, requestErrorStatus(err), err.Error())
 		return
 	}
 	fn, err := updateFunctionMeta(globalCtx, pid, id, patch)
@@ -255,12 +279,12 @@ func (a *App) handleHTTPDeployFunction(w http.ResponseWriter, r *http.Request, i
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpErr(w, http.StatusBadRequest, "invalid json")
+	body, err := decodeObjectBody(w, r)
+	if err != nil {
+		httpErr(w, requestErrorStatus(err), err.Error())
 		return
 	}
-	fn, ver, err := deployFromArgs(globalCtx.WithProject(pid), pid, id, body)
+	fn, ver, err := deployFromArgsContext(r.Context(), globalCtx.WithProject(pid), pid, id, body)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -275,9 +299,9 @@ func (a *App) handleHTTPRollbackFunction(w http.ResponseWriter, r *http.Request,
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpErr(w, http.StatusBadRequest, "invalid json")
+	body, err := decodeObjectBody(w, r)
+	if err != nil {
+		httpErr(w, requestErrorStatus(err), err.Error())
 		return
 	}
 	version := intArg(body, "version", 0)
@@ -285,7 +309,7 @@ func (a *App) handleHTTPRollbackFunction(w http.ResponseWriter, r *http.Request,
 		httpErr(w, http.StatusBadRequest, "version (positive integer) required")
 		return
 	}
-	ver, err := rollbackFunction(globalCtx, pid, id, version)
+	ver, err := rollbackFunctionContext(r.Context(), globalCtx.WithProject(pid), pid, id, version)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -302,12 +326,12 @@ func (a *App) handleHTTPFunctionVersions(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	limit := atoiDefault(r.URL.Query().Get("limit"), 50, 100)
-	out, err := dbListVersions(globalCtx.AppDB(), pid, id, limit)
+	out, err := dbListVersions(globalCtx.AppDB(), pid, id, limit, parseInt64(r.URL.Query().Get("cursor")))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"versions": out})
+	httpJSON(w, versionPage(out, limit))
 }
 
 func (a *App) handleHTTPDeleteFunction(w http.ResponseWriter, r *http.Request, id int64) {
@@ -316,13 +340,11 @@ func (a *App) handleHTTPDeleteFunction(w http.ResponseWriter, r *http.Request, i
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := dbDeleteFunction(globalCtx.AppDB(), pid, id); err != nil {
+	if err := deleteFunction(globalCtx, pid, id); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if globalPool != nil {
-		globalPool.removeFunction(id)
-	}
+
 	httpJSON(w, map[string]any{"deleted": true, "id": id})
 }
 
@@ -333,12 +355,12 @@ func (a *App) handleHTTPFunctionInvocations(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	limit := atoiDefault(r.URL.Query().Get("limit"), 50, 200)
-	out, err := dbListInvocations(globalCtx.AppDB(), pid, id, limit)
+	out, err := dbListInvocations(globalCtx.AppDB(), pid, id, limit, parseInt64(r.URL.Query().Get("cursor")))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"invocations": out})
+	httpJSON(w, invocationPage(out, limit))
 }
 
 func (a *App) handleHTTPInvocationsCollection(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +379,7 @@ func (a *App) handleHTTPInvocationsCollection(w http.ResponseWriter, r *http.Req
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"invocations": out})
+	httpJSON(w, invocationPage(out, limit))
 }
 
 // handleHTTPInvokeByName powers the auto-routed /fn/<name> endpoint.
@@ -365,6 +387,10 @@ func (a *App) handleHTTPInvocationsCollection(w http.ResponseWriter, r *http.Req
 // the function's stdout (verbatim, content-type-tagged JSON when it
 // parses, otherwise text).
 func (a *App) handleHTTPInvokeByName(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, 405, "POST required")
+		return
+	}
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -375,7 +401,7 @@ func (a *App) handleHTTPInvokeByName(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "function name required")
 		return
 	}
-	fn, err := dbGetFunction(globalCtx.AppDB(), pid, 0, name)
+	fn, err := executionFunction(globalCtx, pid, 0, name)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -384,7 +410,11 @@ func (a *App) handleHTTPInvokeByName(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "function not found")
 		return
 	}
-	event := decodeEventBody(r)
+	event, readErr := readEventBody(w, r)
+	if readErr != nil {
+		httpErr(w, requestErrorStatus(readErr), readErr.Error())
+		return
+	}
 	a.runAndWriteResponse(globalCtx.WithProject(pid), w, r, fn, event, "http")
 }
 
@@ -394,7 +424,7 @@ func (a *App) handleHTTPInvokeByID(w http.ResponseWriter, r *http.Request, id in
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	fn, err := dbGetFunction(globalCtx.AppDB(), pid, id, "")
+	fn, err := executionFunction(globalCtx, pid, id, "")
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -403,7 +433,11 @@ func (a *App) handleHTTPInvokeByID(w http.ResponseWriter, r *http.Request, id in
 		httpErr(w, http.StatusNotFound, "function not found")
 		return
 	}
-	event := decodeEventBody(r)
+	event, readErr := readEventBody(w, r)
+	if readErr != nil {
+		httpErr(w, requestErrorStatus(readErr), readErr.Error())
+		return
+	}
 	a.runAndWriteResponse(globalCtx.WithProject(pid), w, r, fn, event, "http")
 }
 
@@ -424,7 +458,7 @@ func (a *App) handleHTTPInvokeByFunctionURL(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	name, token := parts[0], parts[1]
-	fn, err := dbGetFunction(globalCtx.AppDB(), pid, 0, name)
+	fn, err := executionFunction(globalCtx, pid, 0, name)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -454,8 +488,12 @@ func (a *App) handleHTTPInvokeByFunctionURL(w http.ResponseWriter, r *http.Reque
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	raw, truncated := readRequestBody(r)
-	event := buildFunctionURLEvent(r, raw, truncated)
+	raw, readErr := readLimitedBody(w, r, 1<<20)
+	if readErr != nil {
+		httpErr(w, requestErrorStatus(readErr), readErr.Error())
+		return
+	}
+	event := buildFunctionURLEvent(r, raw, false)
 	a.runAndWriteFunctionURLResponse(globalCtx.WithProject(pid), w, r, fn, event, cfg)
 }
 
@@ -469,6 +507,7 @@ func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *htt
 	res, err := invokeFunctionWithStream(ctx, r.Context(), fn, event, trigger, stream)
 	if err != nil {
 		if stream.started {
+			stream.finish("error", err.Error())
 			return
 		}
 		if errors.Is(err, errFunctionBusy) {
@@ -479,6 +518,7 @@ func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *htt
 		return
 	}
 	if stream.started || res.Streamed {
+		stream.finish(res.Status, res.Error)
 		return
 	}
 	w.Header().Set("X-Apteva-Function-Invocation", strconv.FormatInt(res.InvocationID, 10))
@@ -510,6 +550,7 @@ func (a *App) runAndWriteFunctionURLResponse(ctx *sdk.AppCtx, w http.ResponseWri
 	res, err := invokeFunctionWithStream(ctx, r.Context(), fn, event, "function_url", stream)
 	if err != nil {
 		if stream.started {
+			stream.finish("error", err.Error())
 			return
 		}
 		if errors.Is(err, errFunctionBusy) {
@@ -520,6 +561,7 @@ func (a *App) runAndWriteFunctionURLResponse(ctx *sdk.AppCtx, w http.ResponseWri
 		return
 	}
 	if stream.started || res.Streamed {
+		stream.finish(res.Status, res.Error)
 		return
 	}
 	if cfg != nil && cfg.CORS {
@@ -555,36 +597,100 @@ func (a *App) runAndWriteFunctionURLResponse(ctx *sdk.AppCtx, w http.ResponseWri
 // {"raw":"<bytes>"} so the function can still inspect them. Empty
 // body becomes nil — JSON.parse of "null" is valid in every
 // runtime we support.
-func decodeEventBody(r *http.Request) any {
-	body, _ := readRequestBody(r)
-	if len(body) == 0 {
-		return nil
-	}
-	var parsed any
-	if err := json.Unmarshal(body, &parsed); err == nil {
-		return parsed
-	}
-	return map[string]any{"raw": string(body)}
-}
+func decodeEventBody(r *http.Request) any { event, _ := readEventBody(nil, r); return event }
 
-func readRequestBody(r *http.Request) ([]byte, bool) {
+var errBodyTooLarge = errors.New("request body too large")
+
+func requestErrorStatus(err error) int {
+	if errors.Is(err, errBodyTooLarge) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
+}
+func readLimitedBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {
 	if r.Body == nil {
-		return nil, false
+		return nil, nil
 	}
 	defer r.Body.Close()
-	// Cap the read so a malicious caller can't OOM the sidecar with
-	// a chunked stream. 1MB is generous for "an event payload."
-	const maxBody = 1 << 20
-	buf := make([]byte, maxBody+1)
-	n, _ := readAll(r.Body, buf)
-	if n == 0 {
-		return nil, false
+	if w != nil {
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(30 * time.Second))
+		defer rc.SetReadDeadline(time.Time{})
 	}
-	truncated := n > maxBody
-	if truncated {
-		n = maxBody
+	if r.ContentLength > limit {
+		return nil, errBodyTooLarge
 	}
-	return buf[:n], truncated
+	b, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, errBodyTooLarge
+	}
+	return b, nil
+}
+func readEventBody(w http.ResponseWriter, r *http.Request) (any, error) {
+	b, err := readLimitedBody(w, r, 1<<20)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) == 0 {
+		return nil, nil
+	}
+	if json.Valid(b) {
+		return json.RawMessage(b), nil
+	}
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		return nil, errors.New("invalid JSON event")
+	}
+	return map[string]any{"raw": string(b)}, nil
+}
+func decodeObjectBody(w http.ResponseWriter, r *http.Request) (map[string]any, error) {
+	b, err := readLimitedBody(w, r, 2<<20)
+	if err != nil {
+		return nil, err
+	}
+	var obj map[string]any
+	if err = json.Unmarshal(b, &obj); err != nil || obj == nil {
+		return nil, errors.New("request must be a JSON object")
+	}
+	return obj, nil
+}
+func deleteFunction(ctx *sdk.AppCtx, pid string, id int64) error {
+	fn, err := dbGetFunction(ctx.AppDB(), pid, id, "")
+	if err != nil {
+		return err
+	}
+	if fn == nil {
+		return errors.New("function not found")
+	}
+	return deleteFunctionIdentity(ctx, fn)
+}
+func deleteFunctionIdentity(ctx *sdk.AppCtx, fn *Function) error {
+	pid, id := fn.ProjectID, fn.ID
+	if err := dbDeleteFunction(ctx.AppDB(), pid, id, fn.InstanceKey); err != nil {
+		return err
+	}
+	if p := currentPool(); p != nil {
+		p.removeFunction(fn)
+	}
+	ctx.EmitWithProject("function.deleted", pid, map[string]any{"id": id})
+	return nil
+}
+func (s *httpInvocationStream) finish(status, message string) {
+	s.w.Header().Set("X-Apteva-Function-Status", status)
+	if strings.HasPrefix(s.w.Header().Get("Content-Type"), "text/event-stream") {
+		event := "apteva.complete"
+		if status != "ok" {
+			event = "apteva.error"
+		}
+		b, _ := json.Marshal(map[string]any{"status": status, "error": message, "invocation_id": s.invocationID})
+		if err := s.Write([]byte("event: " + event + "\ndata: " + string(b) + "\n\n")); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+	} else if status != "ok" {
+		panic(http.ErrAbortHandler)
+	}
 }
 
 func buildFunctionURLEvent(r *http.Request, raw []byte, truncated bool) map[string]any {
@@ -666,13 +772,26 @@ func writeStructuredFunctionURLResponse(w http.ResponseWriter, s string) bool {
 		return false
 	}
 	status := intFromJSONNumber(rawStatus)
-	if status < 100 || status > 599 {
-		status = http.StatusOK
+	if status < 200 || status > 599 {
+		httpErr(w, http.StatusInternalServerError, "invalid function response status (expected 200–599)")
+		return true
 	}
 	if headers, ok := obj["headers"].(map[string]any); ok {
 		for k, v := range headers {
-			if s, ok := v.(string); ok && k != "" {
-				w.Header().Set(k, s)
+			if !streamResponseHeaderAllowed(k) {
+				continue
+			}
+			switch value := v.(type) {
+			case string:
+				if !strings.ContainsAny(value, "\r\n") {
+					w.Header().Set(k, value)
+				}
+			case []any:
+				for _, entry := range value {
+					if text, ok := entry.(string); ok && !strings.ContainsAny(text, "\r\n") {
+						w.Header().Add(k, text)
+					}
+				}
 			}
 		}
 	}
@@ -695,6 +814,14 @@ func writeStructuredFunctionURLResponse(w http.ResponseWriter, s string) bool {
 		} else {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		}
+	}
+	if flag, _ := obj["isBase64Encoded"].(bool); flag {
+		decoded, err := base64.StdEncoding.DecodeString(body)
+		if err != nil {
+			httpErr(w, 500, "invalid base64 response body")
+			return true
+		}
+		body = string(decoded)
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(body))
@@ -750,11 +877,14 @@ func looksLikeJSON(s string) bool {
 // ─── MCP tool handlers ─────────────────────────────────────────────
 
 func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolCreateContext(context.Background(), ctx, args)
+}
+func (a *App) toolCreateContext(parent context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	fn, err := buildAndCreateFunction(ctx, pid, args)
+	fn, err := buildAndCreateFunctionContext(parent, ctx, pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -790,6 +920,9 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // toolDeploy builds a new version of an existing function and makes
 // it active.
 func (a *App) toolDeploy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolDeployContext(context.Background(), ctx, args)
+}
+func (a *App) toolDeployContext(parent context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -798,18 +931,21 @@ func (a *App) toolDeploy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	fn, ver, err := deployFromArgs(ctx, pid, id, args)
+	fn, ver, err := deployFromArgsContext(parent, ctx, pid, id, args)
 	if err != nil {
 		return nil, err
 	}
 	if ctx != nil {
-		ctx.Emit("function.deployed", map[string]any{"id": id, "name": fn.Name, "version": ver.Version})
+		// Event emitted by deployment service.
 	}
 	return map[string]any{"function": fn, "version": ver}, nil
 }
 
 // toolRollback repoints a function's active version at an older one.
 func (a *App) toolRollback(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolRollbackContext(context.Background(), ctx, args)
+}
+func (a *App) toolRollbackContext(parent context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -822,12 +958,12 @@ func (a *App) toolRollback(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if version <= 0 {
 		return nil, errors.New("version (positive integer) required")
 	}
-	ver, err := rollbackFunction(ctx, pid, id, version)
+	ver, err := rollbackFunctionContext(parent, ctx.WithProject(pid), pid, id, version)
 	if err != nil {
 		return nil, err
 	}
 	if ctx != nil {
-		ctx.Emit("function.deployed", map[string]any{"id": id, "version": ver.Version, "rollback": true})
+		// Event emitted by rollback service.
 	}
 	fn, _ := dbGetFunction(dbFor(ctx), pid, id, "")
 	return map[string]any{"function": fn, "version": ver}, nil
@@ -843,11 +979,11 @@ func (a *App) toolVersions(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := dbListVersions(dbFor(ctx), pid, id, intArg(args, "limit", 50))
+	out, err := dbListVersions(dbFor(ctx), pid, id, intArg(args, "limit", 50), parseInt64(strArg(args, "cursor")))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"versions": out}, nil
+	return versionPage(out, clampInt(intArg(args, "limit", 50), 50, 1, 100)), nil
 }
 
 func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -859,12 +995,10 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := dbDeleteFunction(ctx.AppDB(), pid, id); err != nil {
+	if err := deleteFunction(ctx, pid, id); err != nil {
 		return nil, err
 	}
-	if globalPool != nil {
-		globalPool.removeFunction(id)
-	}
+
 	if ctx != nil {
 		ctx.Emit("function.deleted", map[string]any{"id": id})
 	}
@@ -877,6 +1011,7 @@ func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	out, err := dbListFunctions(ctx.AppDB(), pid, FunctionFilter{
+		Cursor:  strArg(args, "cursor"),
 		Runtime: strArg(args, "runtime"),
 		Status:  strArg(args, "status"),
 		Limit:   intArg(args, "limit", 100),
@@ -884,7 +1019,7 @@ func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"functions": out, "count": len(out)}, nil
+	return functionPage(out, clampInt(intArg(args, "limit", 100), 100, 1, 500)), nil
 }
 
 func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -899,15 +1034,21 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if fn == nil {
 		return map[string]any{"function": nil, "found": false}, nil
 	}
+	if args["include_secrets"] != true {
+		fn = maskFunction(fn)
+	}
 	return map[string]any{"function": fn, "found": true}, nil
 }
 
 func (a *App) toolInvoke(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolInvokeContext(context.Background(), ctx, args)
+}
+func (a *App) toolInvokeContext(parent context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	fn, err := dbGetFunction(ctx.AppDB(), pid, int64Arg(args, "id"), strArg(args, "name"))
+	fn, err := executionFunction(ctx, pid, int64Arg(args, "id"), strArg(args, "name"))
 	if err != nil {
 		return nil, err
 	}
@@ -915,7 +1056,7 @@ func (a *App) toolInvoke(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("function not found")
 	}
 	event := args["event"]
-	res, err := invokeFunction(ctx, context.Background(), fn, event, "manual")
+	res, err := invokeFunction(ctx, parent, fn, event, "manual")
 	if err != nil {
 		return nil, err
 	}
@@ -944,11 +1085,11 @@ func (a *App) toolInvocations(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	out, err := dbListInvocations(ctx.AppDB(), pid, id, intArg(args, "limit", 50))
+	out, err := dbListInvocations(ctx.AppDB(), pid, id, intArg(args, "limit", 50), parseInt64(strArg(args, "cursor")))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"invocations": out}, nil
+	return invocationPage(out, clampInt(intArg(args, "limit", 50), 50, 1, 200)), nil
 }
 
 func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -989,6 +1130,12 @@ func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // deploys v1 (which builds it and makes it active). A failed first
 // build rolls the bare row back so no unrunnable function lingers.
 func buildAndCreateFunction(ctx *sdk.AppCtx, pid string, args map[string]any) (*Function, error) {
+	return buildAndCreateFunctionContext(context.Background(), ctx, pid, args)
+}
+func buildAndCreateFunctionContext(parent context.Context, ctx *sdk.AppCtx, pid string, args map[string]any) (*Function, error) {
+	if err := validateFunctionArgs(args, true); err != nil {
+		return nil, err
+	}
 	fn := &Function{
 		ProjectID:   pid,
 		Name:        strArg(args, "name"),
@@ -1033,16 +1180,23 @@ func buildAndCreateFunction(ctx *sdk.AppCtx, pid string, args map[string]any) (*
 		fn.SourceHash = "pending"
 	}
 
+	if raw, ok := args["access"]; ok && raw != nil {
+		encoded, _ := json.Marshal(raw)
+		if err := json.Unmarshal(encoded, &fn.Access); err != nil {
+			return nil, err
+		}
+	}
 	created, err := dbCreateFunction(dbFor(ctx), pid, fn)
 	if err != nil {
 		return nil, err
 	}
 
-	if _, err := deployVersion(ctx, created, created.SourceKind, created.Source,
+	if _, err := deployVersionContext(parent, ctx, created, created.SourceKind, created.Source,
 		created.RepoID, created.RepoPath, strArg(args, "package_json")); err != nil {
-		_ = dbDeleteFunction(dbFor(ctx), pid, created.ID)
+		_ = deleteFunctionIdentity(ctx, created)
 		return nil, err
 	}
+	ctx.EmitWithProject("function.created", pid, map[string]any{"id": created.ID})
 	return dbGetFunction(dbFor(ctx), pid, created.ID, "")
 }
 
@@ -1051,6 +1205,9 @@ func buildAndCreateFunction(ctx *sdk.AppCtx, pid string, args map[string]any) (*
 // version: they go through functions_deploy, which builds a fresh
 // version, not functions_update.
 func updateFunctionMeta(ctx *sdk.AppCtx, pid string, id int64, patch map[string]any) (*Function, error) {
+	if err := validateFunctionArgs(patch, false); err != nil {
+		return nil, err
+	}
 	for _, k := range []string{"source", "source_kind", "repo_id", "repo_path", "package_json", "runtime"} {
 		if _, has := patch[k]; has {
 			return nil, fmt.Errorf("%q can't be changed with functions_update — use functions_deploy", k)
@@ -1064,8 +1221,9 @@ func updateFunctionMeta(ctx *sdk.AppCtx, pid string, id int64, patch map[string]
 		return nil, errors.New("function not found")
 	}
 	updated, err := dbUpdateFunction(dbFor(ctx), pid, id, patch, "")
-	if err == nil && updated != nil && updated.Status == "disabled" && globalPool != nil {
-		globalPool.activateVersion(updated.ID, -1)
+	if p := currentPool(); err == nil && updated != nil && p != nil {
+		p.refreshFunction(updated)
+		ctx.EmitWithProject("function.updated", pid, map[string]any{"id": id})
 	}
 	return updated, err
 }
@@ -1183,4 +1341,26 @@ func firstDescLine(src []byte) string {
 		return line
 	}
 	return ""
+}
+
+func (a *App) handleHTTPInvocationDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		httpErr(w, 405, "GET required")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	inv, err := dbGetInvocation(globalCtx.AppDB(), pid, parseInt64(strings.TrimPrefix(r.URL.Path, "/invocations/")))
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	if inv == nil {
+		httpErr(w, 404, "invocation not found")
+		return
+	}
+	httpJSON(w, map[string]any{"invocation": inv})
 }

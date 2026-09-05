@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.9.1
+version: 0.10.0
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -24,6 +24,9 @@ description: |
   v0.9.1 adds optional CRM customer synchronization. SaaS customers are
   upserted by email as CRM contacts, the contact link is stored durably,
   and failed or unavailable CRM calls retry without blocking checkout.
+  v0.10.0 adds integration-backed fulfillment and secure, app-owned managed
+  connections so SaaS can push idempotent desired state to customer Apteva
+  instances without storing provider or instance credentials in SaaS data.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
@@ -32,13 +35,16 @@ icon_style: monochrome
 tags: [saas, access, subscriptions, entitlements, usage]
 
 scopes: [project, global]
-min_apteva_version: "0.11.0"
+min_apteva_version: "0.41.1"
 
 requires:
   dynamic_app_calls: true
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.connections.execute
+    - platform.connections.manage_owned_credentials
+    - platform.managed_tenants.manage
   apps:
     - name: catalog
       version: ">=0.2.0"
@@ -154,6 +160,9 @@ provides:
     - name: saas_plan_action_list
       description: List generic fulfillment actions for a plan.
       requires: saas.read
+    - name: saas_connection_ensure
+      description: Securely create or rotate an app-owned integration connection, optionally attaching only its numeric reference to a SaaS account.
+      requires: saas.admin
     - name: saas_customer_create
       description: Find or create a SaaS customer by email.
       requires: saas.admin

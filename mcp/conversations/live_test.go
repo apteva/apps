@@ -27,7 +27,9 @@ package main
 //	APTEVA_API_KEY=sk-... go test -tags live -v -run TestLive_ ./...
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -83,13 +85,15 @@ func (c *liveClient) do(method, path string, body any, out any) int {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
 		c.t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer resp.Body.Close()
 	if out != nil {
-		_ = json.NewDecoder(resp.Body).Decode(out)
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			c.t.Fatalf("decode %s %s response: %v", method, path, err)
+		}
 	}
 	return resp.StatusCode
 }
@@ -173,6 +177,186 @@ func TestLive_CodexChatRoundTrip(t *testing.T) {
 		time.Sleep(4 * time.Second)
 	}
 	t.Fatal("no agent reply within 120s")
+}
+
+// TestLive_CodexSingleConversationRoundTrip proves the focused widget's
+// server-selected conversation is the same durable chat used for a real Codex
+// turn. It covers the lead-agent projection without introducing a second chat
+// transport or transcript implementation.
+func TestLive_CodexSingleConversationRoundTrip(t *testing.T) {
+	c := newLiveClient(t)
+	agentID, cleanupAgent := c.ensureAgent()
+	defer cleanupAgent()
+
+	var conv Conversation
+	status := c.do("POST", "/api/apps/conversations/chats", map[string]any{
+		"agent_id": agentID, "title": "Live single conversation (codex)",
+	}, &conv)
+	if status != http.StatusOK || conv.ID == "" {
+		t.Fatalf("create conversation: status=%d conv=%+v", status, conv)
+	}
+	defer c.do("DELETE", "/api/apps/conversations/chats?id="+conv.ID, nil, nil)
+
+	var latest []Conversation
+	status = c.do("GET", fmt.Sprintf("/api/apps/conversations/chats?lead_agent_id=%d&limit=1", agentID), nil, &latest)
+	if status != http.StatusOK || len(latest) != 1 || latest[0].ID != conv.ID {
+		t.Fatalf("focused lookup: status=%d latest=%+v want=%s", status, latest, conv.ID)
+	}
+
+	status = c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
+		"content":           "Reply with exactly: SINGLE_MODE_PONG",
+		"client_message_id": "live-single-mode-1",
+	}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("post focused message: status=%d", status)
+	}
+
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
+		var transcript []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript)
+		for _, message := range transcript {
+			if message.Role == "agent" && strings.Contains(message.Content, "SINGLE_MODE_PONG") {
+				t.Log("focused conversation lookup and real Codex reply succeeded")
+				return
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatal("no Codex reply in the focused conversation within 120s")
+}
+
+// TestLive_CodexSoftBreak opens the real streaming channel, waits for the
+// acknowledgement that makes the UI's Break control visible, then submits a
+// durable advisory event against that exact active response. The model may
+// finish an already-running provider call; it must nevertheless consume the
+// later event and acknowledge the user's changed intent on its next turn.
+func TestLive_CodexSoftBreak(t *testing.T) {
+	c := newLiveClient(t)
+	agentID, cleanupAgent := c.ensureAgent()
+	defer cleanupAgent()
+
+	var conv struct {
+		ID string `json:"id"`
+	}
+	status := c.do("POST", "/api/apps/conversations/chats", map[string]any{
+		"agent_id": agentID, "title": "Live soft break (codex)",
+	}, &conv)
+	if status != http.StatusOK || conv.ID == "" {
+		t.Fatalf("create conversation: status=%d conv=%+v", status, conv)
+	}
+	defer c.do("DELETE", "/api/apps/conversations/chats?id="+conv.ID, nil, nil)
+
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+	defer cancelStream()
+	streamURL := c.base + "/api/apps/conversations/stream?chat_id=" + conv.ID +
+		"&project_id=" + os.Getenv("APTEVA_LIVE_PROJECT_ID")
+	streamReq, err := http.NewRequestWithContext(streamCtx, http.MethodGet, streamURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamReq.Header.Set("Authorization", "Bearer "+c.key)
+	streamResp, err := http.DefaultClient.Do(streamReq)
+	if err != nil {
+		t.Fatalf("open conversation stream: %v", err)
+	}
+	defer streamResp.Body.Close()
+	if streamResp.StatusCode != http.StatusOK {
+		t.Fatalf("open conversation stream: status=%d", streamResp.StatusCode)
+	}
+	frames := make(chan StreamFrame, 8)
+	go func() {
+		scanner := bufio.NewScanner(streamResp.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			var frame StreamFrame
+			if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &frame) == nil && frame.CallID != "" {
+				select {
+				case frames <- frame:
+				case <-streamCtx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	status = c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
+		"content":           "Begin preparing a detailed answer about resilient job queues.",
+		"client_message_id": "live-soft-break-start",
+	}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("post initial message: status=%d", status)
+	}
+
+	var active StreamFrame
+	deadline := time.After(15 * time.Second)
+	for active.CallID == "" {
+		select {
+		case frame := <-frames:
+			if !frame.Done && frame.ConversationID == conv.ID {
+				active = frame
+			}
+		case <-deadline:
+			t.Fatal("no active response frame within 15s")
+		}
+	}
+	if active.AgentID != agentID {
+		t.Fatalf("active response agent=%d, want %d", active.AgentID, agentID)
+	}
+	t.Logf("active response call=%s agent=%d phase=%s", active.CallID, active.AgentID, active.Phase)
+
+	breakBody := map[string]any{
+		"content":           "Pause here and reconsider before continuing. Reply exactly SOFT_BREAK_ACKNOWLEDGED.",
+		"intent":            messageIntentSoftBreak,
+		"target_call_id":    active.CallID,
+		"target_agent_ids":  []int64{active.AgentID},
+		"client_message_id": "live-soft-break-1",
+	}
+	var breakMessage Message
+	for attempt := 1; attempt <= 2; attempt++ {
+		var responseTarget any
+		if attempt == 1 {
+			responseTarget = &breakMessage
+		}
+		status = c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, breakBody, responseTarget)
+		if status != http.StatusOK {
+			t.Fatalf("post soft break attempt %d: status=%d", attempt, status)
+		}
+	}
+	if breakMessage.ID == 0 || messageIntent(&breakMessage) != messageIntentSoftBreak {
+		t.Fatalf("soft break was not persisted correctly: %+v", breakMessage)
+	}
+
+	responseDeadline := time.Now().Add(150 * time.Second)
+	for time.Now().Before(responseDeadline) {
+		var transcript []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript)
+		breakRows := 0
+		acknowledged := false
+		for _, message := range transcript {
+			if messageIntent(&message) == messageIntentSoftBreak {
+				breakRows++
+				if message.Metadata["target_call_id"] != active.CallID {
+					t.Fatalf("soft break target_call_id=%v, want %s", message.Metadata["target_call_id"], active.CallID)
+				}
+			}
+			if message.Role == "agent" && message.ID > breakMessage.ID && strings.Contains(message.Content, "SOFT_BREAK_ACKNOWLEDGED") {
+				acknowledged = true
+			}
+		}
+		if breakRows > 1 {
+			t.Fatalf("idempotent retry created %d soft-break rows", breakRows)
+		}
+		if breakRows == 1 && acknowledged {
+			t.Log("live soft break was durable, idempotent, agent-scoped, and consumed by Codex")
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatal("Codex did not acknowledge the soft-break event within 150s")
 }
 
 // TestLive_CodexTwoConversationIsolation proves that one agent can hold two
@@ -429,6 +613,9 @@ func TestLive_CodexApprovalRoundTrip(t *testing.T) {
 		}
 	}
 	if !acked {
+		var deliveryState []map[string]any
+		c.do("GET", "/api/apps/conversations/deliveries?chat_id="+item.Message.ConversationID, nil, &deliveryState)
+		t.Logf("approval delivery diagnostics: %+v", deliveryState)
 		t.Fatal("no agent acknowledgment after the verdict within 120s")
 	}
 	t.Log("approval card mutated and the agent acknowledged the verdict")
@@ -652,4 +839,91 @@ func TestLive_CodexPublicRefusal(t *testing.T) {
 
 	c.assertQuietInbox(agentID, 20*time.Second)
 	t.Log("absurd request refused without operator involvement")
+}
+
+// Real multi-agent fan-out plus HTTP retry must keep one durable user request.
+func TestLive_CodexRoomFanoutAndRetry(t *testing.T) {
+	c := newLiveClient(t)
+	first, cleanFirst := c.ensureAgent()
+	defer cleanFirst()
+	second, cleanSecond := c.ensureAgent()
+	defer cleanSecond()
+	if first == second {
+		t.Skip("room test requires two temporary agents; unset APTEVA_LIVE_AGENT_ID")
+	}
+	var conv struct {
+		ID string `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{"agent_ids": []int64{first, second}, "lead_agent_id": first, "title": "Live room fan-out"}, &conv); status != 200 || conv.ID == "" {
+		t.Fatalf("create room: %d", status)
+	}
+	defer c.deleteConversation(conv.ID)
+	payload := map[string]any{"content": "Reply once with exactly: room-ready. Do not delegate or ask the other participant to reply.", "target_agent_ids": []int64{first, second}, "client_message_id": "live-room-retry"}
+	var original, retry struct {
+		ID int64 `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, payload, &original); status != 200 {
+		t.Fatalf("send %d", status)
+	}
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, payload, &retry); status != 200 || retry.ID != original.ID {
+		t.Fatalf("retry status=%d original=%d retry=%d", status, original.ID, retry.ID)
+	}
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
+		var rows []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &rows)
+		users := 0
+		replies := map[int64]bool{}
+		for _, m := range rows {
+			if m.Role == "user" {
+				users++
+			}
+			if m.Role == "agent" && strings.Contains(strings.ToLower(m.Content), "room-ready") {
+				replies[m.AgentID] = true
+			}
+		}
+		if users != 1 {
+			t.Fatalf("retry created %d user rows", users)
+		}
+		if replies[first] && replies[second] {
+			t.Log("both real Codex agents replied; duplicate HTTP submission reused one message")
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatal("both Codex room participants did not reply within 120s")
+}
+
+func TestLive_CodexConversationApprovalDestination(t *testing.T) {
+	c := newLiveClient(t)
+	agent, cleanup := c.ensureAgent()
+	defer cleanup()
+	var conv struct {
+		ID string `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{"agent_id": agent, "title": "Live bound approval"}, &conv); status != 200 || conv.ID == "" {
+		t.Fatalf("create %d", status)
+	}
+	defer c.deleteConversation(conv.ID)
+	c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{"content": "This is a harmless approval-routing test. Use conversations_request_approval in this exact conversation to ask the operator to approve a simulated maintenance operation. Do not perform any real operation. Wait for the verdict, then reply in this conversation with exactly: bound-verdict-received.", "client_message_id": "live-bound-approval"}, nil)
+	item := c.pollInbox(agent, "approval", 120*time.Second)
+	if item.Message.ConversationID != conv.ID {
+		t.Fatalf("approval escaped originating conversation: %s", item.Message.ConversationID)
+	}
+	if status := c.do("POST", "/api/apps/conversations/message-action", map[string]any{"message_id": item.Message.ID, "action_id": approvalActionID(item), "note": "Approved for simulation only."}, nil); status != 200 {
+		t.Fatalf("resolve %d", status)
+	}
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
+		var rows []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &rows)
+		for _, m := range rows {
+			if m.ID > item.Message.ID && m.AgentID == agent && m.Role == "agent" && strings.Contains(m.Content, "bound-verdict-received") {
+				t.Log("real Codex consumed the verdict in its bound originating conversation thread")
+				return
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatal("no bound-thread verdict acknowledgement within 120s")
 }

@@ -68,13 +68,14 @@ type StrategyEvaluation struct {
 }
 
 type StrategyValidationResult struct {
-	StrategyID      int64                     `json:"strategy_id"`
-	StrategyVersion int                       `json:"strategy_version"`
-	SplitPct        float64                   `json:"split_pct"`
-	MarketSource    string                    `json:"market_source"`
-	Train           *StrategyValidationPeriod `json:"train"`
-	Test            *StrategyValidationPeriod `json:"test"`
-	Verdict         string                    `json:"verdict"`
+	StrategyID      int64                        `json:"strategy_id"`
+	StrategyVersion int                          `json:"strategy_version"`
+	SplitPct        float64                      `json:"split_pct"`
+	MarketSource    string                       `json:"market_source"`
+	Train           *StrategyValidationPeriod    `json:"train"`
+	Test            *StrategyValidationPeriod    `json:"test"`
+	Verdict         string                       `json:"verdict"`
+	Scorecard       *StrategyScorecardEvaluation `json:"scorecard,omitempty"`
 }
 
 type StrategyValidationPeriod struct {
@@ -1015,18 +1016,27 @@ func (a *App) toolStrategyAssign(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if portfolioID <= 0 || strategyID <= 0 {
 		return nil, errors.New("portfolio_id and strategy_id required")
 	}
-	if _, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID); err != nil {
+	portfolio, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
+	if err != nil {
 		return nil, err
 	}
 	strategy, err := dbGetStrategy(ctx.AppDB(), pid, strategyID)
 	if err != nil {
 		return nil, err
 	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateStrategyUniverseForPortfolio(ctx.AppDB(), portfolio, def); err != nil {
+		return nil, err
+	}
+	if allowed, reason := scorecardAllowsExecution(ctx.AppDB(), portfolio, strategy.ID); !allowed {
+		return nil, fmt.Errorf("strategy scorecard gate: %s", reason)
+	}
 	cadence := strings.TrimSpace(strArg(args, "cadence"))
 	if cadence == "" {
-		if def, _, err := validateStrategyDefinition(strategy.Definition); err == nil {
-			cadence = strings.TrimSpace(def.Cadence)
-		}
+		cadence = strings.TrimSpace(def.Cadence)
 	}
 	id, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
 		ProjectID: pid, PortfolioID: portfolioID, StrategyID: strategyID,
@@ -1072,7 +1082,11 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 	if err != nil {
 		return nil, err
 	}
-	marketBars, steps, marketSource, err := captureBacktestMarketBars(context.Background(), def.Universe, interval, startAt, endAt)
+	adjustmentMode, err := normalizeBacktestAdjustmentMode(strArg(args, "adjustment_mode"))
+	if err != nil {
+		return nil, err
+	}
+	marketBars, steps, marketSource, err := captureBacktestMarketBarsAdjusted(context.Background(), def.Universe, interval, startAt, endAt, adjustmentMode)
 	if err != nil {
 		return nil, err
 	}
@@ -1088,21 +1102,23 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 		name = fmt.Sprintf("%s strategy backtest", strategy.Name)
 	}
 	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
-		ProjectID:       pid,
-		PortfolioID:     portfolioID,
-		StrategyID:      strategyID,
-		RunKind:         "strategy",
-		StrategyVersion: strategy.Version,
-		Name:            name,
-		Status:          "queued",
-		Symbols:         def.Universe,
-		StartAt:         startAt.Format("2006-01-02"),
-		EndAt:           endAt.Format("2006-01-02"),
-		Interval:        interval,
-		StartingCash:    startingCash,
-		FeeBps:          floatArg(args, "fee_bps", 0),
-		SlippageBps:     floatArg(args, "slippage_bps", defaultSlippageBps),
-		TotalSteps:      steps,
+		ProjectID:         pid,
+		PortfolioID:       portfolioID,
+		StrategyID:        strategyID,
+		RunKind:           "strategy",
+		StrategyVersion:   strategy.Version,
+		Name:              name,
+		Status:            "queued",
+		Symbols:           def.Universe,
+		StartAt:           startAt.Format("2006-01-02"),
+		EndAt:             endAt.Format("2006-01-02"),
+		Interval:          interval,
+		StartingCash:      startingCash,
+		FeeBps:            floatArg(args, "fee_bps", 0),
+		SlippageBps:       floatArg(args, "slippage_bps", defaultSlippageBps),
+		AdjustmentMode:    adjustmentMode,
+		ReferenceManifest: referenceManifest(ctx.AppDB(), def.Universe, startAt.Format("2006-01-02"), endAt.Format("2006-01-02"), adjustmentMode),
+		TotalSteps:        steps,
 		Summary: map[string]any{
 			"portfolio_name": pf.Name,
 			"strategy_name":  strategy.Name,
@@ -1161,7 +1177,11 @@ func (a *App) createStrategyValidation(ctx *sdk.AppCtx, args map[string]any) (*S
 	if err != nil {
 		return nil, err
 	}
-	marketBars, steps, marketSource, err := captureBacktestMarketBars(context.Background(), def.Universe, interval, startAt, endAt)
+	adjustmentMode, err := normalizeBacktestAdjustmentMode(strArg(args, "adjustment_mode"))
+	if err != nil {
+		return nil, err
+	}
+	marketBars, steps, marketSource, err := captureBacktestMarketBarsAdjusted(context.Background(), def.Universe, interval, startAt, endAt, adjustmentMode)
 	if err != nil {
 		return nil, err
 	}
@@ -1188,27 +1208,29 @@ func (a *App) createStrategyValidation(ctx *sdk.AppCtx, args map[string]any) (*S
 	feeBps := floatArg(args, "fee_bps", 0)
 	slippageBps := floatArg(args, "slippage_bps", defaultSlippageBps)
 	train, err := a.createCompletedStrategyValidationRun(ctx, pf, strategy, def, strategyValidationRunSpec{
-		Label:        "in_sample",
-		Name:         name + " · in sample",
-		Interval:     interval,
-		StartingCash: startingCash,
-		FeeBps:       feeBps,
-		SlippageBps:  slippageBps,
-		MarketSource: marketSource,
-		Bars:         reindexBacktestMarketBars(marketBars, 1, trainSteps),
+		Label:          "in_sample",
+		Name:           name + " · in sample",
+		Interval:       interval,
+		StartingCash:   startingCash,
+		FeeBps:         feeBps,
+		SlippageBps:    slippageBps,
+		MarketSource:   marketSource,
+		AdjustmentMode: adjustmentMode,
+		Bars:           reindexBacktestMarketBars(marketBars, 1, trainSteps),
 	})
 	if err != nil {
 		return nil, err
 	}
 	test, err := a.createCompletedStrategyValidationRun(ctx, pf, strategy, def, strategyValidationRunSpec{
-		Label:        "out_of_sample",
-		Name:         name + " · out of sample",
-		Interval:     interval,
-		StartingCash: startingCash,
-		FeeBps:       feeBps,
-		SlippageBps:  slippageBps,
-		MarketSource: marketSource,
-		Bars:         reindexValidationMarketBars(marketBars, trainSteps+1, steps, strategyRequiredBars(def)-1),
+		Label:          "out_of_sample",
+		Name:           name + " · out of sample",
+		Interval:       interval,
+		StartingCash:   startingCash,
+		FeeBps:         feeBps,
+		SlippageBps:    slippageBps,
+		MarketSource:   marketSource,
+		AdjustmentMode: adjustmentMode,
+		Bars:           reindexValidationMarketBars(marketBars, trainSteps+1, steps, strategyRequiredBars(def)-1),
 	})
 	if err != nil {
 		return nil, err
@@ -1222,18 +1244,25 @@ func (a *App) createStrategyValidation(ctx *sdk.AppCtx, args map[string]any) (*S
 		Test:            test,
 	}
 	result.Verdict = strategyValidationVerdict(train.Metrics, test.Metrics)
+	scorecard, scoreErr := evaluateAndStoreStrategyScorecard(ctx.AppDB(), pid, portfolioID, strategyID, test.Run.ID)
+	if scoreErr != nil {
+		return nil, fmt.Errorf("persist validation scorecard: %w", scoreErr)
+	}
+	result.Scorecard = scorecard
+	emit("strategy.scorecard.evaluated", map[string]any{"portfolio_id": portfolioID, "strategy_id": strategyID, "evaluation": scorecard})
 	return result, nil
 }
 
 type strategyValidationRunSpec struct {
-	Label        string
-	Name         string
-	Interval     string
-	StartingCash float64
-	FeeBps       float64
-	SlippageBps  float64
-	MarketSource string
-	Bars         []*BacktestMarketBar
+	Label          string
+	Name           string
+	Interval       string
+	StartingCash   float64
+	FeeBps         float64
+	SlippageBps    float64
+	MarketSource   string
+	AdjustmentMode string
+	Bars           []*BacktestMarketBar
 }
 
 func (a *App) createCompletedStrategyValidationRun(ctx *sdk.AppCtx, pf *Portfolio, strategy *Strategy, def *StrategyDefinition, spec strategyValidationRunSpec) (*StrategyValidationPeriod, error) {
@@ -1243,21 +1272,23 @@ func (a *App) createCompletedStrategyValidationRun(ctx *sdk.AppCtx, pf *Portfoli
 	startAt, endAt := marketBarDateRange(spec.Bars)
 	steps := maxBacktestMarketStep(spec.Bars)
 	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
-		ProjectID:       pf.ProjectID,
-		PortfolioID:     pf.ID,
-		StrategyID:      strategy.ID,
-		RunKind:         "strategy",
-		StrategyVersion: strategy.Version,
-		Name:            spec.Name,
-		Status:          "queued",
-		Symbols:         def.Universe,
-		StartAt:         startAt,
-		EndAt:           endAt,
-		Interval:        spec.Interval,
-		StartingCash:    spec.StartingCash,
-		FeeBps:          spec.FeeBps,
-		SlippageBps:     spec.SlippageBps,
-		TotalSteps:      steps,
+		ProjectID:         pf.ProjectID,
+		PortfolioID:       pf.ID,
+		StrategyID:        strategy.ID,
+		RunKind:           "strategy",
+		StrategyVersion:   strategy.Version,
+		Name:              spec.Name,
+		Status:            "queued",
+		Symbols:           def.Universe,
+		StartAt:           startAt,
+		EndAt:             endAt,
+		Interval:          spec.Interval,
+		StartingCash:      spec.StartingCash,
+		FeeBps:            spec.FeeBps,
+		SlippageBps:       spec.SlippageBps,
+		AdjustmentMode:    spec.AdjustmentMode,
+		ReferenceManifest: referenceManifest(ctx.AppDB(), def.Universe, startAt, endAt, spec.AdjustmentMode),
+		TotalSteps:        steps,
 		Summary: map[string]any{
 			"portfolio_name":    pf.Name,
 			"strategy_name":     strategy.Name,
@@ -1428,6 +1459,10 @@ func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
 	if len(parts) > 1 {
 		action = parts[1]
 	}
+	subaction := ""
+	if len(parts) > 2 {
+		subaction = parts[2]
+	}
 	switch {
 	case action == "" && r.Method == http.MethodGet:
 		strategy, err := dbGetStrategy(globalCtx.AppDB(), pid, id)
@@ -1522,6 +1557,54 @@ func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
 			"_project_id": pid, "strategy_id": id, "portfolio_id": body.PortfolioID,
 			"control_mode": body.ControlMode, "cadence": body.Cadence,
 		})
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "scorecard" && subaction == "" && r.Method == http.MethodGet:
+		out, err := a.toolStrategyScorecardGet(globalCtx, map[string]any{
+			"_project_id": pid, "strategy_id": id, "portfolio_id": r.URL.Query().Get("portfolio_id"), "limit": r.URL.Query().Get("limit"),
+		})
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "scorecard" && subaction == "" && r.Method == http.MethodPut:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["strategy_id"] = pid, id
+		out, err := a.toolStrategyScorecardUpdate(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "scorecard" && subaction == "evaluate" && r.Method == http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["strategy_id"] = pid, id
+		out, err := a.toolStrategyScorecardEvaluate(globalCtx, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "promotion" && r.Method == http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, "invalid json")
+			return
+		}
+		body["_project_id"], body["strategy_id"] = pid, id
+		out, err := a.toolStrategyPromotionUpdate(globalCtx, body)
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return

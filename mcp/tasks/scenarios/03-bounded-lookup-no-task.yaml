@@ -31,7 +31,7 @@ prompt: |
 assert:
   - agent_response_contains: '19'
     thread_id: request-lookup
-  - tool_not_called: tasks_create | tasks_update | tasks_complete
+  - tool_not_called: tasks_create | tasks_set_progress | tasks_edit | tasks_fail | tasks_update | tasks_complete
   - iterations_at_most: 8
 
 budget:

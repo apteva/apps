@@ -7,6 +7,31 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+type RenderProgress struct {
+	Fraction       float64
+	OutTimeSeconds float64
+	Frame          int64
+	Speed          string
+}
+
+type renderProgressKey struct{}
+
+func withRenderProgress(ctx context.Context, fn func(RenderProgress)) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, renderProgressKey{}, fn)
+}
+
+func reportRenderProgress(ctx context.Context, progress RenderProgress) {
+	if ctx == nil {
+		return
+	}
+	if fn, ok := ctx.Value(renderProgressKey{}).(func(RenderProgress)); ok && fn != nil {
+		fn(progress)
+	}
+}
+
 // Executor is the swap-point between rendering modes.
 //
 // Render is expected to block until the work completes (local, remote

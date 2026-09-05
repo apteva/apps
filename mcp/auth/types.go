@@ -32,6 +32,7 @@ type User struct {
 	AvatarURL            string          `json:"avatar_url,omitempty"`
 	Metadata             json.RawMessage `json:"metadata,omitempty"`
 	Status               string          `json:"status"`
+	Kind                 string          `json:"kind"`
 	HasPassword          bool            `json:"has_password"`
 	MFAEnabled           bool            `json:"mfa_enabled"`
 	AuthorizationVersion int64           `json:"authorization_version"`

@@ -47,7 +47,7 @@ func TestUsersCreate_NoPasswordSendsNoEmailByDefault(t *testing.T) {
 	}
 }
 
-func TestUsersCreate_SendResetWhenRequested(t *testing.T) {
+func TestUsersCreate_ReportsMissingDeliveryWithoutLosingUser(t *testing.T) {
 	ctx, _ := newAuthCtx(t)
 	app := &App{}
 
@@ -60,8 +60,8 @@ func TestUsersCreate_SendResetWhenRequested(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	m := out.(map[string]any)
-	if sent, _ := m["password_reset_sent"].(bool); !sent {
-		t.Error("password_reset_sent should be true when send_password_reset=true")
+	if sent, _ := m["password_reset_sent"].(bool); sent || m["delivery_error"] == nil || m["user"] == nil {
+		t.Error("must preserve user and report undelivered reset")
 	}
 }
 

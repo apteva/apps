@@ -12,6 +12,9 @@ export type Portfolio = {
   allowed_classes: AssetClass[];
   status: "active" | "paused" | "halted";
   mode: "paper" | "live";
+  execution_environment: "simulation" | "broker_paper" | "broker_live" | "backtest";
+  live_armed: boolean;
+  broker_slug?: string;
   equity: number;
   cash: number;
   buying_power: number;
@@ -19,11 +22,13 @@ export type Portfolio = {
   day_pnl_pct: number;
   open_pnl: number;
   open_pnl_pct: number;
+  funding_paid?: number;
   watchlist?: string[];
 };
 
 export type Position = {
   symbol: string;
+  security_id?: string;
   asset_class: AssetClass;
   outcome?: "YES" | "NO";
   qty: number;
@@ -42,6 +47,7 @@ export type Order = {
   id: string;
   portfolio_id: number;
   symbol: string;
+  security_id?: string;
   asset_class: AssetClass;
   side: "buy" | "sell" | "yes" | "no";
   outcome?: "YES" | "NO";
@@ -64,10 +70,28 @@ export type Order = {
 export type JournalEntry = {
   id: number;
   portfolio_id: number;
-  kind: "thesis" | "alert" | "fill" | "rationale" | "rejection" | "note";
+  kind: "thesis" | "alert" | "fill" | "funding" | "rationale" | "rejection" | "note" | "corporate_action";
   body: string;
   metadata?: Record<string, unknown>;
   created_at: string;
+};
+
+export type RiskPolicy = {
+  portfolio_id: number; risk_level: "conservative" | "balanced" | "aggressive" | "custom";
+  max_daily_loss_pct: number; max_drawdown_pct: number; max_position_pct: number;
+  max_gross_exposure_pct: number; max_order_pct: number;
+};
+export type RiskState = { high_water_equity: number; current_drawdown_pct: number };
+export type PortfolioObjective = {
+  id: number; name: string; metric: string; target_pct: number; direction: "at_least" | "at_most";
+  starts_at: string; deadline_at?: string; status: string; actual_pct?: number; progress_pct?: number;
+  achieved: boolean; period_state: string;
+};
+export type PortfolioUniversePolicy = {
+  portfolio_id: number;
+  selection_mode: "all_allowed_classes" | "symbol_allowlist" | "reference_universe";
+  include_symbols: string[]; exclude_symbols: string[]; reference_universe_id?: string;
+  require_active_listing: boolean; enforcement_enabled: boolean;
 };
 
 // Symbol — what /universe and /quotes/:s return. Decorated with a
@@ -81,6 +105,14 @@ export type Sym = {
   no_price?: number;
   yes_price?: number;
   volume_24h?: number;
+  bid_price?: number;
+  ask_price?: number;
+  bid_size?: number;
+  ask_size?: number;
+  last_trade_price?: number;
+  last_trade_size?: number;
+  feed?: string;
+  quote_at?: string;
   marked_at: string;
   // Optional polymarket extras (not yet shipped by the v0.1 API).
   resolves_at?: number;       // unix ms

@@ -24,6 +24,7 @@ type Repo struct {
 	StartCmd       string `json:"start_cmd,omitempty"`
 	Port           int    `json:"port,omitempty"`
 	EnvJSON        string `json:"env_json,omitempty"`
+	WorkspaceImage string `json:"workspace_image,omitempty"`
 	DeployService  string `json:"deploy_service,omitempty"`
 	LastDeployedAt string `json:"last_deployed_at,omitempty"`
 	CreatedAt      string `json:"created_at,omitempty"`
@@ -42,11 +43,12 @@ func (r *Repo) IsArchived() bool { return r.ArchivedAt != "" }
 // ─── Inputs ─────────────────────────────────────────────────────────
 
 type CreateRepoInput struct {
-	Name        string
-	Slug        string // optional; derived from Name when empty
-	Description string
-	Framework   string
-	Owner       string
+	Name           string
+	Slug           string // optional; derived from Name when empty
+	Description    string
+	Framework      string
+	Owner          string
+	WorkspaceImage string
 }
 
 type DeployHints struct {
@@ -107,14 +109,18 @@ func dbCreateRepo(db *sql.DB, projectID string, in CreateRepoInput) (*Repo, erro
 	if !validFramework(in.Framework) {
 		return nil, fmt.Errorf("framework %q not supported", in.Framework)
 	}
+	workspaceImage, err := normalizeWorkspaceImage(in.WorkspaceImage)
+	if err != nil {
+		return nil, err
+	}
 	// The final root includes the row id and is filled immediately after
 	// insert. Keeping this column populated preserves the existing API shape.
 	storageRoot := "/repos/pending/"
 
 	res, err := db.Exec(`
-		INSERT INTO repositories (project_id, slug, name, description, framework, storage_root, owner)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, projectID, slug, in.Name, in.Description, in.Framework, storageRoot, in.Owner)
+		INSERT INTO repositories (project_id, slug, name, description, framework, storage_root, owner, workspace_image)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, projectID, slug, in.Name, in.Description, in.Framework, storageRoot, in.Owner, workspaceImage)
 	if err != nil {
 		// SQLite unique constraint name varies by version — match on the
 		// stable substring so collisions surface as a friendly error.
@@ -137,6 +143,7 @@ func dbCreateRepo(db *sql.DB, projectID string, in CreateRepoInput) (*Repo, erro
 const repoColumns = `
 	id, project_id, slug, name, description, framework, storage_root, owner,
 	build_cmd, start_cmd, port, env_json,
+	workspace_image,
 	deploy_service, IFNULL(last_deployed_at,''),
 	created_at, updated_at, IFNULL(archived_at,''),
 	is_template, IFNULL(template_scope,''), IFNULL(template_tagline,''), IFNULL(template_icon,'')
@@ -153,6 +160,7 @@ func scanRepoRow(s rowScanner) (*Repo, error) {
 	err := s.Scan(
 		&r.ID, &r.ProjectID, &r.Slug, &r.Name, &r.Description, &r.Framework, &r.StorageRoot, &r.Owner,
 		&r.BuildCmd, &r.StartCmd, &r.Port, &r.EnvJSON,
+		&r.WorkspaceImage,
 		&r.DeployService, &r.LastDeployedAt,
 		&r.CreatedAt, &r.UpdatedAt, &r.ArchivedAt,
 		&r.IsTemplate, &r.TemplateScope, &r.TemplateTagline, &r.TemplateIcon,
@@ -256,6 +264,35 @@ func dbSetDeployHints(db *sql.DB, projectID, slug string, h DeployHints) (*Repo,
 		   SET build_cmd = ?, start_cmd = ?, port = ?, env_json = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE project_id = ? AND slug = ?
 	`, r.BuildCmd, r.StartCmd, r.Port, r.EnvJSON, projectID, slug); err != nil {
+		return nil, err
+	}
+	return dbGetRepoBySlug(db, projectID, slug)
+}
+
+func normalizeWorkspaceImage(image string) (string, error) {
+	image = strings.TrimSpace(image)
+	if len(image) > 512 || strings.IndexByte(image, 0) >= 0 {
+		return "", errors.New("workspace_image must be at most 512 characters without NUL")
+	}
+	return image, nil
+}
+
+func dbSetWorkspaceImage(db *sql.DB, projectID, slug, image string) (*Repo, error) {
+	r, err := dbGetRepoBySlug(db, projectID, slug)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, errors.New("repo not found")
+	}
+	image, err = normalizeWorkspaceImage(image)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`
+		UPDATE repositories SET workspace_image = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE project_id = ? AND slug = ?
+	`, image, projectID, slug); err != nil {
 		return nil, err
 	}
 	return dbGetRepoBySlug(db, projectID, slug)

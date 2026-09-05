@@ -9,6 +9,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
+	"github.com/apteva/apps/mcp/computer/internal/browser/providerhttp"
 	"io"
 	"net/http"
 	"os"
@@ -77,13 +79,15 @@ type ProxyConfig struct {
 }
 
 type Computer struct {
-	apiKey    string
-	apiBase   string
-	opts      Options
-	sessionID string
-	contextID string
-	debugURL  string
-	streamURL string
+	tabManager  *cdptabs.Manager
+	tabTrackers map[string]*stability.Tracker
+	apiKey      string
+	apiBase     string
+	opts        Options
+	sessionID   string
+	contextID   string
+	debugURL    string
+	streamURL   string
 	// activeProxy is the proxy config we asked the backend to apply
 	// for the *current* session — agent's open-time override wins
 	// over the harness default. Used by the session-ready log.
@@ -130,7 +134,7 @@ func NewWithOptions(apiKey string, display computer.DisplaySize, opts Options) (
 		apiBase: apiBase,
 		opts:    opts,
 		display: display,
-		http:    &http.Client{Timeout: 60 * time.Second},
+		http:    providerhttp.New(60 * time.Second),
 	}, nil
 }
 
@@ -466,7 +470,7 @@ func (c *Computer) establishCDP(connectURL string, attach bool) error {
 	// it before binding the real ctx to whichever existing target we
 	// pick. The probe tab is closed when probeCancel fires.
 	probeCtx, probeCancel := chromedp.NewContext(allocCtx)
-	if err := chromedp.Run(probeCtx); err != nil {
+	if err := cdputil.Run(probeCtx); err != nil {
 		probeCancel()
 		allocCancel()
 		return fmt.Errorf("attach probe: %w", err)
@@ -575,6 +579,8 @@ func (c *Computer) releaseCDP() {
 		c.allocCancel = nil
 	}
 	c.allocCtx = nil
+	c.tabManager = nil
+	c.tabTrackers = nil
 	c.ctx = nil
 }
 
@@ -588,15 +594,22 @@ func (c *Computer) ActiveTabID() string {
 
 func (c *Computer) SwitchTab(tabID string) error {
 	if tabID == c.ActiveTabID() {
-		return nil
+		return cdptabs.Activate(c.ctx, tabID)
 	}
-	ctx, cancel, err := cdptabs.Switch(c.ctx, tabID)
+	if c.tabManager == nil {
+		c.tabManager = cdptabs.NewManager(c.ctx, c.cancel)
+	}
+	ctx, cancel, created, err := c.tabManager.Switch(tabID)
 	if err != nil {
 		return err
 	}
+	_ = created
 	c.ctx = ctx
 	c.cancel = cancel
 	c.attachStabilityTracker()
+	c.labelMu.Lock()
+	c.lastLabels = nil
+	c.labelMu.Unlock()
 	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
 		return fmt.Errorf("reapply browser environment: %w", err)
 	}
@@ -620,7 +633,14 @@ func (c *Computer) CloseTab(tabID string) error {
 			return fmt.Errorf("switch fallback tab: %w", err)
 		}
 	}
-	return cdptabs.Close(c.ctx, tabID)
+	if err := cdptabs.Close(c.ctx, tabID); err != nil {
+		return err
+	}
+	if c.tabManager != nil {
+		c.tabManager.Forget(tabID)
+	}
+	delete(c.tabTrackers, tabID)
+	return nil
 }
 
 func (c *Computer) navigate(url string) error {
@@ -640,7 +660,7 @@ func (c *Computer) Eval(js string, dst any) error {
 	if c.ctx == nil {
 		return fmt.Errorf("browserengine: no active session — cannot eval")
 	}
-	return chromedp.Run(c.ctx, chromedp.Evaluate(js, dst))
+	return cdputil.Run(c.ctx, chromedp.Evaluate(js, dst))
 }
 
 // fetchAttachConnectURL probes GET /sessions/{id} first; if the session
@@ -780,14 +800,20 @@ func (c *Computer) requestRelease() error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", c.apiKey)
 
+	releaseCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(releaseCtx)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
 	}
 	return nil
@@ -799,7 +825,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	}
 	switch action.Type {
 	case "screenshot":
-		return c.finishAction(action)
+		return c.Screenshot()
 
 	case "navigate", "back", "reload":
 		if err := navigation.Run(c.ctx, action.Type, action.URL, 30*time.Second); err != nil {
@@ -832,6 +858,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cursor unavailable, continuing click: %v\n", err)
 		}
 		guardOptions := clickguard.Options{
+			TargetID:     action.TargetID,
 			ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
 			EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
 		}
@@ -846,7 +873,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			return null;
 		})()`, x, y)
 		var focusedTag string
-		_ = chromedp.Run(c.ctx, chromedp.Evaluate(focusJS, &focusedTag))
+		_ = cdputil.Run(c.ctx, chromedp.Evaluate(focusJS, &focusedTag))
 		if focusedTag != "" {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] click focused <%s>\n", strings.ToLower(focusedTag))
 		}
@@ -871,6 +898,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cursor unavailable, continuing double click: %v\n", err)
 		}
 		guardOptions := clickguard.Options{
+			TargetID:     action.TargetID,
 			ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
 			EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
 		}
@@ -888,14 +916,14 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			return nil, fmt.Errorf("type: %w", err)
 		}
 		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "key":
 		if err := keyinput.Dispatch(c.ctx, action.Key, "[BROWSER_ENGINE]"); err != nil {
 			return nil, fmt.Errorf("key: %w", err)
 		}
 		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "scroll":
 		if err := c.scroll(action); err != nil {
@@ -909,7 +937,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if dur <= 0 {
 			dur = 1000
 		}
-		time.Sleep(time.Duration(dur) * time.Millisecond)
+		if err := cdputil.Sleep(c.ctx, time.Duration(dur)*time.Millisecond); err != nil {
+			return nil, err
+		}
 		return c.finishAction(action)
 
 	case "wait_for_stable":
@@ -932,7 +962,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		c.cueTarget(action, res.Selector, "Option selected")
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action.Type)
@@ -947,17 +977,20 @@ func (c *Computer) finishAction(action computer.Action) ([]byte, error) {
 }
 
 func (c *Computer) ExecuteAction(action computer.Action) error {
-	switch action.Type {
-	case "click", "double_click", "scroll", "wait", "wait_for", "wait_for_stable":
-		action.NoScreenshot = true
-		_, err := c.Execute(action)
-		return err
-	default:
-		return fmt.Errorf("browser-engine action-only unsupported for %s", action.Type)
-	}
+	action.NoScreenshot = true
+	_, err := c.Execute(action)
+	return err
 }
 
 func (c *Computer) attachStabilityTracker() {
+	id := cdptabs.ActiveID(c.ctx)
+	if c.tabTrackers == nil {
+		c.tabTrackers = make(map[string]*stability.Tracker)
+	}
+	if tracker := c.tabTrackers[id]; tracker != nil {
+		c.stabilityTracker = tracker
+		return
+	}
 	c.stabilityTracker = nil
 	if c.ctx == nil {
 		return
@@ -968,6 +1001,7 @@ func (c *Computer) attachStabilityTracker() {
 		return
 	}
 	c.stabilityTracker = tracker
+	c.tabTrackers[id] = tracker
 }
 
 func (c *Computer) WaitForStable(quietMS, timeoutMS int) (stability.Result, error) {
@@ -984,9 +1018,13 @@ func (c *Computer) WaitForOutcome(conditions []computer.WaitCondition, match str
 	return stability.WaitForOutcome(c.ctx, conditions, match, quietMS, timeoutMS)
 }
 
+func (c *Computer) ObserveMedia() (computer.MediaObservation, error) {
+	return stability.ObserveMedia(c.ctx)
+}
+
 func (c *Computer) selectOption(action computer.Action) (selectinput.Result, error) {
 	c.setLastSelectResult(nil)
-	target := selectinput.Target{Selector: action.Selector}
+	target := selectinput.Target{ID: action.TargetID, Selector: action.Selector}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -1133,7 +1171,7 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 		c.labelMu.Unlock()
 	}
 	var buf []byte
-	err := chromedp.Run(c.ctx,
+	err := cdputil.Run(c.ctx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			b, err := page.CaptureScreenshot().
 				WithFormat(page.CaptureScreenshotFormatJpeg).
@@ -1152,7 +1190,7 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 
 	if options.Annotate && som.Enabled() {
 		var raw json.RawMessage
-		if err := chromedp.Run(c.ctx, chromedp.Evaluate(som.EnumScript, &raw)); err != nil {
+		if err := cdputil.Run(c.ctx, chromedp.Evaluate(som.EnumScript, &raw)); err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] som enum failed: %v\n", err)
 			return buf, nil
 		}
@@ -1212,8 +1250,11 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 			ID: e.ID, Label: e.Label, X: e.X, Y: e.Y, W: e.W, H: e.H,
 			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
 			Placeholder: e.Placeholder, CurrentValue: e.CurrentValue, Pattern: e.Pattern,
+			Checked: e.Checked, Indeterminate: e.Indeterminate,
 			FormatHint: e.FormatHint, DateLike: e.DateLike, Validity: e.Validity,
-			Disabled: e.Disabled, Loading: e.Loading, Dangerous: e.Dangerous, DestructiveEffect: e.DestructiveEffect,
+			Disabled: e.Disabled, Loading: e.Loading, TargetLoading: e.TargetLoading,
+			ContainerLoading: e.ContainerLoading, PageLoadingCount: e.PageLoadingCount,
+			Dangerous: e.Dangerous, Effect: e.Effect, DestructiveEffect: e.DestructiveEffect,
 		})
 	}
 	return out
@@ -1221,12 +1262,16 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 
 func (c *Computer) DisplaySize() computer.DisplaySize { return c.display }
 
+func (c *Computer) EffectiveEnvironment() (computer.EffectiveEnvironment, error) {
+	return environment.Probe(c.ctx)
+}
+
 func (c *Computer) SessionType() string { return "browser-engine" }
 func (c *Computer) SessionID() string   { return c.sessionID }
 func (c *Computer) ContextID() string   { return c.contextID }
 func (c *Computer) CurrentURL() string {
 	var url string
-	_ = chromedp.Run(c.ctx, chromedp.Location(&url))
+	_ = cdputil.Run(c.ctx, chromedp.Location(&url))
 	return url
 }
 
@@ -1254,15 +1299,45 @@ func (c *Computer) Close() error {
 		c.allocCancel()
 	}
 	c.allocCtx = nil
+	c.tabManager = nil
+	c.tabTrackers = nil
 	c.ctx = nil
 	c.cancel = nil
 	c.allocCancel = nil
 
-	if err := c.requestRelease(); err != nil {
+	releaseErr := c.requestRelease()
+	if err := releaseErr; err != nil {
 		fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] release failed id=%s: %v\n", c.sessionID, err)
 	} else if c.sessionID != "" {
 		fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] session released id=%s\n", c.sessionID)
 	}
-	c.sessionID = ""
+	if releaseErr == nil {
+		c.sessionID = ""
+	}
+	return releaseErr
+}
+
+func (c *Computer) RefreshSemantics() error {
+	var raw json.RawMessage
+	if err := cdputil.Run(c.ctx, chromedp.Evaluate(som.EnumScript, &raw)); err != nil {
+		return err
+	}
+	elements, err := som.UnmarshalElements(raw)
+	if err != nil {
+		return err
+	}
+	if som.ShouldAugmentAX(elements) {
+		elements = som.MergeAX(elements, som.EnumerateViaAX(c.ctx, c.display.Width, c.display.Height))
+	}
+	labels := make(map[int]som.Element, len(elements))
+	for _, el := range elements {
+		labels[el.Label] = el
+	}
+	c.labelMu.Lock()
+	c.lastLabels = labels
+	c.labelMu.Unlock()
+	c.refreshScrollRegions()
 	return nil
 }
+
+func (c *Computer) BindRequest(ctx context.Context) func() { return cdputil.Bind(c.ctx, ctx) }

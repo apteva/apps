@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 
 	sdk "github.com/apteva/app-sdk"
@@ -24,45 +25,47 @@ func (a *App) runHealthPoller(ctx context.Context, app *sdk.AppCtx) error {
 	if err != nil {
 		return err
 	}
-	sem := make(chan struct{}, 8)
+	jobs := make(chan *Tenant)
 	var wg sync.WaitGroup
-	for _, t := range tenants {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		// Skip tenants that aren't expected to respond OR for which
-		// we don't yet have credentials. Stopped/suspended are
-		// intentional; failed had a real error surfaced; starting is
-		// mid-spawn; setup_pending is awaiting tenant_attach_key —
-		// the row's api_key_enc is still the "pending" sentinel and
-		// would fail auth on any /api/health probe.
-		switch t.Status {
-		case StatusDeleted, StatusStopped, StatusSuspended, StatusFailed, StatusStarting, StatusSetupPending:
-			continue
-		}
-		if a.tenantOperation(t.ID) != "" {
-			continue
-		}
-		tenant := t
+	for i := 0; i < 8; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				return
+			for tenant := range jobs {
+				a.probeOnce(ctx, app, tenant)
 			}
-			a.probeOnce(ctx, app, tenant)
 		}()
 	}
+	for _, t := range tenants {
+		select {
+		case jobs <- t:
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return ctx.Err()
+		}
+	}
+	close(jobs)
 	wg.Wait()
 	return ctx.Err()
 }
 
 func (a *App) probeOnce(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
+	done, err := a.beginTenantOperation(t.ID, "health probe")
+	if err != nil {
+		return
+	}
+	defer done()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return
+	}
+	if t.Status != StatusActive && t.Status != StatusDisconnected {
+		return
+	}
+	a.probeOnceLocked(ctx, app, t)
+}
+func (a *App) probeOnceLocked(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
 	// Local-on-parent tenants: port-presence pre-check. When the
 	// port is empty the process is gone — kick a respawn before the
 	// HTTP probe runs (which would just timeout and add 60s of
@@ -73,7 +76,7 @@ func (a *App) probeOnce(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
 	// pattern as kind=remote.
 	if t.Kind == KindLocal && !t.IsHosted() {
 		if port, _ := portFromBaseURL(t.BaseURL); port > 0 && !portInUse(port) {
-			a.tryRespawn(ctx, t)
+			a.tryRespawnLocked(ctx, t)
 			return // come back next tick to evaluate health
 		}
 	}
@@ -95,6 +98,7 @@ func (a *App) probeOnce(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
 	}
 	if baseErr != nil {
 		_ = a.store.updateHealth(t.ID, false, "", []byte(fmt.Sprintf(`{"error":%q}`, baseErr.Error())))
+		a.bumpFailures(app, t)
 		a.maybeRespawnHosted(ctx, app, t)
 		return
 	}
@@ -144,32 +148,61 @@ func (a *App) maybeRespawnHosted(ctx context.Context, app *sdk.AppCtx, t *Tenant
 	if err != nil || alive {
 		return false
 	}
-	a.tryRespawnHosted(ctx, app, t)
+	a.tryRespawnHostedLocked(ctx, app, t)
 	return true
 }
 
-// bumpFailures counts consecutive failures by reading the recent
-// events tail. Cheap relative to the 60s tick.
+// Failure streaks are durable state, independent of event retention.
 func (a *App) bumpFailures(app *sdk.AppCtx, t *Tenant) {
-	_ = a.store.recordEvent(t.ID, "health_failed", "worker:health_poller", nil)
-	if t.Status == StatusActive {
-		evts, err := a.store.recentEvents(t.ID, failuresToDisconnect)
-		if err != nil {
-			return
-		}
-		fails := 0
-		for _, e := range evts {
-			if e.Kind == "health_failed" {
-				fails++
-			} else {
-				break // any non-failure breaks the streak
-			}
-		}
-		if fails >= failuresToDisconnect {
-			_ = a.store.setStatus(t.ID, StatusDisconnected, "worker:health_poller")
-			app.Logger().Warn("fleet: tenant disconnected", "tenant", t.ID, "consecutive_failures", fails)
-		}
+	var count int
+	err := a.store.db.QueryRow(`UPDATE fleet_tenant_state SET health_failures=health_failures+1 WHERE tenant_id=? RETURNING health_failures`, t.ID).Scan(&count)
+	if err != nil {
+		return
 	}
+	_ = a.store.recordEvent(t.ID, "health_failed", "worker:health_poller", map[string]any{"consecutive_failures": count})
+	if count >= failuresToDisconnect && t.Status == StatusActive {
+		_ = a.store.setStatus(t.ID, StatusDisconnected, "worker:health_poller")
+	}
+}
+
+func healthVersion(body []byte) string {
+	var parsed struct {
+		Version string `json:"version"`
+		Apteva  string `json:"apteva"`
+	}
+	_ = json.Unmarshal(body, &parsed)
+	if parsed.Apteva != "" {
+		return strings.TrimPrefix(strings.TrimSpace(parsed.Apteva), "v")
+	}
+	return strings.TrimPrefix(strings.TrimSpace(parsed.Version), "v")
+}
+
+func requireRuntimeHealthVersion(ctx context.Context, baseURL, requested string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(baseURL, "/")+"/api/health", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return body, fmt.Errorf("runtime health returned HTTP %d", resp.StatusCode)
+	}
+	actual := healthVersion(body)
+	requested = strings.TrimPrefix(strings.TrimSpace(requested), "v")
+	if actual != requested {
+		if actual == "" {
+			actual = "unknown"
+		}
+		return body, fmt.Errorf("requested Apteva %s, but launched runtime reports %s", requested, actual)
+	}
+	return body, nil
 }
 
 // probeHealth GETs <base>/api/health with Bearer auth. Returns
@@ -186,7 +219,7 @@ func probeHealth(ctx context.Context, baseURL, apiKey string) (bool, string, []b
 		return false, "", nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
 		return false, "", body, nil
 	}
@@ -196,14 +229,14 @@ func probeHealth(ctx context.Context, baseURL, apiKey string) (bool, string, []b
 	// Either field absent → empty string → store keeps the prior value
 	// (COALESCE NULLIF in store.updateHealth), so we never overwrite
 	// good data with "".
-	var parsed struct {
-		Version string `json:"version"`
-		Apteva  string `json:"apteva"`
+	var health struct {
+		OK *bool `json:"ok"`
 	}
-	_ = json.Unmarshal(body, &parsed)
-	v := parsed.Apteva
-	if v == "" {
-		v = parsed.Version
+	if err := json.Unmarshal(body, &health); err != nil {
+		return false, "", body, err
 	}
-	return true, v, body, nil
+	if health.OK == nil || !*health.OK {
+		return false, "", body, nil
+	}
+	return true, healthVersion(body), body, nil
 }

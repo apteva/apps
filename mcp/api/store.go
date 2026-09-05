@@ -3,33 +3,36 @@ package main
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/url"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
 
 type API struct {
-	ID            int64  `json:"id"`
-	ProjectID     string `json:"project_id,omitempty"`
-	Slug          string `json:"slug"`
-	Name          string `json:"name"`
-	Description   string `json:"description,omitempty"`
-	Status        string `json:"status"`
-	Hostname      string `json:"hostname,omitempty"`
-	DNSMode       string `json:"dns_mode"`
-	DNSStatus     string `json:"dns_status,omitempty"`
-	IngressStatus string `json:"ingress_status,omitempty"`
-	AllowHTTP     bool   `json:"allow_http"`
-	CORSJSON      string `json:"cors_json,omitempty"`
-	AuthJSON      string `json:"auth_json,omitempty"`
-	CreatedAt     string `json:"created_at,omitempty"`
-	UpdatedAt     string `json:"updated_at,omitempty"`
+	ID                    int64  `json:"id"`
+	BrowserOriginsPending bool   `json:"browser_origins_pending"`
+	BrowserOriginsError   string `json:"browser_origins_error,omitempty"`
+	ExposureError         string `json:"exposure_error,omitempty"`
+	ProjectID             string `json:"project_id,omitempty"`
+	Slug                  string `json:"slug"`
+	Name                  string `json:"name"`
+	Description           string `json:"description,omitempty"`
+	Status                string `json:"status"`
+	Hostname              string `json:"hostname,omitempty"`
+	DNSMode               string `json:"dns_mode"`
+	DNSStatus             string `json:"dns_status,omitempty"`
+	IngressStatus         string `json:"ingress_status,omitempty"`
+	AllowHTTP             bool   `json:"allow_http"`
+	CORSJSON              string `json:"cors_json,omitempty"`
+	AuthJSON              string `json:"auth_json,omitempty"`
+	CreatedAt             string `json:"created_at,omitempty"`
+	UpdatedAt             string `json:"updated_at,omitempty"`
 }
 
 type APIRoute struct {
@@ -109,6 +112,7 @@ type routeInput struct {
 	TimeoutMS   int
 	Enabled     bool
 	Priority    int
+	PrioritySet bool
 }
 
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -122,12 +126,17 @@ func normalizeSlug(s string) (string, error) {
 }
 
 func normalizeHostname(h string) (string, error) {
-	h = strings.ToLower(strings.Trim(strings.TrimSpace(h), "."))
+	h = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
 	if h == "" {
 		return "", nil
 	}
 	if strings.ContainsAny(h, " \t\r\n/:?#") || len(h) > 253 {
 		return "", errors.New("invalid hostname")
+	}
+	for _, label := range strings.Split(h, ".") {
+		if len(label) > 63 || !slugRe.MatchString(label) || strings.HasSuffix(label, "-") {
+			return "", errors.New("invalid DNS label")
+		}
 	}
 	return h, nil
 }
@@ -177,13 +186,34 @@ func normalizePathPattern(s string) (string, error) {
 	if strings.ContainsAny(s, " \t\r\n") {
 		return "", errors.New("path_pattern must not contain whitespace")
 	}
-	return strings.TrimRight(s, "/"), nil
+	s = strings.TrimRight(s, "/")
+	if s == "" {
+		return "/", nil
+	}
+	seen := map[string]bool{}
+	parts := splitPath(s)
+	for i, part := range parts {
+		if part == "" || part == "." || part == ".." || strings.ContainsAny(part, "?#%\\") {
+			return "", errors.New("invalid path segment")
+		}
+		if strings.Contains(part, "*") && (part != "*" || i != len(parts)-1) {
+			return "", errors.New("wildcard must be a terminal segment")
+		}
+		if strings.HasPrefix(part, ":") {
+			name := part[1:]
+			if name == "" || seen[name] {
+				return "", errors.New("invalid or duplicate path parameter")
+			}
+			seen[name] = true
+		}
+	}
+	return s, nil
 }
 
 func normalizeTargetKind(s string) (string, error) {
 	switch strings.TrimSpace(s) {
 	case "function", "app", "http", "app_events":
-		return s, nil
+		return strings.TrimSpace(s), nil
 	default:
 		return "", errors.New("target_kind must be function, app, http, or app_events")
 	}
@@ -200,34 +230,62 @@ func validateTarget(kind, ref string) error {
 			return errors.New("http target_ref must be an absolute http(s) URL")
 		}
 	}
-	if kind == "app_events" && !slugRe.MatchString(ref) {
-		return errors.New("app_events target_ref must be an app name")
+	if (kind == "app_events" || kind == "app") && (!slugRe.MatchString(ref) || strings.HasSuffix(ref, "-")) {
+		return errors.New("target_ref must be an app name")
 	}
 	return nil
 }
 
-const apiCols = `id, project_id, slug, name, description, status, hostname, dns_mode,
+const apiBaseCols = `id, project_id, slug, name, description, status, hostname, dns_mode,
 	dns_status, ingress_status, allow_http, cors_json, auth_json, created_at, updated_at`
+const apiCols = apiBaseCols + `,
+ COALESCE((SELECT pending FROM api_policy_sync WHERE api_id=apis.id),0),
+ COALESCE((SELECT error FROM api_policy_sync WHERE api_id=apis.id),''),
+ COALESCE((SELECT group_concat(error, '; ') FROM api_exposures WHERE api_id=apis.id AND error<>''),'')`
 
 func scanAPI(row interface{ Scan(dest ...any) error }) (*API, error) {
 	var a API
 	var allow int
 	if err := row.Scan(&a.ID, &a.ProjectID, &a.Slug, &a.Name, &a.Description, &a.Status,
 		&a.Hostname, &a.DNSMode, &a.DNSStatus, &a.IngressStatus, &allow,
-		&a.CORSJSON, &a.AuthJSON, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&a.CORSJSON, &a.AuthJSON, &a.CreatedAt, &a.UpdatedAt, &a.BrowserOriginsPending, &a.BrowserOriginsError, &a.ExposureError); err != nil {
 		return nil, err
 	}
 	a.AllowHTTP = allow != 0
 	return &a, nil
 }
 
+func ensureHostnameAvailable(db *sql.DB, host string, id int64) error {
+	if host == "" {
+		return nil
+	}
+	var conflicts int
+	err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM apis WHERE hostname=? AND id<>?)+(SELECT COUNT(*) FROM api_exposures WHERE hostname=? AND api_id<>?)`, host, id, host, id).Scan(&conflicts)
+	if err != nil {
+		return err
+	}
+	if conflicts > 0 {
+		return errors.New("hostname belongs to another API or has pending cleanup")
+	}
+	return nil
+}
+
 func dbCreateAPI(db *sql.DB, in apiInput) (*API, error) {
+	if err := validateAuthPolicy(defaultJSON(in.AuthJSON)); err != nil {
+		return nil, err
+	}
+	if _, err := parseEffectiveCORSPolicy(defaultJSON(in.CORSJSON), "{}"); err != nil {
+		return nil, err
+	}
 	slug, err := normalizeSlug(in.Slug)
 	if err != nil {
 		return nil, err
 	}
 	host, err := normalizeHostname(in.Hostname)
 	if err != nil {
+		return nil, err
+	}
+	if err := ensureHostnameAvailable(db, host, 0); err != nil {
 		return nil, err
 	}
 	dnsMode, err := normalizeDNSMode(in.DNSMode)
@@ -281,6 +339,9 @@ func dbUpdateAPI(db *sql.DB, pid string, id int64, patch map[string]any) (*API, 
 		if err != nil {
 			return nil, err
 		}
+		if err := ensureHostnameAvailable(db, in.Hostname, id); err != nil {
+			return nil, err
+		}
 	}
 	if v, ok := patch["dns_mode"].(string); ok {
 		in.DNSMode, err = normalizeDNSMode(v)
@@ -298,7 +359,7 @@ func dbUpdateAPI(db *sql.DB, pid string, id int64, patch map[string]any) (*API, 
 		}
 	}
 	if v, ok := patch["auth"]; ok {
-		in.AuthJSON, err = marshalJSONDefault(v)
+		in.AuthJSON, err = normalizedAuthArg(map[string]any{"auth": v}, "auth", in.AuthJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -308,12 +369,16 @@ func dbUpdateAPI(db *sql.DB, pid string, id int64, patch map[string]any) (*API, 
 		allow = 1
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	if in.Hostname != cur.Hostname || in.DNSMode != cur.DNSMode || in.AllowHTTP != cur.AllowHTTP || in.Status != cur.Status {
+		in.DNSStatus, in.IngressStatus = "", ""
+	}
 	_, err = db.Exec(`UPDATE apis SET name=?, description=?, status=?, hostname=?, dns_mode=?,
-		allow_http=?, cors_json=?, auth_json=?, updated_at=? WHERE id=? AND project_id=?`,
-		in.Name, in.Description, in.Status, in.Hostname, in.DNSMode, allow, defaultJSON(in.CORSJSON), defaultJSON(in.AuthJSON), now, id, pid)
+		allow_http=?, cors_json=?, auth_json=?, updated_at=?, dns_status=?, ingress_status=? WHERE id=? AND project_id=?`,
+		in.Name, in.Description, in.Status, in.Hostname, in.DNSMode, allow, defaultJSON(in.CORSJSON), defaultJSON(in.AuthJSON), now, in.DNSStatus, in.IngressStatus, id, pid)
 	if err != nil {
 		return nil, err
 	}
+	invalidateRoutes(db, pid, id)
 	return dbGetAPIByID(db, pid, id)
 }
 
@@ -331,6 +396,19 @@ func dbGetAPIByID(db *sql.DB, pid string, id int64) (*API, error) {
 	return a, err
 }
 
+// Public dispatch still reads authoritative policy/status on every request,
+// without querying management-only reconciliation diagnostics.
+func dbGetPublicAPI(db *sql.DB, pid, field string, value any) (*API, error) {
+	if field != "id" && field != "slug" && field != "hostname" {
+		return nil, errors.New("invalid lookup field")
+	}
+	a, err := scanAPI(db.QueryRow(`SELECT `+apiBaseCols+`,0,'','' FROM apis WHERE project_id=? AND `+field+`=?`, pid, value))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return a, err
+}
+
 func dbGetAPIBySlug(db *sql.DB, pid, slug string) (*API, error) {
 	row := db.QueryRow(`SELECT `+apiCols+` FROM apis WHERE project_id=? AND slug=?`, pid, slug)
 	a, err := scanAPI(row)
@@ -341,7 +419,7 @@ func dbGetAPIBySlug(db *sql.DB, pid, slug string) (*API, error) {
 }
 
 func dbGetAPIByHostname(db *sql.DB, pid, host string) (*API, error) {
-	row := db.QueryRow(`SELECT `+apiCols+` FROM apis WHERE project_id=? AND hostname=? AND status='active'`, pid, host)
+	row := db.QueryRow(`SELECT `+apiCols+` FROM apis WHERE project_id=? AND hostname=?`, pid, host)
 	a, err := scanAPI(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -384,10 +462,32 @@ func dbListAllAPIs(db *sql.DB) ([]*API, error) {
 }
 
 func dbDeleteAPI(db *sql.DB, pid string, id int64) (bool, error) {
-	res, err := db.Exec(`DELETE FROM apis WHERE project_id=? AND id=?`, pid, id)
+	tx, err := db.Begin()
 	if err != nil {
 		return false, err
 	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`INSERT INTO api_policy_sync(api_id,project_id,delete_requested,pending)
+ SELECT id,project_id,1,1 FROM apis WHERE project_id=? AND id=?
+ ON CONFLICT(api_id) DO UPDATE SET delete_requested=1,pending=1`, pid, id); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(`UPDATE api_exposures SET cleanup=1 WHERE project_id=? AND api_id=?`, pid, id); err != nil {
+		return false, err
+	}
+	for _, table := range []string{"api_request_logs", "api_keys", "api_routes"} {
+		if _, err = tx.Exec("DELETE FROM "+table+" WHERE project_id=? AND api_id=?", pid, id); err != nil {
+			return false, err
+		}
+	}
+	res, err := tx.Exec("DELETE FROM apis WHERE project_id=? AND id=?", pid, id)
+	if err != nil {
+		return false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	invalidateRoutes(db, pid, id)
 	n, _ := res.RowsAffected()
 	return n > 0, nil
 }
@@ -433,10 +533,19 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 	} else {
 		in.EventsJSON = "{}"
 	}
-	if in.TimeoutMS <= 0 {
+	if in.TimeoutMS == 0 {
 		in.TimeoutMS = 30000
 	}
-	if in.Priority == 0 {
+	if in.TimeoutMS < 1 || in.TimeoutMS > 300000 {
+		return nil, "", errors.New("timeout_ms must be between 1 and 300000")
+	}
+	if err := validateAuthPolicy(defaultJSON(in.AuthJSON)); err != nil {
+		return nil, "", err
+	}
+	if in.TargetPath != "" && (!strings.HasPrefix(in.TargetPath, "/") || strings.ContainsAny(in.TargetPath, "?#\\\r\n")) {
+		return nil, "", errors.New("target_path must be an absolute path without query or fragment")
+	}
+	if in.Priority == 0 && !in.PrioritySet {
 		in.Priority = 100
 	}
 	enabled := 0
@@ -457,18 +566,24 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 		if err != nil {
 			return nil, "", err
 		}
+		invalidateRoutes(db, in.ProjectID, in.APIID)
 		r, err := dbGetRouteByID(db, in.ProjectID, existing.ID)
 		return r, "updated", err
 	}
 	res, err := db.Exec(`INSERT INTO api_routes
 		(project_id, api_id, method, path_pattern, target_kind, target_ref, target_path, events_json, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ ON CONFLICT(project_id,api_id,method,path_pattern) DO UPDATE SET
+ target_kind=excluded.target_kind,target_ref=excluded.target_ref,target_path=excluded.target_path,
+ events_json=excluded.events_json,auth_json=excluded.auth_json,cors_json=excluded.cors_json,
+ timeout_ms=excluded.timeout_ms,enabled=excluded.enabled,priority=excluded.priority,updated_at=excluded.updated_at`,
 		in.ProjectID, in.APIID, method, pattern, kind, strings.TrimSpace(in.TargetRef), strings.TrimSpace(in.TargetPath),
 		defaultJSON(in.EventsJSON), defaultJSON(in.AuthJSON), defaultJSON(in.CORSJSON), in.TimeoutMS, enabled, in.Priority, now, now)
 	if err != nil {
 		return nil, "", err
 	}
 	id, _ := res.LastInsertId()
+	invalidateRoutes(db, in.ProjectID, in.APIID)
 	r, err := dbGetRouteByID(db, in.ProjectID, id)
 	return r, "created", err
 }
@@ -510,7 +625,14 @@ func dbListRoutes(db *sql.DB, pid string, apiID int64) ([]*APIRoute, error) {
 }
 
 func dbDeleteRoute(db *sql.DB, pid string, id int64) (bool, error) {
+	route, err := dbGetRouteByID(db, pid, id)
+	if err != nil {
+		return false, err
+	}
 	res, err := db.Exec(`DELETE FROM api_routes WHERE project_id=? AND id=?`, pid, id)
+	if route != nil {
+		invalidateRoutes(db, pid, route.APIID)
+	}
 	if err != nil {
 		return false, err
 	}
@@ -519,57 +641,23 @@ func dbDeleteRoute(db *sql.DB, pid string, id int64) (bool, error) {
 }
 
 func dbMatchRoute(db *sql.DB, pid string, apiID int64, method, path string) (*APIRoute, map[string]string, error) {
-	routes, err := dbListRoutes(db, pid, apiID)
+	routes, err := compiledRoutes(db, pid, apiID)
 	if err != nil {
 		return nil, nil, err
 	}
-	sort.SliceStable(routes, func(i, j int) bool {
-		if routes[i].Priority == routes[j].Priority {
-			return len(routes[i].PathPattern) > len(routes[j].PathPattern)
-		}
-		return routes[i].Priority < routes[j].Priority
-	})
+	segments := splitPath(path)
 	for _, r := range routes {
-		if !r.Enabled || (r.Method != "ANY" && r.Method != method) {
+		if r.route.Method != "ANY" && r.route.Method != method {
 			continue
 		}
-		if params, ok := matchPath(r.PathPattern, path); ok {
-			return r, params, nil
+		if params, ok := matchSegments(r.segments, segments); ok {
+			return r.route, params, nil
 		}
 	}
 	return nil, nil, nil
 }
-
 func matchPath(pattern, path string) (map[string]string, bool) {
-	pattern = strings.TrimRight(pattern, "/")
-	path = strings.TrimRight(path, "/")
-	if pattern == "" {
-		pattern = "/"
-	}
-	if path == "" {
-		path = "/"
-	}
-	pp := splitPath(pattern)
-	rp := splitPath(path)
-	params := map[string]string{}
-	for i := 0; i < len(pp); i++ {
-		if i >= len(rp) {
-			return nil, false
-		}
-		seg := pp[i]
-		if seg == "*" {
-			params["*"] = strings.Join(rp[i:], "/")
-			return params, true
-		}
-		if strings.HasPrefix(seg, ":") && len(seg) > 1 {
-			params[seg[1:]] = rp[i]
-			continue
-		}
-		if seg != rp[i] {
-			return nil, false
-		}
-	}
-	return params, len(pp) == len(rp)
+	return matchSegments(splitPath(pattern), splitPath(path))
 }
 
 func splitPath(s string) []string {
@@ -643,25 +731,32 @@ func dbListAPIKeys(db *sql.DB, pid string, apiID int64) ([]*APIKey, error) {
 	return out, rows.Err()
 }
 
-func dbValidateAPIKey(db *sql.DB, pid string, apiID int64, plain string) (bool, error) {
+func validateAPIKey(db *sql.DB, pid string, apiID int64, plain string) (int64, bool, error) {
 	prefix := ""
 	if len(plain) >= 18 {
 		prefix = plain[:18]
 	}
-	row := db.QueryRow(`SELECT id, key_hash FROM api_keys WHERE project_id=? AND api_id=? AND key_prefix=? AND status='active'`, pid, apiID, prefix)
+	row := db.QueryRow(`SELECT id, key_hash, COALESCE(last_used_at,'') FROM api_keys WHERE project_id=? AND api_id=? AND key_prefix=? AND status='active'`, pid, apiID, prefix)
 	var id int64
-	var want string
-	if err := row.Scan(&id, &want); err != nil {
+	var want, lastUsed string
+	if err := row.Scan(&id, &want, &lastUsed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
+			return 0, false, nil
 		}
-		return false, err
+		return 0, false, err
 	}
-	if hashAPIKey(plain) != want {
-		return false, nil
+	if subtle.ConstantTimeCompare([]byte(hashAPIKey(plain)), []byte(want)) != 1 {
+		return 0, false, nil
 	}
-	_, _ = db.Exec(`UPDATE api_keys SET last_used_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339), id)
-	return true, nil
+	if lastUsed < time.Now().Add(-time.Minute).UTC().Format(time.RFC3339) {
+		_, _ = db.Exec(`UPDATE api_keys SET last_used_at=? WHERE id=? AND (last_used_at IS NULL OR last_used_at < ?)`, time.Now().UTC().Format(time.RFC3339), id, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	}
+	return id, true, nil
+}
+
+func dbValidateAPIKey(db *sql.DB, pid string, apiID int64, plain string) (bool, error) {
+	_, ok, err := validateAPIKey(db, pid, apiID, plain)
+	return ok, err
 }
 
 func dbRevokeAPIKey(db *sql.DB, pid string, id int64) (bool, error) {
@@ -683,12 +778,24 @@ func dbInsertLog(db *sql.DB, l RequestLog) {
 }
 
 func dbListLogs(db *sql.DB, pid string, apiID int64, limit int) ([]*RequestLog, error) {
+	return dbListLogsBefore(db, pid, apiID, limit, 0)
+}
+func dbListLogsBefore(db *sql.DB, pid string, apiID int64, limit int, beforeID int64) ([]*RequestLog, error) {
+	flushRequestLogs(db)
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := db.Query(`SELECT id, project_id, COALESCE(api_id,0), COALESCE(route_id,0), hostname, method, path,
+	query := `SELECT id, project_id, COALESCE(api_id,0), COALESCE(route_id,0), hostname, method, path,
 		status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id, created_at
-		FROM api_request_logs WHERE project_id=? AND api_id=? ORDER BY created_at DESC LIMIT ?`, pid, apiID, limit)
+		FROM api_request_logs WHERE project_id=? AND api_id=?`
+	args := []any{pid, apiID}
+	if beforeID > 0 {
+		query += " AND id<?"
+		args = append(args, beforeID)
+	}
+	query += " ORDER BY id DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

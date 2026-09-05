@@ -3,9 +3,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"net"
-	"net/url"
-	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -104,11 +101,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			"api_id":     map[string]any{"type": "integer"},
 			"api_slug":   map[string]any{"type": "string"},
 			"limit":      map[string]any{"type": "integer"},
+			"before_id":  map[string]any{"type": "integer", "minimum": 1},
 		}, nil), Handler: a.toolLogs},
 	}
 }
 
 func (a *App) toolAPICreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	pid, err := projectFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
@@ -120,7 +120,7 @@ func (a *App) toolAPICreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if _, err := parseEffectiveCORSPolicy(corsJSON, "{}"); err != nil {
 		return nil, err
 	}
-	authJSON, err := jsonTextArg(args, "auth", "{}")
+	authJSON, err := normalizedAuthArg(args, "auth", "{}")
 	if err != nil {
 		return nil, err
 	}
@@ -164,6 +164,8 @@ func (a *App) toolAPIList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolAPIUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	api, err := a.resolveAPI(ctx, args)
 	if err != nil || api == nil {
 		return nil, err
@@ -180,9 +182,34 @@ func (a *App) toolAPIUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		// string as an object rather than storing it as a quoted JSON string.
 		args["cors"] = json.RawMessage(corsJSON)
 	}
+	candidate := *api
+	if _, ok := args["auth"]; ok {
+		raw, err := normalizedAuthArg(args, "auth", api.AuthJSON)
+		if err != nil {
+			return nil, err
+		}
+		args["auth"] = json.RawMessage(raw)
+		candidate.AuthJSON = raw
+	}
+	if _, ok := args["cors"]; ok {
+		raw, err := jsonTextArg(args, "cors", api.CORSJSON)
+		if err != nil {
+			return nil, err
+		}
+		candidate.CORSJSON = raw
+	}
+	if err := validateEffectivePolicies(ctx.AppDB(), &candidate, nil, 0); err != nil {
+		return nil, err
+	}
 	updated, err := dbUpdateAPI(ctx.AppDB(), api.ProjectID, api.ID, args)
 	if err != nil {
 		return nil, err
+	}
+	a.streams.cancelMatching(api.ProjectID, api.ID, 0, 0)
+	if api.Hostname != "" && (updated.Hostname != api.Hostname || updated.Status != "active") {
+		if err := queueExposureCleanup(ctx, api); err != nil {
+			return nil, err
+		}
 	}
 	a.configureExposure(ctx, updated)
 	updated, _ = dbGetAPIByID(ctx.AppDB(), api.ProjectID, api.ID)
@@ -193,31 +220,36 @@ func (a *App) toolAPIUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolAPIDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	api, err := a.resolveAPI(ctx, args)
 	if err != nil || api == nil {
 		return nil, err
 	}
-	if api.Hostname != "" {
-		_ = ctx.PlatformAPI().UnexposeIngress(api.Hostname)
-	}
-	attempted := false
-	var syncErr error
-	if ctx.BrowserOriginsAPI() != nil {
-		attempted = true
-		syncErr = ctx.DeleteBrowserOrigins(browserOriginRegistrationKey(api.ID))
-	}
+	a.streams.cancelMatching(api.ProjectID, api.ID, 0, 0)
+	flushRequestLogs(ctx.AppDB())
 	ok, err := dbDeleteAPI(ctx.AppDB(), api.ProjectID, api.ID)
+	if err != nil {
+		return nil, err
+	}
+	attempted := true
+	syncErr := deleteAPIBrowserPolicy(ctx, api.ID)
 	out := map[string]any{"deleted": ok}
 	recordBrowserOriginSync(out, attempted, syncErr)
+	if cleanupErr := a.reconcileExposures(ctx); cleanupErr != nil {
+		out["exposure_error"] = safeUpstreamError(cleanupErr)
+	}
 	return out, err
 }
 
 func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	api, err := a.resolveAPI(ctx, args)
 	if err != nil || api == nil {
 		return nil, err
 	}
-	authJSON, err := jsonTextArg(args, "auth", "{}")
+	authJSON, err := normalizedAuthArg(args, "auth", "{}")
 	if err != nil {
 		return nil, err
 	}
@@ -236,6 +268,34 @@ func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if _, ok := args["enabled"]; ok {
 		enabled = boolArg(args, "enabled", true)
 	}
+	method, err := normalizeMethod(stringArg(args, "method", ""))
+	if err != nil {
+		return nil, err
+	}
+	pattern, err := normalizePathPattern(stringArg(args, "path_pattern", ""))
+	if err != nil {
+		return nil, err
+	}
+	candidate := &APIRoute{Method: method, PathPattern: pattern, AuthJSON: authJSON, CORSJSON: corsJSON, Enabled: enabled, TargetKind: stringArg(args, "target_kind", "")}
+	if err := validateEffectivePolicies(ctx.AppDB(), api, candidate, 0); err != nil {
+		return nil, err
+	}
+	if err := validateRouteTargetPath(stringArg(args, "target_path", "")); err != nil {
+		return nil, err
+	}
+	if candidate.TargetKind == "app" && enabled {
+		if err := a.validateAppTarget(api.ProjectID, stringArg(args, "target_ref", "")); err != nil {
+			return nil, err
+		}
+	}
+	timeout, err := boundedIntArg(args, "timeout_ms", 30000, 1, 300000)
+	if err != nil {
+		return nil, err
+	}
+	priority, err := boundedIntArg(args, "priority", 100, -2147483648, 2147483647)
+	if err != nil {
+		return nil, err
+	}
 	route, action, err := dbUpsertRoute(ctx.AppDB(), routeInput{
 		ProjectID:   api.ProjectID,
 		APIID:       api.ID,
@@ -247,13 +307,15 @@ func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		EventsJSON:  eventsJSON,
 		AuthJSON:    authJSON,
 		CORSJSON:    corsJSON,
-		TimeoutMS:   intArg(args, "timeout_ms", 30000),
+		TimeoutMS:   timeout,
 		Enabled:     enabled,
-		Priority:    intArg(args, "priority", 100),
+		Priority:    priority,
+		PrioritySet: true,
 	})
 	if err != nil {
 		return nil, err
 	}
+	a.streams.cancelMatching(api.ProjectID, api.ID, route.ID, 0)
 	out := map[string]any{"route": route, "action": action}
 	attempted, syncErr := syncAPIBrowserOriginPolicy(ctx, api)
 	recordBrowserOriginSync(out, attempted, syncErr)
@@ -273,6 +335,8 @@ func (a *App) toolRouteList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolRouteDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	pid, err := projectFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
@@ -288,7 +352,15 @@ func (a *App) toolRouteDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	if api != nil {
+		if err := validateEffectivePolicies(ctx.AppDB(), api, nil, route.ID); err != nil {
+			return nil, err
+		}
+	}
 	ok, err := dbDeleteRoute(ctx.AppDB(), pid, route.ID)
+	if err == nil {
+		a.streams.cancelMatching(pid, route.APIID, route.ID, 0)
+	}
 	out := map[string]any{"deleted": ok}
 	if err == nil && api != nil {
 		attempted, syncErr := syncAPIBrowserOriginPolicy(ctx, api)
@@ -298,6 +370,8 @@ func (a *App) toolRouteDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolKeyCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	api, err := a.resolveAPI(ctx, args)
 	if err != nil || api == nil {
 		return nil, err
@@ -319,11 +393,17 @@ func (a *App) toolKeyList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolKeyRevoke(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
 	pid, err := projectFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	ok, err := dbRevokeAPIKey(ctx.AppDB(), pid, int64(intArg(args, "id", 0)))
+	id := int64(intArg(args, "id", 0))
+	ok, err := dbRevokeAPIKey(ctx.AppDB(), pid, id)
+	if err == nil {
+		a.streams.cancelMatching(pid, 0, 0, id)
+	}
 	return map[string]any{"revoked": ok}, err
 }
 
@@ -332,8 +412,12 @@ func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil || api == nil {
 		return nil, err
 	}
-	logs, err := dbListLogs(ctx.AppDB(), api.ProjectID, api.ID, intArg(args, "limit", 100))
-	return map[string]any{"logs": logs, "count": len(logs)}, err
+	logs, err := dbListLogsBefore(ctx.AppDB(), api.ProjectID, api.ID, intArg(args, "limit", 100), int64(intArg(args, "before_id", 0)))
+	out := map[string]any{"logs": logs, "count": len(logs)}
+	if len(logs) > 0 {
+		out["next_before_id"] = logs[len(logs)-1].ID
+	}
+	return out, err
 }
 
 func (a *App) resolveAPI(ctx *sdk.AppCtx, args map[string]any) (*API, error) {
@@ -367,70 +451,4 @@ func (a *App) resolveAPI(ctx *sdk.AppCtx, args map[string]any) (*API, error) {
 		return api, err
 	}
 	return nil, errors.New("api not found")
-}
-
-func (a *App) configureExposure(ctx *sdk.AppCtx, api *API) {
-	if api == nil || api.Hostname == "" {
-		return
-	}
-	dnsStatus := api.DNSStatus
-	if api.DNSMode == "domains" {
-		if err := writeDomainRecord(ctx, api); err != nil {
-			dnsStatus = "error: " + err.Error()
-		} else {
-			dnsStatus = "ok"
-		}
-	} else {
-		dnsStatus = api.DNSMode
-	}
-	_, err := ctx.PlatformAPI().ExposeIngress(sdk.IngressExposeRequest{
-		Hostname:  api.Hostname,
-		Target:    "app://api/gw?project_id=" + url.QueryEscape(api.ProjectID),
-		ProjectID: api.ProjectID,
-		OwnerKind: "api",
-		CertFQDN:  api.Hostname,
-		AllowHTTP: api.AllowHTTP,
-		TLSMode:   "auto",
-	})
-	ingressStatus := "ok"
-	if err != nil {
-		ingressStatus = "error: " + err.Error()
-	}
-	dbSetAPIExposureStatus(ctx.AppDB(), api.ProjectID, api.ID, dnsStatus, ingressStatus)
-}
-
-func writeDomainRecord(ctx *sdk.AppCtx, api *API) error {
-	target := strings.TrimSpace(ctx.Config().Get("public_host"))
-	if target == "" {
-		return errors.New("public_host config required for dns_mode=domains")
-	}
-	apex, name := splitHostnameForDNS(api.Hostname)
-	if apex == "" {
-		return errors.New("hostname must include a domain and subdomain")
-	}
-	recordType := "CNAME"
-	if net.ParseIP(target) != nil {
-		recordType = "A"
-	}
-	var out map[string]any
-	return ctx.PlatformAPI().CallAppResult("domains", "domain_records_set", map[string]any{
-		"domain":      apex,
-		"name":        name,
-		"type":        recordType,
-		"value":       target,
-		"ttl":         300,
-		"_project_id": api.ProjectID,
-	}, &out)
-}
-
-func splitHostnameForDNS(host string) (apex, name string) {
-	parts := strings.Split(host, ".")
-	if len(parts) < 2 {
-		return "", ""
-	}
-	apex = strings.Join(parts[len(parts)-2:], ".")
-	if len(parts) == 2 {
-		return apex, "@"
-	}
-	return apex, strings.Join(parts[:len(parts)-2], ".")
 }

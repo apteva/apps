@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"reflect"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -11,6 +13,22 @@ import (
 // ParseManifest is the same one apteva-server uses at install time;
 // if it can't parse, neither can the platform.
 func TestManifestParses(t *testing.T) {
+	disk, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	diskManifest, err := sdk.ParseManifest(disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedded, err := sdk.ParseManifest([]byte(manifestYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(diskManifest, embedded) {
+		t.Fatal("embedded manifest differs from apteva.yaml")
+	}
+
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
 	if err != nil {
 		t.Fatalf("ParseManifest: %v", err)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -9,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -16,7 +18,7 @@ import (
 // MCPTools wires every tool to a handler that resolves the project,
 // validates args, and delegates to the store + edit engine.
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{
 			Name:        "repos_list",
 			Description: "List repositories in this project. Args: archived?, q?.",
@@ -29,12 +31,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "repos_create",
 			Description: "Create a repository. Args: name (required), framework? (blank | nextjs | static | go | python), " +
-				"description?, slug?. Walks the template tree into the new repo's storage_root.",
+				"description?, slug?, workspace_image?. Walks the template tree into the new repo's storage_root.",
 			InputSchema: schemaObject(map[string]any{
-				"name":        map[string]any{"type": "string"},
-				"framework":   map[string]any{"type": "string"},
-				"description": map[string]any{"type": "string"},
-				"slug":        map[string]any{"type": "string"},
+				"name":            map[string]any{"type": "string"},
+				"framework":       map[string]any{"type": "string"},
+				"description":     map[string]any{"type": "string"},
+				"slug":            map[string]any{"type": "string"},
+				"workspace_image": map[string]any{"type": "string"},
 			}, []string{"name"}),
 			Handler: a.toolReposCreate,
 		},
@@ -64,6 +67,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"env_json":  map[string]any{"type": "string"},
 			}, []string{"slug"}),
 			Handler: a.toolReposSetDeployHints,
+		},
+		{
+			Name:        "repos_set_workspace_image",
+			Description: "Set or clear the repository's preferred workspace image. Workspaces validates registry policy when the image is used. A changed image provisions a new linked workspace on the next workspace command only when the current workspace has no unapplied source changes; the prior workspace is retained. Args: slug, image (empty clears).",
+			InputSchema: schemaObject(map[string]any{
+				"slug":  map[string]any{"type": "string"},
+				"image": map[string]any{"type": "string"},
+			}, []string{"slug", "image"}),
+			Handler: a.toolReposSetWorkspaceImage,
 		},
 		{
 			Name: "repos_export",
@@ -322,6 +334,26 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolIssuesGet,
 		},
 		{
+			Name: "issues_claim",
+			Description: "Atomically claim an open Code issue before starting work. The claimant is derived from the authenticated agent or delegated user; it cannot be supplied in arguments. " +
+				"If another caller already owns the claim, returns success=false with the current claim instead of replacing it. Args: slug, number.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":   map[string]any{"type": "string"},
+				"number": map[string]any{"type": "integer"},
+			}, []string{"slug", "number"}),
+			HandlerCtx: a.toolIssuesClaim,
+		},
+		{
+			Name: "issues_release",
+			Description: "Release the authenticated caller's claim on a Code issue. Does not release another caller's claim. " +
+				"An in-progress issue returns to todo; closing an issue releases its claim automatically. Args: slug, number.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":   map[string]any{"type": "string"},
+				"number": map[string]any{"type": "integer"},
+			}, []string{"slug", "number"}),
+			HandlerCtx: a.toolIssuesRelease,
+		},
+		{
 			Name: "issues_create",
 			Description: "Create a native Code issue. Args: slug, title, body?, type? " +
 				"(bug | feature | task | chore), priority? (low | medium | high | urgent), assignee?, created_by?, link_path?, line_start?, line_end?.",
@@ -425,18 +457,45 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "repos_run_command",
-			Description: "Run a finite repo command and wait for it to exit. Use this for builds, tests, lint, typecheck, generators, and validation commands such as 'bun run build' or 'go test ./...'. " +
+			Description: "Run a finite repo command and wait for it to exit. runtime=local uses the Code sidecar; runtime=workspace creates or reuses an isolated Workspaces environment, installs dependencies when inputs change, safely synchronizes source, and preserves its cache. Use this for builds, tests, lint, typecheck, generators, and validation commands. " +
 				"Do not use repos_dev_start for finite commands; repos_dev_start is only for long-running preview servers. " +
-				"For JS/Bun/Node repos with package.json, bootstraps dependencies first when node_modules is missing or dependency files changed. " +
-				"Returns structured status, exit_code, duration_ms, dependency_install_ran, stdout_tail, stderr_tail, and log_tail. Args: slug, command, env_json?, timeout_seconds? (default 300, max 1800), tail? (default 200).",
+				"For monorepos, workspace_paths selects editable doublestar globs and support_paths adds read-only build inputs; only the selected files are transferred and only workspace_paths may be applied back. Omitted scope arguments reuse the linked workspace scope; pass workspace_paths=[\"**\"] to switch back to the full repository. " +
+				"Returns structured status, runtime, workspace_id when applicable, exit_code, duration_ms, dependency_install_ran, and bounded logs. Args: slug, command, runtime? (local|workspace), profile? (go|bun|python|apteva), image? (allowlisted immutable workspace image override), workspace_paths?, support_paths?, env_json?, timeout_seconds? (default 300, max 1800), tail? (default 200).",
 			InputSchema: schemaObject(map[string]any{
 				"slug":            map[string]any{"type": "string"},
 				"command":         map[string]any{"type": "string"},
+				"runtime":         map[string]any{"type": "string", "enum": []string{"local", "workspace"}},
+				"profile":         map[string]any{"type": "string", "enum": []string{"go", "bun", "python", "apteva"}},
+				"image":           map[string]any{"type": "string"},
+				"workspace_paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 64},
+				"support_paths":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 64},
 				"env_json":        map[string]any{"type": "string"},
 				"timeout_seconds": map[string]any{"type": "integer"},
 				"tail":            map[string]any{"type": "integer"},
 			}, []string{"slug", "command"}),
-			Handler: a.toolRunCommand,
+			HandlerCtx: a.toolRunCommand,
+		},
+		{
+			Name:        "repos_workspace_changes",
+			Description: "Preview source changes produced in a repository's linked execution workspace. Returns added, modified, and deleted paths plus source revision digests and conflict state. Run this before applying workspace-generated changes. Args: slug.",
+			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
+			HandlerCtx:  a.toolWorkspaceChanges,
+		},
+		{
+			Name:        "repos_workspace_apply",
+			Description: "Apply a previously previewed workspace source revision back to Code. Requires expected_workspace_digest from repos_workspace_changes and refuses when Code changed after synchronization or preview. Git metadata and dependency/build caches are never replaced. Args: slug, expected_workspace_digest.",
+			InputSchema: schemaObject(map[string]any{
+				"slug": map[string]any{"type": "string"}, "expected_workspace_digest": map[string]any{"type": "string"},
+			}, []string{"slug", "expected_workspace_digest"}),
+			HandlerCtx: a.toolWorkspaceApply,
+		},
+		{
+			Name:        "repos_workspace_destroy",
+			Description: "Permanently destroy a repository's linked execution workspace and cached volumes, then unlink it from Code. Repository files in Code are retained. Requires confirm=true. Args: slug, confirm.",
+			InputSchema: schemaObject(map[string]any{
+				"slug": map[string]any{"type": "string"}, "confirm": map[string]any{"type": "boolean"},
+			}, []string{"slug", "confirm"}),
+			HandlerCtx: a.toolWorkspaceDestroy,
 		},
 		{
 			Name:        "repos_dev_stop",
@@ -460,6 +519,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolDevLogs,
 		},
 	}
+	return append(tools, a.gitMCPTools()...)
 }
 
 // ─── repos_dev_* handlers ─────────────────────────────────────────
@@ -572,7 +632,7 @@ func (a *App) toolDevLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"log": body, "available": true}, nil
 }
 
-func (a *App) toolRunCommand(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolRunCommand(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -581,6 +641,31 @@ func (a *App) toolRunCommand(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	repo, err := requireRepo(ctx, pid, slug)
 	if err != nil {
 		return nil, err
+	}
+	runtime := strings.ToLower(strings.TrimSpace(strArg(args, "runtime")))
+	if runtime == "workspace" {
+		release, err := a.commands.acquire(callCtx, repo.ID)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		prep, err := a.prepareExecutionWorkspace(callCtx, ctx, repo, strArg(args, "profile"), strArg(args, "image"), stringSliceArg(args, "workspace_paths"), stringSliceArg(args, "support_paths"))
+		if err != nil {
+			return nil, err
+		}
+		return a.runWorkspaceCommand(callCtx, ctx, prep, repoCommandInput{
+			Command: strArg(args, "command"), EnvJSON: strArg(args, "env_json"),
+			TimeoutSeconds: intArg(args, "timeout_seconds", 300), TailLines: intArg(args, "tail", 200),
+		})
+	}
+	if strArg(args, "image") != "" {
+		return nil, errors.New("image requires runtime=workspace")
+	}
+	if len(stringSliceArg(args, "workspace_paths"))+len(stringSliceArg(args, "support_paths")) > 0 {
+		return nil, errors.New("workspace_paths and support_paths require runtime=workspace")
+	}
+	if runtime != "" && runtime != "local" {
+		return nil, errors.New("runtime must be local or workspace")
 	}
 	pp, ok := a.storeFor(repo).(FileStoreLocalPath)
 	if !ok {
@@ -597,6 +682,74 @@ func (a *App) toolRunCommand(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	return res, nil
+}
+
+func (a *App) toolWorkspaceChanges(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
+		return nil, err
+	}
+	preview, _, _, _, err := a.workspaceChanges(ctx, repo)
+	return preview, err
+}
+
+func (a *App) toolWorkspaceApply(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
+		return nil, err
+	}
+	result, err := a.applyWorkspaceChanges(ctx, repo, strArg(args, "expected_workspace_digest"))
+	if err != nil {
+		return nil, err
+	}
+	ctx.Emit("repo.workspace.applied", map[string]any{"id": repo.ID, "slug": repo.Slug, "workspace_id": result.WorkspaceID, "changes": len(result.Changes)})
+	return result, nil
+}
+
+func (a *App) toolWorkspaceDestroy(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if !boolArg(args, "confirm") {
+		return nil, errors.New("confirm=true is required because workspace destruction permanently deletes its cached volumes")
+	}
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
+		return nil, err
+	}
+	release, err := a.commands.acquire(callCtx, repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	link, err := dbGetRepoWorkspace(ctx.AppDB(), repo.ProjectID, repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	if link == nil {
+		return map[string]any{"slug": repo.Slug, "destroyed": false, "workspace_id": ""}, nil
+	}
+	var destroyed map[string]any
+	if err := ctx.PlatformAPI().CallAppResult(workspacesAppName, "workspace_destroy", map[string]any{
+		"workspace_id": link.WorkspaceID,
+		"confirm":      true,
+	}, &destroyed); err != nil {
+		return nil, fmt.Errorf("destroy execution workspace: %w", err)
+	}
+	if err := dbDeleteRepoWorkspace(ctx.AppDB(), repo.ProjectID, repo.ID); err != nil {
+		return nil, err
+	}
+	ctx.Emit("repo.workspace.destroyed", map[string]any{"id": repo.ID, "slug": repo.Slug, "workspace_id": link.WorkspaceID})
+	return map[string]any{"slug": repo.Slug, "destroyed": true, "workspace_id": link.WorkspaceID}, nil
 }
 
 // ─── repos_import_github handler ──────────────────────────────────
@@ -694,6 +847,68 @@ func (a *App) toolIssuesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return map[string]any{"issue": nil, "found": false}, nil
 	}
 	return map[string]any{"issue": detail.Issue, "comments": detail.Comments, "links": detail.Links, "events": detail.Events, "found": true}, nil
+}
+
+func issueClaimant(callCtx context.Context, app *sdk.AppCtx) (string, string, error) {
+	caller := sdk.CallerFrom(callCtx)
+	if caller == nil {
+		return "", "", errors.New("issue claims require authenticated caller identity")
+	}
+	if caller.AgentID > 0 {
+		owner := fmt.Sprintf("agent:%d", caller.AgentID)
+		label := fmt.Sprintf("Agent %d", caller.AgentID)
+		if agent, err := app.GetAgent(caller.AgentID); err == nil && agent != nil && agent.Name != "" {
+			label = agent.Name
+		}
+		return owner, label, nil
+	}
+	if caller.SubjectType != "" && caller.SubjectID != "" {
+		owner := "user:" + caller.SubjectType + ":" + caller.SubjectID
+		label := caller.SubjectEmail
+		if label == "" {
+			label = caller.SubjectID
+		}
+		return owner, label, nil
+	}
+	return "", "", errors.New("issue claims are available to authenticated agents and users")
+}
+
+func (a *App) toolIssuesClaim(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	_, repo, issue, err := issueFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	owner, label, err := issueClaimant(callCtx, ctx)
+	if err != nil {
+		return nil, err
+	}
+	outcome, err := dbClaimIssue(ctx.AppDB(), issue.ID, owner, label)
+	if err != nil {
+		return nil, err
+	}
+	if outcome.Changed {
+		emitIssueEvent(ctx, "issue.claimed", repo, outcome.Issue)
+	}
+	return outcome, nil
+}
+
+func (a *App) toolIssuesRelease(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	_, repo, issue, err := issueFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	owner, label, err := issueClaimant(callCtx, ctx)
+	if err != nil {
+		return nil, err
+	}
+	outcome, err := dbReleaseIssueClaim(ctx.AppDB(), issue.ID, owner, label)
+	if err != nil {
+		return nil, err
+	}
+	if outcome.Changed {
+		emitIssueEvent(ctx, "issue.claim_released", repo, outcome.Issue)
+	}
+	return outcome, nil
 }
 
 func (a *App) toolIssuesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1081,10 +1296,11 @@ func (a *App) toolReposCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	in := CreateRepoInput{
-		Name:        strArg(args, "name"),
-		Slug:        strArg(args, "slug"),
-		Description: strArg(args, "description"),
-		Framework:   strArg(args, "framework"),
+		Name:           strArg(args, "name"),
+		Slug:           strArg(args, "slug"),
+		Description:    strArg(args, "description"),
+		Framework:      strArg(args, "framework"),
+		WorkspaceImage: strArg(args, "workspace_image"),
 	}
 	r, err := dbCreateRepo(ctx.AppDB(), pid, in)
 	if err != nil {
@@ -1149,14 +1365,7 @@ func (a *App) toolReposArchive(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	force := boolArg(args, "force")
 	if force {
-		repo, err := requireRepo(ctx, pid, slug)
-		if err != nil {
-			return nil, err
-		}
-		if err := a.storeFor(repo).DropRepo(slug); err != nil {
-			return nil, err
-		}
-		if err := dbHardDeleteRepo(ctx.AppDB(), pid, slug); err != nil {
+		if err := a.hardDeleteRepo(ctx.AppDB(), pid, slug); err != nil {
 			return nil, err
 		}
 		if ctx != nil {
@@ -1211,6 +1420,25 @@ func (a *App) toolReposSetDeployHints(ctx *sdk.AppCtx, args map[string]any) (any
 			"id": r.ID, "slug": r.Slug, "name": r.Name, "framework": r.Framework,
 		})
 	}
+	return map[string]any{"repository": r}, nil
+}
+
+func (a *App) toolReposSetWorkspaceImage(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	if slug == "" {
+		return nil, errors.New("slug required")
+	}
+	r, err := dbSetWorkspaceImage(ctx.AppDB(), pid, slug, strArg(args, "image"))
+	if err != nil {
+		return nil, err
+	}
+	ctx.Emit("repo.updated", map[string]any{
+		"id": r.ID, "slug": r.Slug, "name": r.Name, "framework": r.Framework,
+	})
 	return map[string]any{"repository": r}, nil
 }
 

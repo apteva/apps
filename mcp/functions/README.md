@@ -1,10 +1,16 @@
-# Functions (v1.7)
+# Functions 1.8.0
 
 Lambda-style serverless functions for Apteva. Each function is an
 immutable, built **version** served by a pool of **warm worker
 processes**: the runtime boots once, loads your handler, and then
 serves invocations over a socketpair — no per-request process spawn,
-no per-request cold start.
+cold starts only when no suitable worker is available.
+
+## Upgrading to 1.8.0
+
+This release improves execution and callback performance and fixes deployment, concurrency, isolation, streaming and panel issues. See [the audit and performance report](AUDIT_FIXES.md) for measurements and validation.
+
+Linux installations must provide delegated cgroup v2 and Landlock ABI 6 (Linux 6.12+). Configure storage quotas or bounded volumes for artifacts and temporary files. Unary/protocol frames are limited to 8 MiB; read APIs mask secrets and paginate results, and SSE clients must check the terminal event. Review the execution and read-API sections below before upgrading.
 
 ## The handler contract
 
@@ -101,9 +107,7 @@ Go handlers can stream arbitrary bytes with `ctx.StreamStart` and
 
 - **Deploy** (`functions_create` for v1, `functions_deploy` after) —
   creates an immutable version, runs `npm install` once if the
-  version ships a `package_json`, and on a successful build makes it
-  the active version. `functions_rollback` repoints the active
-  version at an older built one.
+  version ships a `package_json`, then validates a sandboxed boot before activation. A lockfile and resolved source snapshot are persisted. Rebuilds use `npm ci`. Rollbacks also validate before activation. A newer deployment or rollback supersedes an older build still in progress.
 - **Invoke** — routes the event to a warm worker for the active
   version (cold-starts one if the pool is empty). A new deploy drains
   the previous version's workers.
@@ -202,13 +206,12 @@ On Linux, dependency builds and warm workers pass through the binary's
 credential-free sandbox helper. It applies Landlock filesystem rules,
 `no_new_privs`, a deny-list seccomp filter, process/file limits, private
 HOME/tmp directories, and read-only artifacts. Cgroup v2 CPU, process and
-memory limits are applied when the service has a delegated writable cgroup
-root; Node and Go runtime memory limits remain active as a fallback.
+memory limits require a delegated writable cgroup v2 root by default. Required isolation needs scoped Landlock signals/abstract sockets (ABI 6, Linux 6.12+) and the native amd64/arm64 syscall ABI. The helper remains on one OS thread through exec. Builds fail closed when these requirements cannot be met.
 
 Useful operator settings:
 
 - `APTEVA_FUNCTIONS_CGROUP_ROOT` — delegated cgroup v2 directory.
-- `APTEVA_FUNCTIONS_REQUIRE_CGROUP=true` — fail closed without hard cgroups.
+- `APTEVA_FUNCTIONS_REQUIRE_CGROUP=true` (Linux default) — fail closed without hard cgroups. Set false only for trusted development inside an independently limited container.
 - `APTEVA_FUNCTIONS_REQUIRE_SANDBOX=false` — emergency Linux compatibility
   escape hatch; Linux otherwise fails closed if Landlock/seccomp cannot load.
 - `APTEVA_FUNCTIONS_MAX_WORKERS=32`, `APTEVA_FUNCTIONS_MAX_QUEUE=256`,
@@ -227,22 +230,53 @@ scrubbing, but does not provide Linux kernel isolation.
   protocol, so it's additive.
 - **third-party Go modules** — go functions are stdlib-only for now;
   a future version takes a user-supplied `go.mod`.
-- **Per-function `allowed_apps` allowlist** — `context.call` reaches
-  any installed app the platform identifies functions as authorised
-  to call (via the dynamic-call bypass in apteva-server). A
-  per-function allowlist that narrows which apps each individual
-  function may call is the next hardening step. The current grant is
-  app-wide; the proper per-call permission model is v2.
 
 ## Local development
 
 ```bash
 cd apps/mcp/functions
 go build .
-go test .                                # spawns real node workers
+GOWORK=off go test -count=1 -timeout=20m .  # real Node and Go workers
 APTEVA_PROJECT_ID=test ./functions       # binds to :8080
 ```
 
 Panel source is `ui/FunctionsPanel.tsx`; the worker harness is
 `harness/node.mjs` (embedded into the binary). Rebuild the panel with
 `bun run scripts/build-panels.ts` from `apps/`.
+
+## Execution limits, cancellation and access
+
+The request deadline covers admission, rebuild, worker boot and execution. Production app/integration callbacks use context-aware HTTP with a shared keep-alive transport. This app-local adapter uses the public SDK callback endpoints because SDK v0.73.0 still lacks context parameters. Custom legacy SDK clients keep a downstream slot until their actual operation returns. Cancellation cannot undo an upstream side effect already accepted; use atomic operations/idempotency for retries.
+
+`access` optionally narrows installation grants: `{"apps":["tables.rows_list"],"integrations":["pushover.*"]}`. An explicit empty array denies that class of call; `null` inherits installation grants. Numeric connection IDs require matching numeric policy rules. Updating environment, memory or access drains workers with stale configuration. Handler background work after completion is unsupported; invocation-scoped logging, calls and streams reject it.
+
+HTTP events are limited to 1 MiB; CRUD bodies to 2 MiB. Protocol frames and complete unary results are limited to 8 MiB, including their JSON envelope. Larger content should use storage references or streaming (64 KiB chunks). Serialization/size errors return explicit errors. Stored response previews are capped at 64 KiB, logs at 16 KiB and event previews at 4 KiB; the caller's unary response is not truncated. Native stdout/stderr is best-effort; use `context.log` / `ctx.Log` for invocation-scoped attribution. Environment secrets are redacted from stored logs and public URL tokens from stored request paths.
+
+SSE streams end with `apteva.complete` or `apteva.error` carrying `{status,error,invocation_id}`. Clients must treat a stream missing its terminal event as incomplete. Arbitrary byte streams use the status trailer and abort the HTTP stream on failure. Headers may already be 200 when a handler fails. The browser console displays chunks incrementally, caps its display, supports cancel, and recognizes the SSE terminal status. Jobs HTTP targets should use unary handlers unless their dispatcher validates the terminal event or trailer; HTTP 200 alone cannot prove streamed execution succeeded.
+
+Invocation rows are created before execution and finalized with actual elapsed time, version ID, configuration digest, truncation and build/queue/cold-start/execution timings. Interrupted builds/invocations become failed/error at restart. Legacy repo versions recover matching source snapshots from old artifacts when available; if both snapshot and artifacts are missing and the repository changed, invocation refuses the drift and requires an explicit redeploy.
+
+Additional operator settings (defaults):
+
+| Setting | Meaning |
+|---|---|
+| `APTEVA_FUNCTIONS_TOTAL_MEMORY_MB=4096` | Memory reservation budget for all live workers, including idle workers |
+| `APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB=128` | In-flight protocol payload reservations; JSON decoding adds overhead, so also limit sidecar container memory |
+| `APTEVA_FUNCTIONS_MAX_DOWNSTREAM_TOTAL=64` | Process-wide downstream operations, retained until actual completion |
+| `APTEVA_FUNCTIONS_MAX_BUILD_QUEUE=16` | Bounded build admission |
+| `APTEVA_FUNCTIONS_TEMP_MB=128` | Per-worker temporary-file budget, checked every 250 ms |
+| `APTEVA_FUNCTIONS_BUILD_DISK_MB=1024` | Temporary build budget, checked every 250 ms |
+| `APTEVA_FUNCTIONS_ARTIFACT_MB=512` | Maximum published artifact size |
+| `APTEVA_FUNCTIONS_TOTAL_ARTIFACT_MB=4096` | Artifact admission budget |
+| `APTEVA_FUNCTIONS_KEEP_VERSIONS=20` | Retain at least the newest 20 versions; prune older inactive versions after seven days |
+| `APTEVA_FUNCTIONS_STDLIB_CACHE` | Optional trusted standard-library seed directory (default under build base) |
+
+Polling disk usage is not an instantaneous hard quota. Configure filesystem/project quotas or bounded volumes for both `APTEVA_DATA_DIR` and the sidecar temporary directory when running untrusted writers. Cgroups do not enforce disk quotas. `/capabilities` exposes configured isolation requirements and current process/memory/downstream counters; successful worker validation confirms kernel setup for that worker.
+
+Go builds receive independent copies of a trusted standard-library cache compiled with matching flags. Untrusted function builds never populate or modify that shared seed. Build-cache scratch files are removed before publishing immutable artifacts. Harness/build fingerprints invalidate stale artifacts after upgrades.
+
+## Read APIs and performance verification
+
+Function lists omit source, environment values and URL tokens. Function detail masks secrets unless `include_secrets=true` (MCP) or `include_secrets=1` (HTTP) is explicitly requested. Function/version/invocation lists return `next_cursor`; pass it as `cursor` for the next page. Invocation lists are summaries; `/invocations/<id>` and `functions_logs` return stored previews. The panel fetches independent details concurrently and rejects stale selection responses.
+
+Run the opt-in workload with `GOWORK=off GOMAXPROCS=4 FUNCTIONS_PERFORMANCE=1 go test -run '^TestPerformance$' -count=1 -v`. It measures real local HTTP invocation and app callbacks with fixed 2 ms downstream latency, first-use/deploy time, p50/p95, allocation bytes and failed requests. `BenchmarkEventRead` isolates HTTP event parsing. Compare identical workloads with release `functions/v1.7.0`; retain error counts and interleave runs on a shared host. Faster first invocation partly reflects boot validation performed during deployment, not elimination of boot cost.

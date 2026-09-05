@@ -34,7 +34,7 @@ func cloneTable(t *Table) *Table {
 		return nil
 	}
 	cp := *t
-	cp.Columns = append([]Column(nil), t.Columns...)
+	cp.Columns = append([]Column{}, t.Columns...)
 	return &cp
 }
 
@@ -82,7 +82,7 @@ func (a *App) loadTableSchema(ctx *sdk.AppCtx, projectID, name string) (*Table, 
 		return table, nil
 	}
 
-	qctx, cancel := context.WithTimeout(context.Background(), time.Duration(maxQueryMs(ctx))*time.Millisecond)
+	qctx, cancel := context.WithTimeout(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond)
 	defer cancel()
 	rows, err := ctx.AppReadDB().QueryContext(qctx, `SELECT
 		t.id, t.name, t.scope, t.physical_name, t.created_at, t.row_count,
@@ -117,7 +117,10 @@ func (a *App) loadTableSchema(ctx *sdk.AppCtx, projectID, name string) (*Table, 
 		if columnName.Valid {
 			column := Column{Name: columnName.String, Type: columnType.String, Nullable: nullable.Int64 != 0}
 			if defaultRaw.Valid && defaultRaw.String != "" {
-				column.Default, _ = jsonParse(defaultRaw.String)
+				column.Default, err = jsonParse(defaultRaw.String)
+				if err != nil {
+					return nil, err
+				}
 			}
 			table.Columns = append(table.Columns, column)
 		}
@@ -126,7 +129,10 @@ func (a *App) loadTableSchema(ctx *sdk.AppCtx, projectID, name string) (*Table, 
 		return nil, queryStageErr("metadata", name, err)
 	}
 	if table == nil {
-		return nil, errf("table %q not found", name)
+		return nil, notFound("table %q not found", name)
+	}
+	if err := upgradeTable(ctx, table); err != nil {
+		return nil, err
 	}
 	a.cache.put(generation, key, table)
 	return cloneTable(table), nil
@@ -147,7 +153,7 @@ func (a *App) loadTableWithCount(ctx *sdk.AppCtx, projectID, name string) (*Tabl
 }
 
 func currentRowCount(ctx *sdk.AppCtx, table *Table) (int64, error) {
-	qctx, cancel := context.WithTimeout(context.Background(), time.Duration(maxQueryMs(ctx))*time.Millisecond)
+	qctx, cancel := context.WithTimeout(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond)
 	defer cancel()
 	var cached sql.NullInt64
 	if err := ctx.AppReadDB().QueryRowContext(qctx, `SELECT row_count FROM tables_meta WHERE id = ?`, table.ID).Scan(&cached); err != nil {
@@ -156,13 +162,16 @@ func currentRowCount(ctx *sdk.AppCtx, table *Table) (int64, error) {
 	if cached.Valid {
 		return cached.Int64, nil
 	}
-	// Legacy rows from before the row_count migration are repaired once on
-	// the serialized writer. Normal operations never enter this path.
-	var count int64
-	if err := ctx.AppDB().QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", quote(table.PhysicalName))).Scan(&count); err != nil {
+	tx, err := beginWrite(ctx)
+	if err != nil {
 		return 0, err
 	}
-	if _, err := ctx.AppDB().Exec(`UPDATE tables_meta SET row_count = ? WHERE id = ? AND row_count IS NULL`, count, table.ID); err != nil {
+	defer tx.Rollback()
+	count, err := initializeCountTx(tx, table)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return count, nil
@@ -194,7 +203,7 @@ type readQueryConn struct {
 
 func acquireReadConn(ctx *sdk.AppCtx, table string) (*readQueryConn, error) {
 	started := time.Now()
-	queueCtx, cancel := context.WithTimeout(context.Background(), time.Duration(maxReadQueueMs(ctx))*time.Millisecond)
+	queueCtx, cancel := context.WithTimeout(requestContext(ctx), time.Duration(maxReadQueueMs(ctx))*time.Millisecond)
 	defer cancel()
 	conn, err := ctx.AppReadDB().Conn(queueCtx)
 	wait := time.Since(started)

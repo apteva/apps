@@ -74,6 +74,37 @@ Template composition overrides may replace `body.response` for one template;
 the resolved contract is frozen onto every dispatched gig. Legacy
 `body.response_mode=optional|required` snapshots remain readable.
 
+Templates may also define generic `response_rules` by instruction kind. A rule
+is applied after instruction and composition overrides, so it enforces the same
+worker response contract on every matching instruction in the dispatched gig:
+
+```json
+{
+  "response_rules": [{
+    "instruction_kind": "audio",
+    "response": {
+      "note": {"enabled": true, "required": false},
+      "files": {
+        "enabled": true,
+        "required": true,
+        "accept": ["video/*"],
+        "min_items": 1,
+        "max_items": 1,
+        "max_size_mb": 2048
+      }
+    }
+  }]
+}
+```
+
+This is deliberately generic: templates can require any supported note/file
+response for any non-input instruction kind. `gigs_create_from_template`
+applies rules to fixed composition rows. For a varying composition, pass
+`template_id` or `template_slug` to `gigs_create_from_instructions`; the gig
+then inherits the active template's response rules, variable and schedule
+defaults, and commercial rate context while keeping the supplied instruction
+order. Rules are versioned with the template and frozen into the gig snapshot.
+
 ### Mixed text and images
 
 Use a `content` instruction when one numbered worker card should mix text and

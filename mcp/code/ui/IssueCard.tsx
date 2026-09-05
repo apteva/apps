@@ -19,6 +19,9 @@ interface Issue {
   state_reason?: string;
   priority: string;
   assignee?: string;
+  claim_owner?: string;
+  claim_label?: string;
+  claimed_at?: string;
   comments_count?: number;
   updated_at?: string;
 }
@@ -42,6 +45,8 @@ const previewData = {
     state: "open",
     priority: "high",
     assignee: "agent-15",
+    claim_owner: "agent:15",
+    claim_label: "Agent 15",
     comments_count: 3,
   },
 };
@@ -96,6 +101,7 @@ export default function IssueCard({ repo, issue_number, projectId, installId, pr
         <DataList
           items={[
             { label: "Assignee", value: issue.assignee || "unassigned" },
+            { label: "Claim", value: issue.claim_label || issue.claim_owner || "available" },
             { label: "Comments", value: (issue.comments_count || 0).toLocaleString() },
           ]}
         />

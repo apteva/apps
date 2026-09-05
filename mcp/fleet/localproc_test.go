@@ -3,12 +3,13 @@ package main
 import (
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
 func TestTenantScopePattern_SanitizesSlug(t *testing.T) {
 	got := tenantScopePattern("client.alpha")
-	want := "fleet-tenant-client_alpha*.scope"
+	want := tenantScopeBase("client.alpha") + "*.scope"
 	if got != want {
 		t.Fatalf("tenantScopePattern = %q, want %q", got, want)
 	}
@@ -24,6 +25,7 @@ fleet-tenant-flex.scope loaded active running tenant flex legacy
 fleet-tenant-flexylead-456.scope loaded active running tenant flexylead
 EOF
 `
+	script = strings.ReplaceAll(script, "fleet-tenant-flex", tenantScopeBase("flex"))
 	if err := os.WriteFile(systemctl, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +33,7 @@ EOF
 	if err != nil {
 		t.Fatalf("listTenantScopeUnits: %v", err)
 	}
-	want := []string{"fleet-tenant-flex-123.scope", "fleet-tenant-flex.scope"}
+	want := []string{tenantScopeBase("flex") + "-123.scope", tenantScopeBase("flex") + ".scope"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("units = %v, want %v", got, want)
 	}

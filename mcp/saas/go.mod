@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/saas
 go 1.26.0
 
 require (
-	github.com/apteva/app-sdk v0.66.0
+	github.com/apteva/app-sdk v0.73.0
 	modernc.org/sqlite v1.50.0
 )
 

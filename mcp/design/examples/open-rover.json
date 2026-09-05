@@ -1,0 +1,151 @@
+{
+  "schema": "apteva-design/v1",
+  "units": "mm",
+  "open_hardware": {
+    "project_name": "Apteva Open Rover",
+    "version": "0.1.0",
+    "license": "CERN-OHL-S-2.0",
+    "repository": "https://github.com/apteva/apps",
+    "homepage": "https://github.com/apteva/apps/tree/main/mcp/design/examples",
+    "authors": ["Apteva contributors"],
+    "readme": "# Apteva Open Rover\n\nA fully reproducible, four-wheel skid-steer robot chassis. Structural parts, wheel hubs and compliant tires are designed for desktop 3D printing. Electronics enter through versioned PCB Studio mechanical envelopes.",
+    "assembly_guide": "# Assembly\n\n1. Print the PETG structural parts and TPU tires using the included profiles.\n2. Press each TPU tire over its PETG hub.\n3. Install four gearmotors in the chassis motor interfaces.\n4. Attach each hub to a motor shaft and verify free rotation.\n5. Fasten the sensor fascia and top deck with M3 heat-set inserts.\n6. Install the electronics tray and verify cable and wheel clearances before powering the robot."
+  },
+  "parameters": {
+    "chassis_length": {"type": "length", "default": 240, "min": 180, "max": 320, "description": "Overall structural chassis length"},
+    "chassis_width": {"type": "length", "default": 150, "min": 120, "max": 220, "description": "Structural chassis width between wheel sets"},
+    "body_height": {"type": "length", "default": 50, "min": 35, "max": 80},
+    "wall": {"type": "length", "default": 4, "min": 2.4, "max": 8},
+    "deck_thickness": {"type": "length", "default": 6, "min": 3, "max": 10},
+    "wheel_radius": {"type": "length", "default": 34, "min": 25, "max": 50},
+    "wheel_width": {"type": "length", "default": 16, "min": 10, "max": 28},
+    "hub_radius": {"type": "length", "default": 21, "min": 15, "max": 35},
+    "axle_radius": {"type": "length", "default": 3.1, "min": 2, "max": 6},
+    "ground_clearance": {"type": "length", "default": 18, "min": 10, "max": 35},
+    "wheelbase": {"type": "length", "default": 130, "min": 90, "max": 190},
+    "grid_pitch": {"type": "length", "default": 20, "min": 15, "max": 30},
+    "grid_hole": {"type": "length", "default": 4.2, "min": 3.2, "max": 6}
+  },
+  "materials": [
+    {"id": "petg_black", "name": "Black PETG", "kind": "thermoplastic", "density_g_cm3": 1.27, "color": "#171a1f", "recyclable": true},
+    {"id": "petg_orange", "name": "Safety orange PETG", "kind": "thermoplastic", "density_g_cm3": 1.27, "color": "#f97316", "recyclable": true},
+    {"id": "tpu_black", "name": "Black TPU 95A", "kind": "elastomer", "density_g_cm3": 1.21, "color": "#252a31", "recyclable": false}
+  ],
+  "print_profiles": [
+    {"id": "petg_structural", "name": "PETG structural 0.6", "process": "fdm", "material_id": "petg_black", "nozzle_mm": 0.6, "layer_height_mm": 0.28, "walls": 5, "infill_percent": 30, "supports": "build-plate-only", "max_overhang_deg": 55, "bed_size_mm": [256, 256, 256]},
+    {"id": "petg_detail", "name": "PETG detail 0.4", "process": "fdm", "material_id": "petg_orange", "nozzle_mm": 0.4, "layer_height_mm": 0.2, "walls": 4, "infill_percent": 25, "supports": "none", "max_overhang_deg": 55, "bed_size_mm": [256, 256, 256]},
+    {"id": "tpu_wheel", "name": "TPU wheel 0.6", "process": "fdm", "material_id": "tpu_black", "nozzle_mm": 0.6, "layer_height_mm": 0.28, "walls": 4, "infill_percent": 18, "supports": "none", "max_overhang_deg": 50, "bed_size_mm": [256, 256, 256]}
+  ],
+  "operations": [
+    {"id": "chassis_outer", "type": "box", "size": ["chassis_length", "chassis_width", "body_height"]},
+    {"id": "chassis_rounded", "type": "fillet", "input": "chassis_outer", "radius": 5},
+    {"id": "chassis_cavity", "type": "box", "size": ["chassis_length-2*wall", "chassis_width-2*wall", "body_height-wall+1"], "origin": ["wall", "wall", "wall"]},
+    {"id": "chassis_tub", "type": "cut", "inputs": ["chassis_rounded", "chassis_cavity"]},
+
+    {"id": "deck_blank", "type": "box", "size": ["chassis_length-10", "chassis_width-10", "deck_thickness"]},
+    {"id": "deck_rounded", "type": "fillet", "input": "deck_blank", "radius": 4},
+    {"id": "grid_hole_seed", "type": "cylinder", "radius": "grid_hole/2", "height": "deck_thickness+2", "origin": [15, 15, -1]},
+    {"id": "grid_hole_row", "type": "linear_pattern", "input": "grid_hole_seed", "count": 11, "step": ["grid_pitch", 0, 0]},
+    {"id": "grid_holes", "type": "linear_pattern", "input": "grid_hole_row", "count": 6, "step": [0, "grid_pitch", 0]},
+    {"id": "top_deck", "type": "cut", "inputs": ["deck_rounded", "grid_holes"]},
+
+    {"id": "tire_outer", "type": "cylinder", "radius": "wheel_radius", "height": "wheel_width", "origin": [0, "-wheel_width/2", 0], "direction": [0, 1, 0]},
+    {"id": "tire_inner", "type": "cylinder", "radius": "hub_radius+0.6", "height": "wheel_width+2", "origin": [0, "-wheel_width/2-1", 0], "direction": [0, 1, 0]},
+    {"id": "tire_ring", "type": "cut", "inputs": ["tire_outer", "tire_inner"]},
+    {"id": "tread_seed", "type": "box", "size": [10, "wheel_width+1", 4], "origin": [-5, "-wheel_width/2-0.5", "wheel_radius-2"]},
+    {"id": "tread_pattern", "type": "circular_pattern", "input": "tread_seed", "count": 16, "center": [0, 0, 0], "direction": [0, 1, 0], "fuse": false},
+    {"id": "printable_tire", "type": "fuse", "inputs": ["tire_ring", "tread_pattern"]},
+
+    {"id": "hub_outer", "type": "cylinder", "radius": "hub_radius", "height": "wheel_width-2", "origin": [0, "-wheel_width/2+1", 0], "direction": [0, 1, 0]},
+    {"id": "hub_bore", "type": "cylinder", "radius": "axle_radius", "height": "wheel_width+2", "origin": [0, "-wheel_width/2-1", 0], "direction": [0, 1, 0]},
+    {"id": "hub_spoke_seed", "type": "box", "size": ["hub_radius*1.5", "wheel_width-2", 4], "origin": [0, "-wheel_width/2+1", -2]},
+    {"id": "hub_spokes", "type": "circular_pattern", "input": "hub_spoke_seed", "count": 6, "center": [0, 0, 0], "direction": [0, 1, 0], "fuse": false},
+    {"id": "hub_reinforced", "type": "fuse", "inputs": ["hub_outer", "hub_spokes"]},
+    {"id": "wheel_hub", "type": "cut", "inputs": ["hub_reinforced", "hub_bore"]},
+
+    {"id": "bumper_blank", "type": "box", "size": [12, "chassis_width+10", 20]},
+    {"id": "front_bumper", "type": "fillet", "input": "bumper_blank", "radius": 3},
+    {"id": "bezel_blank", "type": "box", "size": [4, 94, 28]},
+    {"id": "bezel_hole_1", "type": "cylinder", "radius": 10, "height": 6, "origin": [-1, 20, 14], "direction": [1, 0, 0]},
+    {"id": "bezel_hole_2", "type": "cylinder", "radius": 8, "height": 6, "origin": [-1, 47, 14], "direction": [1, 0, 0]},
+    {"id": "bezel_hole_3", "type": "cylinder", "radius": 10, "height": 6, "origin": [-1, 74, 14], "direction": [1, 0, 0]},
+    {"id": "sensor_bezel", "type": "cut", "inputs": ["bezel_blank", "bezel_hole_1", "bezel_hole_2", "bezel_hole_3"]},
+    {"id": "sensor_plug_1", "type": "cylinder", "radius": 8.5, "height": 3, "origin": [0, 20, 14], "direction": [1, 0, 0]},
+    {"id": "sensor_plug_2", "type": "cylinder", "radius": 6.5, "height": 3, "origin": [0, 47, 14], "direction": [1, 0, 0]},
+    {"id": "sensor_plug_3", "type": "cylinder", "radius": 8.5, "height": 3, "origin": [0, 74, 14], "direction": [1, 0, 0]},
+    {"id": "sensor_blanks", "type": "compound", "inputs": ["sensor_plug_1", "sensor_plug_2", "sensor_plug_3"]},
+
+    {"id": "fender_blank", "type": "box", "size": [52, 12, 12]},
+    {"id": "wheel_fender", "type": "fillet", "input": "fender_blank", "radius": 3},
+    {"id": "rail_blank", "type": "box", "size": [100, 10, 8]},
+    {"id": "rail_hole", "type": "cylinder", "radius": 2.1, "height": 10, "origin": [10, 5, -1]},
+    {"id": "rail_holes", "type": "linear_pattern", "input": "rail_hole", "count": 5, "step": [20, 0, 0]},
+    {"id": "payload_rail", "type": "cut", "inputs": ["rail_blank", "rail_holes"]}
+  ],
+  "output": "chassis_tub",
+  "parts": [
+    {"id": "chassis", "name": "Structural chassis tub", "description": "Printed lower chassis with protected electronics volume.", "output": "chassis_tub", "material_id": "petg_black", "color": "#111419", "manufacturing": {"classification": "printed", "process": "fdm", "print_profile_id": "petg_structural", "orientation": [0, 0, 0], "min_wall_mm": 4, "min_feature_mm": 1.2, "max_overhang_deg": 45}},
+    {"id": "deck", "name": "Modular top deck", "output": "top_deck", "material_id": "petg_black", "manufacturing": {"classification": "printed", "process": "fdm", "print_profile_id": "petg_structural", "orientation": [0, 0, 0], "min_wall_mm": 3, "min_feature_mm": 1.2, "max_overhang_deg": 0}},
+    {"id": "tire", "name": "Compliant printed tire", "description": "TPU tire with integral patterned tread.", "output": "printable_tire", "material_id": "tpu_black", "manufacturing": {"classification": "printed", "process": "fdm", "print_profile_id": "tpu_wheel", "orientation": [90, 0, 0], "min_wall_mm": 2.4, "min_feature_mm": 1.2, "max_overhang_deg": 45}},
+    {"id": "hub", "name": "Printed motor hub", "output": "wheel_hub", "material_id": "petg_orange", "manufacturing": {"classification": "printed", "process": "fdm", "print_profile_id": "petg_detail", "orientation": [90, 0, 0], "min_wall_mm": 2.4, "min_feature_mm": 0.8, "max_overhang_deg": 45}},
+    {"id": "bumper", "name": "Front impact bumper", "output": "front_bumper", "material_id": "petg_black", "manufacturing": {"classification": "printed", "process": "fdm", "print_profile_id": "petg_structural", "orientation": [0, 0, 0], "min_wall_mm": 4, "min_feature_mm": 1.2, "max_overhang_deg": 45}},
+    {"id": "bezel", "name": "Sensor fascia bezel", "output": "sensor_bezel", "material_id": "petg_orange", "manufacturing": {"classification": "printed", "process": "fdm", "print_profile_id": "petg_detail", "orientation": [0, 90, 0], "min_wall_mm": 1.6, "min_feature_mm": 0.8, "max_overhang_deg": 45}},
+    {"id": "sensor_blank", "name": "Open-source sensor placeholder set", "output": "sensor_blanks", "material_id": "petg_black", "manufacturing": {"classification": "reference", "process": "none"}},
+    {"id": "fender", "name": "Wheel fender", "output": "wheel_fender", "material_id": "petg_black", "manufacturing": {"classification": "printed", "process": "fdm", "print_profile_id": "petg_structural", "orientation": [0, 0, 0], "min_wall_mm": 2.4, "min_feature_mm": 1.2, "max_overhang_deg": 45}},
+    {"id": "rail", "name": "Payload mounting rail", "output": "payload_rail", "material_id": "petg_black", "manufacturing": {"classification": "printed", "process": "fdm", "print_profile_id": "petg_structural", "orientation": [0, 0, 0], "min_wall_mm": 2.4, "min_feature_mm": 1.2, "max_overhang_deg": 0}}
+  ],
+  "assembly": {
+    "name": "Apteva Open Rover base platform",
+    "instances": [
+      {"id": "chassis_main", "part_id": "chassis", "transform": {"translate": [0, 0, "ground_clearance"]}},
+      {"id": "top_deck", "part_id": "deck", "transform": {"translate": [5, 5, "ground_clearance+body_height+3"]}},
+      {"id": "front_bumper", "part_id": "bumper", "transform": {"translate": [-5, -5, "ground_clearance+10"]}},
+      {"id": "sensor_bezel", "part_id": "bezel", "transform": {"translate": [-8, 28, "ground_clearance+15"]}},
+      {"id": "sensor_blanks", "part_id": "sensor_blank", "transform": {"translate": [-9, 28, "ground_clearance+15"]}},
+
+      {"id": "tire_fl", "part_id": "tire", "transform": {"translate": ["(chassis_length-wheelbase)/2", "-wheel_width/2-2", "wheel_radius"]}},
+      {"id": "tire_fr", "part_id": "tire", "transform": {"translate": ["(chassis_length-wheelbase)/2", "chassis_width+wheel_width/2+2", "wheel_radius"]}},
+      {"id": "tire_rl", "part_id": "tire", "transform": {"translate": ["(chassis_length+wheelbase)/2", "-wheel_width/2-2", "wheel_radius"]}},
+      {"id": "tire_rr", "part_id": "tire", "transform": {"translate": ["(chassis_length+wheelbase)/2", "chassis_width+wheel_width/2+2", "wheel_radius"]}},
+      {"id": "hub_fl", "part_id": "hub", "transform": {"translate": ["(chassis_length-wheelbase)/2", "-wheel_width/2-2", "wheel_radius"]}},
+      {"id": "hub_fr", "part_id": "hub", "transform": {"translate": ["(chassis_length-wheelbase)/2", "chassis_width+wheel_width/2+2", "wheel_radius"]}},
+      {"id": "hub_rl", "part_id": "hub", "transform": {"translate": ["(chassis_length+wheelbase)/2", "-wheel_width/2-2", "wheel_radius"]}},
+      {"id": "hub_rr", "part_id": "hub", "transform": {"translate": ["(chassis_length+wheelbase)/2", "chassis_width+wheel_width/2+2", "wheel_radius"]}},
+
+      {"id": "fender_fl", "part_id": "fender", "transform": {"translate": ["(chassis_length-wheelbase)/2-26", -6, "wheel_radius+25"]}},
+      {"id": "fender_fr", "part_id": "fender", "transform": {"translate": ["(chassis_length-wheelbase)/2-26", "chassis_width-6", "wheel_radius+25"]}},
+      {"id": "fender_rl", "part_id": "fender", "transform": {"translate": ["(chassis_length+wheelbase)/2-26", -6, "wheel_radius+25"]}},
+      {"id": "fender_rr", "part_id": "fender", "transform": {"translate": ["(chassis_length+wheelbase)/2-26", "chassis_width-6", "wheel_radius+25"]}},
+      {"id": "rail_left", "part_id": "rail", "transform": {"translate": [70, 24, "ground_clearance+body_height+deck_thickness+4"]}},
+      {"id": "rail_right", "part_id": "rail", "transform": {"translate": [70, "chassis_width-34", "ground_clearance+body_height+deck_thickness+4"]}}
+    ],
+    "interfaces": [
+      {"id": "motor_fl", "kind": "motor_shaft", "part_id": "chassis", "position": ["(chassis_length-wheelbase)/2", 0, "wheel_radius"], "direction": [0, -1, 0], "parameters": {"shaft": "6mm-D", "bearing": "625-2RS", "fit_clearance_mm": 0.2}},
+      {"id": "motor_fr", "kind": "motor_shaft", "part_id": "chassis", "position": ["(chassis_length-wheelbase)/2", "chassis_width", "wheel_radius"], "direction": [0, 1, 0], "parameters": {"shaft": "6mm-D", "bearing": "625-2RS", "fit_clearance_mm": 0.2}},
+      {"id": "motor_rl", "kind": "motor_shaft", "part_id": "chassis", "position": ["(chassis_length+wheelbase)/2", 0, "wheel_radius"], "direction": [0, -1, 0], "parameters": {"shaft": "6mm-D", "bearing": "625-2RS", "fit_clearance_mm": 0.2}},
+      {"id": "motor_rr", "kind": "motor_shaft", "part_id": "chassis", "position": ["(chassis_length+wheelbase)/2", "chassis_width", "wheel_radius"], "direction": [0, 1, 0], "parameters": {"shaft": "6mm-D", "bearing": "625-2RS", "fit_clearance_mm": 0.2}},
+      {"id": "payload_grid", "kind": "mounting_grid", "part_id": "deck", "position": [15, 15, "deck_thickness"], "direction": [0, 0, 1], "parameters": {"pitch_mm": 20, "fastener": "M4", "datum": "deck-front-left"}},
+      {"id": "electronics_tray", "kind": "pcb_envelope", "part_id": "chassis", "position": [30, 25, "wall"], "direction": [0, 0, 1], "parameters": {"max_size_mm": [180, 100, 35], "source_role": "pcb_source"}}
+    ],
+    "joints": [
+      {"id": "drive_fl", "type": "revolute", "parent_instance": "chassis_main", "child_instance": "hub_fl", "origin": ["(chassis_length-wheelbase)/2", 0, "wheel_radius"], "axis": [0, 1, 0], "limits": [-360000, 360000]},
+      {"id": "drive_fr", "type": "revolute", "parent_instance": "chassis_main", "child_instance": "hub_fr", "origin": ["(chassis_length-wheelbase)/2", "chassis_width", "wheel_radius"], "axis": [0, 1, 0], "limits": [-360000, 360000]},
+      {"id": "drive_rl", "type": "revolute", "parent_instance": "chassis_main", "child_instance": "hub_rl", "origin": ["(chassis_length+wheelbase)/2", 0, "wheel_radius"], "axis": [0, 1, 0], "limits": [-360000, 360000]},
+      {"id": "drive_rr", "type": "revolute", "parent_instance": "chassis_main", "child_instance": "hub_rr", "origin": ["(chassis_length+wheelbase)/2", "chassis_width", "wheel_radius"], "axis": [0, 1, 0], "limits": [-360000, 360000]}
+    ]
+  },
+  "bom": [
+    {"id": "gearmotor", "name": "12V metal gearmotor with encoder", "quantity": 4, "classification": "purchased", "manufacturer": "generic", "part_number": "37D-12V-encoder", "notes": "Open interface: 6 mm D-shaft and published mounting pattern."},
+    {"id": "bearing_625", "name": "625-2RS bearing", "quantity": 8, "classification": "purchased", "part_number": "625-2RS"},
+    {"id": "insert_m3", "name": "M3 heat-set insert", "quantity": 24, "classification": "purchased", "part_number": "M3x5x4"},
+    {"id": "screw_m3", "name": "M3 socket-head screw assortment", "quantity": 24, "classification": "purchased", "part_number": "ISO 4762 M3"}
+  ],
+  "checks": [
+    {"type": "open_hardware_complete"},
+    {"type": "manufacturing_rules"},
+    {"type": "mass", "max": 2200},
+    {"type": "ground_clearance", "part": "chassis_main", "ground_z": 0, "min": 17},
+    {"type": "part_clearance", "a": "tire_fl", "b": "chassis_main", "min": 0.8},
+    {"type": "bounding_box", "max": [320, 230, 100]}
+  ]
+}

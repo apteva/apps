@@ -329,14 +329,14 @@ func (s store) getRun(id string) (*Run, error) {
 	return run, err
 }
 
-const runSelect = `SELECT id,experiment_id,case_id,case_revision,target_index,repetition,simulation_attempt,status,stage,case_snapshot_json,target_snapshot_json,environment_run_id,execution_json,voice_call_json,assertions_json,judge_json,correctness_score,judge_score,overall_score,started_at,finished_at,error,created_at FROM eval_runs`
+const runSelect = `SELECT id,experiment_id,case_id,case_revision,target_index,repetition,simulation_attempt,status,stage,case_snapshot_json,target_snapshot_json,environment_run_id,execution_json,collaborator_executions_json,voice_call_json,assertions_json,judge_json,correctness_score,judge_score,overall_score,started_at,finished_at,error,created_at FROM eval_runs`
 
 func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	var run Run
 	var caseRaw, targetRaw, assertionsRaw, created string
-	var executionRaw, voiceCallRaw, judgeRaw, started, finished sql.NullString
+	var executionRaw, collaboratorsRaw, voiceCallRaw, judgeRaw, started, finished sql.NullString
 	var correctness, judgeScore, overall sql.NullFloat64
-	err := row.Scan(&run.ID, &run.ExperimentID, &run.CaseID, &run.CaseRevision, &run.TargetIndex, &run.Repetition, &run.SimulationAttempt, &run.Status, &run.Stage, &caseRaw, &targetRaw, &run.EnvironmentRunID, &executionRaw, &voiceCallRaw, &assertionsRaw, &judgeRaw, &correctness, &judgeScore, &overall, &started, &finished, &run.Error, &created)
+	err := row.Scan(&run.ID, &run.ExperimentID, &run.CaseID, &run.CaseRevision, &run.TargetIndex, &run.Repetition, &run.SimulationAttempt, &run.Status, &run.Stage, &caseRaw, &targetRaw, &run.EnvironmentRunID, &executionRaw, &collaboratorsRaw, &voiceCallRaw, &assertionsRaw, &judgeRaw, &correctness, &judgeScore, &overall, &started, &finished, &run.Error, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -353,6 +353,9 @@ func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	if executionRaw.Valid {
 		run.Execution = &sdk.RuntimeAgentExecution{}
 		_ = json.Unmarshal([]byte(executionRaw.String), run.Execution)
+	}
+	if collaboratorsRaw.Valid {
+		_ = json.Unmarshal([]byte(collaboratorsRaw.String), &run.Collaborators)
 	}
 	if voiceCallRaw.Valid {
 		run.VoiceCall = &EnvironmentVoiceCall{}
@@ -420,9 +423,12 @@ func (s store) updateRunProgress(id, stage, environmentRunID string) error {
 }
 
 func (s store) finishRun(run *Run) error {
-	var executionJSON, voiceCallJSON, judgeJSON any
+	var executionJSON, collaboratorsJSON, voiceCallJSON, judgeJSON any
 	if run.Execution != nil {
 		executionJSON = encodeJSON(run.Execution)
+	}
+	if len(run.Collaborators) > 0 {
+		collaboratorsJSON = encodeJSON(run.Collaborators)
 	}
 	if run.Judge != nil {
 		judgeJSON = encodeJSON(run.Judge)
@@ -430,7 +436,7 @@ func (s store) finishRun(run *Run) error {
 	if run.VoiceCall != nil {
 		voiceCallJSON = encodeJSON(run.VoiceCall)
 	}
-	_, err := s.db.Exec(`UPDATE eval_runs SET status=?,stage=?,environment_run_id=?,execution_json=?,voice_call_json=?,assertions_json=?,judge_json=?,correctness_score=?,judge_score=?,overall_score=?,finished_at=?,error=? WHERE id=?`, run.Status, run.Stage, run.EnvironmentRunID, executionJSON, voiceCallJSON, encodeJSON(run.Assertions), judgeJSON, nullableFloat(run.CorrectnessScore), nullableFloat(run.JudgeScore), nullableFloat(run.OverallScore), nullableTime(run.FinishedAt), run.Error, run.ID)
+	_, err := s.db.Exec(`UPDATE eval_runs SET status=?,stage=?,environment_run_id=?,execution_json=?,collaborator_executions_json=?,voice_call_json=?,assertions_json=?,judge_json=?,correctness_score=?,judge_score=?,overall_score=?,finished_at=?,error=? WHERE id=?`, run.Status, run.Stage, run.EnvironmentRunID, executionJSON, collaboratorsJSON, voiceCallJSON, encodeJSON(run.Assertions), judgeJSON, nullableFloat(run.CorrectnessScore), nullableFloat(run.JudgeScore), nullableFloat(run.OverallScore), nullableTime(run.FinishedAt), run.Error, run.ID)
 	if err != nil {
 		return err
 	}
@@ -448,6 +454,7 @@ func (s store) retryInvalidSimulation(run *Run) (bool, error) {
 			simulation_attempt=simulation_attempt+1,
 			environment_run_id='',
 			execution_json=NULL,
+			collaborator_executions_json=NULL,
 			voice_call_json=NULL,
 			assertions_json='[]',
 			judge_json=NULL,
@@ -499,6 +506,7 @@ func (s store) retryRun(source *Run) (*Run, error) {
 	run.Stage = ""
 	run.Repetition++
 	run.EnvironmentRunID, run.Execution, run.Judge, run.Error = "", nil, nil, ""
+	run.Collaborators = nil
 	run.Assertions, run.CorrectnessScore, run.JudgeScore, run.OverallScore = nil, nil, nil, nil
 	run.StartedAt, run.FinishedAt = nil, nil
 	run.CreatedAt = time.Now().UTC()

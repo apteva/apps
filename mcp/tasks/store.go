@@ -10,12 +10,22 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 type taskStore struct {
-	db      *sql.DB
-	onEvent func(TaskEvent)
+	db         *sql.DB
+	onEvent    func(TaskEvent)
+	recoveryMu sync.Mutex
+	clock      func() time.Time
+}
+
+func (s *taskStore) now() time.Time {
+	if s.clock != nil {
+		return s.clock().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func newTaskStore(db *sql.DB, onEvent func(TaskEvent)) *taskStore {
@@ -24,12 +34,16 @@ func newTaskStore(db *sql.DB, onEvent func(TaskEvent)) *taskStore {
 
 const taskColumns = `id, agent_id, project_id, title, description, state,
 	progress, current_step, created_by_thread_id, assigned_thread_id,
-	execution_thread_id, parent_task_id, idempotency_key, schedule_kind,
+	execution_thread_id, parent_task_id, idempotency_key, recovery_of_task_id,
+	original_occurrence_key, recovery_attempt, recovery_reason, operation_key, schedule_kind,
 	schedule_expression, schedule_timezone, schedule_enabled,
 	schedule_overlap_policy, schedule_catchup_policy, next_run_at, last_run_at,
 	last_dispatched_at, last_occurrence_id, last_occurrence_status, last_error,
 	last_result_reference, scheduled_for, schedule_occurrence_key, dispatched_at,
-	dispatch_attempts, last_dispatch_attempt_at, accepted_at, telemetry_reference, result, result_reference, error, created_at,
+	dispatch_attempts, last_dispatch_attempt_at, accepted_at, telemetry_reference,
+	agent_event_source_id, agent_execution_id, agent_execution_state,
+	agent_execution_updated_at, agent_execution_reason, agent_settle_deadline_at,
+	agent_lifecycle_sequence, result, result_reference, error, created_at,
 	updated_at, started_at, completed_at`
 
 type rowScanner interface{ Scan(...any) error }
@@ -38,15 +52,18 @@ func scanTask(row rowScanner) (*Task, error) {
 	var t Task
 	var progress sql.NullInt64
 	var scheduleEnabled int
-	var next, last, lastDispatched, scheduled, dispatched, lastDispatchAttempt, accepted, started, completed sql.NullString
+	var next, last, lastDispatched, scheduled, dispatched, lastDispatchAttempt, accepted, executionUpdated, settleDeadline, started, completed sql.NullString
 	var created, updated string
 	err := row.Scan(&t.ID, &t.AgentID, &t.ProjectID, &t.Title, &t.Description, &t.State,
 		&progress, &t.CurrentStep, &t.CreatedByThreadID, &t.AssignedThreadID,
-		&t.ExecutionThreadID, &t.ParentTaskID, &t.IdempotencyKey, &t.ScheduleKind,
+		&t.ExecutionThreadID, &t.ParentTaskID, &t.IdempotencyKey, &t.RecoveryOfTaskID,
+		&t.OriginalOccurrenceKey, &t.RecoveryAttempt, &t.RecoveryReason, &t.OperationKey, &t.ScheduleKind,
 		&t.ScheduleExpression, &t.ScheduleTimezone, &scheduleEnabled,
 		&t.ScheduleOverlapPolicy, &t.ScheduleCatchupPolicy, &next, &last, &lastDispatched,
 		&t.LastOccurrenceID, &t.LastOccurrenceStatus, &t.LastError, &t.LastResultReference,
 		&scheduled, &t.ScheduleOccurrenceKey, &dispatched, &t.DispatchAttempts, &lastDispatchAttempt, &accepted, &t.TelemetryReference,
+		&t.AgentEventSourceID, &t.AgentExecutionID, &t.AgentExecutionState, &executionUpdated,
+		&t.AgentExecutionReason, &settleDeadline, &t.AgentLifecycleSequence,
 		&t.Result, &t.ResultReference, &t.Error, &created, &updated, &started, &completed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errTaskNotFound
@@ -66,6 +83,8 @@ func scanTask(row rowScanner) (*Task, error) {
 	t.DispatchedAt = parseNullableTime(dispatched)
 	t.LastDispatchAttemptAt = parseNullableTime(lastDispatchAttempt)
 	t.AcceptedAt = parseNullableTime(accepted)
+	t.AgentExecutionUpdated = parseNullableTime(executionUpdated)
+	t.AgentSettleDeadline = parseNullableTime(settleDeadline)
 	t.StartedAt = parseNullableTime(started)
 	t.CompletedAt = parseNullableTime(completed)
 	t.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -114,17 +133,38 @@ func insertEvent(tx *sql.Tx, event TaskEvent) (TaskEvent, error) {
 		(id, task_id, agent_id, event_type, thread_id, from_state, to_state, data_json, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.ID, event.TaskID, event.AgentID,
 		event.EventType, event.ThreadID, event.FromState, event.ToState, string(data),
-		event.CreatedAt.Format(time.RFC3339Nano))
+		event.CreatedAt.Format(timeFormat))
 	return event, err
 }
 
 func (s *taskStore) Create(input CreateTaskInput) (*Task, bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+	var events []TaskEvent
+	task, created, err := s.createTx(tx, input, s.now(), &events)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	for _, event := range events {
+		s.emit(event)
+	}
+	return task, created, nil
+}
+
+func (s *taskStore) createTx(tx *sql.Tx, input CreateTaskInput, now time.Time, events *[]TaskEvent) (*Task, bool, error) {
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
 	input.Title = strings.TrimSpace(input.Title)
 	input.ProjectID = strings.TrimSpace(input.ProjectID)
 	input.AssignedThreadID = strings.TrimSpace(input.AssignedThreadID)
 	input.CreatedByThreadID = strings.TrimSpace(input.CreatedByThreadID)
 	if input.AgentID <= 0 || input.ProjectID == "" || input.Title == "" || input.AssignedThreadID == "" {
-		return nil, false, errors.New("agent_id, project_id, title, and assigned_thread_id are required")
+		return nil, false, validationError("agent_id, project_id, title, and assigned_thread_id are required")
 	}
 	if input.State == "" {
 		input.State = stateQueued
@@ -135,23 +175,6 @@ func (s *taskStore) Create(input CreateTaskInput) (*Task, bool, error) {
 	if input.Progress != nil && (*input.Progress < 0 || *input.Progress > 100) {
 		return nil, false, errInvalidProgress
 	}
-	var normalized *normalizedSchedule
-	var err error
-	if input.Schedule != nil {
-		value, normalizeErr := normalizeSchedule(*input.Schedule, time.Now().UTC())
-		if normalizeErr != nil {
-			return nil, false, normalizeErr
-		}
-		normalized = &value
-		input.State = stateWaiting
-		input.Progress = nil
-		input.CurrentStep = ""
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return nil, false, err
-	}
-	defer tx.Rollback()
 	if input.IdempotencyKey != "" {
 		existing, getErr := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE agent_id=? AND idempotency_key=?`, input.AgentID, input.IdempotencyKey))
 		if getErr == nil {
@@ -161,7 +184,19 @@ func (s *taskStore) Create(input CreateTaskInput) (*Task, bool, error) {
 			return nil, false, getErr
 		}
 	}
-	now := time.Now().UTC()
+	var normalized *normalizedSchedule
+	var err error
+	if input.Schedule != nil {
+		value, normalizeErr := normalizeSchedule(*input.Schedule, now)
+		if normalizeErr != nil {
+			return nil, false, normalizeErr
+		}
+		normalized = &value
+		input.State = stateWaiting
+		input.Progress = nil
+		input.CurrentStep = ""
+	}
+
 	id := newID("task-")
 	var progress any
 	if input.Progress != nil {
@@ -169,10 +204,10 @@ func (s *taskStore) Create(input CreateTaskInput) (*Task, bool, error) {
 	}
 	var started, completed any
 	if input.State == stateRunning {
-		started = now.Format(time.RFC3339Nano)
+		started = now.Format(timeFormat)
 	}
 	if terminalState(input.State) {
-		completed = now.Format(time.RFC3339Nano)
+		completed = now.Format(timeFormat)
 	}
 	var scheduleKind, expression, timezone, overlap, catchup string
 	var enabled int
@@ -180,20 +215,24 @@ func (s *taskStore) Create(input CreateTaskInput) (*Task, bool, error) {
 	if normalized != nil {
 		scheduleKind, expression, timezone = normalized.Kind, normalized.Expression, normalized.Timezone
 		overlap, catchup, enabled = normalized.OverlapPolicy, normalized.CatchupPolicy, 1
-		nextRun = normalized.NextRunAt.Format(time.RFC3339Nano)
+		nextRun = normalized.NextRunAt.Format(timeFormat)
 	}
 	var scheduledFor any
 	if input.ScheduledFor != nil {
-		scheduledFor = input.ScheduledFor.UTC().Format(time.RFC3339Nano)
+		scheduledFor = input.ScheduledFor.UTC().Format(timeFormat)
 	}
-	_, err = tx.Exec(`INSERT INTO tasks (`+taskColumns+`) VALUES (`+strings.TrimSuffix(strings.Repeat("?,", 40), ",")+`)`,
+	_, err = tx.Exec(`INSERT INTO tasks (`+taskColumns+`) VALUES (`+strings.TrimSuffix(strings.Repeat("?,", strings.Count(taskColumns, ",")+1), ",")+`)`,
 		id, input.AgentID, input.ProjectID, input.Title, strings.TrimSpace(input.Description), input.State,
 		progress, strings.TrimSpace(input.CurrentStep), input.CreatedByThreadID, input.AssignedThreadID,
-		"", strings.TrimSpace(input.ParentTaskID), strings.TrimSpace(input.IdempotencyKey), scheduleKind,
+		"", strings.TrimSpace(input.ParentTaskID), strings.TrimSpace(input.IdempotencyKey),
+		strings.TrimSpace(input.RecoveryOfTaskID), strings.TrimSpace(input.OriginalOccurrenceKey), input.RecoveryAttempt,
+		strings.TrimSpace(input.RecoveryReason), strings.TrimSpace(input.OperationKey), scheduleKind,
 		expression, timezone, enabled, overlap, catchup, nextRun, nil, nil, "", "", "", "",
-		scheduledFor, strings.TrimSpace(input.OccurrenceKey), nil, 0, nil, nil, "", "", "", "",
-		now.Format(time.RFC3339Nano),
-		now.Format(time.RFC3339Nano), started, completed)
+		scheduledFor, strings.TrimSpace(input.OccurrenceKey), nil, 0, nil, nil, "",
+		"", "", "", nil, "", nil, 0,
+		"", "", "",
+		now.Format(timeFormat),
+		now.Format(timeFormat), started, completed)
 	if err != nil {
 		return nil, false, err
 	}
@@ -205,14 +244,15 @@ func (s *taskStore) Create(input CreateTaskInput) (*Task, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	if err := tx.Commit(); err != nil {
+	task, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
+	if err != nil {
 		return nil, false, err
 	}
-	task, err := s.Get(id)
-	if err == nil {
-		s.emit(event)
+	if err := enqueueCreatedTaskTx(tx, task, now); err != nil {
+		return nil, false, err
 	}
-	return task, true, err
+	*events = append(*events, event)
+	return task, true, nil
 }
 
 func (s *taskStore) Get(id string) (*Task, error) {
@@ -220,51 +260,8 @@ func (s *taskStore) Get(id string) (*Task, error) {
 }
 
 func (s *taskStore) List(filter TaskFilter) ([]Task, error) {
-	query := `SELECT ` + taskColumns + ` FROM tasks WHERE 1=1`
-	args := []any{}
-	if filter.ProjectID != "" {
-		query += ` AND project_id=?`
-		args = append(args, filter.ProjectID)
-	}
-	if filter.AgentID > 0 {
-		query += ` AND agent_id=?`
-		args = append(args, filter.AgentID)
-	}
-	if len(filter.States) > 0 {
-		marks := make([]string, len(filter.States))
-		for i, state := range filter.States {
-			if !validState(state) {
-				return nil, fmt.Errorf("%w: %s", errInvalidState, state)
-			}
-			marks[i] = "?"
-			args = append(args, state)
-		}
-		query += ` AND state IN (` + strings.Join(marks, ",") + `)`
-	}
-	if filter.ParentTaskID != nil {
-		query += ` AND parent_task_id=?`
-		args = append(args, *filter.ParentTaskID)
-	}
-	limit := filter.Limit
-	if limit <= 0 || limit > 500 {
-		limit = 200
-	}
-	query += ` ORDER BY updated_at DESC, id DESC LIMIT ?`
-	args = append(args, limit)
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Task{}
-	for rows.Next() {
-		task, scanErr := scanTask(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		out = append(out, *task)
-	}
-	return out, rows.Err()
+	page, err := s.ListPage(filter)
+	return page.Tasks, err
 }
 
 func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task, bool, error) {
@@ -277,11 +274,15 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	if err != nil {
 		return nil, false, err
 	}
+	if ((input.Title != nil && strings.TrimSpace(*input.Title) != current.Title) || (input.Description != nil && *input.Description != current.Description)) &&
+		(current.ParentTaskID != "" || current.ScheduledFor != nil) {
+		return nil, false, validationError("cannot edit an occurrence definition; update its recurring parent task")
+	}
 	title := current.Title
 	if input.Title != nil {
 		title = strings.TrimSpace(*input.Title)
 		if title == "" {
-			return nil, false, errors.New("title cannot be empty")
+			return nil, false, validationError("title cannot be empty")
 		}
 	}
 	description := current.Description
@@ -297,8 +298,8 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 		if terminalState(current.State) {
 			return nil, false, errTerminalTask
 		}
-		if current.ParentTaskID != "" {
-			return nil, false, errors.New("cannot edit an occurrence schedule; update its recurring parent task")
+		if current.ParentTaskID != "" || current.ScheduledFor != nil {
+			return nil, false, validationError("cannot edit an occurrence schedule; update its recurring parent task")
 		}
 		n, changed, scheduleErr := mergeSchedulePatch(current, *input.Schedule, time.Now().UTC())
 		if scheduleErr != nil {
@@ -337,6 +338,9 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 		if *input.Progress < 0 || *input.Progress > 100 {
 			return nil, false, errInvalidProgress
 		}
+		if current.Progress != nil && *input.Progress < *current.Progress {
+			return nil, false, validationError("progress cannot decrease")
+		}
 		v := *input.Progress
 		progress = &v
 	}
@@ -354,8 +358,11 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	}
 	if input.AssignedThreadID != nil {
 		assigned = strings.TrimSpace(*input.AssignedThreadID)
+		if assigned != current.AssignedThreadID {
+			execution = ""
+		}
 		if assigned == "" {
-			return nil, false, errors.New("assigned_thread_id cannot be empty")
+			return nil, false, validationError("assigned_thread_id cannot be empty")
 		}
 	}
 	if input.ExecutionThreadID != nil {
@@ -377,23 +384,39 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 		state != current.State || !equalProgress(progress, current.Progress) || step != current.CurrentStep ||
 		assigned != current.AssignedThreadID || execution != current.ExecutionThreadID || result != current.Result ||
 		resultReference != current.ResultReference || failure != current.Error
+	if terminalState(current.State) && changed {
+		return nil, false, errTerminalTask
+	}
+	if isScheduleDefinitionTask(current) && input.State != nil && !terminalState(state) && state != stateWaiting {
+		return nil, false, validationError("update an occurrence's progress, not its schedule definition")
+	}
+	if state == stateCompleted && result == "" {
+		return nil, false, validationError("result required for completion")
+	}
+	if state == stateFailed && failure == "" {
+		return nil, false, validationError("error required for failure")
+	}
 	if !changed {
 		return current, false, nil
 	}
-	now := time.Now().UTC()
+	now := s.now()
 	var progressValue any
 	if progress != nil {
 		progressValue = *progress
 	}
 	var started any
 	if current.StartedAt != nil {
-		started = current.StartedAt.Format(time.RFC3339Nano)
+		started = current.StartedAt.Format(timeFormat)
 	} else if state == stateRunning {
-		started = now.Format(time.RFC3339Nano)
+		started = now.Format(timeFormat)
 	}
 	var completed any
 	if terminalState(state) {
-		completed = now.Format(time.RFC3339Nano)
+		completed = now.Format(timeFormat)
+	}
+	var settleDeadline any
+	if !terminalState(state) && current.AgentSettleDeadline != nil {
+		settleDeadline = current.AgentSettleDeadline.Format(timeFormat)
 	}
 	acceptedAt := current.AcceptedAt
 	telemetryReference := current.TelemetryReference
@@ -406,13 +429,17 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	}
 	var acceptedValue any
 	if acceptedAt != nil {
-		acceptedValue = acceptedAt.Format(time.RFC3339Nano)
+		acceptedValue = acceptedAt.Format(timeFormat)
 	}
 	var nextRunValue any
 	if nextRunAt != nil {
-		nextRunValue = nextRunAt.UTC().Format(time.RFC3339Nano)
+		nextRunValue = nextRunAt.UTC().Format(timeFormat)
 	}
 	enabledValue := 0
+	if terminalState(state) {
+		scheduleEnabled = false
+		nextRunValue = nil
+	}
 	if scheduleEnabled {
 		enabledValue = 1
 	}
@@ -421,16 +448,16 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 			assigned_thread_id=?, execution_thread_id=?, accepted_at=?, telemetry_reference=?, result=?,
 			result_reference=?, error=?, schedule_kind=?, schedule_expression=?, schedule_timezone=?,
 			schedule_enabled=?, schedule_overlap_policy=?, schedule_catchup_policy=?, next_run_at=?,
-			updated_at=?, started_at=?, completed_at=? WHERE id=?`, title, description, state,
+			agent_settle_deadline_at=?, updated_at=?, started_at=?, completed_at=? WHERE id=?`, title, description, state,
 			progressValue, step, assigned, execution, acceptedValue, telemetryReference, result, resultReference,
 			failure, scheduleKind, scheduleExpression, scheduleTimezone, enabledValue, scheduleOverlap,
-			scheduleCatchup, nextRunValue, now.Format(time.RFC3339Nano), started, completed, id)
+			scheduleCatchup, nextRunValue, settleDeadline, now.Format(timeFormat), started, completed, id)
 	} else {
 		_, err = tx.Exec(`UPDATE tasks SET title=?, description=?, state=?, progress=?, current_step=?,
 			assigned_thread_id=?, execution_thread_id=?, accepted_at=?, telemetry_reference=?, result=?,
-			result_reference=?, error=?, updated_at=?, started_at=?, completed_at=?
+			result_reference=?, error=?, schedule_enabled=?, next_run_at=?, agent_settle_deadline_at=?, updated_at=?, started_at=?, completed_at=?
 			WHERE id=?`, title, description, state, progressValue, step, assigned, execution,
-			acceptedValue, telemetryReference, result, resultReference, failure, now.Format(time.RFC3339Nano),
+			acceptedValue, telemetryReference, result, resultReference, failure, enabledValue, nextRunValue, settleDeadline, now.Format(timeFormat),
 			started, completed, id)
 	}
 	if err != nil {
@@ -445,7 +472,7 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 		status := occurrenceStatusValues(state, acceptedAt, current.DispatchedAt)
 		var acceptedRun any
 		if acceptedAt != nil {
-			acceptedRun = acceptedAt.Format(time.RFC3339Nano)
+			acceptedRun = acceptedAt.Format(timeFormat)
 		}
 		_, err = tx.Exec(`UPDATE tasks SET last_occurrence_status=?, last_error=?, last_result_reference=?,
 			last_run_at=COALESCE(?, last_run_at) WHERE id=?`, status, failure, resultReference, acceptedRun, current.ID)
@@ -484,6 +511,22 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	if err != nil {
 		return nil, false, err
 	}
+	updatedTask, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
+	if err != nil {
+		return nil, false, err
+	}
+	if terminalState(state) && !terminalState(current.State) {
+		if err := enqueueTerminalTx(tx, updatedTask, false, "", now); err != nil {
+			return nil, false, err
+		}
+		if _, err := tx.Exec(`UPDATE task_deliveries SET delivered_at=?, last_error='superseded by terminal state' WHERE task_id=? AND event_type IN ('task.assigned','task.ready','task.recovery.ready','task.terminalization_required') AND delivered_at IS NULL`, now.Format(timeFormat), id); err != nil {
+			return nil, false, err
+		}
+	} else if assigned != current.AssignedThreadID && !isScheduleDefinitionTask(updatedTask) && assigned != actorThread {
+		if err := enqueueDeliveryTx(tx, updatedTask, assigned, "task.assigned", "assignment:"+event.ID, now); err != nil {
+			return nil, false, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, false, err
 	}
@@ -496,7 +539,7 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 
 func taskTelemetryReference(agentID int64, threadID string, since time.Time) string {
 	return fmt.Sprintf("/api/telemetry?agent_id=%d&thread_id=%s&since=%s", agentID,
-		url.QueryEscape(threadID), url.QueryEscape(since.UTC().Format(time.RFC3339Nano)))
+		url.QueryEscape(threadID), url.QueryEscape(since.UTC().Format(timeFormat)))
 }
 
 func occurrenceStatusValues(state string, acceptedAt, dispatchedAt *time.Time) string {
@@ -512,10 +555,10 @@ func occurrenceStatusValues(state string, acceptedAt, dispatchedAt *time.Time) s
 func rollupOccurrenceTx(tx *sql.Tx, parentID, occurrenceID, status, failure, resultReference string, dispatchedAt, acceptedAt *time.Time, now time.Time) error {
 	var dispatchedValue, acceptedValue any
 	if dispatchedAt != nil {
-		dispatchedValue = dispatchedAt.UTC().Format(time.RFC3339Nano)
+		dispatchedValue = dispatchedAt.UTC().Format(timeFormat)
 	}
 	if acceptedAt != nil {
-		acceptedValue = acceptedAt.UTC().Format(time.RFC3339Nano)
+		acceptedValue = acceptedAt.UTC().Format(timeFormat)
 	}
 	_, err := tx.Exec(`UPDATE tasks SET
 		last_occurrence_status=?, last_error=?, last_result_reference=?,
@@ -524,7 +567,7 @@ func rollupOccurrenceTx(tx *sql.Tx, parentID, occurrenceID, status, failure, res
 		updated_at=?
 		WHERE id=? AND last_occurrence_id=?`, status, failure, resultReference,
 		dispatchedValue, acceptedValue, acceptedValue, acceptedValue,
-		now.UTC().Format(time.RFC3339Nano), parentID, occurrenceID)
+		now.UTC().Format(timeFormat), parentID, occurrenceID)
 	return err
 }
 
@@ -546,28 +589,30 @@ func (s *taskStore) MarkDispatched(id, actor string, at time.Time) (*Task, bool,
 	}
 	at = at.UTC()
 	telemetryReference := taskTelemetryReference(current.AgentID, current.AssignedThreadID, at)
+	sourceEventID := taskAgentEventSourceID(current.ID)
 	_, err = tx.Exec(`UPDATE tasks SET dispatched_at=?, dispatch_attempts=1,
-		last_dispatch_attempt_at=?, telemetry_reference=?, updated_at=? WHERE id=?`,
-		at.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), telemetryReference,
-		at.Format(time.RFC3339Nano), id)
+		last_dispatch_attempt_at=?, telemetry_reference=?, agent_event_source_id=?, updated_at=? WHERE id=?`,
+		at.Format(timeFormat), at.Format(timeFormat), telemetryReference,
+		sourceEventID, at.Format(timeFormat), id)
 	if err != nil {
 		return nil, false, err
 	}
 	if current.ParentTaskID != "" {
 		_, err = tx.Exec(`UPDATE tasks SET last_dispatched_at=?, last_occurrence_id=?,
 			last_occurrence_status='dispatched', last_error='', last_result_reference='', updated_at=? WHERE id=?`,
-			at.Format(time.RFC3339Nano), current.ID, at.Format(time.RFC3339Nano), current.ParentTaskID)
+			at.Format(timeFormat), current.ID, at.Format(timeFormat), current.ParentTaskID)
 	} else if current.ScheduledFor != nil {
 		_, err = tx.Exec(`UPDATE tasks SET last_dispatched_at=?, last_occurrence_id=?,
 			last_occurrence_status='dispatched', last_error='', last_result_reference='' WHERE id=?`,
-			at.Format(time.RFC3339Nano), current.ID, current.ID)
+			at.Format(timeFormat), current.ID, current.ID)
 	}
 	if err != nil {
 		return nil, false, err
 	}
 	event, err := insertEvent(tx, TaskEvent{TaskID: id, AgentID: current.AgentID,
 		EventType: "occurrence_dispatched", ThreadID: actor, FromState: current.State,
-		ToState: current.State, Data: map[string]any{"dispatched_at": at, "dispatch_attempt": 1, "telemetry_reference": telemetryReference}})
+		ToState: current.State, Data: map[string]any{"dispatched_at": at, "dispatch_attempt": 1,
+			"telemetry_reference": telemetryReference, "source_event_id": sourceEventID}})
 	if err != nil {
 		return nil, false, err
 	}
@@ -625,7 +670,7 @@ func (s *taskStore) ReconcileUnacceptedDispatch(id, actor string, at, eligibleBe
 		result, updateErr := tx.Exec(`UPDATE tasks SET dispatch_attempts=?, last_dispatch_attempt_at=?, updated_at=?
 			WHERE id=? AND state='queued' AND accepted_at IS NULL
 			AND COALESCE(last_dispatch_attempt_at, dispatched_at)<=?`, attempts,
-			at.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), id, eligibleBefore.UTC().Format(time.RFC3339Nano))
+			at.Format(timeFormat), at.Format(timeFormat), id, eligibleBefore.UTC().Format(timeFormat))
 		if updateErr != nil {
 			return nil, dispatchReconcileNone, updateErr
 		}
@@ -646,8 +691,8 @@ func (s *taskStore) ReconcileUnacceptedDispatch(id, actor string, at, eligibleBe
 		result, updateErr := tx.Exec(`UPDATE tasks SET state='failed', error=?, updated_at=?, completed_at=?
 			WHERE id=? AND state='queued' AND accepted_at IS NULL
 			AND COALESCE(last_dispatch_attempt_at, dispatched_at)<=?`, message,
-			at.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), id,
-			eligibleBefore.UTC().Format(time.RFC3339Nano))
+			at.Format(timeFormat), at.Format(timeFormat), id,
+			eligibleBefore.UTC().Format(timeFormat))
 		if updateErr != nil {
 			return nil, dispatchReconcileNone, updateErr
 		}
@@ -669,12 +714,23 @@ func (s *taskStore) ReconcileUnacceptedDispatch(id, actor string, at, eligibleBe
 				return nil, dispatchReconcileNone, err
 			}
 		}
+		failedTask := *current
+		failedTask.State = stateFailed
+		failedTask.Error = message
+		if err := enqueueTerminalTx(tx, &failedTask, true, "dispatch_unaccepted", at); err != nil {
+			return nil, dispatchReconcileNone, err
+		}
 		event, err = insertEvent(tx, TaskEvent{TaskID: id, AgentID: current.AgentID,
 			EventType: "state_changed", ThreadID: actor, FromState: current.State, ToState: stateFailed,
 			Data: map[string]any{"error": message, "dispatch_attempts": attempts, "current_step": current.CurrentStep}})
 	}
 	if err != nil {
 		return nil, dispatchReconcileNone, err
+	}
+	if action == dispatchReconcileRetry {
+		if _, err := tx.Exec(`UPDATE task_deliveries SET delivered_at=NULL,next_attempt_at=? WHERE id=?`, at.Format(timeFormat), "execution:"+id); err != nil {
+			return nil, dispatchReconcileNone, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, dispatchReconcileNone, err
@@ -704,7 +760,7 @@ func (s *taskStore) Accept(id, actorThread string, at time.Time) (*Task, bool, e
 	at = at.UTC()
 	telemetryReference := taskTelemetryReference(current.AgentID, actorThread, *current.DispatchedAt)
 	_, err = tx.Exec(`UPDATE tasks SET accepted_at=?, execution_thread_id=?, telemetry_reference=?, updated_at=? WHERE id=?`,
-		at.Format(time.RFC3339Nano), actorThread, telemetryReference, at.Format(time.RFC3339Nano), id)
+		at.Format(timeFormat), actorThread, telemetryReference, at.Format(timeFormat), id)
 	if err != nil {
 		return nil, false, err
 	}
@@ -714,7 +770,7 @@ func (s *taskStore) Accept(id, actorThread string, at time.Time) (*Task, bool, e
 			return nil, false, err
 		}
 	} else if current.ScheduledFor != nil {
-		_, err = tx.Exec(`UPDATE tasks SET last_run_at=?, last_occurrence_status='accepted' WHERE id=?`, at.Format(time.RFC3339Nano), current.ID)
+		_, err = tx.Exec(`UPDATE tasks SET last_run_at=?, last_occurrence_status='accepted' WHERE id=?`, at.Format(timeFormat), current.ID)
 		if err != nil {
 			return nil, false, err
 		}
@@ -743,23 +799,8 @@ func equalProgress(a, b *int) bool {
 }
 
 func (s *taskStore) Events(taskID string) ([]TaskEvent, error) {
-	rows, err := s.db.Query(`SELECT id, task_id, agent_id, event_type, thread_id, from_state, to_state, data_json, created_at FROM task_events WHERE task_id=? ORDER BY created_at ASC, id ASC`, taskID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []TaskEvent{}
-	for rows.Next() {
-		var event TaskEvent
-		var data, created string
-		if err := rows.Scan(&event.ID, &event.TaskID, &event.AgentID, &event.EventType, &event.ThreadID, &event.FromState, &event.ToState, &data, &created); err != nil {
-			return nil, err
-		}
-		_ = json.Unmarshal([]byte(data), &event.Data)
-		event.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-		out = append(out, event)
-	}
-	return out, rows.Err()
+	page, err := s.EventsPage(taskID, "", 100)
+	return page.Events, err
 }
 
 func (s *taskStore) Counts(projectID string, agentID int64, includeRuns bool) (TaskCounts, error) {
@@ -773,36 +814,12 @@ func (s *taskStore) Counts(projectID string, agentID int64, includeRuns bool) (T
 	if !includeRuns {
 		where += ` AND parent_task_id=''`
 	}
-	rows, err := s.db.Query(`SELECT state, COUNT(*) FROM tasks`+where+` GROUP BY state`, args...)
-	if err != nil {
-		return out, err
+	sum := func(condition string) string { return `COALESCE(SUM(CASE WHEN ` + condition + ` THEN 1 ELSE 0 END),0)` }
+	columns := []string{sum(`state IN ('queued','running','waiting','blocked') AND NOT ` + definitionPredicate)}
+	for _, state := range []string{stateQueued, stateRunning, stateWaiting, stateBlocked, stateCompleted, stateFailed, stateCancelled} {
+		columns = append(columns, sum("state='"+state+"'"))
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var state string
-		var count int
-		if err := rows.Scan(&state, &count); err != nil {
-			return out, err
-		}
-		switch state {
-		case stateQueued:
-			out.Queued = count
-		case stateRunning:
-			out.Running = count
-		case stateWaiting:
-			out.Waiting = count
-		case stateBlocked:
-			out.Blocked = count
-		case stateCompleted:
-			out.Completed = count
-		case stateFailed:
-			out.Failed = count
-		case stateCancelled:
-			out.Cancelled = count
-		}
-	}
-	out.Active = out.Queued + out.Running + out.Waiting + out.Blocked
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM tasks`+where+` AND schedule_kind<>'' AND schedule_enabled=1`, args...).Scan(&out.Scheduled)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM tasks`+where+` AND schedule_kind<>'' AND schedule_enabled=0 AND state='waiting'`, args...).Scan(&out.Paused)
-	return out, nil
+	columns = append(columns, sum(definitionPredicate+` AND state='waiting' AND schedule_enabled=1`), sum(definitionPredicate+` AND state='waiting' AND schedule_enabled=0`))
+	err := s.db.QueryRow(`SELECT `+strings.Join(columns, ",")+` FROM tasks`+where, args...).Scan(&out.Active, &out.Queued, &out.Running, &out.Waiting, &out.Blocked, &out.Completed, &out.Failed, &out.Cancelled, &out.Scheduled, &out.Paused)
+	return out, err
 }

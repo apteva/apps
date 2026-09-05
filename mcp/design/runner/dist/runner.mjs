@@ -2,7 +2,7 @@
 var __require = import.meta.require;
 
 // node_modules/replicad-opencascadejs/src/replicad_single.js
-var __dirname = "/Users/marcoschwartz/Documents/code/apps/mcp/design/runner/node_modules/replicad-opencascadejs/src", __filename = "/Users/marcoschwartz/Documents/code/apps/mcp/design/runner/node_modules/replicad-opencascadejs/src/replicad_single.js";
+var __dirname = "/private/tmp/design-release-0.4.0.F14bsc/mcp/design/runner/node_modules/replicad-opencascadejs/src", __filename = "/private/tmp/design-release-0.4.0.F14bsc/mcp/design/runner/node_modules/replicad-opencascadejs/src/replicad_single.js";
 var Module = (() => {
   var _scriptDir = typeof document !== "undefined" && document.currentScript ? document.currentScript.src : undefined;
   if (typeof __filename !== "undefined")
@@ -21725,6 +21725,19 @@ function shapeFor(id, shapes) {
     fail2(`operation references unknown shape ${id}`);
   return shape;
 }
+function polygonSketch(points, params, label, plane = "XY", origin = [0, 0, 0]) {
+  if (!Array.isArray(points) || points.length < 3)
+    fail2(`${label} needs at least three [x,y] points`);
+  const resolved = points.map((point, index) => {
+    if (!Array.isArray(point) || point.length !== 2)
+      fail2(`${label}[${index}] must be [x,y]`);
+    return [resolve(point[0], params), resolve(point[1], params)];
+  });
+  let pen = draw(resolved[0]);
+  for (const point of resolved.slice(1))
+    pen = pen.lineTo(point);
+  return pen.close().sketchOnPlane(plane, vector(origin, params, `${label}.origin`));
+}
 function buildOperation(operation, shapes, params) {
   if (!operation || typeof operation !== "object")
     fail2("every operation must be an object");
@@ -21793,6 +21806,29 @@ function buildOperation(operation, shapes, params) {
       shape = pen.close().sketchOnPlane("XY", z).extrude(height);
       break;
     }
+    case "revolve_profile": {
+      const sketch = polygonSketch(operation.points, params, `${operation.id}.points`, operation.plane || "XZ", operation.origin);
+      shape = sketch.revolve(vector(operation.axis, params, `${operation.id}.axis`, [0, 0, 1]), { origin: vector(operation.axis_origin, params, `${operation.id}.axis_origin`), angle: resolve(operation.angle ?? 360, params, `${operation.id}.angle`) });
+      break;
+    }
+    case "sweep_circle": {
+      if (!Array.isArray(operation.path) || operation.path.length < 2)
+        fail2(`${operation.id}.path needs at least two [x,y] points`);
+      const path = operation.path.map((point, index) => {
+        if (!Array.isArray(point) || point.length !== 2)
+          fail2(`${operation.id}.path[${index}] must be [x,y]`);
+        return [resolve(point[0], params), resolve(point[1], params)];
+      });
+      let pen = draw(path[0]);
+      for (const point of path.slice(1))
+        pen = pen.lineTo(point);
+      const spine = pen.done().sketchOnPlane(operation.plane || "XY", vector(operation.origin, params, `${operation.id}.origin`));
+      const radius = resolve(operation.radius, params, `${operation.id}.radius`);
+      if (radius <= 0)
+        fail2(`${operation.id}.radius must be positive`);
+      shape = spine.sweepSketch((profilePlane, profileOrigin) => drawCircle(radius).sketchOnPlane(profilePlane, profileOrigin));
+      break;
+    }
     case "fuse":
     case "cut":
     case "intersect": {
@@ -21826,6 +21862,44 @@ function buildOperation(operation, shapes, params) {
       shape = shapeFor(operation.input, shapes).clone().scale(resolve(operation.factor, params, `${operation.id}.factor`), vector(operation.center, params, `${operation.id}.center`));
       break;
     }
+    case "mirror": {
+      shape = shapeFor(operation.input, shapes).clone().mirror(operation.plane || "YZ", vector(operation.origin, params, `${operation.id}.origin`));
+      break;
+    }
+    case "linear_pattern": {
+      const count = Math.trunc(resolve(operation.count, params, `${operation.id}.count`));
+      if (count < 1 || count > 128)
+        fail2(`${operation.id}.count must be between 1 and 128`);
+      const step = vector(operation.step, params, `${operation.id}.step`);
+      const copies = [];
+      for (let index = 0;index < count; index += 1) {
+        copies.push(shapeFor(operation.input, shapes).clone().translate(step.map((value) => value * index)));
+      }
+      shape = copies[0];
+      for (const copy of copies.slice(1))
+        shape = operation.fuse ? shape.fuse(copy) : null;
+      if (!operation.fuse)
+        shape = makeCompound(copies);
+      break;
+    }
+    case "circular_pattern": {
+      const count = Math.trunc(resolve(operation.count, params, `${operation.id}.count`));
+      if (count < 1 || count > 128)
+        fail2(`${operation.id}.count must be between 1 and 128`);
+      const totalAngle = resolve(operation.angle ?? 360, params, `${operation.id}.angle`);
+      const center = vector(operation.center, params, `${operation.id}.center`);
+      const direction = vector(operation.direction, params, `${operation.id}.direction`, [0, 0, 1]);
+      const copies = [];
+      for (let index = 0;index < count; index += 1) {
+        copies.push(shapeFor(operation.input, shapes).clone().rotate(totalAngle * index / count, center, direction));
+      }
+      shape = copies[0];
+      for (const copy of copies.slice(1))
+        shape = operation.fuse ? shape.fuse(copy) : null;
+      if (!operation.fuse)
+        shape = makeCompound(copies);
+      break;
+    }
     case "fillet": {
       const radius = resolve(operation.radius, params, `${operation.id}.radius`);
       if (radius <= 0)
@@ -21845,6 +21919,94 @@ function buildOperation(operation, shapes, params) {
   }
   shapes.set(operation.id, shape);
 }
+function applyAssemblyTransform(shape, transform, params) {
+  let output = shape.clone();
+  if (transform?.scale !== undefined) {
+    output = output.scale(resolve(transform.scale, params, "assembly scale"), [0, 0, 0]);
+  }
+  for (const rotation of transform?.rotate || []) {
+    output = output.rotate(resolve(rotation.angle, params, "assembly rotation angle"), vector(rotation.center, params, "assembly rotation center"), vector(rotation.direction, params, "assembly rotation direction", [0, 0, 1]));
+  }
+  if (transform?.translate)
+    output = output.translate(vector(transform.translate, params, "assembly translation"));
+  return output;
+}
+function rotatePoint(point, angleDegrees, center, axis) {
+  const radians = angleDegrees * Math.PI / 180;
+  const length = Math.hypot(...axis);
+  if (length === 0)
+    fail2("assembly rotation direction must not be zero");
+  const [ux, uy, uz] = axis.map((value) => value / length);
+  const [x, y, z] = point.map((value, index) => value - center[index]);
+  const cosine = Math.cos(radians), sine = Math.sin(radians), dot = ux * x + uy * y + uz * z;
+  return [
+    center[0] + x * cosine + (uy * z - uz * y) * sine + ux * dot * (1 - cosine),
+    center[1] + y * cosine + (uz * x - ux * z) * sine + uy * dot * (1 - cosine),
+    center[2] + z * cosine + (ux * y - uy * x) * sine + uz * dot * (1 - cosine)
+  ];
+}
+function transformPhysical(physical, transform, params) {
+  if (!physical)
+    return null;
+  let center = [...physical.center];
+  let mass = physical.mass;
+  if (transform?.scale !== undefined) {
+    const factor = resolve(transform.scale, params, "assembly scale");
+    center = center.map((value) => value * factor);
+    mass *= Math.abs(factor ** 3);
+  }
+  for (const rotation of transform?.rotate || []) {
+    center = rotatePoint(center, resolve(rotation.angle, params, "assembly rotation angle"), vector(rotation.center, params, "assembly rotation center"), vector(rotation.direction, params, "assembly rotation direction", [0, 0, 1]));
+  }
+  if (transform?.translate) {
+    const translation = vector(transform.translate, params, "assembly translation");
+    center = center.map((value, index) => value + translation[index]);
+  }
+  return { mass, center };
+}
+function hexColor(value, fallback = "#64748b") {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+}
+function assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisuals, params) {
+  const parts = new Map((definition.parts || []).map((part) => [part.id, part]));
+  const materials = new Map((definition.materials || []).map((material) => [material.id, material]));
+  if (!definition.assembly?.instances?.length) {
+    const shape = shapeFor(definition.output, shapes);
+    const outputPart = (definition.parts || []).find((part) => part.output === definition.output);
+    const visuals = outputPart ? partVisuals.get(outputPart.id) : [{ id: definition.output, part_id: definition.output, name: definition.output, color: "#64748b", shape }];
+    return { shape, instances: [], visuals, parts, materials };
+  }
+  const instances = [];
+  for (const instance of definition.assembly.instances) {
+    if (instance.visible === false)
+      continue;
+    const part = parts.get(instance.part_id);
+    if (!part)
+      fail2(`assembly instance ${instance.id} references unknown part ${instance.part_id}`);
+    const sourceShape = partShapes.get(part.id);
+    if (!sourceShape)
+      fail2(`assembly part ${part.id} has no resolved geometry`);
+    const shape = applyAssemblyTransform(sourceShape, instance.transform, params);
+    const material = materials.get(part.material_id);
+    const visuals = (partVisuals.get(part.id) || [{ id: part.id, part_id: part.id, name: part.name, color: hexColor(part.color || material?.color), shape: sourceShape }]).map((visual) => ({
+      ...visual,
+      id: visual.id === part.id ? instance.id : `${instance.id}/${visual.id}`,
+      shape: visual.shape === sourceShape ? shape : applyAssemblyTransform(visual.shape, instance.transform, params)
+    }));
+    instances.push({
+      id: instance.id,
+      part,
+      material,
+      shape,
+      color: hexColor(part.color || material?.color),
+      physical: transformPhysical(partPhysical.get(part.id), instance.transform, params),
+      visuals
+    });
+  }
+  if (!instances.length)
+    fail2("assembly has no visible instances");
+  return { shape: makeCompound(instances.map((item) => item.shape.clone())), instances, visuals: instances.flatMap((item) => item.visuals), parts, materials };
+}
 function validateDefinition(definition) {
   if (!definition || typeof definition !== "object")
     fail2("definition must be an object");
@@ -21852,23 +22014,102 @@ function validateDefinition(definition) {
     fail2(`schema must be ${SCHEMA}`);
   if ((definition.units || "mm") !== "mm")
     fail2("v0.1 supports millimetres only");
-  if (!Array.isArray(definition.operations) || definition.operations.length === 0) {
-    fail2("definition.operations must be a non-empty array");
+  if (!Array.isArray(definition.operations))
+    fail2("definition.operations must be an array");
+  if (definition.operations.length === 0 && !definition.assembly?.instances?.length) {
+    fail2("definition requires operations or an assembly with instances");
   }
-  if (!definition.output || typeof definition.output !== "string")
-    fail2("definition.output is required");
+  if ((!definition.output || typeof definition.output !== "string") && !definition.assembly)
+    fail2("definition.output is required outside an assembly");
   if (definition.operations.length > 256)
     fail2("definition exceeds the 256-operation limit");
+}
+function buildDefinitionGeometry(definition, supplied) {
+  validateDefinition(definition);
+  const params = parameterValues(definition, supplied || {});
+  const shapes = new Map;
+  for (const operation of definition.operations)
+    buildOperation(operation, shapes, params);
+  const resolved = new Map((definition._resolved_components || []).map((component) => [component.part_id, component]));
+  const partShapes = new Map;
+  const partPhysical = new Map;
+  const partVisuals = new Map;
+  const materials = new Map((definition.materials || []).map((material) => [material.id, material]));
+  for (const part of definition.parts || []) {
+    if (part.source) {
+      const component = resolved.get(part.id);
+      if (!component)
+        fail2(`linked part ${part.id} was not resolved by Design Studio`);
+      const child = buildDefinitionGeometry(component.definition, component.parameters || {});
+      const selected = component.source_part_id ? child.partShapes.get(component.source_part_id) : child.assembly.shape;
+      if (!selected)
+        fail2(`linked part ${part.id} source part ${component.source_part_id} has no geometry`);
+      partShapes.set(part.id, selected.clone());
+      const physical2 = component.source_part_id ? child.partPhysical.get(component.source_part_id) : child.physical;
+      if (physical2)
+        partPhysical.set(part.id, physical2);
+      const visuals = component.source_part_id ? child.partVisuals.get(component.source_part_id) : child.assembly.visuals;
+      if (visuals?.length)
+        partVisuals.set(part.id, visuals);
+    } else {
+      const partShape = shapeFor(part.output, shapes);
+      partShapes.set(part.id, partShape);
+      const density = Number(materials.get(part.material_id)?.density_g_cm3 || 0);
+      partPhysical.set(part.id, { mass: density > 0 ? measureVolume(partShape) * density / 1000 : 0, center: exactCenterOfMass(partShape) });
+      partVisuals.set(part.id, [{ id: part.id, part_id: part.id, name: part.name, color: hexColor(part.color || materials.get(part.material_id)?.color), shape: partShape }]);
+    }
+  }
+  const assembly = assemblyGeometry(definition, shapes, partShapes, partPhysical, partVisuals, params);
+  let physical;
+  if (assembly.instances.length) {
+    const mass = assembly.instances.reduce((sum, item) => sum + (item.physical?.mass || 0), 0);
+    const center = mass > 0 ? [0, 1, 2].map((axis) => assembly.instances.reduce((sum, item) => sum + (item.physical?.center[axis] || 0) * (item.physical?.mass || 0), 0) / mass) : exactCenterOfMass(assembly.shape);
+    physical = { mass, center };
+  } else {
+    const matching = (definition.parts || []).find((part) => part.output === definition.output);
+    physical = matching ? partPhysical.get(matching.id) : { mass: 0, center: exactCenterOfMass(assembly.shape) };
+  }
+  return { params, shapes, partShapes, partPhysical, partVisuals, assembly, physical };
 }
 async function writeBlob(path, blob) {
   await mkdir(dirname(path), { recursive: true });
   await Bun.write(path, new Uint8Array(await blob.arrayBuffer()));
 }
-function geometryReport(shape, mesh) {
+function shapeBounds(shape) {
+  const box = shape.boundingBox;
+  const [min, max] = box.bounds;
+  return { min, max, size: [box.width, box.height, box.depth], center: box.center };
+}
+function exactCenterOfMass(shape) {
+  const properties = measureShapeVolumeProperties(shape);
+  try {
+    return properties.centerOfMass;
+  } finally {
+    properties.delete();
+  }
+}
+function geometryReport(shape, mesh, instances = []) {
   const box = shape.boundingBox;
   const [min, max] = box.bounds;
   const volume = measureVolume(shape);
   const area = measureArea(shape);
+  const partReports = instances.map((item) => {
+    const partVolume = measureVolume(item.shape);
+    const bounds = shapeBounds(item.shape);
+    const center = item.physical?.center || exactCenterOfMass(item.shape);
+    return {
+      part_id: item.part.id,
+      instance_id: item.id,
+      name: item.part.name,
+      material_id: item.part.material_id || "",
+      volume_mm3: partVolume,
+      mass_g: item.physical?.mass || 0,
+      center_of_mass: center,
+      bounds
+    };
+  });
+  const mass = partReports.reduce((sum, item) => sum + item.mass_g, 0);
+  const centerOfMass = mass > 0 ? [0, 1, 2].map((axis) => partReports.reduce((sum, item) => sum + item.center_of_mass[axis] * item.mass_g, 0) / mass) : exactCenterOfMass(shape);
   return {
     valid: Number.isFinite(volume) && volume > 0 && mesh.triangles.length >= 3,
     representation: "brep",
@@ -21876,24 +22117,24 @@ function geometryReport(shape, mesh) {
     bounds: { min, max, size: [box.width, box.height, box.depth], center: box.center },
     volume_mm3: volume,
     surface_area_mm2: area,
-    body_count: 1,
+    body_count: instances.length || 1,
     face_count: shape.faces.length,
     edge_count: shape.edges.length,
     vertex_count: mesh.vertices.length / 3,
-    triangle_count: mesh.triangles.length / 3
+    triangle_count: mesh.triangles.length / 3,
+    mass_g: mass,
+    center_of_mass: centerOfMass,
+    parts: partReports
   };
 }
 async function run(request) {
-  validateDefinition(request.definition);
-  const params = parameterValues(request.definition, request.parameters || {});
-  const shapes = new Map;
-  for (const operation of request.definition.operations)
-    buildOperation(operation, shapes, params);
-  const shape = shapeFor(request.definition.output, shapes);
+  const built = buildDefinitionGeometry(request.definition, request.parameters || {});
+  const { params, partShapes, assembly } = built;
+  const shape = assembly.shape;
   const tolerance = finite(request.tolerance ?? 0.1, "tolerance");
   const angularTolerance = finite(request.angular_tolerance ?? 0.1, "angular_tolerance");
   const mesh = shape.mesh({ tolerance, angularTolerance });
-  const report = geometryReport(shape, mesh);
+  const report = geometryReport(shape, mesh, assembly.instances);
   if (!report.valid)
     fail2("output geometry is empty or invalid", report);
   const outputDir = request.output_dir;
@@ -21904,18 +22145,58 @@ async function run(request) {
   const formats = new Set(request.formats || ["mesh-json"]);
   if (formats.has("mesh-json")) {
     const path = join(outputDir, "model.mesh.json");
-    await Bun.write(path, JSON.stringify({ ...mesh, edges: shape.meshEdges({ tolerance, angularTolerance }) }));
+    const partMeshes = assembly.visuals.map((item) => ({
+      id: item.id,
+      part_id: item.part_id,
+      name: item.name,
+      color: item.color,
+      ...item.shape.mesh({ tolerance, angularTolerance }),
+      edges: item.shape.meshEdges({ tolerance, angularTolerance })
+    }));
+    await Bun.write(path, JSON.stringify({ ...mesh, edges: shape.meshEdges({ tolerance, angularTolerance }), parts: partMeshes }));
     artifacts.push({ format: "mesh-json", path, content_type: "application/json" });
+    for (const part of request.definition.parts || []) {
+      if (["purchased", "reference"].includes(part.manufacturing?.classification))
+        continue;
+      const partPath = join(outputDir, `${part.id}.mesh.json`);
+      const partShape = partShapes.get(part.id);
+      if (!partShape)
+        fail2(`part ${part.id} has no export geometry`);
+      const partMesh = partShape.mesh({ tolerance, angularTolerance });
+      await Bun.write(partPath, JSON.stringify({ ...partMesh, edges: partShape.meshEdges({ tolerance, angularTolerance }) }));
+      artifacts.push({ format: "mesh-json", path: partPath, content_type: "application/json", part_id: part.id, part_name: part.name });
+    }
   }
   if (formats.has("step")) {
     const path = join(outputDir, "model.step");
-    await writeBlob(path, exportSTEP([{ shape, name: request.name || "Design" }], { unit: "MM", modelUnit: "MM" }));
+    const stepShapes = assembly.instances.length ? assembly.instances.map((item) => ({ shape: item.shape, name: item.id })) : [{ shape, name: request.name || "Design" }];
+    await writeBlob(path, exportSTEP(stepShapes, { unit: "MM", modelUnit: "MM" }));
     artifacts.push({ format: "step", path, content_type: "model/step" });
+    for (const part of request.definition.parts || []) {
+      if (["purchased", "reference"].includes(part.manufacturing?.classification))
+        continue;
+      const partPath = join(outputDir, `${part.id}.step`);
+      const partShape = partShapes.get(part.id);
+      if (!partShape)
+        fail2(`part ${part.id} has no export geometry`);
+      await writeBlob(partPath, exportSTEP([{ shape: partShape, name: part.name }], { unit: "MM", modelUnit: "MM" }));
+      artifacts.push({ format: "step", path: partPath, content_type: "model/step", part_id: part.id, part_name: part.name });
+    }
   }
   if (formats.has("stl")) {
     const path = join(outputDir, "model.stl");
     await writeBlob(path, shape.blobSTL({ tolerance, angularTolerance, binary: true }));
     artifacts.push({ format: "stl", path, content_type: "model/stl" });
+    for (const part of request.definition.parts || []) {
+      if (["purchased", "reference"].includes(part.manufacturing?.classification))
+        continue;
+      const partPath = join(outputDir, `${part.id}.stl`);
+      const partShape = partShapes.get(part.id);
+      if (!partShape)
+        fail2(`part ${part.id} has no export geometry`);
+      await writeBlob(partPath, partShape.blobSTL({ tolerance, angularTolerance, binary: true }));
+      artifacts.push({ format: "stl", path: partPath, content_type: "model/stl", part_id: part.id, part_name: part.name });
+    }
   }
   return { parameters: params, report, artifacts };
 }

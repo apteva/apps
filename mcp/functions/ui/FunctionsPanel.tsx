@@ -100,6 +100,8 @@ interface FunctionRow {
   timeout_ms: number;
   max_memory_mb: number;
   status: Status;
+  env?: Record<string,string>;
+  access?: {apps: string[]; integrations: string[]};
   function_url?: FunctionURLConfig;
   active_version_id?: number;
 }
@@ -297,12 +299,21 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
     [withParams],
   );
 
+  const detailGeneration = useRef(0);
+  const listGeneration = useRef(0);
   const loadList = useCallback(async () => {
+    const generation = ++listGeneration.current;
     try {
       const extra: Record<string, string> = {};
       if (statusFilter) extra.status = statusFilter;
-      const r = await api<{ functions?: FunctionRow[] }>("GET", "/functions", undefined, extra);
-      setFunctions(r.functions || []);
+      const rows: FunctionRow[] = [];
+      let cursor = "";
+      do {
+        const r = await api<{functions?: FunctionRow[]; next_cursor?: string}>("GET", "/functions", undefined, {...extra, cursor});
+        if(generation !== listGeneration.current) return;
+        rows.push(...(r.functions || [])); cursor = r.next_cursor || "";
+      } while(cursor);
+      setFunctions(rows);
       setError("");
     } catch (e) {
       setError((e as Error).message);
@@ -311,14 +322,19 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
 
   const loadDetail = useCallback(
     async (id: number) => {
+      const generation = ++detailGeneration.current;
       try {
-        const f = await api<{ function: FunctionRow }>("GET", `/functions/${id}`);
-        const v = await api<{ versions?: Version[] }>("GET", `/functions/${id}/versions`);
-        const r = await api<{ invocations?: Invocation[] }>("GET", `/functions/${id}/invocations`);
+        const [f, v, r] = await Promise.all([
+          api<{ function: FunctionRow }>("GET", `/functions/${id}`, undefined, {include_secrets:"1"}),
+          (async () => { const versions: Version[]=[]; let cursor=""; do { const page=await api<{versions?:Version[]; next_cursor?:string}>("GET", `/functions/${id}/versions`, undefined, {cursor}); versions.push(...(page.versions||[]));cursor=page.next_cursor||""; } while(cursor && generation === detailGeneration.current); return {versions}; })(),
+          api<{ invocations?: Invocation[] }>("GET", `/functions/${id}/invocations`),
+        ]);
+        if(generation !== detailGeneration.current) return;
         setDetail(f.function);
         setVersions(v.versions || []);
         setInvocations(r.invocations || []);
       } catch (e) {
+        if(generation !== detailGeneration.current) return;
         setDetail(null);
         setError((e as Error).message);
       }
@@ -327,6 +343,7 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
   );
 
   useEffect(() => { loadList(); }, [loadList]);
+  useEffect(() => { ++detailGeneration.current; ++listGeneration.current; setSelectedId(null);setDetail(null);setVersions([]);setInvocations([]);loadList();return()=>{++detailGeneration.current;++listGeneration.current;}; }, [projectId, installId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -354,11 +371,13 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
   });
 
   const select = (id: number) => {
+    setDetail(null);
     setSelectedId(id);
     loadDetail(id);
   };
 
   const closeDetail = () => {
+    ++detailGeneration.current;
     setSelectedId(null);
     setDetail(null);
     setVersions([]);
@@ -461,6 +480,8 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
 
       {detail && (
         <DetailDialog
+          key={`${projectId}:${installId}:${detail.id}`}
+          onDeleted={loadList}
           fn={detail}
           versions={versions}
           invocations={invocations}
@@ -479,13 +500,14 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
 // ─── Detail dialog ────────────────────────────────────────────────────
 
 function DetailDialog({
-  fn, versions, invocations, api, activeVersionNo, onClose, onChanged, withParams, publicBaseURL,
+  fn, versions, invocations, api, activeVersionNo, onClose, onChanged, onDeleted, withParams, publicBaseURL,
 }: {
   fn: FunctionRow;
   versions: Version[];
   invocations: Invocation[];
   api: ApiFn;
   activeVersionNo: string;
+  onDeleted: () => void | Promise<void>;
   onClose: () => void;
   onChanged: () => void | Promise<void>;
   withParams: (extra?: Record<string, string>) => string;
@@ -512,6 +534,7 @@ function DetailDialog({
     try {
       await api("DELETE", `/functions/${fn.id}`);
       onClose();
+      await onDeleted();
     } catch (e) {
       setBusy("delete: " + (e as Error).message);
     } finally {
@@ -534,6 +557,9 @@ function DetailDialog({
       <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
       <div
         className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-4xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-5 gap-4"
+        role="dialog" aria-modal="true" tabIndex={-1}
+        ref={el=>{if(el && !el.contains(document.activeElement)) el.focus();}}
+        onKeyDown={e=>{if(e.key==="Escape"){e.stopPropagation();const close=e.currentTarget.querySelector<HTMLButtonElement>("button");close?.focus();}if(e.key==="Tab"){const nodes=Array.from(e.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled),input:not(:disabled),textarea,select,[tabindex='0']")).filter(el=>el.offsetParent!==null);const first=nodes[0],last=nodes[nodes.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===e.currentTarget)){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}}}
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-start gap-3">
@@ -710,7 +736,7 @@ function DetailDialog({
                     rows.push(
                       <tr key={inv.id + "-detail"} className="border-t border-border bg-bg-input/30">
                         <td colSpan={5} className="px-3 py-2">
-                          <InvocationDetail inv={inv} />
+                          <LoadedInvocation inv={inv} api={api} />
                         </td>
                       </tr>,
                     );
@@ -722,9 +748,12 @@ function DetailDialog({
           )}
         </section>
 
+        <SettingsEditor fn={fn} api={api} onChanged={onChanged}/>
+        {versions.filter(v=>v.build_status==="failed").map(v=><details key={v.id} className="text-xs text-red"><summary>v{v.version} build failed</summary><pre className="whitespace-pre-wrap max-h-40 overflow-auto">{v.build_log || "No diagnostics available"}</pre></details>)}
         {deploying && (
           <DeployDialog
             fn={fn}
+            activeVersion={versions.find(v=>v.id===fn.active_version_id)}
             api={api}
             onClose={() => setDeploying(false)}
             onDeployed={async () => {
@@ -893,9 +922,10 @@ function FunctionURLSettings({
             </label>
           </div>
 
-          {err && <div className="text-red text-xs">{err}</div>}
+
         </div>
       )}
+      {err && <div role="alert" className="text-red text-xs">{err}</div>}
     </section>
   );
 }
@@ -914,7 +944,10 @@ function InvokeConsole({
   const [result, setResult] = useState<{ status: string; body: string; invocationId: string } | null>(null);
   const [err, setErr] = useState("");
 
+  const controller = useRef<AbortController|null>(null);
+  useEffect(()=>()=>controller.current?.abort(), []);
   const run = async () => {
+    const abort = new AbortController(); controller.current=abort;
     setErr("");
     let body: unknown;
     const trimmed = eventText.trim();
@@ -932,20 +965,40 @@ function InvokeConsole({
     setResult(null);
     try {
       const res = await fetch(`${API}/functions/${fn.id}/invoke?${withParams()}`, {
+        signal: abort.signal,
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const text = await res.text();
-      setResult({
-        status: res.headers.get("X-Apteva-Function-Status") || (res.ok ? "ok" : "error"),
-        body: text,
-        invocationId: res.headers.get("X-Apteva-Function-Invocation") || "",
-      });
+      const invocationId=res.headers.get("X-Apteva-Function-Invocation") || "";
+      const isSSE=res.headers.get("Content-Type")?.includes("text/event-stream");
+      let text="", pending="", terminal="", clipped=false, lastPaint=0;
+      const reader=res.body?.getReader(), decoder=new TextDecoder();
+      if(reader) while(true) {
+        const {value,done}=await reader.read();
+        const chunk=decoder.decode(value,{stream:!done});
+        if(text.length+chunk.length>65536) clipped=true;
+        text=(text+chunk).slice(0,65536);
+        if(isSSE) {
+          pending=(pending+chunk).replace(/\r\n/g,"\n");
+          let split;
+          while((split=pending.indexOf("\n\n"))>=0) {
+            const event=pending.slice(0,split); pending=pending.slice(split+2);
+            if(/^event: apteva\.(complete|error)$/m.test(event)) {
+              try { const data=event.split("\n").filter(l=>l.startsWith("data:")).map(l=>l.slice(5).trim()).join("\n"); terminal=JSON.parse(data).status || "error"; } catch {terminal="error";}
+            }
+          }
+          if(pending.length>131072) pending=pending.slice(-65536);
+        }
+        if(done) break;
+        if(performance.now()-lastPaint>50) {setResult({status:"running",body:text+(clipped?"\n[Display capped at 64 KiB]":""),invocationId});lastPaint=performance.now();}
+      }
+      setResult({status:isSSE?(terminal||"incomplete"):(res.headers.get("X-Apteva-Function-Status") || (res.ok?"ok":"error")),body:text+(clipped?"\n[Display capped at 64 KiB]":""),invocationId});
       await onInvoked();
     } catch (e) {
-      setErr((e as Error).message);
+      setErr(abort.signal.aborted?"Invocation canceled":(e as Error).message);
+      setResult(previous=>previous?{...previous,status:abort.signal.aborted?"canceled":"error"}:null);
     } finally {
       setRunning(false);
     }
@@ -975,6 +1028,7 @@ function InvokeConsole({
             disabled={running || fn.status !== "active"}
             className="px-3 py-1 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
           >{running ? "Running…" : "Invoke"}</button>
+          {running && <button type="button" onClick={()=>controller.current?.abort()} className="text-xs text-red">Cancel run</button>}
           {err && <span className="text-red text-xs">{err}</span>}
         </div>
         {result && (
@@ -1093,15 +1147,18 @@ function CreateFunctionDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={()=>{if(!submitting && window.confirm("Discard this new function?")) onClose();}}>
       <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
       <div
         className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-5xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-4 gap-3"
+        role="dialog" aria-modal="true" tabIndex={-1}
+        ref={el=>{if(el && !el.contains(document.activeElement)) el.focus();}}
+        onKeyDown={e=>{if(e.key==="Escape"){e.stopPropagation();const close=e.currentTarget.querySelector<HTMLButtonElement>("button");close?.focus();}if(e.key==="Tab"){const nodes=Array.from(e.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled),input:not(:disabled),textarea,select,[tabindex='0']")).filter(el=>el.offsetParent!==null);const first=nodes[0],last=nodes[nodes.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===e.currentTarget)){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}}}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
           <div className="text-text font-medium">New function</div>
-          <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
+          <button onClick={()=>{if(!submitting && window.confirm("Discard this new function?")) onClose();}} className="text-text-muted hover:text-text">×</button>
         </div>
 
         <div className="flex flex-col gap-1">
@@ -1209,7 +1266,7 @@ function CreateFunctionDialog({
         {err && <div className="text-red text-xs">{err}</div>}
 
         <div className="flex gap-2 justify-end mt-1">
-          <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
+          <button type="button" onClick={()=>{if(!submitting && window.confirm("Discard this new function?")) onClose();}} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
           <button
             type="button"
             onClick={submit}
@@ -1223,15 +1280,17 @@ function CreateFunctionDialog({
 }
 
 function DeployDialog({
-  fn, api, onClose, onDeployed,
+  fn, activeVersion, api, onClose, onDeployed,
 }: {
   fn: FunctionRow;
+  activeVersion?: Version;
   api: ApiFn;
   onClose: () => void;
   onDeployed: () => void;
 }) {
-  const [source, setSource] = useState(fn.source ?? SAMPLE_HANDLER);
-  const [packageJSON, setPackageJSON] = useState("");
+  const [source, setSource] = useState(activeVersion?.source ?? fn.source ?? (fn.runtime==="go"?SAMPLE_GO:SAMPLE_HANDLER));
+  const [packageJSON, setPackageJSON] = useState(activeVersion?.package_json ?? "");
+  const [sourceKind,setSourceKind]=useState(activeVersion?.source_kind ?? fn.source_kind);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState("");
   const [examples, setExamples] = useState<Example[]>([]);
@@ -1244,9 +1303,10 @@ function DeployDialog({
 
   const submit = async () => {
     setErr("");
-    if (!source.trim()) { setErr("Handler source is required."); return; }
-    const body: Record<string, unknown> = { source_kind: "inline", source };
-    if (packageJSON.trim()) body.package_json = packageJSON;
+    if (sourceKind === "inline" && !source.trim()) { setErr("Handler source is required."); return; }
+    const body: Record<string, unknown> = {source_kind:sourceKind, package_json: packageJSON};
+    if(sourceKind==="inline") body.source=source;
+    else {body.repo_id=activeVersion?.repo_id ?? fn.repo_id;body.repo_path=activeVersion?.repo_path ?? fn.repo_path;}
     setSubmitting(true);
     try {
       await api("POST", `/functions/${fn.id}/deploy`, body);
@@ -1259,18 +1319,23 @@ function DeployDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center" onClick={onClose}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center" onClick={() => { if(!submitting && (source===(activeVersion?.source ?? fn.source ?? "") && packageJSON===(activeVersion?.package_json ?? "") || window.confirm("Discard deployment edits?"))) onClose(); }}>
       <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
       <div
         className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-5xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-4 gap-3"
+        role="dialog" aria-modal="true" tabIndex={-1}
+        ref={el=>{if(el && !el.contains(document.activeElement)) el.focus();}}
+        onKeyDown={e=>{if(e.key==="Escape"){e.stopPropagation();const close=e.currentTarget.querySelector<HTMLButtonElement>("button");close?.focus();}if(e.key==="Tab"){const nodes=Array.from(e.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled),input:not(:disabled),textarea,select,[tabindex='0']")).filter(el=>el.offsetParent!==null);const first=nodes[0],last=nodes[nodes.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===e.currentTarget)){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}}}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
           <div className="text-text font-medium">Deploy new version of {fn.name}</div>
-          <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
+          <button onClick={() => { if(!submitting && (source===(activeVersion?.source ?? fn.source ?? "") && packageJSON===(activeVersion?.package_json ?? "") || window.confirm("Discard deployment edits?"))) onClose(); }} className="text-text-muted hover:text-text">×</button>
         </div>
 
-        <div className="flex flex-col gap-1">
+        {(activeVersion?.repo_id || fn.repo_id) && <label className={labelCls}>Source <select value={sourceKind} onChange={e=>setSourceKind(e.target.value as "repo"|"inline")} className={inputCls}><option value="repo">Redeploy current repository file</option><option value="inline">Edit immutable source snapshot</option></select></label>}
+        {sourceKind==="repo" && <p className="text-xs text-text-muted">Repository {activeVersion?.repo_id ?? fn.repo_id}: {activeVersion?.repo_path ?? fn.repo_path}</p>}
+        <div className="flex flex-col gap-1" hidden={sourceKind==="repo"}>
           <div className="flex items-center gap-2 flex-wrap">
             <label className={labelCls}>Handler source</label>
             {examples.length > 0 && (
@@ -1299,8 +1364,8 @@ function DeployDialog({
           />
         </div>
 
-        <div className="flex flex-col gap-1">
-          <label className={labelCls}>package.json (optional — deps installed at deploy)</label>
+        <div className="flex flex-col gap-1" hidden={fn.runtime!=="node"}>
+          <label className={labelCls}>package.json (blank clears dependencies)</label>
           <textarea
             value={packageJSON}
             onChange={(e) => setPackageJSON(e.target.value)}
@@ -1314,7 +1379,7 @@ function DeployDialog({
         {err && <div className="text-red text-xs">{err}</div>}
 
         <div className="flex gap-2 justify-end mt-1">
-          <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
+          <button type="button" onClick={() => { if(!submitting && (source===(activeVersion?.source ?? fn.source ?? "") && packageJSON===(activeVersion?.package_json ?? "") || window.confirm("Discard deployment edits?"))) onClose(); }} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
           <button
             type="button"
             onClick={submit}
@@ -1325,4 +1390,19 @@ function DeployDialog({
       </div>
     </div>
   );
+}
+
+function SettingsEditor({fn,api,onChanged}:{fn:FunctionRow;api:ApiFn;onChanged:()=>void|Promise<void>}) {
+ const [env,setEnv]=useState(Object.entries(fn.env||{}).map(([k,v])=>`${k}=${v}`).join("\n"));
+ const [timeout,setTimeoutValue]=useState(fn.timeout_ms),[memory,setMemory]=useState(fn.max_memory_mb);
+ const [access,setAccess]=useState(JSON.stringify(fn.access??null,null,2));
+ const [error,setError]=useState(""),[saving,setSaving]=useState(false);
+ const save=async()=>{setSaving(true);try { const parsed=envLinesToMap(env);if(typeof parsed==="string") throw Error(parsed);await api("PATCH",`/functions/${fn.id}`,{env:parsed,timeout_ms:timeout,max_memory_mb:memory,access:JSON.parse(access)});await onChanged();setError("");}catch(e){setError((e as Error).message);}finally{setSaving(false);}};
+ return <details className="text-sm border border-border rounded p-3"><summary>Environment, limits and access</summary><div className="grid gap-2 mt-2"><label>Environment (KEY=value)<textarea value={env} onChange={e=>setEnv(e.target.value)} className={inputCls}/></label><label>Timeout (ms)<input type="number" min={1} max={300000} value={timeout} onChange={e=>setTimeoutValue(Number(e.target.value))} className={inputCls}/></label><label>Memory (MiB)<input type="number" min={16} max={1024} value={memory} onChange={e=>setMemory(Number(e.target.value))} className={inputCls}/></label><label>Access policy (null inherits installation grants)<textarea value={access} onChange={e=>setAccess(e.target.value)} placeholder='{"apps":["tables.*"],"integrations":[]}' className={inputCls}/></label><button disabled={saving} onClick={save}>Save settings</button>{error&&<p role="alert" className="text-red">{error}</p>}</div></details>;
+}
+
+function LoadedInvocation({inv,api}:{inv:Invocation;api:ApiFn}) {
+ const [detail,setDetail]=useState(inv),[error,setError]=useState("");
+ useEffect(()=>{let active=true;api<{invocation:Invocation}>("GET",`/invocations/${inv.id}`).then(r=>{if(active)setDetail(r.invocation)}).catch(e=>{if(active)setError(e.message)});return()=>{active=false};},[inv.id,api]);
+ return error?<p className="text-red">{error}</p>:<InvocationDetail inv={detail}/>;
 }

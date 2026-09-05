@@ -13,6 +13,8 @@ let capturePort = null;
 let playbackPort = null;
 let closed = false;
 let microphoneReady = false;
+let muted = false;
+let stableTimer = null;
 let reconnectStartedAt = 0;
 let reconnectAttempt = 0;
 let playbackSequence = 0;
@@ -28,17 +30,33 @@ function pcm16(floatFrame) {
   return out;
 }
 
+// Streaming, windowed-sinc low-pass conversion. History and fractional phase
+// carry across frames; the fixed delay supplies future taps without edge resets.
+const resamplers = new Map();
 function resample(frame, from, to) {
   if (from === to) return frame;
-  const ratio = from / to;
-  const out = new Float32Array(Math.max(1, Math.round(frame.length / ratio)));
-  for (let i = 0; i < out.length; i += 1) {
-    const position = i * ratio;
-    const low = Math.floor(position);
-    const high = Math.min(low + 1, frame.length - 1);
-    out[i] = frame[low] + (frame[high] - frame[low]) * (position - low);
+  const key = `${from}:${to}`;
+  let state = resamplers.get(key);
+  if (!state) { state = {history:new Float32Array(64), phase:0}; resamplers.set(key,state); }
+  const input = new Float32Array(state.history.length + frame.length);
+  input.set(state.history); input.set(frame, state.history.length);
+  const ratio = from / to, cutoff = Math.min(1,to/from) * 0.90, taps = 64;
+  const values = [];
+  let pos = state.phase;
+  for (; pos < frame.length; pos += ratio) {
+    const center = pos + 32;
+    let value=0, weight=0;
+    for (let j=Math.ceil(center-32); j<=Math.floor(center+32); j++) {
+      const x=j-center;
+      const sinc = Math.abs(x)<1e-9 ? cutoff : Math.sin(Math.PI*cutoff*x)/(Math.PI*x);
+      const w=sinc*(0.5+0.5*Math.cos(Math.PI*x/32));
+      if (j>=0 && j<input.length) { value+=input[j]*w; weight+=w; }
+    }
+    values.push(weight ? value/weight : 0);
   }
-  return out;
+  state.phase = pos-frame.length;
+  state.history = input.slice(-taps);
+  return new Float32Array(values);
 }
 
 function framedCapture(frame, sequence, timestampMS, sourceRate) {
@@ -60,7 +78,7 @@ function decodePlayback(buffer) {
 }
 
 function capture(message) {
-  if (message?.type !== "capture" || !microphoneReady || !socket || socket.readyState !== WebSocket.OPEN) return;
+  if (message?.type !== "capture" || muted || !microphoneReady || !socket || socket.readyState !== WebSocket.OPEN) return;
   if (socket.bufferedAmount > MAX_CAPTURE_BUFFERED_BYTES) {
     postMessage({
       type: "transport.drop",
@@ -83,8 +101,9 @@ function connect() {
   socket = ws;
   ws.onopen = () => {
     if (socket !== ws || closed) { ws.close(); return; }
-    reconnectStartedAt = 0;
-    reconnectAttempt = 0;
+    // A handshake alone is not recovery. Require a stable socket before
+    // resetting the retry budget, otherwise open/close loops run forever.
+    stableTimer = setTimeout(() => { if (socket === ws) { if (microphoneReady) {reconnectStartedAt=0; reconnectAttempt=0;} else {ws.close();} } }, 10000);
     postMessage({ type: "socket.open" });
   };
   ws.onmessage = (event) => {
@@ -100,6 +119,8 @@ function connect() {
   ws.onerror = () => postMessage({ type: "socket.error" });
   ws.onclose = () => {
     if (socket !== ws) return;
+    if (stableTimer !== null) clearTimeout(stableTimer);
+    stableTimer = null;
     socket = null;
     microphoneReady = false;
     playbackPort?.postMessage({ type: "flush" });
@@ -134,6 +155,10 @@ self.onmessage = (event) => {
       playbackPort.start?.();
       connect();
       break;
+    case "muted":
+      muted = Boolean(message.value);
+      resamplers.clear();
+      break;
     case "microphone.ready":
       microphoneReady = Boolean(message.value);
       break;
@@ -148,6 +173,7 @@ self.onmessage = (event) => {
       break;
     case "close":
       closed = true;
+      if(stableTimer!==null) clearTimeout(stableTimer);
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       reconnectTimer = null;
       socket?.close();

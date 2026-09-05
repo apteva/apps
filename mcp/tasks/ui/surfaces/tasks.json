@@ -5,55 +5,256 @@
   "title": "Tasks",
   "description": "Review durable work, schedules, progress, and outcomes.",
   "icon": "list-checks",
-  "context": {"scope": "project"},
+  "context": {
+    "scope": "project"
+  },
   "state": {
-    "query": {"type": "string", "default": ""}
+    "query": {
+      "type": "string",
+      "default": ""
+    }
   },
   "data_sources": {
     "tasks": {
       "request": {
         "method": "GET",
         "path": "/tasks",
-        "query": {"limit": 200}
+        "query": {
+          "limit": 100,
+          "q": "$state.query",
+          "view": "active",
+          "include_runs": true
+        }
       },
-      "response": {"items": "$.tasks", "id": "$.id"},
-      "pagination": {"type": "none"},
-      "refresh": {"on_appear": true, "pull_to_refresh": true}
+      "response": {
+        "items": "$.tasks",
+        "id": "$.id"
+      },
+      "pagination": {
+        "type": "cursor",
+        "request_key": "cursor",
+        "response_path": "$.next_cursor",
+        "page_size": 100
+      },
+      "refresh": {
+        "on_appear": true,
+        "pull_to_refresh": true
+      }
     },
     "task": {
-      "request": {"method": "GET", "path": "/tasks/{item.id}"},
-      "response": {"item": "$.task", "id": "$.id"}
+      "request": {
+        "method": "GET",
+        "path": "/tasks/{item.id}"
+      },
+      "response": {
+        "item": "$.task",
+        "id": "$.id"
+      }
     },
     "events": {
-      "request": {"method": "GET", "path": "/tasks/{item.id}/events"},
-      "response": {"items": "$.events", "id": "$.id"}
+      "request": {
+        "method": "GET",
+        "path": "/tasks/{item.id}/events"
+      },
+      "response": {
+        "items": "$.events",
+        "id": "$.id"
+      },
+      "pagination": {
+        "type": "cursor",
+        "request_key": "cursor",
+        "response_path": "$.next_cursor",
+        "page_size": 100
+      }
+    },
+    "schedules": {
+      "request": {
+        "method": "GET",
+        "path": "/tasks",
+        "query": {
+          "limit": 100,
+          "q": "$state.query",
+          "view": "scheduled",
+          "include_runs": true
+        }
+      },
+      "response": {
+        "items": "$.tasks",
+        "id": "$.id"
+      },
+      "pagination": {
+        "type": "cursor",
+        "request_key": "cursor",
+        "response_path": "$.next_cursor",
+        "page_size": 100
+      },
+      "refresh": {
+        "on_appear": true,
+        "pull_to_refresh": true
+      }
+    },
+    "history": {
+      "request": {
+        "method": "GET",
+        "path": "/tasks",
+        "query": {
+          "limit": 100,
+          "q": "$state.query",
+          "view": "recent",
+          "include_runs": true
+        }
+      },
+      "response": {
+        "items": "$.tasks",
+        "id": "$.id"
+      },
+      "pagination": {
+        "type": "cursor",
+        "request_key": "cursor",
+        "response_path": "$.next_cursor",
+        "page_size": 100
+      },
+      "refresh": {
+        "on_appear": true,
+        "pull_to_refresh": true
+      }
     }
   },
   "sections": [
     {
       "id": "tasks",
       "kind": "collection",
-      "title": "Tasks",
+      "title": "Active work",
       "source": "tasks",
       "presentation": "list",
-      "search": {"state": "query", "placeholder": "Search tasks"},
+      "search": {
+        "state": "query",
+        "placeholder": "Search tasks",
+        "query_key": "q"
+      },
       "item": {
         "id": "$item.id",
         "title": "$item.title",
         "subtitle": [
-          {"value": "$item.current_step", "fallback": "$item.state"},
-          {"value": "$item.state"}
+          {
+            "value": "$item.current_step",
+            "fallback": "$item.state"
+          },
+          {
+            "value": "$item.state"
+          }
         ],
-        "badge": {"value": "$item.state"},
+        "badge": {
+          "value": "$item.state"
+        },
         "destination": "task_detail",
-        "actions": ["update_task", "pause_schedule", "resume_schedule", "run_now", "cancel_task"]
+        "actions": [
+          "update_task",
+          "complete_task",
+          "fail_task",
+          "cancel_task"
+        ]
       },
       "empty": {
         "title": "No tasks yet",
         "description": "Durable work and schedules will appear here.",
         "icon": "list-checks"
       },
-      "loading": {"description": "Loading tasks"},
+      "loading": {
+        "description": "Loading tasks"
+      },
+      "error": {
+        "title": "Could not load tasks",
+        "description": "Check the connection and try again.",
+        "retry": true
+      }
+    },
+    {
+      "id": "schedules",
+      "kind": "collection",
+      "title": "Schedules",
+      "source": "schedules",
+      "presentation": "list",
+      "search": {
+        "state": "query",
+        "placeholder": "Search tasks",
+        "query_key": "q"
+      },
+      "item": {
+        "id": "$item.id",
+        "title": "$item.title",
+        "subtitle": [
+          {
+            "value": "$item.current_step",
+            "fallback": "$item.state"
+          },
+          {
+            "value": "$item.state"
+          }
+        ],
+        "badge": {
+          "value": "$item.state"
+        },
+        "destination": "schedule_detail",
+        "actions": [
+          "edit_definition",
+          "pause_schedule",
+          "resume_schedule",
+          "run_now",
+          "cancel_task"
+        ]
+      },
+      "empty": {
+        "title": "No schedules",
+        "description": "Durable work and schedules will appear here.",
+        "icon": "list-checks"
+      },
+      "loading": {
+        "description": "Loading tasks"
+      },
+      "error": {
+        "title": "Could not load tasks",
+        "description": "Check the connection and try again.",
+        "retry": true
+      }
+    },
+    {
+      "id": "history",
+      "kind": "collection",
+      "title": "Recent outcomes",
+      "source": "history",
+      "presentation": "list",
+      "search": {
+        "state": "query",
+        "placeholder": "Search tasks",
+        "query_key": "q"
+      },
+      "item": {
+        "id": "$item.id",
+        "title": "$item.title",
+        "subtitle": [
+          {
+            "value": "$item.current_step",
+            "fallback": "$item.state"
+          },
+          {
+            "value": "$item.state"
+          }
+        ],
+        "badge": {
+          "value": "$item.state"
+        },
+        "destination": "history_detail",
+        "actions": []
+      },
+      "empty": {
+        "title": "No recent outcomes",
+        "description": "Durable work and schedules will appear here.",
+        "icon": "list-checks"
+      },
+      "loading": {
+        "description": "Loading tasks"
+      },
       "error": {
         "title": "Could not load tasks",
         "description": "Check the connection and try again.",
@@ -72,22 +273,92 @@
           "kind": "properties",
           "title": "Details",
           "fields": [
-            {"id": "state", "label": "State", "value": "$item.state"},
-            {"id": "progress", "label": "Progress", "value": "$item.progress", "format": "number"},
-            {"id": "current_step", "label": "Current step", "value": "$item.current_step"},
-            {"id": "assigned_thread", "label": "Assigned thread", "value": "$item.assigned_thread_id"},
-            {"id": "schedule", "label": "Schedule", "value": "$item.schedule_kind"},
-            {"id": "schedule_expression", "label": "Schedule expression", "value": "$item.schedule_expression"},
-            {"id": "schedule_timezone", "label": "Schedule timezone", "value": "$item.schedule_timezone"},
-            {"id": "next_run", "label": "Next run", "value": "$item.next_run_at", "format": "date_time"},
-            {"id": "last_workflow", "label": "Latest workflow", "value": "$item.last_occurrence_status"},
-            {"id": "last_dispatched", "label": "Last dispatched", "value": "$item.last_dispatched_at", "format": "date_time"},
-            {"id": "last_accepted", "label": "Last accepted", "value": "$item.last_run_at", "format": "date_time"},
-            {"id": "last_error", "label": "Latest workflow error", "value": "$item.last_error"},
-            {"id": "result", "label": "Result", "value": "$item.result"},
-            {"id": "error", "label": "Error", "value": "$item.error"},
-            {"id": "created", "label": "Created", "value": "$item.created_at", "format": "date_time"},
-            {"id": "updated", "label": "Updated", "value": "$item.updated_at", "format": "date_time"}
+            {
+              "id": "state",
+              "label": "State",
+              "value": "$item.state"
+            },
+            {
+              "id": "progress",
+              "label": "Progress",
+              "value": "$item.progress",
+              "format": "number"
+            },
+            {
+              "id": "current_step",
+              "label": "Current step",
+              "value": "$item.current_step"
+            },
+            {
+              "id": "assigned_thread",
+              "label": "Assigned thread",
+              "value": "$item.assigned_thread_id"
+            },
+            {
+              "id": "schedule",
+              "label": "Schedule",
+              "value": "$item.schedule_kind"
+            },
+            {
+              "id": "schedule_expression",
+              "label": "Schedule expression",
+              "value": "$item.schedule_expression"
+            },
+            {
+              "id": "schedule_timezone",
+              "label": "Schedule timezone",
+              "value": "$item.schedule_timezone"
+            },
+            {
+              "id": "next_run",
+              "label": "Next run",
+              "value": "$item.next_run_at",
+              "format": "date_time"
+            },
+            {
+              "id": "last_workflow",
+              "label": "Latest workflow",
+              "value": "$item.last_occurrence_status"
+            },
+            {
+              "id": "last_dispatched",
+              "label": "Last dispatched",
+              "value": "$item.last_dispatched_at",
+              "format": "date_time"
+            },
+            {
+              "id": "last_accepted",
+              "label": "Last accepted",
+              "value": "$item.last_run_at",
+              "format": "date_time"
+            },
+            {
+              "id": "last_error",
+              "label": "Latest workflow error",
+              "value": "$item.last_error"
+            },
+            {
+              "id": "result",
+              "label": "Result",
+              "value": "$item.result"
+            },
+            {
+              "id": "error",
+              "label": "Error",
+              "value": "$item.error"
+            },
+            {
+              "id": "created",
+              "label": "Created",
+              "value": "$item.created_at",
+              "format": "date_time"
+            },
+            {
+              "id": "updated",
+              "label": "Updated",
+              "value": "$item.updated_at",
+              "format": "date_time"
+            }
           ]
         },
         {
@@ -103,30 +374,266 @@
           }
         }
       ],
-      "actions": ["update_task", "pause_schedule", "resume_schedule", "run_now", "cancel_task"]
+      "actions": [
+        "update_task",
+        "complete_task",
+        "fail_task",
+        "cancel_task"
+      ]
+    },
+    "schedule_detail": {
+      "type": "detail",
+      "title": "{item.title}",
+      "source": "task",
+      "sections": [
+        {
+          "id": "details",
+          "kind": "properties",
+          "title": "Details",
+          "fields": [
+            {
+              "id": "state",
+              "label": "State",
+              "value": "$item.state"
+            },
+            {
+              "id": "progress",
+              "label": "Progress",
+              "value": "$item.progress",
+              "format": "number"
+            },
+            {
+              "id": "current_step",
+              "label": "Current step",
+              "value": "$item.current_step"
+            },
+            {
+              "id": "assigned_thread",
+              "label": "Assigned thread",
+              "value": "$item.assigned_thread_id"
+            },
+            {
+              "id": "schedule",
+              "label": "Schedule",
+              "value": "$item.schedule_kind"
+            },
+            {
+              "id": "schedule_expression",
+              "label": "Schedule expression",
+              "value": "$item.schedule_expression"
+            },
+            {
+              "id": "schedule_timezone",
+              "label": "Schedule timezone",
+              "value": "$item.schedule_timezone"
+            },
+            {
+              "id": "next_run",
+              "label": "Next run",
+              "value": "$item.next_run_at",
+              "format": "date_time"
+            },
+            {
+              "id": "last_workflow",
+              "label": "Latest workflow",
+              "value": "$item.last_occurrence_status"
+            },
+            {
+              "id": "last_dispatched",
+              "label": "Last dispatched",
+              "value": "$item.last_dispatched_at",
+              "format": "date_time"
+            },
+            {
+              "id": "last_accepted",
+              "label": "Last accepted",
+              "value": "$item.last_run_at",
+              "format": "date_time"
+            },
+            {
+              "id": "last_error",
+              "label": "Latest workflow error",
+              "value": "$item.last_error"
+            },
+            {
+              "id": "result",
+              "label": "Result",
+              "value": "$item.result"
+            },
+            {
+              "id": "error",
+              "label": "Error",
+              "value": "$item.error"
+            },
+            {
+              "id": "created",
+              "label": "Created",
+              "value": "$item.created_at",
+              "format": "date_time"
+            },
+            {
+              "id": "updated",
+              "label": "Updated",
+              "value": "$item.updated_at",
+              "format": "date_time"
+            }
+          ]
+        },
+        {
+          "id": "events",
+          "kind": "timeline",
+          "title": "Activity",
+          "source": "events",
+          "timeline": {
+            "id": "$item.id",
+            "title": "$item.event_type",
+            "detail": "$item.to_state",
+            "time": "$item.created_at"
+          }
+        }
+      ],
+      "actions": [
+        "edit_definition",
+        "pause_schedule",
+        "resume_schedule",
+        "run_now",
+        "cancel_task"
+      ]
+    },
+    "history_detail": {
+      "type": "detail",
+      "title": "{item.title}",
+      "source": "task",
+      "sections": [
+        {
+          "id": "details",
+          "kind": "properties",
+          "title": "Details",
+          "fields": [
+            {
+              "id": "state",
+              "label": "State",
+              "value": "$item.state"
+            },
+            {
+              "id": "progress",
+              "label": "Progress",
+              "value": "$item.progress",
+              "format": "number"
+            },
+            {
+              "id": "current_step",
+              "label": "Current step",
+              "value": "$item.current_step"
+            },
+            {
+              "id": "assigned_thread",
+              "label": "Assigned thread",
+              "value": "$item.assigned_thread_id"
+            },
+            {
+              "id": "schedule",
+              "label": "Schedule",
+              "value": "$item.schedule_kind"
+            },
+            {
+              "id": "schedule_expression",
+              "label": "Schedule expression",
+              "value": "$item.schedule_expression"
+            },
+            {
+              "id": "schedule_timezone",
+              "label": "Schedule timezone",
+              "value": "$item.schedule_timezone"
+            },
+            {
+              "id": "next_run",
+              "label": "Next run",
+              "value": "$item.next_run_at",
+              "format": "date_time"
+            },
+            {
+              "id": "last_workflow",
+              "label": "Latest workflow",
+              "value": "$item.last_occurrence_status"
+            },
+            {
+              "id": "last_dispatched",
+              "label": "Last dispatched",
+              "value": "$item.last_dispatched_at",
+              "format": "date_time"
+            },
+            {
+              "id": "last_accepted",
+              "label": "Last accepted",
+              "value": "$item.last_run_at",
+              "format": "date_time"
+            },
+            {
+              "id": "last_error",
+              "label": "Latest workflow error",
+              "value": "$item.last_error"
+            },
+            {
+              "id": "result",
+              "label": "Result",
+              "value": "$item.result"
+            },
+            {
+              "id": "error",
+              "label": "Error",
+              "value": "$item.error"
+            },
+            {
+              "id": "created",
+              "label": "Created",
+              "value": "$item.created_at",
+              "format": "date_time"
+            },
+            {
+              "id": "updated",
+              "label": "Updated",
+              "value": "$item.updated_at",
+              "format": "date_time"
+            }
+          ]
+        },
+        {
+          "id": "events",
+          "kind": "timeline",
+          "title": "Activity",
+          "source": "events",
+          "timeline": {
+            "id": "$item.id",
+            "title": "$item.event_type",
+            "detail": "$item.to_state",
+            "time": "$item.created_at"
+          }
+        }
+      ],
+      "actions": []
     }
   },
   "actions": {
     "update_task": {
       "type": "form",
-      "label": "Update task",
+      "label": "Update progress",
       "icon": "edit",
-      "placements": ["item", "detail"],
+      "placements": [
+        "item",
+        "detail"
+      ],
       "request": {
         "method": "PATCH",
         "path": "/tasks/{item.id}",
         "encoding": "json",
         "body": {
-          "title": "$input.title",
-          "description": "$input.description",
           "state": "$input.state",
           "progress": "$input.progress",
           "current_step": "$input.current_step"
         }
       },
       "fields": [
-        {"name": "title", "type": "string", "label": "Title", "default": "$item.title", "required": true},
-        {"name": "description", "type": "multiline", "label": "Description", "default": "$item.description"},
         {
           "name": "state",
           "type": "choice",
@@ -134,20 +641,45 @@
           "default": "$item.state",
           "required": true,
           "options": [
-            {"label": "Queued", "value": "queued"},
-            {"label": "Running", "value": "running"},
-            {"label": "Waiting", "value": "waiting"},
-            {"label": "Blocked", "value": "blocked"},
-            {"label": "Completed", "value": "completed"},
-            {"label": "Failed", "value": "failed"},
-            {"label": "Cancelled", "value": "cancelled"}
+            {
+              "label": "Queued",
+              "value": "queued"
+            },
+            {
+              "label": "Running",
+              "value": "running"
+            },
+            {
+              "label": "Waiting",
+              "value": "waiting"
+            },
+            {
+              "label": "Blocked",
+              "value": "blocked"
+            }
           ]
         },
-        {"name": "progress", "type": "integer", "label": "Progress", "default": "$item.progress"},
-        {"name": "current_step", "type": "string", "label": "Current step", "default": "$item.current_step"}
+        {
+          "name": "progress",
+          "type": "integer",
+          "label": "Progress",
+          "default": "$item.progress"
+        },
+        {
+          "name": "current_step",
+          "type": "string",
+          "label": "Current step",
+          "default": "$item.current_step"
+        }
       ],
       "success": {
-        "refresh": ["tasks", "task", "events"],
+        "refresh": [
+          "tasks",
+          "task",
+          "events",
+          "schedules",
+          "history"
+        ],
         "dismiss": true,
         "toast": "Task updated"
       }
@@ -156,42 +688,213 @@
       "type": "request",
       "label": "Pause schedule",
       "icon": "pause",
-      "placements": ["item", "detail"],
-      "request": {"method": "POST", "path": "/tasks/{item.id}/pause"},
-      "success": {"refresh": ["tasks", "task", "events"], "toast": "Schedule paused"}
+      "placements": [
+        "item",
+        "detail"
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/tasks/{item.id}/pause"
+      },
+      "success": {
+        "refresh": [
+          "tasks",
+          "task",
+          "events",
+          "schedules",
+          "history"
+        ],
+        "toast": "Schedule paused"
+      }
     },
     "resume_schedule": {
       "type": "request",
       "label": "Resume schedule",
       "icon": "play",
-      "placements": ["item", "detail"],
-      "request": {"method": "POST", "path": "/tasks/{item.id}/resume"},
-      "success": {"refresh": ["tasks", "task", "events"], "toast": "Schedule resumed"}
+      "placements": [
+        "item",
+        "detail"
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/tasks/{item.id}/resume"
+      },
+      "success": {
+        "refresh": [
+          "tasks",
+          "task",
+          "events",
+          "schedules",
+          "history"
+        ],
+        "toast": "Schedule resumed"
+      }
     },
     "run_now": {
       "type": "request",
       "label": "Run now",
       "icon": "play-circle",
-      "placements": ["item", "detail"],
-      "request": {"method": "POST", "path": "/tasks/{item.id}/run-now"},
-      "success": {"refresh": ["tasks", "task", "events"], "toast": "Run requested"}
+      "placements": [
+        "item",
+        "detail"
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/tasks/{item.id}/run-now"
+      },
+      "success": {
+        "refresh": [
+          "tasks",
+          "task",
+          "events",
+          "schedules",
+          "history"
+        ],
+        "toast": "Run requested"
+      }
     },
     "cancel_task": {
       "type": "confirm",
       "label": "Cancel task",
       "icon": "cancel",
-      "placements": ["item", "detail"],
+      "placements": [
+        "item",
+        "detail"
+      ],
       "destructive": true,
-      "request": {"method": "DELETE", "path": "/tasks/{item.id}"},
+      "request": {
+        "method": "DELETE",
+        "path": "/tasks/{item.id}"
+      },
       "confirmation": {
         "title": "Cancel this task?",
         "message": "The task or schedule will stop and be marked cancelled.",
         "confirm_label": "Cancel task"
       },
       "success": {
-        "refresh": ["tasks", "task", "events"],
+        "refresh": [
+          "tasks",
+          "task",
+          "events",
+          "schedules",
+          "history"
+        ],
         "dismiss": true,
         "toast": "Task cancelled"
+      }
+    },
+    "complete_task": {
+      "type": "form",
+      "label": "Complete task",
+      "placements": [
+        "item",
+        "detail"
+      ],
+      "request": {
+        "method": "PATCH",
+        "path": "/tasks/{item.id}",
+        "encoding": "json",
+        "body": {
+          "state": "completed",
+          "result": "$input.result"
+        }
+      },
+      "fields": [
+        {
+          "name": "result",
+          "type": "multiline",
+          "label": "Result",
+          "required": true
+        }
+      ],
+      "success": {
+        "refresh": [
+          "tasks",
+          "task",
+          "events",
+          "history",
+          "schedules"
+        ],
+        "dismiss": true,
+        "toast": "Complete task"
+      }
+    },
+    "fail_task": {
+      "type": "form",
+      "label": "Fail task",
+      "placements": [
+        "item",
+        "detail"
+      ],
+      "request": {
+        "method": "PATCH",
+        "path": "/tasks/{item.id}",
+        "encoding": "json",
+        "body": {
+          "state": "failed",
+          "error": "$input.error"
+        }
+      },
+      "fields": [
+        {
+          "name": "error",
+          "type": "multiline",
+          "label": "Error",
+          "required": true
+        }
+      ],
+      "success": {
+        "refresh": [
+          "tasks",
+          "task",
+          "events",
+          "history",
+          "schedules"
+        ],
+        "dismiss": true,
+        "toast": "Fail task"
+      }
+    },
+    "edit_definition": {
+      "type": "form",
+      "label": "Edit definition",
+      "placements": [
+        "item",
+        "detail"
+      ],
+      "request": {
+        "method": "PATCH",
+        "path": "/tasks/{item.id}",
+        "encoding": "json",
+        "body": {
+          "title": "$input.title",
+          "description": "$input.description"
+        }
+      },
+      "fields": [
+        {
+          "name": "title",
+          "type": "string",
+          "label": "Title",
+          "default": "$item.title",
+          "required": true
+        },
+        {
+          "name": "description",
+          "type": "multiline",
+          "label": "Instructions",
+          "default": "$item.description"
+        }
+      ],
+      "success": {
+        "refresh": [
+          "schedules",
+          "task",
+          "events",
+          "history"
+        ],
+        "dismiss": true,
+        "toast": "Definition updated"
       }
     }
   }

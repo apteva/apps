@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tasks
 display_name: Tasks
-version: 3.3.2
+version: 3.5.1
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -11,12 +11,13 @@ icon_style: monochrome
 tags: [productivity, agents, scheduling, automation]
 
 scopes: [project, global]
-min_apteva_version: "0.28.0"
+min_apteva_version: "0.40.6"
 
 requires:
   permissions:
     - db.write.app
     - platform.instances.read
+    - platform.instances.write
     - platform.threads.write
 
 provides:
@@ -26,13 +27,17 @@ provides:
     - { name: create, description: "Create one durable task for multi-step, multi-source, delegated, scheduled, or resumable work." }
     - { name: list, description: List durable tasks visible to the calling agent. }
     - { name: get, description: Get one task and its event history. }
-    - { name: update, description: Atomically edit task definitions and record meaningful progress or state. }
+    - { name: set_progress, description: "Record one meaningful nonterminal progress milestone." }
+    - { name: edit, description: "Atomically edit a task definition while preserving omitted fields." }
+    - { name: fail, description: "Record an explicit terminal task failure." }
+    - { name: update, description: "Legacy compatibility tool; use set_progress, edit, fail, or complete." }
     - { name: assign, description: Assign a task to an existing opaque agent thread. }
     - { name: complete, description: Complete a task with a concrete result. }
     - { name: cancel, description: Cancel a task or schedule. }
     - { name: pause, description: Pause a scheduled task. }
     - { name: resume, description: Resume a scheduled task. }
     - { name: run_now, description: Run a scheduled task now. }
+    - { name: recover_occurrence, description: Create a linked reconciliation-only recovery attempt for a failed occurrence. }
   ui_panels:
     - slot: project.page
       label: Tasks
@@ -56,7 +61,7 @@ provides:
       supported_sizes: [half, full]
       default_size: half
       visibility: project
-      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap]
+      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap, task.terminalization_requested, task.terminalization_execution_claimed, task.terminalization_execution_active, task.terminalization_execution_settled, task.agent_execution_active, task.agent_execution_settled, task.agent_execution_error]
       native:
         schema: apteva-native-surface/v1
         entry: /ui/surfaces/task-overview.json
@@ -89,7 +94,7 @@ provides:
       slots: [dashboard.agent_card, dashboard.agent_detail, dashboard.thread_sidebar]
       suggested: true
       visibility: attached
-      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap]
+      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_dispatched, task.occurrence_redispatched, task.occurrence_accepted, task.occurrence_skipped_overlap, task.terminalization_requested, task.terminalization_execution_claimed, task.terminalization_execution_active, task.terminalization_execution_settled, task.agent_execution_active, task.agent_execution_settled, task.agent_execution_error]
       default_width: 1
     - name: task-card
       entry: /ui/TaskCard.mjs

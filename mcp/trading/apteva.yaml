@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.4.41
+version: 0.9.0
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -18,9 +18,12 @@ description: |
             Bind a broker via Settings → Integrations to enable
             mode=live. Without any binding, every portfolio stays paper.
 
-  Each portfolio has its own mandate, allowed asset classes, and
-  daily-loss halt. Approval flow lives in the agent's directive (via
-  channel-chat), not in this sidecar — keeps the trading surface
+  Each portfolio has its own mandate, allowed asset classes, enforceable
+  risk profile, high-water drawdown and daily-loss halts, and percentage
+  performance objectives. Portfolio tradable-universe policies gate human and
+  automated orders, while durable strategy scorecards control staged promotion
+  into broker-paper and broker-live execution. Approval flow lives in the
+  agent's directive (via channel-chat), not in this sidecar — keeps the trading surface
   focused on state, execution, market data, and audit log.
 
 author: Apteva
@@ -39,6 +42,7 @@ requires:
     - net.egress                   # public market-data endpoints (Binance, Polymarket gamma-api)
     - platform.connections.execute # broker calls (live mode)
     - platform.connections.read    # discover bound brokers per slug — see brokers_list, brokerFor()
+    - platform.connections.read_credentials # authenticated Alpaca market + trade WebSockets; credentials remain server-side/in-memory
     - platform.environments.read   # list/read backtest environments
     - platform.environments.call   # seed replay prices into an isolated trading app
     - platform.environments.manage # create/spawn/snapshot/destroy backtest environments
@@ -79,10 +83,33 @@ requires:
       compatible_slugs: [alpaca-market-data, yahoo-finance]
       capabilities:
         - quotes.equity
+        - bars.equity
+        - latest_quotes.equity
       tools:
         quotes.equity: stock_snapshots
+        bars.equity: stock_bars
+        latest_quotes.equity: stock_latest_quotes
       label: "Market Data — Equity (optional — real prices for live equity portfolios)"
       hint: "Bind alpaca-market-data for paid-tier real-time. yahoo-finance works without auth as a free fallback — the trading sidecar already uses Yahoo automatically when nothing's bound here."
+    - role: reference_actions
+      kind: integration
+      required: false
+      compatible_slugs: [alpaca-market-data]
+      capabilities: [reference.corporate_actions]
+      tools:
+        reference.corporate_actions: corporate_actions
+      label: "Reference Data — Corporate Actions"
+      hint: "Uses Alpaca's revisioned corporate-actions dataset for splits, dividends, mergers, spinoffs, symbol changes, removals, rights, and distributions."
+    - role: reference_broker
+      kind: integration
+      required: false
+      compatible_slugs: [alpaca-trading]
+      capabilities: [reference.assets, reference.calendar, reference.account_activities]
+      tools:
+        reference.assets: list_assets
+        reference.calendar: get_calendar
+        reference.account_activities: list_activities
+      label: "Reference Data — Assets, Sessions, and Account Effects"
 
 provides:
   http_routes:
@@ -92,10 +119,30 @@ provides:
       description: "Create a new paper or live portfolio. Live portfolios pass broker_slug — use brokers_list to enumerate."
     - name: brokers_list
       description: "Enumerate registered broker adapters and their currently-bound connections."
+    - name: venue_profiles_list
+      description: "List effective venue fees, spread/slippage, sessions, funding, minimums, precision, and health."
+    - name: venue_profile_update
+      description: "Create or update a generic venue-wide or symbol-specific execution profile."
     - name: portfolio_list
       description: "List portfolios visible to this agent."
     - name: portfolio_get
       description: "Snapshot of one portfolio (mandate, equity, cash, status, watchlist)."
+    - name: risk_profiles_list
+      description: "List built-in portfolio risk presets and enforced percentage limits."
+    - name: portfolio_risk_get
+      description: "Get a portfolio's resolved risk policy and current drawdown state."
+    - name: portfolio_risk_update
+      description: "Set an enforceable risk preset or custom percentage limits."
+    - name: portfolio_universe_get
+      description: "Get the portfolio's enforced tradable universe policy."
+    - name: portfolio_universe_update
+      description: "Configure a hard symbol allowlist, exclusions, or reference universe."
+    - name: portfolio_objective_create
+      description: "Create a native Trading percentage objective."
+    - name: portfolio_objectives_list
+      description: "List portfolio objectives with live progress."
+    - name: portfolio_objective_update
+      description: "Update or archive a Trading objective."
     - name: account_summary
       description: "Equity, cash, buying power, day and open P&L for one portfolio."
     - name: positions_list
@@ -112,6 +159,16 @@ provides:
       description: "OHLCV bars or probability history for a symbol."
     - name: market_source
       description: "Report the live data source per asset class — provider name, errors_60s, staleness."
+    - name: market_calendar
+      description: "Return normalized exchange-calendar state and instrument metadata for a symbol."
+    - name: reference_data_status
+      description: "Report canonical reference-data coverage, checkpoints, and quality state."
+    - name: security_resolve
+      description: "Resolve symbols and names to stable security/listing identities at a point in time."
+    - name: corporate_actions_list
+      description: "List normalized latest-revision corporate actions."
+    - name: exchange_sessions_list
+      description: "List authoritative normalized exchange sessions."
     - name: watchlist_add
       description: "Track a symbol on a portfolio."
     - name: watchlist_remove
@@ -122,8 +179,14 @@ provides:
       description: "Append a thesis/rationale/note to a portfolio's journal."
     - name: journal_read
       description: "Read journal entries for a portfolio (recent or filtered by kind)."
+    - name: execution_costs_list
+      description: "List attributed fee, spread, slippage, funding, and rebate entries for a portfolio."
+    - name: funding_payment_record
+      description: "Idempotently record a signed venue funding payment."
     - name: portfolio_pause
       description: "Pause this portfolio (no new orders). Self-only — resume is human-only via REST."
+    - name: portfolio_arm_live
+      description: "Explicitly arm or disarm automated execution for a broker_live portfolio. Arming requires the exact LIVE MONEY confirmation."
     - name: strategy_create
       description: "Create a deterministic strategy definition with indicator/ranking/allocation rules."
     - name: strategy_update
@@ -142,6 +205,14 @@ provides:
       description: "Create a deterministic strategy backtest using the existing backtest tables."
     - name: strategy_validate_backtest
       description: "Run fixed-parameter strategy validation with in-sample and out-of-sample backtests."
+    - name: strategy_scorecard_get
+      description: "Get scorecard policy, promotion stage, and durable evaluations."
+    - name: strategy_scorecard_update
+      description: "Configure generic scorecard metric thresholds and enforcement."
+    - name: strategy_scorecard_evaluate
+      description: "Evaluate a completed strategy backtest against its scorecard."
+    - name: strategy_promotion_update
+      description: "Promote, demote, or suspend a strategy under its scorecard gate."
     - name: backtest_market_step
       description: "Internal backtest runner tool: load replay prices into an isolated environment."
   # Same shape as crm + storage: a panel mounted in the dashboard's
@@ -156,9 +227,9 @@ provides:
       label: Trading
       icon: trending-up
       entry: /ui/TradingPanel.mjs
-  # No prompt_fragments. Trading policy (approval gates, position-sizing
-  # opinions) belongs in the operator's per-instance directive, not
-  # baked into every install. The MCP tool descriptions carry the
+  # No prompt_fragments. Approval policy belongs in the operator's
+  # per-instance directive; objective and numeric portfolio risk state are
+  # native Trading domains. The MCP tool descriptions carry the
   # platform contract (rationale length, rejection codes, status
   # semantics); the agent learns the rest from structured rejections.
 
@@ -192,6 +263,16 @@ config_schema:
     default: "5"
     label: Mark refresh cadence (seconds)
     description: How often the paper engine re-marks open positions and tries to fill working orders.
+  - name: alpaca_feed
+    type: text
+    default: "auto"
+    label: Alpaca stock feed
+    description: "auto negotiates the best entitlement; otherwise iex, sip, or delayed_sip. The active feed is always shown in the UI."
+  - name: strict_broker_market_data
+    type: text
+    default: "true"
+    label: Require broker-grade data for broker portfolios
+    description: "When true, broker-backed equity execution never silently falls back to Yahoo marks."
   - name: backtest_max_market_rows
     type: text
     default: "500000"
@@ -200,6 +281,11 @@ config_schema:
       Maximum captured OHLCV rows across all symbols in one backtest. The default supports
       a full year of 5-minute crypto data for four symbols, or decades of hourly data.
       Raise this only when the app has enough memory and disk for larger immutable replays.
+  - name: reference_history_start
+    type: text
+    default: "2000-01-01"
+    label: Reference-data history start
+    description: Earliest process/session date requested during the Alpaca reference-data backfill.
   - name: pricing_provider
     type: text
     default: "live"

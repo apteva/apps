@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: jobs
 display_name: Jobs
-version: 0.1.13
+version: 0.1.14
 description: |
   Scheduled-job runner. Other apps (and agents) enqueue work to be
   delivered later — once at a future time, on an interval, on a cron
@@ -32,22 +32,36 @@ requires:
   dynamic_app_calls: true
 
 provides:
+  permissions:
+    - name: jobs.schedule
+      description: Schedule work and trigger additional manual runs. Checked again for agent-owned jobs before delivery.
+    - name: jobs.read
+      description: Read schedule summaries and run status. Execution payloads and credentials are hidden.
+    - name: jobs.cancel
+      description: Cancel pending or running jobs.
   http_routes:
     - prefix: /
   mcp_tools:
     - name: jobs_schedule
+      requires: jobs.schedule
       description: Schedule a job (once / every / cron / random) with an app-tool, external HTTP, or event target.
     - name: jobs_cancel
+      requires: jobs.cancel
       description: Cancel a scheduled job. Idempotent.
     - name: jobs_list
+      requires: jobs.read
       description: List jobs filtered by owner_app, owner_instance, status.
     - name: jobs_get
+      requires: jobs.read
       description: Fetch one job by id.
     - name: jobs_runs
+      requires: jobs.read
       description: Fetch recent runs for a job (timestamp, status, duration, error).
     - name: jobs_run_now
+      requires: jobs.schedule
       description: Trigger an immediate ad-hoc run of a scheduled job.
     - name: jobs_preview
+      requires: jobs.read
       description: Preview deterministic randomized schedule occurrences.
   ui_panels:
     - slot: project.page
@@ -73,21 +87,27 @@ db:
   migrations: migrations/
 
 config_schema:
+  - name: terminal_job_retention_days
+    type: text
+    default: "90"
+    label: Terminal job retention (days)
+    description: Delete done, failed and cancelled jobs after this many days. Their remaining runs are also deleted. 0 disables pruning.
+  - name: allow_private_http
+    type: text
+    default: "true"
+    label: Allow private HTTP destinations
+    description: True preserves internal webhook support. Set false to restrict HTTP targets to public addresses. Cross-origin redirects are always blocked.
+
   - name: history_retention_days
     type: text
     default: "30"
     label: Run history retention (days)
     description: How long to keep entries in job_runs before pruning. 0 disables pruning.
-  - name: dispatch_batch_size
-    type: text
-    default: "20"
-    label: Dispatch batch size
-    description: Maximum jobs claimed per ticker tick. Tune up for very high schedule density.
   - name: dispatch_concurrency
     type: text
     default: "8"
     label: Dispatch concurrency
-    description: Maximum jobs executed concurrently within one dispatcher tick. Max 50.
+    description: Maximum jobs executed concurrently across the entire installation. Max 50.
   - name: http_dispatch_timeout_seconds
     type: text
     default: "180"

@@ -12,6 +12,8 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,10 +105,10 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(configDir); err == nil {
+	if _, err := os.Lstat(configDir); err == nil {
 		return nil, fmt.Errorf("data dir already exists: %s", configDir)
 	}
-	port, err := allocatePort()
+	port, err := a.pickTenantPort(ctx, fleetHost{}, intArg(args, "port", 0))
 	if err != nil {
 		return nil, err
 	}
@@ -128,8 +130,18 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := a.store.insert(t, apiKeyStub, nil); err != nil {
+	initializationDone, err := a.insertTenantForOperation(t, apiKeyStub, nil, "provision", false)
+	if err != nil {
 		return nil, err
+	}
+	defer initializationDone()
+	if err := os.MkdirAll(filepath.Dir(configDir), 0700); err != nil {
+		_ = a.store.hardDelete(t.ID)
+		return nil, err
+	}
+	if err := os.Mkdir(configDir, 0700); err != nil {
+		_ = a.store.hardDelete(t.ID)
+		return nil, fmt.Errorf("reserve new tenant directory: %w", err)
 	}
 	if pendingTemplate != nil {
 		pendingTemplate.TenantID = t.ID
@@ -174,7 +186,14 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		_ = a.store.setStatus(t.ID, StatusFailed, "user")
 		_ = a.store.recordEvent(t.ID, "spawn_failed", "user", map[string]any{"error": err.Error()})
-		_ = os.RemoveAll(configDir)
+		if stopErr := a.stopTenantBy(t.Slug, configDir, port, 10*time.Second); stopErr != nil {
+			a.requireRecovery(t.ID, stopErr)
+			return nil, fmt.Errorf("spawn failed (%v); cleanup requires recovery: %w", err, stopErr)
+		}
+		if cleanupErr := os.RemoveAll(configDir); cleanupErr != nil {
+			a.requireRecovery(t.ID, cleanupErr)
+			return nil, cleanupErr
+		}
 		_ = a.store.hardDelete(t.ID)
 		return nil, err
 	}
@@ -190,7 +209,11 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// credentials + api_key in the response (one-shot reveal). On
 	// failure we persist the setup_token and fall back to the manual
 	// setup_pending flow so the operator can finish by hand.
-	autoSetup, err := a.autoSetupTenant(context.Background(), t.BaseURL, setupToken, owner, "")
+	if err := a.persistSetupToken(t.ID, setupToken); err != nil {
+		a.requireRecovery(t.ID, err)
+		return nil, err
+	}
+	autoSetup, err := a.provisionTenant(context.Background(), t, t.BaseURL, setupToken, owner)
 	if err != nil {
 		ctx.Logger().Warn("fleet: auto-setup failed, falling back to setup_pending", "tenant", t.ID, "err", err)
 		setupTokenEnc, sealErr := a.keys.seal([]byte(setupToken))
@@ -215,7 +238,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"setup_url":        publicURL + "/?setup=1",
 			"setup_token":      setupToken,
 			"auto_setup_error": err.Error(),
-			"next_steps":       "Auto-setup failed (see auto_setup_error). Manual recovery: open setup_url, register admin with the setup_token, generate an api_key, call tenant_attach_key.",
+			"next_steps":       "Setup is incomplete. Use Resume setup to retry safely with the saved credentials, or attach a valid admin API key.",
 		}
 		if pendingTemplate != nil {
 			out["template"] = pendingTemplateStatus(*pendingTemplate)
@@ -270,21 +293,16 @@ func (a *App) toolAttachKey(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer done()
-	if t.Status == StatusActive {
-		return nil, errors.New("tenant already linked; use a fresh tenant_create or rotate manually")
-	}
-	if t.Status != StatusSetupPending && t.Status != StatusStarting {
-		return nil, fmt.Errorf("tenant in status %q is not awaiting a key", t.Status)
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
 	}
 	baseURL, err := a.internalTenantBaseURL(ctx, t)
 	if err != nil {
 		return nil, fmt.Errorf("open tenant control channel: %w", err)
 	}
 
-	// Validate the key by hitting /api/health with auth. We accept
-	// any 200 — health is unauthenticated, so a wrong key still
-	// returns 200 with the version body. The real "is this an admin
-	// key?" check is /api/auth/status which 401s on bad keys.
+	// Verify an authenticated admin identity; health/status endpoints are public.
 	if err := verifyAPIKey(context.Background(), baseURL, apiKey); err != nil {
 		return nil, fmt.Errorf("verify api_key: %w", err)
 	}
@@ -317,13 +335,9 @@ func (a *App) toolAttachKey(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return out, nil
 }
 
-// verifyAPIKey GETs /api/auth/status with the supplied bearer and
-// asserts a 200. 401 here means the key is bad or doesn't resolve to
-// a user; any other non-2xx is treated as a transient failure rather
-// than a hard reject so we don't lose a perfectly good key when the
-// tenant is briefly slow.
+// verifyAPIKey requires an authenticated platform administrator identity.
 func verifyAPIKey(ctx context.Context, baseURL, apiKey string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/auth/status", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/auth/me", nil)
 	if err != nil {
 		return err
 	}
@@ -339,6 +353,16 @@ func verifyAPIKey(ctx context.Context, baseURL, apiKey string) error {
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("tenant returned %d on auth status: %s", resp.StatusCode, string(body))
+	}
+	var identity struct {
+		UserID int64  `json:"user_id"`
+		Role   string `json:"role"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&identity); err != nil {
+		return fmt.Errorf("invalid authenticated identity: %w", err)
+	}
+	if identity.UserID <= 0 || identity.Role != "admin" {
+		return errors.New("Fleet requires an admin API key")
 	}
 	return nil
 }
@@ -363,6 +387,9 @@ func (a *App) toolConnect(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if _, _, err := a.store.getBySlug(slug); err == nil {
 		return nil, fmt.Errorf("slug %q already in use", slug)
+	}
+	if err := verifyAPIKey(context.Background(), baseURL, apiKey); err != nil {
+		return nil, err
 	}
 	ok, version, body, err := probeHealth(context.Background(), baseURL, apiKey)
 	if err != nil {
@@ -449,6 +476,15 @@ func (a *App) toolGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) decorateView(t *Tenant, events []Event) map[string]any {
 	pub := a.publicTenantView(t)
 	out := map[string]any{"tenant": pub, "events": events}
+	if op, err := a.store.activeOperation(t.ID); err == nil && op != nil && op.Operation != "health probe" && op.Operation != "A2A reconciliation" {
+		out["operation"] = op
+	}
+	if out["operation"] == nil {
+		if lease, err := a.store.operationLease(t.ID); err == nil && lease != nil {
+			out["operation"] = map[string]any{"id": "legacy-" + t.ID, "operation": lease.Operation, "phase": lease.Phase}
+		}
+	}
+	out["setup_complete"] = a.setupComplete(t.ID)
 	for _, event := range events {
 		switch event.Kind {
 		case "a2a_paired", "a2a_pair_failed":
@@ -460,7 +496,7 @@ func (a *App) decorateView(t *Tenant, events []Event) map[string]any {
 		}
 		break
 	}
-	if t.Status != StatusSetupPending {
+	if a.setupComplete(t.ID) {
 		return out
 	}
 	enc, err := a.store.getSetupToken(t.ID)
@@ -489,12 +525,29 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer done()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
+	if t.Kind == KindRemote && t.Status == StatusSuspended {
+		if err := a.store.setStatus(t.ID, StatusActive, "user"); err != nil {
+			return nil, err
+		}
+		return map[string]any{"tenant_id": t.ID, "status": StatusActive}, nil
+	}
 	if t.Kind != KindLocal {
 		return nil, fmt.Errorf("tenant %s is kind=%s; tenant_start is local-only (use tenant_run_remote against the remote endpoint)", id, t.Kind)
 	}
 	port, err := portFromBaseURL(t.BaseURL)
 	if err != nil || port == 0 {
 		return nil, fmt.Errorf("cannot derive port from base_url %q", t.BaseURL)
+	}
+	requiresQuarantine, err := a.cloneRequiresQuarantine(t.ID)
+	if err != nil {
+		return nil, err
+	}
+	if requiresQuarantine {
+		return a.rehearseCloneInQuarantine(ctx, t, port)
 	}
 
 	// Hosted: re-spawn on the remote VPS. freshSetup=false → no
@@ -505,7 +558,6 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if infoErr != nil {
 			return nil, infoErr
 		}
-		prevStatus := t.Status
 		_ = a.store.setStatus(t.ID, StatusStarting, "user")
 		spec := hostedSpawnSpecForTenant(t, info.PublicIPv4, port)
 		spec.AptevaVer = t.TargetVersion
@@ -515,7 +567,7 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, spawnErr
 		}
 		newStatus := StatusActive
-		if prevStatus == StatusSetupPending {
+		if !a.setupComplete(t.ID) {
 			newStatus = StatusSetupPending
 		}
 		_ = a.store.setStatus(t.ID, newStatus, "user")
@@ -529,6 +581,22 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 
 	if portInUse(port) {
+		if !a.setupComplete(t.ID) {
+			return nil, fmt.Errorf("tenant setup is incomplete and port %d is occupied; use Resume setup or stop the owned runtime first", port)
+		}
+		if a.setupComplete(t.ID) {
+			_, enc, keyErr := a.store.get(t.ID)
+			if keyErr != nil {
+				return nil, keyErr
+			}
+			key, keyErr := a.keys.open(enc)
+			if keyErr != nil {
+				return nil, keyErr
+			}
+			if keyErr = verifyAPIKey(context.Background(), t.BaseURL, string(key)); keyErr != nil {
+				return nil, fmt.Errorf("listener identity not verified: %w", keyErr)
+			}
+		}
 		// Already running — make the registry agree.
 		_ = a.store.setStatus(t.ID, StatusActive, "user")
 		return map[string]any{
@@ -541,7 +609,6 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// Re-spawning a previously-bootstrapped tenant: the server already
 	// has a users table, so registration isn't in setup mode and we
 	// don't need to scrape a token. The stored api_key remains valid.
-	prevStatus := t.Status
 	_ = a.store.setStatus(t.ID, StatusStarting, "user")
 	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -554,7 +621,7 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// the setup_pending status so the operator can still complete it.
 	// Otherwise flip to active.
 	newStatus := StatusActive
-	if prevStatus == StatusSetupPending {
+	if !a.setupComplete(t.ID) {
 		newStatus = StatusSetupPending
 	}
 	_ = a.store.setStatus(t.ID, newStatus, "user")
@@ -570,6 +637,67 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return out, nil
 }
 
+func (a *App) cloneRequiresQuarantine(tenantID string) (bool, error) {
+	var required bool
+	err := a.store.db.QueryRow(`SELECT quarantine_required FROM fleet_tenant_state WHERE tenant_id=?`, tenantID).Scan(&required)
+	return required, err
+}
+
+// rehearseCloneInQuarantine is the mandatory first boot for a clone created
+// with start=false. It prepares copied app runtimes while agents, apps,
+// subscriptions, ingress, and refresh workers remain disabled. A second
+// tenant_start is the explicit activation step after this rehearsal succeeds.
+func (a *App) rehearseCloneInQuarantine(ctx *sdk.AppCtx, t *Tenant, port int) (any, error) {
+	version := tenantVersion(t)
+	if !supportsCloneRuntimeRecovery(version) {
+		return nil, fmt.Errorf("clone runs Apteva %q; quarantine rehearsal requires %s or newer — update it before starting", version, cloneQuarantineMinAptevaVersion)
+	}
+	host, err := a.resolveFleetHost(ctx, t.InstanceID)
+	if err != nil {
+		return nil, err
+	}
+	if !host.IsLocal() {
+		if err := a.ensureHostedRuntime(ctx, host.InstanceID); err != nil {
+			return nil, err
+		}
+	}
+	requiredApps, err := a.tenantAppRuntimes(ctx, host, t.ConfigDir)
+	if err != nil {
+		return nil, fmt.Errorf("inventory cloned app runtimes: %w", err)
+	}
+	_ = a.store.setStatus(t.ID, StatusStarting, "user")
+	baseURL, _, err := a.startTenantOnHostMode(ctx, host, t, t.ConfigDir, version, port, t.Status, true)
+	if err != nil {
+		_ = a.store.setStatus(t.ID, StatusFailed, "user")
+		return nil, fmt.Errorf("start clone quarantine: %w", err)
+	}
+	if err := a.waitForQuarantinedRuntimes(ctx, host, t.ConfigDir, requiredApps, 10*time.Minute); err != nil {
+		if stopErr := a.stopTenantOnHost(ctx, t, port); stopErr != nil {
+			a.requireRecovery(t.ID, stopErr)
+			return nil, fmt.Errorf("quarantine cleanup requires recovery: %w", stopErr)
+		}
+		_ = a.store.setStatus(t.ID, StatusFailed, "user")
+		return nil, fmt.Errorf("validate cloned app runtimes: %w", err)
+	}
+	if err := a.stopTenantOnHost(ctx, t, port); err != nil {
+		a.requireRecovery(t.ID, err)
+		_ = a.store.setStatus(t.ID, StatusFailed, "user")
+		return nil, fmt.Errorf("stop quarantined clone: %w", err)
+	}
+	if err := a.store.setLocation(t.ID, t.InstanceID, baseURL, t.ConfigDir); err != nil {
+		return nil, err
+	}
+	_ = a.store.setStatus(t.ID, StatusStopped, "user")
+	_ = a.store.recordEvent(t.ID, "clone_rehearsal_validated", "user", map[string]any{"port": port})
+	return map[string]any{
+		"tenant_id":            t.ID,
+		"status":               StatusStopped,
+		"quarantine_validated": true,
+		"started":              false,
+		"next_step":            "Call tenant_start again to activate the clone.",
+	}, nil
+}
+
 func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := getStr(args, "tenant_id")
 	t, _, err := a.store.get(id)
@@ -581,6 +709,10 @@ func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer done()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
 	if t.Kind != KindLocal {
 		// Remote tenant — registry only.
 		_ = a.store.setStatus(t.ID, StatusSuspended, "user")
@@ -622,6 +754,10 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer done()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
 	retained, err := a.store.getRetainedSource(t.ID)
 	if err != nil {
 		return nil, fmt.Errorf("check retained migration source: %w", err)
@@ -652,7 +788,10 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				"note":      "process stopped; data dir preserved at " + t.ConfigDir + ". Re-run with confirm=true to wipe and remove.",
 			}, nil
 		}
-		if err := a.unregisterTenantHostMappings(ctx, t.ID); err != nil {
+		if err := a.store.setStatus(t.ID, StatusStopped, "user:delete"); err != nil {
+			return nil, err
+		}
+		if err := a.cleanupTenantRouting(ctx, t, optionalProjectFromArgs(args)); err != nil {
 			return nil, fmt.Errorf("remove tenant host ingress before delete: %w", err)
 		}
 		// Wipe only the exact Fleet-managed data directory.
@@ -666,7 +805,7 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				return nil, fmt.Errorf("remove tenant data: %w", err)
 			}
 		}
-	} else if err := a.unregisterTenantHostMappings(ctx, t.ID); err != nil {
+	} else if err := a.cleanupTenantRouting(ctx, t, optionalProjectFromArgs(args)); err != nil {
 		return nil, fmt.Errorf("remove tenant host ingress before delete: %w", err)
 	}
 
@@ -738,8 +877,13 @@ func (a *App) toolSupportLogin(ctx *sdk.AppCtx, args map[string]any) (any, error
 // -- HTTP routes ---------------------------------------------------------
 
 func (a *App) httpList(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
 	list, err := a.store.list(map[string]string{
-		"status":      r.URL.Query().Get("status"),
+		"status": r.URL.Query().Get("status"),
+		"limit":  strconv.Itoa(limit + 1), "offset": r.URL.Query().Get("offset"), "search": r.URL.Query().Get("search"),
 		"owner_email": r.URL.Query().Get("owner_email"),
 		"version":     r.URL.Query().Get("version"),
 		"kind":        r.URL.Query().Get("kind"),
@@ -747,6 +891,10 @@ func (a *App) httpList(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, err)
 		return
+	}
+	hasMore := len(list) > limit
+	if hasMore {
+		list = list[:limit]
 	}
 	// Rewrite stored loopback base_urls to the public form before
 	// shipping. toolList (MCP) already does this; httpList didn't, so
@@ -756,7 +904,7 @@ func (a *App) httpList(w http.ResponseWriter, r *http.Request) {
 	for i, t := range list {
 		out[i] = a.publicTenantView(t)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tenants": out, "count": len(out)})
+	writeJSON(w, http.StatusOK, map[string]any{"tenants": out, "count": len(out), "has_more": hasMore})
 }
 
 func (a *App) httpGet(w http.ResponseWriter, r *http.Request) {
@@ -836,6 +984,7 @@ func deriveSlug(baseURL string) string {
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
@@ -864,7 +1013,7 @@ type autoSetupResult struct {
 	Password string
 }
 
-func (a *App) autoSetupTenant(parent context.Context, baseURL, setupToken, email, password string) (*autoSetupResult, error) {
+func (a *App) autoSetupTenant(parent context.Context, baseURL, setupToken, email, password string) (result *autoSetupResult, resultErr error) {
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 
@@ -876,6 +1025,11 @@ func (a *App) autoSetupTenant(parent context.Context, baseURL, setupToken, email
 		password = randomPassword()
 	}
 
+	defer func() {
+		if resultErr != nil {
+			result = &autoSetupResult{Password: password}
+		}
+	}()
 	// Step 1: register the admin. The server enforces password >= 8
 	// chars; randomPassword() comfortably clears that.
 	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
@@ -887,7 +1041,7 @@ func (a *App) autoSetupTenant(parent context.Context, baseURL, setupToken, email
 		return nil, fmt.Errorf("register: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
+	if resp.StatusCode >= 300 && !canResumeSetup(ctx, baseURL, email, password) {
 		buf, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("register: %d: %s", resp.StatusCode, strings.TrimSpace(string(buf)))
 	}
@@ -997,6 +1151,10 @@ func (a *App) toolResetAdminPassword(appCtx *sdk.AppCtx, args map[string]any) (a
 		return nil, err
 	}
 	defer done()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
 	key, err := a.keys.open(enc)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt key: %w", err)
@@ -1451,6 +1609,7 @@ func (a *App) httpDetachDomain(w http.ResponseWriter, r *http.Request) {
 func (a *App) httpMeta(w http.ResponseWriter, r *http.Request) {
 	projectID, _ := resolveProjectFromRequest(r) // soft — empty is OK
 	if body, ok := a.cachedMeta(projectID); ok {
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "private, max-age=30")
 		_, _ = w.Write(body)
@@ -1543,6 +1702,7 @@ func (a *App) httpMeta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.storeMeta(projectID, body)
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "private, max-age=30")
 	_, _ = w.Write(body)

@@ -28,6 +28,10 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer done()
+	source, apiKeyEnc, err = a.store.get(source.ID)
+	if err != nil {
+		return nil, err
+	}
 	if source.Kind != KindLocal {
 		return nil, fmt.Errorf("tenant %s is kind=%s; clone is only supported for Fleet-managed tenants", sourceID, source.Kind)
 	}
@@ -73,17 +77,13 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	start := true
+	start := false
 	if v, ok := args["start"].(bool); ok {
 		start = v
 	}
 	cloneVersion := tenantVersion(source)
 	if start && !supportsCloneRuntimeRecovery(cloneVersion) {
 		return nil, fmt.Errorf("source tenant runs Apteva %q; clone rehearsal requires %s or newer — update the tenant before cloning", cloneVersion, cloneQuarantineMinAptevaVersion)
-	}
-	status := StatusStopped
-	if start {
-		status = StatusStarting
 	}
 	setupTokenEnc, err := a.store.getSetupToken(source.ID)
 	if err != nil && !errors.Is(err, ErrNotFound) {
@@ -114,26 +114,63 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		OwnerUserID:    source.OwnerUserID,
 		CurrentVersion: source.CurrentVersion,
 		TargetVersion:  source.TargetVersion,
-		Status:         status,
+		Status:         StatusStopped,
 		InstanceID:     targetID,
 	}
-	if err := a.store.insert(clone, apiKeyEnc, setupTokenEnc); err != nil {
+	destinationDone, err := a.insertTenantForOperation(clone, apiKeyEnc, setupTokenEnc, "clone destination", true)
+	if err != nil {
 		return nil, err
 	}
+	defer destinationDone()
 	cleanup := true
+	targetOwned := false
 	targetStarted := false
 	defer func() {
 		if cleanup {
 			if targetStarted {
-				_ = a.stopTenantOnHost(ctx, clone, port)
+				if stopErr := a.stopTenantOnHost(ctx, clone, port); stopErr != nil {
+					a.requireRecovery(clone.ID, stopErr)
+					return
+				}
+			}
+			if targetOwned {
+				if err := a.removeTenantData(ctx, targetHost, slug, targetDir); err != nil {
+					a.requireRecovery(clone.ID, err)
+					return
+				}
 			}
 			_ = a.store.hardDelete(clone.ID)
-			_ = a.removeTenantData(ctx, targetHost, slug, targetDir)
 		}
 	}()
-	if err := a.transferTenantData(ctx, sourceHost, targetHost, sourceDir, targetDir, slug, true); err != nil {
+	_ = a.store.recordEvent(clone.ID, "clone_transfer_started", "user", map[string]any{
+		"source_tenant_id": source.ID,
+		"from_instance_id": source.InstanceID,
+		"to_instance_id":   targetID,
+		"resumable":        sourceHost.InstanceID > 0 && targetHost.InstanceID > 0,
+	})
+	var lastProgress time.Time
+	lastDetail := ""
+	progress := func(phase, detail string) {
+		now := time.Now()
+		if detail == lastDetail || (!lastProgress.IsZero() && now.Sub(lastProgress) < 10*time.Second) {
+			return
+		}
+		lastProgress, lastDetail = now, detail
+		_ = a.store.recordEvent(clone.ID, "clone_transfer_progress", "system", map[string]any{
+			"phase": phase, "detail": detail,
+		})
+	}
+	if err := a.transferTenantDataWithProgress(ctx, sourceHost, targetHost, sourceDir, targetDir, slug, true, progress); err != nil {
+		var published *publishedTransferError
+		if errors.As(err, &published) {
+			targetOwned = true
+		}
 		return nil, fmt.Errorf("transfer clone: %w", err)
 	}
+	targetOwned = true
+	_ = a.store.recordEvent(clone.ID, "clone_transfer_completed", "system", map[string]any{
+		"resumable": sourceHost.InstanceID > 0 && targetHost.InstanceID > 0,
+	})
 	a2aIdentityReset, err := a.resetClonedA2AState(ctx, targetHost, targetDir)
 	if err != nil {
 		return nil, fmt.Errorf("reset cloned A2A identity: %w", err)
@@ -151,17 +188,21 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		cleanup = false
 		ctx.Logger().Info("fleet: tenant cloned without start", "source", source.ID, "clone", clone.ID, "slug", slug, "instance_id", targetID)
 		return map[string]any{
-			"tenant_id":          clone.ID,
-			"source_tenant_id":   source.ID,
-			"slug":               slug,
-			"base_url":           a.publicBaseURL(clone.BaseURL),
-			"status":             StatusStopped,
-			"started":            false,
-			"instance_id":        targetID,
-			"domains_copied":     false,
-			"a2a_identity_reset": a2aIdentityReset,
+			"tenant_id":           clone.ID,
+			"source_tenant_id":    source.ID,
+			"slug":                slug,
+			"base_url":            a.publicBaseURL(clone.BaseURL),
+			"status":              StatusStopped,
+			"started":             false,
+			"instance_id":         targetID,
+			"domains_copied":      false,
+			"requires_quarantine": true,
+			"transfer_resumable":  sourceHost.InstanceID > 0 && targetHost.InstanceID > 0,
+			"a2a_identity_reset":  a2aIdentityReset,
 		}, nil
 	}
+	_ = a.store.setStatus(clone.ID, StatusStarting, "user")
+	targetStarted = true // Starting can fail after a process was launched.
 	baseURL, _, err := a.startTenantOnHostMode(ctx, targetHost, clone, targetDir, cloneVersion, port, source.Status, true)
 	if err != nil {
 		_ = a.store.setStatus(clone.ID, StatusFailed, "user")
@@ -195,6 +236,8 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"rehearsal_validated": true,
 		"instance_id":         targetID,
 		"domains_copied":      false,
+		"requires_quarantine": false,
+		"transfer_resumable":  sourceHost.InstanceID > 0 && targetHost.InstanceID > 0,
 		"a2a_identity_reset":  a2aIdentityReset,
 	}, nil
 }

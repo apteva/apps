@@ -26,39 +26,38 @@ import (
 // ok). When require=false and no param given, returns (nil, pid, true)
 // meaning "roll up across all orgs in the project" — used by the
 // Overview tab for project-wide stats and audit feed.
-func adminOrgInner(w http.ResponseWriter, r *http.Request, require bool) (*Organization, string, bool) {
+func adminOrgInner(w http.ResponseWriter, r *http.Request, required bool) (*Organization, string, bool) {
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		httpErr(w, 400, err.Error())
 		return nil, "", false
 	}
-	ctx := getAppCtx(r)
-	if slug := r.URL.Query().Get("organization_slug"); slug != "" {
-		o, err := dbGetOrgBySlug(ctx.AppDB(), pid, slug)
-		if err != nil {
-			httpErr(w, http.StatusNotFound, "unknown organization_slug")
+	args := map[string]any{}
+	q := r.URL.Query()
+	if q.Has("organization_slug") {
+		if len(q["organization_slug"]) != 1 {
+			httpErr(w, 400, "duplicate organization selector")
 			return nil, "", false
 		}
-		return o, pid, true
+		args["organization_slug"] = q.Get("organization_slug")
 	}
-	if v := r.URL.Query().Get("organization_id"); v != "" {
-		id, _ := strconv.ParseInt(v, 10, 64)
-		if id <= 0 {
-			httpErr(w, http.StatusBadRequest, "invalid organization_id")
+	if q.Has("organization_id") {
+		if len(q["organization_id"]) != 1 {
+			httpErr(w, 400, "duplicate organization selector")
 			return nil, "", false
 		}
-		o, err := dbGetOrgByID(ctx.AppDB(), pid, id)
-		if err != nil {
-			httpErr(w, http.StatusNotFound, "unknown organization_id")
-			return nil, "", false
-		}
-		return o, pid, true
+		args["organization_id"] = json.Number(q.Get("organization_id"))
 	}
-	if require {
-		httpErr(w, http.StatusBadRequest, "organization_id or organization_slug required")
+	org, err := orgFromArgsOptional(getAppCtx(r), pid, args)
+	if err != nil {
+		httpErr(w, 400, err.Error())
 		return nil, "", false
 	}
-	return nil, pid, true
+	if required && org == nil {
+		httpErr(w, 400, "organization required")
+		return nil, "", false
+	}
+	return org, pid, true
 }
 
 func orgID(o *Organization) int64 {
@@ -98,7 +97,7 @@ func (a *App) handleAdminOrgsCreate(w http.ResponseWriter, r *http.Request) {
 		Name  string `json:"name"`
 		Color string `json:"color"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -150,12 +149,16 @@ func (a *App) handleAdminOrgsPatch(w http.ResponseWriter, r *http.Request) {
 		Color           *string `json:"color"`
 		PolicyOverrides *string `json:"policy_overrides"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	if body.Name == nil && body.Color == nil && body.PolicyOverrides == nil {
 		httpErr(w, http.StatusBadRequest, "nothing to update")
+		return
+	}
+	if err := validatePolicyJSON(body.PolicyOverrides); err != nil {
+		httpErr(w, 400, err.Error())
 		return
 	}
 	if err := dbUpdateOrg(ctx.AppDB(), pid, id, body.Name, body.Color, body.PolicyOverrides); err != nil {
@@ -227,22 +230,36 @@ func (a *App) handleAdminUsersList(w http.ResponseWriter, r *http.Request) {
 	createdAfter := r.URL.Query().Get("created_after")
 	limit := parseIntDefault(r.URL.Query().Get("limit"), 100, 1, 500)
 
-	users, err := dbSearchUsers(getAppCtx(r).AppDB(), pid, orgID(org), q, status, createdAfter, limit)
+	var mfa *bool
+	if r.URL.Query().Has("mfa") {
+		b, e := strconv.ParseBool(r.URL.Query().Get("mfa"))
+		if e != nil {
+			httpErr(w, 400, "invalid mfa")
+			return
+		}
+		mfa = &b
+	}
+	var before int64
+	if r.URL.Query().Has("cursor") {
+		n, ok := parseUint(r.URL.Query().Get("cursor"))
+		if !ok {
+			httpErr(w, 400, "invalid cursor")
+			return
+		}
+		before = n
+	}
+	users, err := dbSearchUsersPage(getAppCtx(r).AppDB(), pid, orgID(org), q, status, createdAfter, limit+1, mfa, before)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		httpErr(w, 400, err.Error())
 		return
 	}
-	if mfaRaw := r.URL.Query().Get("mfa"); mfaRaw != "" {
-		want := mfaRaw == "true" || mfaRaw == "1"
-		filtered := users[:0]
-		for _, u := range users {
-			if u.MFAEnabled == want {
-				filtered = append(filtered, u)
-			}
-		}
-		users = filtered
+	more := len(users) > limit
+	cursor := ""
+	if more {
+		users = users[:limit]
+		cursor = uintToStr(users[len(users)-1].ID)
 	}
-	httpJSON(w, map[string]any{"users": users, "count": len(users)})
+	httpJSON(w, map[string]any{"users": users, "count": len(users), "has_more": more, "next_cursor": cursor})
 }
 
 func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
@@ -259,7 +276,7 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 		SendPasswordReset bool             `json:"send_password_reset"`
 		Metadata          *json.RawMessage `json:"metadata"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -285,6 +302,12 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := map[string]any{"user": user}
+	if body.SendPasswordReset {
+		out["password_reset_sent"] = resetSent
+		if !resetSent {
+			out["delivery_error"] = "User created; password reset email was not delivered. Configure messaging and retry."
+		}
+	}
 	if resetSent {
 		out["password_reset_sent"] = true
 	}
@@ -313,18 +336,19 @@ type createUserInput struct {
 // 0 on success.
 func (a *App) createUser(ctx *sdk.AppCtx, pid string, org *Organization, in createUserInput, ip, ua, via string) (*User, bool, int, error) {
 	email := strings.ToLower(strings.TrimSpace(in.email))
-	if email == "" {
-		return nil, false, http.StatusBadRequest, errors.New("email required")
+	if err := validateEmail(email); err != nil {
+		return nil, false, 400, err
+	}
+	if len(in.displayName) > 256 {
+		return nil, false, 400, errors.New("display_name too long")
 	}
 	if existing, err := dbGetUserByEmail(ctx.AppDB(), pid, org.ID, email); err == nil && existing != nil {
 		return nil, false, http.StatusConflict, errors.New("email already registered in this organization")
 	}
 	var pwHash string
 	if in.password != "" {
-		if reason := validatePassword(in.password,
-			cfgInt(ctx, "password_min_length", 8),
-			cfgInt(ctx, "password_classes_required", 0)); reason != "" {
-			return nil, false, http.StatusBadRequest, errors.New(reason)
+		if err := checkPasswordPolicy(ctx, org, in.password); err != nil {
+			return nil, false, 400, err
 		}
 		h, err := hashPassword(in.password)
 		if err != nil {
@@ -374,7 +398,7 @@ func (a *App) handleAdminUsersPatch(w http.ResponseWriter, r *http.Request) {
 		EmailVerified *bool            `json:"email_verified"`
 		Metadata      *json.RawMessage `json:"metadata"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -463,7 +487,7 @@ func (a *App) handleAdminUsersSetPassword(w http.ResponseWriter, r *http.Request
 		Password       string `json:"password"`
 		RevokeSessions *bool  `json:"revoke_sessions"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -479,37 +503,39 @@ func (a *App) handleAdminUsersSetPassword(w http.ResponseWriter, r *http.Request
 	httpJSON(w, map[string]any{"ok": true, "revoked_sessions": revoked})
 }
 
-func (a *App) setUserPassword(ctx *sdk.AppCtx, pid string, orgID, uid int64, password string, revokeSessions bool, auditEvent, clientID, ip, ua string) (int64, int, error) {
-	password = strings.TrimSpace(password)
-	if password == "" {
-		return 0, http.StatusBadRequest, errors.New("password required")
-	}
-	if _, err := dbGetUserByID(ctx.AppDB(), pid, orgID, uid); err != nil {
-		return 0, http.StatusNotFound, errors.New("user not found")
-	}
-	if reason := validatePassword(password,
-		cfgInt(ctx, "password_min_length", 8),
-		cfgInt(ctx, "password_classes_required", 0)); reason != "" {
-		return 0, http.StatusBadRequest, errors.New(reason)
-	}
-	pwHash, err := hashPassword(password)
+func (a *App) setUserPassword(ctx *sdk.AppCtx, pid string, oid, uid int64, password string, revokeSessions bool, event, cid, ip, ua string) (int64, int, error) {
+	org, err := dbGetOrgByID(ctx.AppDB(), pid, oid)
 	if err != nil {
-		return 0, http.StatusInternalServerError, err
+		return 0, 404, errors.New("organization not found")
 	}
-	if err := dbSetUserPassword(ctx.AppDB(), pid, orgID, uid, pwHash); err != nil {
-		return 0, http.StatusInternalServerError, err
+	if err = checkPasswordPolicy(ctx, org, password); err != nil {
+		return 0, 400, err
 	}
-	var revoked int64
-	if revokeSessions {
-		n, err := dbRevokeAllUserSessions(ctx.AppDB(), pid, orgID, uid)
-		if err != nil {
-			return 0, http.StatusInternalServerError, err
-		}
-		revoked = n
+	hash, err := hashPassword(password)
+	if err != nil {
+		return 0, 503, err
 	}
-	dbAudit(ctx.AppDB(), pid, orgID, &uid, clientID, auditEvent, ip, ua,
-		map[string]any{"revoked_sessions": revoked})
-	return revoked, http.StatusOK, nil
+	tx, err := beginAuthTx(ctx.AppDB(), pid, oid)
+	if err != nil {
+		return 0, 500, err
+	}
+	defer tx.Rollback()
+	if _, err = dbGetUserByID(tx, pid, oid, uid); err != nil {
+		return 0, 404, errors.New("user not found")
+	}
+	if err = dbSetUserPassword(tx, pid, oid, uid, hash); err != nil {
+		return 0, 500, err
+	}
+	// Credential replacement always invalidates all sessions and recovery links.
+	n, err := revokeUserState(tx, pid, oid, uid)
+	if err != nil {
+		return 0, 500, err
+	}
+	dbAudit(tx, pid, oid, &uid, cid, event, ip, ua, map[string]any{"revoked_sessions": n})
+	if err = tx.Commit(); err != nil {
+		return 0, 500, err
+	}
+	return n, 200, nil
 }
 
 func (a *App) handleAdminUsersGetContext(w http.ResponseWriter, r *http.Request) {
@@ -565,7 +591,7 @@ func (a *App) handleAdminUsersDisable(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Reason string `json:"reason"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	_ = decodeRequest(w, r, &body)
 	if err := dbSetUserStatus(ctx.AppDB(), pid, org.ID, uid, "disabled"); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -640,6 +666,8 @@ func (a *App) handleAdminClientsList(w http.ResponseWriter, r *http.Request) {
 // "Organizations" / Stytch B2B pattern). When set, the client is bound
 // to that single org (v0.4.0 default behaviour).
 func (a *App) handleAdminClientsCreate(w http.ResponseWriter, r *http.Request) {
+	browserOriginMu.Lock()
+	defer browserOriginMu.Unlock()
 	// adminOrgInner with require=false: missing org param is fine — we
 	// interpret it as "create a multi-org client".
 	org, pid, ok := adminOrgInner(w, r, false)
@@ -656,7 +684,7 @@ func (a *App) handleAdminClientsCreate(w http.ResponseWriter, r *http.Request) {
 		RequireMFA        bool     `json:"require_mfa"`
 		JWTAudience       string   `json:"jwt_audience"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -752,6 +780,8 @@ func (a *App) handleAdminClientsRotate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminClientsDisable(w http.ResponseWriter, r *http.Request) {
+	browserOriginMu.Lock()
+	defer browserOriginMu.Unlock()
 	ctx := getAppCtx(r)
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
@@ -839,21 +869,28 @@ func (a *App) handleAdminOIDC(w http.ResponseWriter, r *http.Request) {
 		}
 		keys = append(keys, k)
 	}
+	policy, err := effectivePolicy(ctx, org)
+	if err != nil {
+		httpErr(w, 500, "invalid policy")
+		return
+	}
 	httpJSON(w, map[string]any{
-		"organization":            org,
+		"organization": org,
+		"protocol":     "apteva-auth", "oauth_supported": false, "mfa_supported": false,
+		"login_endpoint": platformBaseURL(ctx, r) + "/login", "refresh_endpoint": platformBaseURL(ctx, r) + "/refresh", "userinfo_endpoint": platformBaseURL(ctx, r) + "/me",
 		"issuer":                  base,
 		"jwks_uri":                base + "/.well-known/jwks.json",
 		"openid_configuration":    base + "/.well-known/openid-configuration",
 		"signing_keys":            keys,
 		"app_url_configured":      strings.TrimSpace(cfgStr(ctx, "app_url", "")) != "",
-		"verification_required":   cfgBool(ctx, "email_verification_required", true),
-		"magic_link_enabled":      cfgBool(ctx, "magic_link_enabled", true),
-		"access_ttl_seconds":      cfgInt(ctx, "jwt_access_ttl_seconds", 900),
-		"refresh_ttl_days":        cfgInt(ctx, "jwt_refresh_ttl_days", 30),
-		"password_min_length":     cfgInt(ctx, "password_min_length", 8),
-		"password_classes":        cfgInt(ctx, "password_classes_required", 0),
-		"lockout_threshold":       cfgInt(ctx, "lockout_threshold", 5),
-		"lockout_initial_minutes": cfgInt(ctx, "lockout_initial_minutes", 15),
+		"verification_required":   policy.Verify,
+		"magic_link_enabled":      false,
+		"access_ttl_seconds":      policy.AccessSeconds,
+		"refresh_ttl_days":        policy.RefreshDays,
+		"password_min_length":     policy.MinLength,
+		"password_classes":        policy.Classes,
+		"lockout_threshold":       policy.LockThreshold,
+		"lockout_initial_minutes": policy.LockMinutes,
 	})
 }
 

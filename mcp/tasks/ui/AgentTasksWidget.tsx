@@ -5,30 +5,31 @@ import {
   TaskDetails,
   TaskRow,
   isTerminal,
+  taskQueueRank,
   useTasks,
 } from "./taskShared";
 
 export default function AgentTasksWidget(props: HostProps) {
   const agentId = props.agentId || props.instanceId;
   const query = useMemo(
-    () => ({ agent_id: agentId ? String(agentId) : "", limit: "100" }),
+    () => ({ agent_id: agentId ? String(agentId) : "", limit: "100", view: "operational" }),
     [agentId],
   );
-  const { tasks, loading, error, reload } = useTasks(props, query);
+  const { tasks, loading, error, reload, hasMore, loadMore } = useTasks(props, query);
   const [selected, setSelected] = useState<Task | null>(null);
   const visible = tasks
     .filter(
       (task) =>
         !task.parent_task_id && (!isTerminal(task) || task.state === "failed"),
     )
-    .slice(0, 4);
+    .sort((a,b) => taskQueueRank(a) - taskQueueRank(b));
   if (!agentId) return null;
   if (props.slot === "dashboard.agent_card") {
     return (
       <section className="min-w-0">
         <div className="mb-1 flex items-center text-[9px] font-bold uppercase tracking-wide text-text-dim">
           <span>Tasks</span>
-          <span className="ml-auto">{visible.length}</span>
+          <span className="ml-auto">{visible.length}{hasMore ? "+" : ""}</span>
         </div>
         {error ? (
           <p className="text-[10px] text-red">{error}</p>
@@ -60,7 +61,7 @@ export default function AgentTasksWidget(props: HostProps) {
           Tasks
         </h3>
         <span className="ml-auto text-[9px] text-text-dim">
-          {visible.length}
+          {visible.length}{hasMore ? "+" : ""}
         </span>
       </header>
       {error ? (
@@ -74,6 +75,7 @@ export default function AgentTasksWidget(props: HostProps) {
       ) : (
         <p className="p-3 text-[10px] text-text-dim">No current work.</p>
       )}
+      {hasMore && <button disabled={loading} onClick={() => void loadMore()} className="w-full p-3 text-xs text-accent">Load more tasks</button>}
       {selected && (
         <TaskDetails
           props={props}

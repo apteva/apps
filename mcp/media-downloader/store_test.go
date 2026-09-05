@@ -40,6 +40,22 @@ func TestMigrationsAddAndBackfillDownloadStage(t *testing.T) {
 	if stage != stageDownloading {
 		t.Fatalf("backfilled stage = %q, want %q", stage, stageDownloading)
 	}
+	ingestionMigration, err := os.ReadFile("migrations/003_ingestion_artifacts.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(ingestionMigration)); err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []string{"metadata_json", "warnings_json", "ingest"} {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('downloads') WHERE name = ?`, column).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("migration did not add downloads.%s", column)
+		}
+	}
 }
 
 func TestInterruptActiveDownloadsMarksRunningAndQueuedFailed(t *testing.T) {
@@ -59,6 +75,7 @@ CREATE TABLE downloads (
     title TEXT,
     extractor TEXT,
     mode TEXT NOT NULL DEFAULT 'video',
+    ingest INTEGER NOT NULL DEFAULT 0,
     quality TEXT NOT NULL DEFAULT 'best',
     format_id TEXT,
     source_profile_id TEXT,
@@ -68,6 +85,8 @@ CREATE TABLE downloads (
     storage_url TEXT,
     output_name TEXT,
     output_bytes INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL DEFAULT '',
+    warnings_json TEXT NOT NULL DEFAULT '[]',
     error TEXT,
     created_at TEXT NOT NULL,
     started_at TEXT,
@@ -79,6 +98,19 @@ CREATE TABLE download_logs (
     download_id TEXT NOT NULL,
     level TEXT NOT NULL,
     message TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE download_artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    download_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    storage_file_id INTEGER NOT NULL,
+    storage_url TEXT,
+    name TEXT NOT NULL,
+    content_type TEXT,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    language TEXT,
+    caption_source TEXT,
     created_at TEXT NOT NULL
 );`); err != nil {
 		t.Fatal(err)
@@ -157,5 +189,44 @@ VALUES ('src1', 'p1', 'v1:secret', 'valid', 'old error', 'now');`); err != nil {
 	}
 	if status != "deleted" || encrypted != "" || lastErr != "" {
 		t.Fatalf("deleted profile status=%q encrypted=%q last_error=%q", status, encrypted, lastErr)
+	}
+}
+
+func TestDownloadRoundTripIncludesIngestionArtifacts(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, name := range []string{"001_init.sql", "002_job_stages.sql", "003_ingestion_artifacts.sql"} {
+		body, err := os.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+	}
+	job := downloadJob{ID: "dl1", ProjectID: "p1", URL: "https://youtube.com/watch?v=x", Status: statusQueued, Stage: stageQueued, Mode: "video", Ingest: true, Quality: "best", StorageFolder: "/out", StorageVisibility: "private"}
+	if err := insertDownload(context.Background(), db, job); err != nil {
+		t.Fatal(err)
+	}
+	metadata := sourceMetadata{ID: "x", Title: "Video", Description: "Description", PublishDate: "2026-09-04"}
+	if err := setDownloadMetadata(context.Background(), db, job.ID, metadata); err != nil {
+		t.Fatal(err)
+	}
+	artifact := downloadArtifact{Kind: "captions", StorageFileID: 42, Name: "video.en.vtt", ContentType: "text/vtt", Language: "en", CaptionSource: "manual"}
+	if err := insertDownloadArtifact(context.Background(), db, job.ID, artifact); err != nil {
+		t.Fatal(err)
+	}
+	if err := addDownloadWarning(context.Background(), db, job.ID, "thumbnail unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := getDownload(context.Background(), db, "p1", "dl1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Ingest || got.Metadata == nil || got.Metadata.Description != "Description" || len(got.Artifacts) != 1 || got.Artifacts[0].CaptionSource != "manual" || len(got.Warnings) != 1 {
+		t.Fatalf("ingestion job round trip = %#v", got)
 	}
 }

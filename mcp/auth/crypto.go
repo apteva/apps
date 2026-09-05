@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -40,6 +41,13 @@ const (
 )
 
 func hashPassword(password string) (string, error) {
+	if len(password) > 4096 {
+		return "", errors.New("password too long")
+	}
+	if !acquirePasswordHash() {
+		return "", errors.New("password service busy; retry")
+	}
+	defer releasePasswordHash()
 	salt := make([]byte, argonSaltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
@@ -55,6 +63,13 @@ func hashPassword(password string) (string, error) {
 }
 
 func verifyPassword(encoded, password string) (bool, error) {
+	if len(password) > 4096 || len(encoded) > 1024 {
+		return false, errors.New("password too long")
+	}
+	if !acquirePasswordHash() {
+		return false, errors.New("password service busy; retry")
+	}
+	defer releasePasswordHash()
 	parts := strings.Split(encoded, "$")
 	// parts: ["", "argon2id", "v=19", "m=...,t=...,p=...", "<salt>", "<hash>"]
 	if len(parts) != 6 || parts[1] != "argon2id" {
@@ -81,6 +96,9 @@ func verifyPassword(encoded, password string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if m < 8 || m > 128*1024 || t < 1 || t > 10 || p < 1 || p > 4 || len(salt) < 8 || len(salt) > 64 || len(want) < 16 || len(want) > 64 {
+		return false, errors.New("invalid password hash parameters")
+	}
 	got := argon2.IDKey([]byte(password), salt, t, m, p, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
@@ -89,7 +107,10 @@ func verifyPassword(encoded, password string) (bool, error) {
 // or a human-readable reason on rejection. Length is checked first
 // (cheapest); class count second (still cheap).
 func validatePassword(pw string, minLen, classesRequired int) string {
-	if len(pw) < minLen {
+	if len(pw) > 4096 {
+		return "password must be 4096 bytes or less"
+	}
+	if utf8.RuneCountInString(pw) < minLen {
 		return fmt.Sprintf("password must be at least %d characters", minLen)
 	}
 	var hasLower, hasUpper, hasDigit, hasSymbol bool
@@ -243,15 +264,20 @@ func jwtVerify(token string, keyForKid func(kid string) (ed25519.PublicKey, bool
 		return nil, fmt.Errorf("claims b64: %w", err)
 	}
 	var claims map[string]any
-	if err := json.Unmarshal(cb, &claims); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(cb)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&claims); err != nil {
 		return nil, fmt.Errorf("claims json: %w", err)
 	}
-	// Expiry check.
-	if expF, ok := claims["exp"].(float64); ok {
-		if time.Now().Unix() >= int64(expF) {
-			return nil, errors.New("token expired")
-		}
+	exp, ok := jwtInt64Claim(claims, "exp")
+	if !ok || exp <= time.Now().Unix() {
+		return nil, errors.New("token expired or missing expiry")
 	}
+	iat, ok := jwtInt64Claim(claims, "iat")
+	if !ok || iat > time.Now().Unix()+30 || iat >= exp {
+		return nil, errors.New("invalid token issue time")
+	}
+
 	return claims, nil
 }
 
@@ -321,4 +347,19 @@ func parseTTL(s string, dflt time.Duration) time.Duration {
 		return dflt
 	}
 	return time.Duration(n) * time.Second
+}
+
+var passwordHashSlots = make(chan struct{}, 4)
+
+func acquirePasswordHash() bool {
+	select {
+	case passwordHashSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+func releasePasswordHash() { <-passwordHashSlots }
+func dummyPasswordHash() string {
+	return "$argon2id$v=19$m=65536,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 }

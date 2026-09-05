@@ -103,32 +103,35 @@ func (h *hub) publishToUser(userID string, m Message) {
 // keys are "<project>:<user>", preventing inbox events from leaking between
 // tenants served by the same global app install.
 func (h *hub) publishProject(projectID string, m Message) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	prefix := projectID + ":"
 	for key, subs := range h.byUser {
 		if len(key) < len(prefix) || key[:len(prefix)] != prefix {
 			continue
 		}
-		for _, ch := range subs {
-			select {
-			case ch <- m:
-			default:
-			}
+		sendDurable(subs, m)
+		if len(subs) == 0 {
+			delete(h.byUser, key)
 		}
 	}
 }
-
-func (h *hub) fanOut(scope map[string]map[uint64]chan Message, key string, m Message) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for _, ch := range scope[key] {
+func sendDurable(subs map[uint64]chan Message, m Message) {
+	for id, ch := range subs {
 		select {
 		case ch <- m:
 		default:
-			// Slow subscriber: drop rather than block the writer. The
-			// client's ?since= backfill reconciles the gap on reconnect.
+			close(ch)
+			delete(subs, id)
 		}
+	}
+}
+func (h *hub) fanOut(scope map[string]map[uint64]chan Message, key string, m Message) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	sendDurable(scope[key], m)
+	if len(scope[key]) == 0 {
+		delete(scope, key)
 	}
 }
 

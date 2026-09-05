@@ -73,9 +73,18 @@ func parseProviderServerTypes(provider string, data json.RawMessage) ([]ServerTy
 				Arch              string          `json:"arch"`
 				HourlyPrice       json.RawMessage `json:"hourly_price"`
 				MonthlyPrice      json.RawMessage `json:"monthly_price"`
+				BlockBandwidth    int64           `json:"block_bandwidth"`
 				VolumesConstraint struct {
 					MinSize int64 `json:"min_size"`
+					MaxSize int64 `json:"max_size"`
 				} `json:"volumes_constraint"`
+				PerVolumeConstraint map[string]struct {
+					MinSize int64 `json:"min_size"`
+					MaxSize int64 `json:"max_size"`
+				} `json:"per_volume_constraint"`
+				Capabilities struct {
+					BlockStorage bool `json:"block_storage"`
+				} `json:"capabilities"`
 			} `json:"servers"`
 		}
 		if err := json.Unmarshal(data, &v); err != nil {
@@ -83,7 +92,29 @@ func parseProviderServerTypes(provider string, data json.RawMessage) ([]ServerTy
 		}
 		out := make([]ServerType, 0, len(v.Servers))
 		for name, p := range v.Servers {
-			out = append(out, ServerType{Name: name, Description: name, Cores: p.NCPUs, MemoryGB: bytesToGB(p.RAM), DiskGB: int(bytesToGB(p.VolumesConstraint.MinSize)), CPUType: "shared", Architecture: normalizeArchitecture(p.Arch), MonthlyPriceEUR: flexiblePrice(p.MonthlyPrice), HourlyPriceEUR: flexiblePrice(p.HourlyPrice)})
+			bootStorage := make([]StorageConstraint, 0, 2)
+			if local, ok := p.PerVolumeConstraint["l_ssd"]; ok {
+				maxSize := minNonZeroInt64(p.VolumesConstraint.MaxSize, local.MaxSize)
+				if maxSize > 0 {
+					bootStorage = append(bootStorage, StorageConstraint{
+						StorageClass: "local", ProviderType: "l_ssd",
+						MinSizeGB:  decimalGBInt(maxInt64(p.VolumesConstraint.MinSize, local.MinSize)),
+						MaxSizeGB:  decimalGBInt(maxSize),
+						Technology: "ssd", Persistent: false, Replication: "none", Billing: "included",
+					})
+				}
+			}
+			if p.Capabilities.BlockStorage {
+				bootStorage = append(bootStorage, StorageConstraint{StorageClass: "block", ProviderType: "sbs_volume", Technology: "nvme", IOPS: 5000, BandwidthMbps: int(p.BlockBandwidth * 8 / 1_000_000), Persistent: true, Replication: "3 replicas", Billing: "per_gb"})
+			}
+			diskGB := 0
+			for _, constraint := range bootStorage {
+				if constraint.StorageClass == "local" {
+					diskGB = constraint.MaxSizeGB
+					break
+				}
+			}
+			out = append(out, ServerType{Name: name, Description: name, Cores: p.NCPUs, MemoryGB: bytesToGB(p.RAM), DiskGB: diskGB, CPUType: "shared", Architecture: normalizeArchitecture(p.Arch), MonthlyPriceEUR: flexiblePrice(p.MonthlyPrice), HourlyPriceEUR: flexiblePrice(p.HourlyPrice), BootStorage: bootStorage})
 		}
 		return out, nil
 	case "huawei-cloud":
@@ -338,7 +369,8 @@ func parseProviderImages(provider string, data json.RawMessage) ([]Image, error)
 				Public     bool   `json:"public"`
 				State      string `json:"state"`
 				RootVolume struct {
-					Size int64 `json:"size"`
+					Size       int64  `json:"size"`
+					VolumeType string `json:"volume_type"`
 				} `json:"root_volume"`
 			} `json:"images"`
 		}
@@ -348,7 +380,7 @@ func parseProviderImages(provider string, data json.RawMessage) ([]Image, error)
 		out := make([]Image, 0, len(v.Images))
 		for _, im := range v.Images {
 			if im.ID != "" && im.Public && (im.State == "" || im.State == "available") {
-				out = append(out, Image{Name: im.ID, Description: im.Name, OSFlavor: imageFlavor(im.Name), OSVersion: imageVersion(im.Name), Architecture: normalizeArchitecture(im.Arch), DiskSizeGB: int(bytesToGB(im.RootVolume.Size))})
+				out = append(out, Image{Name: im.ID, Description: im.Name, OSFlavor: imageFlavor(im.Name), OSVersion: imageVersion(im.Name), Architecture: normalizeArchitecture(im.Arch), DiskSizeGB: decimalGBInt(im.RootVolume.Size), ProviderType: scalewayImageProviderType(im.RootVolume.VolumeType)})
 			}
 		}
 		return out, nil
@@ -445,15 +477,21 @@ func parseProviderResource(provider string, data json.RawMessage) (id, ipv4, ipv
 			}
 		case "scaleway":
 			candidateID = mapString(obj, "id")
-			if candidateID != "" && (mapValue(obj, "commercial_type") != nil || mapValue(obj, "public_ip") != nil || mapValue(obj, "ssh_username") != nil) {
+			if candidateID != "" && (mapValue(obj, "commercial_type") != nil || mapValue(obj, "public_ip") != nil || mapValue(obj, "ssh_username") != nil || mapValue(obj, "interfaces") != nil || mapValue(obj, "offer_id") != nil || mapValue(obj, "ips") != nil) {
 				ipv4 = nestedMapString(obj, "public_ip", "address")
 				if ipv4 == "" {
 					ipv4 = firstAddress(obj, "public_ips", 4)
 				}
 				if ipv4 == "" {
+					ipv4 = firstAddress(obj, "interfaces", 4)
+				}
+				if ipv4 == "" {
+					ipv4 = firstAddress(obj, "ips", 4)
+				}
+				if ipv4 == "" {
 					ipv4 = mapString(obj, "ip")
 				}
-				ipv6 = firstNonEmpty(nestedMapString(obj, "ipv6", "address"), firstAddress(obj, "public_ips", 6))
+				ipv6 = firstNonEmpty(nestedMapString(obj, "ipv6", "address"), firstAddress(obj, "public_ips", 6), firstAddress(obj, "interfaces", 6), firstAddress(obj, "ips", 6))
 			}
 		case "huawei-cloud":
 			candidateID = firstMapString(obj, "id", "server_id")
@@ -820,6 +858,41 @@ func bytesToGB(bytes int64) float64 {
 		return 0
 	}
 	return float64(bytes) / (1024 * 1024 * 1024)
+}
+
+func decimalGBInt(bytes int64) int {
+	if bytes <= 0 {
+		return 0
+	}
+	return int(bytes / 1_000_000_000)
+}
+
+func minNonZeroInt64(a, b int64) int64 {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 || a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func scalewayImageProviderType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "l_ssd", "l_ssd_snapshot", "local", "instance_local":
+		return "l_ssd"
+	case "sbs", "sbs_volume", "sbs_snapshot", "b_ssd", "instance_sbs":
+		return "sbs_volume"
+	default:
+		return ""
+	}
 }
 
 func normalizeArchitecture(value string) string {

@@ -27,12 +27,16 @@ const DASHBOARD_VENDOR = join(
   "react.entry.ts",
 );
 const MCP_DIR = join(ROOT, "mcp");
-const appFlag = Bun.argv.indexOf("--app");
-const requestedApp = appFlag >= 0 ? Bun.argv[appFlag + 1] : "";
+const PORTABLE_VENDOR_SURFACE = join(ROOT, "scripts", "panel-react-surface.json");
 
 async function vendorExports(): Promise<Set<string>> {
   if (!existsSync(DASHBOARD_VENDOR)) {
-    throw new Error(`vendor entry missing: ${DASHBOARD_VENDOR}`);
+    const portable = JSON.parse(await readFile(PORTABLE_VENDOR_SURFACE, "utf8"));
+    if (!Array.isArray(portable) || !portable.every((name) => typeof name === "string")) {
+      throw new Error(`invalid portable vendor surface: ${PORTABLE_VENDOR_SURFACE}`);
+    }
+    console.log(`dashboard vendor unavailable; using portable React surface contract`);
+    return new Set(portable);
   }
   const src = await readFile(DASHBOARD_VENDOR, "utf8");
   const names = new Set<string>();
@@ -131,7 +135,8 @@ async function main() {
   let checked = 0;
   for (const a of apps) {
     if (!a.isDirectory()) continue;
-    if (requestedApp && a.name !== requestedApp) continue;
+    const flag=Bun.argv.indexOf("--app");
+    if(flag>=0 && a.name!==Bun.argv[flag+1])continue;
     const uiDir = join(MCP_DIR, a.name, "ui");
     if (!existsSync(uiDir)) continue;
     const entries = await readdir(uiDir);

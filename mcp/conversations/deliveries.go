@@ -78,8 +78,9 @@ func (s *store) PendingDeliveries(limit int) ([]Delivery, error) {
 	}
 	rows, err := s.db.Query(`
 		SELECT id, message_id, target, status, attempts, last_error
-		FROM deliveries
-		WHERE status = 'pending' AND next_attempt_at <= ?
+		FROM deliveries d
+		WHERE status = 'pending' AND julianday(next_attempt_at) <= julianday(?)
+        AND (d.target NOT LIKE 'telegram:%' OR NOT EXISTS(SELECT 1 FROM deliveries prior WHERE prior.target=d.target AND prior.message_id<d.message_id AND prior.status IN('pending','processing','ambiguous')))
 		ORDER BY next_attempt_at ASC, id ASC LIMIT ?`, time.Now().UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, err
@@ -117,7 +118,7 @@ func (s *store) FailedDeliveries(projectID string, limit int) ([]FailedDelivery,
 		FROM deliveries d
 		JOIN messages m ON m.id=d.message_id
 		JOIN conversations c ON c.id=m.conversation_id
-		WHERE c.project_id=? AND d.status='failed'
+		WHERE c.project_id=? AND d.status IN ('failed','ambiguous')
 		ORDER BY d.updated_at DESC,d.id DESC LIMIT ?`, projectID, limit)
 	if err != nil {
 		return nil, err
@@ -139,9 +140,9 @@ func (s *store) RetryFailedDelivery(projectID string, deliveryID int64) error {
 	res, err := s.db.Exec(`
 		UPDATE deliveries SET status='pending',attempts=0,last_error='',
 			next_attempt_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
-		WHERE id=? AND status='failed' AND message_id IN (
+		WHERE id=? AND status IN ('failed','ambiguous') AND message_id IN (
 			SELECT m.id FROM messages m JOIN conversations c ON c.id=m.conversation_id
-			WHERE c.project_id=?)`, deliveryID, projectID)
+			WHERE c.project_id=? AND c.archived_at IS NULL)`, deliveryID, projectID)
 	if err != nil {
 		return err
 	}

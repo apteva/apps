@@ -1,0 +1,121 @@
+name: safe-occurrence-recovery
+description: |
+  A failed scheduled occurrence is recovered through a separate linked attempt.
+  The recovery executor fetches the authoritative recovery record, reconciles
+  external state before acting, performs the simulated action only after it is
+  proven absent, and never treats the scheduler event as a thread message.
+
+timeout: 4m
+settle_for: 6s
+max_iterations: 20
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  fake_mcp_servers:
+    - name: recovery-sandbox
+      tools:
+        - name: lookup_operation
+          description: Reconcile whether operation publisher-post-42 already happened. This is a read-only deterministic fixture.
+          required: [operation_key]
+          result: OPERATION_NOT_FOUND
+        - name: perform_operation
+          description: Perform the deterministic simulated operation only after lookup_operation returned OPERATION_NOT_FOUND.
+          required: [operation_key]
+          result: OPERATION_PERFORMED
+  initial_wake:
+    after: 8s
+  seed_mcp_calls:
+    - app: tasks
+      tool: create
+      thread_id: main
+      args:
+        title: Recover ambiguous scheduled publish
+        description: |
+          Operation key: publisher-post-42
+          First execution instruction: simulate an executor loss by recording failed with error "simulated_executor_loss"; do not call either recovery-sandbox tool in the original occurrence. Then call tasks_recover_occurrence for this failed occurrence with reason "Reconcile publisher-post-42" and idempotency_key "recover-publisher-post-42".
+          Recovery instruction: on task.recovery.ready, fetch that recovery task first. Call recovery-sandbox_lookup_operation with operation_key "publisher-post-42". Only if it returns OPERATION_NOT_FOUND, call recovery-sandbox_perform_operation exactly once with the same key and complete the recovery with result "RECOVERY VERIFIED AND PERFORMED".
+        operation_key: publisher-post-42
+        assigned_thread_id: main
+        idempotency_key: safe-recovery-${APTEVA_TEST_AGENT_ID}
+        schedule:
+          kind: once
+          at: ${APTEVA_TEST_WAKE_AT}
+
+directive: |
+  Execute app-owned task events according to their machine-readable event
+  contract and the authoritative task record. Never infer that an external
+  action is safe to repeat. Do not delegate this deterministic fixture.
+
+assert:
+  - tool_called_with:
+      tool: tasks_get
+      thread_id: main
+      count: 2
+      before: recovery-sandbox_lookup_operation
+  - tool_called_with:
+      tool: tasks_fail
+      thread_id: main
+      args:
+        error: simulated_executor_loss
+      count: 1
+      before: tasks_recover_occurrence
+  - tool_not_called: tasks_update
+  - tool_called_with:
+      tool: tasks_recover_occurrence
+      thread_id: main
+      args:
+        reason: Reconcile publisher-post-42
+        idempotency_key: recover-publisher-post-42
+      count: 1
+      before: recovery-sandbox_lookup_operation
+  - tool_called_with:
+      tool: recovery-sandbox_lookup_operation
+      exact: true
+      thread_id: main
+      args:
+        operation_key: publisher-post-42
+      count: 1
+      before: recovery-sandbox_perform_operation
+  - tool_called_with:
+      tool: recovery-sandbox_perform_operation
+      exact: true
+      thread_id: main
+      args:
+        operation_key: publisher-post-42
+      count: 1
+      before: tasks_complete
+  - tool_called_with:
+      tool: tasks_complete
+      thread_id: main
+      args:
+        result: RECOVERY VERIFIED AND PERFORMED
+      count: 1
+  - tool_not_called_with:
+      tool: send
+      thread_id: main
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}&include_runs=1
+    expect_status: 200
+    expect_count_at: tasks
+    expect_count: 2
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}&include_runs=1
+    expect_item_at: tasks
+    expect_item:
+      title: Recover ambiguous scheduled publish
+      state: failed
+      error: simulated_executor_loss
+      operation_key: publisher-post-42
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}&include_runs=1
+    expect_item_at: tasks
+    expect_item:
+      title: Recover ambiguous scheduled publish
+      state: completed
+      recovery_attempt: 1
+      operation_key: publisher-post-42
+      result: RECOVERY VERIFIED AND PERFORMED
+  - iterations_at_most: 20
+
+budget:
+  total_tokens: 300000
+  cost_usd: 2.50

@@ -41,6 +41,8 @@ type tenantTransfer struct {
 	InUse          bool
 }
 
+type tenantTransferProgress func(phase, detail string)
+
 func (a *App) initTransferState() error {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
@@ -54,6 +56,10 @@ func (a *App) initTransferState() error {
 }
 
 func (a *App) transferTenantData(ctx *sdk.AppCtx, sourceHost, targetHost fleetHost, sourceDir, targetDir, slug string, snapshot bool) error {
+	return a.transferTenantDataWithProgress(ctx, sourceHost, targetHost, sourceDir, targetDir, slug, snapshot, nil)
+}
+
+func (a *App) transferTenantDataWithProgress(ctx *sdk.AppCtx, sourceHost, targetHost fleetHost, sourceDir, targetDir, slug string, snapshot bool, progress tenantTransferProgress) error {
 	var err error
 	if sourceHost.IsLocal() {
 		if _, err := os.Stat(sourceDir); err != nil {
@@ -67,20 +73,15 @@ func (a *App) transferTenantData(ctx *sdk.AppCtx, sourceHost, targetHost fleetHo
 	} else if targetHost.IsLocal() {
 		err = a.streamRemoteTenantToLocal(ctx, sourceHost.InstanceID, sourceDir, targetDir, slug, snapshot)
 	} else {
-		relay, relayErr := os.MkdirTemp(transferScratchRoot(), "relay-*")
-		if relayErr != nil {
-			return relayErr
-		}
-		defer os.RemoveAll(relay)
-		staged := filepath.Join(relay, "tenant")
-		if err = a.streamRemoteTenantToLocal(ctx, sourceHost.InstanceID, sourceDir, staged, slug, snapshot); err == nil {
-			err = a.streamLocalTenantToRemote(ctx, staged, targetHost.InstanceID, targetDir, slug)
-		}
+		err = a.streamRemoteTenantToRemote(ctx, sourceHost, targetHost, sourceDir, targetDir, slug, progress)
 	}
 	if err != nil {
 		return err
 	}
-	return removeTransferredRuntimeArtifacts(ctx, targetHost, targetDir)
+	if err := removeTransferredRuntimeArtifacts(ctx, targetHost, targetDir); err != nil {
+		return &publishedTransferError{err}
+	}
+	return nil
 }
 
 func removeTransferredRuntimeArtifacts(ctx *sdk.AppCtx, targetHost fleetHost, targetDir string) error {
@@ -120,28 +121,7 @@ func (a *App) streamLocalTenantToRemote(ctx *sdk.AppCtx, sourceDir string, insta
 	if err != nil {
 		return err
 	}
-	cmd := fmt.Sprintf(`
-set -eu
-DST=%s
-URL=%s
-PARENT=$(dirname "$DST")
-test ! -e "$DST"
-mkdir -p "$PARENT"
-TMP=$(mktemp -d "$PARENT/.transfer-%s-XXXXXX")
-cleanup() { rm -rf "$TMP"; }
-trap cleanup EXIT
-PAYLOAD="$TMP/payload"
-mkdir -p "$PAYLOAD"
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL --retry 3 --connect-timeout 15 "$URL" | tar xzf - -C "$PAYLOAD"
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO- "$URL" | tar xzf - -C "$PAYLOAD"
-else
-  echo "curl or wget required for fleet streaming transfer" >&2
-  exit 127
-fi
-mv "$PAYLOAD" "$DST"
-`, sh(targetDir), sh(transferURL), shellSafeSlug(slug))
+	cmd := "set -eu\n" + remoteExtractCommand(transferURL, targetDir)
 	return runHostedTransferJob(ctx, instanceID, cmd, slug)
 }
 
@@ -374,6 +354,10 @@ fi
 }
 
 func runHostedTransferJob(ctx *sdk.AppCtx, instanceID int64, script, slug string) error {
+	return runHostedTransferJobWithProgress(ctx, instanceID, script, slug, nil)
+}
+
+func runHostedTransferJobWithProgress(ctx *sdk.AppCtx, instanceID int64, script, slug string, progress tenantTransferProgress) error {
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
 	launch := fmt.Sprintf(`
 set -eu
@@ -411,7 +395,7 @@ printf '%%s\n' "$JOB"
 			_, _, _ = instanceRunCommand(ctx, instanceID, stop, 10)
 			return errors.New("remote transfer timed out")
 		}
-		poll := fmt.Sprintf(`if [ -f %s/done ]; then printf 'done:'; cat %s/done; tail -c 8192 %s/output.log 2>/dev/null || true; else PID=$(cat %s/pid 2>/dev/null || true); if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then echo running; else printf 'failed:'; tail -c 8192 %s/output.log 2>/dev/null || true; fi; fi`, sh(job), sh(job), sh(job), sh(job), sh(job))
+		poll := fmt.Sprintf(`if [ -f %s/done ]; then printf 'done:'; cat %s/done; tail -c 8192 %s/output.log 2>/dev/null || true; else PID=$(cat %s/pid 2>/dev/null || true); if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then printf 'running:\n'; tail -c 8192 %s/output.log 2>/dev/null || true; else printf 'failed:'; tail -c 8192 %s/output.log 2>/dev/null || true; fi; fi`, sh(job), sh(job), sh(job), sh(job), sh(job), sh(job))
 		status, pollCode, pollErr := instanceRunCommand(ctx, instanceID, poll, 15)
 		if pollErr != nil || pollCode != 0 {
 			return fmt.Errorf("poll remote transfer: %w (exit %d): %s", pollErr, pollCode, strings.TrimSpace(status))
@@ -426,6 +410,9 @@ printf '%%s\n' "$JOB"
 				return fmt.Errorf("remote transfer failed with exit %s: %s", strings.TrimSpace(lines[0]), log)
 			}
 			return nil
+		}
+		if strings.HasPrefix(status, "running:") && progress != nil {
+			progress("transfer", strings.TrimSpace(strings.TrimPrefix(status, "running:")))
 		}
 		if strings.HasPrefix(status, "failed:") {
 			return fmt.Errorf("remote transfer job exited without status: %s", strings.TrimSpace(strings.TrimPrefix(status, "failed:")))
@@ -454,6 +441,11 @@ func extractTenantArchiveStream(r io.Reader, targetDir string) error {
 		return err
 	}
 	defer os.RemoveAll(stage)
+	root, err := os.OpenRoot(stage)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return err
@@ -475,58 +467,14 @@ func extractTenantArchiveStream(r io.Reader, targetDir string) error {
 			return errors.New("tenant archive exceeds extraction limits")
 		}
 		total += hdr.Size
-		clean := filepath.Clean(filepath.FromSlash(hdr.Name))
-		if clean == "." {
-			continue
-		}
-		if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
-			return fmt.Errorf("unsafe archive path %q", hdr.Name)
-		}
-		dst := filepath.Join(stage, clean)
-		if !strings.HasPrefix(dst, stage+string(os.PathSeparator)) {
-			return fmt.Errorf("unsafe archive path %q", hdr.Name)
-		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(dst, os.FileMode(hdr.Mode)&0o700); err != nil {
-				return err
-			}
-		case tar.TypeReg, tar.TypeRegA:
-			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-				return err
-			}
-			f, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(hdr.Mode)&0o700)
-			if err != nil {
-				return err
-			}
-			_, copyErr := io.CopyN(f, tr, hdr.Size)
-			closeErr := f.Close()
-			if copyErr != nil {
-				return copyErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-		case tar.TypeSymlink:
-			link := filepath.Clean(filepath.FromSlash(hdr.Linkname))
-			if filepath.IsAbs(link) {
-				return fmt.Errorf("unsafe absolute symlink %q", hdr.Linkname)
-			}
-			resolved := filepath.Clean(filepath.Join(filepath.Dir(dst), link))
-			if resolved != stage && !strings.HasPrefix(resolved, stage+string(os.PathSeparator)) {
-				return fmt.Errorf("unsafe escaping symlink %q", hdr.Linkname)
-			}
-			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-				return err
-			}
-			if err := os.Symlink(hdr.Linkname, dst); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("unsupported archive entry type %d", hdr.Typeflag)
+		if err := extractArchiveEntry(root, hdr.Name, hdr, tr); err != nil {
+			return err
 		}
 	}
-	return os.Rename(stage, targetDir)
+	if _, err := io.Copy(io.Discard, gz); err != nil {
+		return err
+	}
+	return publishTenantDirectory(stage, targetDir)
 }
 
 func (a *App) signTransfer(id string, exp int64) string {
@@ -681,3 +629,5 @@ func shellSafeSlug(slug string) string {
 	}
 	return b.String()
 }
+
+type publishedTransferError struct{ error }

@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -68,11 +67,15 @@ func (y *yahooPublic) Quote(symbol string) (*Mark, error) {
 		return nil, fmt.Errorf("yahoo: no regularMarketPrice for %s", symbol)
 	}
 	mk := &Mark{
-		Symbol:     strings.ToUpper(symbol),
-		AssetClass: inferAssetClass(symbol),
-		Price:      meta.RegularMarketPrice,
-		MarkedAt:   yahooRegularMarketTimestamp(meta),
+		Symbol:        strings.ToUpper(symbol),
+		AssetClass:    yahooAssetClass(meta, symbol),
+		Price:         meta.RegularMarketPrice,
+		MarkedAt:      yahooRegularMarketTimestamp(meta),
+		TimestampKind: "exchange",
+		Source:        "yahoo-finance",
+		VolumeUnit:    "shares",
 	}
+	mk.Instrument = yahooInstrument(meta, mk.Symbol, mk.AssetClass, time.Now().UTC())
 	if meta.PreviousClose > 0 {
 		pc := meta.PreviousClose
 		mk.PrevClose = &pc
@@ -134,10 +137,7 @@ func (y *yahooPublic) BacktestBarsContext(ctx context.Context, symbol, interval 
 		q.Set("period1", fmt.Sprint(cursor.Unix()))
 		q.Set("period2", fmt.Sprint(pageEnd.Unix()))
 		q.Set("interval", yahooInterval)
-		bars, err := retryBacktestBars(ctx, func() ([]Bar, error) {
-			bars, _, err := y.fetchChartQueryContext(ctx, symbol, q)
-			return bars, err
-		})
+		bars, _, err := y.fetchChartQueryContext(ctx, symbol, q)
 		if err != nil {
 			return nil, fmt.Errorf("yahoo history %s to %s: %w",
 				cursor.Format("2006-01-02"), pageEnd.Add(-time.Second).Format("2006-01-02"), err)
@@ -275,11 +275,52 @@ func (y *yahooPublic) UniverseBatch(symbols []string) ([]*Mark, error) {
 // state, etc.); we only pull what feeds Mark.
 type yahooMeta struct {
 	Symbol              string  `json:"symbol"`
+	ShortName           string  `json:"shortName"`
+	LongName            string  `json:"longName"`
+	Currency            string  `json:"currency"`
+	QuoteType           string  `json:"instrumentType"`
+	ExchangeName        string  `json:"exchangeName"`
+	FullExchangeName    string  `json:"fullExchangeName"`
+	ExchangeTimezone    string  `json:"exchangeTimezoneName"`
 	RegularMarketPrice  float64 `json:"regularMarketPrice"`
 	RegularMarketTime   int64   `json:"regularMarketTime"`
 	PreviousClose       float64 `json:"previousClose"`
 	ChartPreviousClose  float64 `json:"chartPreviousClose"`
 	RegularMarketVolume float64 `json:"regularMarketVolume"`
+}
+
+func yahooAssetClass(meta *yahooMeta, symbol string) string {
+	if meta != nil && strings.EqualFold(strings.TrimSpace(meta.QuoteType), "ETF") {
+		return "etf"
+	}
+	return inferAssetClass(symbol)
+}
+
+func yahooInstrument(meta *yahooMeta, symbol, assetClass string, now time.Time) *Instrument {
+	i := defaultInstrument(symbol, assetClass, "yahoo-finance", now)
+	if meta == nil {
+		return i
+	}
+	if strings.TrimSpace(meta.Symbol) != "" {
+		i.ProviderSymbol = strings.ToUpper(strings.TrimSpace(meta.Symbol))
+	}
+	if strings.TrimSpace(meta.LongName) != "" {
+		i.Name = strings.TrimSpace(meta.LongName)
+	} else if strings.TrimSpace(meta.ShortName) != "" {
+		i.Name = strings.TrimSpace(meta.ShortName)
+	}
+	if strings.TrimSpace(meta.FullExchangeName) != "" {
+		i.Exchange = strings.ToUpper(strings.TrimSpace(meta.FullExchangeName))
+	} else if strings.TrimSpace(meta.ExchangeName) != "" {
+		i.Exchange = strings.ToUpper(strings.TrimSpace(meta.ExchangeName))
+	}
+	if strings.TrimSpace(meta.ExchangeTimezone) != "" {
+		i.ExchangeTimezone = strings.TrimSpace(meta.ExchangeTimezone)
+	}
+	if strings.TrimSpace(meta.Currency) != "" {
+		i.QuoteCurrency = strings.ToUpper(strings.TrimSpace(meta.Currency))
+	}
+	return i
 }
 
 func yahooRegularMarketTimestamp(meta *yahooMeta) string {
@@ -311,22 +352,9 @@ func (y *yahooPublic) fetchChartQueryContext(parent context.Context, symbol stri
 	// + crumb), the parse fails explicitly and no synthetic data is used.
 	u := y.base + "/v8/finance/chart/" + url.PathEscape(strings.ToUpper(symbol)) + "?" + q.Encode()
 
-	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Apteva-Trading/0.4)")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := y.client.Do(req)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, nil, fmt.Errorf("yahoo HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw, err := publicGET(parent, y.client, "yahoo", u, 4<<20, map[string]string{
+		"User-Agent": "Mozilla/5.0 (compatible; Apteva-Trading/0.4)", "Accept": "application/json",
+	})
 	if err != nil {
 		return nil, nil, err
 	}

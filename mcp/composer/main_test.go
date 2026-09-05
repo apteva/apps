@@ -1,17 +1,17 @@
 package main
 
-// composer v0.1 — smoke tests over the validator + ffmpeg cmd builder.
-// Full executor round-trip (actual ffmpeg invocation) is intentionally
-// skipped — too brittle without a known input fixture, and the
-// per-component pieces (filter graph generation, drawtext escaping)
-// are what's worth pinning.
+// Composer behavior tests cover validation, command construction, and real
+// renderer output using generated, deterministic fixtures.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
+	"image/png"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -78,6 +78,57 @@ func TestValidateEdit_RejectsZeroLength(t *testing.T) {
 	_, err := parseEditJSON(body)
 	if err == nil || !strings.Contains(err.Error(), "length") {
 		t.Fatalf("want length rejection, got %v", err)
+	}
+}
+
+func TestValidateEdit_AcceptsScreenRecordingPrimitives(t *testing.T) {
+	body := `{"timeline":{"markers":[{"id":"send","time":1.2,"type":"agent_status","label":"Send","value":"thinking","region":{"x":0.7,"y":0.8,"width":0.2,"height":0.1}}],"tracks":[{"clips":[{
+		"asset":{"type":"video","src":"storage:1"},"start":0,"length":4,"source_start":8,"source_end":12,"playback_rate":2.5,
+		"crop":{"x":0.1,"y":0.2,"width":0.8,"height":0.7},
+		"transform":{"x":0.5,"y":0.5,"scale":1,"keyframes":[{"time":1,"x":0.75,"y":0.7,"scale":2,"easing":"ease_in_out"},{"time":3,"scale":1.2,"easing":"ease_out"}]}
+	}] }]}}`
+	edit, err := parseEditJSON(body)
+	if err != nil {
+		t.Fatalf("screen-recording primitives should validate: %v", err)
+	}
+	clip := edit.Timeline.Tracks[0].Clips[0]
+	if clip.SourceStart != 8 || clip.SourceEnd != 12 || clip.PlaybackRate != 2.5 || clip.Crop == nil || clip.Transform == nil || len(clip.Transform.Keyframes) != 2 {
+		t.Fatalf("screen-recording fields did not survive parse: %+v", clip)
+	}
+	if len(edit.Timeline.Markers) != 1 || edit.Timeline.Markers[0].Type != "agent_status" || edit.Timeline.Markers[0].Value != "thinking" {
+		t.Fatalf("markers did not survive parse: %+v", edit.Timeline.Markers)
+	}
+}
+
+func TestValidateEdit_RejectsInvalidScreenRecordingPrimitives(t *testing.T) {
+	tests := []struct {
+		name string
+		clip string
+		want string
+	}{
+		{"source range", `"source_start":3,"source_end":2`, "source_end"},
+		{"crop bounds", `"crop":{"x":0.8,"y":0,"width":0.4,"height":1}`, "rectangle"},
+		{"keyframe order", `"transform":{"keyframes":[{"time":2},{"time":1}]}`, "ordered"},
+		{"audio camera", `"asset":{"type":"audio","src":"storage:1"},"transform":{"scale":2}`, "crop/transform"},
+		{"playback rate low", `"playback_rate":0.1`, "playback_rate"},
+		{"image playback rate", `"asset":{"type":"image","src":"storage:1"},"playback_rate":2`, "playback_rate"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			asset := `"asset":{"type":"video","src":"storage:1"}`
+			if strings.Contains(test.clip, `"asset"`) {
+				asset = ""
+			}
+			body := `{"timeline":{"tracks":[{"type":"` + map[bool]string{true: "audio", false: "visual"}[test.name == "audio camera"] + `","clips":[{` + asset
+			if asset != "" {
+				body += ","
+			}
+			body += test.clip + `,"start":0,"length":4}]}]}}`
+			_, err := parseEditJSON(body)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("want error containing %q, got %v", test.want, err)
+			}
+		})
 	}
 }
 
@@ -218,6 +269,174 @@ func TestVisualOverlayClipRefsSortByZIndex(t *testing.T) {
 }
 
 // --- ffmpeg cmd builder ------------------------------------------
+
+func TestBuildLocalFFmpegArgs_ScreenRecordingPrimitives(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[{"clips":[{
+		"asset":{"src":"https://recording","type":"video"},"start":0,"length":4,"source_start":8,"source_end":12,"playback_rate":2.5,"source_audio":"keep",
+		"crop":{"x":0.25,"y":0.1,"width":0.5,"height":0.8},
+		"transform":{"x":0.5,"y":0.5,"scale":1,"keyframes":[{"time":2,"x":0.8,"y":0.7,"scale":2,"easing":"ease_in_out"}]}
+	}] }]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := buildLocalFFmpegArgsWithAudioInfo(e, defaultOutput(), []string{"https://recording"}, -1, "out.mp4", []bool{true})
+	cmd := strings.Join(args, " ")
+	for _, want := range []string{
+		"trim=start=8:end=12,setpts=(PTS-STARTPTS)/2.5",
+		"crop=iw*0.5:ih*0.8:iw*0.25:ih*0.1",
+		"scale=2560:1440",
+		"zoompan=z=",
+		"s=2560x1440",
+		"scale=1280:720:flags=lanczos",
+		"[0:a]atrim=start=8:end=12,asetpts=PTS-STARTPTS,atempo=2,atempo=1.25,apad",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("missing %q in ffmpeg args: %s", want, cmd)
+		}
+	}
+}
+
+func TestScreenRecordingPrimitives_FFmpegSmoke(t *testing.T) {
+	ffmpeg, err := exec.LookPath(ffmpegPath())
+	if err != nil {
+		t.Skip("ffmpeg not available")
+	}
+	dir := t.TempDir()
+	appData := filepath.Join(dir, "apps", "composer", "data", "60")
+	storageKey := "recording.mp4"
+	source := filepath.Join(dir, "apps", "storage", "data", "6", "storage-blobs", "ab", storageKey)
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	generated, err := exec.Command(ffmpeg,
+		"-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=4",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=4",
+		"-shortest", "-c:v", "mpeg4", "-q:v", "5", "-c:a", "aac", source,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate source fixture: %v\n%s", err, generated)
+	}
+	t.Setenv("APTEVA_DATA_DIR", appData)
+	platform := &storageFilesGetPlatform{response: json.RawMessage(`{"found":true,"file":{"id":11701,"storage_key":"recording.mp4"}}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	resolvedSource, err := resolveAssetLocal(ctx, "storage:11701")
+	if err != nil {
+		t.Fatalf("resolve wrapped Storage response to local blob: %v", err)
+	}
+	if resolvedSource != source {
+		t.Fatalf("resolved source = %q, want local blob %q", resolvedSource, source)
+	}
+	e, err := parseEditJSON(`{"timeline":{"tracks":[{"clips":[{
+		"asset":{"src":"fixture","type":"video"},"start":0,"length":2,"source_start":0.5,"source_end":3.5,"playback_rate":1.5,"source_audio":"keep",
+		"crop":{"x":0.1,"y":0.1,"width":0.8,"height":0.8},
+		"transform":{"x":0.5,"y":0.5,"scale":1,"keyframes":[{"time":1,"x":0.72,"y":0.62,"scale":1.8,"easing":"ease_in_out"},{"time":2,"x":0.5,"y":0.5,"scale":1.1,"easing":"ease_out"}]}
+	}] }]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := Output{Format: "mp4", Resolution: "sd", Aspect: "16:9", FPS: 24}
+	destination := filepath.Join(dir, "render.mp4")
+	args := buildLocalFFmpegArgsWithAudioInfo(e, output, []string{resolvedSource}, -1, destination, []bool{true})
+	rendered, err := exec.Command(ffmpeg, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("render source range/crop/keyframes: %v\n%s\nargs=%s", err, rendered, strings.Join(args, " "))
+	}
+	info, err := os.Stat(destination)
+	if err != nil || info.Size() == 0 {
+		t.Fatalf("render output missing or empty: info=%v err=%v", info, err)
+	}
+	if got := probeRenderDuration(destination); got < 1.8 || got > 2.3 {
+		t.Fatalf("render duration = %v, want about 2s", got)
+	}
+}
+
+func TestCameraMotion_OversamplingProducesMonotonicSubpixelSteps(t *testing.T) {
+	ffmpeg, err := exec.LookPath(ffmpegPath())
+	if err != nil {
+		t.Skip("ffmpeg not available")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "line.png")
+	img := image.NewGray(image.Rect(0, 0, 320, 180))
+	for y := 0; y < 180; y++ {
+		for x := 158; x <= 161; x++ {
+			img.SetGray(x, y, color.Gray{Y: 255})
+		}
+	}
+	f, err := os.Create(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	x0, x1, y0 := 0.5, 0.51, 0.5
+	clip := Clip{Transform: &Transform{
+		X: &x0, Y: &y0, Scale: 2,
+		Keyframes: []TransformKeyframe{{Time: 2, X: &x1, Y: &y0, Scale: 2, Easing: "linear"}},
+	}}
+	const width, height, fps, frames = 854, 480, 24, 48
+	filter := "[0:v]" + buildBaseVisualFilter(clip, width, height, fps, "#000000") + ",trim=duration=2[v]"
+	cmd := exec.Command(ffmpeg,
+		"-v", "error", "-loop", "1", "-framerate", "24", "-i", source,
+		"-filter_complex", filter, "-map", "[v]", "-frames:v", "48",
+		"-pix_fmt", "gray", "-f", "rawvideo", "pipe:1",
+	)
+	raw, err := cmd.Output()
+	if err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("render camera motion: %v\n%s\nfilter=%s", err, exit.Stderr, filter)
+		}
+		t.Fatal(err)
+	}
+	frameSize := width * height
+	if len(raw) < frameSize*frames {
+		t.Fatalf("raw render bytes = %d, want at least %d", len(raw), frameSize*frames)
+	}
+	positions := make([]float64, frames)
+	for frame := 0; frame < frames; frame++ {
+		pixels := raw[frame*frameSize : (frame+1)*frameSize]
+		var intensity, weighted float64
+		for offset, value := range pixels {
+			v := float64(value)
+			intensity += v
+			weighted += float64(offset%width) * v
+		}
+		if intensity == 0 {
+			t.Fatalf("frame %d has no visible tracking line", frame)
+		}
+		positions[frame] = weighted / intensity
+	}
+	total := positions[len(positions)-1] - positions[0]
+	if math.Abs(total) < 5 {
+		t.Fatalf("camera moved only %.3fpx; positions=%v", total, positions)
+	}
+	direction := 1.0
+	if total < 0 {
+		direction = -1
+	}
+	movingFrames := 0
+	for frame := 1; frame < len(positions); frame++ {
+		step := (positions[frame] - positions[frame-1]) * direction
+		if step < -0.08 {
+			t.Fatalf("camera motion reversed at frame %d by %.3fpx; positions=%v", frame, step, positions)
+		}
+		if step > 0.55 {
+			t.Fatalf("camera jumped at frame %d by %.3fpx; positions=%v", frame, step, positions)
+		}
+		if step > 0.04 {
+			movingFrames++
+		}
+	}
+	if movingFrames < 20 {
+		t.Fatalf("camera held too many frames: only %d/%d frames moved; positions=%v", movingFrames, frames-1, positions)
+	}
+}
 
 func TestBuildLocalFFmpegArgs_TwoClipsBasic(t *testing.T) {
 	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
@@ -511,7 +730,6 @@ func TestV1TypographyWarningsReportSubstitutionAndUnsupportedSpacing(t *testing.
 	for _, want := range []string{
 		"Arial unavailable; rendering with Inter.",
 		"V1 letter_spacing is not rendered; the value was ignored.",
-		"V1 line_height is not rendered; the value was ignored.",
 	} {
 		if !strings.Contains(warnings, want) {
 			t.Fatalf("warning %q missing from %q", want, warnings)
@@ -1605,6 +1823,108 @@ func TestStorageLocalPathForKey_FindsSiblingStorageBlob(t *testing.T) {
 	}
 }
 
+type storageFilesGetPlatform struct {
+	tk.BasePlatformClient
+	response json.RawMessage
+	calls    int
+}
+
+func (p *storageFilesGetPlatform) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	if appName != "storage" || tool != "files_get" {
+		return fmt.Errorf("unexpected app call %s.%s", appName, tool)
+	}
+	p.calls++
+	return json.Unmarshal(p.response, out)
+}
+
+func TestStorageLocalPath_DecodesWrappedFilesGetResponse(t *testing.T) {
+	root := t.TempDir()
+	appData := filepath.Join(root, "apps", "composer", "data", "60")
+	storageKey := "b1ddf51f-5b5b-4dad-8365-d60e5ef3ece8.mp4"
+	storageBlob := filepath.Join(root, "apps", "storage", "data", "6", "storage-blobs", "2b", storageKey)
+	if err := os.MkdirAll(filepath.Dir(storageBlob), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storageBlob, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APTEVA_DATA_DIR", appData)
+	platform := &storageFilesGetPlatform{response: json.RawMessage(`{
+		"found": true,
+		"file": {
+			"id": 11701,
+			"name": "apteva-conversations-crm-demo-source.mp4",
+			"storage_key": "b1ddf51f-5b5b-4dad-8365-d60e5ef3ece8.mp4"
+		}
+	}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+
+	got, err := storageLocalPath(ctx, 11701)
+	if err != nil {
+		t.Fatalf("storage local path from wrapped files_get: %v", err)
+	}
+	if got != storageBlob {
+		t.Fatalf("path = %q, want %q", got, storageBlob)
+	}
+	if platform.calls != 1 {
+		t.Fatalf("files_get calls = %d, want 1", platform.calls)
+	}
+}
+
+func TestStorageLocalPath_RejectsMissingWrappedFile(t *testing.T) {
+	platform := &storageFilesGetPlatform{response: json.RawMessage(`{"found":false,"file":null}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+
+	_, err := storageLocalPath(ctx, 11701)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("want not-found error, got %v", err)
+	}
+}
+
+func TestToolAssetInspect_UsesLocalStorageBlob(t *testing.T) {
+	ffmpeg, err := exec.LookPath(ffmpegPath())
+	if err != nil {
+		t.Skip("ffmpeg not available")
+	}
+	ffprobe, err := exec.LookPath(ffprobePath())
+	if err != nil {
+		t.Skip("ffprobe not available")
+	}
+
+	root := t.TempDir()
+	appData := filepath.Join(root, "apps", "composer", "data", "60")
+	storageKey := "private-inspect.wav"
+	storageBlob := filepath.Join(root, "apps", "storage", "data", "6", "storage-blobs", "ab", storageKey)
+	if err := os.MkdirAll(filepath.Dir(storageBlob), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	generated, err := exec.Command(ffmpeg,
+		"-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.25",
+		"-c:a", "pcm_s16le", storageBlob,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate local storage fixture: %v\n%s", err, generated)
+	}
+
+	t.Setenv("APTEVA_DATA_DIR", appData)
+	t.Setenv("FFPROBE_PATH", ffprobe)
+	platform := &storageFilesGetPlatform{response: json.RawMessage(`{"found":true,"file":{"id":11701,"storage_key":"private-inspect.wav"}}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+
+	got, err := (&App{}).toolAssetInspect(ctx, map[string]any{"src": "storage:11701"})
+	if err != nil {
+		t.Fatalf("inspect private local Storage asset: %v", err)
+	}
+	probe, ok := got.(map[string]any)
+	streams, streamsOK := probe["streams"].([]any)
+	if !ok || !streamsOK || len(streams) == 0 {
+		t.Fatalf("unexpected ffprobe result: %#v", got)
+	}
+	if platform.calls != 1 {
+		t.Fatalf("Storage calls = %d, want one files_get call and no files_get_url call", platform.calls)
+	}
+}
+
 func TestAIKindHasMediaDuration(t *testing.T) {
 	for _, kind := range []string{"audio_tts", "audio_sfx", "music", "video", "avatar"} {
 		if !aiKindHasMediaDuration(kind) {
@@ -1651,6 +1971,25 @@ func TestBuildLocalAudioFFmpegArgs_MP3WithSilenceGap(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "libmp3lame") || !strings.Contains(cmd, "-map [aout]") {
 		t.Errorf("mp3 audio mapping/codec missing: %s", cmd)
+	}
+}
+
+func TestBuildLocalAudioFFmpegArgs_PlaybackRate(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"audio","clips":[
+			{"asset":{"src":"https://typing.mp3","type":"audio"},"start":0,"length":2,"source_start":1,"source_end":9,"playback_rate":4}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := buildLocalAudioFFmpegArgs(e, Output{Format: "mp3"}, []string{"https://typing.mp3"}, -1, "out.mp3")
+	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "atrim=start=1:end=9,asetpts=PTS-STARTPTS,atempo=2,atempo=2,apad") {
+		t.Fatalf("audio playback rate filters missing: %s", cmd)
+	}
+	if got := playbackRateAudioFilters(0.25); strings.Join(got, ",") != "atempo=0.5,atempo=0.5" {
+		t.Fatalf("slow playback chain = %v", got)
 	}
 }
 
@@ -1787,6 +2126,7 @@ func TestEditFromArgs_ReconstructsTimeline(t *testing.T) {
 		}},
 		"soundtrack": map[string]any{"src": "storage:2", "volume": 0.7},
 		"background": "#101010",
+		"markers":    []any{map[string]any{"id": "send", "time": 1.25, "type": "click", "label": "Send"}},
 	}
 	e, err := editFromArgs(args)
 	if err != nil {
@@ -1797,6 +2137,9 @@ func TestEditFromArgs_ReconstructsTimeline(t *testing.T) {
 	}
 	if e.Timeline.Soundtrack == nil || e.Timeline.Soundtrack.Volume != 0.7 {
 		t.Errorf("soundtrack lost: %+v", e.Timeline.Soundtrack)
+	}
+	if len(e.Timeline.Markers) != 1 || e.Timeline.Markers[0].ID != "send" {
+		t.Errorf("markers lost: %+v", e.Timeline.Markers)
 	}
 	b, _ := json.Marshal(e)
 	if !strings.Contains(string(b), `"length":3`) {
@@ -1812,7 +2155,8 @@ func TestEscDrawText(t *testing.T) {
 		"a:b":          `a\:b`,
 		"it's":         `it\'s`,
 		`a\b`:          `a\\b`,
-		"line1\nline2": "line1 line2",
+		"line1\nline2": `line1\nline2`,
+		"100%":         `100\%`,
 	}
 	for in, want := range cases {
 		if got := escDrawText(in); got != want {
@@ -2243,7 +2587,7 @@ func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
 		map[string]string{composerFontInterBold: "https://agents.example.com/api/apps/composer/render-font?project_id=project-1&face=inter-bold"},
 	)
 	for _, want := range []string{
-		`export STORAGE_BASE="https://agents.example.com/api/apps/callback/apps/storage/proxy"`,
+		`export STORAGE_BASE=https://agents.example.com/api/apps/callback/apps/storage/proxy`,
 		"$STORAGE_BASE/files/init?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID",

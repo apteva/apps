@@ -333,10 +333,12 @@ func (s *Store) SaveArtifact(artifact Artifact) (*Artifact, error) {
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
-	if id == 0 {
-		err = s.db.QueryRow(`SELECT id FROM artifacts WHERE revision_id = ? AND format = ? AND sha256 = ?`,
-			artifact.RevisionID, artifact.Format, artifact.SHA256).Scan(&id)
+	var id int64
+	if affected, _ := res.RowsAffected(); affected > 0 {
+		id, _ = res.LastInsertId()
+	} else {
+		err = s.db.QueryRow(`SELECT id FROM artifacts WHERE revision_id = ? AND format = ? AND sha256 = ? AND metadata_json = ?`,
+			artifact.RevisionID, artifact.Format, artifact.SHA256, string(metadata)).Scan(&id)
 		if err != nil {
 			return nil, err
 		}

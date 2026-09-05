@@ -110,6 +110,8 @@ func (g *tier2PlatformGateway) serveHTTP(w http.ResponseWriter, r *http.Request)
 			data = map[string]any{"data": map[string]any{"id": "application-test-1"}}
 		case "update_phone_number":
 			data = map[string]any{"data": map[string]any{"id": "phone-test-1"}}
+		case "dial_call":
+			data = map[string]any{"data": map[string]any{"call_control_id": "ring:" + fmt.Sprint(request.Input["to"])}}
 		case "answer_call":
 			data = map[string]any{"data": map[string]any{"call_control_id": "call-control-test-1"}}
 		}
@@ -458,6 +460,9 @@ func TestTier2HumanBrowserCallEndToEnd(t *testing.T) {
 		if err := wsutil.WriteClientText(carrier, frame); err != nil {
 			t.Fatal(err)
 		}
+		// Send at carrier cadence: bursting 200ms instantaneously is an overload
+		// scenario and intentionally exercises the browser's drop-oldest queue.
+		time.Sleep(20 * time.Millisecond)
 	}
 	var browserPCM []int16
 	// A streaming band-limited resampler retains its filter tail for the next
@@ -536,6 +541,17 @@ func TestTier2HumanBrowserCallEndToEnd(t *testing.T) {
 		t.Fatalf("hangup callback=%d %s", resp.StatusCode, body)
 	}
 	completed := waitTier2CallStatus(t, sc, callID, "completed")
+	if completed["browser_audio_diagnostics"] != nil {
+		t.Fatal("list should omit detailed audio history")
+	}
+	var detail struct {
+		Calls []map[string]any `json:"calls"`
+	}
+	status, body := tier2Request(t, sc, http.MethodGet, "/calls?project_id="+tier2Project+"&call_id="+callID, nil, &detail, tier2Headers())
+	if status != http.StatusOK || len(detail.Calls) != 1 {
+		t.Fatalf("call detail=%d %s", status, body)
+	}
+	completed = detail.Calls[0]
 	if diagnostics, _ := completed["browser_audio_diagnostics"].(map[string]any); diagnostics["auto_gain_control"] != false || diagnostics["rtt_ms"] != float64(42) {
 		t.Fatalf("persisted browser diagnostics=%v", completed["browser_audio_diagnostics"])
 	}

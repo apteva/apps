@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -89,6 +90,8 @@ func (a *App) handleRepoItem(w http.ResponseWriter, r *http.Request) {
 		a.httpRepoIssueItem(w, r, slug, strings.TrimPrefix(tail, "issues/"))
 	case strings.HasPrefix(tail, "dev/") || tail == "dev":
 		a.httpRepoDev(w, r, slug, strings.TrimPrefix(tail, "dev/"))
+	case strings.HasPrefix(tail, "git/") || tail == "git":
+		a.httpRepoGit(w, r, slug, strings.TrimPrefix(tail, "git/"))
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
@@ -119,20 +122,22 @@ func (a *App) httpCreateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name        string `json:"name"`
-		Slug        string `json:"slug"`
-		Framework   string `json:"framework"`
-		Description string `json:"description"`
+		Name           string `json:"name"`
+		Slug           string `json:"slug"`
+		Framework      string `json:"framework"`
+		Description    string `json:"description"`
+		WorkspaceImage string `json:"workspace_image"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	repo, err := dbCreateRepo(globalCtx.AppDB(), pid, CreateRepoInput{
-		Name:        body.Name,
-		Slug:        body.Slug,
-		Framework:   body.Framework,
-		Description: body.Description,
+		Name:           body.Name,
+		Slug:           body.Slug,
+		Framework:      body.Framework,
+		Description:    body.Description,
+		WorkspaceImage: body.WorkspaceImage,
 	})
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -186,12 +191,13 @@ func (a *App) httpRepoMeta(w http.ResponseWriter, r *http.Request, slug string) 
 		})
 	case http.MethodPatch:
 		var body struct {
-			Name        *string `json:"name"`
-			Description *string `json:"description"`
-			BuildCmd    *string `json:"build_cmd"`
-			StartCmd    *string `json:"start_cmd"`
-			Port        *int    `json:"port"`
-			EnvJSON     *string `json:"env_json"`
+			Name           *string `json:"name"`
+			Description    *string `json:"description"`
+			BuildCmd       *string `json:"build_cmd"`
+			StartCmd       *string `json:"start_cmd"`
+			Port           *int    `json:"port"`
+			EnvJSON        *string `json:"env_json"`
+			WorkspaceImage *string `json:"workspace_image"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
@@ -210,6 +216,12 @@ func (a *App) httpRepoMeta(w http.ResponseWriter, r *http.Request, slug string) 
 				return
 			}
 		}
+		if body.WorkspaceImage != nil {
+			if _, err := dbSetWorkspaceImage(globalCtx.AppDB(), pid, slug, *body.WorkspaceImage); err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 		repo, _ := dbGetRepoBySlug(globalCtx.AppDB(), pid, slug)
 		if globalCtx != nil && repo != nil {
 			globalCtx.Emit("repo.updated", map[string]any{
@@ -218,18 +230,17 @@ func (a *App) httpRepoMeta(w http.ResponseWriter, r *http.Request, slug string) 
 		}
 		httpJSON(w, map[string]any{"repository": repo})
 	case http.MethodDelete:
-		repo, err := requireRepoSlug(globalCtx, pid, slug)
+		_, err := requireRepoSlug(globalCtx, pid, slug)
 		if err != nil {
 			httpErr(w, http.StatusNotFound, err.Error())
 			return
 		}
 		force := r.URL.Query().Get("force") == "1"
 		if force {
-			if err := a.storeFor(repo).DropRepo(slug); err != nil {
+			if err := a.hardDeleteRepo(globalCtx.AppDB(), pid, slug); err != nil {
 				httpErr(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			_ = dbHardDeleteRepo(globalCtx.AppDB(), pid, slug)
 			if globalCtx != nil {
 				globalCtx.Emit("repo.deleted", map[string]any{"slug": slug})
 			}
@@ -814,6 +825,34 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 		refreshed, _ := dbGetIssueByID(globalCtx.AppDB(), iss.ID)
 		emitIssueEvent(globalCtx, "issue.commented", repo, refreshed)
 		httpJSON(w, map[string]any{"comment": comment, "issue": refreshed})
+	case "claim", "release":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		owner, label, err := httpIssueClaimant(r)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var outcome *IssueClaimOutcome
+		if action == "claim" {
+			outcome, err = dbClaimIssue(globalCtx.AppDB(), iss.ID, owner, label)
+		} else {
+			outcome, err = dbReleaseIssueClaim(globalCtx.AppDB(), iss.ID, owner, label)
+		}
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if outcome.Changed {
+			topic := "issue.claimed"
+			if action == "release" {
+				topic = "issue.claim_released"
+			}
+			emitIssueEvent(globalCtx, topic, repo, outcome.Issue)
+		}
+		httpJSON(w, outcome)
 	case "close":
 		if r.Method != http.MethodPost {
 			httpErr(w, http.StatusMethodNotAllowed, "POST")
@@ -888,6 +927,28 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 	default:
 		httpErr(w, http.StatusNotFound, "no such issue action: "+action)
 	}
+}
+
+func httpIssueClaimant(r *http.Request) (string, string, error) {
+	if subjectType := strings.TrimSpace(r.Header.Get("X-Apteva-Subject-Type")); subjectType != "" {
+		subjectID := strings.TrimSpace(r.Header.Get("X-Apteva-Subject-ID"))
+		if subjectID == "" {
+			return "", "", errors.New("authenticated subject id missing")
+		}
+		label := strings.TrimSpace(r.Header.Get("X-Apteva-Subject-Email"))
+		return normaliseClaimant("user:"+subjectType+":"+subjectID, label)
+	}
+	var body struct {
+		Label string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		return "", "", errors.New("invalid JSON")
+	}
+	userID, err := strconv.ParseInt(strings.TrimSpace(r.Header.Get("X-User-ID")), 10, 64)
+	if err != nil || userID <= 0 {
+		return "", "", errors.New("authenticated user id required")
+	}
+	return normaliseClaimant(fmt.Sprintf("user:%d", userID), body.Label)
 }
 
 func (a *App) httpIssueRepo(w http.ResponseWriter, r *http.Request, slug string) (string, *Repo, bool) {
@@ -1107,7 +1168,7 @@ func (a *App) handleGithubReposList(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "GET")
 		return
 	}
-	bound := globalCtx.IntegrationFor("github")
+	bound := boundGitIntegrationForSlug(globalCtx, "github")
 	if bound == nil || bound.ConnectionID == 0 {
 		httpErr(w, http.StatusFailedDependency, "github not connected: bind a github connection on this install first")
 		return

@@ -31,7 +31,7 @@ func importGitHub(ctx *sdk.AppCtx, store FileStore, in importGitHubInput) (*impo
 	if in.Owner == "" || in.Repo == "" {
 		return nil, errors.New("owner and repo are required")
 	}
-	bound := ctx.IntegrationFor("github")
+	bound := boundGitIntegrationForSlug(ctx, "github")
 	if bound == nil || bound.ConnectionID == 0 {
 		return nil, errors.New("github not connected: bind a github connection on this install first")
 	}

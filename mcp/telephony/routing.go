@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -21,8 +23,10 @@ import (
 // version and only ever execute that immutable snapshot; the mutable draft is
 // management state and can never change a call already in progress.
 type routingDefinition struct {
-	Entry string        `json:"entry"`
-	Nodes []routingNode `json:"nodes"`
+	Entry        string                           `json:"entry"`
+	Nodes        []routingNode                    `json:"nodes"`
+	Destinations map[string]routingDestinationRow `json:"destinations"`
+	Groups       map[string]ringGroupRow          `json:"groups,omitempty"`
 }
 
 type routingNode struct {
@@ -71,6 +75,7 @@ type routingSimulationContext struct {
 	Called            string            `json:"called,omitempty"`
 	At                string            `json:"at,omitempty"`
 	Digits            map[string]string `json:"digits,omitempty"`
+	StartNode         string            `json:"-"`
 	StopAtInteraction bool              `json:"-"`
 }
 
@@ -101,6 +106,10 @@ type inboundRoutingPlan struct {
 	TimeoutSec                                                  int
 	Trace                                                       []routingTraceStep
 	NodeID, Prompt, ValidDigits                                 string
+	ContextJSON                                                 string
+	Group                                                       *ringGroupRow
+	GroupDestinations                                           map[string]routingDestinationRow
+	OverflowNodeID                                              string
 }
 
 var routingIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
@@ -277,7 +286,7 @@ func simulateRoutingDefinition(def routingDefinition, input routingSimulationCon
 		}
 	}
 	result := routingSimulation{Valid: true}
-	current := def.Entry
+	current := firstNonEmpty(input.StartNode, def.Entry)
 	for steps := 0; steps <= len(def.Nodes); steps++ {
 		node := nodes[current]
 		trace := routingTraceStep{NodeID: node.ID, NodeType: node.Type, Label: node.Label}
@@ -606,6 +615,48 @@ func (a *App) validateRoutingReferences(project string, def routingDefinition) [
 			}
 		}
 	}
+	groups, err := a.listRingGroups(project)
+	if err != nil {
+		errs = append(errs, err.Error())
+	} else {
+		for _, node := range def.Nodes {
+			if node.Type != "ring_group" {
+				continue
+			}
+			for _, group := range groups {
+				if group.ID != routingConfigString(node.Config, "ring_group_id") {
+					continue
+				}
+				if err := validateExecutableRingGroup(group); err != nil {
+					errs = append(errs, err.Error())
+				}
+				for _, member := range group.Members {
+					if !member.Enabled {
+						continue
+					}
+					dest, err := a.findRoutingDestination(project, member.DestinationID)
+					if err != nil || dest == nil || !dest.Enabled {
+						errs = append(errs, "ring group member destination is unavailable")
+						continue
+					}
+					if dest.Kind == "voicemail" {
+						errs = append(errs, "voicemail belongs in the no-answer fallback, not in the ring group")
+					}
+				}
+				if group.OverflowNodeID != "" {
+					found := false
+					for _, candidate := range def.Nodes {
+						if candidate.ID == group.OverflowNodeID {
+							found = true
+						}
+					}
+					if !found {
+						errs = append(errs, "ring group overflow node does not exist in the flow")
+					}
+				}
+			}
+		}
+	}
 	return uniqueStrings(errs)
 }
 
@@ -618,15 +669,51 @@ func (a *App) validateFlowForRoute(project string, def routingDefinition, route 
 		if node.Type == "dtmf_menu" && (route.InboundTransport == inboundTransportSIPDirect || (route.CarrierSlug != "twilio" && route.CarrierSlug != "telnyx")) {
 			errs = append(errs, fmt.Sprintf("%s does not support Telephony-managed DTMF menus on this route", route.CarrierSlug))
 		}
-		if node.Type == "voicemail" && route.CarrierSlug != "twilio" {
+		if node.Type == "voicemail" && (route.CarrierSlug != "twilio" || route.InboundTransport == inboundTransportSIPDirect) {
 			errs = append(errs, fmt.Sprintf("voicemail is not enabled for %s routes yet", route.CarrierSlug))
 		}
-		if node.Type != "destination" {
-			continue
+		ids := []string{}
+		if node.Type == "destination" {
+			ids = append(ids, routingConfigString(node.Config, "destination_id"))
 		}
-		destination, _ := a.findRoutingDestination(project, routingConfigString(node.Config, "destination_id"))
-		if destination != nil && (destination.Kind == "pstn" || destination.Kind == "sip") {
-			errs = append(errs, fmt.Sprintf("%s destination %q is defined but live child-leg bridging is not enabled yet", strings.ToUpper(destination.Kind), destination.Name))
+		if node.Type == "ring_group" {
+			groups, err := a.listRingGroups(project)
+			if err != nil {
+				errs = append(errs, err.Error())
+			}
+			for _, group := range groups {
+				if group.ID == routingConfigString(node.Config, "ring_group_id") {
+					if err := validateExecutableRingGroup(group); err != nil {
+						errs = append(errs, err.Error())
+					}
+					for _, member := range group.Members {
+						if member.Enabled {
+							ids = append(ids, member.DestinationID)
+						}
+					}
+				}
+			}
+		}
+		for _, id := range ids {
+			destination, _ := a.findRoutingDestination(project, id)
+			if frozen, ok := def.Destinations[id]; ok {
+				destination = &frozen
+			}
+			if destination == nil || !destination.Enabled {
+				errs = append(errs, "destination unavailable")
+				continue
+			}
+			if destination.Kind == "pstn" || destination.Kind == "sip" {
+				if route.InboundTransport == inboundTransportSIPDirect {
+					errs = append(errs, "external ring destinations require a provider webhook route")
+				}
+				if route.CarrierSlug != "twilio" && route.CarrierSlug != "telnyx" && route.CarrierSlug != "plivo" {
+					errs = append(errs, "external ring destinations require Twilio, Telnyx, or Plivo")
+				}
+			}
+			if destination.Kind == "voicemail" && (route.CarrierSlug != "twilio" || route.InboundTransport == inboundTransportSIPDirect) {
+				errs = append(errs, "voicemail requires a Twilio webhook route")
+			}
 		}
 	}
 	return uniqueStrings(errs)
@@ -641,6 +728,7 @@ func (a *App) saveRoutingFlow(project, id, name, description, draft string) (*ro
 	if err != nil {
 		return nil, err
 	}
+	def.Destinations, def.Groups = nil, nil
 	canonical, _ := json.Marshal(def)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if id == "" {
@@ -653,12 +741,16 @@ func (a *App) saveRoutingFlow(project, id, name, description, draft string) (*ro
 		(id, project_id, name, description, draft_json, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description,
-			draft_json=excluded.draft_json, updated_at=excluded.updated_at
+			draft_json=excluded.draft_json, generated=0, updated_at=excluded.updated_at
 		WHERE routing_flows.project_id=excluded.project_id`, id, project, name, strings.TrimSpace(description), string(canonical), now, now)
 	if err != nil {
 		return nil, err
 	}
-	return a.findRoutingFlow(project, id)
+	row, err := a.findRoutingFlow(project, id)
+	if err == nil && row == nil {
+		err = errors.New("flow is not owned by this project")
+	}
+	return row, err
 }
 
 func (a *App) publishRoutingFlow(project, id string) (*routingFlowVersionRow, []string, error) {
@@ -689,6 +781,13 @@ func (a *App) publishRoutingFlow(project, id string) (*routingFlowVersionRow, []
 	if len(validation) > 0 {
 		return nil, uniqueStrings(validation), nil
 	}
+	if err := a.snapshotRoutingReferences(project, &def); err != nil {
+		return nil, nil, err
+	}
+	published, err := json.Marshal(def)
+	if err != nil {
+		return nil, nil, err
+	}
 	tx, err := a.db().db.Begin()
 	if err != nil {
 		return nil, nil, err
@@ -700,7 +799,7 @@ func (a *App) publishRoutingFlow(project, id string) (*routingFlowVersionRow, []
 	}
 	versionID := fmt.Sprintf("%s_v%d", id, version)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`INSERT INTO routing_flow_versions(id,flow_id,project_id,version,definition,created_at) VALUES(?,?,?,?,?,?)`, versionID, id, project, version, flow.DraftJSON, now); err != nil {
+	if _, err := tx.Exec(`INSERT INTO routing_flow_versions(id,flow_id,project_id,version,definition,created_at) VALUES(?,?,?,?,?,?)`, versionID, id, project, version, string(published), now); err != nil {
 		return nil, nil, err
 	}
 	if _, err := tx.Exec(`UPDATE routing_flows SET published_version_id=?, updated_at=? WHERE id=? AND project_id=?`, versionID, now, id, project); err != nil {
@@ -712,7 +811,7 @@ func (a *App) publishRoutingFlow(project, id string) (*routingFlowVersionRow, []
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
-	return &routingFlowVersionRow{ID: versionID, FlowID: id, ProjectID: project, Version: version, Definition: flow.DraftJSON, CreatedAt: now}, nil, nil
+	return &routingFlowVersionRow{ID: versionID, FlowID: id, ProjectID: project, Version: version, Definition: string(published), CreatedAt: now}, nil, nil
 }
 
 func (a *App) findRoutingFlow(project, id string) (*routingFlowRow, error) {
@@ -826,7 +925,7 @@ func (a *App) saveRoutingDestination(project, id, name, kind string, config any,
 			return nil, errors.New("PSTN destination requires an E.164 phone_number")
 		}
 	case "sip":
-		if routingConfigString(decoded, "uri") == "" {
+		if !validRingSIPURI(routingConfigString(decoded, "uri")) {
 			return nil, errors.New("SIP destination requires uri")
 		}
 	}
@@ -839,7 +938,11 @@ func (a *App) saveRoutingDestination(project, id, name, kind string, config any,
 	if err != nil {
 		return nil, err
 	}
-	return a.findRoutingDestination(project, id)
+	row, err := a.findRoutingDestination(project, id)
+	if err == nil && row == nil {
+		err = errors.New("destination is not owned by this project")
+	}
+	return row, err
 }
 
 func (a *App) findRoutingDestination(project, id string) (*routingDestinationRow, error) {
@@ -870,14 +973,22 @@ func (a *App) listRingGroups(project string) ([]ringGroupRow, error) {
 			return nil, err
 		}
 		row.Enabled = enabled != 0
-		members, err := a.listRingGroupMembers(row.ID)
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		members, err := a.listRingGroupMembers(out[i].ID)
 		if err != nil {
 			return nil, err
 		}
-		row.Members = members
-		out = append(out, row)
+		out[i].Members = members
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (a *App) listRingGroupMembers(groupID string) ([]ringGroupMemberRow, error) {
@@ -913,13 +1024,16 @@ func (a *App) saveRingGroup(project, id, name, strategy string, timeout int, mem
 	if timeout < 5 || timeout > 300 {
 		return nil, errors.New("timeout_sec must be between 5 and 300")
 	}
-	if len(members) == 0 {
-		return nil, errors.New("ring group needs at least one member")
+	if len(members) == 0 || len(members) > 25 {
+		return nil, errors.New("ring group needs between 1 and 25 members")
 	}
 	if id == "" {
 		id = "group_" + newCallID()
 	}
 	for _, member := range members {
+		if member.TimeoutSec != 0 && (member.TimeoutSec < 5 || member.TimeoutSec > 300) {
+			return nil, errors.New("member timeout must be between 5 and 300 seconds")
+		}
 		destination, err := a.findRoutingDestination(project, member.DestinationID)
 		if err != nil || destination == nil {
 			return nil, fmt.Errorf("unknown destination %q", member.DestinationID)
@@ -931,8 +1045,12 @@ func (a *App) saveRingGroup(project, id, name, strategy string, timeout int, mem
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`INSERT INTO ring_groups(id,project_id,name,strategy,timeout_sec,enabled,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,strategy=excluded.strategy,timeout_sec=excluded.timeout_sec,enabled=1,updated_at=excluded.updated_at WHERE ring_groups.project_id=excluded.project_id`, id, project, name, strategy, timeout, now, now); err != nil {
+	result, err := tx.Exec(`INSERT INTO ring_groups(id,project_id,name,strategy,timeout_sec,enabled,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,strategy=excluded.strategy,timeout_sec=excluded.timeout_sec,enabled=1,updated_at=excluded.updated_at WHERE ring_groups.project_id=excluded.project_id`, id, project, name, strategy, timeout, now, now)
+	if err != nil {
 		return nil, err
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		return nil, errors.New("ring group is not owned by this project")
 	}
 	if _, err := tx.Exec(`DELETE FROM ring_group_members WHERE ring_group_id=?`, id); err != nil {
 		return nil, err
@@ -1023,7 +1141,7 @@ func (a *App) ensureLegacyRoutingFlows(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
-	return nil
+	return a.freezeExistingRoutingVersions()
 }
 
 func (a *App) resolveInboundRoutingPlan(route *routeRow, caller string, digits map[string]string) (*inboundRoutingPlan, error) {
@@ -1038,8 +1156,79 @@ func (a *App) resolveInboundRoutingPlan(route *routeRow, caller string, digits m
 	if err != nil {
 		return nil, err
 	}
+	if def.Destinations == nil {
+		if err := a.snapshotRoutingReferences(route.ProjectID, &def); err != nil {
+			return nil, err
+		}
+	}
+	plan, err := a.resolveRoutingDefinition(route, caller, digits, version, def)
+	if err != nil {
+		return nil, err
+	}
+	if plan.Group != nil {
+		liveGroups, err := a.listRingGroups(route.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		enabled := false
+		for _, group := range liveGroups {
+			if group.ID == plan.Group.ID {
+				enabled = group.Enabled
+			}
+		}
+		if !enabled && plan.TerminalType != "destination" {
+			return nil, errors.New("ring group is disabled for new calls")
+		}
+		for i, member := range plan.Group.Members {
+			if !member.Enabled {
+				continue
+			}
+			live, err := a.findRoutingDestination(route.ProjectID, member.DestinationID)
+			if err != nil {
+				return nil, err
+			}
+			if live == nil || !live.Enabled {
+				plan.Group.Members[i].Enabled = false
+				delete(plan.GroupDestinations, member.DestinationID)
+			}
+		}
+		if len(plan.GroupDestinations) == 0 {
+			return nil, errors.New("ring group has no enabled destinations for new calls")
+		}
+		var frozen routingExecutionContext
+		if err := json.Unmarshal([]byte(plan.ContextJSON), &frozen); err != nil {
+			return nil, err
+		}
+		if plan.TerminalType == "ring_group" {
+			frozen.Definition.Groups[plan.Group.ID] = *plan.Group
+		}
+		raw, err := json.Marshal(frozen)
+		if err != nil {
+			return nil, err
+		}
+		plan.ContextJSON = string(raw)
+	}
+	// Disabling a destination prevents new ingress; it does not interrupt a
+	// call already running from its persisted execution snapshot.
+	if plan.DestinationID != "" {
+		live, err := a.findRoutingDestination(route.ProjectID, plan.DestinationID)
+		if err != nil {
+			return nil, err
+		}
+		if live == nil || !live.Enabled {
+			return nil, errors.New("routing destination is disabled for new calls")
+		}
+	}
+	return plan, nil
+}
+
+func (a *App) resolveRoutingDefinition(route *routeRow, caller string, digits map[string]string, version *routingFlowVersionRow, def routingDefinition, startNode ...string) (*inboundRoutingPlan, error) {
 	def = expandRoutingDefinition(def, route)
-	simulation := simulateRoutingDefinition(def, routingSimulationContext{Caller: caller, Called: route.PhoneNumber, Digits: digits, StopAtInteraction: true})
+	start := ""
+	if len(startNode) > 0 {
+		start = startNode[0]
+	}
+	simulation := simulateRoutingDefinition(def, routingSimulationContext{StartNode: start, Caller: caller, Called: route.PhoneNumber, Digits: digits, StopAtInteraction: true})
 	if !simulation.Valid {
 		return nil, errors.New(strings.Join(simulation.Errors, "; "))
 	}
@@ -1064,25 +1253,66 @@ func (a *App) resolveInboundRoutingPlan(route *routeRow, caller string, digits m
 		}
 	}
 	if simulation.RingGroupID != "" {
-		groups, err := a.listRingGroups(route.ProjectID)
-		if err != nil {
+		group, ok := def.Groups[simulation.RingGroupID]
+		if !ok {
+			return nil, errors.New("ring group snapshot unavailable")
+		}
+		if err := validateExecutableRingGroup(group); err != nil {
 			return nil, err
 		}
-		for _, group := range groups {
-			if group.ID == simulation.RingGroupID {
-				for _, member := range group.Members {
-					if member.Enabled {
-						plan.DestinationID = member.DestinationID
-						break
-					}
-				}
-				break
+		plan.Group = &group
+		plan.GroupDestinations = map[string]routingDestinationRow{}
+		plan.TimeoutSec = 600
+		plan.AgentID = 0
+		plan.AnswerMode = answerModeAgent
+		for _, member := range group.Members {
+			if !member.Enabled {
+				continue
+			}
+			dest, ok := def.Destinations[member.DestinationID]
+			if !ok || !dest.Enabled {
+				return nil, errors.New("ring group destination unavailable")
+			}
+			var config map[string]any
+			if err := json.Unmarshal([]byte(dest.ConfigJSON), &config); err != nil {
+				return nil, err
+			}
+			expanded, _ := json.Marshal(expandRoutingValue(config, routingTemplateVariables(route)))
+			dest.ConfigJSON = string(expanded)
+			plan.GroupDestinations[dest.ID] = dest
+			if dest.Kind == "browser" {
+				plan.AnswerMode = answerModeHumanBrowser
+			}
+		}
+		for _, node := range def.Nodes {
+			if node.ID == plan.NodeID {
+				plan.OverflowNodeID = firstNonEmpty(node.Branches["no_answer"], node.Next, group.OverflowNodeID)
 			}
 		}
 	}
 	if plan.DestinationID != "" {
-		destination, err := a.findRoutingDestination(route.ProjectID, plan.DestinationID)
-		if err != nil || destination == nil {
+		var destination *routingDestinationRow
+		if frozen, ok := def.Destinations[plan.DestinationID]; ok {
+			destination = &frozen
+		} else if def.Destinations == nil {
+			destination, _ = a.findRoutingDestination(route.ProjectID, plan.DestinationID)
+		}
+		// Generated legacy flows deliberately track route settings until explicitly edited.
+		generated := false
+		if strings.HasPrefix(version.FlowID, "legacy_flow_") {
+			flow, _ := a.findRoutingFlow(route.ProjectID, version.FlowID)
+			generated = flow != nil && flow.Generated
+		}
+		if generated {
+			if destination != nil {
+				copy := *destination
+				destination = &copy
+				destination.Kind = map[string]string{answerModeHumanBrowser: "browser", answerModeRealtimeImmediate: "ai", answerModeAgent: "agent"}[route.AnswerMode]
+				raw, _ := json.Marshal(map[string]any{"agent_id": route.AgentID, "directive": route.AutoDirective, "voice": route.AutoVoice, "greeting": route.AutoGreeting, "hold_prompt": route.HoldPrompt, "timeout_sec": route.TimeoutSec})
+				destination.ConfigJSON = string(raw)
+			}
+		}
+		if destination == nil || !destination.Enabled {
 			return nil, fmt.Errorf("routing destination unavailable")
 		}
 		var config map[string]any
@@ -1106,7 +1336,29 @@ func (a *App) resolveInboundRoutingPlan(route *routeRow, caller string, digits m
 		case "voicemail":
 			plan.TerminalType = "voicemail"
 		case "pstn", "sip":
-			return nil, fmt.Errorf("%s live call legs are not enabled in this release", destination.Kind)
+			if route.InboundTransport == inboundTransportSIPDirect {
+				return nil, errors.New("external destinations require a provider webhook route")
+			}
+			timeout := plan.TimeoutSec
+			if timeout < 5 {
+				timeout = 20
+			}
+			timeout = min(timeout, 300)
+			raw, _ := json.Marshal(config)
+			copy := *destination
+			copy.ConfigJSON = string(raw)
+			plan.Group = &ringGroupRow{ID: "destination_" + destination.ID, ProjectID: route.ProjectID, Strategy: "sequential", TimeoutSec: timeout, Enabled: true, Members: []ringGroupMemberRow{{DestinationID: destination.ID, TimeoutSec: timeout, Enabled: true}}}
+			plan.RingGroupID = plan.Group.ID
+			plan.GroupDestinations = map[string]routingDestinationRow{destination.ID: copy}
+			plan.DestinationID = ""
+			plan.AgentID = 0
+			plan.AnswerMode = answerModeAgent
+			plan.TimeoutSec = 600
+			for _, node := range def.Nodes {
+				if node.ID == plan.NodeID {
+					plan.OverflowNodeID = firstNonEmpty(node.Branches["no_answer"], node.Next)
+				}
+			}
 		}
 	}
 	announcements := []string{}
@@ -1142,24 +1394,36 @@ func (a *App) resolveInboundRoutingPlan(route *routeRow, caller string, digits m
 	if holdPrompt, ok := variables["hold_prompt"].(string); ok && strings.TrimSpace(holdPrompt) != "" {
 		plan.HoldPrompt = strings.TrimSpace(holdPrompt)
 	}
+	context, _ := json.Marshal(routingExecutionContext{Route: *route, Definition: def})
+	plan.ContextJSON = string(context)
 	return plan, nil
 }
 
 func (a *App) persistRoutingExecution(callID, project string, plan *inboundRoutingPlan) error {
-	if plan == nil {
-		return nil
-	}
 	tx, err := a.db().db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	executionID := "exec_" + callID
-	if _, err := tx.Exec(`UPDATE calls SET routing_flow_id=?,routing_flow_version_id=?,routing_destination_id=? WHERE id=? AND project_id=?`, plan.FlowID, plan.VersionID, plan.DestinationID, callID, project); err != nil {
+	if err := persistRoutingExecutionTx(tx, callID, project, plan); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT OR IGNORE INTO call_route_executions(id,call_id,project_id,flow_id,flow_version_id,status,current_node_id,selected_destination_id,started_at) VALUES(?,?,?,?,?,'selected',?,?,?)`, executionID, callID, project, plan.FlowID, plan.VersionID, lastTraceNode(plan.Trace), plan.DestinationID, now); err != nil {
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	a.emitRoutingTrace(project, callID, plan, true)
+	return nil
+}
+func persistRoutingExecutionTx(tx *sql.Tx, callID, project string, plan *inboundRoutingPlan) error {
+	if plan == nil {
+		return nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	executionID := "exec_" + callID
+	if _, err := tx.Exec(`UPDATE calls SET routing_flow_id=?,routing_flow_version_id=?,routing_destination_id=? WHERE id=? AND project_id=? AND (routing_flow_version_id='' OR routing_flow_version_id=?)`, plan.FlowID, plan.VersionID, plan.DestinationID, callID, project, plan.VersionID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO call_route_executions(id,call_id,project_id,flow_id,flow_version_id,status,current_node_id,selected_destination_id,started_at,context_json) VALUES(?,?,?,?,?,'selected',?,?,?,?)`, executionID, callID, project, plan.FlowID, plan.VersionID, lastTraceNode(plan.Trace), plan.DestinationID, now, plan.ContextJSON); err != nil {
 		return err
 	}
 	for index, step := range plan.Trace {
@@ -1169,41 +1433,9 @@ func (a *App) persistRoutingExecution(callID, project string, plan *inboundRouti
 			return err
 		}
 	}
-	if plan.RingGroupID != "" {
-		rows, err := tx.Query(`SELECT destination_id,timeout_sec FROM ring_group_members WHERE ring_group_id=? AND enabled=1 ORDER BY priority,position`, plan.RingGroupID)
-		if err != nil {
-			return err
-		}
-		type offered struct {
-			id      string
-			timeout int
-		}
-		offers := []offered{}
-		for rows.Next() {
-			var item offered
-			if err := rows.Scan(&item.id, &item.timeout); err != nil {
-				rows.Close()
-				return err
-			}
-			offers = append(offers, item)
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		for _, offer := range offers {
-			timeout := offer.timeout
-			if timeout <= 0 {
-				timeout = 20
-			}
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO call_offers(id,call_id,project_id,ring_group_id,destination_id,status,offered_at,expires_at) VALUES(?,?,?,?,?,'offered',?,?)`, "offer_"+newCallID(), callID, project, plan.RingGroupID, offer.id, now, time.Now().UTC().Add(time.Duration(timeout)*time.Second).Format(time.RFC3339Nano)); err != nil {
-				return err
-			}
-		}
-	}
-	if err := tx.Commit(); err != nil {
+	if err := initRingRunTx(tx, callID, project, plan, time.Now()); err != nil {
 		return err
 	}
-	a.emitRoutingTrace(project, callID, plan, true)
 	return nil
 }
 
@@ -1230,9 +1462,39 @@ func (a *App) routingPlanForCall(row *callRow, digits map[string]string) (*route
 	if row.RoutingFlowVersionID != "" {
 		route.PublishedFlowVersionID = row.RoutingFlowVersionID
 	}
-	plan, err := a.resolveInboundRoutingPlan(route, row.FromNumber, digits)
+	var contextJSON, current string
+	err = a.db().db.QueryRow(`SELECT context_json,current_node_id FROM call_route_executions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&contextJSON, &current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, err
+	}
+	var execution routingExecutionContext
+	var plan *inboundRoutingPlan
+	if json.Unmarshal([]byte(contextJSON), &execution) == nil && execution.Definition.Entry != "" {
+		route = &execution.Route
+
+		// Old callbacks are retries: render the current interaction without consuming their digits.
+		input := map[string]string{}
+		if value, ok := digits[current]; ok {
+			input[current] = value
+		}
+		version := &routingFlowVersionRow{ID: row.RoutingFlowVersionID, FlowID: row.RoutingFlowID}
+		plan, err = a.resolveRoutingDefinition(route, row.FromNumber, input, version, execution.Definition, current)
+	} else {
+		plan, err = a.resolveInboundRoutingPlan(route, row.FromNumber, digits)
+	}
 	if err != nil {
 		return nil, nil, err
+	}
+	if plan != nil && plan.Group != nil && row.RoutingDestinationID != "" {
+		plan.DestinationID = row.RoutingDestinationID
+		plan.AgentID = row.AgentID
+		plan.Directive = row.Directive
+		plan.Voice = row.Voice
+		if row.PeerKind == peerKindHuman {
+			plan.AnswerMode = answerModeHumanBrowser
+		} else {
+			plan.AnswerMode = answerModeAgent
+		}
 	}
 	applyRoutingPlanToRoute(route, plan)
 	return route, plan, nil
@@ -1261,18 +1523,10 @@ func (a *App) updateCallRoutingPlan(row *callRow, plan *inboundRoutingPlan) erro
 	if row == nil || plan == nil {
 		return nil
 	}
-	peer := inboundPeerKind(plan.AnswerMode)
-	_, err := a.db().db.Exec(`UPDATE calls SET agent_id=?, peer_kind=?, directive=?, voice=?,
-		routing_flow_id=?, routing_flow_version_id=?, routing_destination_id=?, updated_at=?
-		WHERE id=? AND project_id=?`, plan.AgentID, peer, firstNonEmpty(plan.Directive, "inbound pending"), plan.Voice,
-		plan.FlowID, plan.VersionID, plan.DestinationID, time.Now().UTC().Format(time.RFC3339Nano), row.ID, row.ProjectID)
-	if err != nil {
-		return err
-	}
 	return a.persistRoutingProgress(row.ID, row.ProjectID, plan)
 }
 
-func (a *App) persistRoutingProgress(callID, project string, plan *inboundRoutingPlan) error {
+func (a *App) persistRoutingProgress(callID, project string, plan *inboundRoutingPlan, finishedRuns ...string) error {
 	if plan == nil {
 		return nil
 	}
@@ -1281,8 +1535,50 @@ func (a *App) persistRoutingProgress(callID, project string, plan *inboundRoutin
 		return err
 	}
 	defer tx.Rollback()
+	var status string
+	if err := tx.QueryRow(`SELECT status FROM calls WHERE id=? AND project_id=?`, callID, project).Scan(&status); err != nil {
+		return err
+	}
+	if status != "pending" {
+		return nil
+	}
+	var currentNode string
+	_ = tx.QueryRow(`SELECT current_node_id FROM call_route_executions WHERE call_id=?`, callID).Scan(&currentNode)
+	if len(finishedRuns) > 0 {
+		var runStatus, runNode string
+		if err := tx.QueryRow(`SELECT status,node_id FROM call_ring_runs WHERE id=? AND call_id=?`, finishedRuns[0], callID).Scan(&runStatus, &runNode); err != nil {
+			return err
+		}
+		if runStatus != "exhausted" || currentNode != runNode {
+			return nil
+		}
+		if _, err := tx.Exec(`UPDATE call_ring_runs SET status='finished' WHERE id=?`, finishedRuns[0]); err != nil {
+			return err
+		}
+	}
+	if currentNode != plan.NodeID && plan.Group == nil {
+		seconds := plan.TimeoutSec
+		if plan.TerminalType == "voicemail" {
+			seconds = 190
+		}
+		if plan.TerminalType == "dtmf_menu" {
+			seconds = max(seconds, 30)
+		}
+		if _, err := tx.Exec(`UPDATE calls SET state_expires_at=? WHERE id=?`, time.Now().UTC().Add(time.Duration(max(seconds, 5))*time.Second).Format(time.RFC3339), callID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE calls SET agent_id=?,peer_kind=?,directive=?,voice=?,routing_flow_id=?,routing_flow_version_id=?,routing_destination_id=?,updated_at=? WHERE id=? AND project_id=?`, plan.AgentID, inboundPeerKind(plan.AnswerMode), firstNonEmpty(plan.Directive, "inbound pending"), plan.Voice, plan.FlowID, plan.VersionID, plan.DestinationID, time.Now().UTC().Format(time.RFC3339Nano), callID, project); err != nil {
+		return err
+	}
+	if plan.Group == nil && plan.AnswerMode == answerModeAgent && plan.DestinationID != "" {
+		message := fmt.Sprintf("Incoming routed phone call. call_id=%s. Answer with telephony_answer_call or decline with telephony_reject_call.", callID)
+		if _, err := tx.Exec(`INSERT INTO inbound_event_outbox(call_id,project_id,agent_id,message,next_attempt_at) VALUES(?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET agent_id=excluded.agent_id,message=excluded.message,delivered_at='',next_attempt_at=excluded.next_attempt_at WHERE inbound_event_outbox.agent_id<>excluded.agent_id`, callID, project, plan.AgentID, message, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			return err
+		}
+	}
 	executionID := "exec_" + callID
-	if _, err := tx.Exec(`UPDATE call_route_executions SET status='selected',current_node_id=?,selected_destination_id=?,error_message='' WHERE id=? AND project_id=?`, plan.NodeID, plan.DestinationID, executionID, project); err != nil {
+	if _, err := tx.Exec(`INSERT INTO call_route_executions(id,call_id,project_id,flow_id,flow_version_id,status,current_node_id,selected_destination_id,context_json,started_at) VALUES(?,?,?,?,?,'selected',?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET current_node_id=excluded.current_node_id, selected_destination_id=excluded.selected_destination_id, context_json=excluded.context_json`, executionID, callID, project, plan.FlowID, plan.VersionID, plan.NodeID, plan.DestinationID, plan.ContextJSON, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -1291,6 +1587,9 @@ func (a *App) persistRoutingProgress(callID, project string, plan *inboundRoutin
 		if _, err := tx.Exec(`INSERT INTO call_node_executions(id,execution_id,node_id,node_type,outcome,detail_json,entered_at,exited_at) VALUES(?,?,?,?,?,?,?,?)`, "node_"+newCallID(), executionID, step.NodeID, step.NodeType, step.Outcome, string(raw), now, now); err != nil {
 			return err
 		}
+	}
+	if err := initRingRunTx(tx, callID, project, plan, time.Now()); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -1403,6 +1702,12 @@ func (a *App) handleIVRCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if isTerminalStatus(row.Status) {
 		writeTwilioHangup(w)
+		return
+	}
+	defer lockRoutingCall(row.ID)()
+	row, err = a.db().findCall(row.ID)
+	if err != nil || row == nil {
+		http.Error(w, "call unavailable", 500)
 		return
 	}
 	nodeID := strings.TrimSpace(r.URL.Query().Get("node"))
@@ -2179,4 +2484,152 @@ func (a *App) toolFlowsSimulate(_ context.Context, ctx *sdk.AppCtx, args map[str
 	}
 	input := routingSimulationContext{Caller: strArg(args, "caller", ""), Called: strArg(args, "called", "")}
 	return simulateRoutingDefinition(def, input), nil
+}
+
+// All configured strategies execute from durable offers, with bounded waits.
+func validateExecutableRingGroup(group ringGroupRow) error {
+	if !group.Enabled {
+		return errors.New("ring group is disabled")
+	}
+	count := 0
+	for _, member := range group.Members {
+		if member.Enabled {
+			count++
+		}
+	}
+	if count < 1 || count > 25 {
+		return errors.New("ring groups require between 1 and 25 enabled destinations")
+	}
+	switch group.Strategy {
+	case "simultaneous", "sequential", "round_robin", "priority":
+	default:
+		return errors.New("unsupported ring strategy")
+	}
+	if group.TimeoutSec < 5 || group.TimeoutSec > 300 {
+		return errors.New("ring timeout must be between 5 and 300 seconds")
+	}
+	for _, member := range group.Members {
+		if member.Enabled && (member.TimeoutSec != 0 && (member.TimeoutSec < 5 || member.TimeoutSec > 300)) {
+			return errors.New("member timeout must be between 5 and 300 seconds")
+		}
+	}
+	return nil
+}
+
+type routingExecutionContext struct {
+	Route      routeRow          `json:"route"`
+	Definition routingDefinition `json:"definition"`
+}
+
+func (a *App) snapshotRoutingReferences(project string, def *routingDefinition) error {
+	def.Destinations = map[string]routingDestinationRow{}
+	def.Groups = map[string]ringGroupRow{}
+	add := func(id string) error {
+		dest, err := a.findRoutingDestination(project, id)
+		if err != nil {
+			return err
+		}
+		if dest == nil || !dest.Enabled {
+			return fmt.Errorf("destination %q is unavailable", id)
+		}
+		def.Destinations[id] = *dest
+		return nil
+	}
+	for _, node := range def.Nodes {
+		if node.Type == "destination" {
+			if err := add(routingConfigString(node.Config, "destination_id")); err != nil {
+				return err
+			}
+		}
+		if node.Type == "ring_group" {
+			groups, err := a.listRingGroups(project)
+			if err != nil {
+				return err
+			}
+			found := false
+			for _, group := range groups {
+				if group.ID == routingConfigString(node.Config, "ring_group_id") {
+					found = true
+					if err := validateExecutableRingGroup(group); err != nil {
+						return err
+					}
+					def.Groups[group.ID] = group
+					for _, member := range group.Members {
+						if member.Enabled {
+							if err := add(member.DestinationID); err != nil {
+								return err
+							}
+						}
+					}
+				}
+			}
+			if !found {
+				return errors.New("ring group unavailable")
+			}
+		}
+	}
+	return nil
+}
+
+var routingCallLocks [128]sync.Mutex
+
+func lockRoutingCall(id string) func() {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(id))
+	lock := &routingCallLocks[hash.Sum32()%uint32(len(routingCallLocks))]
+	lock.Lock()
+	return lock.Unlock
+}
+
+// Capture legacy dependencies once at upgrade. Historical values before the
+// upgrade cannot be reconstructed, but later edits can no longer rewrite them.
+func (a *App) freezeExistingRoutingVersions() error {
+	rows, err := a.db().db.Query(`SELECT id,project_id,definition FROM routing_flow_versions WHERE COALESCE(json_type(definition,'$.destinations'),'null')='null'`)
+	if err != nil {
+		return err
+	}
+	type oldVersion struct{ id, project, definition string }
+	var versions []oldVersion
+	for rows.Next() {
+		var v oldVersion
+		if err := rows.Scan(&v.id, &v.project, &v.definition); err != nil {
+			rows.Close()
+			return err
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, v := range versions {
+		def, err := parseRoutingDefinition(v.definition)
+		if err != nil {
+			return err
+		}
+		// Snapshot legacy definitions once so execution never reads mutable groups.
+		destinations, err := a.listRoutingDestinations(v.project)
+		if err != nil {
+			return err
+		}
+		groups, err := a.listRingGroups(v.project)
+		if err != nil {
+			return err
+		}
+		def.Destinations = map[string]routingDestinationRow{}
+		for _, d := range destinations {
+			def.Destinations[d.ID] = d
+		}
+		def.Groups = map[string]ringGroupRow{}
+		for _, g := range groups {
+			def.Groups[g.ID] = g
+		}
+		raw, err := json.Marshal(def)
+		if err != nil {
+			return err
+		}
+		if _, err := a.db().db.Exec(`UPDATE routing_flow_versions SET definition=? WHERE id=? AND definition=?`, string(raw), v.id, v.definition); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -26,6 +26,8 @@ func TestMetaLeadFormLifecycleAndInstantFormWiring(t *testing.T) {
 	platform := newRecordingPlatform()
 	platform.executeResponder = func(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 		switch tool {
+		case "campaign_list":
+			return executeJSON(`{"data":[{"id":"campaign_1","objective":"OUTCOME_LEADS"}]}`), nil
 		case "leadform_create":
 			return executeJSON(`{"id":"form_99"}`), nil
 		case "leadform_update":

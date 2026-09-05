@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,7 +72,7 @@ func (e *localFFmpegExecutor) Render(
 		}
 		outFile := filepath.Join(scratch, "out."+output.Format)
 		args := buildLocalAudioFFmpegArgs(edit, output, inputs, soundtrackIdx, outFile)
-		result, runErr := runLocalFFmpeg(ctx, app, start, scratch, len(inputs), outFile, args)
+		result, runErr := runLocalFFmpeg(ctx, app, start, scratch, len(inputs), outFile, args, editDurationSeconds(edit))
 		if runErr != nil {
 			app.Logger().Warn("kept scratch dir for post-mortem", "path", scratch, "err", runErr)
 		} else {
@@ -127,7 +129,7 @@ func (e *localFFmpegExecutor) Render(
 		args = materializeComposerFontArgs(args, fontPaths)
 	}
 
-	result, runErr := runLocalFFmpeg(ctx, app, start, scratch, len(inputs), outFile, args)
+	result, runErr := runLocalFFmpeg(ctx, app, start, scratch, len(inputs), outFile, args, editDurationSeconds(edit))
 	if runErr != nil {
 		app.Logger().Warn("kept scratch dir for post-mortem", "path", scratch, "err", runErr)
 	} else {
@@ -136,23 +138,64 @@ func (e *localFFmpegExecutor) Render(
 	return result, runErr
 }
 
-func runLocalFFmpeg(ctx context.Context, app *sdk.AppCtx, start time.Time, scratch string, inputCount int, outFile string, args []string) (Result, error) {
+func runLocalFFmpeg(ctx context.Context, app *sdk.AppCtx, start time.Time, scratch string, inputCount int, outFile string, args []string, totalDuration float64) (Result, error) {
 	app.Logger().Info("local ffmpeg render", "scratch", scratch, "inputs", inputCount, "out", outFile)
 
-	cmd := exec.CommandContext(ctx, ffmpegPath(), args...)
+	execArgs := append([]string(nil), args...)
+	if len(execArgs) > 0 {
+		last := execArgs[len(execArgs)-1]
+		execArgs = append(execArgs[:len(execArgs)-1], "-progress", "pipe:1", "-nostats", last)
+	}
+	cmd := exec.CommandContext(ctx, ffmpegPath(), execArgs...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return Result{FFmpegCommand: shellEcho(ffmpegPath(), args)}, fmt.Errorf("ffmpeg failed: %w\nstderr (last 1KB):\n%s",
-			err, truncTail(stderr.String(), 1024))
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return Result{FFmpegCommand: redactSecrets(shellEcho(ffmpegPath(), execArgs))}, fmt.Errorf("ffmpeg progress pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return Result{FFmpegCommand: redactSecrets(shellEcho(ffmpegPath(), execArgs))}, fmt.Errorf("start ffmpeg: %w", err)
+	}
+	progress := map[string]string{}
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		line := scanner.Text()
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		progress[key] = value
+		if key == "progress" {
+			reportParsedFFmpegProgress(ctx, progress, totalDuration)
+			progress = map[string]string{}
+		}
+	}
+	waitErr := cmd.Wait()
+	if waitErr != nil {
+		return Result{FFmpegCommand: redactSecrets(shellEcho(ffmpegPath(), execArgs))}, fmt.Errorf("ffmpeg failed: %w\nstderr (last 1KB):\n%s",
+			waitErr, redactSecrets(truncTail(stderr.String(), 1024)))
 	}
 
 	return Result{
 		Sync:          true,
 		LocalPath:     outFile,
 		DurationMS:    time.Since(start).Milliseconds(),
-		FFmpegCommand: shellEcho(ffmpegPath(), args),
+		FFmpegCommand: redactSecrets(shellEcho(ffmpegPath(), execArgs)),
 	}, nil
+}
+
+func reportParsedFFmpegProgress(ctx context.Context, values map[string]string, totalDuration float64) {
+	outMicros, _ := strconv.ParseFloat(firstNonEmpty(values["out_time_us"], values["out_time_ms"]), 64)
+	outSeconds := outMicros / 1_000_000
+	frame, _ := strconv.ParseInt(values["frame"], 10, 64)
+	fraction := 0.0
+	if totalDuration > 0 {
+		fraction = clampFloat(outSeconds/totalDuration, 0, 1)
+	}
+	if values["progress"] == "end" {
+		fraction = 1
+	}
+	reportRenderProgress(ctx, RenderProgress{Fraction: fraction, OutTimeSeconds: outSeconds, Frame: frame, Speed: values["speed"]})
 }
 
 // buildLocalFFmpegArgs assembles the ffmpeg argv for the canonical Edit.
@@ -224,13 +267,10 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 	// Build the filter graph.
 	var filter strings.Builder
 	for i, c := range track.Clips {
-		// Scale + pad to output dims, set fps, set SAR=1.
-		fmt.Fprintf(&filter,
-			"[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,"+
-				"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=%s,"+
-				"setsar=1,fps=%d",
-			i, w, h, w, h, escFFmpegColor(edit.Timeline.Background), output.FPS,
-		)
+		// Select the source range/crop, fit it to the canvas, then apply
+		// source-space camera keyframes. The clip is still trimmed to its
+		// timeline length below, so one source can back many timeline clips.
+		fmt.Fprintf(&filter, "[%d:v]%s", i, buildBaseVisualFilter(c, w, h, output.FPS, edit.Timeline.Background))
 		// Trim length — important for video clips that are longer than
 		// the requested clip length. Image clips are already length-pinned
 		// via -t on input.
@@ -255,7 +295,15 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 			filter.WriteString(",")
 			filter.WriteString(buildDrawText(c.Text, w, h))
 		}
-		fmt.Fprintf(&filter, "[v%d];", i)
+		layout := resolveClipLayout(c, w, h)
+		effects := visualEffectFilters(c, layout)
+		if effects == "" && !layout.shadow {
+			fmt.Fprintf(&filter, "[v%d];", i)
+		} else {
+			filter.WriteString(effects)
+			fmt.Fprintf(&filter, "[vfg%d];", i)
+			writeVisualOnBackground(&filter, fmt.Sprintf("vfg%d", i), fmt.Sprintf("v%d", i), c, layout, w, h, output.FPS, edit.Timeline.Background, i)
+		}
 
 		// Per-clip audio: trim or silence-pad to clip length.
 		if !visualClipUsesSourceAudio(c, visualHasAudioAt(visualHasAudio, i, c)) {
@@ -263,7 +311,7 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 			// no-audio videos so concat audio stream count matches.
 			fmt.Fprintf(&filter, "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration=%s[a%d];", trimFloat(clipDuration(c)), i)
 		} else {
-			fmt.Fprintf(&filter, "[%d:a]apad,atrim=duration=%s,asetpts=PTS-STARTPTS[a%d];", i, trimFloat(clipDuration(c)), i)
+			fmt.Fprintf(&filter, "[%d:a]%sapad,atrim=duration=%s,asetpts=PTS-STARTPTS[a%d];", i, sourceAudioFilterPrefix(c), trimFloat(clipDuration(c)), i)
 		}
 	}
 
@@ -506,6 +554,7 @@ type resolvedClipLayout struct {
 	width   int
 	height  int
 	opacity float64
+	shadow  bool
 }
 
 func buildVisualOverlayChain(inputIdx int, baseLabel, outLabel string, c Clip, canvasW, canvasH, fps int) string {
@@ -513,12 +562,67 @@ func buildVisualOverlayChain(inputIdx int, baseLabel, outLabel string, c Clip, c
 	d := trimFloat(clipDuration(c))
 	start := trimFloat(c.Start)
 	end := trimFloat(c.Start + clipDuration(c))
-	chain := visualFitFilter(layout, fps)
-	if layout.opacity < 1 {
-		chain += ",colorchannelmixer=aa=" + trimFloat(layout.opacity)
+	chain := buildLayerVisualFilter(c, layout, fps)
+	chain += visualEffectFilters(c, layout)
+	if !layout.shadow {
+		return fmt.Sprintf("[%d:v]%s,trim=duration=%s,setpts=PTS-STARTPTS+%s/TB[ov%d];[%s][ov%d]overlay=x=%d:y=%d:enable='between(t\\,%s\\,%s)':eof_action=pass[%s];",
+			inputIdx, chain, d, start, inputIdx, baseLabel, inputIdx, layout.x, layout.y, start, end, outLabel)
 	}
-	return fmt.Sprintf("[%d:v]%s,trim=duration=%s,setpts=PTS-STARTPTS+%s/TB[ov%d];[%s][ov%d]overlay=x=%d:y=%d:enable='between(t\\,%s\\,%s)':eof_action=pass[%s];",
-		inputIdx, chain, d, start, inputIdx, baseLabel, inputIdx, layout.x, layout.y, start, end, outLabel)
+	return fmt.Sprintf("[%d:v]%s,trim=duration=%s,setpts=PTS-STARTPTS+%s/TB[ov%d];[ov%d]split=2[ovshadowin%d][ovcontent%d];[ovshadowin%d]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.45,boxblur=10:1[ovshadow%d];[%s][ovshadow%d]overlay=x=%d:y=%d:enable='between(t\\,%s\\,%s)':eof_action=pass[ovshadowbase%d];[ovshadowbase%d][ovcontent%d]overlay=x=%d:y=%d:enable='between(t\\,%s\\,%s)':eof_action=pass[%s];",
+		inputIdx, chain, d, start, inputIdx, inputIdx, inputIdx, inputIdx, inputIdx, inputIdx, baseLabel, inputIdx, layout.x+10, layout.y+10, start, end, inputIdx, inputIdx, inputIdx, layout.x, layout.y, start, end, outLabel)
+}
+
+func visualEffectFilters(c Clip, layout resolvedClipLayout) string {
+	var filters []string
+	if radius := clipBorderRadius(c); radius > 0 {
+		filters = append(filters, roundedAlphaFilter(radius))
+	}
+	if layout.opacity < 1 {
+		filters = append(filters, "colorchannelmixer=aa="+trimFloat(layout.opacity))
+	}
+	if len(filters) == 0 {
+		return ""
+	}
+	return "," + strings.Join(filters, ",")
+}
+
+func clipBorderRadius(c Clip) int {
+	radius := c.BorderRadius
+	if c.Layout != nil && c.Layout.BorderRadius > 0 {
+		radius = c.Layout.BorderRadius
+	}
+	if radius <= 0 {
+		return 0
+	}
+	return int(radius + 0.5)
+}
+
+func roundedAlphaFilter(radius int) string {
+	if radius <= 0 {
+		return ""
+	}
+	r := strconv.Itoa(radius)
+	// Preserve the source alpha inside a rounded rectangle and clear only the
+	// pixels outside its corner arcs. The expression is evaluated in the
+	// already-sized layer, so preview and output use the same pixel radius.
+	alpha := "if(lte(hypot(max(" + r + "-X,0)+max(X-(W-1-" + r + "),0),max(" + r + "-Y,0)+max(Y-(H-1-" + r + "),0))," + r + "),alpha(X,Y),0)"
+	return "format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='" + alpha + "'"
+}
+
+func writeVisualOnBackground(filter *strings.Builder, foregroundLabel, outLabel string, c Clip, layout resolvedClipLayout, w, h, fps int, background string, suffix int) {
+	duration := trimFloat(clipDuration(c))
+	bg := fmt.Sprintf("vebg%d", suffix)
+	fmt.Fprintf(filter, "color=c=%s:s=%dx%d:r=%d:d=%s[%s];", escFFmpegColor(background), w, h, fps, duration, bg)
+	if !layout.shadow {
+		fmt.Fprintf(filter, "[%s][%s]overlay=x=0:y=0:shortest=1[%s];", bg, foregroundLabel, outLabel)
+		return
+	}
+	shadowIn := fmt.Sprintf("veshadowin%d", suffix)
+	content := fmt.Sprintf("vecontent%d", suffix)
+	shadow := fmt.Sprintf("veshadow%d", suffix)
+	shadowBase := fmt.Sprintf("veshadowbase%d", suffix)
+	fmt.Fprintf(filter, "[%s]split=2[%s][%s];[%s]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.45,boxblur=10:1[%s];[%s][%s]overlay=x=10:y=10:shortest=1[%s];[%s][%s]overlay=x=0:y=0:shortest=1[%s];",
+		foregroundLabel, shadowIn, content, shadowIn, shadow, bg, shadow, shadowBase, shadowBase, content, outLabel)
 }
 
 func visualFitFilter(layout resolvedClipLayout, fps int) string {
@@ -536,11 +640,254 @@ func visualFitFilter(layout resolvedClipLayout, fps int) string {
 	}
 }
 
+func buildBaseVisualFilter(c Clip, w, h, fps int, background string) string {
+	parts := sourceVisualFilters(c)
+	workingW, workingH := cameraWorkingSize(c, w, h)
+	parts = append(parts, baseVisualFitFilter(c, workingW, workingH, fps, background))
+	if camera := cameraZoomPanFilter(c, workingW, workingH, fps); camera != "" {
+		parts = append(parts, camera)
+	}
+	if workingW != w || workingH != h {
+		parts = append(parts, fmt.Sprintf("scale=%d:%d:flags=lanczos,setsar=1,fps=%d", w, h, fps))
+	}
+	return strings.Join(parts, ",")
+}
+
+func baseVisualFitFilter(c Clip, w, h, fps int, background string) string {
+	fit := strings.ToLower(strings.TrimSpace(c.Fit))
+	if c.Layout != nil && strings.TrimSpace(c.Layout.Fit) != "" {
+		fit = strings.ToLower(strings.TrimSpace(c.Layout.Fit))
+	}
+	switch fit {
+	case "crop", "cover":
+		return fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,fps=%d", w, h, w, h, fps)
+	case "stretch":
+		return fmt.Sprintf("format=rgba,scale=%d:%d,setsar=1,fps=%d", w, h, fps)
+	default:
+		return fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=%s,setsar=1,fps=%d", w, h, w, h, escFFmpegColor(background), fps)
+	}
+}
+
+func buildLayerVisualFilter(c Clip, layout resolvedClipLayout, fps int) string {
+	parts := sourceVisualFilters(c)
+	workingW, workingH := cameraWorkingSize(c, layout.width, layout.height)
+	workingLayout := layout
+	workingLayout.width = workingW
+	workingLayout.height = workingH
+	parts = append(parts, visualFitFilter(workingLayout, fps))
+	if camera := cameraZoomPanFilter(c, workingW, workingH, fps); camera != "" {
+		parts = append(parts, camera)
+	}
+	if workingW != layout.width || workingH != layout.height {
+		parts = append(parts, fmt.Sprintf("scale=%d:%d:flags=lanczos,setsar=1,fps=%d", layout.width, layout.height, fps))
+	}
+	return strings.Join(parts, ",")
+}
+
+const cameraMaxWorkingDimension = 4096
+
+// cameraWorkingSize oversamples camera motion at 4x where practical and 2x
+// for HD/full-HD canvases. zoompan positions its source crop on integer pixels;
+// oversampling makes those steps quarter/half-output-pixel movements, and the
+// Lanczos downscale turns them into stable subpixel motion. Native 4K stays at
+// 1x to avoid an unbounded memory and render-time penalty.
+func cameraWorkingSize(c Clip, w, h int) (int, int) {
+	if c.Transform == nil || w <= 0 || h <= 0 {
+		return w, h
+	}
+	for factor := 4; factor >= 2; factor /= 2 {
+		if w*factor <= cameraMaxWorkingDimension && h*factor <= cameraMaxWorkingDimension {
+			return w * factor, h * factor
+		}
+	}
+	return w, h
+}
+
+func sourceVisualFilters(c Clip) []string {
+	parts := []string{}
+	if trim := sourceTrimFilter("trim", c); trim != "" {
+		parts = append(parts, trim)
+	}
+	if rate := clipPlaybackRate(c); rate != 1 {
+		parts = append(parts, "setpts=(PTS-STARTPTS)/"+trimFloat(rate))
+	} else if len(parts) > 0 {
+		parts = append(parts, "setpts=PTS-STARTPTS")
+	}
+	if crop := c.Crop; crop != nil {
+		parts = append(parts, fmt.Sprintf(
+			"crop=iw*%s:ih*%s:iw*%s:ih*%s",
+			trimFloat(crop.Width), trimFloat(crop.Height), trimFloat(crop.X), trimFloat(crop.Y),
+		))
+	}
+	return parts
+}
+
+func sourceAudioFilterPrefix(c Clip) string {
+	parts := []string{}
+	if trim := sourceTrimFilter("atrim", c); trim != "" {
+		parts = append(parts, trim)
+	}
+	if len(parts) > 0 || clipPlaybackRate(c) != 1 {
+		parts = append(parts, "asetpts=PTS-STARTPTS")
+	}
+	parts = append(parts, playbackRateAudioFilters(clipPlaybackRate(c))...)
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, ",") + ","
+}
+
+func clipPlaybackRate(c Clip) float64 {
+	if c.PlaybackRate > 0 {
+		return c.PlaybackRate
+	}
+	return 1
+}
+
+// atempo is kept in the portable 0.5..2 range and chained for larger
+// speed changes. This preserves pitch while keeping retained source audio in
+// sync with the video's setpts-based playback rate.
+func playbackRateAudioFilters(rate float64) []string {
+	if rate <= 0 {
+		rate = 1
+	}
+	var filters []string
+	for rate > 2.000001 {
+		filters = append(filters, "atempo=2")
+		rate /= 2
+	}
+	for rate < 0.499999 {
+		filters = append(filters, "atempo=0.5")
+		rate /= 0.5
+	}
+	if rate < 0.999999 || rate > 1.000001 {
+		filters = append(filters, "atempo="+trimFloat(rate))
+	}
+	return filters
+}
+
+func sourceTrimFilter(name string, c Clip) string {
+	if c.SourceStart <= 0 && c.SourceEnd <= 0 {
+		return ""
+	}
+	parts := []string{}
+	if c.SourceStart > 0 {
+		parts = append(parts, "start="+trimFloat(c.SourceStart))
+	}
+	if c.SourceEnd > 0 {
+		parts = append(parts, "end="+trimFloat(c.SourceEnd))
+	}
+	return name + "=" + strings.Join(parts, ":")
+}
+
+type cameraPoint struct {
+	time   float64
+	x      float64
+	y      float64
+	scale  float64
+	easing string
+}
+
+// cameraZoomPanFilter converts source-space transform keyframes into a
+// frame-evaluated FFmpeg zoompan expression. The output size is fixed, so it
+// composes safely with both fullscreen base clips and timed overlay layers.
+func cameraZoomPanFilter(c Clip, w, h, fps int) string {
+	if c.Transform == nil || w <= 0 || h <= 0 || fps <= 0 {
+		return ""
+	}
+	points := cameraPoints(c.Transform)
+	if len(points) == 0 {
+		return ""
+	}
+	timeExpr := fmt.Sprintf("on/%d", fps)
+	z := cameraPropertyExpr(points, timeExpr, func(p cameraPoint) float64 { return p.scale })
+	x := cameraPropertyExpr(points, timeExpr, func(p cameraPoint) float64 { return p.x })
+	y := cameraPropertyExpr(points, timeExpr, func(p cameraPoint) float64 { return p.y })
+	return fmt.Sprintf(
+		"zoompan=z='%s':x='max(0,min(iw-iw/zoom,iw*(%s)-iw/(2*zoom)))':y='max(0,min(ih-ih/zoom,ih*(%s)-ih/(2*zoom)))':d=1:s=%dx%d:fps=%d,format=rgba",
+		z, x, y, w, h, fps,
+	)
+}
+
+func cameraPoints(t *Transform) []cameraPoint {
+	if t == nil {
+		return nil
+	}
+	x, y, scale := 0.5, 0.5, 1.0
+	if t.X != nil {
+		x = *t.X
+	}
+	if t.Y != nil {
+		y = *t.Y
+	}
+	if t.Scale > 0 {
+		scale = t.Scale
+	}
+	points := []cameraPoint{{time: 0, x: x, y: y, scale: scale, easing: "linear"}}
+	for _, keyframe := range t.Keyframes {
+		if keyframe.X != nil {
+			x = *keyframe.X
+		}
+		if keyframe.Y != nil {
+			y = *keyframe.Y
+		}
+		if keyframe.Scale > 0 {
+			scale = keyframe.Scale
+		}
+		point := cameraPoint{time: keyframe.Time, x: x, y: y, scale: scale, easing: strings.ToLower(strings.TrimSpace(keyframe.Easing))}
+		if point.easing == "" {
+			point.easing = "linear"
+		}
+		if point.time == 0 {
+			points[0] = point
+			continue
+		}
+		points = append(points, point)
+	}
+	return points
+}
+
+func cameraPropertyExpr(points []cameraPoint, timeExpr string, value func(cameraPoint) float64) string {
+	if len(points) == 0 {
+		return "0"
+	}
+	if len(points) == 1 {
+		return trimFloat(value(points[0]))
+	}
+	expr := trimFloat(value(points[len(points)-1]))
+	for i := len(points) - 2; i >= 0; i-- {
+		from, to := points[i], points[i+1]
+		duration := to.time - from.time
+		if duration <= 0 {
+			continue
+		}
+		progress := fmt.Sprintf("max(0,min(1,((%s)-%s)/%s))", timeExpr, trimFloat(from.time), trimFloat(duration))
+		progress = cameraEaseExpr(progress, to.easing)
+		segment := fmt.Sprintf("%s+(%s-%s)*(%s)", trimFloat(value(from)), trimFloat(value(to)), trimFloat(value(from)), progress)
+		expr = fmt.Sprintf("if(lt(%s\\,%s)\\,%s\\,%s)", timeExpr, trimFloat(to.time), segment, expr)
+	}
+	return expr
+}
+
+func cameraEaseExpr(progress, easing string) string {
+	switch strings.ToLower(strings.TrimSpace(easing)) {
+	case "ease_in":
+		return "(" + progress + ")*(" + progress + ")"
+	case "ease_out":
+		return "1-(1-(" + progress + "))*(1-(" + progress + "))"
+	case "ease_in_out":
+		return fmt.Sprintf("if(lt((%s)\\,0.5)\\,2*(%s)*(%s)\\,1-pow(-2*(%s)+2\\,2)/2)", progress, progress, progress, progress)
+	default:
+		return progress
+	}
+}
+
 func resolveClipLayout(c Clip, canvasW, canvasH int) resolvedClipLayout {
 	width := measureClipLayoutValue(c.Width, canvasW)
 	height := measureClipLayoutValue(c.Height, canvasH)
 	fit := strings.ToLower(strings.TrimSpace(c.Fit))
 	opacity := c.Opacity
+	shadow := c.Shadow
 	scale := c.Scale
 	position := clipPositionName(c.Position)
 	marginX, marginY := 0, 0
@@ -560,6 +907,9 @@ func resolveClipLayout(c Clip, canvasW, canvasH int) resolvedClipLayout {
 		}
 		if l.Opacity > 0 {
 			opacity = l.Opacity
+		}
+		if l.Shadow {
+			shadow = true
 		}
 		if l.Anchor != "" {
 			position = l.Anchor
@@ -612,7 +962,7 @@ func resolveClipLayout(c Clip, canvasW, canvasH int) resolvedClipLayout {
 	if explicitY != nil {
 		y = measureClipLayoutValue(*explicitY, canvasH)
 	}
-	return resolvedClipLayout{fit: fit, x: x, y: y, width: width, height: height, opacity: opacity}
+	return resolvedClipLayout{fit: fit, x: x, y: y, width: width, height: height, opacity: opacity, shadow: shadow}
 }
 
 func measureClipLayoutValue(v float64, viewport int) int {
@@ -753,6 +1103,13 @@ func buildLocalAudioFFmpegArgs(edit *Edit, output Output, inputs []string, sound
 
 func writeTimedAudioFilter(filter *strings.Builder, inputIdx int, c Clip, delayMS int, label string) {
 	chain := []string{}
+	if trim := sourceTrimFilter("atrim", c); trim != "" {
+		chain = append(chain, trim)
+	}
+	if len(chain) > 0 || clipPlaybackRate(c) != 1 {
+		chain = append(chain, "asetpts=PTS-STARTPTS")
+	}
+	chain = append(chain, playbackRateAudioFilters(clipPlaybackRate(c))...)
 	if c.Audio != nil && c.Audio.TrimSilence {
 		chain = append(chain, "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.05")
 	}
@@ -964,6 +1321,9 @@ func buildTimedDrawTextWithBody(c Clip, w, h int, body string) string {
 	if c.Asset.Font != nil && c.Asset.Font.Size > 0 {
 		fs = c.Asset.Font.Size
 	}
+	layout := layoutV1Text(c, body, fs, w, h)
+	body = layout.body
+	fs = layout.fontSize
 	color := "#ffffff"
 	if c.Text != nil && strings.TrimSpace(c.Text.Color) != "" {
 		color = c.Text.Color
@@ -1005,6 +1365,11 @@ func buildTimedDrawTextWithBody(c Clip, w, h int, body string) string {
 		fmt.Sprintf("x=%s", escapeDrawTextExpr(x)),
 		fmt.Sprintf("y=%s", escapeDrawTextExpr(y)),
 		fmt.Sprintf("enable='%s'", escapeDrawTextExpr(fmt.Sprintf("between(t,%s,%s)", trimFloat(c.Start), trimFloat(c.Start+clipDuration(c))))),
+		"fix_bounds=true",
+	}
+	if c.Asset.Style != nil && c.Asset.Style.LineHeight > 0 {
+		lineSpacing := int(math.Round(float64(fs) * (c.Asset.Style.LineHeight - 1.0)))
+		parts = append(parts, fmt.Sprintf("line_spacing=%d", lineSpacing))
 	}
 	if shadow := drawTextShadow(c.Asset.Shadow); shadow != "" {
 		parts = append(parts, shadow)
@@ -1316,7 +1681,8 @@ func escDrawText(s string) string {
 		`\`, `\\`,
 		`:`, `\:`,
 		`'`, `\'`,
-		"\n", " ",
+		"%", `\%`,
+		"\n", `\n`,
 	)
 	return r.Replace(s)
 }
@@ -1346,21 +1712,26 @@ func trimFloat(f float64) string {
 	return s
 }
 
-// shellEcho returns a printable, single-quoted representation of the
-// command for logging — NOT for re-execution (we don't quote-escape
-// embedded single quotes the bash-strict way).
+// shellQuote returns one Bash-safe argument. Remote rendering uses the same
+// representation to ensure text and paths survive transport unchanged.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(s, " \t\n\r\"'$&|<>;()`\\*?[]{}!~") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// shellEcho returns a Bash-safe representation of a command. It is also
+// useful as a redacted diagnostic because each argv boundary remains visible.
 func shellEcho(bin string, args []string) string {
 	var b strings.Builder
-	b.WriteString(bin)
+	b.WriteString(shellQuote(bin))
 	for _, a := range args {
 		b.WriteByte(' ')
-		if strings.ContainsAny(a, " \t\"'$&|<>;()`\\") {
-			b.WriteByte('\'')
-			b.WriteString(strings.ReplaceAll(a, "'", `'\''`))
-			b.WriteByte('\'')
-		} else {
-			b.WriteString(a)
-		}
+		b.WriteString(shellQuote(a))
 	}
 	return b.String()
 }

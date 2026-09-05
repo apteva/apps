@@ -3,6 +3,7 @@ name: how-to-use-computer
 triggers:
   - browser_session
   - computer_use
+  - browser_download
   - computer_context_create
   - computer_context_list
   - computer_context_get
@@ -40,6 +41,42 @@ emulation. Computer filters mechanically populated defaults and reports them in
 `ignored_arguments` and `argument_warnings`. Unknown arguments are rejected
 instead of being silently honored.
 
+### Session lifetime is not an action timeout
+
+For cloud browsers, omit `timeout` unless the user explicitly requests a
+maximum provider-session lifetime. Omission uses 1,800 seconds (30 minutes).
+`timeout` is a wall-clock limit for the entire browser session: the provider
+terminates the browser when it expires even if the agent is actively browsing.
+Never set `timeout=60` to bound a page load, click, wait, or task. Use the
+relevant `computer_use` action's `timeout_ms` for short operation waits.
+Even when the whole task is expected to take about one minute, omit `timeout`;
+estimated task duration is not authorization to shorten the browser lifetime.
+
+## Browser downloads are a three-step lifecycle
+
+A click only dispatches the page action. When it starts a download,
+`computer_use` may return compact `downloads_started` metadata with a `dl_*`
+id. That is not completion. Use the same browser session to wait and export:
+
+```json
+{"action":"wait","session_id":"br_...","download_id":"dl_..."}
+```
+
+Only after the browser reports `status="completed"`, retrieve the captured
+bytes:
+
+```json
+{"action":"get","session_id":"br_...","download_id":"dl_..."}
+```
+
+Core replaces that binary response with a compact `blobref://...` handle.
+Pass the handle to Storage, archive extraction, or document-processing tools.
+Do not refetch the source URL: authenticated, POST-generated, signed, and
+`blob:` downloads may only be reproducible from the browser's captured bytes.
+If a click did not surface an id, call `browser_download(action="list")`.
+Retrieve downloads before closing the browser session; Computer deletes local
+download bytes at session close and does not unzip or interpret them.
+
 ## SoM badge colors
 
 Every interactive element on a screenshot has a colored numeric badge:
@@ -73,6 +110,29 @@ again at dispatch time. For the rare raw-coordinate click, pass
 `expected_text` when the intended target has consequences such as Publish,
 Send, Delete, or Pay. Computer rejects a loading/disabled target, a changed
 accessible name, or a consequential coordinate without that confirmation.
+
+### Wait for media terminal state, not one guessed message
+
+After submitting a video/audio/embed URL, wait for either a rendered media
+block or an explicit rejection:
+
+```json
+{"action":"wait_for","session_id":"br_...","conditions":[{"type":"media_present"},{"type":"media_error"}],"match":"any","timeout_ms":30000}
+```
+
+`media_present` matches browser-visible rendered-player evidence;
+`media_error` matches an explicit rejected-media banner. Screenshot and wait
+observations report `media_embed_status` (`loading`, `loaded`, `rejected`, or
+`unknown`), visible player/iframe, thumbnail and duration evidence,
+media-configuration controls, error text, iframe source or normalized provider
+when available, and `draft_save_state`.
+
+These signals prove what the browser rendered, not that it is the correct
+asset. When status is `loaded`, inspect the screenshot plus `media_provider`,
+`media_iframe_src`, thumbnail, and duration before continuing. When an expected
+error string is absent but Computer reports a rendered media block, do not
+submit the URL again automatically; verify the player first. This avoids
+duplicate embeds caused by treating “no error text” as “nothing happened.”
 
 ## Chat attachments are agent-selected
 

@@ -1,0 +1,130 @@
+PAIR 1 VERSION before
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:50: PERF routes=10 requests=100 cold_ms=5.106 p50_ms=0.539 p95_ms=1.743 requests_per_second=1344.11 total_with_log_drain_ms=74.399
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:50: PERF routes=100 requests=100 cold_ms=3.808 p50_ms=1.280 p95_ms=6.976 requests_per_second=409.39 total_with_log_drain_ms=244.266
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:50: PERF routes=1000 requests=100 cold_ms=17.359 p50_ms=12.572 p95_ms=82.840 requests_per_second=46.08 total_with_log_drain_ms=2170.085
+--- PASS: TestGatewayHTTPPerformance (2.55s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.09s)
+    --- PASS: TestGatewayHTTPPerformance/100 (0.25s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (2.21s)
+PASS
+PAIR 1 VERSION after
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:74: PERF routes=10 requests=100 cold_ms=11.657 p50_ms=0.868 p95_ms=4.704 requests_per_second=606.39 total_with_log_drain_ms=164.910
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:74: PERF routes=100 requests=100 cold_ms=2.338 p50_ms=0.530 p95_ms=2.460 requests_per_second=1014.08 total_with_log_drain_ms=98.611
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:74: PERF routes=1000 requests=100 cold_ms=20.929 p50_ms=0.852 p95_ms=3.536 requests_per_second=730.89 total_with_log_drain_ms=136.820
+--- PASS: TestGatewayHTTPPerformance (0.49s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.21s)
+    --- PASS: TestGatewayHTTPPerformance/100 (0.10s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (0.18s)
+PASS
+PAIR 2 VERSION before
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:50: PERF routes=10 requests=100 cold_ms=5.038 p50_ms=0.591 p95_ms=2.489 requests_per_second=1037.73 total_with_log_drain_ms=96.364
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:50: PERF routes=100 requests=100 cold_ms=2.219 p50_ms=0.792 p95_ms=2.633 requests_per_second=840.23 total_with_log_drain_ms=119.015
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:50: PERF routes=1000 requests=100 cold_ms=5.874 p50_ms=6.950 p95_ms=19.904 requests_per_second=109.42 total_with_log_drain_ms=913.879
+--- PASS: TestGatewayHTTPPerformance (1.22s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.11s)
+    --- PASS: TestGatewayHTTPPerformance/100 (0.13s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (0.98s)
+PASS
+PAIR 2 VERSION after
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:74: PERF routes=10 requests=100 cold_ms=30.300 p50_ms=0.654 p95_ms=4.736 requests_per_second=712.88 total_with_log_drain_ms=140.277
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:74: PERF routes=100 requests=100 cold_ms=1.694 p50_ms=0.546 p95_ms=3.992 requests_per_second=815.63 total_with_log_drain_ms=122.604
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:74: PERF routes=1000 requests=100 cold_ms=6.009 p50_ms=0.680 p95_ms=3.264 requests_per_second=802.78 total_with_log_drain_ms=124.568
+--- PASS: TestGatewayHTTPPerformance (0.47s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.18s)
+    --- PASS: TestGatewayHTTPPerformance/100 (0.13s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (0.15s)
+PASS
+PAIR 3 VERSION before
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:50: PERF routes=10 requests=100 cold_ms=3.397 p50_ms=0.431 p95_ms=1.903 requests_per_second=1539.63 total_with_log_drain_ms=64.951
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:50: PERF routes=100 requests=100 cold_ms=4.138 p50_ms=1.272 p95_ms=4.616 requests_per_second=542.32 total_with_log_drain_ms=184.392
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:50: PERF routes=1000 requests=100 cold_ms=7.592 p50_ms=7.110 p95_ms=23.794 requests_per_second=102.51 total_with_log_drain_ms=975.473
+--- PASS: TestGatewayHTTPPerformance (1.26s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.07s)
+    --- PASS: TestGatewayHTTPPerformance/100 (0.19s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (1.00s)
+PASS
+PAIR 3 VERSION after
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:74: PERF routes=10 requests=100 cold_ms=2.553 p50_ms=0.884 p95_ms=2.787 requests_per_second=866.75 total_with_log_drain_ms=115.373
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:74: PERF routes=100 requests=100 cold_ms=8.661 p50_ms=0.974 p95_ms=7.182 requests_per_second=549.39 total_with_log_drain_ms=182.019
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:74: PERF routes=1000 requests=100 cold_ms=5.456 p50_ms=1.498 p95_ms=7.138 requests_per_second=390.34 total_with_log_drain_ms=256.187
+--- PASS: TestGatewayHTTPPerformance (0.62s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.13s)
+    --- PASS: TestGatewayHTTPPerformance/100 (0.19s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (0.30s)
+PASS
+PAIR 4 VERSION before
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:50: PERF routes=10 requests=100 cold_ms=1.610 p50_ms=0.671 p95_ms=2.344 requests_per_second=1058.57 total_with_log_drain_ms=94.467
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:50: PERF routes=100 requests=100 cold_ms=3.135 p50_ms=2.099 p95_ms=8.569 requests_per_second=318.38 total_with_log_drain_ms=314.094
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:50: PERF routes=1000 requests=100 cold_ms=15.748 p50_ms=15.223 p95_ms=68.921 requests_per_second=41.90 total_with_log_drain_ms=2386.475
+--- PASS: TestGatewayHTTPPerformance (2.86s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.10s)
+    --- PASS: TestGatewayHTTPPerformance/100 (0.33s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (2.43s)
+PASS
+PAIR 4 VERSION after
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:74: PERF routes=10 requests=100 cold_ms=31.179 p50_ms=2.031 p95_ms=21.941 requests_per_second=176.28 total_with_log_drain_ms=567.275
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:74: PERF routes=100 requests=100 cold_ms=3.028 p50_ms=0.847 p95_ms=4.317 requests_per_second=711.26 total_with_log_drain_ms=140.595
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:74: PERF routes=1000 requests=100 cold_ms=18.755 p50_ms=1.126 p95_ms=13.929 requests_per_second=312.10 total_with_log_drain_ms=320.408
+--- PASS: TestGatewayHTTPPerformance (1.12s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.61s)
+    --- PASS: TestGatewayHTTPPerformance/100 (0.15s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (0.36s)
+PASS
+PAIR 5 VERSION before
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:50: PERF routes=10 requests=100 cold_ms=1.645 p50_ms=0.632 p95_ms=2.221 requests_per_second=1162.58 total_with_log_drain_ms=86.016
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:50: PERF routes=100 requests=100 cold_ms=2.826 p50_ms=2.332 p95_ms=12.113 requests_per_second=258.30 total_with_log_drain_ms=387.141
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:50: PERF routes=1000 requests=100 cold_ms=16.892 p50_ms=6.500 p95_ms=18.576 requests_per_second=123.99 total_with_log_drain_ms=806.518
+--- PASS: TestGatewayHTTPPerformance (1.33s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.09s)
+    --- PASS: TestGatewayHTTPPerformance/100 (0.40s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (0.84s)
+PASS
+PAIR 5 VERSION after
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:74: PERF routes=10 requests=100 cold_ms=3.899 p50_ms=0.852 p95_ms=4.069 requests_per_second=676.34 total_with_log_drain_ms=147.854
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:74: PERF routes=100 requests=100 cold_ms=1.928 p50_ms=0.852 p95_ms=4.260 requests_per_second=758.26 total_with_log_drain_ms=131.881
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:74: PERF routes=1000 requests=100 cold_ms=28.353 p50_ms=0.552 p95_ms=2.137 requests_per_second=1138.65 total_with_log_drain_ms=87.823
+--- PASS: TestGatewayHTTPPerformance (0.49s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.16s)
+    --- PASS: TestGatewayHTTPPerformance/100 (0.14s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (0.19s)
+PASS

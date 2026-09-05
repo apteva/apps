@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.7.0
+
+- Replaced the seed-first panel with a project overview showing tracked sites,
+  competitors, keywords, opportunities, quick workflows, and recent activity.
+- Added a searchable domain explorer with separate Sites, Competitors, and All
+  views plus focused Overview, Rankings, and Backlinks tabs for each domain.
+- Consolidated research and tracked SERP results under Explorer, with search
+  engine controls shown only inside workflows where they apply.
+- Moved DataForSEO, YepAPI, locations, and activity into Settings so refresh
+  infrastructure no longer competes with the application's primary navigation.
+- Kept paid refresh actions explicit while making cached data browsing and
+  backlink history easier to discover.
+
+## 0.6.3
+
+- Added a dedicated backlink detail view from each domain's movement panel.
+- Added cached pagination, source/target/anchor search, active/lost filters, and
+  follow/nofollow filters through the read-only `backlinks_browse` tool.
+- Shows complete source and destination links, link attributes, authority,
+  provider, status, and first/last-seen dates without making provider requests.
+
+## 0.6.2
+
+- Added the read-only `backlink_movement` tool with configurable 1-730 day
+  gained/lost buckets, active/lost totals, net movement, and timestamp coverage.
+- Added cached backlink movement cards, a 30-day trend chart, and recent active
+  and lost link lists to the domain panel.
+- Derived all movement from the existing provider-supplied `first_seen`,
+  `last_seen`, and `is_lost` fields. No snapshots, migrations, or additional
+  provider calls are introduced.
+
+## 0.6.1
+
+- Added per-tracker daily, weekly, and monthly automatic rank refresh choices.
+- Kept the existing daily policy of top-20 checks with a top-100 Sunday scan;
+  weekly and monthly trackers use the regular top-20 depth on each run.
+- Made cadence changes reschedule immediately without deleting rank history.
+- Updated the monthly budget estimator for DataForSEO's discounted additional
+  SERP pages.
+
+## 0.6.0
+
+- Added opt-in daily Google rank tracking through app-sdk workers and
+  DataForSEO's lower-cost Standard Queue.
+- Added a configurable monthly spend cap, top-20 daily checks, and top-100
+  Sunday checks with deterministic scheduling jitter.
+- Deduplicated provider work by keyword, locale, device, provider, and day so
+  multiple tracked targets share one paid SERP request.
+- Added durable compact observations for both ranked and explicit not-found
+  results while retaining the existing bounded full-SERP snapshot policy.
+- Added rank tracking, budget, status, and historical views to the SEO panel
+  plus read-only MCP tools for tracker status and history.
+- Preserved v0.5.1 provider isolation and v0.4.11 resumable bulk keyword metric
+  jobs alongside the new rank-tracking workers.
+
 ## 0.5.1
 
 - Made every provider-sensitive cached read use the configured default provider;

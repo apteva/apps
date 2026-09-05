@@ -20,7 +20,6 @@ package main
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"database/sql"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -44,15 +43,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.9.4
+version: 0.11.0
 description: |
-  Identity layer for Apteva-deployed SaaS, partitioned by Organization
-  (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
-  owns N orgs; each org has its own users, clients, signing keys, JWKS,
-  and audit log. EdDSA JWTs, refresh-token rotation, email verification,
-  password reset, magic links, TOTP MFA. Optional delegated authorization
-  is resolved independently by the Apteva server per OAuth client. OAuth
-  client origins are reconciled with platform-managed CORS.
+  Organization-scoped first-party authentication with EdDSA access tokens,
+  atomic refresh rotation, revocation, email verification and password reset,
+  RBAC and trusted sibling-app identity login. Browser origins synchronize
+  with platform CORS. OAuth/OIDC, magic-link login and MFA challenges are not
+  implemented; accounts requiring MFA fail closed. v0.11.0 invalidates old
+  sessions and recovery links and requires login after recovery.
 author: Apteva
 scopes: [project]
 min_apteva_version: "0.14.1"
@@ -65,7 +63,7 @@ requires:
   apps:
     - name: messaging
       optional: true
-      reason: Sends transactional email. Without it, links go to the audit log.
+      reason: Required for email delivery. Recovery credentials never enter audit logs.
 provides:
   http_routes:
     - prefix: /signup
@@ -164,13 +162,26 @@ provides:
     - name: auth_clients_list
       description: List OAuth clients; org-scoped or project-wide.
     - name: auth_clients_create
-      description: Register a new OAuth client (requires org).
+      description: Register a first-party client; omit the organization only for an intentional multi-organization client.
     - name: auth_clients_update
       description: Add or remove allowed browser origins without replacing the client.
     - name: auth_clients_rotate_secret
       description: Rotate a client secret (org derived from client).
     - name: auth_clients_disable
       description: Disable a client (org derived from client).
+    - name: auth_public_login_identity
+      description: APP-TO-APP ONLY. Log a player or visitor in by an external identity the calling app has already verified (device possession, Steam ticket, Apple identity token) and mint a session. Unknown identities create a guest user unless create_if_missing=false; creation is rate-limited per client. Returns {user, created, access_token, refresh_token, expires_in, authorization}.
+      exposure: app_only
+    - name: auth_identities_link
+      description: Bind a verified external identity (provider + provider_user_id) to an existing user (requires org). Idempotent for the same user; errors when the subject belongs to another user.
+    - name: auth_identities_unlink
+      description: Remove an external identity from a user (requires org). Refuses to strand a guest's last identity unless force=true.
+    - name: auth_identities_list
+      description: List a user's external identities, or resolve one provider subject to its user (requires org). Read-only.
+    - name: auth_guest_upgrade
+      description: Convert a guest user into a full account with an email and password (requires org). Revokes guest sessions and removes linked identities; sends a verification email when required.
+    - name: auth_jwks_get
+      description: Return the organization's public signing keys (JWKS) and issuer so sibling apps can verify auth-issued JWTs locally.
   ui_panels:
     - slot: project.page
       label: Auth
@@ -192,11 +203,11 @@ config_schema:
   - name: app_url
     type: text
     label: Public app URL (override)
-    description: Optional. Used in JWT issuer, email links, and OAuth redirects. Leave blank to auto-derive from the platform's public URL; set this only when this auth install fronts a custom domain different from apteva-server. e.g. https://app.example.com
+    description: Optional canonical public Auth URL, including this install's route path. Used for JWT issuer, recovery links, and discovery. Leave blank to derive it from the platform public URL and install route; set it for a custom public Auth endpoint.
   - name: from_email
     type: text
     label: Outbound from-address
-    description: Sender address for transactional email (verify, reset, magic-link). Configure a Messaging-verified address for production portals. When omitted, links are written to the audit log for local development only.
+    description: Sender address for verification and password-reset email. Requires Messaging and a verified sender address. Missing configuration reports a delivery error; recovery secrets are never written to audit logs.
   - name: jwt_access_ttl_seconds
     type: text
     default: "900"
@@ -232,11 +243,16 @@ config_schema:
     default: "true"
     label: Require verified email to log in
     description: When true, /login refuses unverified accounts. true | false.
-  - name: magic_link_enabled
+  - name: audit_retention_days
     type: text
-    default: "true"
-    label: Enable magic-link login
-    description: Allows /magic-link/request — passwordless login by emailed token. true | false.
+    default: "90"
+    label: Audit retention (days)
+    description: Hourly cleanup removes audit events older than this many days (7 to 3650).
+  - name: identity_signups_per_client_per_hour
+    type: text
+    default: "600"
+    label: Identity signups per client per hour
+    description: Maximum new guest or external-identity users one OAuth client may create per hour through auth_public_login_identity. Returning logins are not counted. 0 disables the limit.
 upgrade_policy: auto-patch
 `
 
@@ -275,6 +291,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		if err := ensureSigningKey(ctx.AppDB(), pid, orgID); err != nil {
 			return fmt.Errorf("seed signing key: %w", err)
 		}
+		orgs, err := dbListOrgs(ctx.AppDB(), pid, false)
+		if err != nil {
+			return err
+		}
+		for _, org := range orgs {
+			if err = ensureSigningKey(ctx.AppDB(), pid, org.ID); err != nil {
+				return err
+			}
+		}
 		if err := reconcileBrowserOrigins(ctx, pid); err != nil {
 			// Auth's database remains authoritative and the same stable keys are
 			// retried on the next mount. A CORS control-plane outage must not make
@@ -287,9 +312,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{Name: "auth-maintenance", Schedule: "@every 1h", Run: a.maintenance}, {Name: "recovery-delivery", Schedule: "@every 1m", Run: a.deliverRecoveryJobs}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // ─── HTTP routes ──────────────────────────────────────────────────────
@@ -298,9 +325,11 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // frontend hits these directly; the dashboard panels also use them.
 
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{
+	routes := []sdk.Route{
 		// Per-org discovery (v0.4.0).
 		{Pattern: "/orgs/", Handler: a.handleOrgPublic, NoAuth: true},
+		{Method: "GET", Pattern: "/orgs/{slug}/password/reset", Handler: a.handleRecoveryPage, NoAuth: true},
+		{Method: "GET", Pattern: "/orgs/{slug}/email/verify", Handler: a.handleRecoveryPage, NoAuth: true},
 		{Pattern: "/orgs/{slug}/.well-known/jwks.json", Handler: a.handleJWKS, NoAuth: true},
 		{Pattern: "/orgs/{slug}/.well-known/openid-configuration", Handler: a.handleOIDCConfig, NoAuth: true},
 
@@ -350,12 +379,18 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "PATCH", Pattern: "/admin/permissions/{id}", Handler: a.handleAdminPermissionsUpdate},
 		{Method: "DELETE", Pattern: "/admin/permissions/{id}", Handler: a.handleAdminPermissionsDelete},
 		{Method: "GET", Pattern: "/admin/clients", Handler: a.handleAdminClientsList},
+		{Method: "PATCH", Pattern: "/admin/clients/{client_id}", Handler: a.handleAdminClientsUpdate},
+		{Method: "POST", Pattern: "/admin/signing_keys/rotate", Handler: a.handleAdminRotateSigningKey},
 		{Method: "POST", Pattern: "/admin/clients", Handler: a.handleAdminClientsCreate},
 		{Method: "POST", Pattern: "/admin/clients/{client_id}/rotate", Handler: a.handleAdminClientsRotate},
 		{Method: "POST", Pattern: "/admin/clients/{client_id}/disable", Handler: a.handleAdminClientsDisable},
 		{Method: "GET", Pattern: "/admin/audit", Handler: a.handleAdminAudit},
 		{Method: "GET", Pattern: "/admin/oidc", Handler: a.handleAdminOIDC},
 	}
+	for i := range routes {
+		routes[i].Handler = publicGuard(routes[i].Handler)
+	}
+	return routes
 }
 
 // ─── MCP tools ────────────────────────────────────────────────────────
@@ -378,7 +413,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		}
 		return out
 	}
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		// ─── Organizations ─────────────────────────────────────────
 		{
 			Name:        "auth_orgs_list",
@@ -424,13 +459,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"status":        map[string]any{"type": "string"},
 				"mfa":           map[string]any{"type": "boolean"},
 				"created_after": map[string]any{"type": "string"},
+				"cursor":        map[string]any{"type": "string", "description": "next_cursor returned by the preceding page"},
 				"limit":         map[string]any{"type": "integer"},
 			}), nil),
 			Handler: a.toolUsersSearch,
 		},
 		{
 			Name:        "auth_users_create",
-			Description: "Provision a user. Requires organization_id/slug + email. Optional: password (omit for passwordless/invite), display_name, email_verified (default true), send_password_reset (default false — no email is sent unless set, so bulk email imports stay silent). Returns the user + password_reset_sent. ADMIN tool — does not mint a session and does not check password policy. For visitor-facing signup that issues tokens + verification email, use auth_public_signup.",
+			Description: "Provision a user. Requires organization_id/slug + email. Optional: password (omit for passwordless/invite), display_name, email_verified (default true), send_password_reset (default false — no email is sent unless set, so bulk email imports stay silent). Returns the user + password_reset_sent. ADMIN tool — does not mint a session and enforces the effective password policy. For visitor-facing signup that issues tokens + verification email, use auth_public_signup.",
 			InputSchema: schemaObject(merge(map[string]any{
 				"email":               map[string]any{"type": "string"},
 				"password":            map[string]any{"type": "string"},
@@ -459,6 +495,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"email":             map[string]any{"type": "string"},
 				"password":          map[string]any{"type": "string"},
 				"display_name":      map[string]any{"type": "string"},
+				"client_secret":     map[string]any{"type": "string", "description": "Required for confidential web clients"},
+				"continue_url":      map[string]any{"type": "string"},
 				"client_id":         map[string]any{"type": "string"},
 				"organization_slug": map[string]any{"type": "string"},
 				"ip":                map[string]any{"type": "string"},
@@ -645,7 +683,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "auth_clients_create",
-			Description: "Register a new OAuth client. Requires organization_id/slug. Returns client_id + (for confidential clients) one-time client_secret.",
+			Description: "Register a first-party client. Omitting organization_id/slug explicitly creates a multi-organization client. Returns client_id + (for confidential clients) one-time client_secret.",
 			InputSchema: schemaObject(merge(map[string]any{
 				"name":                map[string]any{"type": "string"},
 				"type":                map[string]any{"type": "string"},
@@ -684,6 +722,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolClientsDisable,
 		},
 	}
+	tools = append(tools, a.identityTools()...)
+	return tools
 }
 
 func main() { sdk.Run(&App{}) }
@@ -696,6 +736,9 @@ func envProject() string {
 
 func resolveProjectFromArgs(args map[string]any) (string, error) {
 	if pid := envProject(); pid != "" {
+		if v, exists := args["_project_id"]; exists && v != pid {
+			return "", errors.New("project does not match install")
+		}
 		return pid, nil
 	}
 	if v, ok := args["_project_id"].(string); ok && v != "" {
@@ -706,6 +749,9 @@ func resolveProjectFromArgs(args map[string]any) (string, error) {
 
 func resolveProjectFromRequest(r *http.Request) (string, error) {
 	if pid := envProject(); pid != "" {
+		if r.URL.Query().Has("project_id") && r.URL.Query().Get("project_id") != pid {
+			return "", errors.New("project does not match install")
+		}
 		return pid, nil
 	}
 	if v := r.URL.Query().Get("project_id"); v != "" {
@@ -762,7 +808,7 @@ func cfgStr(ctx *sdk.AppCtx, name, dflt string) string {
 // organization owns its own keys (per-org JWKS). Called from OnMount
 // for the default org and from /admin/organizations POST for new ones.
 
-func ensureSigningKey(db *sql.DB, projectID string, orgID int64) error {
+func ensureSigningKey(db DBTX, projectID string, orgID int64) error {
 	if projectID == "" || orgID <= 0 {
 		return nil
 	}
@@ -829,6 +875,12 @@ func httpStatus(w http.ResponseWriter, code int, v any) {
 }
 
 func httpErr(w http.ResponseWriter, code int, msg string) {
+	if code >= 500 {
+		if globalCtx != nil {
+			globalCtx.Logger().Error("Auth request failed", "status", code)
+		}
+		msg = "auth_service_unavailable"
+	}
 	httpStatus(w, code, map[string]string{"error": msg})
 }
 

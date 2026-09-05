@@ -14,8 +14,7 @@
 //     target={kind:http, app:"functions", path:"/fn/<name>"}.
 //   - Manual — functions_invoke MCP tool.
 //
-// Deferred post-v1.0: the python runtime, max_memory_mb enforcement,
-// and a per-function context.call allowlist.
+// Linux production workers require Landlock, seccomp and cgroup v2.
 package main
 
 import (
@@ -51,77 +50,8 @@ var examplesFS embed.FS
 // ─── Manifest (also lives in apteva.yaml; embedded so the running
 // binary is self-describing). ─────────────────────────────────────
 
-const manifestYAML = `schema: apteva-app/v1
-name: functions
-display_name: Functions
-version: 1.7.0
-description: |
-  Lambda-style serverless functions in node or Go. Each function is
-  an immutable, built version served by a pool of warm worker
-  processes; handlers reach sibling apps via context.call and
-  integration connections via context.integration. Auto-routed HTTP
-  endpoint at /fn/<name>, plus optional public Function URLs at
-  /url/<name>/<token>. Node and Go handlers can stream incremental HTTP
-  responses and Server-Sent Events through their invocation context.
-author: Apteva
-icon: /ui/icon.svg
-icon_style: monochrome
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - platform.apps.call
-    - platform.connections.read
-    - platform.connections.execute
-  dynamic_app_calls: true
-  dynamic_integration_access: true
-provides:
-  http_routes:
-    - prefix: /
-    - prefix: /url/
-      no_auth: true
-  mcp_tools:
-    - name: functions_create
-      description: Create a function and deploy its first version.
-    - name: functions_update
-      description: Update a function's metadata (env, limits, status).
-    - name: functions_delete
-      description: Delete a function and all its versions + invocations.
-    - name: functions_list
-      description: List functions in the project.
-    - name: functions_get
-      description: Fetch one function by id or name.
-    - name: functions_invoke
-      description: Synchronously invoke a function's active version.
-    - name: functions_invocations
-      description: Recent invocations for a function.
-    - name: functions_logs
-      description: Return value + console output of a single invocation.
-    - name: functions_deploy
-      description: Deploy a new immutable version and make it active.
-    - name: functions_rollback
-      description: Make an older built version active again.
-    - name: functions_versions
-      description: List a function's deploy history.
-  ui_panels:
-    - slot: project.page
-      label: Functions
-      icon: code
-      entry: /ui/FunctionsPanel.mjs
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/functions
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/functions.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 type App struct{}
 
@@ -142,16 +72,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err != nil {
 		return fmt.Errorf("init worker pool: %w", err)
 	}
-	globalPool = p
+	poolRef.Store(p)
 	ctx.Logger().Info("functions mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
-	if globalPool != nil {
-		globalPool.shutdown()
-		globalPool = nil
+	if p := poolRef.Swap(nil); p != nil {
+		p.shutdown()
 	}
 	return nil
 }
@@ -172,6 +101,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// because the per-function URL token is the external auth gate.
 		{Pattern: "/url/", Handler: a.handleHTTPInvokeByFunctionURL, NoAuth: true},
 		// Recent invocations across the project (dashboard).
+		{Pattern: "/invocations/", Handler: a.handleHTTPInvocationDetail},
+		{Pattern: "/capabilities", Handler: a.handleHTTPCapabilities},
 		{Pattern: "/invocations", Handler: a.handleHTTPInvocationsCollection},
 		// Built-in handler examples for the panel's "Load" picker.
 		{Pattern: "/examples", Handler: a.handleHTTPExamples},
@@ -184,6 +115,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "functions_create",
 			Description: "Create a function and deploy v1. Args: name, runtime (node|go), source (inline handler — node: `export default async (event, context) => result`; go: `func Handle(event json.RawMessage, ctx *Context) (any, error)`) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?, function_url?.",
 			InputSchema: schemaObject(map[string]any{
+				"access":        map[string]any{"type": "object", "description": "Optional apps and integrations arrays of app.tool or app.* rules. Empty arrays deny calls."},
 				"name":          map[string]any{"type": "string"},
 				"runtime":       map[string]any{"type": "string", "enum": []any{"node", "go"}},
 				"source_kind":   map[string]any{"type": "string", "enum": []any{"inline", "repo"}},
@@ -199,7 +131,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"description": "Optional public URL config: enabled, allowed_methods, cors, rotate_token/token.",
 				},
 			}, []string{"name", "runtime"}),
-			Handler: a.toolCreate,
+			HandlerCtx: a.toolCreateContext,
 		},
 		{
 			Name:        "functions_update",
@@ -212,6 +144,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"max_memory_mb": map[string]any{"type": "integer"},
 				"status":        map[string]any{"type": "string", "enum": []any{"active", "disabled"}},
 				"function_url":  map[string]any{"type": "object", "description": "Patch public URL config: enabled, allowed_methods, cors, rotate_token/token."},
+				"access":        map[string]any{"type": "object", "description": "Optional apps and integrations arrays of app.tool or app.* rules. Empty arrays deny calls."},
 			}, nil),
 			Handler: a.toolUpdate,
 		},
@@ -228,6 +161,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "functions_list",
 			Description: "List functions. Args: runtime?, status?, limit (default 100, max 500).",
 			InputSchema: schemaObject(map[string]any{
+				"cursor":  map[string]any{"type": "string", "description": "next_cursor from the previous page"},
 				"runtime": map[string]any{"type": "string"},
 				"status":  map[string]any{"type": "string"},
 				"limit":   map[string]any{"type": "integer"},
@@ -238,8 +172,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "functions_get",
 			Description: "Fetch a function by id or name.",
 			InputSchema: schemaObject(map[string]any{
-				"id":   map[string]any{"type": "integer"},
-				"name": map[string]any{"type": "string"},
+				"include_secrets": map[string]any{"type": "boolean", "description": "Explicitly reveal environment values and URL token (default false)"},
+				"id":              map[string]any{"type": "integer"},
+				"name":            map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolGet,
 		},
@@ -251,15 +186,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"name":  map[string]any{"type": "string"},
 				"event": map[string]any{"description": "JSON payload passed to the handler as its first argument."},
 			}, nil),
-			Handler: a.toolInvoke,
+			HandlerCtx: a.toolInvokeContext,
 		},
 		{
 			Name:        "functions_invocations",
 			Description: "List recent invocations of a function. Args: id (or name), limit (default 50, max 200).",
 			InputSchema: schemaObject(map[string]any{
-				"id":    map[string]any{"type": "integer"},
-				"name":  map[string]any{"type": "string"},
-				"limit": map[string]any{"type": "integer"},
+				"cursor": map[string]any{"type": "string", "description": "next_cursor from the previous page"},
+				"id":     map[string]any{"type": "integer"},
+				"name":   map[string]any{"type": "string"},
+				"limit":  map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolInvocations,
 		},
@@ -283,7 +219,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"repo_path":    map[string]any{"type": "string"},
 				"package_json": map[string]any{"type": "string", "description": "Optional package.json — dependencies installed once at deploy."},
 			}, nil),
-			Handler: a.toolDeploy,
+			HandlerCtx: a.toolDeployContext,
 		},
 		{
 			Name:        "functions_rollback",
@@ -293,15 +229,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"name":    map[string]any{"type": "string"},
 				"version": map[string]any{"type": "integer"},
 			}, []string{"version"}),
-			Handler: a.toolRollback,
+			HandlerCtx: a.toolRollbackContext,
 		},
 		{
 			Name:        "functions_versions",
 			Description: "List a function's deploy history. Args: id (or name), limit (default 50, max 100).",
 			InputSchema: schemaObject(map[string]any{
-				"id":    map[string]any{"type": "integer"},
-				"name":  map[string]any{"type": "string"},
-				"limit": map[string]any{"type": "integer"},
+				"cursor": map[string]any{"type": "string", "description": "next_cursor from the previous page"},
+				"id":     map[string]any{"type": "integer"},
+				"name":   map[string]any{"type": "string"},
+				"limit":  map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolVersions,
 		},

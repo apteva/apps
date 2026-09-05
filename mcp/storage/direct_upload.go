@@ -14,12 +14,9 @@ package main
 // fall back to POST /files (the bytes-through-storage path that
 // works on any backend).
 //
-// Trade-off: client-supplied sha256 is trusted at finalize time. We
-// can't reliably re-derive it server-side because S3's ETag is MD5
-// for single-PUT and a hash-of-hashes for multipart — neither is
-// SHA256, and re-fetching the bytes to hash defeats the purpose.
-// We DO verify size_bytes via Stat so a corrupted-but-shorter
-// upload won't be accepted.
+// Finalization hashes a bounded snapshot and writes a new object key. Only
+// the temporary key is client-writable, and its cleanup remains scheduled
+// until the signed PUT expires. Publication and completion are atomic.
 
 import (
 	"context"
@@ -29,8 +26,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,12 +92,24 @@ func (a *App) handleDirectInit(w http.ResponseWriter, r *http.Request) {
 		Tags        []string `json:"tags"`
 		Source      string   `json:"source"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 32*1024)).Decode(&body); err != nil {
+	if err := decodeJSON(r, &body, 32*1024, false); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	body.Name = normaliseFilename(body.Name)
-	body.Folder = normaliseFolder(body.Folder)
+	body.Name, err = validateFilename(body.Name)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	body.Folder, err = validateFolder(body.Folder)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	if err = validateVisibility(body.Visibility); err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	body.SHA256 = strings.ToLower(strings.TrimSpace(body.SHA256))
 
 	if body.Name == "" {
@@ -136,6 +145,10 @@ func (a *App) handleDirectInit(w http.ResponseWriter, r *http.Request) {
 	// new filename/folder are a distinct user-visible file and must be
 	// uploaded/materialised there.
 	if existing, err := dbFindExact(ctx.AppDB(), pid, body.SHA256, body.Folder, body.Name); err == nil && existing != nil {
+		if _, _, err := compatibleExisting(existing, uploadInput{ContentType: safeResponseContentType(body.ContentType), Visibility: visibility, Tags: cleanTags(body.Tags)}); err != nil {
+			httpErr(w, 409, err.Error())
+			return
+		}
 		httpJSON(w, map[string]any{
 			"file":         existing,
 			"was_existing": true,
@@ -144,6 +157,18 @@ func (a *App) handleDirectInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uploadID := newDirectUploadID()
+	expiresAt := time.Now().Add(presignTTL).Unix()
+	if err = reserveUpload(ctx, uploadID, pid, body.SizeBytes, expiresAt); err != nil {
+		httpErr(w, 429, err.Error())
+		return
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			releaseUploadReservation(ctx, uploadID)
+		}
+	}()
 	storageKey := uuid.NewString() + extOf(body.Name, body.ContentType)
 	objKey := objectKey(body.SHA256, storageKey)
 
@@ -161,8 +186,6 @@ func (a *App) handleDirectInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	uploadID := newDirectUploadID()
-	expiresAt := time.Now().Add(presignTTL).Unix()
 	tagsJSON, _ := json.Marshal(body.Tags)
 	if _, err := ctx.AppDB().Exec(`
 		INSERT INTO pending_uploads
@@ -170,12 +193,17 @@ func (a *App) handleDirectInit(w http.ResponseWriter, r *http.Request) {
 			 size_bytes, declared_sha256, visibility, tags, source, requested_by, expires_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		uploadID, pid, storageKey, body.Name, body.Folder, body.ContentType,
-		body.SizeBytes, body.SHA256, visibility, string(tagsJSON), body.Source, callerLabel(), expiresAt,
+		body.SizeBytes, body.SHA256, visibility, string(tagsJSON), body.Source, requestActor(r), expiresAt,
 	); err != nil {
 		httpErr(w, http.StatusInternalServerError, "persist session: "+err.Error())
 		return
 	}
 
+	if err = queueBlobCleanup(ctx, objKey, time.Unix(expiresAt+60, 0)); err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	reserved = false
 	httpJSON(w, map[string]any{
 		"upload_id":  uploadID,
 		"upload_url": uploadURL,
@@ -189,117 +217,103 @@ func (a *App) handleDirectInit(w http.ResponseWriter, r *http.Request) {
 // ─── finalize ─────────────────────────────────────────────────────
 
 func (a *App) handleDirectFinalize(w http.ResponseWriter, r *http.Request, uploadID string) {
-	ctx := globalCtx
-	be := backend()
-	if be.Kind() != "s3" {
-		httpErr(w, http.StatusNotImplemented, "backend=disk: presigned uploads not supported")
+	app := globalCtx
+	if backend().Kind() != "s3" {
+		httpErr(w, 501, "backend=disk: presigned uploads not supported")
 		return
 	}
-
 	var body struct {
-		SHA256 string `json:"sha256"` // optional — must match init's declared if set
+		SHA256 string `json:"sha256"`
 	}
-	_ = json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body)
-
+	if err := decodeJSON(r, &body, 1024, true); err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		httpErr(w, 400, err.Error())
 		return
 	}
-
-	var (
-		sk, name, folder, ct, vis, tags, source, declaredSHA string
-		size                                                 int64
-		expiresAt                                            int64
-	)
-	err = ctx.AppDB().QueryRow(`
-		SELECT storage_key, name, folder, COALESCE(content_type,''),
-		       size_bytes, declared_sha256, COALESCE(visibility,''),
-		       COALESCE(tags,'[]'), COALESCE(source,''), expires_at
-		  FROM pending_uploads
-		 WHERE upload_id = ? AND project_id = ?`,
-		uploadID, pid,
-	).Scan(&sk, &name, &folder, &ct, &size, &declaredSHA, &vis, &tags, &source, &expiresAt)
-	if err == sql.ErrNoRows {
-		httpErr(w, http.StatusNotFound, "upload session not found (already finalized or expired?)")
+	mu := sessionLock(uploadID)
+	mu.Lock()
+	defer func() { mu.Unlock(); releaseSessionLock(uploadID) }()
+	if f, existed, e := completedUpload(app, uploadID, pid); e != nil {
+		httpErr(w, 500, e.Error())
+		return
+	} else if f != nil {
+		meta, e := loadSessionOrCompletion(app, uploadID, pid)
+		if e != nil || authorizeHTTPSession(r, meta) != nil {
+			httpErr(w, 403, "not your upload")
+			return
+		}
+		if body.SHA256 != "" && !strings.EqualFold(body.SHA256, f.SHA256) {
+			httpErr(w, 400, "sha256 mismatch")
+			return
+		}
+		httpJSON(w, map[string]any{"file": f, "was_existing": existed})
 		return
 	}
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "lookup: "+err.Error())
-		return
-	}
-	if time.Now().Unix() > expiresAt {
-		httpErr(w, http.StatusGone, "upload session expired")
-		return
-	}
-
-	// Optional client-side hash check; reject mismatch loud.
-	if body.SHA256 != "" && !strings.EqualFold(body.SHA256, declaredSHA) {
-		httpErr(w, http.StatusBadRequest, "sha256 mismatch with declared at init")
-		return
-	}
-
-	objKey := objectKey(declaredSHA, sk)
-
-	// Verify the object actually arrived + is the declared size.
-	gotSize, err := be.Stat(r.Context(), objKey)
-	if errors.Is(err, ErrNotFound) {
-		httpErr(w, http.StatusBadRequest, "no object at presigned URL — did the PUT succeed?")
+	var sk, name, folder, ct, vis, tags, source, sha, owner string
+	var size, expires int64
+	err = app.AppDB().QueryRow(`SELECT storage_key,name,folder,COALESCE(content_type,''),size_bytes,declared_sha256,COALESCE(visibility,''),COALESCE(tags,'[]'),COALESCE(source,''),expires_at,COALESCE(requested_by,'') FROM pending_uploads WHERE upload_id=? AND project_id=?`, uploadID, pid).Scan(&sk, &name, &folder, &ct, &size, &sha, &vis, &tags, &source, &expires, &owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		httpErr(w, 404, "upload session not found")
 		return
 	}
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "stat object: "+err.Error())
+		httpErr(w, 500, err.Error())
 		return
 	}
-	if gotSize != size {
-		// Best-effort cleanup so a half-broken upload doesn't linger
-		// in the bucket.
-		_ = be.Delete(r.Context(), objKey)
-		httpErr(w, http.StatusBadRequest,
-			fmt.Sprintf("size mismatch: declared %d, actual %d", size, gotSize))
+	if strings.HasPrefix(owner, "human:") && owner != requestActor(r) {
+		httpErr(w, 403, "not your upload")
 		return
 	}
-
-	// Defensive exact-destination dedup re-check — between init and
-	// finalize, another upload might have created this same file. A row
-	// with the same bytes elsewhere must not replace the requested output.
-	if existing, err := dbFindExact(ctx.AppDB(), pid, declaredSHA, folder, name); err == nil && existing != nil {
-		_ = be.Delete(r.Context(), objKey)
-		_, _ = ctx.AppDB().Exec(`DELETE FROM pending_uploads WHERE upload_id = ?`, uploadID)
-		httpJSON(w, map[string]any{
-			"file":         existing,
-			"was_existing": true,
-		})
+	if time.Now().Unix() > expires {
+		httpErr(w, 410, "upload session expired")
 		return
 	}
-
-	// Insert the final files row + delete the session in one go.
-	res, err := ctx.AppDB().Exec(`
-		INSERT INTO files
-			(project_id, name, folder, storage_key, content_type, size_bytes,
-			 sha256, uploaded_by, source, tags, visibility)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, name, folder, sk, ct, size, declaredSHA, callerLabel(),
-		ifEmpty(source, "presigned"), tags, vis,
-	)
+	if body.SHA256 != "" && !strings.EqualFold(body.SHA256, sha) {
+		httpErr(w, 400, "sha256 mismatch with declared at init")
+		return
+	}
+	release, err := acquireTransfer(r.Context())
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "insert: "+err.Error())
+		httpErr(w, 400, err.Error())
 		return
 	}
-	insID, _ := res.LastInsertId()
-	if _, err := ctx.AppDB().Exec(`DELETE FROM pending_uploads WHERE upload_id = ?`, uploadID); err != nil {
-		ctx.Logger().Warn("pending session cleanup failed", "upload_id", uploadID, "err", err)
-	}
-	row, err := dbGetByID(ctx.AppDB(), pid, insID)
-	if err != nil || row == nil {
-		httpErr(w, http.StatusInternalServerError, "lookup new row")
+	defer release()
+	key := objectKey(sha, sk)
+	read, err := backend().OpenObject(r.Context(), key, ObjectReadOptions{})
+	if err != nil {
+		httpErr(w, 400, "no object at presigned URL: "+err.Error())
 		return
 	}
-	emitFileEvent(ctx, "file.added", row, false)
-	httpJSON(w, map[string]any{
-		"file":         row,
-		"was_existing": false,
-	})
+	defer read.Body.Close()
+	var tagList []string
+	if err = json.Unmarshal([]byte(tags), &tagList); err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	uid, _ := strconv.ParseInt(r.Header.Get("X-User-ID"), 10, 64)
+	in := uploadInput{Name: name, Folder: folder, ContentType: ct, Visibility: vis, Tags: tagList, Source: ifEmpty(source, "presigned"), ExpectedSHA: sha, ExpectedSize: size, UploadID: uploadID, UserID: uid}
+	// Spool and hash this exact GET snapshot, then publish under a NEW key.
+	// Reusing a still-valid PUT can only alter the temporary object.
+	c := context.WithValue(r.Context(), actorContextKey{}, requestActor(r))
+	row, existed, err := saveStream(c, app, pid, in, read.Body)
+	if err != nil {
+		cleanupBlobNow(app, key)
+		_ = queueBlobCleanup(app, key, time.Unix(expires+60, 0))
+		httpErr(w, 400, err.Error())
+		return
+	}
+	// Keep cleanup scheduled until the PUT expires, even if the client recreates it.
+	if err = queueBlobCleanup(app, key, time.Unix(expires+60, 0)); err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	retireSessionLock(uploadID)
+	emitFileEvent(app, "file.added", row, existed)
+	httpJSON(w, map[string]any{"file": row, "was_existing": existed})
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
@@ -372,10 +386,12 @@ func sweepStalePendingUploads(ctx *sdk.AppCtx) {
 	removed := 0
 	for _, item := range stale {
 		key := objectKey(item.sha256, item.storageKey)
-		if err := backend().Delete(context.Background(), key); err != nil {
+		if !cleanupBlob(ctx, key) {
+			err := errors.New("blob cleanup pending")
 			ctx.Logger().Warn("pending upload object cleanup failed", "upload_id", item.id, "key", key, "err", err)
 			continue
 		}
+		releaseUploadReservation(ctx, item.id)
 		res, err := ctx.AppDB().Exec(
 			`DELETE FROM pending_uploads WHERE upload_id = ? AND expires_at < ?`, item.id, now)
 		if err != nil {

@@ -25,6 +25,20 @@ type WaitCondition = api.WaitCondition
 type WaitConditionResult = api.WaitConditionResult
 type WaitResult = api.WaitResult
 type StabilityWaiter = api.StabilityWaiter
+type MediaObservation = api.MediaObservation
+type MediaObserver = api.MediaObserver
+type DownloadStatus = api.DownloadStatus
+type Download = api.Download
+type DownloadManager = api.DownloadManager
+type DownloadEventSource = api.DownloadEventSource
+
+const (
+	DownloadInProgress = api.DownloadInProgress
+	DownloadCompleted  = api.DownloadCompleted
+	DownloadFailed     = api.DownloadFailed
+	DownloadCancelled  = api.DownloadCancelled
+)
+
 type TabInfo = api.TabInfo
 type TabController = api.TabController
 type ScreenshotWithOptions = api.ScreenshotWithOptions
@@ -42,6 +56,10 @@ const (
 type OpenOptions = api.OpenOptions
 type ExternalProxy = api.ExternalProxy
 type EnvironmentOptions = api.EnvironmentOptions
+type EffectiveEnvironment = api.EffectiveEnvironment
+type EnvironmentReporter = api.EnvironmentReporter
+type ProviderSessionState = api.ProviderSessionState
+type ProviderSessionStateReporter = api.ProviderSessionStateReporter
 type GeolocationOptions = api.GeolocationOptions
 type SessionOpener = api.SessionOpener
 type SessionInfo = api.SessionInfo

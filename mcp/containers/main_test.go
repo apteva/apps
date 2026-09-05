@@ -460,6 +460,24 @@ func TestDestroyIgnoresAlreadyMissingDockerResources(t *testing.T) {
 	}
 }
 
+func TestDockerMissingResourceErrorVariants(t *testing.T) {
+	for _, tc := range []struct {
+		resource string
+		message  string
+	}{
+		{resource: "container", message: "docker rm: No such container: containers-demo"},
+		{resource: "network", message: "Error response from daemon: network containers-demo not found"},
+		{resource: "volume", message: "docker volume rm: No such volume: containers-demo-data"},
+	} {
+		if !isDockerMissingResourceError(errors.New(tc.message), tc.resource) {
+			t.Fatalf("did not recognize missing %s error %q", tc.resource, tc.message)
+		}
+	}
+	if isDockerMissingResourceError(errors.New("permission denied"), "network") {
+		t.Fatal("unrelated Docker error was treated as a missing resource")
+	}
+}
+
 func TestHealthPollRetriesErrorWorkloads(t *testing.T) {
 	db := testDB(t)
 	w := testWorkload("wrk_error", "demo", StatusError)

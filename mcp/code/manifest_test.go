@@ -19,8 +19,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 37 {
-		t.Errorf("expected 37 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 55 {
+		t.Errorf("expected 55 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.UIComponents) != 3 {
 		t.Errorf("expected 3 UI components in manifest, got %d", len(m.Provides.UIComponents))
@@ -36,6 +36,15 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 		if !gotScopes[want] {
 			t.Errorf("manifest missing scope %q", want)
 		}
+	}
+	workspacesOptional := false
+	for _, dependency := range m.Requires.Apps {
+		if dependency.Name == "workspaces" && dependency.Version == ">=0.5.0" && dependency.Optional {
+			workspacesOptional = true
+		}
+	}
+	if !workspacesOptional {
+		t.Error("Workspaces >=0.5.0 must remain an optional dependency")
 	}
 }
 
@@ -122,14 +131,17 @@ func TestMCPTools_EditingSurfaceComplete(t *testing.T) {
 		got[tool.Name] = true
 	}
 	must := []string{
-		"repos_list", "repos_create", "repos_get", "repos_archive", "repos_set_deploy_hints",
-		"repos_run_command",
+		"repos_list", "repos_create", "repos_get", "repos_archive", "repos_set_deploy_hints", "repos_set_workspace_image",
+		"repos_run_command", "repos_workspace_changes", "repos_workspace_apply", "repos_workspace_destroy",
 		"code_list_files", "code_glob", "code_grep",
 		"code_read_file", "code_read_excerpt", "code_file_outline",
 		"code_write_file", "code_apply_patch", "code_edit_file", "code_multi_edit",
 		"code_rename_path", "code_delete_file",
 		"issues_list", "issues_search", "issues_get", "issues_create", "issues_update",
-		"issues_comment", "issues_close", "issues_reopen", "issues_link_path",
+		"issues_claim", "issues_release", "issues_comment", "issues_close", "issues_reopen", "issues_link_path",
+		"repos_git_import", "repos_git_connect", "repos_git_status", "repos_git_fetch",
+		"repos_git_pull", "repos_git_commit", "repos_git_push", "repos_git_diff", "repos_git_log",
+		"repos_git_branches", "repos_git_branch_create", "repos_git_switch",
 	}
 	for _, name := range must {
 		if !got[name] {
@@ -152,8 +164,8 @@ func TestMCPTools_AllHaveSchemas(t *testing.T) {
 		if !ok || len(props) == 0 {
 			t.Errorf("tool %q has empty/missing properties", tool.Name)
 		}
-		if tool.Handler == nil {
-			t.Errorf("tool %q has nil Handler", tool.Name)
+		if tool.Handler == nil && tool.HandlerCtx == nil {
+			t.Errorf("tool %q has no handler", tool.Name)
 		}
 	}
 }

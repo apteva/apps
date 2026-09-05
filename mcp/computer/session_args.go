@@ -42,7 +42,7 @@ var browserSessionSupportedArguments = map[string]struct{}{
 	"url": {}, "context_id": {}, "context_name": {}, "provider_context_id": {},
 	"auto_create_context": {}, "persist": {}, "timeout": {}, "proxy_mode": {},
 	"proxy_profile": {}, "proxy_country": {}, "proxy_sticky": {}, "environment": {},
-	"viewport": {},
+	"environment_override": {}, "viewport": {},
 
 	// Accepted compatibility aliases are intentionally not advertised in the
 	// public schema, but remain supported for existing programmatic clients.
@@ -86,17 +86,22 @@ func normalizeBrowserSessionArgsWithDiagnostics(args map[string]any) (map[string
 	var diagnostics sessionArgumentDiagnostics
 
 	// Some models mechanically fill every optional schema property with an
-	// empty, false, or boundary-looking value. This exact shape is not a real
-	// device profile. Discard its default-looking overrides as one unit so a
-	// schema minimum such as device_scale_factor=0.1 cannot distort the page.
+	// empty, false, or boundary/default-looking value. This exact shape is not a
+	// real device profile. Discard its generated overrides as one unit so schema
+	// values such as device_scale_factor=1 or timeout=60 cannot distort the page
+	// or terminate an active cloud session after one minute.
 	if looksLikeSynthesizedSessionTemplate(out) {
-		for _, key := range []string{"environment", "backend", "presentation_mode", "proxy_mode", "proxy_sticky", "persist", "auto_create_context", "timeout", "viewport"} {
+		for _, key := range []string{"environment", "environment_override", "backend", "presentation_mode", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky", "persist", "auto_create_context", "viewport"} {
 			if _, ok := out[key]; ok {
 				delete(out, key)
 				diagnostics.ignore(key)
 			}
 		}
-		diagnostics.warn("Ignored mechanically populated browser-session defaults; no browser emulation was applied")
+		if looksLikeSynthesizedSessionTimeout(out) {
+			delete(out, "timeout")
+			diagnostics.ignore("timeout")
+		}
+		diagnostics.warn("Ignored mechanically populated browser-session defaults; no browser emulation or generated session-lifetime override was applied")
 	}
 
 	for _, key := range []string{
@@ -148,9 +153,18 @@ func normalizeBrowserSessionArgsWithDiagnostics(args map[string]any) (map[string
 	}
 
 	if environment, ok := out["environment"].(map[string]any); ok {
-		if normalized := normalizeSessionEnvironmentArgs(environment, &diagnostics); len(normalized) == 0 {
+		normalized := normalizeSessionEnvironmentArgs(environment, &diagnostics)
+		if len(normalized) == 0 {
 			delete(out, "environment")
 			diagnostics.ignore("environment")
+		} else if savedContextOpen(out) && !boolArgDefault(out, "environment_override", false) && looksLikeGeneratedEnvironmentDefaults(normalized) {
+			// Saved provider contexts own their existing browser environment.
+			// Some schema serializers materialize an environment object even
+			// when the caller omitted it. Known generator-only values must not
+			// turn an ordinary saved-context open into an override request.
+			delete(out, "environment")
+			diagnostics.ignore("environment")
+			diagnostics.warn("Ignored generated browser-environment defaults while reopening the saved context")
 		} else {
 			out["environment"] = normalized
 		}
@@ -269,7 +283,7 @@ func filterBrowserSessionArgumentsForAction(args map[string]any, diagnostics *se
 	for _, key := range []string{
 		"backend", "presentation_mode", "url", "context_id", "context_name", "provider_context_id", "provider_context",
 		"auto_create_context", "persist", "timeout", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky",
-		"environment", "viewport", "user_agent", "backend_session_id", "provider_session_id", "region", "backend_url", "initial_url", "proxy_url",
+		"environment", "environment_override", "viewport", "user_agent", "backend_session_id", "provider_session_id", "region", "backend_url", "initial_url", "proxy_url",
 		"solve_captchas", "use_proxy", "block_ads", "solve_captcha", "proxy_enabled", "browser_project_id",
 	} {
 		if _, ok := args[key]; ok {
@@ -309,7 +323,7 @@ func looksLikeSynthesizedSessionTemplate(args map[string]any) bool {
 	if value, ok := args["auto_create_context"].(bool); ok && !value {
 		signals++
 	}
-	if value, ok := numericArg(args["timeout"]); ok && value == 0 {
+	if looksLikeSynthesizedSessionTimeout(args) {
 		signals++
 	}
 	if viewport, ok := args["viewport"].(map[string]any); ok && intArg(viewport, "width") == 1600 && intArg(viewport, "height") == 800 {
@@ -319,6 +333,10 @@ func looksLikeSynthesizedSessionTemplate(args map[string]any) bool {
 }
 
 func looksLikeSynthesizedEnvironmentTemplate(environment map[string]any) bool {
+	return looksLikeLegacySynthesizedEnvironmentTemplate(environment) || looksLikeCurrentSynthesizedEnvironmentTemplate(environment)
+}
+
+func looksLikeLegacySynthesizedEnvironmentTemplate(environment map[string]any) bool {
 	if len(environment) < 7 {
 		return false
 	}
@@ -330,6 +348,128 @@ func looksLikeSynthesizedEnvironmentTemplate(environment map[string]any) bool {
 		mobileOK && !mobile && touchOK && !touch &&
 		sessionArgString(environment["user_agent"]) == "" && sessionArgString(environment["locale"]) == "" &&
 		sessionArgString(environment["timezone"]) == "" && emptySliceValue(environment["languages"])
+}
+
+// Agents 0.41.2 materialized the normal browser values and schema defaults as
+// though they were requested overrides. These values are recognized only as
+// part of a broader generated session bundle; the environment object alone is
+// still handled by the stricter saved-context logic below.
+func looksLikeCurrentSynthesizedEnvironmentTemplate(environment map[string]any) bool {
+	if len(environment) < 7 {
+		return false
+	}
+	dsf, dsfOK := numericArg(environment["device_scale_factor"])
+	maxTouch, maxTouchOK := numericArg(environment["max_touch_points"])
+	mobile, mobileOK := environment["mobile"].(bool)
+	touch, touchOK := environment["touch"].(bool)
+	geo, geoOK := environment["geolocation"].(map[string]any)
+	return dsfOK && dsf == 1 && maxTouchOK && maxTouch == 1 &&
+		mobileOK && !mobile && touchOK && !touch && geoOK &&
+		looksLikeCurrentSynthesizedGeolocation(geo) &&
+		sessionArgString(environment["user_agent"]) == "" && sessionArgString(environment["locale"]) == "" &&
+		(sessionArgString(environment["timezone"]) == "" || strings.EqualFold(sessionArgString(environment["timezone"]), "UTC")) &&
+		emptySliceValue(environment["languages"])
+}
+
+func looksLikeCurrentSynthesizedGeolocation(geolocation map[string]any) bool {
+	latitude, latOK := numericArg(geolocation["latitude"])
+	longitude, longOK := numericArg(geolocation["longitude"])
+	accuracy, accuracyOK := numericArg(geolocation["accuracy"])
+	permission := strings.ToLower(sessionArgString(geolocation["permission"]))
+	return latOK && latitude == 0 && longOK && longitude == 0 &&
+		accuracyOK && accuracy == 100 && (permission == "grant" || permission == "prompt")
+}
+
+func looksLikeSynthesizedSessionTimeout(args map[string]any) bool {
+	timeout, ok := numericArg(args["timeout"])
+	return ok && (timeout == 0 || timeout == minimumCloudSessionTimeoutSeconds)
+}
+
+func savedContextOpen(args map[string]any) bool {
+	if stringArg(args, "action") != "open" {
+		return false
+	}
+	return firstNonEmpty(
+		stringArg(args, "context_id"),
+		stringArg(args, "context_name"),
+		stringArg(args, "provider_context_id"),
+		stringArg(args, "provider_context"),
+	) != ""
+}
+
+// looksLikeGeneratedEnvironmentDefaults recognizes only values commonly
+// materialized from the public schema. It intentionally runs only for a saved-
+// context open without environment_override. Any non-default locale, timezone,
+// location, device setting, or user agent remains material and fails closed.
+func looksLikeGeneratedEnvironmentDefaults(environment map[string]any) bool {
+	if len(environment) == 0 {
+		return true
+	}
+	for key, value := range environment {
+		switch key {
+		case "user_agent", "locale":
+			if sessionArgString(value) != "" {
+				return false
+			}
+		case "timezone":
+			timezone := strings.ToUpper(sessionArgString(value))
+			if timezone != "" && timezone != "UTC" {
+				return false
+			}
+		case "languages":
+			if !emptySliceValue(value) {
+				return false
+			}
+		case "device_scale_factor":
+			number, ok := numericArg(value)
+			if !ok || (number != 0 && number != 0.1 && number != 0.5 && number != 1) {
+				return false
+			}
+		case "mobile", "touch":
+			flag, ok := value.(bool)
+			if !ok || flag {
+				return false
+			}
+		case "max_touch_points":
+			number, ok := numericArg(value)
+			if !ok || (number != 0 && number != 1) {
+				return false
+			}
+		case "geolocation":
+			geo, ok := value.(map[string]any)
+			if !ok || !looksLikeGeneratedGeolocationDefaults(geo) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func looksLikeGeneratedGeolocationDefaults(geolocation map[string]any) bool {
+	for key, value := range geolocation {
+		switch key {
+		case "latitude", "longitude":
+			number, ok := numericArg(value)
+			if !ok || number != 0 {
+				return false
+			}
+		case "accuracy":
+			number, ok := numericArg(value)
+			if !ok || (number != 0 && number != 100) {
+				return false
+			}
+		case "permission":
+			permission := strings.ToLower(sessionArgString(value))
+			if permission != "" && permission != "prompt" && permission != "grant" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func emptySliceValue(value any) bool {

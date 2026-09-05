@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"os"
 	"regexp"
 	"strings"
@@ -40,13 +41,13 @@ func Type(ctx context.Context, text, logPrefix string) error {
 				fmt.Fprintf(os.Stderr, "%s temporal set failed (%v), falling back to key events\n", logPrefix, err)
 			}
 		}
-		return chromedp.Run(ctx, chromedp.KeyEvent(text))
+		return cdputil.Run(ctx, chromedp.KeyEvent(text))
 	}
 
-	err := chromedp.Run(ctx, input.InsertText(text))
+	err := cdputil.Run(ctx, input.InsertText(text))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s insertText failed (%v), falling back to KeyEvent\n", logPrefix, err)
-		if err := chromedp.Run(ctx, chromedp.KeyEvent(text)); err != nil {
+		if err := cdputil.Run(ctx, chromedp.KeyEvent(text)); err != nil {
 			return fmt.Errorf("type: %w", err)
 		}
 	}
@@ -66,9 +67,9 @@ func TypeWithDelay(ctx context.Context, text, logPrefix string, delay time.Durat
 		return Type(ctx, text, logPrefix)
 	}
 	for _, char := range []rune(text) {
-		if err := chromedp.Run(ctx, input.InsertText(string(char))); err != nil {
+		if err := cdputil.Run(ctx, input.InsertText(string(char))); err != nil {
 			fmt.Fprintf(os.Stderr, "%s delayed insertText failed (%v), falling back to KeyEvent\n", logPrefix, err)
-			return chromedp.Run(ctx, chromedp.KeyEvent(string(char)))
+			return cdputil.Run(ctx, chromedp.KeyEvent(string(char)))
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -83,7 +84,7 @@ func TypeWithDelay(ctx context.Context, text, logPrefix string, delay time.Durat
 
 func activeElement(ctx context.Context) (focusedElement, error) {
 	var elem focusedElement
-	err := chromedp.Run(ctx, chromedp.Evaluate(`(function(){
+	err := cdputil.Run(ctx, chromedp.Evaluate(`(function(){
 		var el = document.activeElement;
 		if (!el) return {tag:"", type:""};
 		return {tag: String(el.tagName || "").toLowerCase(), type: String(el.type || "").toLowerCase()};
@@ -108,7 +109,7 @@ func setActiveValue(ctx context.Context, value string) error {
 		el.dispatchEvent(new Event("change", {bubbles:true}));
 		return el.value;
 	})()`, string(encoded))
-	err = chromedp.Run(ctx, chromedp.Evaluate(expr, &actual))
+	err = cdputil.Run(ctx, chromedp.Evaluate(expr, &actual))
 	if err != nil {
 		return err
 	}

@@ -16,17 +16,21 @@ setup:
     mcp: [tasks]
     directive: |
       Convert the request into exactly one recurring task by calling
-      tasks_create directly. Represent one recurring outcome as one logical
+      tasks_create directly. Tasks tools are already loaded in this thread;
+      do not call search_tools to rediscover them. Represent one recurring outcome as one logical
       task. Use the interval schedule form specifically: kind="interval" and
       every="15m"; do not translate the interval into cron. Do not spawn a
       worker and do not execute a future occurrence during schedule creation.
-      Confirm the saved title in your response and stop.
+      Set assigned_thread_id exactly to "main" in the single tasks_create
+      call. Confirm the saved title in your response and stop.
   app:
     path: ./
 
 directive: |
-  You are the durable default executor for scheduled Tasks events. Do not
-  create recurring work without a task.ready event addressed to main.
+  You are only the durable default executor for scheduled Tasks events. Before
+  a task.ready event addressed to main, immediately pace: do not inspect,
+  message, or kill request threads, and do not create recurring work. The
+  request thread owns schedule creation.
 
 prompt: |
   Every 15 minutes, review newly active leads. Name the recurring work "New lead review".
@@ -36,7 +40,7 @@ assert:
       tool: tasks_create
       thread_id: request-recurring
       count: 1
-  - tool_not_called: tasks_update | tasks_complete | spawn
+  - tool_not_called: tasks_set_progress | tasks_edit | tasks_fail | tasks_update | tasks_complete | spawn
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_status: 200
     expect_count_at: tasks
