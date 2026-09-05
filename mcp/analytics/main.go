@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.13.0
+version: 0.14.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -224,7 +224,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: analytics/v0.14.0
     entry: mcp/analytics
   port: 8080
   health_check: /health
@@ -252,6 +252,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("analytics requires a db block")
 	}
+	if err := upgradeLegacyPolicyKeys(ctx.AppDB()); err != nil {
+		return err
+	}
 	globalCtx = ctx
 	ctx.Logger().Info("analytics mounted")
 	// Bus auto-capture subscriber (idles until enabled in the Capture tab).
@@ -259,12 +262,25 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if captureStop != nil {
+		captureStop()
+	}
+	if captureDone != nil {
+		<-captureDone
+	}
+	return nil
+}
 
 // HTTPRoutes back the read-only dashboard panel (ui/AnalyticsPanel.mjs).
 // Agents use the MCP tools; these endpoints are panel-only aggregates.
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{
+	routes := []sdk.Route{
+		{Pattern: "/references", Handler: a.handleReferences},
+		{Pattern: "/fx-rates", Handler: a.handleFX},
+		{Pattern: "/retention", Handler: a.handleRetention},
+		{Pattern: "/archive/restore", Handler: a.handleArchiveRestore},
+		{Pattern: "/diagnostics", Handler: a.handleHealth},
 		{Pattern: "/summary", Handler: a.handleSummary},
 		{Pattern: "/series", Handler: a.handleSeries},
 		{Pattern: "/top", Handler: a.handleTop},
@@ -308,9 +324,15 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/event-specs/", Handler: a.handleEventSpecItem},
 		{Pattern: "/event-spec-violations", Handler: a.handleEventSpecViolations},
 	}
+	for i := range routes {
+		routes[i].Handler = boundedHandler(routes[i].Handler)
+	}
+	return routes
 }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{Name: "analytics-retention", Schedule: "@every 5m", Run: a.retentionWorker}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) MCPTools() []sdk.Tool {
@@ -319,14 +341,15 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "analytics_track",
 			Description: "Record one event in the current project. Args: event (required), props?, app?, user_id?, session_id?, install_id?, ts? (unix ms; defaults to now). Do not pass project_id; the platform assigns it automatically. Returns {id, ts}.",
 			InputSchema: schemaObject(map[string]any{
-				"event":      map[string]any{"type": "string"},
-				"props":      map[string]any{"type": "object"},
-				"app":        map[string]any{"type": "string"},
-				"user_id":    map[string]any{"type": "string"},
-				"session_id": map[string]any{"type": "string"},
-				"install_id": map[string]any{"type": "integer"},
-				"upsert_key": map[string]any{"type": "string"},
-				"ts":         map[string]any{"type": "integer"},
+				"event":       map[string]any{"type": "string"},
+				"props":       map[string]any{"type": "object"},
+				"app":         map[string]any{"type": "string"},
+				"user_id":     map[string]any{"type": "string"},
+				"session_id":  map[string]any{"type": "string"},
+				"install_id":  map[string]any{"type": "integer"},
+				"upsert_key":  map[string]any{"type": "string"},
+				"delivery_id": map[string]any{"type": "string", "description": "Stable retry identity; reusing it with different data is rejected."},
+				"ts":          map[string]any{"type": "integer"},
 			}, []string{"event"}),
 			Handler: a.toolTrack,
 		},
@@ -453,7 +476,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"label":         map[string]any{"type": "string"},
 				"status":        map[string]any{"type": "string", "enum": []string{"active", "inactive"}},
 				"metadata":      map[string]any{"type": "object"},
-			}, []string{"reference_set", "value", "label", "status"}),
+			}, []string{"reference_set", "value"}),
 			Handler: a.toolReferenceValueUpsert,
 		},
 		{
@@ -462,6 +485,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"reference_set": map[string]any{"type": "string"},
 				"status":        map[string]any{"type": "string", "enum": []string{"active", "inactive"}},
+				"after":         map[string]any{"type": "integer"},
+				"search":        map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
 			}, []string{"reference_set"}),
 			Handler: a.toolReferenceValuesList,
@@ -510,6 +535,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"upsert_policy":       map[string]any{"type": "object"},
 				"rollup_policy":       map[string]any{"type": "object"},
 				"properties":          map[string]any{"type": "array"},
+				"updated_at":          map[string]any{"type": "integer", "description": "Version from the fetched spec; stale edits are rejected."},
 				"clear_properties":    map[string]any{"type": "boolean"},
 				"clear_upsert_policy": map[string]any{"type": "boolean"},
 				"clear_rollup_policy": map[string]any{"type": "boolean"},
@@ -590,7 +616,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolEventViolations,
 		},
 	}
-	return append(tools, a.objectiveTools()...)
+	return withToolDeadlines(append(tools, a.objectiveTools()...))
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {

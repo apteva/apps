@@ -19,11 +19,14 @@ import (
 )
 
 type fleetTenantBackupManifest struct {
-	FormatVersion int       `json:"format_version"`
-	Provider      string    `json:"provider"`
-	ScopeKind     string    `json:"scope_kind"`
-	GeneratedAt   time.Time `json:"generated_at"`
-	Tenant        *Tenant   `json:"tenant"`
+	FormatVersion int              `json:"format_version"`
+	Provider      string           `json:"provider"`
+	ScopeKind     string           `json:"scope_kind"`
+	GeneratedAt   time.Time        `json:"generated_at"`
+	Tenant        *Tenant          `json:"tenant"`
+	ManagementKey []byte           `json:"management_key_enc,omitempty"`
+	SetupComplete bool             `json:"setup_complete"`
+	Metadata      *restoreMetadata `json:"control_state,omitempty"`
 }
 
 func (a *App) toolTenantBackupPlan(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -76,6 +79,10 @@ func (a *App) toolFleetTenantSnapshot(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	defer done()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
 	if t.Kind != KindLocal {
 		return nil, fmt.Errorf("tenant %s is kind=%s; only Fleet-managed local tenants can be snapshotted", id, t.Kind)
 	}
@@ -92,9 +99,25 @@ func (a *App) toolFleetTenantSnapshot(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, fmt.Errorf("tenant data dir: %w", err)
 	}
 
+	if err := preflightSnapshotSpace(t.ConfigDir, transferScratchRoot()); err != nil {
+		return nil, err
+	}
 	port, _ := portFromBaseURL(t.BaseURL)
 	wasRunning := port > 0 && portInUse(port)
 	if wasRunning {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		ok, actual, _, probeErr := probeHealth(probeCtx, t.BaseURL, "")
+		if probeErr != nil || !ok || actual == "" {
+			return nil, fmt.Errorf("cannot verify running runtime before snapshot: %v", probeErr)
+		}
+		if _, err := ensureVersionInstalled(probeCtx, actual); err != nil {
+			return nil, fmt.Errorf("prepare restart of runtime %s before stopping: %w", actual, err)
+		}
+		t.CurrentVersion = actual
+		if err := a.store.setCurrentVersion(t.ID, actual); err != nil {
+			return nil, err
+		}
 		if err := a.stopTenantBy(t.Slug, t.ConfigDir, port, 15*time.Second); err != nil {
 			return nil, fmt.Errorf("stop tenant for snapshot: %w", err)
 		}
@@ -115,37 +138,59 @@ func (a *App) toolFleetTenantSnapshot(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 
 	manifest := fleetTenantBackupManifest{
-		FormatVersion: 1,
+		FormatVersion: 2,
 		Provider:      "fleet",
 		ScopeKind:     "fleet_tenant",
 		GeneratedAt:   time.Now().UTC(),
 		Tenant:        t,
 	}
-	if boolArg(args, "supports_streaming") {
-		stage, err := os.MkdirTemp(transferScratchRoot(), "backup-*")
-		if err != nil {
-			return finish(nil, err)
-		}
-		payload := filepath.Join(stage, "tenant")
-		if err := copyDirReadOnly(t.ConfigDir, payload); err != nil {
+	_, keyEnc, keyErr := a.store.get(t.ID)
+	if keyErr != nil {
+		return finish(nil, keyErr)
+	}
+	manifest.ManagementKey = keyEnc
+	manifest.SetupComplete = a.setupComplete(t.ID)
+	metadata, err := a.store.backupMetadata(t.ID)
+	if err != nil {
+		return finish(nil, err)
+	}
+	manifest.Metadata = &metadata
+	stage, err := os.MkdirTemp(transferScratchRoot(), "backup-*")
+	if err != nil {
+		return finish(nil, err)
+	}
+	keepStage := false
+	defer func() {
+		if !keepStage {
 			_ = os.RemoveAll(stage)
-			return finish(nil, err)
 		}
+	}()
+	payload := filepath.Join(stage, "tenant")
+	if err = copyDirReadOnly(t.ConfigDir, payload); err != nil {
+		return finish(nil, err)
+	}
+	// Compression/download no longer extend the quiescence window.
+	if _, err = finish(nil, nil); err != nil {
+		return nil, err
+	}
+	wasRunning = false
+	streaming := true
+	if explicit, ok := args["supports_streaming"].(bool); ok {
+		streaming = explicit
+	}
+	if streaming {
 		archiveURL, err := a.createBackupDownloadURL(ctx, payload, stage, manifest, tenantTransferTTL)
 		if err != nil {
-			_ = os.RemoveAll(stage)
-			return finish(nil, err)
+			return nil, err
 		}
+		keepStage = true
 		mb, _ := json.Marshal(manifest)
 		_ = a.store.recordEvent(t.ID, "backup_snapshot_created", "backup", map[string]any{"mode": "stream"})
-		return finish(map[string]any{
-			"archive_url": archiveURL,
-			"manifest":    json.RawMessage(mb),
-			"streaming":   true,
-		}, nil)
+		return map[string]any{"archive_url": archiveURL, "manifest": json.RawMessage(mb), "streaming": true}, nil
 	}
+
 	var buf bytes.Buffer
-	if err := writeFleetTenantArchive(&buf, t.ConfigDir, manifest); err != nil {
+	if err := writeFleetTenantArchive(&boundedWriter{w: &buf, remaining: maxLegacyBackupBytes}, payload, manifest); err != nil {
 		return finish(nil, err)
 	}
 	mb, _ := json.Marshal(manifest)
@@ -183,6 +228,9 @@ func (a *App) toolFleetTenantRestore(ctx *sdk.AppCtx, args map[string]any) (any,
 	if archiveB64 == "" {
 		return nil, errors.New("archive_b64 required")
 	}
+	if int64(len(archiveB64)) > 4*((maxLegacyBackupBytes+2)/3) {
+		return nil, errors.New("legacy restore exceeds 32 MiB; use streaming upload")
+	}
 	raw, err := base64.StdEncoding.DecodeString(archiveB64)
 	if err != nil {
 		return nil, fmt.Errorf("decode archive_b64: %w", err)
@@ -203,7 +251,14 @@ func (a *App) restoreFleetTenantArchive(ctx *sdk.AppCtx, id string, archive io.R
 		return nil, err
 	}
 	defer done()
-	stage, err := os.MkdirTemp("", "fleet-tenant-restore-*")
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(t.ConfigDir), 0700); err != nil {
+		return nil, err
+	}
+	stage, err := os.MkdirTemp(filepath.Dir(t.ConfigDir), ".fleet-tenant-restore-*")
 	if err != nil {
 		return nil, err
 	}
@@ -219,6 +274,39 @@ func (a *App) restoreFleetTenantArchive(ctx *sdk.AppCtx, id string, archive io.R
 		return nil, fmt.Errorf("backup belongs to a different tenant; expected id=%s slug=%s", t.ID, t.Slug)
 	}
 
+	oldTenant := *t
+	oldMetadata, err := a.store.backupMetadata(t.ID)
+	oldKey := oldMetadata.APIKey
+	if err != nil {
+		return nil, err
+	}
+	restoreMetadata := oldMetadata
+	restoreKey := oldKey
+	if manifest.FormatVersion >= 2 {
+		if len(manifest.ManagementKey) == 0 {
+			return nil, errors.New("backup lacks management credential")
+		}
+		if _, err = a.keys.open(manifest.ManagementKey); err != nil {
+			return nil, fmt.Errorf("backup credentials require the original Fleet master key: %w", err)
+		}
+		restoreKey = manifest.ManagementKey
+		restoreMetadata.APIKey = restoreKey
+		restoreMetadata.SetupComplete = manifest.SetupComplete
+		if manifest.Metadata != nil {
+			restoreMetadata = *manifest.Metadata
+			restoreMetadata.APIKey = restoreKey
+		}
+		if !restoreMetadata.SetupComplete && manifest.Metadata == nil {
+			return nil, errors.New("backup has incomplete setup without recovery credentials")
+		}
+
+	}
+	restoreVersion := manifest.Tenant.CurrentVersion
+	if restoreVersion != "" {
+		if _, err = ensureVersionInstalled(context.Background(), restoreVersion); err != nil {
+			return nil, fmt.Errorf("prepare saved runtime: %w", err)
+		}
+	}
 	port, _ := portFromBaseURL(t.BaseURL)
 	wasRunning := port > 0 && portInUse(port)
 	if wasRunning {
@@ -236,22 +324,74 @@ func (a *App) restoreFleetTenantArchive(ctx *sdk.AppCtx, id string, archive io.R
 		return nil, cause
 	}
 
-	backupDir := t.ConfigDir + ".prerestore-" + time.Now().UTC().Format("20060102-150405")
+	backupDir := t.ConfigDir + ".prerestore-" + time.Now().UTC().Format("20060102-150405.000000000")
+	if err = a.checkpointOperation(t.ID, "restore_swap", map[string]any{"source": t, "previous_data_dir": backupDir, "source_metadata": oldMetadata}); err != nil {
+		return restartAfterFailure(err)
+	}
+
 	if _, err := os.Stat(t.ConfigDir); err == nil {
 		if err := os.Rename(t.ConfigDir, backupDir); err != nil {
 			return restartAfterFailure(fmt.Errorf("backup current data dir: %w", err))
 		}
 	}
-	if err := copyDir(payloadDir, t.ConfigDir); err != nil {
-		_ = os.RemoveAll(t.ConfigDir)
-		_ = os.Rename(backupDir, t.ConfigDir)
-		return restartAfterFailure(fmt.Errorf("restore data dir: %w", err))
+	if err := publishTenantDirectory(payloadDir, t.ConfigDir); err != nil {
+		// Do not remove an unexpected directory that won the publication race.
+		if _, statErr := os.Lstat(t.ConfigDir); os.IsNotExist(statErr) {
+			if renameErr := os.Rename(backupDir, t.ConfigDir); renameErr == nil {
+				return restartAfterFailure(err)
+			}
+		}
+		a.requireRecovery(t.ID, err)
+		return nil, fmt.Errorf("restore publication failed; previous data retained at %s: %w", backupDir, err)
+	}
+	t.CurrentVersion = restoreVersion
+	t.TargetVersion = restoreVersion
+	restoreMetadata.CurrentVersion = restoreVersion
+	restoreMetadata.TargetVersion = restoreVersion
+	if err = a.store.restoreMetadata(t.ID, restoreMetadata); err != nil {
+		a.requireRecovery(t.ID, err)
+		return nil, err
+	}
+	rollbackRestore := func(cause error) (map[string]any, error) {
+		if stopErr := a.stopTenantBy(t.Slug, t.ConfigDir, port, 15*time.Second); stopErr != nil {
+			a.requireRecovery(t.ID, stopErr)
+			return nil, fmt.Errorf("restore recovery required: %w", stopErr)
+		}
+		failedDir := t.ConfigDir + ".failedrestore-" + time.Now().UTC().Format("20060102-150405.000000000")
+		if err := os.Rename(t.ConfigDir, failedDir); err != nil {
+			a.requireRecovery(t.ID, err)
+			return nil, err
+		}
+		if err := os.Rename(backupDir, t.ConfigDir); err != nil {
+			a.requireRecovery(t.ID, err)
+			return nil, err
+		}
+		if err := a.store.restoreMetadata(t.ID, oldMetadata); err != nil {
+			a.requireRecovery(t.ID, err)
+			return nil, err
+		}
+		if wasRunning {
+			if err := a.restartTenantAfterBackup(ctx, &oldTenant); err != nil {
+				a.requireRecovery(t.ID, err)
+				return nil, err
+			}
+		}
+		return nil, fmt.Errorf("restore failed and previous data restored: %w (failed payload retained at %s)", cause, failedDir)
 	}
 	_ = a.store.recordEvent(t.ID, "backup_restored", "backup", map[string]any{"previous_data_dir": backupDir})
 	if wasRunning {
 		if err := a.restartTenantAfterBackup(ctx, t); err != nil {
 			_ = a.store.setStatus(t.ID, StatusFailed, "backup")
-			return nil, fmt.Errorf("restart after restore: %w", err)
+			return rollbackRestore(fmt.Errorf("restart after restore: %w", err))
+		}
+	}
+	if wasRunning && a.setupComplete(t.ID) {
+		raw, err := a.keys.open(restoreKey)
+		if err != nil {
+			return rollbackRestore(err)
+		}
+		if err = verifyAPIKey(context.Background(), t.BaseURL, string(raw)); err != nil {
+			return rollbackRestore(err)
 		}
 	}
 	return map[string]any{
@@ -286,7 +426,7 @@ func (a *App) restartTenantAfterBackup(ctx *sdk.AppCtx, t *Tenant) error {
 	}
 	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	_, proc, err := a.spawnTenant(spawnCtx, t.ID, t.Slug, t.ConfigDir, tenantAptevaBin(t.TargetVersion), port, false)
+	_, proc, err := a.spawnTenant(spawnCtx, t.ID, t.Slug, t.ConfigDir, tenantAptevaBin(t.CurrentVersion), port, false)
 	if err != nil {
 		return err
 	}
@@ -375,6 +515,14 @@ func extractFleetTenantArchive(r io.Reader, stage string) (fleetTenantBackupMani
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 	payloadDir := filepath.Join(stage, "tenant")
+	if err := os.MkdirAll(payloadDir, 0700); err != nil {
+		return manifest, "", err
+	}
+	root, err := os.OpenRoot(payloadDir)
+	if err != nil {
+		return manifest, "", err
+	}
+	defer root.Close()
 	files := 0
 	var total int64
 	for {
@@ -404,59 +552,26 @@ func extractFleetTenantArchive(r io.Reader, stage string) (fleetTenantBackupMani
 			}
 			continue
 		}
-		if clean == "tenant" || strings.HasPrefix(clean, "tenant"+string(filepath.Separator)) || strings.HasPrefix(clean, "tenant/") {
-			rel := strings.TrimPrefix(strings.TrimPrefix(clean, "tenant/"), "tenant"+string(filepath.Separator))
-			dst := filepath.Join(payloadDir, rel)
-			if dst != payloadDir && !strings.HasPrefix(dst, payloadDir+string(filepath.Separator)) {
-				return manifest, "", fmt.Errorf("unsafe archive path %q", h.Name)
+		if clean == "tenant" || strings.HasPrefix(clean, "tenant/") {
+			rel := strings.TrimPrefix(clean, "tenant/")
+			if clean == "tenant" {
+				rel = "."
 			}
-			if h.Typeflag == tar.TypeDir {
-				if err := os.MkdirAll(dst, h.FileInfo().Mode()); err != nil {
-					return manifest, "", err
-				}
-				continue
-			}
-			if h.Typeflag == tar.TypeSymlink {
-				link := filepath.Clean(filepath.FromSlash(h.Linkname))
-				if filepath.IsAbs(link) {
-					return manifest, "", fmt.Errorf("unsafe absolute symlink %q", h.Linkname)
-				}
-				resolved := filepath.Clean(filepath.Join(filepath.Dir(dst), link))
-				if resolved != payloadDir && !strings.HasPrefix(resolved, payloadDir+string(filepath.Separator)) {
-					return manifest, "", fmt.Errorf("unsafe escaping symlink %q", h.Linkname)
-				}
-				if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-					return manifest, "", err
-				}
-				if err := os.Symlink(h.Linkname, dst); err != nil {
-					return manifest, "", err
-				}
-				continue
-			}
-			if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
-				return manifest, "", fmt.Errorf("unsupported backup archive entry type %d", h.Typeflag)
-			}
-			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			if err := extractArchiveEntry(root, rel, h, tr); err != nil {
 				return manifest, "", err
 			}
-			f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, h.FileInfo().Mode())
-			if err != nil {
-				return manifest, "", err
-			}
-			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
-				return manifest, "", err
-			}
-			if err := f.Close(); err != nil {
-				return manifest, "", err
-			}
+		} else {
+			return manifest, "", fmt.Errorf("unexpected archive entry %q", h.Name)
 		}
 	}
-	if manifest.FormatVersion != 1 {
+	if manifest.FormatVersion != 1 && manifest.FormatVersion != 2 {
 		return manifest, "", fmt.Errorf("unsupported fleet tenant backup format %d", manifest.FormatVersion)
 	}
 	if _, err := os.Stat(payloadDir); err != nil {
 		return manifest, "", fmt.Errorf("archive missing tenant payload: %w", err)
+	}
+	if _, err := io.Copy(io.Discard, gz); err != nil {
+		return manifest, "", err
 	}
 	return manifest, payloadDir, nil
 }
@@ -473,6 +588,13 @@ func copyDir(src, dst string) error {
 		target := filepath.Join(dst, rel)
 		if info.IsDir() {
 			return os.MkdirAll(target, info.Mode())
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err

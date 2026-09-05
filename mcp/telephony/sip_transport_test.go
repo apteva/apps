@@ -481,7 +481,9 @@ func TestSIPNumberExtractionPreservesForwardedDestination(t *testing.T) {
 	}
 }
 
-func TestSIPGatewayRingsAndCancelsInboundDialog(t *testing.T) {
+func TestSIPGatewayRingsAndCancelsInboundDialog(t *testing.T) { testSIPGatewayPendingDialog(t, false) }
+func TestSIPGatewayRejectReleasesDialog(t *testing.T)         { testSIPGatewayPendingDialog(t, true) }
+func testSIPGatewayPendingDialog(t *testing.T, reject bool) {
 	app, ctx := withTelephonyTestContext(t, &answerPlatform{})
 	portProbe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -542,6 +544,38 @@ func TestSIPGatewayRingsAndCancelsInboundDialog(t *testing.T) {
 	}
 	readSIPResponseContaining(t, conn, "180 Ringing")
 
+	if reject {
+		call, err := app.db().findInboundCallByProviderID("cancel-test@127.0.0.1")
+		if err != nil || call == nil {
+			t.Fatalf("pending call: %v", err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- gateway.Reject(call) }()
+		response := readSIPResponseContaining(t, conn, "486 Busy Here")
+		ack := strings.ReplaceAll(strings.Split(invite, "Content-Type:")[0], "INVITE", "ACK")
+		for _, line := range strings.Split(response, "\r\n") {
+			if strings.HasPrefix(line, "To:") {
+				ack = strings.Replace(ack, fmt.Sprintf("To: <sip:%s@127.0.0.1>", route.PhoneNumber), line, 1)
+			}
+		}
+		ack += "Content-Length: 0\r\n\r\n"
+		if _, err := conn.Write([]byte(ack)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("SIP reject deadlocked")
+		}
+		if gateway.sessionCount() != 0 {
+			t.Fatal("rejected SIP dialog retained")
+		}
+		return
+	}
+
 	cancel := fmt.Sprintf("CANCEL sip:%s@127.0.0.1:%d SIP/2.0\r\n", route.PhoneNumber, signalingPort) +
 		fmt.Sprintf("Via: SIP/2.0/UDP 127.0.0.1:%d;branch=z9hG4bK-cancel-test;rport\r\n", localPort) +
 		"Max-Forwards: 70\r\n" +
@@ -568,7 +602,7 @@ func TestSIPGatewayRingsAndCancelsInboundDialog(t *testing.T) {
 	}
 }
 
-func readSIPResponseContaining(t *testing.T, conn *net.UDPConn, expected string) {
+func readSIPResponseContaining(t *testing.T, conn *net.UDPConn, expected string) string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	buffer := make([]byte, 4096)
@@ -585,10 +619,11 @@ func readSIPResponseContaining(t *testing.T, conn *net.UDPConn, expected string)
 		response := string(buffer[:n])
 		observed = append(observed, strings.SplitN(response, "\r\n", 2)[0])
 		if strings.Contains(response, expected) {
-			return
+			return response
 		}
 	}
 	t.Fatalf("SIP response %q not observed; got %v", expected, observed)
+	return ""
 }
 
 func TestConnectedNumberDirectSIPHealth(t *testing.T) {

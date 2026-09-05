@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
-	"io"
+	"github.com/apteva/apps/mcp/computer/internal/browser/providerhttp"
 	"net/http"
 	"net/url"
 	"strings"
@@ -23,7 +23,7 @@ type ReplayResolver struct {
 func NewReplayResolver(apiKey string) *ReplayResolver {
 	return &ReplayResolver{
 		apiKey: apiKey,
-		http:   &http.Client{Timeout: 30 * time.Second},
+		http:   providerhttp.New(30 * time.Second),
 	}
 }
 
@@ -119,7 +119,7 @@ func (r *ReplayResolver) fetch(ctx context.Context, providerSessionID, endpoint 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return nil, "", "", &replay.HTTPError{Provider: "steel", Op: "recording resource", Status: resp.StatusCode}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	body, err := providerhttp.ReadAll(resp.Body, 32<<20)
 	if err != nil {
 		return nil, "", "", err
 	}

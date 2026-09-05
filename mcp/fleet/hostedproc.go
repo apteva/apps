@@ -20,9 +20,10 @@ package main
 // passes one explicitly. v0.6.0 ships single-tenant-per-VPS as the
 // happy path; multi-tenant packing is v0.7.
 //
-// No systemd-run --scope: the apteva-server runs under `setsid` so it
-// detaches from the SSH session and survives the connection drop.
-// Operator-driven stop kills the whole process tree via pid+pgrp.
+// The apteva-server runs under `setsid` so it detaches from the SSH session
+// and survives the connection drop. Operator-driven stop revalidates and
+// signals every tenant-owned process in that session; child components use
+// separate process groups, so the fleet.pid PGID alone is not sufficient.
 
 import (
 	"context"
@@ -186,12 +187,21 @@ VERSION=%s
 	SERVER=%s
 	CORE=%s
 	PACKAGE_JSON="$VERSION_DIR/node_modules/apteva/package.json"
-	mkdir -p "$VERSION_DIR"
+ FINAL_DIR="$VERSION_DIR"
+ mkdir -p "$(dirname "$VERSION_DIR")"
+ command -v flock >/dev/null 2>&1 || { echo "flock required for atomic runtime installation" >&2; exit 127; }
+ exec 9>"$VERSION_DIR.install.lock"
+ flock -w 240 9
 	if [ ! -x "$CLI" ] || [ ! -x "$SERVER" ] || [ ! -x "$CORE" ]; then
+  VERSION_DIR=$(mktemp -d "$FINAL_DIR.stage-XXXXXX")
+  CLI="$VERSION_DIR/node_modules/apteva/apteva"
+  SERVER="$VERSION_DIR/node_modules/apteva/apteva-server"
+  CORE="$VERSION_DIR/node_modules/apteva/apteva-core"
+  PACKAGE_JSON="$VERSION_DIR/node_modules/apteva/package.json"
   INSTALL_HOME="$VERSION_DIR/.npm-apteva-home"
   rm -rf -- "$INSTALL_HOME"
   mkdir -p "$INSTALL_HOME"
-  trap 'rm -rf -- "$INSTALL_HOME"' EXIT
+  trap 'rm -rf -- "$INSTALL_HOME"; if [ "$VERSION_DIR" != "$FINAL_DIR" ]; then rm -rf -- "$VERSION_DIR"; fi' EXIT
   env APTEVA_HOME="$INSTALL_HOME" npm install --prefix "$VERSION_DIR" --no-audit --no-fund --silent "apteva@$VERSION"
 fi
 	[ -f "$PACKAGE_JSON" ] || { echo "versioned package manifest missing: $PACKAGE_JSON" >&2; exit 65; }
@@ -216,6 +226,11 @@ fi
 	  actual=${actual#v}
 	  [ "$actual" = "$expected" ] || { echo "Requested Apteva $expected, but $label reports ${actual:-unknown}" >&2; exit 65; }
 done
+if [ "$VERSION_DIR" != "$FINAL_DIR" ]; then
+  rm -rf -- "$INSTALL_HOME"
+  if [ -e "$FINAL_DIR" ]; then mv "$FINAL_DIR" "$FINAL_DIR.invalid-$(date +%%s)-$$"; fi
+  mv "$VERSION_DIR" "$FINAL_DIR"
+fi
 printf 'FLEET_VERSION_READY %%s\n' "$expected"`, sh(version), sh(versionDir), sh(runtime.CLI), sh(runtime.Server), sh(runtime.Core))
 }
 
@@ -230,6 +245,11 @@ func (a *App) ensureHostedVersionInstalled(ctx *sdk.AppCtx, instanceID int64, ve
 	if err := a.ensureHostedRuntime(ctx, instanceID); err != nil {
 		return aptevaRuntimePaths{}, "", err
 	}
+	unlock, lockErr := lockResource(context.Background(), fmt.Sprintf("host-version:%d:%s", instanceID, version))
+	if lockErr != nil {
+		return aptevaRuntimePaths{}, "", lockErr
+	}
+	defer unlock()
 	versionDir := remoteFleetRoot + "/versions/" + version
 	runtime := versionedRuntimePaths(versionDir)
 	out, code, err := instanceRunCommand(ctx, instanceID, hostedVersionInstallScript(versionDir, version), 240)
@@ -300,11 +320,15 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 	logPath := dataDir + "/fleet-child.log"
 	pidPath := dataDir + "/fleet.pid"
 
-	// 1) Create the tenant data directory.
-	if _, code, err := instanceRunCommand(ctx, spec.InstanceID,
-		fmt.Sprintf(`mkdir -p %s`, sh(dataDir)),
-		30,
-	); err != nil || code != 0 {
+	// A fresh provisioning attempt must never adopt an existing directory.
+	mkdirCmd := fmt.Sprintf(`mkdir -p %s`, sh(dataDir))
+	if spec.FreshSetup {
+		mkdirCmd = fmt.Sprintf(`mkdir -p %s && { mkdir %s || exit 73; }`, sh(remoteFleetRoot), sh(dataDir))
+	}
+	if _, code, err := instanceRunCommand(ctx, spec.InstanceID, mkdirCmd, 30); err != nil || code != 0 {
+		if code == 73 {
+			return "", "", errHostedDataDirExists
+		}
 		return "", "", fmt.Errorf("mkdir remote dirs: %w (exit %d)", err, code)
 	}
 	// 2) Prepare and validate the exact package binaries. npm's .bin/apteva
@@ -318,6 +342,21 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 	// The management port always stays on loopback. Direct hosted ingress
 	// additionally binds the server-native HTTP/TLS listeners on 80/443.
 	envArgs := hostedProcessEnv(spec)
+	if tenant, _, lookupErr := a.store.getBySlug(spec.Slug); lookupErr == nil {
+		dnsEnv, envErr := a.tenantDNSEnv(tenant.ID, true)
+		if envErr != nil {
+			return "", "", envErr
+		}
+		base, envErr := a.reserveAppPortBlock(tenant.ID, spec.InstanceID, spec.Port)
+		if envErr != nil {
+			return "", "", envErr
+		}
+		dnsEnv = applyAppPortEnv(dnsEnv, base)
+		for _, kv := range dnsEnv {
+			envArgs += " " + sh(kv)
+		}
+	}
+
 	quarantineEnv := "APTEVA_CLONE_QUARANTINE=0"
 	if spec.Quarantine {
 		quarantineEnv = "APTEVA_CLONE_QUARANTINE=1"
@@ -349,6 +388,9 @@ fi
 setsid sh -c %s >/dev/null 2>&1 &
 PID=$!
 echo "$PID" > "$PID_FILE"
+SID=$(ps -o sid= -p "$PID" 2>/dev/null | tr -d ' ')
+case "$SID" in ''|*[!0-9]*) rm -f "$PID_FILE"; kill -TERM "$PID" 2>/dev/null || true; echo "failed to record tenant session" >&2; exit 70;; esac
+echo "$SID" > "$DATA_DIR/fleet.sid"
 `, sh(dataDir), sh(pidPath), spec.Port, sh(inner))
 	if out, code, err := instanceRunCommand(ctx, spec.InstanceID, spawnCmd, 10); err != nil || code != 0 {
 		return "", "", fmt.Errorf("spawn remote apteva: %w (exit %d): %s", err, code, strings.TrimSpace(out))
@@ -392,10 +434,148 @@ echo "$PID" > "$PID_FILE"
 	return setupToken, baseURL, nil
 }
 
-// stopHostedTenant SIGTERMs (then SIGKILLs) the apteva-server process
-// listening on the tenant's port on the VPS. Mirrors fleet's local
-// stopTenantBy logic — find pid by port via lsof or ss, kill the
-// whole process group.
+var errHostedStopIndeterminate = errors.New("hosted tenant stop state is indeterminate")
+
+// hostedProcessControlScript identifies a legacy hosted tenant by its exact
+// APTEVA_HOME/data-dir marker and its setsid-created session. It signals
+// individual, revalidated processes instead of a single process group: the
+// CLI, server, cores, and sidecars deliberately use different PGIDs. Detached
+// deploy static servers are excluded because they have their own lifecycle.
+func hostedProcessControlScript(dataDir string, port, graceSec int, stop bool) string {
+	action := "inspect"
+	if stop {
+		action = "stop"
+	}
+	return fmt.Sprintf(`set -u
+DATA_DIR=%s
+PORT=%d
+GRACE=%d
+ACTION=%s
+PID_FILE="$DATA_DIR/fleet.pid"
+SID_FILE="$DATA_DIR/fleet.sid"
+numeric() { case "${1:-}" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
+proc_sid() { ps -o sid= -p "$1" 2>/dev/null | tr -d ' '; }
+proc_pgid() { ps -o pgid= -p "$1" 2>/dev/null | tr -d ' '; }
+proc_live() {
+  [ -d "/proc/$1" ] || return 1
+  state=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)
+  [ -n "$state" ] && [ "$state" != Z ]
+}
+is_static() { (tr '\000' '\n' < "/proc/$1/cmdline") 2>/dev/null | grep -Fxq -- '--static-server'; }
+is_static_group() {
+  pgid=$(proc_pgid "$1")
+  numeric "$pgid" || return 1
+  case " $STATIC_PGIDS " in *" $pgid "*) return 0;; esac
+  return 1
+}
+is_owned() {
+  pid="$1"
+  proc_live "$pid" || return 1
+  if (tr '\000' '\n' < "/proc/$pid/environ") 2>/dev/null | grep -Fxq -- "APTEVA_HOME=$DATA_DIR"; then return 0; fi
+  if (tr '\000' '\n' < "/proc/$pid/cmdline") 2>/dev/null | grep -Fxq -- "$DATA_DIR"; then return 0; fi
+  exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
+  case "$exe" in "$DATA_DIR"/*) return 0;; esac
+  return 1
+}
+listener_pids() {
+  (lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null || true
+   ss -ltnpH "sport = :$PORT" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 || true) | sort -un
+}
+refresh() {
+  ROOT=$(cat "$PID_FILE" 2>/dev/null || true)
+  numeric "$ROOT" || ROOT=''
+  SID=$(cat "$SID_FILE" 2>/dev/null || true)
+  numeric "$SID" || SID=''
+  LISTENERS=$(listener_pids)
+  UNKNOWN=''
+  if [ -n "$ROOT" ] && proc_live "$ROOT"; then
+    if ! is_owned "$ROOT" || is_static "$ROOT"; then UNKNOWN="pid-file process $ROOT is not tenant-owned"
+    else
+      root_sid=$(proc_sid "$ROOT")
+      if ! numeric "$root_sid" || [ "$root_sid" -le 1 ]; then UNKNOWN="unsafe root session ${root_sid:-unknown}"
+      elif [ -n "$SID" ] && [ "$SID" != "$root_sid" ]; then UNKNOWN="recorded session $SID differs from root session $root_sid"
+      else SID="$root_sid"; fi
+    fi
+  fi
+  for pid in $LISTENERS; do
+    if ! numeric "$pid" || ! is_owned "$pid" || is_static "$pid"; then UNKNOWN="listener ${pid:-unknown} is not tenant-owned"; continue; fi
+    listener_sid=$(proc_sid "$pid")
+    if ! numeric "$listener_sid" || [ "$listener_sid" -le 1 ]; then UNKNOWN="unsafe listener session ${listener_sid:-unknown}"
+    elif [ -n "$SID" ] && [ "$SID" != "$listener_sid" ]; then UNKNOWN="listener session $listener_sid differs from tenant session $SID"
+    else SID="$listener_sid"; fi
+  done
+  STATIC_PGIDS=''
+  if numeric "$SID" && [ "$SID" -gt 1 ]; then
+    for proc in /proc/[0-9]*; do
+      pid=${proc#/proc/}
+      proc_live "$pid" || continue
+      [ "$(proc_sid "$pid")" = "$SID" ] || continue
+      is_static "$pid" || continue
+      pgid=$(proc_pgid "$pid")
+      numeric "$pgid" && STATIC_PGIDS="$STATIC_PGIDS $pgid"
+    done
+  fi
+  OWNED=''
+  if numeric "$SID" && [ "$SID" -gt 1 ]; then
+    for proc in /proc/[0-9]*; do
+      pid=${proc#/proc/}
+      proc_live "$pid" || continue
+      [ "$(proc_sid "$pid")" = "$SID" ] || continue
+      is_owned "$pid" || continue
+      is_static_group "$pid" && continue
+      OWNED="$OWNED $pid"
+    done
+  fi
+}
+emit_state() {
+  refresh
+  if [ -n "$UNKNOWN" ]; then state=unknown
+  elif [ -z "$LISTENERS" ] && [ -z "${OWNED# }" ]; then state=stopped
+  else state=running
+  fi
+  printf 'FLEET_STOP_STATE %%s root=%%s sid=%%s listeners=%%s owned=%%s reason=%%s\n' "$state" "${ROOT:-none}" "${SID:-none}" "${LISTENERS:-none}" "${OWNED# }" "${UNKNOWN:-none}"
+  [ "$state" = stopped ] && return 0
+  [ "$state" = running ] && return 3
+  return 4
+}
+refresh
+if [ "$ACTION" = inspect ]; then emit_state; exit $?; fi
+if [ -n "$UNKNOWN" ]; then emit_state; exit $?; fi
+if [ -z "$LISTENERS" ] && [ -z "${OWNED# }" ]; then rm -f "$PID_FILE" "$SID_FILE"; emit_state; exit 0; fi
+if ! numeric "$SID" || [ "$SID" -le 1 ]; then UNKNOWN='no validated tenant session'; emit_state; exit $?; fi
+printf '%%s\n' "$SID" > "$SID_FILE"
+if [ -n "${OWNED# }" ]; then kill -TERM $OWNED 2>/dev/null || true; fi
+for i in $(seq 1 "$GRACE"); do
+  sleep 1
+  refresh
+  if [ -n "$UNKNOWN" ]; then emit_state; exit $?; fi
+  if [ -z "$LISTENERS" ] && [ -z "${OWNED# }" ]; then rm -f "$PID_FILE" "$SID_FILE"; emit_state; exit 0; fi
+  if [ -n "${OWNED# }" ]; then kill -TERM $OWNED 2>/dev/null || true; fi
+done
+refresh
+if [ -n "$UNKNOWN" ]; then emit_state; exit $?; fi
+if [ -n "${OWNED# }" ]; then kill -KILL $OWNED 2>/dev/null || true; fi
+sleep 1
+refresh
+if [ -z "$UNKNOWN" ] && [ -z "$LISTENERS" ] && [ -z "${OWNED# }" ]; then rm -f "$PID_FILE" "$SID_FILE"; emit_state; exit 0; fi
+emit_state
+exit $?`, sh(dataDir), port, graceSec, sh(action))
+}
+
+func hostedStopState(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) >= 2 && fields[0] == "FLEET_STOP_STATE" {
+			return fields[1]
+		}
+	}
+	return ""
+}
+
+// stopHostedTenant stops every validated process in the tenant's session and
+// then verifies the postcondition. If SSH completion is ambiguous, a separate
+// command re-inspects the listener and owned processes before deciding whether
+// the stop succeeded.
 //
 // `port` is the local-to-VPS port (what's bound on the VPS, not what
 // fleet calls externally — they're the same number in v0.6).
@@ -412,58 +592,30 @@ func stopHostedTenant(ctx *sdk.AppCtx, instanceID int64, slug string, port int, 
 	if err := validateTenantPort(port); err != nil {
 		return err
 	}
-	// One round-trip: find pid+pgrp, kill -PGID, wait for port to
-	// free, escalate to SIGKILL on timeout.
 	graceSec := int(grace.Seconds())
 	if graceSec <= 0 {
 		graceSec = 10
 	}
 	dataDir := remoteFleetRoot + "/" + slug
-	pidPath := dataDir + "/fleet.pid"
-	script := fmt.Sprintf(`
-set -u
-PORT=%d
-GRACE=%d
-DATA_DIR=%s
-PID_FILE=%s
-PID=$(cat "$PID_FILE" 2>/dev/null || true)
-if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
-  PID=$( (lsof -ti tcp:$PORT -sTCP:LISTEN 2>/dev/null || ss -ltnpH "sport = :$PORT" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2) | head -1)
-fi
-if [ -z "$PID" ]; then rm -f "$PID_FILE"; echo "no listener"; exit 0; fi
-case "$PID" in *[!0-9]*|'') echo "invalid tenant pid" >&2; exit 42;; esac
-if ! tr '\000' '\n' < "/proc/$PID/cmdline" 2>/dev/null | grep -Fxq -- "$DATA_DIR"; then
-  echo "refusing to stop pid=$PID: command has no exact $DATA_DIR argument" >&2
-  exit 42
-fi
-PGID=$(ps -o pgid= -p $PID 2>/dev/null | tr -d ' ')
-[ -z "$PGID" ] && PGID=$PID
-case "$PGID" in *[!0-9]*|'') echo "invalid tenant process group" >&2; exit 42;; esac
-if [ "$PGID" -le 1 ]; then echo "refusing unsafe process group $PGID" >&2; exit 42; fi
-kill -TERM -$PGID 2>/dev/null
-for i in $(seq 1 $GRACE); do
-  sleep 1
-  if ! ss -ltn "sport = :$PORT" 2>/dev/null | grep -q :$PORT && ! lsof -i tcp:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
-    rm -f "$PID_FILE"
-    echo "stopped pid=$PID pgrp=$PGID"
-    exit 0
-  fi
-done
-kill -KILL -$PGID 2>/dev/null
-kill -KILL $PID 2>/dev/null
-sleep 1
-if ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q . || lsof -i "tcp:$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "tenant listener still active after SIGKILL" >&2
-  exit 1
-fi
-rm -f "$PID_FILE"
-echo "sigkilled pid=$PID pgrp=$PGID"
-`, port, graceSec, sh(dataDir), sh(pidPath))
+	script := hostedProcessControlScript(dataDir, port, graceSec, true)
 	out, code, err := instanceRunCommand(ctx, instanceID, script, graceSec+15)
-	if err != nil || code != 0 {
-		return fmt.Errorf("remote stop: %w (exit %d): %s", err, code, strings.TrimSpace(out))
+	if err == nil && code == 0 && hostedStopState(out) == "stopped" {
+		return nil
 	}
-	return nil
+	firstDetail := fmt.Sprintf("remote stop exit %d: %s", code, strings.TrimSpace(out))
+	if err != nil {
+		firstDetail = fmt.Sprintf("remote stop: %v (exit %d): %s", err, code, strings.TrimSpace(out))
+	}
+	inspect := hostedProcessControlScript(dataDir, port, 1, false)
+	checkOut, checkCode, checkErr := instanceRunCommand(ctx, instanceID, inspect, 15)
+	switch hostedStopState(checkOut) {
+	case "stopped":
+		return nil
+	case "running":
+		return fmt.Errorf("%s; verified tenant is still running (exit %d): %s", firstDetail, checkCode, strings.TrimSpace(checkOut))
+	default:
+		return fmt.Errorf("%w: %s; follow-up inspection failed (exit %d): %s", errHostedStopIndeterminate, firstDetail, checkCode, strings.TrimSpace(checkOut)+" "+errorString(checkErr))
+	}
 }
 
 // destroyHostedTenant wipes the tenant's remote data dir. Called from
@@ -564,7 +716,10 @@ func hostedPortListening(ctx *sdk.AppCtx, instanceID int64, port int) (bool, err
 // party binding that port between now and spawn, but good enough for
 // v0.6 (operator can pass an explicit port to dodge collisions).
 func (a *App) pickHostedPort(ctx *sdk.AppCtx, instanceID int64, override int) (int, error) {
-	rows, _ := a.store.list(map[string]string{"kind": KindLocal}) // includes hosted (kind=local) too
+	rows, listErr := a.store.list(map[string]string{"kind": KindLocal}) // includes hosted (kind=local) too
+	if listErr != nil {
+		return 0, listErr
+	}
 	used := map[int]bool{}
 	for _, t := range rows {
 		if t.InstanceID == instanceID {
@@ -576,6 +731,13 @@ func (a *App) pickHostedPort(ctx *sdk.AppCtx, instanceID int64, override int) (i
 	check := func(port int) (bool, error) {
 		if err := validateTenantPort(port); err != nil {
 			return false, err
+		}
+		var reservations int
+		if err := a.store.db.QueryRow(`SELECT (SELECT COUNT(*) FROM fleet_port_reservations WHERE instance_id=? AND port=?)+(SELECT COUNT(*) FROM fleet_app_port_blocks WHERE instance_id=? AND ? BETWEEN base AND base+999)`, instanceID, port, instanceID, port).Scan(&reservations); err != nil {
+			return false, err
+		}
+		if reservations > 0 {
+			return false, nil
 		}
 		if used[port] {
 			return false, nil
@@ -683,9 +845,11 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 	if err != nil {
 		return nil, err
 	}
-	if err := a.store.insert(t, apiKeyStub, nil); err != nil {
+	initializationDone, err := a.insertTenantForOperation(t, apiKeyStub, nil, "provision", false)
+	if err != nil {
 		return nil, err
 	}
+	defer initializationDone()
 	if pendingTemplate != nil {
 		pendingTemplate.TenantID = t.ID
 		if err := a.store.savePendingTemplate(*pendingTemplate); err != nil {
@@ -705,6 +869,10 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 		FreshSetup: true,
 	})
 	if spawnErr != nil {
+		if errors.Is(spawnErr, errHostedDataDirExists) {
+			_ = a.store.hardDelete(t.ID)
+			return nil, spawnErr
+		}
 		_ = a.store.setStatus(t.ID, StatusFailed, "user")
 		_ = a.store.recordEvent(t.ID, "spawn_failed", "user",
 			map[string]any{"error": spawnErr.Error()})
@@ -716,13 +884,17 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 	_ = a.store.recordEvent(t.ID, "spawned", "user",
 		map[string]any{"base_url": baseURL, "instance_id": instanceID, "port": port})
 
+	if err := a.persistSetupToken(t.ID, setupToken); err != nil {
+		a.requireRecovery(t.ID, err)
+		return nil, err
+	}
 	controlURL, err := a.hostedTunnelBaseURL(ctx, instanceID, port)
 	if err != nil {
 		return nil, fmt.Errorf("open hosted setup tunnel: %w", err)
 	}
 	// Setup credentials stay inside the SSH tunnel; baseURL is only
 	// retained as the tenant's operator-facing location.
-	autoSetup, err := a.autoSetupTenant(context.Background(), controlURL, setupToken, owner, "")
+	autoSetup, err := a.provisionTenant(context.Background(), t, controlURL, setupToken, owner)
 	if err != nil {
 		ctx.Logger().Warn("hosted: auto-setup failed, falling back to setup_pending",
 			"tenant", t.ID, "err", err)
@@ -781,3 +953,5 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 	out["a2a"] = a.reconcileTenantA2ABestEffort(ctx, t.ID, "tool:tenant_create")
 	return out, nil
 }
+
+var errHostedDataDirExists = errors.New("remote tenant directory already exists or cannot be reserved; existing data was preserved")

@@ -11,6 +11,11 @@ the closest approved profile (`go`, `bun`, or `python`), and a realistic TTL.
 The optional `apteva` profile works only when an operator configured its
 combined development image.
 
+When a profile image is not suitable, pass `image` with an operator-allowlisted
+container reference. Custom images must use an immutable `@sha256` digest by
+default. The profile still describes the expected toolchain; the explicit image
+only overrides what Containers runs.
+
 Keep the returned `workspace.id`; every later operation uses it. If another app
 created the workspace, respect the repository/branch labels and origin link as
 context. Those labels are not proof of the current Git state.
@@ -58,3 +63,16 @@ it before starting another.
 
 Workspaces does not inspect Git. Treat `dirty_state=unknown` or
 `unpushed_state=unknown` as a real data-loss risk, not as clean state.
+
+## Source owned by another app
+
+Source synchronization tools are app-only. The originating app supplies a
+digest and managed path list when creating the workspace, uses
+`workspace_source_sync` with the expected prior digest for later refreshes, and
+uses `workspace_source_export` with `managed=true` to retrieve source changes.
+Only that same app installation can perform these operations.
+
+After the originating app safely reconciles an export, it calls
+`workspace_source_accept`. Workspaces records that revision but never treats it
+as a Git commit and never pushes it. Humans and agents should use the
+originating app—in particular Code—for repository reconciliation.

@@ -7,80 +7,40 @@ package main
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
-// #1: adopting an existing identity whose DKIM is TEMPORARY_FAILURE must
-// delete + recreate it (forcing a fresh SES probe) rather than inheriting
-// the broken status.
-func TestSendersCreate_Domain_ReprobesStuckDkim(t *testing.T) {
-	plat := &stubPlatform{
-		bindingsOverride: map[string]any{"email_provider": float64(1)}, // domains NOT bound → DNS publish skipped
-		executeOverride: func(tool string, prior int) *sdk.ExecuteResult {
-			switch tool {
-			case "verify_domain":
-				if prior == 0 {
-					// first create → already exists
-					return &sdk.ExecuteResult{Success: false, Status: 409, Data: json.RawMessage(`{"message":"already exists"}`)}
-				}
-				// re-create after delete → fresh, probing
-				return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(
-					`{"DkimAttributes":{"Tokens":["a","b","c"],"Status":"SUCCESS"}}`)}
-			case "get_identity_verification":
-				return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(
-					`{"DkimAttributes":{"Tokens":["x","y","z"],"Status":"TEMPORARY_FAILURE"}}`)}
-			case "delete_identity":
-				return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}
-			}
-			return nil
-		},
-	}
+// Adopting an unhealthy identity must preserve its provider resource and status.
+func TestSendersCreate_Domain_PreservesStuckDkimIdentity(t *testing.T) {
+	plat := &stubPlatform{replyByTool: map[string]*sdk.ExecuteResult{
+		"verify_domain":             {Success: false, Status: 409, Data: json.RawMessage(`{"message":"already exists"}`)},
+		"get_identity_verification": {Success: true, Data: json.RawMessage(`{"DkimAttributes":{"Tokens":["x","y","z"],"Status":"TEMPORARY_FAILURE"}}`)},
+	}}
 	ctx := newTestCtx(t, plat)
-	app := &App{}
-
-	out, err := app.toolSendersCreate(ctx, map[string]any{"address": "stuck.com", "inbound": "false"})
+	out, err := (&App{}).toolSendersCreate(ctx, map[string]any{"address": "stuck.com", "inbound": "false"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp := out.(*sendersCreateResp)
-
-	if resp.DkimStatus != "SUCCESS" {
-		t.Errorf("expected re-probed status SUCCESS, got %q", resp.DkimStatus)
+	if out.(*sendersCreateResp).DkimStatus != "TEMPORARY_FAILURE" {
+		t.Fatalf("status=%+v", out)
 	}
-	// delete_identity must have run as part of the re-probe.
-	deleted := false
-	verifyDomainCalls := 0
-	for _, c := range plat.executeCalls {
-		switch c.Tool {
-		case "delete_identity":
-			deleted = true
-		case "verify_domain":
-			verifyDomainCalls++
+	verify := 0
+	for _, call := range plat.executeCalls {
+		if call.Tool == "delete_identity" {
+			t.Fatal("adoption deleted existing identity")
+		}
+		if call.Tool == "verify_domain" {
+			verify++
 		}
 	}
-	if !deleted {
-		t.Errorf("expected delete_identity during re-probe")
+	if verify != 1 {
+		t.Fatalf("verify calls=%d", verify)
 	}
-	if verifyDomainCalls != 2 {
-		t.Errorf("expected verify_domain called twice (create + recreate), got %d", verifyDomainCalls)
-	}
-	// Step detail should note the re-probe.
-	noted := false
-	for _, s := range resp.Steps {
-		if s.Step == "ses_verify_domain" && strings.Contains(s.Detail, "re-probed") {
-			noted = true
-		}
-	}
-	if !noted {
-		t.Errorf("ses_verify_domain step should note the re-probe, steps=%+v", resp.Steps)
-	}
-	// Identity persisted as verified (fresh SUCCESS).
-	id, _ := dbFindIdentity(ctx.AppDB(), "test-proj", "email_domain", "stuck.com")
-	if id == nil || !id.Verified {
-		t.Errorf("expected re-probed identity persisted verified, got %+v", id)
+	row, err := dbFindIdentity(ctx.AppDB(), "test-proj", "email_domain", "stuck.com")
+	if err != nil || row == nil || row.Verified {
+		t.Fatalf("identity=%+v error=%v", row, err)
 	}
 }
 

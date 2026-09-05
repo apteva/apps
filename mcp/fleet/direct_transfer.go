@@ -321,7 +321,7 @@ echo 'phase=ordinary-files method=rsync resume=true'
 rsync -rlptD --safe-links --delete-delay --partial --partial-dir=.fleet-rsync-partial --info=progress2 \
   -e "$KEYDIR/ssh" \
   --exclude='*.db' --exclude='*.sqlite' --exclude='*.sqlite3' \
-  --exclude='*-wal' --exclude='*-shm' --exclude='*-journal' --exclude='fleet.pid' \
+  --exclude='*-wal' --exclude='*-shm' --exclude='*-journal' --exclude='fleet.pid' --exclude='fleet.sid' \
   "$SRC/" "$DEST:$STAGE/"
 db_count=0
 find "$SRC" -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print | while IFS= read -r db; do
@@ -345,7 +345,7 @@ mkdir -p "$STAGE"
 echo 'phase=ordinary-files method=rsync resume=true'
 rsync -rlptD --safe-links --delete-delay --partial --partial-dir=.fleet-rsync-partial --info=progress2 \
   --exclude='*.db' --exclude='*.sqlite' --exclude='*.sqlite3' \
-  --exclude='*-wal' --exclude='*-shm' --exclude='*-journal' --exclude='fleet.pid' \
+  --exclude='*-wal' --exclude='*-shm' --exclude='*-journal' --exclude='fleet.pid' --exclude='fleet.sid' \
   "$SRC/" "$STAGE/"
 find "$SRC" -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print | while IFS= read -r db; do
   rel=${db#"$SRC"/}
@@ -361,9 +361,9 @@ DST=%s
 STAGE=%s
 test ! -e "$DST"
 test -d "$STAGE"
-find "$STAGE" -type f \( -name '*-wal' -o -name '*-shm' -o -name '*-journal' -o -name 'fleet.pid' \) -delete
+find "$STAGE" -type f \( -name '*-wal' -o -name '*-shm' -o -name '*-journal' -o -name 'fleet.pid' -o -name 'fleet.sid' \) -delete
 rm -rf -- "$STAGE/.fleet-rsync-partial"
-mv "$STAGE" "$DST"`, sh(targetDir), sh(stageDir))
+`, sh(targetDir), sh(stageDir)) + remotePublishCommand(stageDir, targetDir)
 	out, code, err := instanceRunCommand(ctx, instanceID, cmd, 60)
 	if err != nil || code != 0 {
 		return fmt.Errorf("finalize direct transfer: %w (exit %d): %s", err, code, strings.TrimSpace(out))

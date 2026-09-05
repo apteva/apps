@@ -216,6 +216,9 @@ func eventIsOlder(incoming, current string) bool {
 }
 
 func (a *App) handleMessagingDeliveryEvent(ctx *sdk.AppCtx, event sdk.Event) error {
+	if bound := messagingBound(ctx); bound != nil && event.SourceInstallID > 0 && event.SourceInstallID != bound.InstallID {
+		return nil
+	}
 	pid, err := eventProjectID(ctx, event)
 	if err != nil {
 		return err
@@ -287,7 +290,7 @@ func (a *App) handleMessagingDeliveryEvent(ctx *sdk.AppCtx, event sdk.Event) err
 			}
 			_, err = tx.Exec(
 				`UPDATE contact_channel_delivery_state
-				 SET status = 'hard_bounced', last_bounce_at = ?, status_reason = ?,
+				 SET delivery_evidence = 'hard_bounced', status = 'hard_bounced', last_bounce_at = ?, status_reason = ?,
 					 status_updated_at = ?, updated_at = CURRENT_TIMESTAMP
 				 WHERE project_id = ? AND channel_id = ? AND transport = ?`,
 				occurred, reason, occurred, pid, channelID, transport,
@@ -316,7 +319,7 @@ func (a *App) handleMessagingDeliveryEvent(ctx *sdk.AppCtx, event sdk.Event) err
 		}
 		_, err = tx.Exec(
 			`UPDATE contact_channel_delivery_state
-			 SET status = 'complained', status_reason = ?, status_updated_at = ?, updated_at = CURRENT_TIMESTAMP
+			 SET delivery_evidence = 'complained', status = 'complained', status_reason = ?, status_updated_at = ?, updated_at = CURRENT_TIMESTAMP
 			 WHERE project_id = ? AND channel_id = ? AND transport = ?`,
 			reason, occurred, pid, channelID, transport,
 		)
@@ -447,6 +450,9 @@ func statusForSuppression(reason string) string {
 }
 
 func (a *App) handleMessagingSuppressionEvent(ctx *sdk.AppCtx, event sdk.Event) error {
+	if bound := messagingBound(ctx); bound != nil && event.SourceInstallID > 0 && event.SourceInstallID != bound.InstallID {
+		return nil
+	}
 	pid, err := eventProjectID(ctx, event)
 	if err != nil {
 		return err
@@ -496,7 +502,21 @@ func (a *App) handleMessagingSuppressionEvent(ctx *sdk.AppCtx, event sdk.Event) 
 	if suppressedAt == "" {
 		suppressedAt = now
 	}
+	occurred := strArg(event.Data, "occurred_at")
+	if occurred == "" {
+		occurred = now
+	}
 	for _, route := range routes {
+		var previous sql.NullString
+		if err = tx.QueryRow(`SELECT suppression_event_at FROM contact_channel_delivery_state WHERE project_id=? AND channel_id=? AND transport=?`, pid, route.ChannelID, route.Transport).Scan(&previous); err != nil {
+			return err
+		}
+		if eventIsOlder(occurred, previous.String) {
+			continue
+		}
+		if _, err = tx.Exec(`UPDATE contact_channel_delivery_state SET suppression_event_at=? WHERE project_id=? AND channel_id=? AND transport=?`, occurred, pid, route.ChannelID, route.Transport); err != nil {
+			return err
+		}
 		if suppressed {
 			status := statusForSuppression(reason)
 			_, err = tx.Exec(
@@ -504,8 +524,8 @@ func (a *App) handleMessagingSuppressionEvent(ctx *sdk.AppCtx, event sdk.Event) 
 				 SET suppressed = 1, suppression_kind = ?, suppression_match = ?,
 					 suppression_reason = ?, suppression_source = ?, suppressed_at = ?,
 					 suppression_checked_at = ?,
-					 status = CASE WHEN ? <> '' THEN ? ELSE status END,
-					 status_reason = CASE WHEN ? <> '' THEN ? ELSE status_reason END,
+					 status = CASE WHEN delivery_evidence IS NOT NULL THEN delivery_evidence WHEN ? <> '' THEN ? ELSE status END,
+					 status_reason = CASE WHEN delivery_evidence IS NOT NULL THEN status_reason WHEN ? <> '' THEN ? ELSE status_reason END,
 					 status_updated_at = CASE WHEN ? <> '' THEN ? ELSE status_updated_at END,
 					 updated_at = CURRENT_TIMESTAMP
 				 WHERE project_id = ? AND channel_id = ? AND transport = ?`,
@@ -530,8 +550,8 @@ func (a *App) handleMessagingSuppressionEvent(ctx *sdk.AppCtx, event sdk.Event) 
 					 SET suppressed = 0, suppression_kind = NULL, suppression_match = NULL,
 						 suppression_reason = NULL, suppression_source = NULL, suppressed_at = NULL,
 						 suppression_checked_at = ?,
-						 status = CASE WHEN status IN ('hard_bounced','complained','unsubscribed') THEN 'active' ELSE status END,
-						 status_reason = CASE WHEN status IN ('hard_bounced','complained','unsubscribed') THEN NULL ELSE status_reason END,
+						 status = CASE WHEN delivery_evidence IS NOT NULL THEN delivery_evidence WHEN status IN ('hard_bounced','complained','unsubscribed') THEN 'active' ELSE status END,
+						 status_reason = CASE WHEN delivery_evidence IS NOT NULL THEN status_reason WHEN status IN ('hard_bounced','complained','unsubscribed') THEN NULL ELSE status_reason END,
 						 status_updated_at = ?, updated_at = CURRENT_TIMESTAMP
 					 WHERE project_id = ? AND channel_id = ? AND transport = ?`,
 					now, now, pid, route.ChannelID, route.Transport,
@@ -563,7 +583,7 @@ func emitChannelDeliverabilityChanged(ctx *sdk.AppCtx, pid string, contactID, ch
 		if state.Transport != transport {
 			continue
 		}
-		ctx.Emit("contact.channel.deliverability.changed", map[string]any{
+		emitCRMEvent(ctx, pid, "contact.channel.deliverability.changed", map[string]any{
 			"contact_id":            contactID,
 			"channel_id":            channelID,
 			"transport":             transport,
@@ -652,6 +672,34 @@ func allDeliveryRoutes(db *sql.DB, pid string) ([]reconcileRoute, error) {
 	return out, rows.Err()
 }
 
+type suppressionIndex map[string]*messagingSuppression
+
+func indexSuppressions(items []messagingSuppression) suppressionIndex {
+	out := suppressionIndex{}
+	for i := range items {
+		item := &items[i]
+		address := canonicalDeliveryRecipient(item.Channel, item.Address)
+		if item.Kind == "domain" {
+			address = strings.ToLower(strings.TrimPrefix(item.Address, "@"))
+		}
+		key := item.Channel + "|" + item.Kind + "|" + address
+		if out[key] == nil {
+			out[key] = item
+		}
+	}
+	return out
+}
+func (index suppressionIndex) match(transport, address string) *messagingSuppression {
+	canonical := canonicalDeliveryRecipient(transport, address)
+	if item := index[transport+"|address|"+canonical]; item != nil {
+		return item
+	}
+	if at := strings.LastIndex(canonical, "@"); at >= 0 {
+		return index[transport+"|domain|"+canonical[at+1:]]
+	}
+	return nil
+}
+
 func effectiveSuppression(items []messagingSuppression, transport, address string) *messagingSuppression {
 	canonical := canonicalDeliveryRecipient(transport, address)
 	domain := ""
@@ -694,6 +742,9 @@ func (a *App) reconcileMessagingSuppressions(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) reconcileProjectSuppressions(ctx *sdk.AppCtx, pid string) error {
+	started := time.Now()
+	snapshotStarted := started.UTC().Format(time.RFC3339Nano)
+	changed := int64(0)
 	items, err := listMessagingSuppressions(ctx, pid)
 	if err != nil {
 		return err
@@ -708,39 +759,56 @@ func (a *App) reconcileProjectSuppressions(ctx *sdk.AppCtx, pid string) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, route := range routes {
-		match := effectiveSuppression(items, route.Transport, route.Address)
+	index := indexSuppressions(items)
+	for i, route := range routes {
+		if i > 0 && i%100 == 0 {
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+			tx, err = ctx.AppDB().Begin()
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+		}
+		var result sql.Result
+		match := index.match(route.Transport, route.Address)
 		if match != nil {
 			status := statusForSuppression(match.Reason)
-			_, err = tx.Exec(
+			result, err = tx.Exec(
 				`UPDATE contact_channel_delivery_state
 				 SET suppressed = 1, suppression_kind = ?, suppression_match = ?,
 					 suppression_reason = ?, suppression_source = ?, suppressed_at = ?,
 					 suppression_checked_at = ?,
-					 status = CASE WHEN ? <> '' THEN ? ELSE status END,
-					 status_reason = CASE WHEN ? <> '' THEN ? ELSE status_reason END,
+					 status = CASE WHEN delivery_evidence IS NOT NULL THEN delivery_evidence WHEN ? <> '' THEN ? ELSE status END,
+					 status_reason = CASE WHEN delivery_evidence IS NOT NULL THEN status_reason WHEN ? <> '' THEN ? ELSE status_reason END,
 					 status_updated_at = CASE WHEN ? <> '' THEN ? ELSE status_updated_at END,
 					 updated_at = CURRENT_TIMESTAMP
-				 WHERE project_id = ? AND channel_id = ? AND transport = ?`,
+				 WHERE project_id = ? AND channel_id = ? AND transport = ? AND (suppression_checked_at IS NULL OR julianday(suppression_checked_at)<=julianday(?)) AND (suppression_checked_at IS NULL OR suppressed<>1 OR COALESCE(suppression_kind,'')<>? OR COALESCE(suppression_match,'')<>? OR COALESCE(suppression_reason,'')<>? OR COALESCE(suppression_source,'')<>?)`,
 				match.Kind, match.Address, match.Reason, match.Source, nullStr(match.FirstSeen), now,
-				status, status, status, match.Reason, status, now, pid, route.ChannelID, route.Transport,
+				status, status, status, match.Reason, status, now, pid, route.ChannelID, route.Transport, snapshotStarted, match.Kind, match.Address, match.Reason, match.Source,
 			)
 		} else {
-			_, err = tx.Exec(
+			result, err = tx.Exec(
 				`UPDATE contact_channel_delivery_state
 				 SET suppressed = 0, suppression_kind = NULL, suppression_match = NULL,
 					 suppression_reason = NULL, suppression_source = NULL, suppressed_at = NULL,
 					 suppression_checked_at = ?,
-					 status = CASE WHEN status IN ('hard_bounced','complained','unsubscribed') THEN 'active' ELSE status END,
-					 status_reason = CASE WHEN status IN ('hard_bounced','complained','unsubscribed') THEN NULL ELSE status_reason END,
+					 status = CASE WHEN delivery_evidence IS NOT NULL THEN delivery_evidence WHEN status IN ('hard_bounced','complained','unsubscribed') THEN 'active' ELSE status END,
+					 status_reason = CASE WHEN delivery_evidence IS NOT NULL THEN status_reason WHEN status IN ('hard_bounced','complained','unsubscribed') THEN NULL ELSE status_reason END,
 					 updated_at = CURRENT_TIMESTAMP
-				 WHERE project_id = ? AND channel_id = ? AND transport = ?`,
-				now, pid, route.ChannelID, route.Transport,
+				 WHERE project_id = ? AND channel_id = ? AND transport = ? AND (suppression_checked_at IS NULL OR julianday(suppression_checked_at)<=julianday(?)) AND (suppressed<>0 OR suppression_checked_at IS NULL)`,
+				now, pid, route.ChannelID, route.Transport, snapshotStarted,
 			)
 		}
 		if err != nil {
 			return err
 		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		changed += n
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -786,6 +854,7 @@ func (a *App) reconcileProjectSuppressions(ctx *sdk.AppCtx, pid string) error {
 			a.removeSoftBounceSuppression(ctx, pid, route.transport, route.kind, route.match)
 		}
 	}
+	ctx.Logger().Info("crm suppression reconciliation", "project_id", pid, "duration_ms", time.Since(started).Milliseconds(), "routes", len(routes), "suppressions", len(items), "changed", changed, "retries", len(retries))
 	return nil
 }
 
@@ -826,8 +895,8 @@ func syncUncheckedContactSuppressions(ctx *sdk.AppCtx, pid string, contactID int
 				`UPDATE contact_channel_delivery_state
 				 SET suppressed = 1, suppression_kind = ?, suppression_match = ?, suppression_reason = ?,
 					 suppression_source = ?, suppressed_at = ?, suppression_checked_at = ?,
-					 status = CASE WHEN ? <> '' THEN ? ELSE status END,
-					 status_reason = CASE WHEN ? <> '' THEN ? ELSE status_reason END,
+					 status = CASE WHEN delivery_evidence IS NOT NULL THEN delivery_evidence WHEN ? <> '' THEN ? ELSE status END,
+					 status_reason = CASE WHEN delivery_evidence IS NOT NULL THEN status_reason WHEN ? <> '' THEN ? ELSE status_reason END,
 					 status_updated_at = CASE WHEN ? <> '' THEN ? ELSE status_updated_at END,
 					 updated_at = CURRENT_TIMESTAMP
 				 WHERE project_id = ? AND channel_id = ? AND transport = ?`,
@@ -852,8 +921,8 @@ func recordSuppressionPreflight(db *sql.DB, pid string, channelID int64, transpo
 			`UPDATE contact_channel_delivery_state
 			 SET suppressed = 1, suppression_kind = ?, suppression_match = ?, suppression_reason = ?,
 				 suppression_source = ?, suppressed_at = ?, suppression_checked_at = ?,
-				 status = CASE WHEN ? <> '' THEN ? ELSE status END,
-				 status_reason = CASE WHEN ? <> '' THEN ? ELSE status_reason END,
+				 status = CASE WHEN delivery_evidence IS NOT NULL THEN delivery_evidence WHEN ? <> '' THEN ? ELSE status END,
+				 status_reason = CASE WHEN delivery_evidence IS NOT NULL THEN status_reason WHEN ? <> '' THEN ? ELSE status_reason END,
 				 status_updated_at = CASE WHEN ? <> '' THEN ? ELSE status_updated_at END,
 				 updated_at = CURRENT_TIMESTAMP
 			 WHERE project_id = ? AND channel_id = ? AND transport = ?`,

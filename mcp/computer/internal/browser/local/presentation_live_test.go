@@ -36,7 +36,18 @@ input[data-control="date"] { position:fixed; left:100px; top:330px; width:240px;
 <input id="agree" type="checkbox" aria-label="Agree">
 <input type="date" data-control="date" aria-label="Date">
 <input id="file" type="file" aria-label="File">
-<a id="next-link" href="/next">Next page</a>`))
+<a id="next-link" href="/next">Next page</a>
+<script>
+// Capture transient cues when rendered. A screenshot may finish after the
+// caption's intentional fade-out, especially with the Go race detector.
+window.demoCaptionEvents=[];
+new MutationObserver(function(records){
+  for(var record of records)for(var node of record.addedNodes){
+    if(node.id==='__apteva_demo_caption'&&node.getBoundingClientRect().width>0)
+      window.demoCaptionEvents.push(node.textContent);
+  }
+}).observe(document.documentElement,{childList:true,subtree:true});
+</script>`))
 	}))
 	defer server.Close()
 
@@ -185,7 +196,7 @@ input[data-control="date"] { position:fixed; left:100px; top:330px; width:240px;
 	}
 	if err := chromedp.Run(c.ctx, chromedp.Evaluate(`({
 		cursor: !!document.getElementById("__apteva_demo_cursor"),
-		caption: document.getElementById("__apteva_demo_caption")?.textContent || "",
+		caption: window.demoCaptionEvents.at(-1) || "",
 		value: document.getElementById("demo").value,
 		choice: document.getElementById("choice").value,
 		checked: document.getElementById("agree").checked,

@@ -150,7 +150,7 @@ func (e *remoteFFmpegExecutor) Render(
 
 	storageID, parseErr := parseRemoteResult(res)
 	if parseErr != nil {
-		return Result{FFmpegCommand: cmd}, fmt.Errorf("remote result parse: %w (raw: %s)", parseErr, truncTail(res, 600))
+		return Result{FFmpegCommand: cmd}, fmt.Errorf("remote result parse: %w (raw: %s)", parseErr, redactSecrets(truncTail(res, 600)))
 	}
 
 	return Result{
@@ -162,11 +162,11 @@ func (e *remoteFFmpegExecutor) Render(
 }
 
 func remoteExecFailure(err error, output string) error {
-	detail := strings.TrimSpace(output)
+	detail := strings.TrimSpace(redactSecrets(output))
 	if detail == "" {
-		return fmt.Errorf("remote exec: %w", err)
+		return fmt.Errorf("remote exec: %s", redactSecrets(err.Error()))
 	}
-	return fmt.Errorf("remote exec: %w\nremote output (last 4KB):\n%s", err, truncTail(detail, 4096))
+	return fmt.Errorf("remote exec: %s\nremote output (last 4KB):\n%s", redactSecrets(err.Error()), truncTail(detail, 4096))
 }
 
 func remoteVisualAudioDefaults(edit *Edit) []bool {
@@ -225,10 +225,10 @@ func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, 
 		if fontURL == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "curl -fsSL --retry 3 -H %q -o ./%s %q\n", "Authorization: Bearer "+token, face.Filename, fontURL)
+		fmt.Fprintf(&b, "curl -fsSL --retry 3 -H %s -o ./%s %s\n", shellQuote("Authorization: Bearer "+token), face.Filename, shellQuote(fontURL))
 	}
 	for i, u := range urls {
-		fmt.Fprintf(&b, "curl -fsSL --retry 3 -o ./in%d %q\n", i, u)
+		fmt.Fprintf(&b, "curl -fsSL --retry 3 -o ./in%d %s\n", i, shellQuote(u))
 	}
 	b.WriteString(ffmpegCmd)
 	b.WriteByte('\n')
@@ -241,12 +241,12 @@ func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, 
 	b.WriteString("  echo \"missing sha256sum/shasum on remote render host\" >&2\n")
 	b.WriteString("  exit 127\n")
 	b.WriteString("fi\n")
-	fmt.Fprintf(&b, "export STORAGE_TOKEN=%q\n", token)
-	fmt.Fprintf(&b, "export STORAGE_BASE=%q\n", strings.TrimRight(publicURL, "/")+composerBoundStorageProxyPath)
-	fmt.Fprintf(&b, "export PROJECT_ID=%q\n", projectID)
+	fmt.Fprintf(&b, "export STORAGE_TOKEN=%s\n", shellQuote(token))
+	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(strings.TrimRight(publicURL, "/")+composerBoundStorageProxyPath))
+	fmt.Fprintf(&b, "export PROJECT_ID=%s\n", shellQuote(projectID))
 	b.WriteString("export FOLDER=/.composer/\n")
-	fmt.Fprintf(&b, "export NAME=%q\n", shellFormValue(filename))
-	fmt.Fprintf(&b, "export CT=%q\n", shellFormValue(contentType))
+	fmt.Fprintf(&b, "export NAME=%s\n", shellQuote(shellFormValue(filename)))
+	fmt.Fprintf(&b, "export CT=%s\n", shellQuote(shellFormValue(contentType)))
 	fmt.Fprintf(&b, "export OUT=./out.%s\n", format)
 	b.WriteString(remoteStorageUploadScriptFragment)
 	b.WriteString(`echo "APTEVA_RESULT:{\"storage_id\":${STORAGE_ID},\"bytes\":${BYTES},\"sha256\":\"${SHA}\",\"format\":\"` + format + `\"}"` + "\n")
@@ -504,7 +504,7 @@ func callComposerInstancesRunCommand(ctx context.Context, timeoutS int, input ma
 		if readErr != nil {
 			return fmt.Errorf("instances call: HTTP %d; additionally failed reading body: %w", res.StatusCode, readErr)
 		}
-		return fmt.Errorf("instances call: HTTP %d: %s", res.StatusCode, truncTail(string(raw), 500))
+		return fmt.Errorf("instances call: HTTP %d: %s", res.StatusCode, redactSecrets(truncTail(string(raw), 500)))
 	}
 	if readErr != nil {
 		return readErr

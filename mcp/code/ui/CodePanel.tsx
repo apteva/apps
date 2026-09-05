@@ -1,40 +1,15 @@
+import { encodeFilePath, containsPath, RequestGate } from "./components/editorState";
+import { useDebouncedRefresh } from "./components/codeCards";
 // CodePanel — native React panel for the code app. Three-pane:
 // left = repo list, middle = file tree of the selected repo,
 // right = file editor. Loaded by the dashboard via dynamic import;
 // uses host React via importmap; talks to the code sidecar through
 // /api/apps/code/api/* with same-origin cookies.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import hljs from "highlight.js/lib/core";
-import bash from "highlight.js/lib/languages/bash";
-import css from "highlight.js/lib/languages/css";
-import diff from "highlight.js/lib/languages/diff";
-import dockerfile from "highlight.js/lib/languages/dockerfile";
-import go from "highlight.js/lib/languages/go";
-import javascript from "highlight.js/lib/languages/javascript";
-import json from "highlight.js/lib/languages/json";
-import markdown from "highlight.js/lib/languages/markdown";
-import python from "highlight.js/lib/languages/python";
-import sql from "highlight.js/lib/languages/sql";
-import typescript from "highlight.js/lib/languages/typescript";
-import xml from "highlight.js/lib/languages/xml";
-import yaml from "highlight.js/lib/languages/yaml";
-import { DeviceFrame } from "./components/DeviceFrame";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { CodeViewer, syntaxLanguageForPath } from "./components/CodeViewer";
+import { DevBar, DevLogsView, RemoteDeviceView, type DevRunWire } from "./components/DevRuntime";
 import { parseCodePanelLink } from "./components/codeLinks";
-
-hljs.registerLanguage("bash", bash);
-hljs.registerLanguage("css", css);
-hljs.registerLanguage("diff", diff);
-hljs.registerLanguage("dockerfile", dockerfile);
-hljs.registerLanguage("go", go);
-hljs.registerLanguage("javascript", javascript);
-hljs.registerLanguage("json", json);
-hljs.registerLanguage("markdown", markdown);
-hljs.registerLanguage("python", python);
-hljs.registerLanguage("sql", sql);
-hljs.registerLanguage("typescript", typescript);
-hljs.registerLanguage("xml", xml);
-hljs.registerLanguage("yaml", yaml);
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps install independently.
@@ -421,128 +396,6 @@ function isLikelyText(path: string): boolean {
   return true;
 }
 
-interface SyntaxLanguage {
-  id: string | null;
-  label: string;
-}
-
-// Keep language selection deterministic. Auto-detection looks clever on tiny
-// files but produces distracting false positives (README as CSS, env as SQL).
-function syntaxLanguageForPath(path: string): SyntaxLanguage {
-  const name = path.split("/").pop()?.toLowerCase() || "";
-  const ext = name.includes(".") ? name.split(".").pop() || "" : "";
-  if (name === "dockerfile" || name.startsWith("dockerfile.")) return { id: "dockerfile", label: "Dockerfile" };
-  if (name === "makefile") return { id: null, label: "Makefile" };
-  switch (ext) {
-    case "js": case "jsx": case "mjs": case "cjs":
-      return { id: "javascript", label: ext === "jsx" ? "JSX" : "JavaScript" };
-    case "ts": case "tsx": case "mts": case "cts":
-      return { id: "typescript", label: ext === "tsx" ? "TSX" : "TypeScript" };
-    case "json": case "jsonc":
-      return { id: "json", label: ext.toUpperCase() };
-    case "css": case "scss": case "sass": case "less":
-      return { id: "css", label: ext.toUpperCase() };
-    case "html": case "htm": case "xml": case "svg":
-      return { id: "xml", label: ext === "svg" ? "SVG" : ext.toUpperCase() };
-    case "md": case "mdx":
-      return { id: "markdown", label: ext.toUpperCase() };
-    case "sh": case "bash": case "zsh":
-      return { id: "bash", label: "Shell" };
-    case "go":
-      return { id: "go", label: "Go" };
-    case "py": case "pyw":
-      return { id: "python", label: "Python" };
-    case "yaml": case "yml":
-      return { id: "yaml", label: "YAML" };
-    case "sql":
-      return { id: "sql", label: "SQL" };
-    case "diff": case "patch":
-      return { id: "diff", label: "Diff" };
-    default:
-      return { id: null, label: ext ? ext.toUpperCase() : "Plain text" };
-  }
-}
-
-function escapeHTML(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-const CODE_SYNTAX_THEME = `
-  .code-syntax .hljs-comment,
-  .code-syntax .hljs-quote { color: var(--text-dim); font-style: italic; }
-  .code-syntax .hljs-keyword,
-  .code-syntax .hljs-selector-tag,
-  .code-syntax .hljs-doctag { color: var(--accent); font-weight: 600; }
-  .code-syntax .hljs-string,
-  .code-syntax .hljs-regexp,
-  .code-syntax .hljs-attr,
-  .code-syntax .hljs-template-tag { color: var(--success); }
-  .code-syntax .hljs-number,
-  .code-syntax .hljs-literal,
-  .code-syntax .hljs-symbol,
-  .code-syntax .hljs-bullet { color: var(--warn); }
-  .code-syntax .hljs-title,
-  .code-syntax .hljs-section,
-  .code-syntax .hljs-function .hljs-title { color: var(--info); }
-  .code-syntax .hljs-built_in,
-  .code-syntax .hljs-type,
-  .code-syntax .hljs-class .hljs-title { color: color-mix(in srgb, var(--warn), var(--text) 22%); }
-  .code-syntax .hljs-variable,
-  .code-syntax .hljs-template-variable,
-  .code-syntax .hljs-params,
-  .code-syntax .hljs-attribute { color: color-mix(in srgb, var(--accent), var(--text) 38%); }
-  .code-syntax .hljs-meta,
-  .code-syntax .hljs-tag,
-  .code-syntax .hljs-name { color: color-mix(in srgb, var(--info), var(--text) 25%); }
-  .code-syntax .hljs-property { color: color-mix(in srgb, var(--info), var(--text) 42%); }
-  .code-syntax .hljs-addition { color: var(--success); background: color-mix(in srgb, var(--success), transparent 88%); }
-  .code-syntax .hljs-deletion { color: var(--error); background: color-mix(in srgb, var(--error), transparent 88%); }
-  .code-syntax .hljs-emphasis { font-style: italic; }
-  .code-syntax .hljs-strong { font-weight: 700; }
-`;
-
-function CodeViewer({
-  path,
-  content,
-  viewerRef,
-}: {
-  path: string;
-  content: string;
-  viewerRef?: RefObject<HTMLDivElement | null>;
-}) {
-  const language = syntaxLanguageForPath(path);
-  const highlighted = useMemo(() => {
-    if (!language.id) return escapeHTML(content);
-    try {
-      return hljs.highlight(content, { language: language.id, ignoreIllegals: true }).value;
-    } catch {
-      return escapeHTML(content);
-    }
-  }, [content, language.id]);
-  const lineNumbers = useMemo(
-    () => Array.from({ length: Math.max(1, content.split("\n").length) }, (_, i) => String(i + 1)).join("\n"),
-    [content],
-  );
-
-  return (
-    <div ref={viewerRef} className="code-syntax min-w-full flex items-start bg-bg">
-      <style>{CODE_SYNTAX_THEME}</style>
-      <pre
-        aria-hidden="true"
-        className="sticky left-0 z-10 shrink-0 select-none border-r border-border/70 bg-bg-subtle px-3 py-4 text-right font-mono text-[11px] leading-5 text-text-dim"
-      >{lineNumbers}</pre>
-      <pre className="min-w-max flex-1 bg-bg px-4 py-4 font-mono text-[12px] leading-5 text-text" style={{ tabSize: 2 }}>
-        <code className={language.id ? `hljs language-${language.id}` : "hljs"} dangerouslySetInnerHTML={{ __html: highlighted }} />
-      </pre>
-    </div>
-  );
-}
-
 // Strip leading slashes / collapse "./" — the backend normalises too
 // but matching here keeps optimistic UI in sync with the eventual path.
 function cleanRel(p: string): string {
@@ -558,7 +411,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [query, setQuery] = useState("");
   const [selectedSlug, setSelectedSlug] = useState<string | null>(initialLink.repo || null);
   const [tree, setTree] = useState<FileMeta[]>([]);
-  const [openFile, setOpenFile] = useState<{ path: string; content: string } | null>(null);
+  const [openFile, setOpenFile] = useState<{ path: string; content: string; etag?: string; slug?: string } | null>(null);
   const [draft, setDraft] = useState<string>("");
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -589,6 +442,14 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
 
   const selectedRepo = repos.find((r) => r.slug === selectedSlug);
 
+  const selectionRef = useRef(selectedSlug);
+  selectionRef.current = selectedSlug;
+  const repoGate = useRef(new RequestGate());
+  const fileGate = useRef(new RequestGate());
+  const treeGate = useRef(new RequestGate());
+  const gitGate = useRef(new RequestGate());
+  const draftRef = useRef(draft); draftRef.current = draft;
+  const fileRef = useRef(openFile); fileRef.current = openFile;
   const dirty = editing && openFile !== null && draft !== openFile.content;
 
   const withParams = useCallback(
@@ -620,12 +481,12 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   // PUT /files/<path> takes raw bytes, not JSON — the api() helper
   // would coerce the body so we hand-roll the fetch.
   const putFile = useCallback(
-    async (slug: string, path: string, body: BodyInit, contentType = "application/octet-stream") => {
-      const url = `${API}/repos/${slug}/files/${path}?${withParams()}`;
+    async (slug: string, path: string, body: BodyInit, contentType = "application/octet-stream", etag?: string) => {
+      const url = `${API}/repos/${slug}/files/${encodeFilePath(path)}?${withParams()}`;
       const res = await fetch(url, {
         method: "PUT",
         credentials: "same-origin",
-        headers: { "Content-Type": contentType },
+        headers: { "Content-Type": contentType, ...(etag ? { "If-Match": etag } : { "If-None-Match": "*" }) },
         body,
       });
       if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
@@ -650,14 +511,17 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   );
 
   const loadRepos = useCallback(async () => {
+    const token=repoGate.current.next();
     try {
       const extra: Record<string, string> = {};
       if (includeArchived) extra.archived = "1";
       if (query.trim()) extra.q = query.trim();
       const r = await api<{ repositories?: Repo[] }>("GET", "/repos", undefined, extra);
+      if(!repoGate.current.current(token))return;
       setRepos(r.repositories || []);
       setError("");
     } catch (e) {
+      if(!repoGate.current.current(token))return;
       setError((e as Error).message);
     }
   }, [api, includeArchived, query]);
@@ -666,9 +530,11 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
 
   const loadTree = useCallback(
     async (slug: string) => {
+      const token=treeGate.current.next();
       setLoadingTree(true);
       try {
         const r = await api<{ files?: FileMeta[] }>("GET", `/repos/${slug}/tree`);
+        if (!treeGate.current.current(token) || selectionRef.current!==slug) return;
         const files = (r.files || []).filter((f) => !f.is_dir);
         setTree(files);
         // First load: expand top-level dirs so the user sees the
@@ -679,10 +545,11 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
           return initialExpansion(buildTree(files), null);
         });
       } catch (e) {
+        if (!treeGate.current.current(token) || selectionRef.current!==slug) return;
         setError((e as Error).message);
         setTree([]);
       } finally {
-        setLoadingTree(false);
+        if(treeGate.current.current(token)) setLoadingTree(false);
       }
     },
     [api],
@@ -691,9 +558,11 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const loadGitStatus = useCallback(
     async (slug: string) => {
       try {
-        setGitStatus(await api<GitStatus>("GET", `/repos/${slug}/git/status`));
+        const token=gitGate.current.next();
+        const status=await api<GitStatus>("GET", `/repos/${slug}/git/status`);
+        if(gitGate.current.current(token)&&selectionRef.current===slug) setGitStatus(status);
       } catch {
-        setGitStatus(null);
+        if(selectionRef.current===slug) setGitStatus(null);
       }
     },
     [api],
@@ -703,6 +572,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [markTemplateFor, setMarkTemplateFor] = useState<string | null>(null);
 
   const doSelectRepo = (slug: string) => {
+    selectionRef.current=slug;fileGate.current.invalidate();setTree([]);setGitStatus(null);
     setSelectedSlug(slug);
     setOpenFile(null);
     setEditing(false);
@@ -728,6 +598,8 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
 
   const openPath = useCallback(
     async (slug: string, path: string) => {
+      const token=fileGate.current.next();
+      if(selectionRef.current!==slug) return;
       if (!isLikelyText(path)) {
         setOpenFile({ path, content: "(binary file — preview not supported)" });
         setDraft("");
@@ -736,19 +608,21 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
       }
       setLoadingFile(true);
       try {
-        const url = `${API}/repos/${slug}/files/${path}?${withParams()}`;
+        const url = `${API}/repos/${slug}/files/${encodeFilePath(path)}?${withParams()}`;
         const res = await fetch(url, { credentials: "same-origin" });
         if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
         const text = await res.text();
-        setOpenFile({ path, content: text });
+        if(!fileGate.current.current(token)||selectionRef.current!==slug) return;
+        setOpenFile({ path, content: text, etag: res.headers.get("ETag") || undefined, slug });
         setDraft(text);
         setEditing(false);
       } catch (e) {
+        if(!fileGate.current.current(token)||selectionRef.current!==slug) return;
         setOpenFile({ path, content: "Error: " + (e as Error).message });
         setDraft("");
         setEditing(false);
       } finally {
-        setLoadingFile(false);
+        if(fileGate.current.current(token)) setLoadingFile(false);
       }
     },
     [withParams],
@@ -779,10 +653,12 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     });
   }, [initialLink, openFile]);
 
+  const refreshSelectedTree = useDebouncedRefresh(() => { if(selectionRef.current) loadTree(selectionRef.current); });
   // Live refresh — react to repo + file mutations from agents, other
   // tabs, AND this panel's own writes (the backend emits on every
   // mutation, REST-driven or MCP-driven).
   useAppEvents<FileEventData>("code", projectId, (ev) => {
+    const openFile=fileRef.current;
     switch (ev.topic) {
       case "repo.added":
       case "repo.updated":
@@ -792,7 +668,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         break;
       case "file.changed":
         if (selectedSlug && ev.data?.slug === selectedSlug) {
-          loadTree(selectedSlug);
+          refreshSelectedTree();
           // Re-fetch the open file when it's the one that changed and
           // the user isn't mid-edit. If they are, leave the buffer
           // alone — clobbering would lose work.
@@ -803,8 +679,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         break;
       case "file.deleted":
         if (selectedSlug && ev.data?.slug === selectedSlug) {
-          loadTree(selectedSlug);
-          if (openFile && ev.data?.path === openFile.path) {
+          refreshSelectedTree();
+          if (openFile && ev.data?.path && containsPath(ev.data.path,openFile.path)) {
+            if(dirty){setError("This file was deleted externally. Your draft is preserved; copy it or save it as a new file.");break;}
             setOpenFile(null);
             setDraft("");
             setEditing(false);
@@ -813,13 +690,16 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         break;
       case "file.renamed":
         if (selectedSlug && ev.data?.slug === selectedSlug) {
-          loadTree(selectedSlug);
-          if (openFile && ev.data?.from && openFile.path === ev.data.from && ev.data.to) {
+          refreshSelectedTree();
+          if (openFile && ev.data?.from && containsPath(ev.data.from,openFile.path) && ev.data.to) {
             // Follow the rename so the editor stays on the same content.
-            openPath(selectedSlug, ev.data.to);
+            const moved=ev.data.to+openFile.path.slice(ev.data.from.length);
+            if(dirty){fileRef.current={...openFile,path:moved};setOpenFile(fileRef.current);setError("File renamed externally. Your draft is preserved; saving will verify its revision.");}else openPath(selectedSlug,moved);
           }
         }
         break;
+      case "repo.workspace.applied":
+      case "repo.imported":
       case "repo.git.connected":
       case "repo.git.fetched":
       case "repo.git.pulled":
@@ -828,7 +708,8 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
       case "repo.git.switched":
         if (selectedSlug && ev.data?.slug === selectedSlug) {
           loadGitStatus(selectedSlug);
-          loadTree(selectedSlug);
+          if(openFile&&!dirty) openPath(selectedSlug,openFile.path);
+          refreshSelectedTree();
         }
         break;
     }
@@ -952,17 +833,16 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   };
 
   const handleSave = async () => {
-    if (!selectedSlug || !openFile) return;
+    if (!selectedSlug || !openFile || openFile.slug!==selectedSlug || !openFile.etag) return;
+    const slug=selectedSlug, file=openFile, body=draft, token=fileGate.current.next();
     setSaving(true);
     try {
-      await putFile(selectedSlug, openFile.path, draft, "text/plain");
-      setOpenFile({ path: openFile.path, content: draft });
-      setEditing(false);
-    } catch (e) {
-      setError("Save failed: " + (e as Error).message);
-    } finally {
-      setSaving(false);
-    }
+      const result=await putFile(slug,file.path,body,"text/plain",file.etag);
+      if(!fileGate.current.current(token)||selectionRef.current!==slug||fileRef.current?.path!==file.path) return;
+      setOpenFile({...file,content:body,etag:`"${result.file.sha256}"`});
+      if(draftRef.current===body) setEditing(false);
+    } catch(e) {if(selectionRef.current===slug) setError("Save failed; your draft is preserved. " +(e as Error).message);}
+    finally {setSaving(false);}
   };
 
   const handleDiscard = () => {
@@ -1032,8 +912,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
       setRenameTo("");
       // Optimistic: if the renamed file is open, follow it. The event
       // handler does this too, but doing it here avoids a flash.
-      if (openFile?.path === from) {
-        openPath(selectedSlug, cleanTo);
+      if (openFile && containsPath(from,openFile.path)) {
+        const moved=cleanTo+openFile.path.slice(from.length);
+        if(dirty) setOpenFile({...openFile,path:moved});else openPath(selectedSlug, moved);
       }
     } catch (e) {
       setError("Rename failed: " + (e as Error).message);
@@ -1049,7 +930,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
       tone: "danger",
       onConfirm: async () => {
         try {
-          const res = await fetch(`${API}/repos/${selectedSlug}/files/${path}?${withParams()}`, {
+          const res = await fetch(`${API}/repos/${selectedSlug}/files/${encodeFilePath(path)}?${withParams()}`, {
             method: "DELETE",
             credentials: "same-origin",
           });
@@ -1349,7 +1230,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
               </aside>
 
               <section className="flex-1 min-w-0 overflow-hidden flex flex-col">
-                <DevBar
+                <DevBar key={selectedSlug}
                   slug={selectedSlug}
                   api={api}
                   withParams={withParams}
@@ -1359,7 +1240,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                   onRunChange={setDevRun}
                 />
                 {showDevLogs ? (
-                  <DevLogsView slug={selectedSlug} withParams={withParams} />
+                  <DevLogsView key={devRun?.started_at || selectedSlug} slug={selectedSlug} withParams={withParams} />
                 ) : devRun?.runner === "simulator" && devRun.status === "live" ? (
                   <RemoteDeviceView run={devRun} />
                 ) : !openFile ? (
@@ -1409,7 +1290,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                         ) : (
                           <button
                             type="button"
-                            onClick={() => { setDraft(openFile.content); setEditing(true); }}
+                            onClick={() => { fileGate.current.invalidate();setDraft(openFile.content); setEditing(true); }}
                             className="px-2 py-0.5 text-xs border border-border rounded hover:bg-bg-input"
                           >Edit</button>
                         )
@@ -2437,8 +2318,13 @@ function IssuesView({
   onOpenPath: (repoSlug: string, path: string) => void;
 }) {
   const [issues, setIssues] = useState<CodeIssue[]>([]);
+  const [offset,setOffset]=useState(0);const [total,setTotal]=useState(0);
+  const issueGate=useRef(new RequestGate());const detailGate=useRef(new RequestGate());
+  const [linkedIssue,setLinkedIssue]=useState<CodeIssue|null>(null);
   const [selected, setSelected] = useState<number | null>(null);
-  const [detail, setDetail] = useState<{ issue: CodeIssue; comments: IssueComment[]; links: IssueLink[] } | null>(null);
+  const [detail, setDetail] = useState<{ issue: CodeIssue; comments: IssueComment[]; links: IssueLink[];history_total:number } | null>(null);
+ const [historyOffset,setHistoryOffset]=useState(0);
+ useEffect(()=>setHistoryOffset(0),[selected]);
   const [repoFilter, setRepoFilter] = useState(initialRepoSlug || "");
   const [state, setState] = useState("all");
   const [status, setStatus] = useState("all");
@@ -2469,15 +2355,19 @@ function IssuesView({
     return () => { cancelled = true; };
   }, []);
 
+  useEffect(()=>{setOffset(0);},[repoFilter,state,status,query]);
   const loadIssues = useCallback(async () => {
+    const token=issueGate.current.next();
     try {
-      const extra: Record<string, string> = { state, status };
+      const extra: Record<string, string> = { state, status,offset:String(offset),limit:"100" };
       if (repoFilter) extra.repo = repoFilter;
       if (query.trim()) extra.q = query.trim();
-      const r = await api<{ issues: CodeIssue[] }>("GET", "/issues", undefined, extra);
+      const r = await api<{ issues: CodeIssue[];total:number }>("GET", "/issues", undefined, extra);
+      if(!issueGate.current.current(token))return;setTotal(r.total);
       const list = r.issues || [];
       setIssues(list);
       setSelected((cur) => {
+        if(!initialIssueApplied.current && linkedIssue){initialIssueApplied.current=true;return linkedIssue.id;}
         if (!initialIssueApplied.current && initialIssueNumber) {
           const linked = list.find((issue) =>
             issue.number === initialIssueNumber && (!initialRepoSlug || issue.repo_slug === initialRepoSlug),
@@ -2487,35 +2377,42 @@ function IssuesView({
             return linked.id;
           }
         }
-        return cur && list.some((issue) => issue.id === cur) ? cur : list[0]?.id ?? null;
+        return cur && (linkedIssue?.id===cur || list.some((issue) => issue.id === cur)) ? cur : list[0]?.id ?? null;
       });
       setErr("");
     } catch (e) {
+      if(!issueGate.current.current(token))return;
       setErr((e as Error).message);
       setIssues([]);
       setSelected(null);
     }
-  }, [api, repoFilter, state, status, query, initialIssueNumber, initialRepoSlug]);
+  }, [api, repoFilter, state, status, query, initialIssueNumber, initialRepoSlug,offset,linkedIssue]);
 
+  useEffect(()=>{if(!initialRepoSlug||!initialIssueNumber)return;let cancelled=false;
+    api<{issue:CodeIssue}>("GET",`/repos/${initialRepoSlug}/issues/${initialIssueNumber}`).then(r=>{if(!cancelled){setLinkedIssue(r.issue);setSelected(r.issue.id);}}).catch(e=>{if(!cancelled)setErr("Linked issue unavailable: "+e.message)});return()=>{cancelled=true};
+  },[api,initialRepoSlug,initialIssueNumber]);
   const loadDetail = useCallback(async (issueId: number | null) => {
+    const token=detailGate.current.next();setDetail(null);
     if (!issueId) {
       setDetail(null);
       return;
     }
-    const item = issues.find((i) => i.id === issueId);
+    const item = issues.find((i) => i.id === issueId) || (linkedIssue?.id===issueId?linkedIssue:null);
     if (!item?.repo_slug) {
       setDetail(null);
       return;
     }
     try {
-      const r = await api<{ issue: CodeIssue; comments?: IssueComment[]; links?: IssueLink[] }>("GET", `/repos/${item.repo_slug}/issues/${item.number}`);
-      setDetail({ issue: r.issue, comments: r.comments || [], links: r.links || [] });
+      const r = await api<{ issue: CodeIssue; comments?: IssueComment[]; links?: IssueLink[];comments_total?:number;events_total?:number;links_total?:number }>("GET", `/repos/${item.repo_slug}/issues/${item.number}`,undefined,{history_offset:String(historyOffset)});
+      if(!detailGate.current.current(token))return;
+      setDetail({ issue: r.issue, comments: r.comments || [], links: r.links || [],history_total:Math.max(r.comments_total||0,r.events_total||0,r.links_total||0) });
       setErr("");
     } catch (e) {
+      if(!detailGate.current.current(token))return;
       setErr((e as Error).message);
       setDetail(null);
     }
-  }, [api, issues]);
+  }, [api, issues,linkedIssue,historyOffset]);
 
   useEffect(() => { loadIssues(); }, [loadIssues]);
   useEffect(() => { loadDetail(selected); }, [selected, loadDetail]);
@@ -2616,7 +2513,10 @@ function IssuesView({
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center gap-2">
             <div className="text-sm font-semibold text-text flex-1">Issues</div>
-            <span className="text-[11px] text-text-dim">{issues.length}</span>
+            <span className="text-[11px] text-text-dim">{total} issues</span>
+            <button disabled={offset===0} onClick={()=>setOffset(Math.max(0,offset-100))}>Previous</button>
+            <span>{total?offset+1:0}–{Math.min(offset+issues.length,total)}</span>
+            <button disabled={offset+issues.length>=total} onClick={()=>setOffset(offset+100)}>Next</button>
           </div>
           <div className="flex items-center gap-2">
             <input
@@ -2786,7 +2686,8 @@ function IssuesView({
 
               <section className="space-y-2">
                 <h3 className="text-xs uppercase tracking-wide text-text-dim">Comments</h3>
-                {detail.comments.map((c) => (
+                {detail.history_total>200 && <div><button disabled={historyOffset===0} onClick={()=>setHistoryOffset(Math.max(0,historyOffset-200))}>Previous history</button> <span>History {historyOffset+1}–{Math.min(historyOffset+200,detail.history_total)}</span> <button disabled={historyOffset+200>=detail.history_total} onClick={()=>setHistoryOffset(historyOffset+200)}>Next history</button></div>}
+                  {detail.comments.map((c) => (
                   <div key={c.id} className="border border-border rounded p-3">
                     <div className="text-[11px] text-text-dim">{c.author || "comment"} · {shortDate(c.created_at)}</div>
                     <div className="mt-1 text-sm text-text whitespace-pre-wrap">{c.body}</div>
@@ -2879,7 +2780,7 @@ function IssueMetaDialog({
   const [draft, setDraft] = useState({
     status: issue.status,
     state: issue.state,
-    state_reason: issue.state_reason || "completed",
+    state_reason: (issue.state_reason || "completed") as IssueStateReason,
     type: issue.type,
     priority: issue.priority,
     assignee: issue.assignee || "",
@@ -3113,244 +3014,6 @@ function CreateIssueDialog({
         </div>
       </form>
     </div>
-  );
-}
-
-// ─── DevBar / DevLogsView ─────────────────────────────────────────
-//
-// Dev runtime UI for the right pane. DevBar is the thin status strip
-// above the file editor; it polls /api/repos/<slug>/dev/status every
-// 2s and offers Run / Stop. DevLogsView replaces the file editor when
-// the user toggles "Logs", streaming the dev process's stdout/stderr
-// via SSE on /api/repos/<slug>/dev/log?follow=1.
-
-interface DevRunWire {
-  id: number;
-  status: "starting" | "live" | "stopped" | "crashed";
-  port: number;
-  pid: number;
-  framework: string;
-  run_cmd?: string;
-  started_at?: string;
-  stopped_at?: string;
-  error?: string;
-  // Remote-runner fields — populated for mobile repos delegated to the
-  // Simulator app. runner="" for local web dev runs.
-  runner?: string;
-  sim_id?: string;
-  stream_url?: string;
-}
-
-function devStatusColor(s?: string): string {
-  if (s === "live") return "text-green";
-  if (s === "starting") return "text-blue";
-  if (s === "crashed") return "text-red";
-  return "text-text-dim";
-}
-
-function uptimeStr(startedAt?: string): string {
-  if (!startedAt) return "";
-  const ms = Date.now() - new Date(startedAt).getTime();
-  if (ms < 0) return "";
-  if (ms < 60_000) return `${Math.floor(ms / 1000)}s`;
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`;
-  return `${Math.floor(ms / 3_600_000)}h${Math.floor((ms % 3_600_000) / 60_000)}m`;
-}
-
-function DevBar({
-  slug,
-  api,
-  withParams,
-  showLogs,
-  onToggleLogs,
-  onError,
-  onRunChange,
-}: {
-  slug: string;
-  api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
-  withParams: (extra?: Record<string, string>) => string;
-  showLogs: boolean;
-  onToggleLogs: () => void;
-  onError: (msg: string) => void;
-  onRunChange?: (run: DevRunWire | null) => void;
-}) {
-  const [run, setRun] = useState<DevRunWire | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const refresh = useCallback(async () => {
-    try {
-      const r = await api<{ dev_run: DevRunWire | null }>("GET", `/repos/${slug}/dev/status`);
-      setRun(r.dev_run);
-      onRunChange?.(r.dev_run);
-    } catch (e) {
-      // Swallow — this polls in the background; the panel-wide error
-      // banner is for explicit user actions.
-    }
-  }, [api, slug, onRunChange]);
-
-  useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 2000);
-    return () => clearInterval(t);
-  }, [refresh]);
-
-  const start = async () => {
-    setBusy(true);
-    try {
-      await api("POST", `/repos/${slug}/dev/start`, {});
-      await refresh();
-    } catch (e) {
-      onError("Run failed: " + (e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const stop = async () => {
-    setBusy(true);
-    try {
-      await api("POST", `/repos/${slug}/dev/stop`, {});
-      await refresh();
-    } catch (e) {
-      onError("Stop failed: " + (e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const status = run?.status ?? "stopped";
-  const isLive = status === "live";
-  const isBusy = status === "starting" || busy;
-  const isRemote = run?.runner === "simulator";
-
-  return (
-    <div className="px-3 py-2 border-b border-border flex items-center gap-2 bg-bg-input/40">
-      <span className={`text-xs ${devStatusColor(status)}`}>●</span>
-      <span className="text-xs text-text-muted">
-        {status === "live" && isRemote ? (
-          <>
-            Running on {run?.framework === "ios" ? "iOS Simulator" : "Android emulator"}
-            {" "}· {uptimeStr(run?.started_at)}
-          </>
-        ) : status === "live" ? (
-          <>
-            Running on{" "}
-            <a
-              href={`http://127.0.0.1:${run?.port}/`}
-              target="_blank"
-              rel="noreferrer"
-              className="text-accent hover:underline font-mono"
-            >127.0.0.1:{run?.port}</a>
-            {" "}· {uptimeStr(run?.started_at)} · {run?.framework}
-          </>
-        ) : status === "starting" ? (
-          <>Starting {run?.framework}…</>
-        ) : status === "crashed" ? (
-          <span className="text-red">
-            Crashed: <span className="font-mono">{(run?.error || "").split("\n")[0].slice(0, 80)}</span>
-          </span>
-        ) : (
-          <>Dev preview stopped · deploy production from the Deploy app</>
-        )}
-      </span>
-      <span className="flex-1" />
-      <button
-        type="button"
-        onClick={onToggleLogs}
-        className={`px-2 py-0.5 text-xs border rounded ${showLogs ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"}`}
-      >Logs</button>
-      {isLive ? (
-        <button
-          type="button"
-          onClick={stop}
-          disabled={isBusy}
-          className="px-2 py-0.5 text-xs border border-red text-red rounded hover:bg-red hover:text-white disabled:opacity-50"
-        >Stop</button>
-      ) : (
-        <button
-          type="button"
-          onClick={start}
-          disabled={isBusy}
-          className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
-        >{isBusy ? "Starting…" : "Run"}</button>
-      )}
-    </div>
-  );
-}
-
-// RemoteDeviceView renders the live mobile device for a Simulator-app
-// dev run. Mounted by the panel body below the DevBar when the active
-// dev run has runner=simulator and a stream URL.
-function RemoteDeviceView({ run }: { run: DevRunWire }) {
-  if (!run.stream_url) {
-    return (
-      <div className="p-4 text-xs text-text-muted">
-        Device starting — waiting for the stream URL…
-      </div>
-    );
-  }
-  return (
-    <div className="p-4 flex justify-center">
-      <DeviceFrame streamUrl={run.stream_url} platform={run.framework} />
-    </div>
-  );
-}
-
-// DevLogsView streams the dev run log via SSE. Auto-scrolls to bottom
-// unless the user scrolls up; resumes auto-scroll when they scroll
-// back to the bottom. No history retention beyond the current session
-// — the log file is truncated on each `repos_dev_start`, so older
-// runs aren't accessible (by design).
-function DevLogsView({
-  slug,
-  withParams,
-}: {
-  slug: string;
-  withParams: (extra?: Record<string, string>) => string;
-}) {
-  const [lines, setLines] = useState<string[]>([]);
-  const containerRef = useRef<HTMLPreElement | null>(null);
-  const stickToBottom = useRef(true);
-
-  useEffect(() => {
-    setLines([]);
-    const url = `/api/apps/code/api/repos/${slug}/dev/log?${withParams({ follow: "1" })}`;
-    const es = new EventSource(url, { withCredentials: true });
-    es.onmessage = (e) => {
-      // SSE delivers each `data:` line as a separate message; the
-      // server emits them line-by-line so we just append.
-      setLines((prev) => prev.concat([e.data]));
-    };
-    es.onerror = () => {
-      // EventSource auto-reconnects; nothing to do.
-    };
-    return () => es.close();
-  }, [slug, withParams]);
-
-  useEffect(() => {
-    if (stickToBottom.current && containerRef.current) {
-      containerRef.current.scrollTop = containerRef.current.scrollHeight;
-    }
-  }, [lines]);
-
-  const onScroll = (e: React.UIEvent<HTMLPreElement>) => {
-    const el = e.currentTarget;
-    const distFromBottom = el.scrollHeight - el.clientHeight - el.scrollTop;
-    stickToBottom.current = distFromBottom < 24;
-  };
-
-  return (
-    <pre
-      ref={containerRef}
-      onScroll={onScroll}
-      className="flex-1 overflow-auto bg-bg text-text font-mono text-[11px] p-3 whitespace-pre"
-    >
-      {lines.length === 0 ? (
-        <span className="text-text-dim">Waiting for output…</span>
-      ) : (
-        lines.join("\n")
-      )}
-    </pre>
   );
 }
 

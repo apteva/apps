@@ -29,6 +29,8 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
+	"image/draw"
 	"image/jpeg"
 	_ "image/png"
 	"io"
@@ -51,7 +53,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.16.0
+version: 0.16.3
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -542,6 +544,10 @@ var platforms = map[string]platformDef{
 		},
 		ThumbnailFrameField: "video_cover_timestamp_ms",
 		OptionFields: []optionField{
+			{Name: "privacy_level", Type: "select", Label: "TikTok privacy", Help: "Choose from this creator's current privacy options before publishing."},
+			{Name: "disable_comment", Type: "boolean", Label: "Disable comments"},
+			{Name: "disable_duet", Type: "boolean", Label: "Disable duet"},
+			{Name: "disable_stitch", Type: "boolean", Label: "Disable stitch"},
 			{Name: "thumbnail_frame_ms", Type: "number", Label: "Cover frame (ms)",
 				Help: "Optional video timestamp used as TikTok's cover frame."},
 			{Name: "auto_add_music", Type: "boolean", Label: "Auto add music",
@@ -661,7 +667,7 @@ var platforms = map[string]platformDef{
 
 var globalCtx *sdk.AppCtx
 
-type App struct{}
+type App struct{ avatarClient *http.Client }
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -1041,10 +1047,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "inbox_get",
-			Description: "Fetch one inbox item by id. Pass with_thread=true to also return every sibling in the same conversation (walked via parent_external_id). Args: id, with_thread?.",
+			Description: "Fetch one inbox item by id. Pass with_thread=true to return the latest conversation page. Use thread_next_before as thread_before to load older messages. Args: id, with_thread?, thread_limit?, thread_before?.",
 			InputSchema: schemaObject(map[string]any{
-				"id":          map[string]any{"type": "integer"},
-				"with_thread": map[string]any{"type": "boolean"},
+				"id":            map[string]any{"type": "integer"},
+				"with_thread":   map[string]any{"type": "boolean"},
+				"thread_limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 500},
+				"thread_before": map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			Handler: a.toolInboxGet,
 		},
@@ -1181,6 +1189,7 @@ func projectScope(ctx *sdk.AppCtx, argSets ...map[string]any) string {
 // ─── account_add ───────────────────────────────────────────────────
 
 func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	plat, _ := args["platform"].(string)
 	provider := strings.ToLower(strings.TrimSpace(toString(args["provider"])))
 	if provider == zernioProviderSlug {
@@ -1236,7 +1245,7 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		var reuseSrc string
 		err := ctx.AppDB().QueryRow(
 			`SELECT connection_id FROM social_accounts
-			 WHERE project_id=? AND platform=? AND status='active'
+			 WHERE project_id=? AND platform=? AND status='active' AND COALESCE(provider_slug,'native')='native'
 			 ORDER BY id DESC LIMIT 1`,
 			pid, def.Platform,
 		).Scan(&existingConnID)
@@ -1348,6 +1357,7 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 // ─── account_list_pending_pages ────────────────────────────────────
 
 func (a *App) toolAccountListPendingPages(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	pendingID := intArg(args, "pending_account_id", 0)
 	if pendingID <= 0 {
 		return nil, errors.New("pending_account_id required")
@@ -1401,6 +1411,7 @@ func (a *App) toolAccountListPendingPages(ctx *sdk.AppCtx, args map[string]any) 
 // ─── account_finalize ─────────────────────────────────────────────
 
 func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	pendingID := intArg(args, "pending_account_id", 0)
 	if pendingID <= 0 {
 		return nil, errors.New("pending_account_id required")
@@ -1476,7 +1487,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		displayName = def.DisplayName
 	}
 	// Replace the upstream signed URL with our content-addressed local
-	// cache. cacheAvatar falls back to the upstream URL on any error
+	// cache. cacheAvatar omits the avatar on any error
 	// so finalize never breaks here — broken thumbnails are recoverable
 	// by reconnecting; a failed finalize isn't.
 	avatar = a.cacheAvatar(ctx, avatar)
@@ -1584,6 +1595,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 // ─── account_list ─────────────────────────────────────────────────
 
 func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	pid := projectScope(ctx, args)
 	platformFilter, _ := args["platform"].(string)
 	statusFilter, _ := args["status"].(string)
@@ -1683,6 +1695,7 @@ type accountCheckResult struct {
 }
 
 func (a *App) toolAccountCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	pid := projectScope(ctx, args)
 	if boolArg(args, "all", false) {
 		profileID := resolveProfileArg(ctx, pid, args)
@@ -1890,6 +1903,7 @@ func (a *App) persistAccountCheck(ctx *sdk.AppCtx, pid string, result accountChe
 // ─── account_disconnect ──────────────────────────────────────────
 
 func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	id := int64(intArg(args, "id", 0))
 	if id <= 0 {
 		return nil, errors.New("id required")
@@ -2046,6 +2060,9 @@ func (a *App) hardDeleteAccount(ctx *sdk.AppCtx, pid string, id, connID int64, p
 		}
 		postsDeleted, _ = res.RowsAffected()
 	}
+	if _, err = tx.Exec(`DELETE FROM account_metric_cache WHERE social_account_id=? AND project_id=?`, id, pid); err != nil {
+		return nil, err
+	}
 	acctRes, err := tx.Exec(`DELETE FROM social_accounts WHERE id=? AND project_id=?`, id, pid)
 	if err != nil {
 		return nil, fmt.Errorf("delete account: %w", err)
@@ -2178,6 +2195,7 @@ func validatePostTargets(ctx *sdk.AppCtx, pid string, targets []targetSpec) (map
 }
 
 func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	mode, err := explicitPostMode(args)
 	if err != nil {
 		return mcpError(err.Error()), nil
@@ -2252,6 +2270,9 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return mcpError("provider_sync_mode must be local or mirror"), nil
 	}
 	approvalRequired := boolArg(args, "approval_required", false)
+	if approvalRequired && mode != postModeDraft {
+		return mcpError("approval_required needs mode=draft; submit and approve the draft before delivery"), nil
+	}
 	// Resolve the post's profile_id. Order:
 	//   1. explicit `profile` / `profile_id` arg
 	//   2. unique profile_id shared by all selected accounts
@@ -2620,7 +2641,8 @@ type publishJob struct {
 	// pageCreds — JSON map of per-destination credentials populated at
 	// finalize time (e.g. Facebook's page-level access_token). Empty
 	// for platforms that reuse the user-level token for writes.
-	pageCreds string
+	pageCreds  string
+	tiktokInfo map[string]any
 }
 
 // publishPostTargets walks every pending target on a post and tries to
@@ -2721,6 +2743,10 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 				continue
 			}
 			platformPostID, platformURL, err := a.publishZernio(ctx, j)
+			var pending *providerPendingError
+			if errors.As(err, &pending) {
+				continue
+			}
 			if err != nil {
 				a.markTargetError(ctx, j.targetID, err)
 				failures++
@@ -2765,6 +2791,12 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		if err != nil {
 			var warning *publishedWarningError
 			if errors.As(err, &warning) && (platformPostID != "" || warning.operationID != "") {
+				if warning.pending {
+					_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET publish_operation_id=?,last_error=?,identity_resolve_after=datetime('now','+5 minutes') WHERE id=?`, warning.operationID, warning.Error(), j.targetID)
+					ctx.Emit("target.pending", map[string]any{"target_id": j.targetID, "platform": j.platform, "reason": warning.Error()})
+					continue
+				}
+
 				_, _ = ctx.AppDB().Exec(
 					`UPDATE post_targets
 					    SET status='published', platform_post_id=?, platform_url=?,
@@ -2814,6 +2846,7 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 }
 
 type publishedWarningError struct {
+	pending     bool
 	warning     string
 	operationID string
 }
@@ -2823,8 +2856,8 @@ func (e *publishedWarningError) Error() string { return e.warning }
 func claimPostTarget(ctx *sdk.AppCtx, targetID int64) (bool, error) {
 	res, err := ctx.AppDB().Exec(
 		`UPDATE post_targets
-		    SET status='publishing', attempts=attempts+1, last_attempt_at=CURRENT_TIMESTAMP
-		  WHERE id=? AND status='pending'`,
+		    SET status='publishing', delivery_revision=(SELECT revision FROM posts WHERE id=post_id), attempts=attempts+1, last_attempt_at=CURRENT_TIMESTAMP
+		  WHERE id=? AND status='pending' AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.status IN ('publishing','scheduled','failed','partial') AND (p.approval_required=0 OR p.approved_revision=p.revision))`,
 		targetID,
 	)
 	if err != nil {
@@ -2909,6 +2942,8 @@ func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
 // platform-side post id + URL on success, or an error to record on the
 // target row.
 func (a *App) runStrategy(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	unlock := lockSocialResource(ctx, j.connID, "delivery-connection")
+	defer unlock()
 	switch def.Strategy {
 	case "twitter":
 		return a.publishTwitter(ctx, def, j)
@@ -3126,7 +3161,7 @@ func postPinterestMultipartUpload(uploadURL string, fields map[string]any, item 
 	if err != nil {
 		return fmt.Errorf("build pinterest media GET: %w", err)
 	}
-	mediaRes, err := http.DefaultClient.Do(mediaReq)
+	mediaRes, err := mediaHTTPClient.Do(mediaReq)
 	if err != nil {
 		return fmt.Errorf("fetch pinterest video from storage: %w", err)
 	}
@@ -3157,7 +3192,7 @@ func postPinterestMultipartUpload(uploadURL string, fields map[string]any, item 
 	}
 	req.ContentLength = stat.Size()
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	res, err := http.DefaultClient.Do(req)
+	res, err := mediaHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("upload pinterest video: %w", err)
 	}
@@ -3175,6 +3210,9 @@ func postPinterestMultipartUpload(uploadURL string, fields map[string]any, item 
 // media item's MIME (Facebook splits POST /feed for photos and POST
 // /videos for video; same token, different endpoint).
 func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	if len(j.media) > 1 {
+		return "", "", errors.New("this native destination accepts one media item per post; split the post or use a provider supporting albums")
+	}
 	bodyField := def.BodyField
 	if bodyField == "" {
 		bodyField = "text"
@@ -3437,7 +3475,7 @@ func (a *App) uploadTwitterMediaChunked(ctx *sdk.AppCtx, connID int64, item medi
 	if err != nil {
 		return "", fmt.Errorf("build storage GET: %w", err)
 	}
-	getResp, err := http.DefaultClient.Do(getReq)
+	getResp, err := mediaHTTPClient.Do(getReq)
 	if err != nil {
 		return "", fmt.Errorf("fetch media bytes from storage: %w", err)
 	}
@@ -3628,7 +3666,7 @@ func readMediaURL(url string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build storage GET: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := mediaHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch media bytes from storage: %w", err)
 	}
@@ -3636,7 +3674,11 @@ func readMediaURL(url string, limit int64) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch media: storage returned %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, limit))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err == nil && int64(len(body)) > limit {
+		return nil, fmt.Errorf("media exceeds %d bytes", limit)
+	}
+	return body, err
 }
 
 // publishInstagram runs the two-step IG dance: create_media_container
@@ -3644,6 +3686,9 @@ func readMediaURL(url string, limit int64) ([]byte, error) {
 // (with the containerId returned by step 1). IG Business writes need
 // the page-level access_token same as Facebook.
 func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	if len(j.media) > 1 {
+		return "", "", errors.New("this native destination accepts one media item per post; split the post or use a provider supporting albums")
+	}
 	if len(j.media) == 0 {
 		return "", "", errors.New("instagram requires media")
 	}
@@ -3776,6 +3821,9 @@ func (a *App) instagramPermalink(ctx *sdk.AppCtx, j publishJob, mediaID, pageTok
 // watch URL. The post body is used as the title; the title field is
 // the only required snippet metadata.
 func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	if len(j.media) > 1 {
+		return "", "", errors.New("this native destination accepts one media item per post; split the post or use a provider supporting albums")
+	}
 	if len(j.media) == 0 {
 		return "", "", errors.New("youtube requires a video file")
 	}
@@ -3865,7 +3913,7 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	if err != nil {
 		return "", "", fmt.Errorf("build storage GET: %w", err)
 	}
-	getResp, err := http.DefaultClient.Do(getReq)
+	getResp, err := mediaHTTPClient.Do(getReq)
 	if err != nil {
 		return "", "", fmt.Errorf("fetch media bytes from storage: %w", err)
 	}
@@ -3984,6 +4032,11 @@ func (a *App) publishTikTok(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 	if len(j.media) == 0 {
 		return "", "", errors.New("tiktok requires media")
 	}
+	info, err := tikTokPostInfo(ctx, j)
+	if err != nil {
+		return "", "", err
+	}
+	j.tiktokInfo = info
 	first := j.media[0]
 	if first.IsImage() {
 		return a.publishTikTokPhotos(ctx, j)
@@ -4001,15 +4054,22 @@ func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string
 	if len(j.media) > 35 {
 		return "", "", fmt.Errorf("tiktok photo posts accept at most 35 images, got %d", len(j.media))
 	}
-	images := make([]string, 0, len(j.media))
 	for i, item := range j.media {
 		if !item.IsImage() {
 			return "", "", fmt.Errorf("tiktok photo posts cannot mix images with %q media at index %d", item.Mime, i)
 		}
-		if item.URL == "" {
-			return "", "", fmt.Errorf("tiktok photo %d has no public URL", i)
+	}
+	images := make([]string, 0, len(j.media))
+	for i, item := range j.media {
+		prepared, err := a.prepareTikTokPhoto(ctx, item, j.mediaProjectID)
+		if err != nil {
+			return "", "", fmt.Errorf("tiktok photo %d: %w", i, err)
 		}
-		images = append(images, item.URL)
+		proxyURL, err := a.resolveTikTokPhotoURL(ctx, prepared, j.mediaProjectID)
+		if err != nil {
+			return "", "", fmt.Errorf("tiktok photo %d: %w", i, err)
+		}
+		images = append(images, proxyURL)
 	}
 	coverIndex := 0
 	if n, ok := numericOption(j.options, "photo_cover_index"); ok {
@@ -4020,9 +4080,12 @@ func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string
 	}
 	postInfo := map[string]any{
 		"description":          j.body,
-		"privacy_level":        "PUBLIC_TO_EVERYONE",
+		"privacy_level":        j.tiktokInfo["privacy_level"],
 		"brand_content_toggle": false,
 		"brand_organic_toggle": false,
+	}
+	for k, v := range j.tiktokInfo {
+		postInfo[k] = v
 	}
 	if title := strings.TrimSpace(strOption(j.options, "title")); title != "" {
 		postInfo["title"] = title
@@ -4052,7 +4115,170 @@ func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string
 	if pubID == "" {
 		return "", "", fmt.Errorf("post_photo: missing publish_id in response: %s", string(out.Data))
 	}
+	if err := persistPublishOperation(ctx, j.targetID, pubID); err != nil {
+		return "", "", &publishedWarningError{warning: err.Error(), operationID: pubID, pending: true}
+	}
 	return a.waitTikTokPublish(ctx, j.connID, pubID)
+}
+
+const (
+	tiktokPhotoURLTTLSeconds = 2 * 60 * 60
+	tiktokPhotoMaxBytes      = 20 << 20
+	tiktokPhotoMaxPixels     = 40_000_000
+	tiktokJPEGFolder         = "/.social/tiktok-jpeg/"
+	tiktokJPEGVariant        = "tiktok-photo-jpeg-v1"
+)
+
+func isTikTokPhotoMime(mime string) bool {
+	mime = strings.ToLower(strings.TrimSpace(strings.SplitN(mime, ";", 2)[0]))
+	return mime == "image/jpeg" || mime == "image/webp"
+}
+
+// prepareTikTokPhoto preserves formats accepted by TikTok and turns every
+// other decodable image (notably PNG) into a private JPEG derivation. The
+// deterministic folder/name pair lets Storage return the existing row on
+// retries, while the leading-dot folder keeps the derivative out of Media's
+// user-facing catalog.
+func (a *App) prepareTikTokPhoto(ctx *sdk.AppCtx, item mediaItem, projectID string) (mediaItem, error) {
+	if isTikTokPhotoMime(item.Mime) {
+		return item, nil
+	}
+	if item.ID <= 0 {
+		return mediaItem{}, errors.New("storage file id is missing")
+	}
+	args := map[string]any{"id": item.ID}
+	if projectID != "" {
+		args["_project_id"] = projectID
+	}
+	var source struct {
+		ContentBase64 string `json:"content_base64"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_content", args, &source); err != nil {
+		return mediaItem{}, fmt.Errorf("read source from storage: %w", err)
+	}
+	body, err := base64.StdEncoding.DecodeString(source.ContentBase64)
+	if err != nil {
+		return mediaItem{}, fmt.Errorf("decode storage content: %w", err)
+	}
+	if len(body) == 0 {
+		return mediaItem{}, errors.New("storage returned empty image content")
+	}
+	config, _, err := image.DecodeConfig(bytes.NewReader(body))
+	if err != nil {
+		return mediaItem{}, fmt.Errorf("decode unsupported TikTok image: %w", err)
+	}
+	if config.Width <= 0 || config.Height <= 0 || int64(config.Width)*int64(config.Height) > tiktokPhotoMaxPixels {
+		return mediaItem{}, fmt.Errorf("image dimensions are too large: %dx%d", config.Width, config.Height)
+	}
+	sourceImage, _, err := image.Decode(bytes.NewReader(body))
+	if err != nil {
+		return mediaItem{}, fmt.Errorf("decode unsupported TikTok image: %w", err)
+	}
+	bounds := sourceImage.Bounds()
+	opaque := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
+	draw.Draw(opaque, opaque.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	draw.Draw(opaque, opaque.Bounds(), sourceImage, bounds.Min, draw.Over)
+	var encoded bytes.Buffer
+	if err := jpeg.Encode(&encoded, opaque, &jpeg.Options{Quality: 92}); err != nil {
+		return mediaItem{}, fmt.Errorf("encode TikTok JPEG: %w", err)
+	}
+	if encoded.Len() > tiktokPhotoMaxBytes {
+		return mediaItem{}, fmt.Errorf("converted JPEG is %d bytes; TikTok limit is %d", encoded.Len(), tiktokPhotoMaxBytes)
+	}
+	name := fmt.Sprintf("%d-%s.jpg", item.ID, tiktokJPEGVariant)
+	uploadArgs := map[string]any{
+		"name":           name,
+		"folder":         tiktokJPEGFolder,
+		"content_type":   "image/jpeg",
+		"content_base64": base64.StdEncoding.EncodeToString(encoded.Bytes()),
+		"source":         "social-tiktok-derivative",
+		"tags":           []string{"internal", "derived", "tiktok"},
+		"visibility":     "private",
+	}
+	if projectID != "" {
+		uploadArgs["_project_id"] = projectID
+	}
+	var uploaded struct {
+		ID        int64  `json:"id"`
+		Name      string `json:"name"`
+		SizeBytes int64  `json:"size_bytes"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", uploadArgs, &uploaded); err != nil {
+		return mediaItem{}, fmt.Errorf("store TikTok JPEG derivative: %w", err)
+	}
+	if uploaded.ID <= 0 {
+		return mediaItem{}, errors.New("storage returned no id for TikTok JPEG derivative")
+	}
+	if uploaded.Name == "" {
+		uploaded.Name = name
+	}
+	if uploaded.SizeBytes <= 0 {
+		uploaded.SizeBytes = int64(encoded.Len())
+	}
+	return mediaItem{ID: uploaded.ID, Mime: "image/jpeg", Name: uploaded.Name, Bytes: uploaded.SizeBytes}, nil
+}
+
+// resolveTikTokPhotoURL mints the redirect-free Storage URL required by
+// TikTok's PULL_FROM_URL flow. The generic media resolver deliberately keeps
+// its provider-neutral delivery behavior; only TikTok photos need Storage to
+// proxy the bytes instead of redirecting to its object-storage backend.
+func (a *App) resolveTikTokPhotoURL(ctx *sdk.AppCtx, item mediaItem, projectID string) (string, error) {
+	if item.ID <= 0 {
+		return "", errors.New("storage file id is missing")
+	}
+	args := map[string]any{
+		"id":          item.ID,
+		"ttl_seconds": tiktokPhotoURLTTLSeconds,
+		"delivery":    "proxy",
+		"disposition": "inline",
+	}
+	if projectID != "" {
+		args["_project_id"] = projectID
+	}
+	var signed struct {
+		URL string `json:"url"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", args, &signed); err != nil {
+		return "", fmt.Errorf("storage files_get_url(%d): %w", item.ID, err)
+	}
+	if strings.TrimSpace(signed.URL) == "" {
+		return "", fmt.Errorf("storage files_get_url(%d) returned no url", item.ID)
+	}
+	fullURL := absoluteStorageURL(signed.URL)
+	if err := preflightTikTokPhotoURL(fullURL); err != nil {
+		return "", err
+	}
+	return fullURL, nil
+}
+
+// preflightTikTokPhotoURL performs a real GET because canonical Storage URLs
+// can answer HEAD directly but redirect GET to the backend. TikTok does not
+// follow redirects for PULL_FROM_URL. A one-byte range avoids downloading the
+// whole image during validation; Storage's proxy endpoint supports ranges.
+func preflightTikTokPhotoURL(mediaURL string) error {
+	req, err := http.NewRequest(http.MethodGet, mediaURL, nil)
+	if err != nil {
+		return fmt.Errorf("build proxy URL preflight: %w", err)
+	}
+	req.Header.Set("Range", "bytes=0-0")
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("preflight proxy URL: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return fmt.Errorf("proxy URL returned redirect status %d", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return fmt.Errorf("proxy URL returned status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // publishTikTokVideo drives TikTok's video publish flow.
@@ -4078,6 +4304,9 @@ func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string
 // for callers that need it (verified-domain installs that want
 // TikTok's servers to do the fetch instead of streaming through us).
 func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	if len(j.media) > 1 {
+		return "", "", errors.New("this native destination accepts one media item per post; split the post or use a provider supporting albums")
+	}
 	if len(j.media) == 0 {
 		return "", "", errors.New("tiktok requires a video")
 	}
@@ -4126,7 +4355,10 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 	// pass the post_info / source_info shapes TikTok expects.
 	postInfo := map[string]any{
 		"title":         j.body,
-		"privacy_level": "PUBLIC_TO_EVERYONE", // sensible default; future: per-target override
+		"privacy_level": j.tiktokInfo["privacy_level"],
+	}
+	for k, v := range j.tiktokInfo {
+		postInfo[k] = v
 	}
 	if ms, ok := numericOption(j.options, "thumbnail_frame_ms"); ok && def.ThumbnailFrameField != "" {
 		postInfo[def.ThumbnailFrameField] = ms
@@ -4153,6 +4385,9 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 	if uploadURL == "" || publishID == "" {
 		return "", "", fmt.Errorf("post_video init: missing upload_url or publish_id in response: %s", string(out.Data))
 	}
+	if err := persistPublishOperation(ctx, j.targetID, publishID); err != nil {
+		return "", "", &publishedWarningError{warning: err.Error(), operationID: publishID, pending: true}
+	}
 	ctx.Logger().Info("publishTikTok: init done",
 		"publish_id", publishID, "upload_url_len", len(uploadURL))
 
@@ -4163,7 +4398,7 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 	if err != nil {
 		return "", "", fmt.Errorf("build storage GET: %w", err)
 	}
-	getResp, err := http.DefaultClient.Do(getReq)
+	getResp, err := mediaHTTPClient.Do(getReq)
 	if err != nil {
 		return "", "", fmt.Errorf("fetch media bytes from storage: %w", err)
 	}
@@ -4244,7 +4479,7 @@ func (a *App) waitTikTokPublish(ctx *sdk.AppCtx, connID int64, publishID string)
 		if err != nil {
 			message := "TikTok accepted the upload, but publish status could not be verified"
 			message += ": " + err.Error()
-			return "", "", &publishedWarningError{warning: message, operationID: publishID}
+			return "", "", &publishedWarningError{warning: message, operationID: publishID, pending: true}
 		}
 		switch status {
 		case "PUBLISH_COMPLETE":
@@ -4261,12 +4496,14 @@ func (a *App) waitTikTokPublish(ctx *sdk.AppCtx, connID int64, publishID string)
 			// Keep polling below.
 		default:
 			return "", "", &publishedWarningError{
+				pending:     true,
 				warning:     "TikTok accepted the upload, but returned unexpected publish status " + strconv.Quote(status),
 				operationID: publishID,
 			}
 		}
 		if time.Now().After(deadline) {
 			return "", "", &publishedWarningError{
+				pending:     true,
 				warning:     "TikTok accepted the upload, but it was still processing after 5 minutes",
 				operationID: publishID,
 			}
@@ -4338,12 +4575,19 @@ func (a *App) publishTikTokPullFromURL(ctx *sdk.AppCtx, def platformDef, j publi
 	input := map[string]any{
 		"post_info": map[string]any{
 			"title":         j.body,
-			"privacy_level": "PUBLIC_TO_EVERYONE",
+			"privacy_level": j.tiktokInfo["privacy_level"],
 		},
 		"source_info": map[string]any{
 			"source":    "PULL_FROM_URL",
 			"video_url": j.media[0].URL,
 		},
+	}
+	postInfo := input["post_info"].(map[string]any)
+	for k, v := range j.tiktokInfo {
+		postInfo[k] = v
+	}
+	if ms, ok := numericOption(j.options, "thumbnail_frame_ms"); ok {
+		postInfo["video_cover_timestamp_ms"] = ms
 	}
 	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
 	if err != nil {
@@ -4355,6 +4599,9 @@ func (a *App) publishTikTokPullFromURL(ctx *sdk.AppCtx, def platformDef, j publi
 	pubID := extractTikTokPublishID(out.Data)
 	if pubID == "" {
 		return "", "", fmt.Errorf("post_video: missing publish_id in response: %s", string(out.Data))
+	}
+	if err := persistPublishOperation(ctx, j.targetID, pubID); err != nil {
+		return "", "", &publishedWarningError{warning: err.Error(), operationID: pubID, pending: true}
 	}
 	return a.waitTikTokPublish(ctx, j.connID, pubID)
 }
@@ -4399,11 +4646,12 @@ func (a *App) loadPostMedia(ctx *sdk.AppCtx, postID int64) ([]int64, string) {
 // return size_bytes (older storage versions); strategies that need
 // it should error out clearly rather than guess.
 type mediaItem struct {
-	ID    int64
-	URL   string
-	Mime  string
-	Name  string
-	Bytes int64
+	Duration float64
+	ID       int64
+	URL      string
+	Mime     string
+	Name     string
+	Bytes    int64
 }
 
 // IsVideo reports whether this is a video MIME type.
@@ -4411,6 +4659,22 @@ func (m mediaItem) IsVideo() bool { return strings.HasPrefix(m.Mime, "video/") }
 
 // IsImage reports whether this is an image MIME type.
 func (m mediaItem) IsImage() bool { return strings.HasPrefix(m.Mime, "image/") }
+
+func absoluteStorageURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+		return rawURL
+	}
+	publicBase := os.Getenv("APTEVA_PUBLIC_URL")
+	if publicBase == "" {
+		publicBase = "http://127.0.0.1:5280"
+	}
+	publicBase = strings.TrimRight(publicBase, "/")
+	if strings.HasPrefix(rawURL, "/api/apps/storage/") {
+		return publicBase + rawURL
+	}
+	return publicBase + "/api/apps/storage" + rawURL
+}
 
 // resolveMedia turns storage file ids into absolute, publicly fetchable
 // URLs paired with the file's content_type. Calls storage.files_get
@@ -4421,12 +4685,6 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	publicBase := os.Getenv("APTEVA_PUBLIC_URL")
-	if publicBase == "" {
-		publicBase = "http://127.0.0.1:5280"
-	}
-	publicBase = strings.TrimRight(publicBase, "/")
-
 	out := make([]mediaItem, 0, len(ids))
 	for _, id := range ids {
 		storageArgs := map[string]any{"id": id}
@@ -4437,13 +4695,15 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		// (image → /feed; video → /videos for FB; REELS for IG).
 		var meta struct {
 			File struct {
-				ContentType string `json:"content_type"`
-				Name        string `json:"name"`
-				SizeBytes   int64  `json:"size_bytes"`
+				ContentType string  `json:"content_type"`
+				Name        string  `json:"name"`
+				SizeBytes   int64   `json:"size_bytes"`
+				Duration    float64 `json:"duration_seconds"`
 			} `json:"file"`
-			ContentType string `json:"content_type"`
-			Name        string `json:"name"`
-			SizeBytes   int64  `json:"size_bytes"`
+			ContentType string  `json:"content_type"`
+			Name        string  `json:"name"`
+			SizeBytes   int64   `json:"size_bytes"`
+			Duration    float64 `json:"duration_seconds"`
 		}
 		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", storageArgs, &meta); err != nil {
 			return nil, fmt.Errorf("storage files_get(%d): %w", id, err)
@@ -4481,14 +4741,7 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		if rel == "" {
 			return nil, fmt.Errorf("storage files_get_url(%d) returned no url", id)
 		}
-		var fullURL string
-		if strings.HasPrefix(rel, "http://") || strings.HasPrefix(rel, "https://") {
-			fullURL = rel
-		} else if strings.HasPrefix(rel, "/api/apps/storage/") {
-			fullURL = publicBase + rel
-		} else {
-			fullURL = publicBase + "/api/apps/storage" + rel
-		}
+		fullURL := absoluteStorageURL(rel)
 		ctx.Logger().Info("resolveMedia: item",
 			"id", id, "mime", mime, "is_video", strings.HasPrefix(mime, "video/"))
 		out = append(out, mediaItem{ID: id, URL: fullURL, Mime: mime, Name: name, Bytes: size})
@@ -4588,7 +4841,7 @@ func fetchYouTubeThumbnailEnvelope(url, mime string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := mediaHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -4709,6 +4962,12 @@ func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) (int
 	if err != nil {
 		return 0, fmt.Errorf("invalid schedule_at %q: %w", scheduleAt, err)
 	}
+	var projectID string
+	var generation int64
+	if err := ctx.AppDB().QueryRow(`SELECT project_id, schedule_generation FROM posts WHERE id=?`, postID).Scan(&projectID, &generation); err != nil {
+		return 0, err
+	}
+	ctx = ctx.WithProject(projectID)
 	var jr struct {
 		Job struct {
 			ID int64 `json:"id"`
@@ -4724,9 +4983,9 @@ func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) (int
 			"kind":  "app_tool",
 			"app":   "social",
 			"tool":  "post_publish_scheduled",
-			"input": map[string]any{"post_id": postID},
+			"input": map[string]any{"post_id": postID, "schedule_generation": generation},
 		},
-		"idempotency_key": fmt.Sprintf("social.post.%d", postID),
+		"idempotency_key": fmt.Sprintf("social.post.%d.%d", postID, generation),
 		"max_retries":     3,
 		"backoff_seconds": 60,
 		"owner_app":       "social",
@@ -4813,6 +5072,7 @@ func (a *App) markTargetFailure(ctx *sdk.AppCtx, targetID int64, msg string, fai
 // ─── post_list ────────────────────────────────────────────────────
 
 func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	return a.listPosts(ctx, args, 200)
 }
 
@@ -5117,10 +5377,13 @@ func (a *App) loadTargets(ctx *sdk.AppCtx, postID int64) []map[string]any {
 // ─── post_retry ───────────────────────────────────────────────────
 
 func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	postID := int64(intArg(args, "post_id", 0))
 	if postID <= 0 {
 		return nil, errors.New("post_id required")
 	}
+	unlock := lockSocialPost(ctx, postID)
+	defer unlock()
 	pid := projectScope(ctx, args)
 	var postStatus, scheduleAt string
 	var jobID int64
@@ -5136,7 +5399,9 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if postStatus == "failed" && scheduleAt != "" && jobID == 0 {
+	var attempted int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE post_id=? AND attempts>0`, postID).Scan(&attempted)
+	if postStatus == "failed" && scheduleAt != "" && jobID == 0 && attempted == 0 {
 		return a.retryFailedSchedule(ctx, pid, postID, scheduleAt)
 	}
 	res, err := ctx.AppDB().Exec(
@@ -5144,8 +5409,7 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		    SET status='pending', last_error=NULL, failure_code='',
 		        upstream_status=0, existing_post_id=''
 		  WHERE post_id=? AND (
-		        (status='failed' AND retryable=1) OR
-		        (status='publishing' AND last_attempt_at < datetime('now','-1 hour'))
+		        (status='failed' AND retryable=1)
 		      )
 		    AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`,
 		postID, pid,
@@ -5182,6 +5446,7 @@ func (a *App) runScheduledPublisher(runCtx context.Context, ctx *sdk.AppCtx) err
 	if pid == "" {
 		return nil
 	}
+	a.recoverDeliveries(ctx)
 	if err := a.resolvePendingTikTokPostIDs(runCtx, ctx, pid); err != nil {
 		ctx.Logger().Warn("resolve pending TikTok post IDs", "project", pid, "err", err)
 	}
@@ -5204,22 +5469,7 @@ func (a *App) runScheduledPublisher(runCtx context.Context, ctx *sdk.AppCtx) err
 		}
 	}
 	rows.Close()
-	for _, id := range ids {
-		if runCtx.Err() != nil {
-			return runCtx.Err()
-		}
-		res, err := ctx.AppDB().Exec(
-			`UPDATE posts SET status='publishing' WHERE id=? AND project_id=? AND status='scheduled' AND job_id=0`,
-			id, pid,
-		)
-		if err != nil {
-			return err
-		}
-		if n, _ := res.RowsAffected(); n != 1 {
-			continue
-		}
-		a.publishPostTargets(ctx, id)
-	}
+	publishDueBatch(runCtx, ids, func(id int64) { a.publishDuePost(ctx, id) })
 	return nil
 }
 
@@ -5305,6 +5555,7 @@ func (a *App) runInboxCollector(runCtx context.Context, ctx *sdk.AppCtx) error {
 // ─── post_reschedule ──────────────────────────────────────────────
 
 func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	postID := int64(intArg(args, "post_id", 0))
 	scheduleAt, _ := args["schedule_at"].(string)
 	if postID <= 0 {
@@ -5313,6 +5564,8 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if scheduleAt == "" {
 		return mcpError("schedule_at required"), nil
 	}
+	unlock := lockSocialPost(ctx, postID)
+	defer unlock()
 	pid := projectScope(ctx, args)
 	var status string
 	var jobID int64
@@ -5331,6 +5584,9 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 	rfc, err := normaliseScheduleAt(scheduleAt)
 	if err != nil {
 		return mcpError("invalid schedule_at: " + err.Error()), nil
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE posts SET schedule_at=?,schedule_generation=schedule_generation+1,job_id=0 WHERE id=? AND project_id=? AND status='scheduled'`, rfc, postID, pid); err != nil {
+		return nil, err
 	}
 	if ctx.IntegrationFor("jobs") == nil {
 		_, err = ctx.AppDB().Exec(
@@ -6137,6 +6393,7 @@ func parseInt64(s string) int64 {
 // ─── account_metrics ──────────────────────────────────────────────
 
 type accountMetricsResult struct {
+	Available       []string              `json:"available,omitempty"`
 	SocialAccountID int64                 `json:"social_account_id"`
 	ProfileID       int64                 `json:"profile_id,omitempty"`
 	Platform        string                `json:"platform"`
@@ -7045,7 +7302,7 @@ func (a *App) collectAndStoreAccountMetrics(ctx *sdk.AppCtx, pid string, account
 			"project", pid, "account", accountID, "platform", res.Platform, "err", err)
 	}
 	res.UpdatedAt, _ = latestAccountMetricsRefresh(ctx, pid, accountID)
-	if history := loadAccountMetricHistory(ctx, pid, accountID, query.RangeDays); len(history) > 0 {
+	if history := loadAccountMetricHistoryForQuery(ctx, pid, accountID, query); len(history) > 0 && len(query.Filters) == 0 {
 		if res.Insights == nil {
 			res.Insights = history
 		} else {
@@ -7057,9 +7314,7 @@ func (a *App) collectAndStoreAccountMetrics(ctx *sdk.AppCtx, pid string, account
 		}
 		res.HistorySource = "social_metric_points"
 	}
-	if stored := loadAccountBreakdowns(ctx, pid, accountID, query.period()); len(stored) > 0 {
-		res.Breakdowns = mergeAccountBreakdowns(res.Breakdowns, stored)
-	}
+
 	if res.Status != "failed" && persisted {
 		ctx.EmitWithProject("metrics.updated", pid, map[string]any{
 			"social_account_id": accountID,
@@ -7092,25 +7347,30 @@ func (a *App) storedAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64,
 		DisplayName:     displayName,
 		Capabilities:    analyticsCapabilitiesFor(platform, providerSlug),
 	}
-	out.UpdatedAt, _ = latestAccountMetricsRefresh(ctx, pid, accountID)
-	requested := requestedProviderBreakdowns(query)
-	out.Capabilities = enrichAnalyticsCapabilities(out.Capabilities, requested)
-	out.Breakdowns = unsupportedBreakdowns(out.Capabilities, requested)
-	storedBreakdowns := loadAccountBreakdowns(ctx, pid, accountID, query.period())
-	if len(storedBreakdowns) == 0 {
-		storedBreakdowns = loadLatestAccountBreakdowns(ctx, pid, accountID)
+	var raw, refreshed string
+	if err := ctx.AppDB().QueryRow(`SELECT result,refreshed_at FROM account_metric_cache WHERE project_id=? AND social_account_id=? AND query_key=?`, pid, accountID, query.cacheKey()).Scan(&raw, &refreshed); err == nil {
+		var cached accountMetricsResult
+		if json.Unmarshal([]byte(raw), &cached) == nil {
+			cached.ProfileID = profileID
+			cached.DisplayName = displayName
+			cached.UpdatedAt = refreshed
+			cached.HistorySource = "social_metric_points"
+			if len(query.Filters) == 0 {
+				if cached.Insights == nil {
+					cached.Insights = insightSeries{}
+				}
+				for name, points := range loadAccountMetricHistoryForQuery(ctx, pid, accountID, query) {
+					if len(cached.Insights[name]) == 0 {
+						cached.Insights[name] = points
+					}
+				}
+			}
+
+			return cached
+		}
 	}
-	out.Breakdowns = mergeAccountBreakdowns(out.Breakdowns, storedBreakdowns)
-	history := loadAccountMetricHistory(ctx, pid, accountID, query.RangeDays)
-	if len(history) == 0 {
-		out.Status = "unsupported"
-		out.Reason = "No stored analytics yet. A refresh will run automatically."
-		return out
-	}
-	out.Status = "ok"
-	out.HistorySource = "social_metric_points"
-	out.Insights = history
-	applyLatestAccountHistory(&out, history)
+	out.Status = "unsupported"
+	out.Reason = "No cached analytics for this exact date range and filters. Refresh to load them."
 	return out
 }
 
@@ -7167,8 +7427,13 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 			res.SocialAccountID, pid,
 		).Scan(&profileID)
 	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	source := accountMetricSource(res.Platform, "snapshot")
-	if err := insertSocialMetricPoint(ctx, pid, profileID, res.SocialAccountID, 0, 0, res.Platform, "account", "_refresh", "heartbeat", now, 1, source, "ok", ""); err != nil {
+	if err := insertSocialMetricPointDB(tx, pid, profileID, res.SocialAccountID, 0, 0, res.Platform, "account", "_refresh", "heartbeat", now, 1, source, "ok", ""); err != nil {
 		return err
 	}
 	totals := []struct {
@@ -7192,18 +7457,21 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 		{"clicks", res.Clicks},
 	}
 	for _, item := range totals {
-		if item.value <= 0 {
+		if item.value < 0 || (item.value == 0 && !accountMetricKnown(res, item.name)) {
 			continue
 		}
-		if err := insertSocialMetricPoint(ctx, pid, profileID, res.SocialAccountID, 0, 0, res.Platform, "account", item.name, "snapshot", now, item.value, source, "ok", ""); err != nil {
+		if err := insertSocialMetricPointDB(tx, pid, profileID, res.SocialAccountID, 0, 0, res.Platform, "account", item.name, query.snapshotPeriod(item.name), now, item.value, source, "ok", ""); err != nil {
 			return err
 		}
 	}
 	seriesSource := accountMetricSource(res.Platform, "series")
 	for metric, points := range res.Insights {
+		if len(query.Filters) > 0 {
+			continue
+		}
 		for _, point := range points {
 			pointTime := normaliseMetricPointTime(point.Time, now)
-			if err := insertSocialMetricPoint(ctx, pid, profileID, res.SocialAccountID, 0, 0, res.Platform, "account", metric, "day", pointTime, point.Value, seriesSource, "ok", ""); err != nil {
+			if err := insertSocialMetricPointDB(tx, pid, profileID, res.SocialAccountID, 0, 0, res.Platform, "account", metric, "day", pointTime, point.Value, seriesSource, "ok", ""); err != nil {
 				return err
 			}
 		}
@@ -7215,13 +7483,27 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 		for _, row := range breakdown.Rows {
 			for metric, value := range row.Metrics {
 				source := accountMetricSource(res.Platform, "breakdown") + ":" + breakdown.Dimension
-				if err := insertSocialMetricPointDimensions(ctx, pid, profileID, res.SocialAccountID, 0, 0, res.Platform, "account", metric, query.period(), now, value, source, "ok", "", row.Dimensions); err != nil {
+				if err := insertSocialMetricPointDimensionsDB(tx, pid, profileID, res.SocialAccountID, 0, 0, res.Platform, "account", metric, query.cacheKey(), now, value, source, "ok", "", row.Dimensions); err != nil {
 					return err
 				}
 			}
 		}
 	}
-	return nil
+	res.UpdatedAt = now
+	res.ProfileID = profileID
+	res.Raw = sanitizeRawJSON(res.Raw)
+	raw, err := json.Marshal(res)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO account_metric_cache(project_id,social_account_id,query_key,result,refreshed_at) VALUES (?,?,?,?,?) ON CONFLICT(project_id,social_account_id,query_key) DO UPDATE SET result=excluded.result,refreshed_at=excluded.refreshed_at`, pid, res.SocialAccountID, query.cacheKey(), string(raw), now); err != nil {
+		return err
+	}
+	// Query results are rebuildable cache data; preserve metric history.
+	if _, err = tx.Exec(`DELETE FROM account_metric_cache WHERE project_id=? AND social_account_id=? AND datetime(refreshed_at)<datetime('now','-90 days')`, pid, res.SocialAccountID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func persistPostMetricOutcome(ctx *sdk.AppCtx, pid string, profileID, postID int64, outcome targetMetricsOutcome) error {
@@ -7289,6 +7571,10 @@ func insertSocialMetricPoint(ctx *sdk.AppCtx, pid string, profileID, accountID, 
 }
 
 func insertSocialMetricPointDimensions(ctx *sdk.AppCtx, pid string, profileID, accountID, postID, targetID int64, platform, scope, metric, period, pointTime string, value int64, source, status, note string, dimensions map[string]string) error {
+	return insertSocialMetricPointDimensionsDB(ctx.AppDB(), pid, profileID, accountID, postID, targetID, platform, scope, metric, period, pointTime, value, source, status, note, dimensions)
+}
+
+func insertSocialMetricPointDimensionsDB(db metricDB, pid string, profileID, accountID, postID, targetID int64, platform, scope, metric, period, pointTime string, value int64, source, status, note string, dimensions map[string]string) error {
 	if pid == "" || accountID <= 0 || platform == "" || scope == "" || metric == "" || pointTime == "" {
 		return nil
 	}
@@ -7302,7 +7588,7 @@ func insertSocialMetricPointDimensions(ctx *sdk.AppCtx, pid string, profileID, a
 		status = "ok"
 	}
 	dimensionsJSON, dimensionsKey := canonicalDimensionsJSON(dimensions)
-	_, err := ctx.AppDB().Exec(
+	_, err := db.Exec(
 		`INSERT INTO social_metric_points (
 		    project_id, profile_id, social_account_id, post_id, post_target_id,
 		    platform, scope, metric, period, point_time, value, source, status, note,
@@ -7331,7 +7617,7 @@ func loadAccountMetricHistory(ctx *sdk.AppCtx, pid string, accountID int64, days
 		`SELECT metric, period, point_time, value
 		   FROM social_metric_points
 		  WHERE project_id=? AND social_account_id=? AND scope='account' AND dimensions_key=''
-		    AND status='ok' AND metric<>'_refresh' AND point_time >= ?
+		    AND status='ok' AND metric<>'_refresh' AND period IN ('snapshot','day') AND point_time >= ?
 		  ORDER BY point_time ASC, id ASC`,
 		pid, accountID, since,
 	)
@@ -7389,21 +7675,15 @@ func loadAccountBreakdowns(ctx *sdk.AppCtx, pid string, accountID int64, period 
 	if pid == "" || accountID <= 0 || period == "" {
 		return nil
 	}
-	rows, err := ctx.AppDB().Query(
-		`SELECT p.metric, p.value, p.dimensions_json, p.source
-		   FROM social_metric_points p
-		  WHERE p.project_id=? AND p.social_account_id=? AND p.scope='account'
-		    AND p.period=? AND p.dimensions_key<>'' AND p.status='ok'
-		    AND p.point_time=(
-		      SELECT MAX(newer.point_time) FROM social_metric_points newer
-		       WHERE newer.project_id=p.project_id
-		         AND newer.social_account_id=p.social_account_id
-		         AND newer.scope=p.scope AND newer.period=p.period
-		         AND newer.source=p.source AND newer.status='ok'
-		    )
-		  ORDER BY dimensions_key, metric`,
-		pid, accountID, period,
-	)
+
+	rows, err := ctx.AppDB().Query(`WITH latest AS (
+ SELECT source,MAX(point_time) AS point_time FROM social_metric_points
+ WHERE project_id=? AND social_account_id=? AND scope='account' AND period=? AND status='ok' GROUP BY source
+ ) SELECT p.metric,p.value,p.dimensions_json,p.source FROM latest
+ JOIN social_metric_points p ON p.source=latest.source AND p.point_time=latest.point_time
+ WHERE p.project_id=? AND p.social_account_id=? AND p.scope='account' AND p.period=? AND p.status='ok' AND p.dimensions_key<>''
+ ORDER BY p.dimensions_key,p.metric`, pid, accountID, period, pid, accountID, period)
+
 	if err != nil {
 		return nil
 	}
@@ -7613,6 +7893,7 @@ func scrubSensitiveURL(s string) string {
 // post's targets, dispatches each to its platform's fetcher, returns
 // the per-target outcomes.
 func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	postID := int64(intArg(args, "post_id", 0))
 	if postID <= 0 {
 		return mcpError("post_id required"), nil
@@ -7694,6 +7975,7 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 // toolAccountMetrics is the account_metrics MCP entrypoint.
 func (a *App) toolAccountMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	id := int64(intArg(args, "social_account_id", 0))
 	for _, key := range []string{"period", "range"} {
 		if value := strings.TrimSpace(toString(args[key])); value != "" {
@@ -8744,6 +9026,7 @@ type targetEditOutcome struct {
 }
 
 func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	postID := int64(intArg(args, "post_id", 0))
 	if postID <= 0 {
 		return mcpError("post_id required"), nil
@@ -8754,13 +9037,23 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return mcpError("nothing to edit — pass body and/or targets"), nil
 	}
 	pid := projectScope(ctx, args)
+	unlock := lockSocialPost(ctx, postID)
+	defer unlock()
 	var currentBody, status string
+	var approvalRequired bool
 	err := ctx.AppDB().QueryRow(
-		`SELECT body, status FROM posts WHERE id=? AND project_id=?`,
+		`SELECT body, status, approval_required FROM posts WHERE id=? AND project_id=?`,
 		postID, pid,
-	).Scan(&currentBody, &status)
+	).Scan(&currentBody, &status, &approvalRequired)
 	if err != nil {
 		return mcpError("post not found"), nil
+	}
+
+	if approvalRequired {
+		return mcpError("reviewed publications must be changed through a new draft and approval"), nil
+	}
+	if status != "published" && status != "partial" {
+		return mcpError("use post_draft_update for drafts; publishing, scheduled, and review content cannot be edited here"), nil
 	}
 
 	// Parse target-specific overrides into a map keyed by
@@ -8849,8 +9142,10 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// This keeps a typo in targets[] from partially changing posts.body.
 	if hasBody {
 		resolvedPostBody = newBody
+	}
+	{
 		if _, err := ctx.AppDB().Exec(
-			`UPDATE posts SET body=? WHERE id=? AND project_id=?`,
+			`UPDATE posts SET body=?, revision=revision+1, approved_revision=0, approval_status='not_requested', updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`,
 			resolvedPostBody, postID, pid,
 		); err != nil {
 			return nil, fmt.Errorf("update post body: %w", err)
@@ -8867,7 +9162,9 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			requested = map[string]any{}
 		}
 		if hasBody {
-			requested["body"] = resolvedPostBody
+			if _, explicit := requested["body"]; !explicit {
+				requested["body"] = resolvedPostBody
+			}
 		}
 		out := targetEditOutcome{
 			TargetID:        r.TargetID,
@@ -8896,7 +9193,7 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		// Body resolution: this target's override → existing target body
 		// → resolvedPostBody (post-level after body update).
-		if targeted {
+		if targeted || hasBody {
 			for k, v := range requested {
 				eff[k] = v
 			}
@@ -8939,6 +9236,22 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			out.Reason = "no edit verb wired for this platform yet"
 		}
 		outcomes = append(outcomes, out)
+	}
+
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var revision int64
+	if err = tx.QueryRow(`SELECT revision FROM posts WHERE id=?`, postID).Scan(&revision); err != nil {
+		return nil, err
+	}
+	if err = recordPostRevisionTx(tx, postID, revision, workflowActor(args)); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
 	}
 
 	return map[string]any{
@@ -9203,11 +9516,14 @@ type targetDeleteOutcome struct {
 }
 
 func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	postID := int64(intArg(args, "post_id", 0))
 	if postID <= 0 {
 		return mcpError("post_id required"), nil
 	}
 	forceLocal := boolArg(args, "force_local_only", false)
+	unlock := lockSocialPost(ctx, postID)
+	defer unlock()
 	pid := projectScope(ctx, args)
 	var status string
 	var jobID int64
@@ -9218,6 +9534,9 @@ func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return mcpError("post not found"), nil
 	}
+	if status == "publishing" {
+		return mcpError("publication is in flight; wait for confirmation before deleting"), nil
+	}
 	// Cancel the upstream jobs row first (best-effort — if the post
 	// already fired, jobs treats the cancel as a no-op).
 	if status == "scheduled" && jobID > 0 {
@@ -9227,8 +9546,13 @@ func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// platform_post_id. Best-effort: failures are recorded but the
 	// local rows still get removed below.
 	var outcomes []targetDeleteOutcome
-	if !forceLocal && (status == "published" || status == "partial") {
+	if !forceLocal {
 		outcomes = a.deletePostUpstream(ctx, postID)
+		for _, out := range outcomes {
+			if out.Status == "failed" {
+				return map[string]any{"status": "partial", "deleted": false, "post_id": postID, "upstream": outcomes, "error": "remote deletion incomplete; retry deletion"}, nil
+			}
+		}
 	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
@@ -9244,6 +9568,12 @@ func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		    AND COALESCE(t.provider_post_id,'')!=''`, postID,
 	); err != nil {
 		return nil, fmt.Errorf("record provider deletion: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE inbox_items SET post_id=NULL WHERE post_id=?`, postID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM social_metric_points WHERE post_id=?`, postID); err != nil {
+		return nil, err
 	}
 	if _, err := tx.Exec(`DELETE FROM post_targets WHERE post_id=?`, postID); err != nil {
 		return nil, fmt.Errorf("delete targets: %w", err)
@@ -9297,7 +9627,7 @@ func (a *App) deletePostUpstream(ctx *sdk.AppCtx, postID int64) []targetDeleteOu
 	)
 	if err != nil {
 		ctx.Logger().Warn("deletePostUpstream: query targets", "post_id", postID, "err", err)
-		return nil
+		return []targetDeleteOutcome{{Status: "failed", Error: err.Error()}}
 	}
 	defer rows.Close()
 	type row struct {
@@ -9322,6 +9652,18 @@ func (a *App) deletePostUpstream(ctx *sdk.AppCtx, postID int64) []targetDeleteOu
 		out := targetDeleteOutcome{TargetID: r.targetID, PlatformPostID: r.extPostID}
 		if r.platform.Valid {
 			out.Platform = r.platform.String
+		}
+		var deleted string
+		_ = ctx.AppDB().QueryRow(`SELECT delete_status FROM post_targets WHERE id=?`, r.targetID).Scan(&deleted)
+		if deleted == "deleted" {
+			out.Status = "deleted"
+			outcomes = append(outcomes, out)
+			continue
+		}
+		if r.provider == zernioProviderSlug && r.providerPostID != "" && r.connID.Valid {
+			out = a.deleteZernioPost(ctx, out, r.connID.Int64, r.providerPostID)
+			outcomes = append(outcomes, out)
+			continue
 		}
 		// Skip unpublished targets and orphans (account row gone).
 		if r.status != "published" || r.extPostID == "" || !r.platform.Valid || !r.connID.Valid {
@@ -9380,6 +9722,9 @@ func (a *App) deletePostUpstream(ctx *sdk.AppCtx, postID int64) []targetDeleteOu
 		ctx.Logger().Info("deletePostUpstream: deleted",
 			"platform", def.Platform, "platform_post_id", r.extPostID)
 		outcomes = append(outcomes, out)
+	}
+	for _, out := range outcomes {
+		_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET delete_status=?,delete_error=? WHERE id=?`, out.Status, out.Error, out.TargetID)
 	}
 	return outcomes
 }
@@ -9510,6 +9855,8 @@ func (a *App) handleInboxItem(w http.ResponseWriter, r *http.Request) {
 		args := projectArgsFromRequest(r)
 		args["id"] = id
 		args["with_thread"] = r.URL.Query().Get("with_thread") != "false"
+		args["thread_limit"], _ = strconv.Atoi(r.URL.Query().Get("thread_limit"))
+		args["thread_before"], _ = strconv.Atoi(r.URL.Query().Get("thread_before"))
 		out, err := a.toolInboxGet(globalCtx, args)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -9767,6 +10114,10 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "creator-info" && r.Method == http.MethodGet {
+		a.handleTikTokCreatorInfo(w, r, id)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "pages" && r.Method == http.MethodGet {
@@ -10028,6 +10379,7 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) toolPostPublishScheduled(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	postID := int64(intArg(args, "post_id", 0))
 	if postID <= 0 {
 		return map[string]any{"status": "failed", "error": "post_id required"}, nil
@@ -10036,13 +10388,27 @@ func (a *App) toolPostPublishScheduled(ctx *sdk.AppCtx, args map[string]any) (an
 	if pid == "" {
 		return map[string]any{"status": "failed", "error": "project required"}, nil
 	}
+	if generation, ok := optionalInt64Arg(args, "schedule_generation"); ok {
+		return a.publishScheduledPost(ctx, pid, postID, generation), nil
+	}
 	return a.publishScheduledPost(ctx, pid, postID), nil
 }
 
 // publishScheduledPost is shared by the brokered app_tool callback and the
 // legacy HTTP route. It is idempotent: published targets are never claimed
 // again, and a post is acknowledged only when every target was published.
-func (a *App) publishScheduledPost(ctx *sdk.AppCtx, pid string, postID int64) map[string]any {
+func (a *App) publishScheduledPost(ctx *sdk.AppCtx, pid string, postID int64, expectedGeneration ...int64) map[string]any {
+	ctx = ctx.WithProject(pid)
+	unlock := lockSocialPost(ctx, postID)
+	defer unlock()
+	var scheduleAt string
+	var generation int64
+	if err := ctx.AppDB().QueryRow(`SELECT COALESCE(schedule_at,''),schedule_generation FROM posts WHERE id=? AND project_id=?`, postID, pid).Scan(&scheduleAt, &generation); err != nil {
+		return map[string]any{"status": "failed", "error": "post not found"}
+	}
+	if (len(expectedGeneration) > 0 && expectedGeneration[0] != generation) || (scheduleAt != "" && !postScheduleDue(scheduleAt)) {
+		return map[string]any{"status": "terminal", "outcome": "obsolete", "post_id": postID}
+	}
 	var postStatus string
 	if err := ctx.AppDB().QueryRow(
 		`SELECT status FROM posts WHERE id=? AND project_id=?`,
@@ -10150,7 +10516,7 @@ func (a *App) handleJobPublishPost(w http.ResponseWriter, r *http.Request) {
 	}
 	result := a.publishScheduledPost(globalCtx, postProject, body.PostID)
 	status := toString(result["status"])
-	if status != "published" {
+	if status != "published" && status != "terminal" {
 		code := http.StatusBadGateway
 		if status == "error" && toString(result["error"]) == "publish still in progress" {
 			code = http.StatusConflict
@@ -10548,7 +10914,7 @@ func extFromContentType(ct string) string {
 	case "image/webp":
 		return ".webp"
 	case "image/svg+xml":
-		return ".svg"
+		return ""
 	}
 	return ""
 }
@@ -10559,7 +10925,7 @@ func extFromContentType(ct string) string {
 // content → same on-disk filename, second call is a near-no-op.
 //
 // Failures are logged but never bubble up — the caller stays
-// resilient and falls back to the upstream URL if cache fails.
+// resilient and omits the avatar if the safe cache fetch fails.
 func (a *App) cacheAvatar(ctx *sdk.AppCtx, upstreamURL string) string {
 	if upstreamURL == "" {
 		return ""
@@ -10569,36 +10935,38 @@ func (a *App) cacheAvatar(ctx *sdk.AppCtx, upstreamURL string) string {
 		// same connection re-runs finalize with our own URL).
 		return upstreamURL
 	}
-	cli := &http.Client{Timeout: 15 * time.Second}
-	resp, err := cli.Get(upstreamURL)
+	parsed, err := url.Parse(upstreamURL)
+	if err != nil || validateAvatarURL(parsed) != nil {
+		return ""
+	}
+	resp, err := a.avatarClientForRequest().Get(upstreamURL)
 	if err != nil {
-		ctx.Logger().Warn("avatar fetch failed", "url", upstreamURL, "err", err)
-		return upstreamURL
+		ctx.Logger().Warn("avatar fetch failed", "url", redactedMediaURL(upstreamURL), "err", err)
+		return ""
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		ctx.Logger().Warn("avatar fetch non-2xx", "url", upstreamURL, "status", resp.StatusCode)
-		return upstreamURL
+		ctx.Logger().Warn("avatar fetch non-2xx", "url", redactedMediaURL(upstreamURL), "status", resp.StatusCode)
+		return ""
 	}
 	// 2 MB cap — avatars are typically <50KB. A pathological response
-	// stops getting copied past the cap; we'll see a truncated file
-	// and the browser will drop it cleanly.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		ctx.Logger().Warn("avatar read failed", "url", upstreamURL, "err", err)
-		return upstreamURL
+	// is rejected instead of caching truncated bytes.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
+	if err != nil || len(body) > 2<<20 {
+		ctx.Logger().Warn("avatar read failed", "url", redactedMediaURL(upstreamURL), "err", err)
+		return ""
 	}
 	ext := extFromContentType(resp.Header.Get("Content-Type"))
 	if ext == "" {
-		ctx.Logger().Warn("avatar unknown content-type", "url", upstreamURL, "ct", resp.Header.Get("Content-Type"))
-		return upstreamURL
+		ctx.Logger().Warn("avatar unknown content-type", "url", redactedMediaURL(upstreamURL), "ct", resp.Header.Get("Content-Type"))
+		return ""
 	}
 	sum := sha256.Sum256(body)
 	name := hex.EncodeToString(sum[:]) + ext
 	dir := avatarsDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		ctx.Logger().Warn("avatar mkdir failed", "dir", dir, "err", err)
-		return upstreamURL
+		return ""
 	}
 	path := filepath.Join(dir, name)
 	// Skip the write if the file already exists with the right size.
@@ -10608,14 +10976,14 @@ func (a *App) cacheAvatar(ctx *sdk.AppCtx, upstreamURL string) string {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, body, 0644); err != nil {
 		ctx.Logger().Warn("avatar write failed", "path", tmp, "err", err)
-		return upstreamURL
+		return ""
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		ctx.Logger().Warn("avatar rename failed", "from", tmp, "to", path, "err", err)
 		_ = os.Remove(tmp)
-		return upstreamURL
+		return ""
 	}
-	ctx.Logger().Info("avatar cached", "url", upstreamURL, "name", name, "bytes", len(body))
+	ctx.Logger().Info("avatar cached", "url", redactedMediaURL(upstreamURL), "name", name, "bytes", len(body))
 	return "/api/apps/social/avatars/" + name
 }
 
@@ -10635,6 +11003,12 @@ func (a *App) handleAvatar(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad name", http.StatusBadRequest)
 		return
 	}
+	if strings.HasSuffix(strings.ToLower(rest), ".svg") {
+		http.Error(w, "SVG avatars are not served", http.StatusUnsupportedMediaType)
+		return
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	path := filepath.Join(avatarsDir(), rest)
 	f, err := os.Open(path)
 	if err != nil {

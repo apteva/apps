@@ -12,12 +12,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"mime"
 	"net"
@@ -40,6 +43,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	browserenvironment "github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
+	"github.com/apteva/apps/mcp/computer/internal/browser/providerhttp"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/stability"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
@@ -56,11 +60,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.86
+version: 0.7.88
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.86 adds
-  provider-neutral media embed state, terminal media waits, draft-save
-  diagnostics, and rendered-media guidance after unmatched text waits.
+  Watch, steer, and replay hosted browser sessions. v0.7.88 improves stable
+  control targeting, framework input state, tab activation, session cleanup,
+  and observation efficiency, with expanded live LLM regression coverage.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -93,9 +97,11 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name, for example {\"action\":\"open\",\"url\":\"https://example.com\"}. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. Computer ignores mechanically populated empty/default arguments and reports what it ignored. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Omitted timeout gives cloud sessions a 1800-second maximum lifetime. timeout terminates the entire cloud browser on wall-clock expiry even while it is active; omit it unless the user explicitly requested that exact provider lifetime. Never derive timeout from estimated task duration. Use computer_use timeout_ms for action waits. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
+      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name, for example {\"action\":\"open\",\"url\":\"https://example.com\"}. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. Computer ignores mechanically populated empty/default arguments and reports what it ignored. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Omitted timeout gives cloud sessions a 1800-second maximum lifetime. timeout terminates the entire cloud browser on wall-clock expiry even while it is active; omit it unless the user explicitly requested that exact provider lifetime. Never derive timeout from estimated task duration. Use computer_use timeout_ms for action waits. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a NEW reusable context requested by the user, pass context_name with auto_create_context=true. For an EXISTING saved context, omit auto_create_context entirely, including false. Unknown saved context names/ids are rejected. Omitted names for new contexts are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
-      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, semantic scroll_regions, date-field format metadata, and visible semantic calendar cells. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. expected_text guards click identity. When dangerous=true, expected_effect and an identical confirm_consequence are required and checked against the live target before dispatch; omit both for ordinary clicks. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and uses scalar verification for native single-line inputs. set_temporal accepts ISO dates for native or confidently detected masked date fields and returns requested/actual values, format, and validity diagnostics. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes."
+      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, semantic scroll_regions, date-field format metadata, and visible semantic calendar cells. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. expected_text guards click identity. When dangerous=true, expected_effect and an identical confirm_consequence are required and checked against the live target before dispatch; omit both for ordinary clicks. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and uses scalar verification for native single-line inputs. set_temporal accepts ISO dates for native or confidently detected masked date fields and returns requested/actual values, format, and validity diagnostics. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes. A click that starts a browser download may return downloads_started metadata; this does not mean the download completed. Use browser_download(action=wait), then browser_download(action=get)."
+    - name: browser_download
+      description: "List, wait for, or export files captured by an active browser session. After a click returns a dl_* id, wait for browser-confirmed completion before get. get exports the browser-captured bytes as a Core-managed blobref; it never refetches the URL and Computer never unzips or interprets the file. Actions: list, wait, get."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -299,7 +305,7 @@ var sourceURLPublicDNSHTTPClient = &http.Client{Transport: publicDNSTransport()}
 
 // session is one open browser, owned by this sidecar.
 type session struct {
-	actionMu             sync.Mutex
+	actionMu             sessionLock
 	comp                 backends.Computer
 	backend              string
 	presentation         backends.PresentationOptions
@@ -315,10 +321,26 @@ type session struct {
 	effectiveEnvironment *backends.EffectiveEnvironment
 	openedAt             time.Time
 	lastUsed             time.Time
+	lastUsedMu           sync.Mutex
 	somRevision          int
 	somPrevious          map[string]backends.SetOfMarkTarget
 	somDirty             bool
+	owner                sessionOwner
 }
+
+type sessionOwner struct {
+	ProjectID   string
+	AgentID     int64
+	ThreadID    string
+	SubjectType string
+	SubjectID   string
+}
+
+const (
+	defaultDownloadWaitMS  = 30_000
+	maximumDownloadWaitMS  = 120_000
+	maxDownloadExportBytes = int64(64 << 20)
+)
 
 const (
 	defaultCloudSessionTimeoutSeconds = 30 * 60
@@ -381,7 +403,9 @@ func (r *registry) get(id string) (*session, bool) {
 	defer r.mu.Unlock()
 	s, ok := r.m[id]
 	if ok {
+		s.lastUsedMu.Lock()
 		s.lastUsed = time.Now()
+		s.lastUsedMu.Unlock()
 	}
 	return s, ok
 }
@@ -423,7 +447,7 @@ func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 	var stale []staleEntry
 	for id, s := range r.m {
 		providerExpired := s.backend != "local" && s.timeout > 0 && !s.openedAt.IsZero() && !now.Before(s.openedAt.Add(time.Duration(s.timeout)*time.Second))
-		if s.lastUsed.Before(cutoff) || providerExpired {
+		if s.usedAt().Before(cutoff) || providerExpired {
 			stale = append(stale, staleEntry{id: id, s: s, providerExpired: providerExpired})
 			delete(r.m, id)
 		}
@@ -432,6 +456,7 @@ func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 	reaped := make([]reapedSession, 0, len(stale))
 	for _, entry := range stale {
 		s := entry.s
+		s.actionMu.Lock()
 		disp := s.comp.DisplaySize()
 		reaped = append(reaped, reapedSession{
 			ID:               entry.id,
@@ -446,12 +471,13 @@ func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 			Width:            disp.Width,
 			Height:           disp.Height,
 			OpenedAt:         s.openedAt,
-			LastUsedAt:       s.lastUsed,
-			Idle:             now.Sub(s.lastUsed),
+			LastUsedAt:       s.usedAt(),
+			Idle:             now.Sub(s.usedAt()),
 			ProviderExpired:  entry.providerExpired,
 			Proxy:            s.proxy,
 			sess:             s,
 		})
+		s.actionMu.Unlock()
 	}
 	return reaped
 }
@@ -459,7 +485,8 @@ func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 // ─── App ───────────────────────────────────────────────────────────
 
 type App struct {
-	reg *registry
+	providerCleanupMu sync.Mutex
+	reg               *registry
 }
 
 // globalCtx is the AppCtx captured at OnMount. HTTP handlers need an
@@ -482,9 +509,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.reg = &registry{m: map[string]*session{}}
 	globalCtx = ctx
+	if err := recoverLegacyProviderLeases(ctx); err != nil {
+		return fmt.Errorf("recover provider leases: %w", err)
+	}
 	interrupted, err := dbInterruptActiveSessions(ctx.AppDB(), time.Now())
 	if err != nil {
 		return fmt.Errorf("interrupt orphaned computer sessions: %w", err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE computer_provider_leases SET pending=1, terminal_status='interrupted' WHERE terminal_status<>'released'`); err != nil {
+		return err
 	}
 	go a.reaper(ctx)
 	ctx.Logger().Info("computer mounted", "tools", len(a.MCPTools()), "idle_ttl", idleTTL.String(), "interrupted_sessions", interrupted)
@@ -493,7 +526,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
 	// Best-effort close on shutdown. We don't lock for the whole sweep
-	// — we're shutting down, racing is fine.
+	// — each session is serialized with in-flight actions.
 	if a.reg == nil {
 		return nil
 	}
@@ -574,7 +607,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. " +
 				"Omitted timeout gives cloud sessions a 1800-second maximum lifetime. timeout is not a page-load, action, or task timeout: it terminates the entire cloud browser on wall-clock expiry even while the agent is active. Omit timeout unless the user explicitly requests that exact provider session lifetime. Never derive timeout from estimated task duration; a task expected to take one minute still omits timeout. Use computer_use timeout_ms for action waits. Explicit timeout accepts 60-21600 seconds. Results expose effective timeout, session started/expires/age, provider status, and browser-observed locale/timezone. " +
 				"Prefer context_id returned by computer_context_list to reopen saved browser state; context_name works across providers when unique. " +
-				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
+				"For a NEW reusable context requested by the user, pass context_name with auto_create_context=true. For an EXISTING saved context, omit auto_create_context entirely, including false. Unknown saved context names/ids are rejected. Omitted names for new contexts are auto-generated. " +
 				"Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). " +
 				"Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. " +
 				"Returns {session_id, backend_session_id, backend, current_url, active_tab_id, tabs, context_id, debug_url, width, height, view}. " +
@@ -586,7 +619,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"backend":           map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}, "description": "Optional provider override. Omit for normal browsing so Computer uses its configured default."},
 				"presentation_mode": map[string]any{"type": "string", "enum": []string{"fast", "demo"}, "description": "Opt-in recording presentation layer. fast preserves normal automation behavior (default); demo shows a non-interactive cursor/click pulse and structured-control cues on CDP backends, types short text character by character, and holds visible states. Presentation overlays never dispatch input events or replace agent actions."},
 				"url":               map[string]any{"type": "string"},
-				"context_id":        map[string]any{"type": "string", "description": "App context id preferred; legacy raw provider context ids still work."},
+				"context_id":        map[string]any{"type": "string", "description": "App-managed saved context id. Unknown ids return context_not_found. Import provider ids with computer_context_create or use the explicit provider_context_id compatibility argument."},
 				"context_name":      map[string]any{"type": "string", "description": "App-managed context name. Pass this when creating or reopening a reusable saved context."},
 				"provider_context_id": map[string]any{
 					"type": "string",
@@ -609,7 +642,8 @@ func (a *App) MCPTools() []sdk.Tool {
 					},
 				},
 			}, []string{"action"}),
-			Handler: a.toolBrowserSession,
+			Handler:    a.toolBrowserSession,
+			HandlerCtx: a.toolBrowserSessionCaller,
 		},
 		{
 			Name: "computer_use",
@@ -624,6 +658,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"For action=scroll, screenshots return semantic scroll_regions. When more than one region can scroll, pass target_id for the intended region and optionally expected_name/expected_role. Scroll reports the region that actually moved, before/after offsets, moved, wrong_target, at_start/at_end, and newly revealed controls. amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
 				"Use action=navigate with url for direct navigation, action=back for browser history, and action=reload to refresh the current page. Do not emulate these with Control+L, Alt+ArrowLeft, or F5. " +
 				"Use action=batch for a consequential click followed by wait_for so the declared external outcome is verified without risking a duplicate retry. Consequential clicks always return a lightweight SoM delta and action_dispatched/outcome_verified fields; outcome_verified remains false until an explicit wait condition proves the result. Set observation=som_delta for other compact refreshes; batch keeps observation=screenshot as its compatibility default. Semantic labels and target ids become stale after page-changing actions and must be refreshed before reuse. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
+				"Scroll regions include bounded content_hints naming controls in each panel, including below the viewport; use those hints to choose which panel to scroll. Snapshots include checked (true/false), indeterminate for mixed checkboxes, and current_value for ordinary form fields including time inputs. Use these values to verify configuration without repeating input; password values are omitted. " +
 				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), target_id? (stable SoM target or scroll region), som_revision? (stale-target guard), selector? (CSS selector), expected_text? (click identity guard), expected_effect?, confirm_consequence?, expected_name?, expected_role?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, conditions?, match?, quiet_ms?, timeout_ms?, observation?, annotate? (screenshot only, default true). " +
 				"Screenshot and wait responses include media_embed_status=loading|loaded|rejected|unknown, visible player/iframe, thumbnail/duration/configuration evidence, explicit media error text, normalized provider/source when available, and draft_save_state. They highlight a visible media block even when a requested text condition did not match. Screenshot responses also include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
@@ -678,7 +713,19 @@ func (a *App) MCPTools() []sdk.Tool {
 				"som":         map[string]any{"type": "boolean", "description": "Alias for annotate."},
 				"include_som": map[string]any{"type": "boolean", "description": "For action=screenshot. Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
 			}, []string{"session_id", "action"}),
-			Handler: a.toolComputerUse,
+			Handler:    a.toolComputerUse,
+			HandlerCtx: a.toolComputerUseCaller,
+		},
+		{
+			Name:        "browser_download",
+			Description: "List, wait for, or export files captured by an active browser session. Workflow: after computer_use clicks a download control, use action=list when the click did not return downloads_started; use action=wait with its dl_* download_id until browser-confirmed completed/failed/cancelled state; then use action=get to receive a Core-managed blobref file handle. Click success never proves download completion. get exports the browser-captured bytes and never refetches the source URL. Computer does not unzip or interpret files. Actions: list, wait, get.",
+			InputSchema: strictSchemaObject(map[string]any{
+				"action":      map[string]any{"type": "string", "enum": []string{"list", "wait", "get"}},
+				"session_id":  map[string]any{"type": "string", "description": "Active app-owned br_* browser session."},
+				"download_id": map[string]any{"type": "string", "description": "Opaque dl_* id returned by downloads_started, list, or wait. Required for wait and get."},
+				"timeout_ms":  map[string]any{"type": "integer", "minimum": 0, "maximum": maximumDownloadWaitMS, "default": defaultDownloadWaitMS, "description": "Bounded wait duration for action=wait. This does not alter browser-session lifetime."},
+			}, []string{"action", "session_id"}),
+			HandlerCtx: a.toolBrowserDownload,
 		},
 		{
 			Name:        "computer_context_create",
@@ -741,11 +788,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name:     "browser_open",
 			Exposure: sdk.ToolExposureAppOnly,
-			Description: "Compatibility alias for browser_session(action=open). For ordinary browsing pass only url or context_id/context_name; omit all advanced optional fields and never synthesize defaults. Args: backend? (local|browserbase|steel|browser-engine, default from Computer app settings), " +
+			Description: "Compatibility alias for browser_session(action=open). For existing saved contexts omit auto_create_context entirely (do not send false); missing contexts return context_not_found. For ordinary browsing pass only url or context_id/context_name; omit all advanced optional fields and never synthesize defaults. Args: backend? (local|browserbase|steel|browser-engine, default from Computer app settings), " +
 				"url? (navigate after open), context_name?, auto_create_context?, timeout?, viewport?, presentation_mode? (fast|demo, default fast). Use demo for visible, human-paced actions and non-interactive structured-control cues in live views and recordings. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
 				"Pass environment only for an explicitly requested QA/device-emulation profile; never send it for normal navigation, audits, or saved login. " +
 				"Browserbase honors timeout as max session lifetime. " +
-				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
+				"For a NEW reusable context requested by the user, pass context_name with auto_create_context=true. For an EXISTING saved context, omit auto_create_context entirely, including false. Unknown saved context names/ids are rejected. Omitted names for new contexts are auto-generated. " +
 				"Returns {session_id, backend, current_url, width, height}. " +
 				"Session owned by this sidecar until browser_close or 30-minute idle reaper.",
 			InputSchema: schemaObject(map[string]any{
@@ -1116,6 +1163,10 @@ func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, err
 			if !ok {
 				return nil, fmt.Errorf("session_not_active: app session %s is no longer active; open a new browser session with context_id or context_name instead of resuming session_id", id)
 			}
+			if err := a.lockActiveSession(id, sess); err != nil {
+				return nil, err
+			}
+			defer sess.actionMu.Unlock()
 			return decorate(a.sessionOutput(id, sess), nil)
 		}
 		return decorate(a.openBrowserSession(ctx, args, true))
@@ -1131,7 +1182,7 @@ func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, err
 			if ctx == nil || ctx.AppDB() == nil {
 				return nil, fmt.Errorf("session %s not found", id)
 			}
-			row, err := dbGetSession(ctx.AppDB(), id)
+			row, err := dbGetSessionMetadata(ctx.AppDB(), id)
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return nil, fmt.Errorf("session %s not found", id)
@@ -1140,6 +1191,10 @@ func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, err
 			}
 			return decorate(historicalSessionOutput(row), nil)
 		}
+		if err := a.lockActiveSession(id, sess); err != nil {
+			return nil, err
+		}
+		defer sess.actionMu.Unlock()
 		return decorate(a.sessionOutput(id, sess), nil)
 	case "tabs":
 		return decorate(a.toolBrowserTabs(ctx, args))
@@ -1152,6 +1207,166 @@ func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, err
 	default:
 		return nil, fmt.Errorf("unknown browser_session action %q", action)
 	}
+}
+
+func (a *App) toolBrowserSessionCaller(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	out, err := a.toolBrowserSession(app, args)
+	if err != nil || stringArg(args, "action") != "open" {
+		return out, err
+	}
+	result, ok := out.(map[string]any)
+	if !ok {
+		return out, nil
+	}
+	id, _ := result["session_id"].(string)
+	if id == "" {
+		return out, nil
+	}
+	owner, valid := sessionOwnerFromCaller(callCtx, app)
+	if !valid {
+		return out, nil
+	}
+	if sess, found := a.reg.get(id); found {
+		if a.lockActiveSession(id, sess) == nil {
+			sess.owner = owner
+			sess.actionMu.Unlock()
+		}
+	}
+	return out, nil
+}
+
+func sessionOwnerFromCaller(callCtx context.Context, app *sdk.AppCtx) (sessionOwner, bool) {
+	caller := sdk.CallerFrom(callCtx)
+	if caller == nil {
+		return sessionOwner{}, false
+	}
+	projectID := caller.ProjectID
+	if projectID == "" && app != nil {
+		projectID = app.CurrentProject()
+	}
+	owner := sessionOwner{
+		ProjectID: projectID, AgentID: caller.AgentID, ThreadID: caller.ThreadID,
+		SubjectType: caller.SubjectType, SubjectID: caller.SubjectID,
+	}
+	valid := owner.AgentID != 0 || owner.ThreadID != "" || owner.SubjectID != ""
+	return owner, valid
+}
+
+func (owner sessionOwner) matches(other sessionOwner) bool {
+	return owner.ProjectID == other.ProjectID && owner.AgentID == other.AgentID && owner.ThreadID == other.ThreadID &&
+		owner.SubjectType == other.SubjectType && owner.SubjectID == other.SubjectID
+}
+
+func (a *App) toolBrowserDownload(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	action := strings.TrimSpace(stringArg(args, "action"))
+	sessionID := strings.TrimSpace(stringArg(args, "session_id"))
+	if action == "" || sessionID == "" {
+		return nil, fmt.Errorf("invalid_download_request: action and session_id are required")
+	}
+	if action != "list" && action != "wait" && action != "get" {
+		return nil, fmt.Errorf("invalid_download_request: unsupported action %q", action)
+	}
+	owner, valid := sessionOwnerFromCaller(callCtx, app)
+	if !valid {
+		return nil, fmt.Errorf("downloads_caller_context_required")
+	}
+	sess, ok := a.reg.get(sessionID)
+	if !ok {
+		if app != nil && app.AppDB() != nil {
+			if row, err := dbGetSessionMetadata(app.AppDB(), sessionID); err == nil && row.Status != "active" {
+				return nil, fmt.Errorf("session_closed: downloads must be retrieved before closing the browser session")
+			}
+		}
+		return nil, fmt.Errorf("session_not_active")
+	}
+	if err := a.lockActiveSession(sessionID, sess); err != nil {
+		return nil, err
+	}
+	defer sess.actionMu.Unlock()
+	if !sess.owner.matches(owner) {
+		return nil, fmt.Errorf("download_not_found_or_not_owned")
+	}
+	manager, supported := sess.comp.(backends.DownloadManager)
+	if !supported {
+		return nil, fmt.Errorf("downloads_not_supported: backend=%s", sess.backend)
+	}
+	requestCtx := callCtx
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+	switch action {
+	case "list":
+		listed, err := manager.ListDownloads(requestCtx)
+		if err != nil {
+			return nil, normalizeDownloadError(err)
+		}
+		return map[string]any{"session_id": sessionID, "downloads": listed}, nil
+	case "wait":
+		downloadID := strings.TrimSpace(stringArg(args, "download_id"))
+		if downloadID == "" {
+			return nil, fmt.Errorf("invalid_download_request: download_id is required for wait")
+		}
+		timeoutMS := defaultDownloadWaitMS
+		if rawArgPresent(args, "timeout_ms") {
+			timeoutMS = intArg(args, "timeout_ms")
+		}
+		if timeoutMS < 0 || timeoutMS > maximumDownloadWaitMS {
+			return nil, fmt.Errorf("invalid_download_request: timeout_ms must be between 0 and %d", maximumDownloadWaitMS)
+		}
+		waitCtx, cancel := context.WithTimeout(requestCtx, time.Duration(timeoutMS)*time.Millisecond)
+		defer cancel()
+		download, err := manager.WaitForDownload(waitCtx, downloadID)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return map[string]any{"session_id": sessionID, "download": download, "terminal": false, "timed_out": true}, nil
+		}
+		if err != nil {
+			return nil, normalizeDownloadError(err)
+		}
+		return map[string]any{"session_id": sessionID, "download": download, "terminal": true, "timed_out": false}, nil
+	case "get":
+		downloadID := strings.TrimSpace(stringArg(args, "download_id"))
+		if downloadID == "" {
+			return nil, fmt.Errorf("invalid_download_request: download_id is required for get")
+		}
+		reader, meta, err := manager.OpenDownload(requestCtx, downloadID)
+		if err != nil {
+			return nil, normalizeDownloadError(err)
+		}
+		defer reader.Close()
+		payload, err := io.ReadAll(io.LimitReader(reader, maxDownloadExportBytes+1))
+		if err != nil {
+			return nil, fmt.Errorf("download_bytes_unavailable")
+		}
+		if int64(len(payload)) > maxDownloadExportBytes {
+			return nil, fmt.Errorf("download_size_limit_exceeded")
+		}
+		if meta.Size > 0 && meta.Size != int64(len(payload)) {
+			return nil, fmt.Errorf("download_integrity_mismatch: expected_size=%d actual_size=%d", meta.Size, len(payload))
+		}
+		sum := sha256.Sum256(payload)
+		if meta.SHA256 != "" && !strings.EqualFold(meta.SHA256, hex.EncodeToString(sum[:])) {
+			return nil, fmt.Errorf("download_integrity_mismatch: sha256")
+		}
+		mimeType := strings.TrimSpace(strings.Split(meta.MIMEType, ";")[0])
+		if mimeType == "" || mimeType == "application/octet-stream" {
+			mimeType = http.DetectContentType(payload)
+		}
+		return binaryEnvelope(payload, mimeType), nil
+	}
+	return nil, fmt.Errorf("invalid_download_request")
+}
+
+func normalizeDownloadError(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	for _, code := range []string{"session_closed", "download_not_found_or_not_owned", "download_not_ready", "download_size_limit_exceeded", "download_session_limit_exceeded", "download_bytes_unavailable", "download_identity_ambiguous"} {
+		if strings.Contains(message, code) {
+			return fmt.Errorf("%s", message)
+		}
+	}
+	return fmt.Errorf("download_provider_error")
 }
 
 func (a *App) sessionTabController(args map[string]any) (string, *session, backends.TabController, error) {
@@ -1167,14 +1382,18 @@ func (a *App) sessionTabController(args map[string]any) (string, *session, backe
 	if !ok {
 		return "", nil, nil, fmt.Errorf("backend %q does not support tabs", sess.backend)
 	}
+	if err := a.lockActiveSession(id, sess); err != nil {
+		return "", nil, nil, err
+	}
 	return id, sess, tc, nil
 }
 
 func (a *App) toolBrowserTabs(_ *sdk.AppCtx, args map[string]any) (any, error) {
-	id, _, tc, err := a.sessionTabController(args)
+	id, sess, tc, err := a.sessionTabController(args)
 	if err != nil {
 		return nil, err
 	}
+	defer sess.actionMu.Unlock()
 	tabs, err := tc.ListTabs()
 	if err != nil {
 		return nil, fmt.Errorf("tabs: %w", err)
@@ -1192,6 +1411,7 @@ func (a *App) toolBrowserSwitchTab(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
+	defer sess.actionMu.Unlock()
 	tabID := stringArg(args, "tab_id")
 	if tabID == "" {
 		return nil, fmt.Errorf("tab_id required")
@@ -1199,6 +1419,7 @@ func (a *App) toolBrowserSwitchTab(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err := tc.SwitchTab(tabID); err != nil {
 		return nil, fmt.Errorf("switch_tab: %w", err)
 	}
+	markSemanticSnapshotDirty(sess, "switch_tab")
 	a.recordSessionNavigation(ctx, id, sess)
 	payload := a.sessionEventPayload(id, sess)
 	payload["action"] = "switch_tab"
@@ -1212,6 +1433,7 @@ func (a *App) toolBrowserCloseTab(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
+	defer sess.actionMu.Unlock()
 	tabID := stringArg(args, "tab_id")
 	if tabID == "" {
 		return nil, fmt.Errorf("tab_id required")
@@ -1219,6 +1441,7 @@ func (a *App) toolBrowserCloseTab(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err := tc.CloseTab(tabID); err != nil {
 		return nil, fmt.Errorf("close_tab: %w", err)
 	}
+	markSemanticSnapshotDirty(sess, "switch_tab")
 	a.recordSessionNavigation(ctx, id, sess)
 	payload := a.sessionEventPayload(id, sess)
 	payload["action"] = "close_tab"
@@ -1260,7 +1483,10 @@ func (a *App) resolveSessionContext(ctx *sdk.AppCtx, backend string, args map[st
 
 	db := appDB(ctx)
 	if db == nil {
-		out.ProviderContextID = firstNonEmpty(rawProviderID, contextIDArg)
+		if contextName != "" || contextIDArg != "" {
+			return out, errors.New("context_store_unavailable: cannot resolve saved context")
+		}
+		out.ProviderContextID = rawProviderID
 		return out, nil
 	}
 
@@ -1321,18 +1547,24 @@ func (a *App) resolveSessionContext(ctx *sdk.AppCtx, backend string, args map[st
 		}
 	}
 	if rec != nil {
+		if explicitBackend && rec.Backend != backend {
+			return out, fmt.Errorf("context_backend_mismatch: context uses %s, requested %s", rec.Backend, backend)
+		}
 		out.AppContextID = rec.ID
 		out.ContextName = rec.Name
 		out.Backend = rec.Backend
 		out.ProviderContextID = rec.ProviderContextID
 		out.Persist = boolArgDefault(args, "persist", rec.PersistDefault)
-		if out.ProviderContextID == "" && backend == "steel" {
+		if out.ProviderContextID == "" && rec.Backend == "steel" {
 			out.CreateProviderOnOpen = true
 		}
 		return out, nil
 	}
 
-	out.ProviderContextID = firstNonEmpty(rawProviderID, contextIDArg)
+	if contextName != "" || contextIDArg != "" {
+		return out, fmt.Errorf("context_not_found: %s", firstNonEmpty(contextName, contextIDArg))
+	}
+	out.ProviderContextID = rawProviderID
 	return out, nil
 }
 
@@ -1399,7 +1631,10 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		return nil, err
 	}
 	if rc.Backend != "" {
-		backend = rc.Backend
+		backend, err = a.resolveBackend(ctx, map[string]any{"backend": rc.Backend})
+		if err != nil {
+			return nil, err
+		}
 	}
 	effectiveTimeout := effectiveSessionTimeout(backend, intArg(args, "timeout"))
 	proxyPolicy, err := a.resolveSessionProxy(ctx, args, backend, rc.AppContextID)
@@ -1515,12 +1750,16 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		_ = comp.Close()
 		return nil, errors.New("computer session history is unavailable")
 	}
+	if err := storeProviderLease(ctx, id, comp, cfg); err != nil {
+		_ = comp.Close()
+		return nil, err
+	}
 	if err := dbPutSession(ctx.AppDB(), sessionRecord(id, sess, "active", "", nil)); err != nil {
 		_ = comp.Close()
 		return nil, err
 	}
 	if err := dbAppendNavigation(ctx.AppDB(), id, currentURL(comp), activeTabTitle(comp), now); err != nil {
-		_ = comp.Close()
+		_, _ = a.finalizeSession(ctx, id, sess, "failed", "navigation_history_failed", "session.closed")
 		return nil, err
 	}
 
@@ -1538,6 +1777,8 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 			dbTouchContext(ctx.AppDB(), rc.AppContextID)
 		}
 	}
+	sess.actionMu.Lock()
+	defer sess.actionMu.Unlock()
 	a.reg.put(id, sess)
 
 	if ctx != nil {
@@ -1626,42 +1867,34 @@ func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 // state) are called outside the lock to avoid blocking other tools
 // on a slow getter.
 func (a *App) listSessions() []sessionInfo {
-	type frozen struct {
-		id                   string
-		comp                 backends.Computer
-		backend              string
-		presentation         backends.PresentationOptions
-		appContextID         string
-		contextName          string
-		persist              bool
-		timeout              int
-		providerState        backends.ProviderSessionState
-		effectiveEnvironment *backends.EffectiveEnvironment
-		proxy                SessionProxyState
-		opened               time.Time
-		used                 time.Time
-	}
 	a.reg.mu.Lock()
-	rows := make([]frozen, 0, len(a.reg.m))
+	rows := make(map[string]*session, len(a.reg.m))
 	for id, s := range a.reg.m {
-		rows = append(rows, frozen{id: id, comp: s.comp, backend: s.backend, presentation: s.presentation, appContextID: s.appContextID, contextName: s.contextName, persist: s.persist, timeout: s.timeout, providerState: s.providerState, effectiveEnvironment: s.effectiveEnvironment, proxy: s.proxy, opened: s.openedAt, used: s.lastUsed})
+		rows[id] = s
 	}
 	a.reg.mu.Unlock()
-
 	out := make([]sessionInfo, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, presentation: r.presentation, appContextID: r.appContextID, contextName: r.contextName, persist: r.persist, timeout: r.timeout, providerState: r.providerState, effectiveEnvironment: r.effectiveEnvironment, proxy: r.proxy, openedAt: r.opened, lastUsed: r.used}))
+	for id, s := range rows {
+		if a.lockActiveSession(id, s) != nil {
+			continue
+		}
+		out = append(out, a.sessionInfo(id, s))
+		s.actionMu.Unlock()
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].OpenedAt > out[j].OpenedAt })
 	return out
 }
 
 func (a *App) listUISessions(ctx *sdk.AppCtx, limit int) ([]sessionInfo, error) {
+	return a.listUISessionsPage(ctx, limit, 0)
+}
+
+func (a *App) listUISessionsPage(ctx *sdk.AppCtx, limit, offset int) ([]sessionInfo, error) {
 	active := a.listSessions()
 	if ctx == nil || ctx.AppDB() == nil {
 		return active, nil
 	}
-	history, err := dbListSessions(ctx.AppDB(), limit)
+	history, err := dbListSessionsPage(ctx.AppDB(), limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1756,7 +1989,7 @@ func (a *App) sessionInfo(id string, s *session) sessionInfo {
 		Width:                disp.Width,
 		Height:               disp.Height,
 		OpenedAt:             startedAt.UTC().Format(time.RFC3339),
-		LastUsedAt:           s.lastUsed.UTC().Format(time.RFC3339),
+		LastUsedAt:           s.usedAt().UTC().Format(time.RFC3339),
 		Proxy:                s.proxy,
 		Environment:          environmentPointer(s.environment),
 		EffectiveEnvironment: s.effectiveEnvironment,
@@ -1862,7 +2095,7 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	m := out.(map[string]any)
 	res := map[string]any{
-		"png_b64":        m["screenshot_b64"],
+		"png_b64":        pngBase64(m["screenshot"]),
 		"screenshot":     m["screenshot"],
 		"screenshot_url": sessionResourceURL(ctx, stringArg(args, "session_id"), "screenshot"),
 		"current_url":    m["current_url"],
@@ -1916,7 +2149,9 @@ func (a *App) extractSessionDOM(sessionID string, opts extractOptions) (map[stri
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", errExtractSessionNotFound, sessionID)
 	}
-	sess.actionMu.Lock()
+	if err := a.lockActiveSession(sessionID, sess); err != nil {
+		return nil, err
+	}
 	defer sess.actionMu.Unlock()
 	extractor, ok := sess.comp.(backends.DOMExtractor)
 	if !ok {
@@ -2180,6 +2415,9 @@ func jsonObjectSize(value map[string]any) int {
 }
 
 func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolComputerUseCaller(context.Background(), ctx, args)
+}
+func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := stringArg(args, "session_id")
 	if id == "" {
 		return nil, fmt.Errorf("session_id required")
@@ -2195,8 +2433,15 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"Open a new browser_session using context_id or context_name, then retry from a fresh screenshot.",
 			nil)
 	}
-	sess.actionMu.Lock()
+	requestCtx, cancelRequest := context.WithTimeout(callCtx, 2*time.Minute)
+	defer cancelRequest()
+	if err := a.lockActiveSessionCaller(requestCtx, id, sess); err != nil {
+		return nil, err
+	}
 	defer sess.actionMu.Unlock()
+	if bound, ok := sess.comp.(interface{ BindRequest(context.Context) func() }); ok {
+		defer bound.BindRequest(requestCtx)()
+	}
 	if action == "navigate" {
 		if !validToolNavigationURL(stringArg(args, "url")) {
 			return nil, computerUseFailure("invalid_navigation", id, sess, action,
@@ -2214,6 +2459,9 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			err.Error(),
 			"Call computer_use(action=\"screenshot\", som=true), then click a visible label >= 1, or pass coordinate=\"x,y\".",
 			nil)
+	}
+	if action == "wait" && (intArg(args, "duration") < 0 || intArg(args, "duration") > 30000) {
+		return nil, fmt.Errorf("duration must be milliseconds between 0 and 30000")
 	}
 	if err := validateStableArgs(action, args); err != nil {
 		return nil, computerUseFailure("invalid_wait", id, sess, action,
@@ -2257,6 +2505,9 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if err := tc.SwitchTab(tabID); err != nil {
 			return nil, fmt.Errorf("switch tab %s: %w", tabID, err)
 		}
+	}
+	if action == "select_option" && rawArgPresent(args, "value") && stringArg(args, "value") == "" {
+		args["values"] = []string{""}
 	}
 	if action == "batch" {
 		return a.toolComputerUseBatchLocked(ctx, id, sess, args)
@@ -2429,6 +2680,12 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 
 	beforeURL := currentURL(sess.comp)
+	var downloadEvents backends.DownloadEventSource
+	var downloadCursor uint64
+	if source, supported := sess.comp.(backends.DownloadEventSource); supported {
+		downloadEvents = source
+		downloadCursor = source.DownloadEventCursor()
+	}
 	beforeTabs := []backends.TabInfo(nil)
 	if action == "click" || action == "double_click" {
 		beforeTabs = tabsFor(sess.comp)
@@ -2561,8 +2818,12 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 		return nil, computerUseFailure("backend_error", id, sess, action,
 			fmt.Sprintf("browser action failed: %v", err),
-			"Take a fresh screenshot and retry once. If the session is stale, close it and reopen from context.",
+			"The input may have been dispatched. Inspect a fresh screenshot before deciding whether another input is needed.",
 			err)
+	}
+	var downloadsStarted []backends.Download
+	if downloadEvents != nil {
+		downloadsStarted = downloadEvents.DownloadsStartedSince(downloadCursor)
 	}
 	tabEvent := tabFollowResult{}
 	if len(beforeTabs) > 0 && (action == "click" || action == "double_click") {
@@ -2582,10 +2843,10 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	var observationDelta map[string]any
 	if action != "screenshot" && observation != "none" {
 		observeAnnotate := observation == "som_delta" || annotateArg(args, true)
-		observedShot, observeErr := screenshotWithOptions(sess.comp, observeAnnotate)
+		observedShot, observeErr := observeBrowser(sess.comp, observation, observeAnnotate)
 		if observeErr != nil {
 			return nil, computerUseFailure("backend_error", id, sess, action,
-				"browser action completed but semantic observation failed",
+				"browser action completed but semantic observation failed; do not repeat the input",
 				"Call computer_use(action=screenshot) to retrieve the latest browser state.", observeErr)
 		}
 		if observeAnnotate {
@@ -2671,6 +2932,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 	mergeMediaObservationPayload(payload, mediaObservation)
+	mergeDownloadsStartedPayload(payload, downloadsStarted)
 	if mediaObservationErr != nil {
 		payload["media_observation_error"] = mediaObservationErr.Error()
 	}
@@ -2696,6 +2958,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 	mergeMediaObservationPayload(out, mediaObservation)
+	mergeDownloadsStartedPayload(out, downloadsStarted)
 	if mediaObservationErr != nil {
 		out["media_observation_error"] = mediaObservationErr.Error()
 	}
@@ -2721,6 +2984,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if !scrollResult.Moved {
 			out["text"] = "Scroll was dispatched, but no scrollable region moved. The target may already be at its boundary or may be wrong."
 			out["navigation_progress"] = false
+			out["next_step"] = "This scroll revealed no new content. Inspect the existing controls; do not count reaching a boundary as new navigation progress."
 		} else if scrollResult.WrongTarget {
 			out["text"] = "Scroll moved a different region than requested; inspect scroll.actual_target_id before continuing."
 			out["navigation_progress"] = false
@@ -2809,12 +3073,7 @@ func (a *App) closeUnhealthySession(ctx *sdk.AppCtx, id string, sess *session, a
 }
 
 func canExecuteActionOnly(sess *session, action string) bool {
-	if sess == nil {
-		return false
-	}
-	switch action {
-	case "click", "double_click", "wait", "wait_for", "wait_for_stable":
-	default:
+	if sess == nil || action == "screenshot" {
 		return false
 	}
 	_, ok := sess.comp.(backends.ActionOnlyExecutor)
@@ -2837,6 +3096,12 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 	}
 	beforeURL := currentURL(sess.comp)
 	beforeTabs := tabsFor(sess.comp)
+	var downloadEvents backends.DownloadEventSource
+	var downloadCursor uint64
+	if source, supported := sess.comp.(backends.DownloadEventSource); supported {
+		downloadEvents = source
+		downloadCursor = source.DownloadEventCursor()
+	}
 	completed := make([]map[string]any, 0, len(steps))
 	completedCount := 0
 	batchTimedOut := false
@@ -2864,6 +3129,9 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 					fmt.Sprintf("step %d: scroll requires direction", index+1), "Use up, down, left, or right.", nil)
 			}
 		case "wait":
+			if duration := intArg(step, "duration"); duration < 0 || duration > 30000 {
+				return nil, fmt.Errorf("step %d: duration must be milliseconds between 0 and 30000", index+1)
+			}
 		default:
 			return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
 				fmt.Sprintf("step %d uses unsupported action %q", index+1, action), "Use click, double_click, scroll, wait, wait_for, or wait_for_stable inside a batch.", nil)
@@ -2998,7 +3266,7 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 	var delta map[string]any
 	if observation != "none" {
 		observeAnnotate := observation == "som_delta" || annotateArg(args, true)
-		shot, err = screenshotWithOptions(sess.comp, observeAnnotate)
+		shot, err = observeBrowser(sess.comp, observation, observeAnnotate)
 		if err != nil {
 			return nil, computerUseFailure("backend_error", id, sess, "batch", "batch completed but final observation failed", "Call action=screenshot to retrieve the latest frame.", err)
 		}
@@ -3044,7 +3312,14 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 	mergeNavigationDelta(out, "batch", beforeURL, afterURL, "")
 	mergeMediaObservationPayload(out, mediaObservation)
 	mergeTabFollowPayload(out, tabEvent)
-	emitEvent(ctx, "session.action", map[string]any{"session_id": id, "action": "batch", "completed_steps": completedCount, "timed_out": batchTimedOut, "current_url": afterURL})
+	var downloadsStarted []backends.Download
+	if downloadEvents != nil {
+		downloadsStarted = downloadEvents.DownloadsStartedSince(downloadCursor)
+	}
+	mergeDownloadsStartedPayload(out, downloadsStarted)
+	eventPayload := map[string]any{"session_id": id, "action": "batch", "completed_steps": completedCount, "timed_out": batchTimedOut, "current_url": afterURL}
+	mergeDownloadsStartedPayload(eventPayload, downloadsStarted)
+	emitEvent(ctx, "session.action", eventPayload)
 	return out, nil
 }
 
@@ -3083,10 +3358,11 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 			"view":       browserViewReference(id),
 		}
 		if ctx != nil && ctx.AppDB() != nil {
-			row, err := dbGetSession(ctx.AppDB(), id)
+			row, err := dbGetSessionMetadata(ctx.AppDB(), id)
 			switch {
 			case err == nil && row.Status != "active":
-				out["already_closed"] = true
+				out["already_closed"] = row.Status != "cleanup_pending"
+				out["cleanup_pending"] = row.Status == "cleanup_pending"
 				out["status"] = row.Status
 				out["recording_status"] = row.RecordingStatus
 				if usage := sessionUsageFromRow(row); usage != nil {
@@ -3169,6 +3445,26 @@ func mergeTabFollowPayload(payload map[string]any, result tabFollowResult) {
 	if result.Switched {
 		payload["switched_tab"] = true
 	}
+}
+
+func mergeDownloadsStartedPayload(payload map[string]any, started []backends.Download) {
+	if len(started) == 0 {
+		return
+	}
+	compact := make([]map[string]any, 0, len(started))
+	for _, download := range started {
+		item := map[string]any{
+			"id":       download.ID,
+			"filename": download.Filename,
+			"status":   download.Status,
+		}
+		if download.MIMEType != "" {
+			item["mime_type"] = download.MIMEType
+		}
+		compact = append(compact, item)
+	}
+	payload["downloads_started"] = compact
+	payload["download_next_step"] = "Call browser_download(action=wait) for the download id; only a completed result may be exported with action=get."
 }
 
 func mergeNavigationDelta(payload map[string]any, action, beforeURL, afterURL, requestedURL string) {
@@ -3326,7 +3622,7 @@ func refreshSemanticObservation(sess *session) (map[string]any, error) {
 	if sess == nil || sess.comp == nil {
 		return nil, errors.New("browser session is unavailable")
 	}
-	if _, err := screenshotWithOptions(sess.comp, true); err != nil {
+	if err := refreshSemantics(sess.comp); err != nil {
 		return nil, err
 	}
 	return setOfMarkDelta(sess), nil
@@ -3948,6 +4244,8 @@ func (a *App) reaper(ctx *sdk.AppCtx) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			a.reconcileProviderCleanup(ctx)
+			a.pruneSessionHistory(ctx)
 			rows := a.reapIdleSessions(ctx, idleTTL)
 			for _, row := range rows {
 				reason := "idle_timeout"
@@ -4103,6 +4401,13 @@ func (a *App) finalizeSession(ctx *sdk.AppCtx, id string, s *session, status, cl
 	if s == nil {
 		return nil, fmt.Errorf("session %s is unavailable", id)
 	}
+	a.providerCleanupMu.Lock()
+	defer a.providerCleanupMu.Unlock()
+	snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	unbind := func() {}
+	if bound, ok := s.comp.(interface{ BindRequest(context.Context) func() }); ok {
+		unbind = bound.BindRequest(snapshotCtx)
+	}
 	payload := a.sessionEventPayload(id, s)
 	active := sessionRecord(id, s, "active", "", nil)
 	if shot, err := screenshotWithOptions(s.comp, false); err == nil && len(shot) > 0 {
@@ -4111,14 +4416,25 @@ func (a *App) finalizeSession(ctx *sdk.AppCtx, id string, s *session, status, cl
 	} else if err != nil && ctx != nil {
 		ctx.Logger().Warn("final browser screenshot failed", "session_id", id, "err", err.Error())
 	}
+	snapshotCancel()
+	unbind()
 	var persistErr error
 	if ctx == nil || ctx.AppDB() == nil {
 		persistErr = errors.New("computer session history is unavailable")
 	} else {
 		persistErr = dbPutSession(ctx.AppDB(), active)
 	}
-	if err := s.comp.Close(); err != nil && ctx != nil {
-		ctx.Logger().Warn("browser_close underlying Close error", "session_id", id, "err", err.Error())
+	if ctx != nil && ctx.AppDB() != nil {
+		_, err := ctx.AppDB().Exec(`UPDATE computer_provider_leases SET pending=1,terminal_status=? WHERE session_id=?`, status, id)
+		persistErr = errors.Join(persistErr, err)
+	}
+	closeErr := s.comp.Close()
+	if closeErr != nil {
+		persistErr = errors.Join(persistErr, fmt.Errorf("cleanup_pending: %w", closeErr))
+		status = "cleanup_pending"
+	} else if ctx != nil && ctx.AppDB() != nil {
+		_, err := ctx.AppDB().Exec(`UPDATE computer_provider_leases SET pending=0,terminal_status='released' WHERE session_id=?`, id)
+		persistErr = errors.Join(persistErr, err)
 	}
 	usage, usageErr := collectSessionUsage(s.comp)
 	if usageErr != nil && ctx != nil {
@@ -4506,7 +4822,7 @@ func createBrowserbaseContext(ctx *sdk.AppCtx) (string, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-BB-API-Key", apiKey)
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := providerhttp.New(30 * time.Second).Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -4538,7 +4854,7 @@ func deleteBrowserbaseContext(ctx *sdk.AppCtx, providerID string) error {
 		return err
 	}
 	req.Header.Set("X-BB-API-Key", apiKey)
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := providerhttp.New(30 * time.Second).Do(req)
 	if err != nil {
 		return err
 	}
@@ -4574,7 +4890,7 @@ func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, 
 	case "browser-engine":
 		fields := integrationFields(ctx, "browser-engine")
 		cfg.APIKey = firstNonEmpty(fields["BROWSER_API_KEY"], fields["api_key"], fields["token"], os.Getenv("BROWSER_API_KEY"), os.Getenv("NEXT_PUBLIC_BROWSER_API_KEY"))
-		cfg.URL = firstNonEmpty(stringArg(args, "backend_url"), fields["BROWSER_API_URL"], fields["base_url"], os.Getenv("BROWSER_API_URL"))
+		cfg.URL = firstNonEmpty(fields["BROWSER_API_URL"], fields["base_url"], os.Getenv("BROWSER_API_URL"))
 		cfg.InitialURL = stringArg(args, "initial_url")
 		cfg.UserAgent = environmentOptions.UserAgent
 		cfg.ProxyEnabled = boolArgDefault(args, "proxy_enabled", false)
@@ -4583,7 +4899,7 @@ func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, 
 	case "local":
 		cfg.ProxyURL = firstNonEmpty(stringArg(args, "proxy_url"), os.Getenv("APTEVA_LOCAL_PROXY_URL"))
 	case "service":
-		cfg.URL = firstNonEmpty(stringArg(args, "backend_url"), os.Getenv("APTEVA_BROWSER_SERVICE_URL"))
+		cfg.URL = os.Getenv("APTEVA_BROWSER_SERVICE_URL")
 	}
 	return cfg
 }
@@ -4773,7 +5089,7 @@ func stringSliceArg(args map[string]any, k string) []string {
 	case []any:
 		out := make([]string, 0, len(v))
 		for _, item := range v {
-			if s := strings.TrimSpace(fmt.Sprint(item)); s != "" {
+			if s := strings.TrimSpace(fmt.Sprint(item)); s != "" || k == "values" {
 				out = append(out, s)
 			}
 		}
@@ -5053,7 +5369,7 @@ func validateSelectOptionArgs(action string, args map[string]any) error {
 		return fmt.Errorf("select_option requires label=N, selector, or coordinate=\"x,y\"")
 	}
 	if strings.TrimSpace(stringArg(args, "text")) == "" &&
-		strings.TrimSpace(stringArg(args, "value")) == "" &&
+		!rawArgPresent(args, "value") &&
 		len(stringSliceArg(args, "texts")) == 0 &&
 		len(stringSliceArg(args, "values")) == 0 {
 		return fmt.Errorf("select_option requires text/texts or value/values")
@@ -5103,7 +5419,7 @@ func validateSetTextArgs(action string, args map[string]any) error {
 	if rawArgPresent(args, "label") && intArg(args, "label") <= 0 {
 		return fmt.Errorf("label=%d is not valid; label must be a positive label from the latest screenshot", intArg(args, "label"))
 	}
-	if stringArg(args, "text") == "" && stringArg(args, "value") == "" {
+	if !rawArgPresent(args, "text") && !rawArgPresent(args, "value") {
 		return fmt.Errorf("set_text requires text")
 	}
 	mode := strings.ToLower(strings.TrimSpace(stringArg(args, "mode")))
@@ -5481,7 +5797,7 @@ func sessionUnhealthyEventPayload(id string, sess *session, action string, cause
 	payload["timeout_seconds"] = sess.timeout
 	payload["provider_expires_at"] = providerExpiresAt(sess.openedAt, sess.timeout)
 	payload["opened_at"] = sess.openedAt.UTC().Format(time.RFC3339)
-	payload["last_used_at"] = sess.lastUsed.UTC().Format(time.RFC3339)
+	payload["last_used_at"] = sess.usedAt().UTC().Format(time.RFC3339)
 	if sess.comp != nil {
 		disp := sess.comp.DisplaySize()
 		payload["width"] = disp.Width
@@ -5528,6 +5844,29 @@ func imageMIME(b []byte) string {
 		return "image/jpeg"
 	}
 	return "application/octet-stream"
+}
+
+// pngBase64 preserves the legacy PNG contract while the canonical envelope
+// retains the original format (usually JPEG).
+func pngBase64(raw any) string {
+	envelope, _ := raw.(map[string]any)
+	encoded, _ := envelope["base64"].(string)
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return ""
+	}
+	if imageMIME(data) == "image/png" {
+		return encoded
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return ""
+	}
+	var output bytes.Buffer
+	if png.Encode(&output, img) != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(output.Bytes())
 }
 
 func binaryEnvelope(b []byte, mime string) map[string]any {
@@ -5711,12 +6050,29 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.listUISessions(appCtxForRequest(r, nil), 100)
+	limit, offset := 100, 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 500 {
+			httpErr(w, 400, "limit must be between 1 and 500")
+			return
+		}
+		limit = n
+	}
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			httpErr(w, 400, "offset must be nonnegative")
+			return
+		}
+		offset = n
+	}
+	rows, err := a.listUISessionsPage(appCtxForRequest(r, nil), limit, offset)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"sessions": rows})
+	writeJSON(w, map[string]any{"sessions": rows, "limit": limit, "offset": offset, "next_offset": offset + limit})
 }
 
 func (a *App) handleOpenSession(w http.ResponseWriter, r *http.Request) {
@@ -5815,7 +6171,7 @@ func (a *App) handleComputerUse(w http.ResponseWriter, r *http.Request) {
 		body = map[string]any{}
 	}
 	body["session_id"] = id
-	out, err := a.toolComputerUse(appCtxForRequest(r, body), body)
+	out, err := a.toolComputerUseCaller(r.Context(), appCtxForRequest(r, body), body)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -5927,12 +6283,18 @@ func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 		}
 		contentType := firstNonEmpty(row.FinalScreenshotMIME, imageMIME(row.FinalScreenshot))
 		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("Cache-Control", "private, no-store")
 		_, _ = w.Write(row.FinalScreenshot)
 		return
 	}
-	sess.actionMu.Lock()
+	if err := a.lockActiveSession(rest, sess); err != nil {
+		httpErr(w, http.StatusConflict, err.Error())
+		return
+	}
 	defer sess.actionMu.Unlock()
+	if binder, ok := sess.comp.(interface{ BindRequest(context.Context) func() }); ok {
+		defer binder.BindRequest(r.Context())()
+	}
 	annotate := boolArgDefault(map[string]any{
 		"annotate": r.URL.Query().Get("annotate"),
 		"som":      r.URL.Query().Get("som"),
@@ -5962,7 +6324,10 @@ func (a *App) handleSessionPresentation(w http.ResponseWriter, r *http.Request) 
 	ctx := appCtxForRequest(r, nil)
 	var info sessionInfo
 	if sess, ok := a.reg.get(id); ok {
-		sess.actionMu.Lock()
+		if err := a.lockActiveSession(id, sess); err != nil {
+			httpErr(w, http.StatusConflict, err.Error())
+			return
+		}
 		info = a.sessionInfo(id, sess)
 		sess.actionMu.Unlock()
 	} else {
@@ -5970,7 +6335,7 @@ func (a *App) handleSessionPresentation(w http.ResponseWriter, r *http.Request) 
 			httpErr(w, http.StatusNotFound, "session not found")
 			return
 		}
-		row, err := dbGetSession(ctx.AppDB(), id)
+		row, err := dbGetSessionMetadata(ctx.AppDB(), id)
 		if err != nil {
 			httpErr(w, http.StatusNotFound, "session not found")
 			return
@@ -6013,7 +6378,10 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := appCtxForRequest(r, nil)
 	if sess, ok := a.reg.get(id); ok {
-		sess.actionMu.Lock()
+		if err := a.lockActiveSession(id, sess); err != nil {
+			httpErr(w, http.StatusConflict, err.Error())
+			return
+		}
 		liveURL := streamURL(sess.comp)
 		backend := sess.backend
 		sess.actionMu.Unlock()
@@ -6028,7 +6396,7 @@ func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "session not found")
 		return
 	}
-	row, err := dbGetSession(ctx.AppDB(), id)
+	row, err := dbGetSessionMetadata(ctx.AppDB(), id)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "session not found")
 		return
@@ -6087,3 +6455,43 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 }
 
 func main() { sdk.Run(&App{}) }
+
+func (s *session) usedAt() time.Time {
+	s.lastUsedMu.Lock()
+	defer s.lastUsedMu.Unlock()
+	return s.lastUsed
+}
+
+// Lock order: never hold the registry mutex while waiting for actionMu.
+// A queued request must revalidate membership because close removes first.
+func (a *App) lockActiveSession(id string, s *session) error {
+	return a.lockActiveSessionCaller(context.Background(), id, s)
+}
+
+func (a *App) lockActiveSessionCaller(ctx context.Context, id string, s *session) error {
+	if err := s.actionMu.LockContext(ctx); err != nil {
+		return err
+	}
+	a.reg.mu.Lock()
+	active := a.reg.m[id] == s
+	a.reg.mu.Unlock()
+	if !active {
+		s.actionMu.Unlock()
+		return fmt.Errorf("session_not_active: %s", id)
+	}
+	return nil
+}
+
+func refreshSemantics(comp backends.Computer) error {
+	if observer, ok := comp.(interface{ RefreshSemantics() error }); ok {
+		return observer.RefreshSemantics()
+	}
+	_, err := screenshotWithOptions(comp, true)
+	return err
+}
+func observeBrowser(comp backends.Computer, mode string, annotate bool) ([]byte, error) {
+	if mode == "som_delta" {
+		return nil, refreshSemantics(comp)
+	}
+	return screenshotWithOptions(comp, annotate)
+}

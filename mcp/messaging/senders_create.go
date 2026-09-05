@@ -167,7 +167,26 @@ func (a *App) toolSendersCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	return a.sendersCreateImpl(ctx, body)
 }
 
-func (a *App) sendersCreateImpl(ctx *sdk.AppCtx, req sendersCreateReq) (*sendersCreateResp, error) {
+func (a *App) sendersCreateImpl(ctx *sdk.AppCtx, req sendersCreateReq) (result *sendersCreateResp, resultErr error) {
+	defer func() {
+		if resultErr != nil || result == nil || !req.SetDefault {
+			return
+		}
+		pid := req.ProjectID
+		if pid == "" {
+			pid = os.Getenv("APTEVA_PROJECT_ID")
+		}
+		channel := req.Channel
+		if channel == "" {
+			channel = inferChannelFromAddress(req.Address)
+		}
+		if channel == "" {
+			channel = "email"
+		}
+		if err := dbSetDefaultSender(ctx.AppDB(), pid, channel, strings.ToLower(stripScheme(req.Address))); err != nil {
+			resultErr = fmt.Errorf("set default sender: %w", err)
+		}
+	}()
 	pid := req.ProjectID
 	if pid == "" {
 		pid = strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
@@ -417,6 +436,17 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	if err != nil {
 		return nil, err
 	}
+	connections := []int64{sesConnID}
+	if doInbound && s3Bound != nil {
+		connections = append(connections, s3Bound.ConnectionID)
+	}
+	if doInbound && snsBound != nil {
+		connections = append(connections, snsBound.ConnectionID)
+	}
+	region, err = validateProviderRegions(ctx, req.Region, connections...)
+	if err != nil {
+		return nil, err
+	}
 	resp.Inbound = &sendersCreateInbound{Bootstrapped: false, SkippedReason: skipReason, Region: region}
 
 	id, _ := ctx.PlatformAPI().WhoAmI()
@@ -430,7 +460,18 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	}
 	ruleSetName := req.RuleSetName
 	if ruleSetName == "" {
-		ruleSetName = "apteva-default"
+		active := ""
+		if doInbound {
+			var err error
+			active, err = activeReceiptRuleSet(ctx, sesConnID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		ruleSetName = active
+		if ruleSetName == "" {
+			ruleSetName = "apteva-default"
+		}
 	}
 	ruleName := req.RuleName
 	if ruleName == "" {
@@ -507,6 +548,9 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	resp.DkimTokens = dkimTokens
 	resp.DkimStatus = dkimStatus
 	resp.DnsRecords = dkimCNAMERecords(domain, dkimTokens)
+	if doInbound {
+		resp.DnsRecords = append(resp.DnsRecords, map[string]string{"name": domain, "type": "MX", "value": "10 inbound-smtp." + region + ".amazonaws.com"})
+	}
 	if publishSPF {
 		resp.DnsRecords = append(resp.DnsRecords, map[string]string{
 			"name":  domain,
@@ -587,16 +631,7 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 				}
 				resp.Steps = append(resp.Steps, st)
 			}
-			if doInbound {
-				st := bootstrapPublishDNSRecord(
-					ctx, pid, "dns_mx", domain, "@", "MX",
-					"10 inbound-smtp."+region+".amazonaws.com",
-				)
-				if !st.OK {
-					resp.DnsPublishPartial = true
-				}
-				resp.Steps = append(resp.Steps, st)
-			}
+
 			if publishSPF {
 				st := bootstrapPublishDNSRecord(
 					ctx, pid, "dns_spf", domain, "@", "TXT",
@@ -726,6 +761,14 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 			step.Skipped = "subscription already exists"
 		}
 		resp.Steps = append(resp.Steps, step)
+		if publishDNS && resolveDNSPublisher(ctx, domain) != "" {
+			st := bootstrapPublishDNSRecord(ctx, pid, "dns_mx", domain, "@", "MX", "10 inbound-smtp."+region+".amazonaws.com")
+			resp.Steps = append(resp.Steps, st)
+			if !st.OK {
+				resp.DnsPublishPartial = true
+				return resp, nil
+			}
+		}
 		resp.Inbound.Bootstrapped = true
 	}
 
@@ -926,11 +969,6 @@ func (a *App) persistSenderRow(ctx *sdk.AppCtx, pid string, u *senderUpsert, res
 		return
 	}
 	step := bootstrapStep{Step: "persist_local", OK: true, Detail: fmt.Sprintf("sender id=%d", id)}
-	// The req.SetDefault path is only triggered by the caller passing
-	// set_default=true; pass it down via resp.NextStep semantics — we
-	// don't have direct access to the req here, so the orchestrators
-	// already account for it before calling persistSenderRow if
-	// needed. Future: thread req through.
 	resp.Steps = append(resp.Steps, step)
 }
 
@@ -1043,7 +1081,7 @@ func (a *App) sendersCreatePhone(ctx *sdk.AppCtx, pid, channel, addr string, req
 
 	// 3. Set the SMS webhook URL on the phone number (if requested).
 	if doInbound {
-		webhookURL := publicURL + "/api/apps/messaging/webhooks/twilio-inbound?api_key=" + os.Getenv("APTEVA_APP_TOKEN")
+		webhookURL := twilioWebhookURL(ctx, "/webhooks/twilio-inbound", pid)
 		if match.SmsURL == webhookURL && strings.EqualFold(match.SmsMethod, "POST") {
 			resp.Steps = append(resp.Steps, bootstrapStep{
 				Step: "twilio_update_phone_number", OK: true,
@@ -1169,7 +1207,7 @@ func (a *App) sendersCreateWhatsApp(ctx *sdk.AppCtx, pid, addr string, req sende
 	resp.Inbound = &sendersCreateInbound{Bootstrapped: false, SkippedReason: skipReason}
 
 	if doInbound {
-		webhookURL := publicURL + "/api/apps/messaging/webhooks/twilio-inbound?api_key=" + url.QueryEscape(os.Getenv("APTEVA_APP_TOKEN"))
+		webhookURL := twilioWebhookURL(ctx, "/webhooks/twilio-inbound", pid)
 		statusWebhookURL := twilioWebhookURL(ctx, "/webhooks/twilio-status", pid)
 		webhook := map[string]any{
 			"callback_url":    webhookURL,
@@ -1486,6 +1524,29 @@ func s3BucketPolicy(bucket, accountID string) string {
 }
 
 func bootstrapSetS3BucketPolicy(ctx *sdk.AppCtx, connID int64, bucket, policy string) error {
+	existing, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_bucket_policy", map[string]any{"bucket": bucket})
+	if err != nil {
+		return err
+	}
+	var previous []byte
+	if existing == nil {
+		return errors.New("empty bucket policy response")
+	}
+	if existing.Success {
+		previous = existing.Data
+		var quoted string
+		if json.Unmarshal(previous, &quoted) == nil {
+			previous = []byte(quoted)
+		}
+	} else if existing.Status != 404 {
+		return fmt.Errorf("read bucket policy: %s", truncateResData(existing))
+	}
+	merged, err := mergeBucketPolicy(previous, []byte(policy))
+	if err != nil {
+		return err
+	}
+	policy = merged
+
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "put_bucket_policy", map[string]any{
 		"bucket": bucket,
 		"policy": policy,
@@ -1513,10 +1574,11 @@ var sesEventTypes = []string{
 }
 
 func bootstrapConfigureSESEvents(ctx *sdk.AppCtx, connID int64, topicArn string) error {
+	name := scopedSESConfigName(ctx, connID)
 	if topicArn == "" {
 		return errors.New("sns topic arn missing")
 	}
-	if err := bootstrapCreateSESConfigSet(ctx, connID, sesEventConfigurationSetName); err != nil {
+	if err := bootstrapCreateSESConfigSet(ctx, connID, name); err != nil {
 		return err
 	}
 	dest := map[string]any{
@@ -1527,7 +1589,7 @@ func bootstrapConfigureSESEvents(ctx *sdk.AppCtx, connID int64, topicArn string)
 		},
 	}
 	args := map[string]any{
-		"ConfigurationSetName": sesEventConfigurationSetName,
+		"ConfigurationSetName": name,
 		"EventDestinationName": "apteva-messaging-sns",
 		"EventDestination":     dest,
 	}
@@ -1536,7 +1598,7 @@ func bootstrapConfigureSESEvents(ctx *sdk.AppCtx, connID int64, topicArn string)
 		return fmt.Errorf("add_event_destination: %w", err)
 	}
 	if res != nil && res.Success {
-		return nil
+		return saveSESConfigName(ctx, connID, name)
 	}
 	body := ""
 	if res != nil {
@@ -1552,7 +1614,7 @@ func bootstrapConfigureSESEvents(ctx *sdk.AppCtx, connID int64, topicArn string)
 	if res == nil || !res.Success {
 		return fmt.Errorf("update_event_destination non-2xx: %s", truncateResData(res))
 	}
-	return nil
+	return saveSESConfigName(ctx, connID, name)
 }
 
 func bootstrapCreateSESConfigSet(ctx *sdk.AppCtx, connID int64, name string) error {
@@ -1600,21 +1662,8 @@ func bootstrapVerifyDomain(ctx *sdk.AppCtx, connID int64, domain string) (tokens
 			if gErr != nil {
 				return nil, "", false, false, fmt.Errorf("verify_domain reported exists but get_identity_verification failed: %w", gErr)
 			}
-			// Heal stuck adoptions: an identity imported with a broken
-			// DKIM status (TEMPORARY_FAILURE / FAILED — e.g. carried over
-			// from a prior tool's setup) won't re-probe on its own. Force
-			// a clean re-probe by delete + recreate. Easy-DKIM tokens are
-			// deterministic per (account, domain) and the caller
-			// republishes DNS afterward regardless, so existing CNAMEs
-			// keep working. On any re-probe failure we keep the adopted
-			// status rather than leaving the domain in limbo.
-			if isBrokenDkimStatus(s) {
-				if t2, s2, rErr := reprobeDomainIdentity(ctx, connID, domain); rErr == nil {
-					return t2, s2, true, true, nil
-				} else {
-					ctx.Logger().Warn("dkim re-probe failed; keeping adopted status", "domain", domain, "status", s, "err", rErr.Error())
-				}
-			}
+			// Adoption must never delete an existing identity to restart verification.
+
 			return t, s, true, false, nil
 		}
 		return nil, "", false, false, fmt.Errorf("verify_domain non-2xx: %s", truncate(body, 400))
@@ -1644,32 +1693,7 @@ func isBrokenDkimStatus(s string) bool {
 // schedule on the new identity. Tokens are deterministic per (account,
 // domain) under Easy DKIM, so the previously-published CNAMEs stay valid.
 func reprobeDomainIdentity(ctx *sdk.AppCtx, connID int64, domain string) ([]string, string, error) {
-	if _, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "delete_identity", map[string]any{
-		"EmailIdentity": domain,
-	}); err != nil {
-		return nil, "", fmt.Errorf("delete_identity: %w", err)
-	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "verify_domain", map[string]any{
-		"EmailIdentity": domain,
-	})
-	if err != nil {
-		return nil, "", fmt.Errorf("verify_domain (re-create): %w", err)
-	}
-	if res == nil || !res.Success {
-		body := ""
-		if res != nil {
-			body = string(res.Data)
-		}
-		return nil, "", fmt.Errorf("verify_domain (re-create) non-2xx: %s", truncate(body, 400))
-	}
-	var probe struct {
-		DkimAttributes struct {
-			Tokens []string `json:"Tokens"`
-			Status string   `json:"Status"`
-		} `json:"DkimAttributes"`
-	}
-	_ = json.Unmarshal(res.Data, &probe)
-	return probe.DkimAttributes.Tokens, probe.DkimAttributes.Status, nil
+	return nil, "", errors.New("destructive DKIM reprobe is disabled; repair DNS and recheck the existing identity")
 }
 
 // bootstrapClearMailFrom resets any leftover custom MAIL FROM domain on
@@ -1747,6 +1771,34 @@ func getDomainDKIM(ctx *sdk.AppCtx, connID int64, domain string) ([]string, stri
 
 func bootstrapPublishDNSRecord(ctx *sdk.AppCtx, pid, step, domain, name, recType, value string) bootstrapStep {
 	publisher := resolveDNSPublisher(ctx, domain)
+	recordID := ""
+	// DKIM labels are isolated, but SPF/DMARC/MX can belong to other services.
+	if recType == "TXT" || recType == "MX" {
+		if !isAppDepBound(ctx, "domains") {
+			return bootstrapStep{Step: step, Error: "DNS inventory unavailable; review the proposed record and configure it manually or bind Domains before changing existing mail DNS"}
+		}
+		var inventory struct {
+			Records *[]setupDNSRecord `json:"records"`
+		}
+		err := ctx.PlatformAPI().CallAppResult("domains", "domain_records_list", map[string]any{"_project_id": pid, "domain": domain, "type": recType, "name": name}, &inventory)
+		if err != nil {
+			return bootstrapStep{Step: step, Error: err.Error()}
+		}
+		if inventory.Records == nil {
+			return bootstrapStep{Step: step, Error: "invalid DNS inventory; no change applied"}
+		}
+		next, id, unchanged, err := planDNSRecord(*inventory.Records, domain, name, recType, value)
+		if err != nil {
+			return bootstrapStep{Step: step, Error: err.Error()}
+		}
+		if unchanged {
+			return bootstrapStep{Step: step, OK: true, Skipped: "existing DNS already satisfies this setting"}
+		}
+		value, recordID = next, id
+		// Use the inventory's provider and exact record identity for updates.
+		publisher = "domains"
+	}
+
 	if publisher == "platform" {
 		result, err := ctx.PlatformAPI().UpsertDNSRecord(sdk.DNSRecordRequest{
 			ProjectID: pid,
@@ -1782,6 +1834,10 @@ func bootstrapPublishDNSRecord(ctx *sdk.AppCtx, pid, step, domain, name, recType
 		"value":       value,
 		"ttl":         1800,
 	}
+	if recordID != "" {
+		args["record_id"] = recordID
+	}
+
 	var probe struct {
 		Action string `json:"action"`
 		Error  string `json:"error"`
@@ -1891,102 +1947,48 @@ func buildReceiptRuleArgs(ruleSetName, ruleName string, recipients []string, buc
 	return args
 }
 
-// mergeReceiptRuleRecipient reads the existing rule via the active
-// rule set describe call, unions in `domain`, deletes the rule, and
-// recreates it with the merged recipient list + the caller's S3
-// target. The S3 target gets overwritten by the latest caller — same
-// install always has the same bucket/topic, so this is a no-op
-// rewrite in the common case.
+// mergeReceiptRuleRecipient preserves the complete existing rule and updates in place.
 func mergeReceiptRuleRecipient(ctx *sdk.AppCtx, connID int64, ruleSetName, ruleName, domain, bucket, topicArn string) error {
-	existing, err := describeReceiptRuleRecipients(ctx, connID, ruleSetName, ruleName)
+	rule, err := readReceiptRule(ctx, connID, ruleSetName, ruleName)
 	if err != nil {
-		return fmt.Errorf("merge: describe failed: %w", err)
+		return err
 	}
-	merged := append([]string{}, existing...)
-	seen := false
-	for _, r := range merged {
-		if strings.EqualFold(strings.TrimSpace(r), strings.TrimSpace(domain)) {
-			seen = true
-			break
+	recipients, err := receiptRecipients(rule["Recipients"])
+	if err != nil {
+		return err
+	}
+	// Empty recipients means the existing rule matches all recipients; preserve that meaning.
+	if len(recipients) > 0 {
+		found := false
+		for _, r := range recipients {
+			if strings.EqualFold(r, domain) {
+				found = true
+			}
 		}
+		if !found {
+			recipients = append(recipients, domain)
+		}
+		rule["Recipients"] = recipients
 	}
-	if !seen {
-		merged = append(merged, domain)
-	}
-	// Delete the existing rule first; create_receipt_rule won't let
-	// us overwrite. Idempotent — delete on a missing rule errors but
-	// we just attempted describe, so it definitely exists.
-	if _, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "delete_receipt_rule", map[string]any{
-		"RuleSetName": ruleSetName,
-		"RuleName":    ruleName,
-	}); err != nil {
-		return fmt.Errorf("merge: delete failed: %w", err)
-	}
-	args := buildReceiptRuleArgs(ruleSetName, ruleName, merged, bucket, topicArn)
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "create_receipt_rule", args)
+	args := map[string]any{"RuleSetName": ruleSetName}
+	flattenAWSQuery(args, "Rule", rule)
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "update_receipt_rule", args)
 	if err != nil {
-		return fmt.Errorf("merge: recreate failed: %w", err)
+		return err
 	}
 	if res == nil || !res.Success {
-		body := ""
-		if res != nil {
-			body = string(res.Data)
-		}
-		return fmt.Errorf("merge: recreate non-2xx: %s", truncate(body, 400))
+		return fmt.Errorf("update receipt rule: %s", truncateResData(res))
 	}
 	return nil
 }
 
-// describeReceiptRuleRecipients reads the active rule set, finds the
-// rule by name, returns its current recipient list. Returns nil + no
-// error when the rule isn't in the set (treated as empty recipients;
-// the caller will create-from-scratch).
-//
-// SES Query API converts XML to JSON wrappers the integration runner
-// passes through. The shape is deeply nested and slightly variable:
-// single-element lists may not be wrapped in a JSON array. Best-
-// effort parsing — if we can't pull recipients out, return empty and
-// let the recreate overwrite with just the new domain (worse than a
-// merge but better than silent failure).
+// describeReceiptRuleRecipients reads the exact named rule and rejects malformed lists.
 func describeReceiptRuleRecipients(ctx *sdk.AppCtx, connID int64, ruleSetName, ruleName string) ([]string, error) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "describe_active_receipt_rule_set", map[string]any{})
+	rule, err := readReceiptRule(ctx, connID, ruleSetName, ruleName)
 	if err != nil {
-		return nil, fmt.Errorf("describe_active_receipt_rule_set: %w", err)
+		return nil, err
 	}
-	if res == nil || !res.Success {
-		body := ""
-		if res != nil {
-			body = string(res.Data)
-		}
-		return nil, fmt.Errorf("describe_active_receipt_rule_set non-2xx: %s", truncate(body, 400))
-	}
-	// Two response wrappers depending on output style; try both.
-	var env struct {
-		DescribeActiveReceiptRuleSetResponse struct {
-			DescribeActiveReceiptRuleSetResult struct {
-				Metadata struct {
-					Name string `json:"Name"`
-				} `json:"Metadata"`
-				Rules json.RawMessage `json:"Rules"`
-			} `json:"DescribeActiveReceiptRuleSetResult"`
-		} `json:"DescribeActiveReceiptRuleSetResponse"`
-		// Flatter variant some runners emit.
-		Metadata struct {
-			Name string `json:"Name"`
-		} `json:"Metadata"`
-		Rules json.RawMessage `json:"Rules"`
-	}
-	_ = json.Unmarshal(res.Data, &env)
-	if ruleSetName != "" && env.DescribeActiveReceiptRuleSetResponse.DescribeActiveReceiptRuleSetResult.Metadata.Name != "" {
-		if !strings.EqualFold(env.DescribeActiveReceiptRuleSetResponse.DescribeActiveReceiptRuleSetResult.Metadata.Name, ruleSetName) {
-			return nil, fmt.Errorf("active rule set is %q, not %q", env.DescribeActiveReceiptRuleSetResponse.DescribeActiveReceiptRuleSetResult.Metadata.Name, ruleSetName)
-		}
-	}
-	rules := env.DescribeActiveReceiptRuleSetResponse.DescribeActiveReceiptRuleSetResult.Rules
-	if len(rules) == 0 {
-		rules = env.Rules
-	}
-	return extractRecipientsForRule(rules, ruleName), nil
+	return receiptRecipients(rule["Recipients"])
 }
 
 // extractRecipientsForRule walks the Rules payload (which can be
@@ -2013,6 +2015,9 @@ func extractRecipientsForRule(raw json.RawMessage, ruleName string) []string {
 	// Try single object.
 	var single map[string]any
 	if err := json.Unmarshal(raw, &single); err == nil && len(single) > 0 {
+		if member, ok := single["member"].(map[string]any); ok {
+			single = member
+		}
 		return recipientsFromRuleList([]map[string]any{single}, ruleName)
 	}
 	return nil
@@ -2057,6 +2062,16 @@ func extractRecipientsField(raw json.RawMessage) []string {
 }
 
 func bootstrapActivateRuleSet(ctx *sdk.AppCtx, connID int64, name string) error {
+	active, err := activeReceiptRuleSet(ctx, connID)
+	if err != nil {
+		return err
+	}
+	if active == name {
+		return nil
+	}
+	if active != "" {
+		return fmt.Errorf("active receipt ruleset is %q; use it or explicitly migrate it before activating %q", active, name)
+	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "set_active_receipt_rule_set", map[string]any{
 		"RuleSetName": name,
 	})
@@ -2070,8 +2085,7 @@ func bootstrapActivateRuleSet(ctx *sdk.AppCtx, connID int64, name string) error 
 }
 
 func messagingWebhookURL(publicURL, webhookPath, projectID string, includeProjectID bool) string {
-	q := url.Values{}
-	q.Set("api_key", os.Getenv("APTEVA_APP_TOKEN"))
+	q := webhookRoutingQuery(globalCtx)
 	if includeProjectID && projectID != "" {
 		q.Set("project_id", projectID)
 	}

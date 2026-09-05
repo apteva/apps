@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 )
 
 var errNotFound = sql.ErrNoRows
+var errNodeEditConflict = errors.New("node body changed since it was read")
 
 type Book struct {
 	ID              int64               `json:"id"`
@@ -375,6 +378,34 @@ func nodeTree(nodes []*BookNode) []*BookNode {
 	return attach(0)
 }
 
+// nodeTreeForList keeps inventory reads small by excluding manuscript bodies
+// unless a caller explicitly asks for them. It clones the tree so a compact
+// response cannot mutate nodes that another operation still owns.
+func nodeTreeForList(nodes []*BookNode, includeBody bool) []*BookNode {
+	tree := nodeTree(nodes)
+	if includeBody {
+		return tree
+	}
+	var clone func(*BookNode) *BookNode
+	clone = func(node *BookNode) *BookNode {
+		copyNode := *node
+		copyNode.BodyMarkdown = ""
+		copyNode.Children = make([]*BookNode, 0, len(node.Children))
+		for _, child := range node.Children {
+			copyNode.Children = append(copyNode.Children, clone(child))
+		}
+		if len(copyNode.Children) == 0 {
+			copyNode.Children = nil
+		}
+		return &copyNode
+	}
+	out := make([]*BookNode, 0, len(tree))
+	for _, node := range tree {
+		out = append(out, clone(node))
+	}
+	return out
+}
+
 func getNode(db *sql.DB, id int64) (*BookNode, error) {
 	n, err := scanNode(db.QueryRow(`
 		SELECT id, book_id, parent_id, type, title, body_markdown, summary, position, status,
@@ -468,6 +499,93 @@ func updateNode(db *sql.DB, id int64, fields map[string]any) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+type NodeBodyEditResult struct {
+	ID              int64  `json:"id"`
+	Operation       string `json:"operation"`
+	ActualWordCount int    `json:"actual_word_count"`
+	BodySHA256      string `json:"body_sha256"`
+	UpdatedAt       string `json:"updated_at"`
+}
+
+func nodeBodySHA256(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
+}
+
+// editNodeBody applies a bounded edit without asking the caller to resubmit the
+// whole manuscript node. Every successful edit snapshots the previous body and
+// can be guarded by the checksum returned from the preceding read or edit.
+func editNodeBody(db *sql.DB, id int64, operation, content, match, expectedSHA256, changeSummary string) (*NodeBodyEditResult, error) {
+	operation = strings.ToLower(strings.TrimSpace(operation))
+	if id <= 0 {
+		return nil, errors.New("id required")
+	}
+	if operation != "append" && operation != "prepend" && operation != "replace" {
+		return nil, errors.New("operation must be append, prepend, or replace")
+	}
+	if content == "" && operation != "replace" {
+		return nil, errors.New("content required")
+	}
+	if operation == "replace" && match == "" {
+		return nil, errors.New("match required for replace")
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	old, err := getNodeTx(tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if old == nil {
+		return nil, errNotFound
+	}
+	oldSHA256 := nodeBodySHA256(old.BodyMarkdown)
+	if expected := strings.ToLower(strings.TrimSpace(expectedSHA256)); expected != "" && expected != oldSHA256 {
+		return nil, fmt.Errorf("%w: expected %s, found %s", errNodeEditConflict, expected, oldSHA256)
+	}
+
+	nextBody := old.BodyMarkdown
+	switch operation {
+	case "append":
+		nextBody += content
+	case "prepend":
+		nextBody = content + nextBody
+	case "replace":
+		occurrences := strings.Count(nextBody, match)
+		if occurrences != 1 {
+			return nil, fmt.Errorf("replace match must occur exactly once; found %d occurrences", occurrences)
+		}
+		nextBody = strings.Replace(nextBody, match, content, 1)
+	}
+	if nextBody == old.BodyMarkdown {
+		return nil, errors.New("body edit made no change")
+	}
+	if err := insertRevisionTx(tx, old, changeSummary); err != nil {
+		return nil, err
+	}
+	updatedAt := now()
+	actualWordCount := wordCount(nextBody)
+	if _, err := tx.Exec(`
+		UPDATE book_nodes
+		SET body_markdown = ?, actual_word_count = ?, updated_at = ?
+		WHERE id = ?`, nextBody, actualWordCount, updatedAt, id); err != nil {
+		return nil, err
+	}
+	if err := touchBookTx(tx, old.BookID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &NodeBodyEditResult{
+		ID: id, Operation: operation, ActualWordCount: actualWordCount,
+		BodySHA256: nodeBodySHA256(nextBody), UpdatedAt: updatedAt,
+	}, nil
 }
 
 func getNodeTx(tx *sql.Tx, id int64) (*BookNode, error) {

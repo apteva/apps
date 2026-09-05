@@ -6,6 +6,7 @@ package main
 // inline beyond the pre-trade checks in toolOrderPlace.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -37,9 +38,27 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"name"}),
 			Handler: a.toolPortfolioCreate},
 
+		{Name: "portfolio_broker_bind", Description: "Confirm a legacy portfolio's broker connection without redirecting an existing binding. Leaves live execution disarmed.", InputSchema: schemaObject(map[string]any{"portfolio_id": map[string]any{"type": "integer"}, "connection_id": map[string]any{"type": "integer"}, "confirmation": map[string]any{"type": "string"}}, []string{"portfolio_id", "connection_id", "confirmation"}), Handler: a.toolPortfolioBrokerBind},
 		{Name: "brokers_list", Description: "List broker adapters registered in this build and their currently-bound connections. Use before portfolio_create with mode=live to pick a broker_slug.",
 			InputSchema: schemaObject(nil, nil),
 			Handler:     a.toolBrokersList},
+
+		{Name: "venue_profiles_list", Description: "List effective generic execution profiles: fees, spread/slippage, sessions, funding, minimums, precision, and venue health.",
+			InputSchema: schemaObject(map[string]any{"venue_slug": map[string]any{"type": "string"}, "asset_class": map[string]any{"type": "string"}}, nil),
+			Handler:     a.toolVenueProfilesList},
+
+		{Name: "venue_profile_update", Description: "Create or update a venue-wide or symbol-specific execution profile used by paper and live pre-trade checks.",
+			InputSchema: schemaObject(map[string]any{
+				"venue_slug": map[string]any{"type": "string"}, "asset_class": map[string]any{"type": "string"}, "symbol": map[string]any{"type": "string"},
+				"status":   map[string]any{"type": "string", "enum": []string{"active", "degraded", "maintenance", "outage"}},
+				"calendar": map[string]any{"type": "string"}, "session_policy": map[string]any{"type": "string", "enum": []string{"continuous", "regular_only", "venue_managed"}},
+				"maker_fee_bps": map[string]any{"type": "number"}, "taker_fee_bps": map[string]any{"type": "number"}, "fee_currency": map[string]any{"type": "string"},
+				"spread_model": map[string]any{"type": "string", "enum": []string{"quote", "fixed_bps", "none"}}, "fallback_spread_bps": map[string]any{"type": "number"},
+				"slippage_model": map[string]any{"type": "string", "enum": []string{"fixed_bps", "none"}}, "slippage_bps": map[string]any{"type": "number"},
+				"min_qty": map[string]any{"type": "number"}, "min_notional": map[string]any{"type": "number"}, "qty_step": map[string]any{"type": "number"}, "price_tick": map[string]any{"type": "number"},
+				"funding_rate_bps": map[string]any{"type": "number"}, "funding_interval_hours": map[string]any{"type": "integer"},
+				"supports_post_only": map[string]any{"type": "boolean"}, "supports_reduce_only": map[string]any{"type": "boolean"},
+			}, []string{"venue_slug", "asset_class"}), Handler: a.toolVenueProfileUpdate},
 
 		// ─── Reads ────────────────────────────────────────────────
 		{Name: "portfolio_list", Description: "List portfolios visible in this project.",
@@ -70,6 +89,22 @@ func (a *App) MCPTools() []sdk.Tool {
 				"max_gross_exposure_pct": map[string]any{"type": "number"},
 				"max_order_pct":          map[string]any{"type": "number"},
 			}, []string{"portfolio_id", "risk_level"}), Handler: a.toolPortfolioRiskUpdate},
+
+		{Name: "portfolio_universe_get", Description: "Get the portfolio's enforced tradable universe policy and allowed asset classes.",
+			InputSchema: schemaObject(map[string]any{
+				"portfolio_id": map[string]any{"type": "integer"},
+			}, []string{"portfolio_id"}), Handler: a.toolPortfolioUniverseGet},
+
+		{Name: "portfolio_universe_update", Description: "Set a hard portfolio universe using all allowed classes, a symbol allowlist, or a dated reference universe.",
+			InputSchema: schemaObject(map[string]any{
+				"portfolio_id":           map[string]any{"type": "integer"},
+				"selection_mode":         map[string]any{"type": "string", "enum": []string{"all_allowed_classes", "symbol_allowlist", "reference_universe"}},
+				"include_symbols":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"exclude_symbols":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"reference_universe_id":  map[string]any{"type": "string"},
+				"require_active_listing": map[string]any{"type": "boolean"},
+				"enforcement_enabled":    map[string]any{"type": "boolean"},
+			}, []string{"portfolio_id"}), Handler: a.toolPortfolioUniverseUpdate},
 
 		{Name: "portfolio_objective_create", Description: "Create a native Trading percentage objective for portfolio, day, period, or drawdown performance.",
 			InputSchema: schemaObject(map[string]any{
@@ -164,21 +199,40 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"portfolio_id"}),
 			Handler: a.toolJournalRead},
 
+		{Name: "execution_costs_list", Description: "List attributed fee, spread, slippage, funding, and rebate entries for a portfolio.",
+			InputSchema: schemaObject(map[string]any{"portfolio_id": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"}}, []string{"portfolio_id"}),
+			Handler:     a.toolExecutionCostsList},
+
 		// ─── Writes ───────────────────────────────────────────────
 		{Name: "order_place", Description: "Place a paper order. Required rationale ≥ 30 chars; subject to mandate + size cap + daily-loss halt.",
 			InputSchema: schemaObject(map[string]any{
-				"portfolio_id": map[string]any{"type": "integer"},
-				"symbol":       map[string]any{"type": "string"},
-				"side":         map[string]any{"type": "string", "enum": []string{"buy", "sell", "yes", "no"}},
-				"outcome":      map[string]any{"type": "string", "enum": []string{"yes", "no"}, "description": "Polymarket outcome. Required when side=sell; inferred for side=yes|no."},
-				"type":         map[string]any{"type": "string", "enum": []string{"market", "limit", "stop"}},
-				"qty":          map[string]any{"type": "number"},
-				"limit_price":  map[string]any{"type": "number"},
-				"stop_price":   map[string]any{"type": "number"},
-				"tif":          map[string]any{"type": "string"},
-				"rationale":    map[string]any{"type": "string"},
+				"idempotency_key": map[string]any{"type": "string", "description": "Stable unique key for retrying this exact order intent"},
+				"portfolio_id":    map[string]any{"type": "integer"},
+				"symbol":          map[string]any{"type": "string"},
+				"side":            map[string]any{"type": "string", "enum": []string{"buy", "sell", "yes", "no"}},
+				"outcome":         map[string]any{"type": "string", "enum": []string{"yes", "no"}, "description": "Polymarket outcome. Required when side=sell; inferred for side=yes|no."},
+				"type":            map[string]any{"type": "string", "enum": []string{"market", "limit", "stop"}},
+				"qty":             map[string]any{"type": "number"},
+				"limit_price":     map[string]any{"type": "number"},
+				"stop_price":      map[string]any{"type": "number"},
+				"tif":             map[string]any{"type": "string"},
+				"rationale":       map[string]any{"type": "string"},
 			}, []string{"portfolio_id", "symbol", "side", "type", "qty", "rationale"}),
-			Handler: a.toolOrderPlace},
+			HandlerCtx: func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+				copy := map[string]any{}
+				for k, v := range args {
+					copy[k] = v
+				}
+				if caller := sdk.CallerFrom(call); caller != nil {
+					if caller.ProjectID != "" {
+						copy["_project_id"] = caller.ProjectID
+					}
+					if strArg(copy, "idempotency_key") == "" && caller.ToolCallID != "" {
+						copy["idempotency_key"] = "mcp:" + caller.ToolCallID
+					}
+				}
+				return a.toolOrderPlace(ctx, copy)
+			}},
 
 		{Name: "order_cancel", Description: "Cancel a working order. No-op on already-resolved orders.",
 			InputSchema: schemaObject(map[string]any{
@@ -195,6 +249,13 @@ func (a *App) MCPTools() []sdk.Tool {
 				"metadata":     map[string]any{"type": "object"},
 			}, []string{"portfolio_id", "kind", "body"}),
 			Handler: a.toolJournalWrite},
+
+		{Name: "funding_payment_record", Description: "Idempotently record a signed funding payment from a venue feed. Positive amount is paid; negative amount is received.",
+			InputSchema: schemaObject(map[string]any{
+				"portfolio_id": map[string]any{"type": "integer"}, "symbol": map[string]any{"type": "string"}, "venue_slug": map[string]any{"type": "string"},
+				"provider_event_id": map[string]any{"type": "string"}, "amount": map[string]any{"type": "number"}, "currency": map[string]any{"type": "string"},
+				"rate_bps": map[string]any{"type": "number"}, "occurred_at": map[string]any{"type": "string"}, "metadata": map[string]any{"type": "object"},
+			}, []string{"portfolio_id", "symbol", "provider_event_id", "amount"}), Handler: a.toolFundingPaymentRecord},
 
 		{Name: "watchlist_add", Description: "Track a symbol on a portfolio.",
 			InputSchema: schemaObject(map[string]any{
@@ -321,14 +382,45 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"portfolio_id", "strategy_id"}),
 			Handler: a.toolStrategyValidateBacktest},
 
-		{Name: "backtest_market_step", Description: "Internal runner tool: load replay prices into an isolated backtest environment.",
+		{Name: "strategy_scorecard_get", Description: "Get a portfolio strategy's scorecard policy, promotion stage, and durable evaluation history.",
+			InputSchema: schemaObject(map[string]any{
+				"portfolio_id": map[string]any{"type": "integer"}, "strategy_id": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"},
+			}, []string{"portfolio_id", "strategy_id"}), Handler: a.toolStrategyScorecardGet},
+
+		{Name: "strategy_scorecard_update", Description: "Configure generic metric thresholds and enforcement for a portfolio strategy scorecard.",
+			InputSchema: schemaObject(map[string]any{
+				"portfolio_id": map[string]any{"type": "integer"}, "strategy_id": map[string]any{"type": "integer"},
+				"criteria":           map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"min_completed_runs": map[string]any{"type": "integer"}, "require_out_of_sample": map[string]any{"type": "boolean"},
+				"enforcement_enabled": map[string]any{"type": "boolean"},
+			}, []string{"portfolio_id", "strategy_id"}), Handler: a.toolStrategyScorecardUpdate},
+
+		{Name: "strategy_scorecard_evaluate", Description: "Evaluate and durably snapshot a completed strategy backtest against its current scorecard policy.",
+			InputSchema: schemaObject(map[string]any{
+				"portfolio_id": map[string]any{"type": "integer"}, "strategy_id": map[string]any{"type": "integer"}, "backtest_run_id": map[string]any{"type": "integer"},
+			}, []string{"portfolio_id", "strategy_id", "backtest_run_id"}), Handler: a.toolStrategyScorecardEvaluate},
+
+		{Name: "strategy_promotion_update", Description: "Promote one scorecard stage at a time after passing the required distinct runs, demote it, or suspend it.",
+			InputSchema: schemaObject(map[string]any{
+				"portfolio_id": map[string]any{"type": "integer"}, "strategy_id": map[string]any{"type": "integer"},
+				"promotion_stage": map[string]any{"type": "string", "enum": []string{"research", "paper_candidate", "paper", "live_candidate", "live", "suspended"}},
+			}, []string{"portfolio_id", "strategy_id", "promotion_stage"}), Handler: a.toolStrategyPromotionUpdate},
+
+		{Name: "backtest_market_step", Exposure: sdk.ToolExposureAppOnly, Description: "Internal runner tool: load replay prices into an isolated backtest environment.",
 			InputSchema: schemaObject(map[string]any{
 				"portfolio_id": map[string]any{"type": "integer"},
 				"run_id":       map[string]any{"type": "integer"},
+				"replay_at":    map[string]any{"type": "string"},
 				"step":         map[string]any{"type": "integer"},
 				"prices":       map[string]any{"type": "array"},
-			}, []string{"portfolio_id", "step", "prices"}),
-			Handler: a.toolBacktestMarketStep},
+			}, []string{"portfolio_id", "run_id", "step", "replay_at", "prices"}),
+			HandlerCtx: func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+				caller := sdk.CallerFrom(call)
+				if caller == nil || caller.AgentID != 0 || caller.AppName != "trading" || caller.AppInstallID == 0 {
+					return nil, errors.New("replay mutation requires authenticated trading runner")
+				}
+				return a.toolBacktestMarketStep(ctx, args)
+			}},
 	}
 }
 
@@ -434,11 +526,13 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		)
 		if callErr != nil || acctRaw == nil || !acctRaw.Success {
 			code, detail := adapter.ErrText(acctRaw, callErr)
+			noteVenueCall(adapter.Slug(), fmt.Errorf("%s: %s", code, detail))
 			return rejectStruct("broker_error",
 				fmt.Sprintf("could not read broker account (%s): %s", code, detail)), nil
 		}
 		acct, parseErr := adapter.ParseAccount(acctRaw.Data)
 		if parseErr != nil {
+			noteVenueCall(adapter.Slug(), parseErr)
 			return rejectStruct("broker_error",
 				"could not parse broker account: "+parseErr.Error()), nil
 		}
@@ -456,9 +550,14 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 					for k, v := range holdings {
 						acct.Holdings[k] = v
 					}
+				} else {
+					return rejectStruct("broker_error", "could not parse broker holdings: "+herr.Error()), nil
 				}
+			} else {
+				return rejectStruct("broker_error", "could not read broker holdings; portfolio was not created"), nil
 			}
 		}
+		noteVenueCall(adapter.Slug(), nil)
 		cash := acct.QuoteCash
 		id, err := dbCreatePortfolio(ctx.AppDB(), &Portfolio{
 			ProjectID: pid, Name: name, Mandate: mandate,
@@ -466,6 +565,14 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 			Mode: "live", ExecutionEnvironment: executionEnvironment, BrokerSlug: brokerSlug,
 		})
 		if err != nil {
+			return nil, err
+		}
+		createdPF, err := dbGetPortfolio(ctx.AppDB(), pid, id)
+		if err != nil {
+			return nil, err
+		}
+		if err := pinBroker(ctx, createdPF, bb.ConnectionID); err != nil {
+			_, _ = ctx.AppDB().Exec(`DELETE FROM portfolios WHERE id=?`, id)
 			return nil, err
 		}
 		_, _ = ctx.AppDB().Exec(`UPDATE portfolios SET available_cash = ? WHERE id = ?`, acct.QuoteAvailable, id)
@@ -785,6 +892,7 @@ func registeredSlugs() []string {
 // so the agent can decide which slug to pass to portfolio_create. Pure
 // read; safe to call without a portfolio.
 func (a *App) toolBrokersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	profiles, _ := effectiveVenueProfiles(ctx.AppDB())
 	out := make([]map[string]any, 0)
 	for _, ad := range allAdapters() {
 		caps := ad.Capabilities()
@@ -796,7 +904,15 @@ func (a *App) toolBrokersList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"fractional":    caps.Fractional,
 			"quote":         caps.QuoteCurrency,
 			"connections":   []map[string]any{},
+			"runtime":       venueRuntimeSnapshot(ad.Slug()),
 		}
+		var venueProfiles []VenueExecutionProfile
+		for _, profile := range profiles {
+			if profile.VenueSlug == ad.Slug() {
+				venueProfiles = append(venueProfiles, profile)
+			}
+		}
+		row["execution_profiles"] = venueProfiles
 		if ctx != nil && ctx.PlatformAPI() != nil {
 			conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{AppSlug: ad.Slug()})
 			if err == nil {
@@ -813,6 +929,180 @@ func (a *App) toolBrokersList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		out = append(out, row)
 	}
 	return map[string]any{"brokers": out}, nil
+}
+
+func (a *App) toolVenueProfilesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	profiles, err := effectiveVenueProfiles(ctx.AppDB())
+	if err != nil {
+		return nil, err
+	}
+	venue, class := strings.ToLower(strings.TrimSpace(strArg(args, "venue_slug"))), strings.ToLower(strings.TrimSpace(strArg(args, "asset_class")))
+	filtered := make([]VenueExecutionProfile, 0, len(profiles))
+	for _, p := range profiles {
+		if venue != "" && p.VenueSlug != venue {
+			continue
+		}
+		if class != "" && p.AssetClass != class {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	return map[string]any{"profiles": filtered, "count": len(filtered)}, nil
+}
+
+func (a *App) toolVenueProfileUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	venue := strings.ToLower(strings.TrimSpace(strArg(args, "venue_slug")))
+	class := strings.ToLower(strings.TrimSpace(strArg(args, "asset_class")))
+	symbol := canonicalSymbol(strArg(args, "symbol"))
+	if symbol == "" {
+		symbol = "*"
+	}
+	p := defaultVenueProfile(venue, class)
+	if existing, err := dbVenueProfile(ctx.AppDB(), venue, class, symbol); err == nil && existing.Symbol == symbol {
+		p = *existing
+	}
+	p.VenueSlug, p.AssetClass, p.Symbol, p.Source = venue, class, symbol, "operator"
+	setString := func(key string, target *string) {
+		if _, ok := args[key]; ok {
+			*target = strArg(args, key)
+		}
+	}
+	setFloat := func(key string, target *float64) {
+		if _, ok := args[key]; ok {
+			*target = anyFloat(args[key])
+		}
+	}
+	setString("status", &p.Status)
+	setString("calendar", &p.Calendar)
+	setString("session_policy", &p.SessionPolicy)
+	setString("fee_currency", &p.FeeCurrency)
+	setString("spread_model", &p.SpreadModel)
+	setString("slippage_model", &p.SlippageModel)
+	setFloat("maker_fee_bps", &p.MakerFeeBps)
+	setFloat("taker_fee_bps", &p.TakerFeeBps)
+	setFloat("fallback_spread_bps", &p.FallbackSpreadBps)
+	setFloat("slippage_bps", &p.SlippageBps)
+	setFloat("min_qty", &p.MinQty)
+	setFloat("min_notional", &p.MinNotional)
+	setFloat("qty_step", &p.QtyStep)
+	setFloat("price_tick", &p.PriceTick)
+	setFloat("funding_rate_bps", &p.FundingRateBps)
+	if _, ok := args["funding_interval_hours"]; ok {
+		p.FundingIntervalHours = int(int64Arg(args, "funding_interval_hours", 0))
+	}
+	if v, ok := args["supports_post_only"].(bool); ok {
+		p.SupportsPostOnly = v
+	}
+	if v, ok := args["supports_reduce_only"].(bool); ok {
+		p.SupportsReduceOnly = v
+	}
+	if err := dbUpsertVenueProfile(ctx.AppDB(), &p); err != nil {
+		return nil, err
+	}
+	emit("venue.profile.changed", map[string]any{"venue_slug": p.VenueSlug, "asset_class": p.AssetClass, "symbol": p.Symbol, "profile": p})
+	return map[string]any{"profile": p}, nil
+}
+
+func (a *App) toolExecutionCostsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	portfolioID := int64Arg(args, "portfolio_id", 0)
+	if _, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID); err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", portfolioID)
+	}
+	costs, err := dbExecutionCosts(ctx.AppDB(), portfolioID, int(int64Arg(args, "limit", 100)))
+	if err != nil {
+		return nil, err
+	}
+	totals := map[string]float64{}
+	byCurrency := map[string]map[string]float64{}
+	rows, err := ctx.AppDB().Query(`SELECT kind,currency,SUM(amount) FROM execution_costs WHERE portfolio_id=? GROUP BY kind,currency`, portfolioID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind, currency string
+		var amount float64
+		if err := rows.Scan(&kind, &currency, &amount); err != nil {
+			return nil, err
+		}
+		if byCurrency[currency] == nil {
+			byCurrency[currency] = map[string]float64{}
+		}
+		byCurrency[currency][kind] = amount
+		if currency == "USD" {
+			totals[kind] = amount
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"costs": costs, "totals": totals, "totals_currency": "USD", "totals_by_currency": byCurrency, "count": len(costs)}, nil
+}
+
+func (a *App) toolFundingPaymentRecord(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	portfolioID := int64Arg(args, "portfolio_id", 0)
+	pf, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", portfolioID)
+	}
+	symbol := canonicalSymbol(strArg(args, "symbol"))
+	eventID := strings.TrimSpace(strArg(args, "provider_event_id"))
+	amount := anyFloat(args["amount"])
+	if symbol == "" || eventID == "" || !finite(amount) || amount == 0 {
+		return nil, errors.New("symbol, provider_event_id, and a finite non-zero amount are required")
+	}
+	venue := strings.ToLower(strings.TrimSpace(strArg(args, "venue_slug")))
+	if venue == "" {
+		venue = executionVenue(pf)
+	}
+	profile := resolveVenueProfile(ctx.AppDB(), pf, symbol, inferAssetClass(symbol))
+	currency := strings.ToUpper(strings.TrimSpace(strArg(args, "currency")))
+	if currency == "" {
+		currency = profile.FeeCurrency
+	}
+	if currency != "USD" {
+		return nil, errors.New("funding must be converted to portfolio quote currency USD with conversion evidence before recording")
+	}
+	var rate *float64
+	if _, ok := args["rate_bps"]; ok {
+		v := anyFloat(args["rate_bps"])
+		if !finite(v) {
+			return nil, errors.New("rate_bps must be finite")
+		}
+		rate = &v
+	}
+	metadata, _ := args["metadata"].(map[string]any)
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	id, inserted, err := dbInsertExecutionCostTx(tx, pid, portfolioID, "", nil, venue, symbol, "funding", amount, currency, rate, "", eventID, metadata, strArg(args, "occurred_at"))
+	if err != nil {
+		return nil, err
+	}
+	if inserted && pf.Mode != "live" {
+		if _, err := tx.Exec(`UPDATE portfolios SET cash=cash-?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, amount, portfolioID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	if inserted {
+		body := fmt.Sprintf("Funding %+.8f %s for %s at %s", -amount, currency, symbol, venue)
+		_, _ = dbInsertJournal(ctx.AppDB(), pid, portfolioID, "funding", body, map[string]any{"execution_cost_id": id, "provider_event_id": eventID, "amount": amount, "currency": currency, "rate_bps": rate, "venue_slug": venue})
+		emit("funding.applied", map[string]any{"portfolio_id": portfolioID, "symbol": symbol, "venue_slug": venue, "amount": amount, "currency": currency, "provider_event_id": eventID})
+	}
+	return map[string]any{"execution_cost_id": id, "recorded": inserted, "duplicate": !inserted}, nil
 }
 
 // ─── Read handlers ────────────────────────────────────────────────
@@ -837,7 +1127,7 @@ func (a *App) toolPortfolioList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			"equity": snap.Equity, "cash": snap.Cash,
 			"day_pnl": snap.DayPnL, "day_pnl_pct": snap.DayPnLPct,
 			"open_pnl": snap.OpenPnL, "open_pnl_pct": snap.OpenPnLPct,
-			"realized_pnl": snap.RealizedPnL, "fees_paid": snap.FeesPaid,
+			"realized_pnl": snap.RealizedPnL, "fees_paid": snap.FeesPaid, "funding_paid": snap.FundingPaid,
 			"total_pnl": snap.TotalPnL, "total_pnl_pct": snap.TotalPnLPct,
 		})
 	}
@@ -876,7 +1166,7 @@ func (a *App) toolAccountSummary(ctx *sdk.AppCtx, args map[string]any) (any, err
 		"equity": snap.Equity, "cash": snap.Cash, "buying_power": snap.BuyingPower,
 		"day_pnl": snap.DayPnL, "day_pnl_pct": snap.DayPnLPct,
 		"open_pnl": snap.OpenPnL, "open_pnl_pct": snap.OpenPnLPct,
-		"realized_pnl": snap.RealizedPnL, "fees_paid": snap.FeesPaid,
+		"realized_pnl": snap.RealizedPnL, "fees_paid": snap.FeesPaid, "funding_paid": snap.FundingPaid,
 		"total_pnl": snap.TotalPnL, "total_pnl_pct": snap.TotalPnLPct,
 		"status": snap.Status, "mode": snap.Mode,
 	}, nil
@@ -1300,6 +1590,19 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, fmt.Errorf("portfolio %d not found", id)
 	}
 
+	requestKey := strings.TrimSpace(strArg(args, "idempotency_key"))
+	requestHash := orderIntentHash(args)
+	if requestKey != "" {
+		orderRequestMu.Lock()
+		defer orderRequestMu.Unlock()
+		previous, err := previousOrderRequest(ctx.AppDB(), pid, id, requestKey, requestHash)
+		if err != nil {
+			return nil, err
+		}
+		if previous != nil {
+			return previous, nil
+		}
+	}
 	// Pre-trade pipeline. Each rejection returns a structured status —
 	// the agent should reason about it, not raise.
 	rationale, _ := args["rationale"].(string)
@@ -1318,7 +1621,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	side := strings.ToLower(strings.TrimSpace(strArg(args, "side")))
 	otype := strings.ToLower(strings.TrimSpace(strArg(args, "type")))
 	qty := floatArg(args, "qty", 0)
-	if symbol == "" || side == "" || otype == "" || qty <= 0 {
+	if symbol == "" || side == "" || otype == "" || qty <= 0 || !finite(qty) {
 		return rejectStruct("invalid_args", "symbol, side, type, qty are required and qty > 0"), nil
 	}
 	class := inferAssetClass(symbol)
@@ -1348,9 +1651,27 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			return rejectStruct("invalid_side", "equity/crypto side must be 'buy' or 'sell'"), nil
 		}
 	}
+	if violation, universeErr := portfolioUniverseViolation(ctx.AppDB(), pf, symbol); universeErr != nil {
+		return nil, universeErr
+	} else if violation != nil && !(side == "sell" && portfolioCanReducePosition(ctx.AppDB(), pf.ID, symbol, outcome, qty)) {
+		emit("order.rejected", map[string]any{"portfolio_id": pf.ID, "symbol": symbol, "code": violation.Code, "detail": violation.Detail})
+		return rejectStruct(violation.Code, violation.Detail), nil
+	}
 	tif, _ := args["tif"].(string)
 	if tif == "" {
 		tif = "day"
+	}
+	tif = strings.ToLower(strings.TrimSpace(tif))
+	if !oneOfString(otype, "market", "limit", "stop") || !oneOfString(tif, "day", "gtc", "ioc", "fok") {
+		return rejectStruct("invalid_args", "unsupported order type or time in force"), nil
+	}
+	for _, key := range []string{"limit_price", "stop_price"} {
+		if _, ok := args[key]; ok && (!finite(floatArg(args, key, 0)) || floatArg(args, key, 0) <= 0) {
+			return rejectStruct("invalid_args", key+" must be positive and finite"), nil
+		}
+	}
+	if otype == "stop" && oneOfString(tif, "ioc", "fok") {
+		return rejectStruct("invalid_args", "stop orders require day or gtc"), nil
 	}
 	var lp, sp *float64
 	if v := floatArg(args, "limit_price", 0); v > 0 {
@@ -1382,10 +1703,55 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	} else if isBuySide(side) && mark.AskPrice != nil && *mark.AskPrice > 0 {
 		riskPrice = *mark.AskPrice
 	}
+	profile := resolveVenueProfile(ctx.AppDB(), pf, symbol, class)
+	if violation := validateExecutionOrder(profile, mark.Instrument, mark, qty, riskPrice); violation != nil {
+		emit("order.rejected", map[string]any{"portfolio_id": pf.ID, "symbol": symbol, "code": violation.Code, "detail": violation.Detail, "venue_slug": profile.VenueSlug})
+		return rejectStruct(violation.Code, violation.Detail), nil
+	}
+	if lp != nil {
+		if violation := validatePriceTick(profile, *lp, "limit_price"); violation != nil {
+			return rejectStruct(violation.Code, violation.Detail), nil
+		}
+	}
+	if sp != nil {
+		if violation := validatePriceTick(profile, *sp, "stop_price"); violation != nil {
+			return rejectStruct(violation.Code, violation.Detail), nil
+		}
+	}
+	if pf.Mode == "live" {
+		if adapter := adapterBySlug(pf.BrokerSlug); adapter != nil {
+			caps := adapter.Capabilities()
+			if !contains(caps.OrderTypes, otype) {
+				return rejectStruct("broker_unsupported_order_type", fmt.Sprintf("%s does not support %s orders", adapter.Slug(), otype)), nil
+			}
+			if !contains(caps.TIFs, strings.ToLower(tif)) && !(strings.EqualFold(tif, "day") && contains(caps.TIFs, "gtc")) {
+				return rejectStruct("broker_unsupported_tif", fmt.Sprintf("%s does not support tif %s", adapter.Slug(), tif)), nil
+			}
+		}
+	}
 	// Serialize the policy snapshot and local order insert. Without this
 	// narrow critical section, concurrent callers could each pass against
 	// the same pre-order exposure and collectively exceed the limit.
 	orderPlacementMu.Lock()
+	pf, err = dbGetPortfolio(ctx.AppDB(), pid, id)
+	if err != nil {
+		orderPlacementMu.Unlock()
+		return nil, err
+	}
+	if pf.Status != "active" || (pf.ExecutionEnvironment == "broker_live" && !pf.LiveArmed) {
+		orderPlacementMu.Unlock()
+		return rejectStruct("portfolio_not_active", "portfolio changed during order preflight"), nil
+	}
+	if side == "sell" && !portfolioCanReducePosition(ctx.AppDB(), pf.ID, symbol, outcome, qty) {
+		orderPlacementMu.Unlock()
+		return rejectStruct("insufficient_position", "sell exceeds unreserved long holdings"), nil
+	}
+	if sid := int64Arg(args, "strategy_id", 0); sid > 0 {
+		if allowed, reason := scorecardAllowsExecution(ctx.AppDB(), pf, sid); !allowed {
+			orderPlacementMu.Unlock()
+			return rejectStruct("strategy_gate", reason), nil
+		}
+	}
 	if breach, checkErr := preTradeRiskCheck(ctx.AppDB(), pf, symbol, side, qty, riskPrice); checkErr != nil {
 		orderPlacementMu.Unlock()
 		return nil, checkErr
@@ -1417,26 +1783,47 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// engine picks it up on the next tick; for live, we forward to the
 	// broker below and reflect the response inline.
 	o := &Order{
-		ID:          "o-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12],
-		PortfolioID: pf.ID,
-		Symbol:      symbol,
-		AssetClass:  class,
-		Side:        side,
-		Outcome:     strings.ToUpper(outcome),
-		Type:        otype,
-		Qty:         qty,
-		LimitPrice:  lp,
-		StopPrice:   sp,
-		TIF:         tif,
-		Status:      "working",
-		Rationale:   rationale,
-		Source:      source,
+		ID:            "o-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12],
+		PortfolioID:   pf.ID,
+		Symbol:        symbol,
+		AssetClass:    class,
+		Side:          side,
+		Outcome:       strings.ToUpper(outcome),
+		Type:          otype,
+		Qty:           qty,
+		LimitPrice:    lp,
+		StopPrice:     sp,
+		TIF:           tif,
+		Status:        "working",
+		Rationale:     rationale,
+		Source:        source,
+		LiquidityRole: orderLiquidityAtPlacement(mark, side, otype, lp),
 	}
-	if err := dbInsertOrder(ctx.AppDB(), o, pid); err != nil {
+	o.VenueFeeBps = profileFeeBps(profile, o.LiquidityRole)
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
 		orderPlacementMu.Unlock()
 		return nil, err
 	}
+	if err = dbInsertOrder(tx, o, pid); err == nil && requestKey != "" {
+		_, err = tx.Exec(`INSERT INTO order_requests(project_id,portfolio_id,request_key,intent_hash,order_id) VALUES(?,?,?,?,?)`, pid, id, requestKey, requestHash, o.ID)
+	}
+	if err == nil {
+		_, err = tx.Exec(`UPDATE orders SET placed_at=COALESCE((SELECT replay_at FROM replay_steps WHERE portfolio_id=?),placed_at) WHERE id=?`, pf.ID, o.ID)
+	}
+	if err == nil && strategyID > 0 {
+		_, err = tx.Exec(`UPDATE orders SET strategy_id=?,strategy_version=(SELECT version FROM strategies WHERE id=?) WHERE id=?`, strategyID, strategyID, o.ID)
+	}
+	if err != nil {
+		tx.Rollback()
+		orderPlacementMu.Unlock()
+		return nil, err
+	}
+	err = tx.Commit()
 	orderPlacementMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 
 	// ─── Live: forward to broker, apply response inline ─────────────
 	if pf.Mode == "live" {
@@ -1509,9 +1896,20 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			emit("order.rejected", map[string]any{"order_id": o.ID, "code": "translate_failed", "detail": terr.Error()})
 			return rejectStruct("translate_failed", terr.Error()), nil
 		}
+		if _, err := ctx.AppDB().Exec(`UPDATE orders SET broker_connection_id=?,reconciliation_required=1 WHERE id=?`, bb.ConnectionID, o.ID); err != nil {
+			return nil, err
+		}
 		res, callErr := ctx.PlatformAPI().ExecuteIntegrationTool(
 			bb.ConnectionID, bb.placeToolFor(o), brokerArgs,
 		)
+		if callErr != nil {
+			noteVenueCall(adapter.Slug(), callErr)
+		} else if res == nil || !res.Success {
+			code, detail := adapter.ErrText(res, nil)
+			noteVenueCall(adapter.Slug(), fmt.Errorf("%s: %s", code, detail))
+		} else {
+			noteVenueCall(adapter.Slug(), nil)
+		}
 		// Ambiguous broker outcomes (network error, non-success response,
 		// parse failure of a successful response) leave the local order in
 		// 'working' state instead of marking it rejected. The broker may
@@ -1551,7 +1949,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				"uncertain": true,
 				"code":      code,
 				"detail":    detail,
-				"note":      "broker response was ambiguous; local order kept working — reconciler will poll by client_order_id",
+				"note":      "broker response was ambiguous; order remains supervised; adapters without client-ID recovery require account reconciliation",
 			}, nil
 		}
 		if callErr != nil || res == nil || !res.Success {
@@ -1563,6 +1961,9 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			return uncertain("broker_parse_failed", perr.Error())
 		}
 
+		if _, err := ctx.AppDB().Exec(`UPDATE orders SET broker_order_id=?,reconciliation_required=0 WHERE id=?`, br.BrokerOrderID, o.ID); err != nil {
+			return uncertain("broker_linkage_failed", err.Error())
+		}
 		// Persist broker linkage in the rationale journal row before any
 		// fill row lands, so an audit can join order → broker_order_id by
 		// kind='rationale' alone.
@@ -1595,6 +1996,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			"rationale":       rationale,
 			"mode":            "live",
 			"broker_slug":     adapter.Slug(),
+			"liquidity_role":  o.LiquidityRole,
 			"broker_order_id": br.BrokerOrderID,
 			"source":          source,
 			"strategy_id":     strategyID,
@@ -1621,21 +2023,22 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 	// ─── Paper (default) — engine fills on next tick ────────────────
 	emit("order.placed", map[string]any{
-		"order_id":      o.ID,
-		"portfolio_id":  pf.ID,
-		"symbol":        symbol,
-		"asset_class":   class,
-		"side":          side,
-		"type":          otype,
-		"qty":           qty,
-		"limit_price":   o.LimitPrice,
-		"stop_price":    o.StopPrice,
-		"status":        "working",
-		"rationale":     rationale,
-		"mode":          "paper",
-		"source":        source,
-		"strategy_id":   strategyID,
-		"assignment_id": assignmentID,
+		"order_id":       o.ID,
+		"portfolio_id":   pf.ID,
+		"symbol":         symbol,
+		"asset_class":    class,
+		"side":           side,
+		"type":           otype,
+		"qty":            qty,
+		"limit_price":    o.LimitPrice,
+		"stop_price":     o.StopPrice,
+		"status":         "working",
+		"rationale":      rationale,
+		"mode":           "paper",
+		"source":         source,
+		"strategy_id":    strategyID,
+		"assignment_id":  assignmentID,
+		"liquidity_role": o.LiquidityRole,
 	})
 	// Auto-attach a rationale row to the journal for audit.
 	if entryID, err := dbInsertJournal(ctx.AppDB(), pid, pf.ID, "rationale", rationale, map[string]any{
@@ -1678,6 +2081,9 @@ func (a *App) toolOrderCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	// "not found", we still flip locally — the reconciler would have
 	// caught it on the next tick anyway.
 	if pf.Mode == "live" {
+		if _, err := ctx.AppDB().Exec(`UPDATE orders SET cancel_requested=1 WHERE id=?`, id); err != nil {
+			return nil, err
+		}
 		bb, ferr := brokerFor(ctx, pf)
 		if ferr != nil {
 			return rejectStruct("broker_unbound",
@@ -1700,12 +2106,20 @@ func (a *App) toolOrderCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			)
 			if cerr != nil || res == nil || !res.Success {
 				code, detail := adapter.ErrText(res, cerr)
+				noteVenueCall(adapter.Slug(), fmt.Errorf("%s: %s", code, detail))
 				// Unknown/not-cancelable does not prove whether the order filled,
 				// expired, or is still active under a different identifier. Leave
 				// the local row working; the status reconciler will resolve truth.
 				return rejectStruct("broker_cancel_unconfirmed", code+": "+detail), nil
 			}
+			noteVenueCall(adapter.Slug(), nil)
+			if progress, parseErr := adapter.ParseOrder(res.Data); parseErr == nil {
+				if _, err := applyBrokerProgress(ctx.AppDB(), pid, pf, o, progress); err != nil {
+					return nil, err
+				}
+			}
 		}
+		return map[string]any{"status": o.Status, "order_id": id, "cancel_requested": true}, nil
 	}
 
 	status, err := dbCancelOrder(ctx.AppDB(), pid, id, reason)

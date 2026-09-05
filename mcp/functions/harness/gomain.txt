@@ -32,7 +32,7 @@ import (
 	"sync"
 )
 
-const maxHarnessFrame = 128 << 20
+const maxHarnessFrame = 8 << 20
 const maxHarnessLogs = 16 << 10
 
 // Context is handed to Handle. Call reaches other Apteva apps through
@@ -47,12 +47,19 @@ type Context struct {
 	invocationID  int64
 	streamMu      sync.Mutex
 	streamStarted bool
+	done          chan struct{}
+	logMu         sync.Mutex
+	logs          []string
+	logBytes      int
 }
 
 // Call invokes another Apteva app's MCP tool. input is marshalled to
 // JSON; the result is the tool's (unwrapped) JSON response.
 func (c *Context) Call(app, tool string, input any) (json.RawMessage, error) {
-	return c.h.call(app, tool, input)
+	if err := c.checkActive(); err != nil {
+		return nil, err
+	}
+	return c.h.call(c.invocationID, app, tool, input)
 }
 
 // Integration invokes a tool on an integration connection in the
@@ -63,13 +70,28 @@ func (c *Context) Call(app, tool string, input any) (json.RawMessage, error) {
 // returns non-success or the slug doesn't resolve to exactly one
 // connection.
 func (c *Context) Integration(conn any, tool string, input any) (json.RawMessage, error) {
-	return c.h.integration(conn, tool, input)
+	if err := c.checkActive(); err != nil {
+		return nil, err
+	}
+	return c.h.integration(c.invocationID, conn, tool, input)
 }
 
 // Log appends a line to the captured output returned with the
 // invocation result.
 func (c *Context) Log(args ...any) {
-	c.h.appendLog(fmt.Sprintln(args...))
+	if c.checkActive() != nil {
+		return
+	}
+	c.logMu.Lock()
+	defer c.logMu.Unlock()
+	line := fmt.Sprintln(args...)
+	if left := maxHarnessLogs - c.logBytes; left > 0 {
+		if len(line) > left {
+			line = line[:left]
+		}
+		c.logs = append(c.logs, line)
+		c.logBytes += len(line)
+	}
 }
 
 // StreamStart begins an incremental HTTP response. StreamWrite starts a
@@ -80,7 +102,18 @@ func (c *Context) StreamStart(statusCode int, headers map[string]string) error {
 	return c.streamStartLocked(statusCode, headers)
 }
 
+func (c *Context) checkActive() error {
+	select {
+	case <-c.done:
+		return fmt.Errorf("invocation already completed")
+	default:
+		return nil
+	}
+}
 func (c *Context) streamStartLocked(statusCode int, headers map[string]string) error {
+	if err := c.checkActive(); err != nil {
+		return err
+	}
 	if c.streamStarted {
 		return nil
 	}
@@ -109,14 +142,27 @@ func (c *Context) StreamWrite(chunk []byte) error {
 			return err
 		}
 	}
-	return c.h.writeFrame(map[string]any{
-		"type": "stream_chunk", "id": c.invocationID,
-		"encoding": "base64", "data": base64.StdEncoding.EncodeToString(chunk),
-	})
+	if err := c.checkActive(); err != nil {
+		return err
+	}
+	for len(chunk) > 0 {
+		n := len(chunk)
+		if n > 65536 {
+			n = 65536
+		}
+		if err := c.h.writeFrame(map[string]any{"type": "stream_chunk", "id": c.invocationID, "encoding": "base64", "data": base64.StdEncoding.EncodeToString(chunk[:n])}); err != nil {
+			return err
+		}
+		chunk = chunk[n:]
+	}
+	return nil
 }
 
 // SSE emits one Server-Sent Event, starting the event stream on first use.
 func (c *Context) SSE(event string, data any) error {
+	if err := c.checkActive(); err != nil {
+		return err
+	}
 	c.streamMu.Lock()
 	defer c.streamMu.Unlock()
 	if !c.streamStarted {
@@ -144,19 +190,33 @@ func (c *Context) SSE(event string, data any) error {
 		out.WriteString(strings.NewReplacer("\r", "", "\n", "").Replace(event))
 		out.WriteByte('\n')
 	}
-	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+	for _, line := range strings.Split(strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(text), "\n") {
 		out.WriteString("data: ")
 		out.WriteString(line)
 		out.WriteByte('\n')
 	}
 	out.WriteByte('\n')
-	return c.h.writeFrame(map[string]any{
-		"type": "stream_chunk", "id": c.invocationID,
-		"encoding": "base64", "data": base64.StdEncoding.EncodeToString([]byte(out.String())),
-	})
+	dataBytes := []byte(out.String())
+	for len(dataBytes) > 0 {
+		n := len(dataBytes)
+		if n > 65536 {
+			n = 65536
+		}
+		if err := c.checkActive(); err != nil {
+			return err
+		}
+		if err := c.h.writeFrame(map[string]any{"type": "stream_chunk", "id": c.invocationID, "encoding": "base64", "data": base64.StdEncoding.EncodeToString(dataBytes[:n])}); err != nil {
+			return err
+		}
+		dataBytes = dataBytes[n:]
+	}
+	return nil
 }
 
 func (c *Context) SSEComment(comment string) error {
+	if err := c.checkActive(); err != nil {
+		return err
+	}
 	c.streamMu.Lock()
 	defer c.streamMu.Unlock()
 	if !c.streamStarted {
@@ -169,16 +229,27 @@ func (c *Context) SSEComment(comment string) error {
 		}
 	}
 	var out strings.Builder
-	for _, line := range strings.Split(strings.ReplaceAll(comment, "\r\n", "\n"), "\n") {
+	for _, line := range strings.Split(strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(comment), "\n") {
 		out.WriteString(": ")
 		out.WriteString(line)
 		out.WriteByte('\n')
 	}
 	out.WriteByte('\n')
-	return c.h.writeFrame(map[string]any{
-		"type": "stream_chunk", "id": c.invocationID,
-		"encoding": "base64", "data": base64.StdEncoding.EncodeToString([]byte(out.String())),
-	})
+	dataBytes := []byte(out.String())
+	for len(dataBytes) > 0 {
+		n := len(dataBytes)
+		if n > 65536 {
+			n = 65536
+		}
+		if err := c.checkActive(); err != nil {
+			return err
+		}
+		if err := c.h.writeFrame(map[string]any{"type": "stream_chunk", "id": c.invocationID, "encoding": "base64", "data": base64.StdEncoding.EncodeToString(dataBytes[:n])}); err != nil {
+			return err
+		}
+		dataBytes = dataBytes[n:]
+	}
+	return nil
 }
 
 type harness struct {
@@ -243,7 +314,7 @@ func readFrame(r io.Reader) ([]byte, error) {
 	return buf, nil
 }
 
-func (h *harness) call(app, tool string, input any) (json.RawMessage, error) {
+func (h *harness) call(invocationID int64, app, tool string, input any) (json.RawMessage, error) {
 	if app == "" || tool == "" {
 		return nil, fmt.Errorf("context.Call: app and tool are required")
 	}
@@ -260,7 +331,7 @@ func (h *harness) call(app, tool string, input any) (json.RawMessage, error) {
 	h.mu.Unlock()
 
 	if err := h.writeFrame(map[string]any{
-		"type": "call", "callId": id, "app": app, "tool": tool,
+		"type": "call", "id": invocationID, "callId": id, "app": app, "tool": tool,
 		"input": json.RawMessage(inputJSON),
 	}); err != nil {
 		h.mu.Lock()
@@ -278,7 +349,7 @@ func (h *harness) call(app, tool string, input any) (json.RawMessage, error) {
 	return ans.result, nil
 }
 
-func (h *harness) integration(conn any, tool string, input any) (json.RawMessage, error) {
+func (h *harness) integration(invocationID int64, conn any, tool string, input any) (json.RawMessage, error) {
 	if conn == nil {
 		return nil, fmt.Errorf("context.Integration: conn (numeric id or slug) is required")
 	}
@@ -306,7 +377,7 @@ func (h *harness) integration(conn any, tool string, input any) (json.RawMessage
 	h.mu.Unlock()
 
 	if err := h.writeFrame(map[string]any{
-		"type": "integration", "callId": id, "tool": tool,
+		"type": "integration", "id": invocationID, "callId": id, "tool": tool,
 		"conn":  json.RawMessage(connJSON),
 		"input": json.RawMessage(inputJSON),
 	}); err != nil {
@@ -348,7 +419,9 @@ func (h *harness) takeLogs() []string {
 }
 
 func main() {
-	conn, err := net.FileConn(os.NewFile(3, "apteva-fn-sock"))
+	file := os.NewFile(3, "apteva-fn-sock")
+	conn, err := net.FileConn(file)
+	_ = file.Close()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "harness: fd 3 is not a socket:", err)
 		os.Exit(1)
@@ -403,13 +476,18 @@ func main() {
 }
 
 func runInvocation(h *harness, ctx *Context, id int64, event json.RawMessage) {
+	env := make(map[string]string, len(ctx.Env))
+	for k, v := range ctx.Env {
+		env[k] = v
+	}
 	invocationCtx := &Context{
 		FunctionName: ctx.FunctionName,
 		FunctionID:   ctx.FunctionID,
 		Runtime:      ctx.Runtime,
-		Env:          ctx.Env,
+		Env:          env,
 		h:            h,
 		invocationID: id,
+		done:         make(chan struct{}),
 	}
 	var result any
 	var handlerErr error
@@ -422,7 +500,10 @@ func runInvocation(h *harness, ctx *Context, id int64, event json.RawMessage) {
 		result, handlerErr = Handle(event, invocationCtx)
 	}()
 
-	frame := map[string]any{"id": id, "logs": h.takeLogs()}
+	close(invocationCtx.done)
+	invocationCtx.logMu.Lock()
+	defer invocationCtx.logMu.Unlock()
+	frame := map[string]any{"type": "result", "id": id, "logs": invocationCtx.logs}
 	if handlerErr != nil {
 		frame["ok"] = false
 		frame["error"] = handlerErr.Error()
@@ -430,5 +511,9 @@ func runInvocation(h *harness, ctx *Context, id int64, event json.RawMessage) {
 		frame["ok"] = true
 		frame["result"] = result
 	}
-	_ = h.writeFrame(frame)
+	if err := h.writeFrame(frame); err != nil {
+		if err = h.writeFrame(map[string]any{"type": "result", "id": id, "ok": false, "error": "Response serialization failed: " + err.Error()}); err != nil {
+			os.Exit(1)
+		}
+	}
 }

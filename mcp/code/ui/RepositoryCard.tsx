@@ -73,7 +73,7 @@ export default function RepositoryCard({ repo, projectId, installId, preview }: 
   });
   useEffect(() => {
     if (preview || !projectId) return;
-    const timer = window.setInterval(resource.refresh, 15_000);
+    const timer = window.setInterval(resource.refresh, 60_000);
     return () => window.clearInterval(timer);
   }, [preview, projectId, resource.refresh]);
 

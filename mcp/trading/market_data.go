@@ -25,6 +25,8 @@ type Instrument struct {
 	VolumeUnit       string  `json:"volume_unit"`
 	TickSize         float64 `json:"tick_size,omitempty"`
 	LotSize          float64 `json:"lot_size,omitempty"`
+	MinQty           float64 `json:"min_qty,omitempty"`
+	MinNotional      float64 `json:"min_notional,omitempty"`
 	Active           bool    `json:"active"`
 	ExpiresAt        string  `json:"expires_at,omitempty"`
 	Source           string  `json:"source"`
@@ -120,11 +122,14 @@ func normalizeInstrument(i *Instrument, symbol, assetClass, source string, now t
 	if v := strings.ToLower(strings.TrimSpace(i.VolumeUnit)); v != "" {
 		base.VolumeUnit = v
 	}
-	if i.TickSize < 0 || i.LotSize < 0 || !finite(i.TickSize) || !finite(i.LotSize) {
-		return nil, errors.New("instrument tick_size and lot_size must be finite and non-negative")
+	if i.TickSize < 0 || i.LotSize < 0 || i.MinQty < 0 || i.MinNotional < 0 ||
+		!finite(i.TickSize) || !finite(i.LotSize) || !finite(i.MinQty) || !finite(i.MinNotional) {
+		return nil, errors.New("instrument tick_size, lot_size, min_qty, and min_notional must be finite and non-negative")
 	}
 	base.TickSize = i.TickSize
 	base.LotSize = i.LotSize
+	base.MinQty = i.MinQty
+	base.MinNotional = i.MinNotional
 	base.Active = i.Active
 	if v := strings.TrimSpace(i.ExpiresAt); v != "" {
 		at, err := time.Parse(time.RFC3339Nano, v)
@@ -194,6 +199,15 @@ func normalizeMark(source string, mark *Mark, receivedAt time.Time) (*Mark, erro
 		mark.QuoteAt = quoteAt.UTC().Format(time.RFC3339Nano)
 	}
 
+	if mark.QuoteAt != "" {
+		qt, _ := time.Parse(time.RFC3339Nano, mark.QuoteAt)
+		if receivedAt.Sub(qt) > staleAfter {
+			mark.BidPrice = nil
+			mark.AskPrice = nil
+			mark.BidSize = nil
+			mark.AskSize = nil
+		}
+	}
 	mark.Source = strings.TrimSpace(source)
 	mark.ReceivedAt = receivedAt.Format(time.RFC3339Nano)
 	if strings.TrimSpace(mark.MarkedAt) == "" {

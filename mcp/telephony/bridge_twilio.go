@@ -240,12 +240,15 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dialer := ws.Dialer{}
-	core, _, _, err := dialer.Dial(r.Context(), coreURL.String())
+	core, buffered, _, err := dialer.Dial(r.Context(), coreURL.String())
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
 		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "core audio bridge rejected", string(mediaCloseLegCore))
 		globalCtx.Logger().Warn("dial core audio bridge", "err", err, "url", redactURL(coreURL.String()))
 		return
+	}
+	if buffered != nil {
+		core = hijackedConn{Conn: core, reader: buffered}
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
@@ -409,7 +412,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	maxQueuedMS := 0
 	pacerPolicy := bufferedCarrierPacerPolicy()
 	pacerMode := "buffered"
-	if row.PeerKind == peerKindHuman {
+	if row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal {
 		pacerPolicy = liveHumanCarrierPacerPolicy()
 		pacerMode = "live_human"
 	}

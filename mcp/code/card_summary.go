@@ -2,6 +2,8 @@ package main
 
 import (
 	"net/http"
+	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -90,15 +92,9 @@ func emitDevEvent(ctx *sdk.AppCtx, repo *Repo, devRun *DevRun) {
 }
 
 func (a *App) repoCardData(projectID string, repo *Repo) (*RepoCardData, error) {
-	files, err := listSourceFiles(a.storeFor(repo), repo.Slug, "", true, false)
+	count, totalSize, err := a.sourceSummary(repo)
 	if err != nil {
 		return nil, err
-	}
-	var totalSize int64
-	for _, file := range files {
-		if !file.IsDir {
-			totalSize += file.Size
-		}
 	}
 	devRun, err := dbGetDevRun(globalCtx.AppDB(), projectID, repo.ID)
 	if err != nil {
@@ -123,7 +119,7 @@ func (a *App) repoCardData(projectID string, repo *Repo) (*RepoCardData, error) 
 		IsTemplate:    repo.IsTemplate,
 		TemplateScope: repo.TemplateScope,
 		UpdatedAt:     repo.UpdatedAt,
-		FileCount:     len(files),
+		FileCount:     count,
 		TotalSize:     totalSize,
 		DevRun:        cardDevRun,
 	}, nil
@@ -150,4 +146,46 @@ func (a *App) httpRepoSummary(w http.ResponseWriter, r *http.Request, slug strin
 		return
 	}
 	httpJSON(w, map[string]any{"repository": data})
+}
+
+// Revision invalidation covers Code mutations; expiry also catches trusted local
+// dev processes, which can write outside FileStore. Only 256 summaries are kept.
+type sourceSummaryEntry struct {
+	revision uint64
+	at       time.Time
+	count    int
+	bytes    int64
+}
+type summaryCache struct {
+	sync.Mutex
+	entries map[string]sourceSummaryEntry
+}
+
+func (a *App) sourceSummary(repo *Repo) (int, int64, error) {
+	key := repoStoreKey(repo)
+	revision := uint64(0)
+	if a.locks != nil {
+		revision = a.locks.revision(key)
+	}
+	a.summaries.Lock()
+	defer a.summaries.Unlock()
+	if e, ok := a.summaries.entries[key]; ok && e.revision == revision && time.Since(e.at) < 15*time.Second {
+		return e.count, e.bytes, nil
+	}
+	files, err := listSourceFiles(a.storeFor(repo), repo.Slug, "", true, false)
+	if err != nil {
+		return 0, 0, err
+	}
+	e := sourceSummaryEntry{revision: revision, at: time.Now()}
+	for _, f := range files {
+		if !f.IsDir {
+			e.count++
+			e.bytes += f.Size
+		}
+	}
+	if a.summaries.entries == nil || len(a.summaries.entries) >= 256 {
+		a.summaries.entries = map[string]sourceSummaryEntry{}
+	}
+	a.summaries.entries[key] = e
+	return e.count, e.bytes, nil
 }

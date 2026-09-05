@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
+	"time"
 )
 
 // repoLockSet serializes whole-tree operations such as Git checkout with the
@@ -11,8 +16,9 @@ import (
 // kept for the life of the app; repository counts are small and retaining the
 // mutex avoids reference-count races during archive/delete.
 type repoLockSet struct {
-	mu    sync.Mutex
-	locks map[string]*sync.RWMutex
+	mu        sync.Mutex
+	locks     map[string]*sync.RWMutex
+	revisions map[string]uint64
 }
 
 func newRepoLockSet() *repoLockSet {
@@ -33,7 +39,20 @@ func (s *repoLockSet) forRepo(slug string) *sync.RWMutex {
 func (s *repoLockSet) lock(slug string) func() {
 	lock := s.forRepo(slug)
 	lock.Lock()
-	return lock.Unlock
+	return func() {
+		s.mu.Lock()
+		if s.revisions == nil {
+			s.revisions = map[string]uint64{}
+		}
+		s.revisions[slug]++
+		s.mu.Unlock()
+		lock.Unlock()
+	}
+}
+func (s *repoLockSet) revision(slug string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.revisions[slug]
 }
 
 func (s *repoLockSet) rlock(slug string) func() {
@@ -135,27 +154,96 @@ func (s *lockedFileStore) RepoPath(slug string) string {
 // hardDeleteRepo removes the database row, working tree, and external Git
 // metadata under one repository lock. Using the raw local store here avoids
 // recursively acquiring the lockedFileStore mutex.
-func (a *App) hardDeleteRepo(db *sql.DB, projectID, slug string) error {
+// Quarantine filesystem state before deleting the database row. Failures keep
+// the row/link and restore the source so deletion can be retried safely.
+func (a *App) hardDeleteRepo(db *sql.DB, projectID, slug string) (err error) {
 	repo, err := dbGetRepoBySlug(db, projectID, slug)
+	if err != nil || repo == nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	finish, err := a.commands.beginDelete(ctx, repo.ID)
 	if err != nil {
 		return err
 	}
-	if a.locks == nil || a.git == nil || repo == nil {
-		if err := dbHardDeleteRepo(db, projectID, slug); err != nil {
+	success := false
+	defer func() { finish(success) }()
+	if a.dev != nil && globalCtx != nil {
+		if err := a.dev.stopDevRun(globalCtx, projectID, repo.ID); err != nil {
 			return err
 		}
-		if repo == nil {
-			return nil
+	}
+	link, err := dbGetRepoWorkspace(db, projectID, repo.ID)
+	if err != nil {
+		return err
+	}
+	if link != nil {
+		if globalCtx == nil || globalCtx.PlatformAPI() == nil {
+			return errors.New("workspace cleanup requires the platform; repository was preserved")
 		}
-		return a.storeFor(repo).DropRepo(slug)
+		var out map[string]any
+		if err := globalCtx.PlatformAPI().CallAppResult(workspacesAppName, "workspace_destroy", map[string]any{"workspace_id": link.WorkspaceID, "confirm": true}, &out); err != nil {
+			return fmt.Errorf("workspace cleanup failed; repository was preserved: %w", err)
+		}
+		if err := dbDeleteRepoWorkspace(db, projectID, repo.ID); err != nil {
+			return err
+		}
 	}
 	key := repoStoreKey(repo)
-	defer a.locks.lock(key)()
-	if err := dbHardDeleteRepo(db, projectID, slug); err != nil {
+	if a.locks != nil {
+		defer a.locks.lock(key)()
+	}
+	raw := a.store
+	if locked, ok := raw.(*lockedFileStore); ok {
+		raw = locked.inner
+	}
+	local, ok := raw.(FileStoreLocalPath)
+	if !ok {
+		return errors.New("transactional repository deletion requires local storage")
+	}
+	paths := []string{local.RepoPath(key)}
+	if a.git != nil {
+		paths = append(paths, a.git.gitDir(repo.ID))
+	}
+	moved := map[string]string{}
+	defer func() {
+		if err != nil {
+			for original, temp := range moved {
+				if e := os.Rename(temp, original); e != nil {
+					err = errors.Join(err, fmt.Errorf("restore %s from %s: %w", original, temp, e))
+				}
+			}
+		}
+	}()
+	for _, original := range paths {
+		if _, e := os.Lstat(original); errors.Is(e, os.ErrNotExist) {
+			continue
+		} else if e != nil {
+			return e
+		}
+		dir, e := os.MkdirTemp(filepath.Dir(original), ".code-delete-")
+		if e != nil {
+			return e
+		}
+		temp := filepath.Join(dir, "source")
+		if e = os.Rename(original, temp); e != nil {
+			_ = os.Remove(dir)
+			return e
+		}
+		moved[original] = temp
+	}
+	if err = dbHardDeleteRepo(db, projectID, slug); err != nil {
 		return err
 	}
-	if err := a.git.store.DropRepo(key); err != nil {
-		return err
+	success = true
+	// Database deletion committed. Quarantine is no longer live source; retain
+	// its path in a cleanup error rather than resurrecting a deleted repository.
+	for original, temp := range moved {
+		delete(moved, original)
+		if e := os.RemoveAll(filepath.Dir(temp)); e != nil {
+			err = errors.Join(err, fmt.Errorf("repository deleted; remove quarantine %s: %w", filepath.Dir(temp), e))
+		}
 	}
-	return os.RemoveAll(a.git.gitDir(repo.ID))
+	return err
 }

@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, CardHeader, StatusDot, StatusPill, DataList } from "@apteva/ui-kit";
 import Hls from "hls.js";
+import { usePollingRefresh } from "./refresh";
 
 interface AppEventEnvelope<T = unknown> {
   topic: string;
@@ -257,8 +258,15 @@ function appURL(path: string, projectId?: string, extra?: Record<string, string 
   return `${url.pathname}${url.search}`;
 }
 
-export default function ComputerPanel({ projectId }: NativePanelProps) {
+export default function ComputerPanel(props: NativePanelProps) {
+ return <ComputerPanelContent key={props.projectId ?? ""} {...props}/>;
+}
+
+function ComputerPanelContent({ projectId }: NativePanelProps) {
+ const settingsGeneration = useRef(0);
   const [rows, setRows] = useState<SessionRow[]>([]);
+  const [loadedProject, setLoadedProject] = useState<string | null>(null);
+  const pendingSelection = useRef<string | null>(null);
   const [contexts, setContexts] = useState<ContextRow[]>([]);
   const [settings, setSettings] = useState<ComputerSettings>({
     default_backend: "local",
@@ -282,13 +290,14 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
   const [showAddProxy, setShowAddProxy] = useState(false);
   const [pendingProxyDelete, setPendingProxyDelete] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = usePollingRefresh(async (signal) => {
+    const settingsVersion = settingsGeneration.current;
     try {
       const [sessionsRes, contextsRes, settingsRes, proxiesRes] = await Promise.all([
-        fetch(appURL(SESSIONS_URL, projectId), { credentials: "include" }),
-        fetch(appURL(CONTEXTS_URL, projectId), { credentials: "include" }),
-        fetch(appURL(SETTINGS_URL, projectId), { credentials: "include" }),
-        fetch(appURL(PROXY_PROFILES_URL, projectId), { credentials: "include" }),
+        fetch(appURL(SESSIONS_URL, projectId), { credentials: "include", signal }),
+        fetch(appURL(CONTEXTS_URL, projectId), { credentials: "include", signal }),
+        fetch(appURL(SETTINGS_URL, projectId), { credentials: "include", signal }),
+        fetch(appURL(PROXY_PROFILES_URL, projectId), { credentials: "include", signal }),
       ]);
       if (!sessionsRes.ok) throw new Error(`sessions HTTP ${sessionsRes.status}`);
       if (!contextsRes.ok) throw new Error(`contexts HTTP ${contextsRes.status}`);
@@ -302,22 +311,32 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
       if (contextBody.error) throw new Error(contextBody.error);
       if (settingsBody.error) throw new Error(settingsBody.error);
       if (proxiesBody.error) throw new Error(proxiesBody.error);
-      setRows(body.sessions ?? []);
+      if (signal.aborted) return;
+      const nextRows = body.sessions ?? [];
+      const requested = pendingSelection.current ?? selected;
+      if (requested && !nextRows.some((row) => row.session_id === requested)) {
+        const detail = await fetch(appURL(`${SESSIONS_URL}/${encodeURIComponent(requested)}/presentation`, projectId), { credentials: "include", signal });
+        if (detail.ok) {
+          const presentation = await detail.json();
+          if (signal.aborted) return;
+          if (presentation.session) nextRows.push(presentation.session);
+        }
+      }
+      if (signal.aborted) return;
+      if (pendingSelection.current && pendingSelection.current !== requested) return;
+      pendingSelection.current = null;
+      setRows(nextRows);
+      setLoadedProject(projectId ?? "");
       setContexts(contextBody.contexts ?? []);
-      if (settingsBody.settings) setSettings(settingsBody.settings);
+      if (settingsBody.settings && settingsVersion === settingsGeneration.current) setSettings(settingsBody.settings);
       setProxyProfiles(proxiesBody.profiles ?? []);
       setProxyConnections(proxiesBody.connections ?? []);
       setErr(null);
     } catch (e: any) {
-      setErr(String(e?.message ?? e));
+      if (!signal.aborted) setErr(String(e?.message ?? e));
     }
-  }, [projectId]);
+  }, projectId, POLL_MS);
 
-  useEffect(() => {
-    void refresh();
-    const t = setInterval(refresh, POLL_MS);
-    return () => clearInterval(t);
-  }, [refresh]);
 
   useEffect(() => {
     const t = setInterval(() => setNowTick(Date.now()), 60_000);
@@ -373,11 +392,20 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
   });
 
   useEffect(() => {
+    if (loadedProject !== (projectId ?? "") || pendingSelection.current) return;
     if (!selected && rows.length > 0) setSelected(rows[0].session_id);
     if (selected && !rows.some((r) => r.session_id === selected) && closedSession?.session_id !== selected) {
       setSelected(rows[0]?.session_id ?? null);
     }
-  }, [rows, selected, closedSession]);
+  }, [rows, selected, closedSession, loadedProject, projectId]);
+
+  useEffect(() => {
+    setRows([]); setContexts([]); setClosedSession(null); setLoadedProject(null);
+    const query = new URLSearchParams(window.location.search);
+    const requested = query.get("instance") || query.get("session_id");
+    pendingSelection.current = requested;
+    setSelected(requested);
+  }, [projectId]);
 
   const onClose = useCallback(
     async (id: string) => {
@@ -428,8 +456,8 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
 
   const updateSettings = useCallback(
     async (patch: Partial<ComputerSettings>) => {
-      const next = { ...settings, ...patch };
-      setSettings(next);
+      const generation = ++settingsGeneration.current;
+      setSettings((previous) => ({ ...previous, ...patch }));
       try {
         const r = await fetch(appURL(SETTINGS_URL, projectId), {
           method: "PATCH",
@@ -439,14 +467,18 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
         });
         const body = (await r.json()) as SettingsResponse;
         if (!r.ok || body.error) throw new Error(body.error ?? `HTTP ${r.status}`);
-        if (body.settings) setSettings(body.settings);
-        setErr(null);
+        if (generation === settingsGeneration.current) {
+          if (body.settings) setSettings(body.settings);
+          setErr(null);
+        }
       } catch (e: any) {
-        setErr(`settings failed: ${String(e?.message ?? e)}`);
+        if (generation === settingsGeneration.current) setErr(`settings failed: ${String(e?.message ?? e)}`);
+      } finally {
+        settingsGeneration.current++;
         void refresh();
       }
     },
-    [projectId, refresh, settings],
+    [projectId, refresh],
   );
 
   const onDeleteProxy = useCallback(
@@ -485,6 +517,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
         onDeleteProxy={setPendingProxyDelete}
       />
       <SessionDetail
+        key={`${projectId ?? ""}:${selected ?? ""}`}
         session={sel}
         projectId={projectId}
         now={nowTick}
@@ -501,6 +534,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
           projectId={projectId}
           onOpened={(newID) => {
             setShowOpen(false);
+            pendingSelection.current = newID;
             setSelected(newID);
             void refresh();
           }}
@@ -600,7 +634,7 @@ function BrowsersList({
         title="Browsers"
         right={
           <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-            <StatusDot variant={err ? "error" : "success"} />
+            <StatusDot variant={err ? "error" : "live"}>{err ? "Error" : "Connected"}</StatusDot>
             <IconButton onClick={onOpen} title="Open session">
               <PlusIcon /> New
             </IconButton>
@@ -894,7 +928,7 @@ function BrowserListItem({
             {host}
           </span>
           <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-            <StatusPill variant={isActive ? "success" : "neutral"} label={row.status || "active"} />
+            <StatusPill variant={isActive ? "success" : "neutral"}>{row.status || "active"}</StatusPill>
             {isActive && onClose && (
               <button
                 onClick={(e) => {
@@ -1168,9 +1202,9 @@ function SessionDetail({
         right={
           <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
             {session.recording_supported && (
-              <StatusPill variant="neutral" label={recordingStatusLabel(session.recording_status ?? "recording")} />
+              <StatusPill variant="neutral">{recordingStatusLabel(session.recording_status ?? "recording")}</StatusPill>
             )}
-            <StatusPill variant="neutral" label={BACKEND_LABEL[session.backend] ?? session.backend} />
+            <StatusPill variant="neutral">{BACKEND_LABEL[session.backend] ?? session.backend}</StatusPill>
           </div>
         }
       />
@@ -1396,14 +1430,15 @@ function RecordingSessionDetail({
   const [selectedStream, setSelectedStream] = useState("");
   const [err, setErr] = useState<string | null>(null);
 
-  const refreshRecording = useCallback(async () => {
+  const refreshRecording = usePollingRefresh(async (signal) => {
     try {
       const response = await fetch(
         appURL(`${SESSIONS_URL}/${encodeURIComponent(session.session_id)}/recording`, projectId),
-        { credentials: "include" },
+        { credentials: "include", signal },
       );
       const body = (await response.json()) as RecordingMetadata;
       if (!response.ok || body.error) throw new Error(body.error ?? `HTTP ${response.status}`);
+      if(signal.aborted) return;
       setMetadata(body);
       setSelectedStream((current) => {
         if (body.streams.some((stream) => stream.id === current)) return current;
@@ -1411,23 +1446,12 @@ function RecordingSessionDetail({
       });
       setErr(null);
     } catch (e: any) {
-      setErr(String(e?.message ?? e));
+      if(!signal.aborted) setErr(String(e?.message ?? e));
     }
-  }, [projectId, session.session_id]);
+  }, `${projectId ?? ""}:${session.session_id}`, (metadata?.status ?? session.recording_status) === "processing" || (metadata?.status ?? session.recording_status) === "recording" ? POLL_MS : 0);
 
-  useEffect(() => {
-    setMetadata(null);
-    setSelectedStream("");
-    setErr(null);
-    void refreshRecording();
-  }, [refreshRecording, externalRefreshKey]);
-
-  useEffect(() => {
-    const status = metadata?.status ?? session.recording_status;
-    if (status !== "processing" && status !== "recording") return;
-    const timer = window.setInterval(refreshRecording, POLL_MS);
-    return () => window.clearInterval(timer);
-  }, [metadata?.status, refreshRecording, session.recording_status]);
+  useEffect(() => { setMetadata(null); setSelectedStream(""); setErr(null); }, [projectId, session.session_id]);
+  useEffect(() => { void refreshRecording(); }, [externalRefreshKey, refreshRecording]);
 
   const status = metadata?.status ?? session.recording_status ?? (session.recording_supported ? "processing" : "unsupported");
   const streams = metadata?.streams ?? [];
@@ -1440,8 +1464,8 @@ function RecordingSessionDetail({
         title={host || "Recording"}
         right={
           <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-            <StatusPill variant="neutral" label={recordingStatusLabel(status)} />
-            <StatusPill variant="neutral" label={BACKEND_LABEL[session.backend] ?? session.backend} />
+            <StatusPill variant="neutral">{recordingStatusLabel(status)}</StatusPill>
+            <StatusPill variant="neutral">{BACKEND_LABEL[session.backend] ?? session.backend}</StatusPill>
           </div>
         }
       />
@@ -1484,7 +1508,7 @@ function RecordingSessionDetail({
               className="border border-border bg-bg-subtle text-text-muted"
               style={{ ...browserViewportFrameStyle, display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontSize: "13px" }}
             >
-              {status === "processing" || status === "recording" ? <StatusDot variant="active" /> : <StatusDot variant={status === "failed" ? "error" : "muted"} />}
+              {status === "processing" || status === "recording" ? <StatusDot variant="active">{null}</StatusDot> : <StatusDot variant={status === "failed" ? "error" : "muted"}>{null}</StatusDot>}
               {err || metadata?.message || recordingStatusLabel(status)}
             </div>
           )}

@@ -18,7 +18,7 @@ func TestEmbeddedManifestValid(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Fatal("db migrations missing")
 	}
-	if got, want := len(m.Provides.MCPTools), 23; got != want {
+	if got, want := len(m.Provides.MCPTools), 24; got != want {
 		t.Fatalf("tool count = %d, want %d", got, want)
 	}
 	if len(m.Provides.UIPanels) != 1 {

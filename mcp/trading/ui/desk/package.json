@@ -6,13 +6,15 @@
   "private": true,
   "scripts": {
     "build": "bun run build.ts",
-    "dev": "bun run --watch build.ts"
+    "dev": "bun run --watch build.ts",
+    "test": "bun test"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.2.2",
     "@types/bun": "latest",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "happy-dom": "^20.14.0",
     "tailwindcss": "^4.2.2"
   },
   "peerDependencies": {

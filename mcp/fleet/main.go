@@ -4,8 +4,9 @@
 package main
 
 import (
+	"context"
+	_ "embed"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -16,176 +17,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: fleet
-display_name: Fleet
-version: 0.10.4
-description: Control plane for a local fleet of apteva tenants.
-author: Apteva
-icon: /ui/icon.svg
-icon_style: monochrome
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - net.egress
-    - platform.apps.call
-    - platform.connections.execute
-    - platform.ingress.write
-    - platform.templates.read
-  apps:
-    - name: a2a
-      version: ">=0.4.0"
-      optional: true
-      reason: Automatically install and pair A2A across managed tenants when the parent A2A app is bound.
-  integrations:
-    - role: domains
-      kind: app
-      required: false
-      compatible_app_names: [domains]
-      label: Domains app
-      hint: Install the Domains app to attach custom hostnames to tenants.
-    - role: host_provider
-      kind: app
-      required: false
-      compatible_app_names: [instances]
-      label: Instances app
-      hint: Install the Instances app to host tenants on remote VPSes; without it, all tenants live on the parent host.
-    - role: backup
-      kind: app
-      required: false
-      compatible_app_names: [backup]
-      label: Backup app
-      hint: Install the Backup app to schedule and retain per-tenant snapshots.
-provides:
-  http_routes:
-    - prefix: /
-    - prefix: /transfers/
-      no_auth: true
-    - prefix: /provider-grants/
-      no_auth: true
-  mcp_tools:
-    - name: tenant_create
-      description: Spawn a new local apteva tenant.
-    - name: tenant_template_list
-      description: List project templates available for tenant provisioning.
-    - name: tenant_apply_template
-      description: Import and apply a project template to a managed tenant.
-    - name: tenant_clone
-      description: Clone a Fleet tenant with resumable direct hosted transfer and mandatory quarantine before activation.
-    - name: tenant_attach_key
-      description: Finish admin-driven setup by attaching the tenant's api_key.
-    - name: tenant_connect
-      description: Register an existing apteva-server as a tenant.
-    - name: tenant_list
-      description: List managed tenants.
-    - name: tenant_get
-      description: Full record for one tenant.
-    - name: tenant_start
-      description: Start a stopped tenant, rehearsing unvalidated clones in quarantine first.
-    - name: tenant_stop
-      description: Stop a running local tenant.
-    - name: tenant_delete
-      description: Stop and remove a tenant.
-    - name: tenant_support_login
-      description: Mint a short-lived super-admin URL on the tenant.
-    - name: tenant_run_remote
-      description: Proxy an MCP tool call to a tenant.
-    - name: tenant_inventory
-      description: Read tenant-local platform inventory through the tenant API.
-    - name: tenant_platform_call
-      description: Generic allowlisted tenant platform operation.
-    - name: tenant_app_tools
-      description: List MCP tools exposed by an installed tenant app.
-    - name: tenant_app_call
-      description: Call an MCP tool exposed by an installed tenant app.
-    - name: tenant_attach_domain
-      description: Attach a public hostname to a tenant via Domains DNS and server-native ingress.
-    - name: tenant_detach_domain
-      description: Clear a tenant's domain link.
-    - name: tenant_domain_grant
-      description: Delegate a base domain to a tenant for tenant-local apps.
-    - name: tenant_domain_list
-      description: List Fleet domain grants.
-    - name: tenant_domain_revoke
-      description: Revoke a Fleet domain grant.
-    - name: tenant_host_attach
-      description: Register one exact application hostname for a tenant.
-    - name: tenant_host_list
-      description: List exact tenant host mappings.
-    - name: tenant_host_remove
-      description: Remove one exact tenant host mapping.
-    - name: tenant_ingress_prepare_direct
-      description: Prepare a hosted tenant to serve its domains directly on its Instances host.
-    - name: tenant_ingress_verify
-      description: Verify hosted direct-ingress DNS, HTTPS, and tenant-local routes.
-    - name: tenant_ingress_finalize
-      description: Finalize hosted direct ingress after successful verification.
-    - name: tenant_ingress_rollback
-      description: Restore parent ingress for a hosted direct-ingress tenant.
-    - name: tenant_domain_record_set
-      description: Proxy a DNS upsert for a tenant inherited domain.
-    - name: tenant_domain_record_delete
-      description: Proxy a DNS delete for a tenant inherited domain.
-    - name: tenant_provider_grant
-      description: Expose a parent integration connection inside a tenant as a tenant-local virtual connection.
-    - name: tenant_provider_grant_list
-      description: List delegated provider/integration grants.
-    - name: tenant_provider_grant_revoke
-      description: Revoke a delegated provider/integration grant.
-    - name: tenant_migrate
-      description: Move a Fleet tenant between local and Instances hosts — cold transfer of the data dir, re-spawn there, re-point the route.
-    - name: tenant_migrate_finalize
-      description: Permanently remove a source retained by tenant_migrate after explicit confirmation.
-    - name: tenant_update
-      description: Update a tenant's apteva version with exact runtime validation while preserving stopped state.
-    - name: tenant_check_updates
-      description: Report npm's apteva latest version + which tenants are behind. Read-only.
-    - name: tenant_set_target_version
-      description: Pin a tenant's desired apteva version without applying. Surfaces drift on the panel.
-    - name: tenant_reveal_api_key
-      description: Return the tenant's api_key (unsealed from fleet's keyring).
-    - name: tenant_reset_admin_password
-      description: Rotate the tenant admin user's password to a fresh random one. Revokes all existing sessions for that user. Returns the new password.
-    - name: fleet_tenant_backup_plan
-      description: Report backup coverage and Backup-app scope arguments for a tenant.
-    - name: fleet_tenant_snapshot
-      description: Provider hook used by Backup to stream a snapshot of one local Fleet tenant.
-    - name: fleet_tenant_restore
-      description: Provider hook used by Backup to stream and restore one local Fleet tenant snapshot.
-  ui_panels:
-    - slot: project.page
-      label: Fleet
-      icon: server
-      entry: /ui/FleetPanel.mjs
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: fleet/v0.10.0
-    entry: mcp/fleet
-  image: ghcr.io/apteva/fleet:0.1.0
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/fleet.db
-  migrations: migrations/
-config_schema:
-  - name: a2a_main_agents_json
-    label: Parent agents allowed over A2A
-    type: text
-    description: JSON list of attached parent agent names, IDs, card IDs, or "*". Defaults to all parent agents deliberately attached to A2A.
-    default: '["*"]'
-    required: false
-  - name: a2a_tenant_agents_json
-    label: Tenant agents allowed over A2A
-    type: text
-    description: JSON list of attached tenant agent names, IDs, card IDs, or "*". Defaults to all tenant agents, which Fleet attaches to their tenant A2A install.
-    default: '["*"]'
-    required: false
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 type App struct {
 	store *store
@@ -260,9 +93,6 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.publicHost = detectPublicHost()
 	globalCtx = ctx
-	if err := a.reconcileOnBoot(ctx); err != nil {
-		return fmt.Errorf("fleet startup reconciliation failed: %w", err)
-	}
 	ctx.Logger().Info("fleet mounted", "data_root", localDataRoot(), "public_host", a.publicHost)
 	return nil
 }
@@ -295,11 +125,13 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	// inside httpTenantItem so /tenants/<id>, /tenants/<id>/attach-domain,
 	// and /tenants/<id>/update can all share one ServeMux pattern.
 	return []sdk.Route{
-		{Method: http.MethodGet, Pattern: "/tenants", Handler: a.httpList},
-		{Pattern: "/tenants/", Handler: a.httpTenantItem},
+		{Method: http.MethodGet, Pattern: "/tenants", Handler: fleetAuthenticated(a.httpList)},
+		{Pattern: "/tenants/", Handler: fleetAuthenticated(a.httpTenantItem)},
+		{Pattern: "/maintenance", Handler: fleetAuthenticated(a.httpMaintenance)},
+		{Pattern: "/dns/", Handler: a.httpDelegatedDNS, NoAuth: true},
 		{Pattern: "/transfers/", Handler: a.httpTransfer, NoAuth: true},
 		{Method: http.MethodPost, Pattern: "/provider-grants/", Handler: a.httpProviderGrantExecute, NoAuth: true},
-		{Method: http.MethodGet, Pattern: "/_meta", Handler: a.httpMeta},
+		{Method: http.MethodGet, Pattern: "/_meta", Handler: fleetAuthenticated(a.httpMeta)},
 	}
 }
 
@@ -326,6 +158,10 @@ func (a *App) httpTenantItem(w http.ResponseWriter, r *http.Request) {
 		a.httpMigrate(w, r)
 	case "reveal-api-key":
 		a.httpRevealAPIKey(w, r)
+	case "recover-operation":
+		fleetAuthenticated(a.httpRecoverOperation)(w, r)
+	case "resume-setup":
+		fleetAuthenticated(a.httpSetupRecovery)(w, r)
 	case "reset-admin-password":
 		a.httpResetAdminPassword(w, r)
 	default:
@@ -908,6 +744,8 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "startup_reconcile", Run: func(_ context.Context, ctx *sdk.AppCtx) error { return a.reconcileOnBoot(ctx) }},
+		{Name: "log_retention", Schedule: "@every 60s", Run: a.runLogRetention},
 		{Name: "health_poller", Schedule: "@every 60s", Run: a.runHealthPoller},
 		{Name: "a2a_reconcile_on_mount", Run: a.runA2AReconciler},
 		{Name: "a2a_reconcile", Schedule: a2aReconcileEvery, Run: a.runA2AReconciler},

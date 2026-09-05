@@ -1,3 +1,4 @@
+import { AttachmentContent, GenericComponents, reportSectionsText } from "./messageContent";
 // ConversationsPanel — chat + inbox for the conversations app.
 //
 // The chat column is a faithful port of the dashboard Chat page's UX:
@@ -83,6 +84,7 @@ export interface Conversation {
   directive?: string;
   created_at: string;
   updated_at: string;
+  archived_at?: string | null;
 }
 
 interface CardComponent {
@@ -92,6 +94,7 @@ interface CardComponent {
 }
 
 export interface Message {
+ revision?: number;
   id: number;
   conversation_id: string;
   role: "user" | "agent" | "system";
@@ -100,12 +103,15 @@ export interface Message {
   component_kind?: string;
   severity?: string;
   components: CardComponent[];
+  attachments?: Array<{type:string;data_url?:string;name?:string}>;
   client_message_id?: string;
   metadata?: Record<string, unknown>;
   created_at: string;
 }
 
 interface StreamFrame {
+ after_message_id?: number;
+ run_id?: string;
   chat_id: string;
   agent_id?: number;
   thread_id?: string;
@@ -114,6 +120,8 @@ interface StreamFrame {
   phase?: string;
   done: boolean;
 }
+
+interface InboxPage {items:InboxItem[];total:number;next_cursor:string;attention:Record<string,number>}
 
 interface InboxItem {
   message: Message;
@@ -436,6 +444,7 @@ function ReportCard({ message }: { message: Message }) {
       <p className="mt-1 text-sm text-text-muted whitespace-pre-wrap">
         {String(card.props.summary ?? "")}
       </p>
+      <div className="chat-md" dangerouslySetInnerHTML={{__html:renderSafeMarkdown(reportSectionsText(card.props.sections))}} />
     </div>
   );
 }
@@ -1137,7 +1146,13 @@ function ContextColumn({
 //   user   — right-aligned accent-tinted bubble, plain text
 //   agent  — full-width markdown (chat-md, the dashboard's own styles)
 //   system — centered status line
-function MessageRow({
+function MessageRow(props: {message:Message;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
+ return <div className="min-w-0 shrink-0 flex flex-col gap-2">
+ {props.message.agent_id ? <p className="text-xs text-text-muted">Agent {props.message.agent_id}</p> : null}
+ <MessageBody {...props}/><AttachmentContent attachments={props.message.attachments}/><GenericComponents components={props.message.components}/>
+ </div>;
+}
+function MessageBody({
   message,
   onAction,
 }: {
@@ -1202,6 +1217,8 @@ function MessageRow({
 }
 
 interface StreamBubbleState {
+ afterMessageId?: number;
+ runId?: string;
   callId: string;
   agentId?: number;
   text: string;
@@ -1219,224 +1236,136 @@ function normalizeStreamText(value: string): string {
   return value.replace(/\r\n/g, "\n").trim();
 }
 
+interface ChangePage { messages: Message[]; cursor: number; has_more: boolean; before: number }
 function useConversationTransport(conversationID: string, projectId: string) {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [bubble, setBubbleState] = useState<StreamBubbleState | null>(null);
+  const [bubbles, setBubbles] = useState<StreamBubbleState[]>([]);
   const [connected, setConnected] = useState(false);
-  const highestSeenRef = useRef(0);
-  // Message rows and stream frames travel over two independent SSE
-  // channels; either can outrun the other. Short-lived tombstones
-  // (NOT permanent — providers like Gemini reuse call ids across
-  // responses) plus recent-agent-message matching keep a late frame
-  // from resurrecting a settled bubble. Same scheme, constants, and
-  // pruning as the dashboard's chatConnections.
-  const settledCallsRef = useRef<Map<string, number>>(new Map());
-  const recentAgentRef = useRef<Array<{ content: string; settledAt: number }>>([]);
-  const bubbleRef = useRef<StreamBubbleState | null>(null);
-  const clearTimerRef = useRef(0);
-  const pendingFrameRef = useRef<StreamFrame | null>(null);
-  const rafRef = useRef(0);
-
-  const setBubble = useCallback((next: StreamBubbleState | null) => {
-    bubbleRef.current = next;
-    setBubbleState(next);
-  }, []);
-
-  const cancelStreamClear = useCallback(() => {
-    if (clearTimerRef.current) {
-      window.clearTimeout(clearTimerRef.current);
-      clearTimerRef.current = 0;
-    }
-  }, []);
-
-  const pruneSettled = useCallback(() => {
-    const cutoff = Date.now() - SETTLED_STREAM_TTL_MS;
-    for (const [callId, settledAt] of settledCallsRef.current) {
-      if (settledAt < cutoff) settledCallsRef.current.delete(callId);
-    }
-    recentAgentRef.current = recentAgentRef.current
-      .filter((m) => m.settledAt >= cutoff)
-      .slice(-SETTLED_STREAM_MAX);
-    if (settledCallsRef.current.size > SETTLED_STREAM_MAX) {
-      const overflow = settledCallsRef.current.size - SETTLED_STREAM_MAX;
-      for (const callId of [...settledCallsRef.current.keys()].slice(0, overflow)) {
-        settledCallsRef.current.delete(callId);
-      }
-    }
-  }, []);
-
-  const rememberSettled = useCallback(
-    (callId: string) => {
-      if (!callId) return;
-      settledCallsRef.current.set(callId, Date.now());
-      pruneSettled();
-    },
-    [pruneSettled],
-  );
-
-  const mergeMessages = useCallback(
-    (incoming: Message[]) => {
-      if (incoming.length === 0) return;
-      let sawAgentRow = false;
-      for (const m of incoming) {
-        if (m.role === "agent" && !m.component_kind) {
-          sawAgentRow = true;
-          const normalized = normalizeStreamText(m.content);
-          if (normalized) {
-            recentAgentRef.current.push({ content: normalized, settledAt: Date.now() });
-            pruneSettled();
-          }
+  const [historyError, setHistoryError] = useState("");
+  const [hasOlder, setHasOlder] = useState(false);
+  const beforeRef = useRef(0);
+  const generationRef = useRef(0);
+  const loadingOlderRef = useRef(false);
+  const lastUserIdRef=useRef(0);
+  const streamRef = useRef(new Map<string, StreamBubbleState & { updatedAt: number }>());
+  const settledRef = useRef(new Map<string, number>());
+  const publishBubbles = useCallback(() => setBubbles([...streamRef.current.values()]), []);
+  const mergeMessages = useCallback((incoming: Message[]) => {
+    const valid = incoming.filter(m => m.conversation_id === conversationID);
+    if (!valid.length) return;
+    for(const m of valid)if(m.role==="user")lastUserIdRef.current=Math.max(lastUserIdRef.current,m.id);
+    for (const m of valid) {
+      if (m.role !== "agent" || m.component_kind) continue;
+      for (const [key, value] of streamRef.current) {
+        if (value.agentId !== m.agent_id || m.id <= (value.afterMessageId ?? 0)) continue;
+        if (value.phase === "acknowledgement" || (value.text && normalizeStreamText(m.content) === normalizeStreamText(value.text))) {
+          settledRef.current.set(key, Date.now()); streamRef.current.delete(key);
         }
       }
-      // A durable agent row settles the streaming bubble: remember its
-      // call id before clearing so the parallel stream channel cannot
-      // resurrect the same text (donor: chatConnections.onmessage).
-      if (sawAgentRow) {
-        if (bubbleRef.current?.callId) rememberSettled(bubbleRef.current.callId);
-        cancelStreamClear();
-        setBubble(null);
-      }
-      setMessages((current) => {
-        const byId = new Map<number, Message>(current.map((m) => [m.id, m]));
-        for (const m of incoming) {
-          byId.set(m.id, m);
-          if (m.id > highestSeenRef.current) highestSeenRef.current = m.id;
-        }
-        return [...byId.values()].sort((a, b) => a.id - b.id);
-      });
-    },
-    [cancelStreamClear, pruneSettled, rememberSettled, setBubble],
-  );
-
-  const applyFrame = useCallback(
-    (frame: StreamFrame) => {
-      pruneSettled();
-      if (frame.call_id && settledCallsRef.current.has(frame.call_id)) return;
-      if (
-        !frame.done &&
-        frame.text &&
-        (() => {
-          const normalized = normalizeStreamText(frame.text);
-          return (
-            normalized !== "" &&
-            recentAgentRef.current.some((m) => m.content.startsWith(normalized))
-          );
-        })()
-      ) {
-        // The durable row already carries this text — the frame lost
-        // the race. Settle its call so its later frames stay quiet.
-        rememberSettled(frame.call_id);
-        return;
-      }
-      if (frame.done) {
-        // Normally the durable row clears the bubble first. An orphan
-        // done (suppressed duplicate — no row coming) clears after a
-        // short grace so the final text doesn't blink out mid-read.
-        const current = bubbleRef.current;
-        if (!current || (frame.call_id && current.callId !== frame.call_id)) return;
-        rememberSettled(frame.call_id);
-        cancelStreamClear();
-        clearTimerRef.current = window.setTimeout(() => {
-          clearTimerRef.current = 0;
-          const active = bubbleRef.current;
-          if (!active || (frame.call_id && active.callId !== frame.call_id)) return;
-          setBubble(null);
-        }, STREAM_DONE_GRACE_MS);
-        return;
-      }
-      cancelStreamClear();
-      setBubble({ callId: frame.call_id, agentId: frame.agent_id, text: frame.text, phase: frame.phase });
-    },
-    [cancelStreamClear, pruneSettled, rememberSettled, setBubble],
-  );
-
-  // SSE: default events = durable rows, named `stream` events =
-  // ephemeral frames (RAF-coalesced so token bursts don't thrash React).
+    }
+    publishBubbles();
+    setMessages(current => {
+      const byId = new Map(current.filter(m => m.conversation_id === conversationID).map(m => [m.id, m]));
+      for (const m of valid) if ((m.revision ?? 0) >= (byId.get(m.id)?.revision ?? 0)) byId.set(m.id, m);
+      return [...byId.values()].sort((a,b) => a.id-b.id);
+    });
+  }, [conversationID, publishBubbles]);
+  const loadOlder = useCallback(async () => {
+    if (loadingOlderRef.current || !beforeRef.current) return;
+    loadingOlderRef.current = true;
+    const generation = generationRef.current;
+    try {
+      const page = await apiGet<ChangePage>(`/messages?chat_id=${encodeURIComponent(conversationID)}&page=1&before=${beforeRef.current}&limit=100`, projectId);
+      if (generation !== generationRef.current) return;
+      mergeMessages(page.messages); beforeRef.current = page.before; setHasOlder(page.has_more); setHistoryError("");
+    } catch (err) { if (generation === generationRef.current) setHistoryError(String(err)); }
+    finally { loadingOlderRef.current = false; }
+  }, [conversationID, projectId, mergeMessages]);
   useEffect(() => {
-    if (!conversationID) return;
-    highestSeenRef.current = 0;
-    settledCallsRef.current = new Map();
-    recentAgentRef.current = [];
-    cancelStreamClear();
-    setMessages([]);
-    setBubble(null);
-
-    let cancelled = false;
-    let es: EventSource | null = null;
-    let reconnectTimer = 0;
-
-    const connect = () => {
-      if (cancelled) return;
-      es = new EventSource(
-        `${API}${scopedPath(`/stream?chat_id=${encodeURIComponent(conversationID)}&since=${highestSeenRef.current}`, projectId)}`,
-        { withCredentials: true },
-      );
-      es.onopen = () => setConnected(true);
-      es.onmessage = (e) => {
-        try {
-          const m = JSON.parse(e.data) as Message;
-          if (m.id) mergeMessages([m]);
-        } catch {
-          /* ignore malformed */
+    generationRef.current++;
+    let cancelled = false, loading = false, initialized = false, cursor = 0;
+    setMessages([]); setBubbles([]); setConnected(false); setHistoryError(""); setHasOlder(false);
+    streamRef.current.clear(); settledRef.current.clear(); beforeRef.current = 0;lastUserIdRef.current=0;
+    const applyFrame = (frame: StreamFrame) => {
+      if (cancelled || frame.chat_id !== conversationID) return;
+      const key = `${frame.agent_id ?? 0}:${frame.thread_id ?? ""}:${frame.call_id}:${frame.run_id ?? ""}`;
+      if (frame.done) {
+        for (const [k,v] of streamRef.current) if ((frame.run_id ? k === key : v.callId === frame.call_id) && (!frame.agent_id || v.agentId === frame.agent_id)) {
+          streamRef.current.delete(k); settledRef.current.set(k, Date.now());
         }
-      };
-      es.addEventListener("stream", (e) => {
-        try {
-          pendingFrameRef.current = JSON.parse((e as MessageEvent).data) as StreamFrame;
-        } catch {
-          return;
+      } else if (!settledRef.current.has(key)) {
+        const afterMessageId=frame.after_message_id ?? Math.max(lastUserIdRef.current,...[...streamRef.current.values()].filter(v=>v.agentId===frame.agent_id).map(v=>v.afterMessageId ?? 0));
+        if (frame.phase !== "acknowledgement") for (const [k,v] of streamRef.current) {
+          if (v.agentId === frame.agent_id && v.phase === "acknowledgement") streamRef.current.delete(k);
         }
-        if (!rafRef.current) {
-          rafRef.current = requestAnimationFrame(() => {
-            rafRef.current = 0;
-            const frame = pendingFrameRef.current;
-            pendingFrameRef.current = null;
-            if (frame && !cancelled) applyFrame(frame);
-          });
-        }
-      });
-      es.onerror = () => {
-        setConnected(false);
-        // Drop any in-progress bubble on disconnect — the next thing
-        // shown should be the durable row after reconnect, not a
-        // stale partial (donor: chatConnections.onerror).
-        cancelStreamClear();
-        setBubble(null);
-        if (es && es.readyState === EventSource.CLOSED) {
-          window.clearTimeout(reconnectTimer);
-          reconnectTimer = window.setTimeout(connect, 2000);
-        }
-      };
-    };
-    connect();
-
-    // History + the 5s reconcile poll — SSE is the low-latency path,
-    // never the only one.
-    const load = async () => {
-      try {
-        const rows = await apiGet<Message[]>(
-          `/messages?chat_id=${encodeURIComponent(conversationID)}&since=${highestSeenRef.current}&limit=200`,
-          projectId,
-        );
-        if (!cancelled) mergeMessages(rows);
-      } catch {
-        /* transient */
+        streamRef.current.set(key, {afterMessageId,runId:frame.run_id,callId: frame.call_id, agentId: frame.agent_id, text:frame.text, phase:frame.phase, updatedAt:Date.now()});
       }
+      publishBubbles();
     };
-    load();
-    const poll = window.setInterval(load, 5000);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(reconnectTimer);
-      window.clearInterval(poll);
-      cancelStreamClear();
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      if (es) es.close();
+    const load = async () => {
+      if (loading || cancelled) return; loading = true;
+      try {
+        if (!initialized) {
+          const page = await apiGet<ChangePage>(`/messages?chat_id=${encodeURIComponent(conversationID)}&page=1&limit=100`, projectId);
+          if (cancelled) return;
+          mergeMessages(page.messages); cursor=page.cursor; beforeRef.current=page.before; setHasOlder(page.has_more); initialized=true;
+        }
+        // Only complete durable pages advance the replay cursor, never SSE.
+        for (let n=0;n<10 && !cancelled;n++) {
+          const page = await apiGet<ChangePage>(`/changes?chat_id=${encodeURIComponent(conversationID)}&cursor=${cursor}`, projectId);
+          if (cancelled) return;
+          mergeMessages(page.messages); cursor=page.cursor;
+          if (!page.has_more) break;
+        }
+        setHistoryError("");
+      } catch (err) { if (!cancelled) setHistoryError(`History refresh failed: ${String(err)}`); }
+      finally { loading=false; }
     };
-  }, [conversationID, projectId, mergeMessages, applyFrame, cancelStreamClear, setBubble]);
+    const es = new EventSource(`${API}${scopedPath(`/stream?chat_id=${encodeURIComponent(conversationID)}`, projectId)}`, {withCredentials:true});
+    es.onopen = () => { if (!cancelled) {setConnected(true); void load();} };
+    es.onmessage = e => { try { if (!cancelled) mergeMessages([JSON.parse(e.data)]); } catch {} };
+    es.addEventListener("stream", e => { try {applyFrame(JSON.parse((e as MessageEvent).data));} catch {} });
+    es.addEventListener("resync", () => { void load(); });
+    es.onerror = () => { if (!cancelled) { setConnected(false); streamRef.current.clear(); publishBubbles(); } };
+    void load();
+    const poll = window.setInterval(() => {
+      void load();
+      for (const [k,v] of streamRef.current) if (Date.now()-v.updatedAt>90_000) streamRef.current.delete(k);
+      for (const [k,t] of settledRef.current) if (Date.now()-t>SETTLED_STREAM_TTL_MS) settledRef.current.delete(k);
+      publishBubbles();
+    }, 5000);
+    return () => { cancelled=true; generationRef.current++; window.clearInterval(poll); es.close(); };
+  }, [conversationID, projectId, mergeMessages, publishBubbles]);
+  return { messages, bubbles, bubble:bubbles[0] ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
+}
 
-  return { messages, bubble, connected, mergeMessages };
+// Refresh every loaded page so deleted/archived rows cannot linger behind page one.
+export async function refreshConversationList(path:string, projectId:string, count=100, selectedId="") {
+ const out:Conversation[]=[];let cursor="";
+ do {
+  const page=await apiGet<{conversations:Conversation[];next_cursor:string}>(`${path}${path.includes("?")?"&":"?"}page=1&limit=100&cursor=${encodeURIComponent(cursor)}`,projectId);
+  for(const row of page.conversations)if(!out.some(old=>old.id===row.id))out.push(row);
+  if(!page.next_cursor||page.next_cursor===cursor)break;cursor=page.next_cursor;
+ }while(out.length<Math.max(100,count));
+ if(selectedId&&!out.some(row=>row.id===selectedId)) {
+  try {const row=await apiGet<Conversation>(`/chats?id=${encodeURIComponent(selectedId)}`,projectId);if(Boolean(row.archived_at)===path.includes("archived=1"))out.unshift(row);}catch{}
+ }
+ return out;
+}
+
+interface MessageDelivery {id:number;message_id:number;status:string;target:string;last_error?:string;attempts:number}
+export function MoreConversations({path,projectId,rows,onRows}: {path:string;projectId:string;rows:Conversation[];onRows:(rows:Conversation[])=>void}) {
+ const [busy,setBusy]=useState(false),[error,setError]=useState("");
+ const scopeRef=useRef("");scopeRef.current=projectId+":"+path;
+ const more=async()=>{if(busy||!rows.length)return;const scope=scopeRef.current;setBusy(true);try{
+  const last=rows.at(-1)!;
+  const cursor=btoa(JSON.stringify({updated:last.updated_at,id:last.id})).replace(/=+$/g,"").replace(/\+/g,"-").replace(/\//g,"_");
+  const page=await apiGet<{conversations:Conversation[];next_cursor:string}>(`${path}${path.includes("?")?"&":"?"}page=1&cursor=${encodeURIComponent(cursor)}`,projectId);
+  if(scope!==scopeRef.current)return;
+  if(!page.conversations.length){setError("No earlier conversations");return}
+  onRows([...rows,...page.conversations.filter(c=>!rows.some(old=>old.id===c.id))]);setError("");
+ }catch(err){setError(String(err));}finally{setBusy(false)}};
+ return <div className="p-2 text-center text-xs"><button type="button" disabled={busy||!rows.length} className="text-accent" onClick={more}>{busy?"Loading…":"Load earlier conversations"}</button>{error&&<p role="status">{error}</p>}</div>;
 }
 
 export function ConversationChat({
@@ -1454,9 +1383,19 @@ export function ConversationChat({
   onActed: () => void;
   onRemoved: () => void;
 }) {
-  const { messages, bubble, connected, mergeMessages } = useConversationTransport(conversation.id, conversation.project_id);
-  const [draft, setDraft] = useState("");
+  const { messages, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
+  const storageKey = `conversations:draft:${conversation.project_id}:${conversation.id}`;
+  const [draft, setDraft] = useState(() => { try { return sessionStorage.getItem(storageKey) ?? ""; } catch { return ""; } });
+  const pendingSendRef = useRef<{ content:string; client_message_id:string } | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => { mountedRef.current=true; return () => {mountedRef.current=false;}; }, []);
+  useEffect(() => {try {sessionStorage.setItem(storageKey,draft);} catch {}},[storageKey,draft]);
   const [sending, setSending] = useState(false);
+  const [deliveries,setDeliveries]=useState<MessageDelivery[]>([]);
+  const refreshDeliveries=useCallback(async()=>{try{setDeliveries(await apiGet<MessageDelivery[]>(`/deliveries?chat_id=${encodeURIComponent(conversation.id)}`,conversation.project_id));}catch{}},[conversation.id,conversation.project_id]);
+  useEffect(()=>{void refreshDeliveries();const timer=window.setInterval(refreshDeliveries,5000);return ()=>window.clearInterval(timer);},[refreshDeliveries]);
+  const retryDelivery=async(delivery:MessageDelivery)=>{try{await apiPost("/delivery-failures",{id:delivery.id},conversation.project_id);void refreshDeliveries();}catch(err){setSendError(String(err));}};
+
   const [breakBusy, setBreakBusy] = useState(false);
   const [breakRequested, setBreakRequested] = useState(false);
   const breakRequestRef = useRef<{ callId: string; agentId?: number; clientId: string } | null>(null);
@@ -1486,8 +1425,8 @@ export function ConversationChat({
     try {
       await apiPatch(`/chats?id=${encodeURIComponent(conversation.id)}`, { archived: next }, conversation.project_id);
       onRemoved();
-    } catch {
-      /* surfaced by the next list refresh */
+    } catch (err) {
+      setSendError(String(err));
     } finally {
       setArchiveBusy(false);
     }
@@ -1499,42 +1438,47 @@ export function ConversationChat({
     try {
       await apiDelete(`/chats?id=${encodeURIComponent(conversation.id)}`, conversation.project_id);
       onRemoved();
-    } catch {
-      /* surfaced by the next list refresh */
+    } catch (err) {
+      setSendError(String(err));
     } finally {
       setArchiveBusy(false);
     }
   };
 
+  const nearBottomRef = useRef(true);
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, bubble?.text]);
+    const bottom=bottomRef.current, scroller=bottom?.parentElement;
+    if (!bottom || !scroller) return;
+    let lastMarked=0;
+    const update=() => {
+      nearBottomRef.current=scroller.scrollHeight-scroller.scrollTop-scroller.clientHeight<80;
+      const latest=messages.at(-1)?.id ?? 0;
+      if (!archived && scroller.clientHeight>0 && bottom.getClientRects().length>0 && bottom.getBoundingClientRect().top>=0 && bottom.getBoundingClientRect().bottom<=window.innerHeight && nearBottomRef.current && document.visibilityState === "visible" && bottom.getBoundingClientRect().bottom <= scroller.getBoundingClientRect().bottom+5 && latest>lastMarked) {
+        lastMarked=latest;
+        void apiPost("/seen",{chat_id:conversation.id,last_seen_id:latest},conversation.project_id).then(onActed,() => {lastMarked=0;});
+      }
+    };
+    if (nearBottomRef.current) bottom.scrollIntoView({block:"end"});
+    update(); scroller.addEventListener("scroll",update);document.addEventListener("visibilitychange",update);
+    return () => {scroller.removeEventListener("scroll",update);document.removeEventListener("visibilitychange",update);};
+  },[messages, conversation.id, conversation.project_id, archived]);
 
   const send = async () => {
-    const content = draft.trim();
-    if (!content || sending) return;
-    setSending(true);
-    setSendError("");
+    const content=draft.trim(); if (!content || sending) return;
+    let request=pendingSendRef.current;
+    if (!request) { try { request=JSON.parse(sessionStorage.getItem(storageKey+":pending") ?? "null"); } catch {} }
+    if (!request) request={content,client_message_id:newClientMessageId()};
+    pendingSendRef.current=request;
+    try {sessionStorage.setItem(storageKey+":pending",JSON.stringify(request));} catch {}
+    setSending(true);setSendError("");
     try {
-      // Idempotent: retries and remounts resolve to the same row.
-      const row = await apiPost<Message>(`/messages?chat_id=${encodeURIComponent(conversation.id)}`, {
-        content,
-        client_message_id: newClientMessageId(),
-      }, conversation.project_id);
-      mergeMessages([row]);
-      setDraft("");
-      // Reset the auto-grown textarea and restore focus — the same
-      // defensive refocus the dashboard composer does after a send.
-      const el = inputRef.current;
-      if (el) {
-        el.style.height = "auto";
-        el.focus();
-      }
-    } catch (err) {
-      setSendError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSending(false);
-    }
+      const row=await apiPost<Message>(`/messages?chat_id=${encodeURIComponent(conversation.id)}`,request,conversation.project_id);
+      pendingSendRef.current=null;try {sessionStorage.removeItem(storageKey+":pending"); if ((sessionStorage.getItem(storageKey) ?? "").trim() === request.content) sessionStorage.removeItem(storageKey);} catch {}
+      if (!mountedRef.current) return;
+      mergeMessages([row]);setDraft(current => current.trim()===request!.content ? "" : current);
+      inputRef.current?.focus();
+    } catch(err) {if(mountedRef.current)setSendError(`Send was not confirmed. Retry will reuse the same message: ${String(err)}`);}
+    finally {if(mountedRef.current)setSending(false);}
   };
 
   const requestSoftBreak = async () => {
@@ -1585,11 +1529,14 @@ export function ConversationChat({
       publicAudience={conversation.audience === "public"}
       connected={connected}
       archived={archived}
-      messageNodes={messages.map((message) => (
-        <MessageRow key={message.id} message={message} onAction={onAction} />
-      ))}
+      messageNodes={<>
+        {hasOlder && <button type="button" className="text-sm text-accent" onClick={loadOlder}>Load earlier messages</button>}
+        {messages.map(message => <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} onAction={onAction}/></fieldset>
+ {deliveries.filter(d=>d.message_id===message.id).map(d=><div key={d.id} role="status" className="mt-1 text-xs text-text-muted">{d.status === "processing" ? "Sending" : d.status === "pending" ? (d.attempts ? "Retrying" : "Queued") : d.status} · {d.target.split(":")[0]} {d.last_error && <span>{d.last_error}</span>}{["failed","ambiguous"].includes(d.status) && <button type="button" className="ml-2 text-accent" onClick={()=>retryDelivery(d)}>{d.status==="ambiguous"?"Retry (may duplicate)":"Retry delivery"}</button>}</div>)}
+ </div>)}
+      </>}
       hasMessages={messages.length > 0}
-      streamNode={bubble ? (bubble.text ? <StreamingBubble text={bubble.text} /> : <ThinkingMessagePlaceholder />) : null}
+      streamNode={bubbles.length ? <>{bubbles.map(b => <div key={`${b.agentId}:${b.callId}:${b.runId}`}><p className="text-xs text-text-muted">Agent {b.agentId}</p>{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder />}</div>)}</> : null}
       headerActions={headerActions}
       bottomRef={bottomRef}
       inputRef={inputRef}
@@ -1598,7 +1545,7 @@ export function ConversationChat({
       responseActive={Boolean(bubble)}
       breakBusy={breakBusy}
       breakRequested={breakRequested}
-      sendError={sendError}
+      sendError={sendError || historyError}
       archiveBusy={archiveBusy}
       confirmDelete={confirmDelete}
       onDraftChange={(value, element) => {
@@ -1646,15 +1593,17 @@ function InboxTab({
 }) {
   const [items, setItems] = useState<InboxItem[]>([]);
   const [note, setNote] = useState("");
+ const [cursor,setCursor]=useState("");
+ const expandedRef=useRef(false);
 
   const load = useCallback(async () => {
     try {
-      const inbox = await apiGet<InboxItem[]>(
-        agentScopedPath("/inbox?limit=100", instanceId),
+      const inbox = await apiGet<InboxPage>(
+        agentScopedPath("/inbox?page=1&limit=100", instanceId),
         projectId,
       );
-      setItems(inbox);
-      setNote(`${inbox.length} item${inbox.length === 1 ? "" : "s"}`);
+      setItems(inbox.items);setCursor(inbox.next_cursor);expandedRef.current=false;
+      setNote(`${inbox.total} item${inbox.total === 1 ? "" : "s"}`);
     } catch (err) {
       setNote(err instanceof Error ? err.message : String(err));
     }
@@ -1662,10 +1611,11 @@ function InboxTab({
 
   useEffect(() => {
     load();
-    const interval = window.setInterval(load, 15000);
+    const interval = window.setInterval(()=>{if(!expandedRef.current)void load();}, 15000);
     return () => window.clearInterval(interval);
   }, [load]);
 
+  const loadMore=async()=>{try{const page=await apiGet<InboxPage>(agentScopedPath(`/inbox?page=1&limit=100&cursor=${encodeURIComponent(cursor)}`,instanceId),projectId);setItems(current=>[...current,...page.items.filter(i=>!current.some(old=>old.message.id===i.message.id))]);setCursor(page.next_cursor);expandedRef.current=true;}catch(err){setNote(String(err));}};
   const act = async (messageId: number, actionId: string, actionNote: string) => {
     await apiPost(`/message-action`, { message_id: messageId, action_id: actionId, note: actionNote }, projectId);
     load();
@@ -1683,6 +1633,7 @@ function InboxTab({
   return (
     <div className="flex-1 min-h-0 flex flex-col">
       <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-3">
+ <div className="flex gap-3 text-xs"><button className="text-accent" onClick={load}>Refresh inbox</button>{cursor&&<button className="text-accent" onClick={loadMore}>Load more items</button>}</div>
         {items.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
             <span className="text-text-dim">
@@ -1739,276 +1690,6 @@ function InboxTab({
 
 // ─── Telegram transport tab ─────────────────────────────────────────
 
-function TelegramTabLegacy({
-  projectId,
-  conversations,
-}: {
-  projectId: string;
-  conversations: Conversation[];
-}) {
-  const [connections, setConnections] = useState<TelegramConnectionView[]>([]);
-  const [bindings, setBindings] = useState<TelegramBindingView[]>([]);
-  const [connectionId, setConnectionId] = useState("");
-  const [conversationId, setConversationId] = useState("");
-  const [chatId, setChatId] = useState("");
-  const [allowedUsers, setAllowedUsers] = useState("");
-  const [busy, setBusy] = useState("");
-  const [notice, setNotice] = useState("");
-
-  const load = useCallback(async () => {
-    try {
-      const [connectionResult, bindingResult] = await Promise.all([
-        apiGet<{ connections: TelegramConnectionView[] }>("/telegram-connections", projectId),
-        apiGet<{ bindings: TelegramBindingView[] }>("/telegram-bindings", projectId),
-      ]);
-      setConnections(connectionResult.connections ?? []);
-      setBindings(bindingResult.bindings ?? []);
-      setConnectionId((current) =>
-        current && connectionResult.connections.some((item) => item.enabled && String(item.connection_id) === current)
-          ? current
-          : String(connectionResult.connections.find((item) => item.enabled)?.connection_id ?? ""),
-      );
-      setConversationId((current) =>
-        current && conversations.some((item) => item.id === current)
-          ? current
-          : (conversations[0]?.id ?? ""),
-      );
-    } catch (err) {
-      setNotice(err instanceof Error ? err.message : String(err));
-    }
-  }, [projectId, conversations]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  const enable = async (id: number) => {
-    setBusy(`enable-${id}`);
-    setNotice("");
-    try {
-      const enabled = await apiPost<TelegramConnectionView>(
-        "/telegram-connections",
-        { connection_id: id },
-        projectId,
-      );
-      setNotice(
-        enabled.bot_username
-          ? `Webhook active for @${enabled.bot_username}.`
-          : "Telegram webhook active.",
-      );
-      await load();
-    } catch (err) {
-      setNotice(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const createBinding = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!connectionId || !conversationId || !chatId.trim()) return;
-    setBusy("bind");
-    setNotice("");
-    const parsedAllowed = allowedUsers
-      .split(",")
-      .map((value) => Number(value.trim()))
-      .filter((value) => Number.isSafeInteger(value) && value > 0);
-    try {
-      await apiPost(
-        "/telegram-bindings",
-        {
-          connection_id: Number(connectionId),
-          conversation_id: conversationId,
-          chat_id: chatId.trim(),
-          allowed_user_ids: parsedAllowed,
-        },
-        projectId,
-      );
-      setChatId("");
-      setAllowedUsers("");
-      setNotice("Telegram chat bound to the conversation.");
-      await load();
-    } catch (err) {
-      setNotice(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const removeBinding = async (id: string) => {
-    setBusy(`delete-${id}`);
-    setNotice("");
-    try {
-      await apiDelete(`/telegram-bindings?id=${encodeURIComponent(id)}`, projectId);
-      setNotice("Telegram chat disconnected.");
-      await load();
-    } catch (err) {
-      setNotice(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const enabledConnections = connections.filter((connection) => connection.enabled);
-
-  return (
-    <div className="flex-1 min-h-0 overflow-auto p-4">
-      <div className="mx-auto max-w-3xl flex flex-col gap-4">
-        <section className="rounded-md border border-border bg-bg-card p-4">
-          <h2 className="text-sm font-semibold text-text">Telegram bots</h2>
-          <p className="mt-1 text-xs text-text-muted">
-            Bot tokens stay in platform integration connections. Conversations stores only webhook and chat routing metadata.
-          </p>
-          <p className="mt-1 text-xs text-text-dim">
-            Telegram permits one webhook per bot. Enabling it here replaces any webhook currently configured for that bot.
-          </p>
-          {connections.length === 0 ? (
-            <div className="mt-4 rounded border border-border bg-bg px-3 py-2 text-xs text-text-muted">
-              No Telegram connection is bound to this app. Add or select a Telegram integration connection in the app installation settings first.
-            </div>
-          ) : (
-            <div className="mt-4 flex flex-col gap-2">
-              {connections.map((connection) => (
-                <div key={connection.connection_id} className="rounded border border-border bg-bg px-3 py-2 flex items-center gap-3">
-                  <div className="min-w-0">
-                    <p className="text-sm text-text truncate">
-                      {connection.bot_username ? `@${connection.bot_username}` : connection.name}
-                    </p>
-                    <p className="text-xs text-text-dim truncate">
-                      {connection.enabled ? "Webhook active" : "Connection ready; webhook not enabled"}
-                    </p>
-                  </div>
-                  <span className={`ml-auto h-2 w-2 rounded-full ${connection.enabled ? "bg-success" : "bg-warn"}`} />
-                  {!connection.enabled && (
-                    <button
-                      type="button"
-                      onClick={() => enable(connection.connection_id)}
-                      disabled={busy !== ""}
-                      className="rounded bg-accent px-2.5 py-1.5 text-xs font-semibold text-bg disabled:opacity-40"
-                    >
-                      {busy === `enable-${connection.connection_id}` ? "Enabling…" : "Enable webhook"}
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="rounded-md border border-border bg-bg-card p-4">
-          <h2 className="text-sm font-semibold text-text">Bind a Telegram chat</h2>
-          <p className="mt-1 text-xs text-text-muted">
-            Each numeric chat ID maps to one existing conversation. Unknown Telegram chats are ignored.
-          </p>
-          <form onSubmit={createBinding} className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <label className="text-xs text-text-muted flex flex-col gap-1">
-              Bot connection
-              <select
-                value={connectionId}
-                onChange={(event) => setConnectionId(event.target.value)}
-                className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"
-              >
-                <option value="">Select an enabled bot</option>
-                {enabledConnections.map((connection) => (
-                  <option key={connection.connection_id} value={connection.connection_id}>
-                    {connection.bot_username ? `@${connection.bot_username}` : connection.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="text-xs text-text-muted flex flex-col gap-1">
-              Conversation
-              <select
-                value={conversationId}
-                onChange={(event) => setConversationId(event.target.value)}
-                className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"
-              >
-                <option value="">Select a conversation</option>
-                {conversations.map((conversation) => (
-                  <option key={conversation.id} value={conversation.id}>
-                    {conversation.title} ({conversation.audience === "public" ? "public" : "operator"})
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="text-xs text-text-muted flex flex-col gap-1">
-              Telegram chat ID
-              <input
-                value={chatId}
-                onChange={(event) => setChatId(event.target.value)}
-                placeholder="123456789 or -100…"
-                className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text placeholder:text-text-dim"
-              />
-            </label>
-            <label className="text-xs text-text-muted flex flex-col gap-1">
-              Allowed user IDs
-              <input
-                value={allowedUsers}
-                onChange={(event) => setAllowedUsers(event.target.value)}
-                placeholder="Optional for public chats"
-                className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text placeholder:text-text-dim"
-              />
-              <span className="text-text-dim">Comma-separated. Required for operator groups; private operator chats default to the chat ID.</span>
-            </label>
-            <div className="sm:col-span-2 flex justify-end">
-              <button
-                type="submit"
-                disabled={busy !== "" || !connectionId || !conversationId || !chatId.trim()}
-                className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40"
-              >
-                {busy === "bind" ? "Binding…" : "Bind chat"}
-              </button>
-            </div>
-          </form>
-        </section>
-
-        <section className="rounded-md border border-border bg-bg-card p-4">
-          <h2 className="text-sm font-semibold text-text">Active chat routes</h2>
-          {bindings.length === 0 ? (
-            <p className="mt-3 text-xs text-text-muted">No Telegram chats are bound in this project.</p>
-          ) : (
-            <div className="mt-3 flex flex-col gap-2">
-              {bindings.map((binding) => {
-                const connection = connections.find((item) => item.connection_id === binding.connection_id);
-                return (
-                  <div key={binding.id} className="rounded border border-border bg-bg px-3 py-2 flex items-center gap-3">
-                    <div className="min-w-0">
-                      <p className="text-sm text-text truncate">{binding.conversation_title || binding.conversation_id}</p>
-                      <p className="text-xs text-text-dim truncate">
-                        {connection?.bot_username ? `@${connection.bot_username}` : connection?.name || `connection ${binding.connection_id}`}
-                        {` · chat ${binding.chat_id} · ${binding.audience || "operator"}`}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => removeBinding(binding.id)}
-                      disabled={busy !== ""}
-                      className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-error disabled:opacity-40"
-                      aria-label="Disconnect Telegram chat"
-                      title="Disconnect Telegram chat"
-                    >
-                      <Glyph d={GLYPH_TRASH} size={14} />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        {notice && (
-          <div className="rounded border border-border bg-bg px-3 py-2 text-xs text-text-muted" role="status">
-            {notice}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// Guided transport onboarding. The legacy numeric-ID form above remains
-// intentionally unreachable except through the Advanced recovery section
-// below; it is kept nearby while 0.9 installations migrate their routes.
 function TelegramTab({ projectId, conversations }: { projectId: string; conversations: Conversation[] }) {
   const [connections, setConnections] = useState<TelegramConnectionView[]>([]);
   const [bindings, setBindings] = useState<TelegramBindingView[]>([]);
@@ -2018,6 +1699,8 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [connectionId, setConnectionId] = useState("");
   const [mode, setMode] = useState<"pairing" | "public" | "closed">("pairing");
+  const dirtyPolicyRef=useRef(false);
+  const policyConnectionRef=useRef("");
   const [agentId, setAgentId] = useState("");
   const [defaultTitle, setDefaultTitle] = useState("Telegram conversation");
   const [requireMention, setRequireMention] = useState(true);
@@ -2056,7 +1739,7 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
     }
-  }, [projectId, conversations]);
+  }, [projectId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -2068,6 +1751,8 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
   const selectableAgents = agents.filter((item) => item.attached !== false);
 
   useEffect(() => {
+    if(policyConnectionRef.current!==connectionId){policyConnectionRef.current=connectionId;dirtyPolicyRef.current=false;}
+    if(dirtyPolicyRef.current)return;
     if (policy) {
       setMode(policy.mode);
       setAgentId(String(policy.default_agent_id || ""));
@@ -2079,7 +1764,7 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
       setDefaultTitle("Telegram conversation");
       setRequireMention(true);
     }
-  }, [connectionId, policies, agents]);
+  }, [connectionId, Boolean(policy), agents.length === 0]);
 
   useEffect(() => {
     setInviteURL("");
@@ -2125,6 +1810,7 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
       default_agent_id: Number(agentId),
       default_title: defaultTitle, require_group_mention: requireMention,
     }, projectId);
+    dirtyPolicyRef.current=false;
     setSetupStep(3);
     return mode === "pairing" ? "Secure pairing is active." : mode === "public" ? "Public intake is active." : "Unknown chats are closed.";
   });
@@ -2207,9 +1893,9 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
 
         {setupStep === 2 && connection?.enabled && <section className="rounded-md border border-border bg-bg-card p-4">
           <h2 className="text-sm font-semibold text-text">Choose who can start conversations</h2><p className="mt-1 text-xs text-text-muted">This policy applies to unknown chats. Existing routes keep working.</p>
-          <div className="mt-4 grid gap-2 sm:grid-cols-3">{([ ["pairing", "Secure pairing", "Approve each person or group before messages reach an agent."], ["public", "Public intake", "Every new private chat gets its own public conversation."], ["closed", "Invites only", "Ignore unknown chats; one-time invites still work."] ] as const).map(([value, title, description]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => setMode(value)} className={`rounded border p-3 text-left ${mode === value ? "border-accent bg-bg-input" : "border-border bg-bg hover:bg-bg-input"}`}><span className="text-sm font-medium text-text">{title}</span><span className="mt-1 block text-xs leading-relaxed text-text-dim">{description}</span></button>)}</div>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="flex flex-col gap-1 text-xs text-text-muted">Lead agent for new conversations<select value={agentId} onChange={(event) => setAgentId(event.target.value)} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="">Select an agent</option>{(selectableAgents.length ? selectableAgents : agents).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><label className="flex flex-col gap-1 text-xs text-text-muted">Conversation title prefix<input value={defaultTitle} onChange={(event) => setDefaultTitle(event.target.value)} maxLength={120} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text" /></label></div>
-          <label className="mt-4 flex items-start gap-2 text-xs text-text-muted"><input type="checkbox" checked={requireMention} onChange={(event) => setRequireMention(event.target.checked)} className="mt-0.5" /><span><span className="font-medium text-text">Require a bot mention in groups</span><span className="mt-0.5 block text-text-dim">Recommended: ordinary group chatter does not trigger the agent.</span></span></label>
+          <div className="mt-4 grid gap-2 sm:grid-cols-3">{([ ["pairing", "Secure pairing", "Approve each person or group before messages reach an agent."], ["public", "Public intake", "Every new private chat gets its own public conversation."], ["closed", "Invites only", "Ignore unknown chats; one-time invites still work."] ] as const).map(([value, title, description]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => {dirtyPolicyRef.current=true;setMode(value);}} className={`rounded border p-3 text-left ${mode === value ? "border-accent bg-bg-input" : "border-border bg-bg hover:bg-bg-input"}`}><span className="text-sm font-medium text-text">{title}</span><span className="mt-1 block text-xs leading-relaxed text-text-dim">{description}</span></button>)}</div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="flex flex-col gap-1 text-xs text-text-muted">Lead agent for new conversations<select value={agentId} onChange={(event) => {dirtyPolicyRef.current=true;setAgentId(event.target.value);}} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="">Select an agent</option>{(selectableAgents.length ? selectableAgents : agents).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><label className="flex flex-col gap-1 text-xs text-text-muted">Conversation title prefix<input value={defaultTitle} onChange={(event) => {dirtyPolicyRef.current=true;setDefaultTitle(event.target.value);}} maxLength={120} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text" /></label></div>
+          <label className="mt-4 flex items-start gap-2 text-xs text-text-muted"><input type="checkbox" checked={requireMention} onChange={(event) => {dirtyPolicyRef.current=true;setRequireMention(event.target.checked);}} className="mt-0.5" /><span><span className="font-medium text-text">Require a bot mention in groups</span><span className="mt-0.5 block text-text-dim">Recommended: ordinary group chatter does not trigger the agent.</span></span></label>
           <label className="mt-3 flex items-start gap-2 text-xs text-text-muted"><input type="checkbox" checked={connection.auto_name_enabled} onChange={(event) => setAutoName(event.target.checked)} disabled={busy !== ""} className="mt-0.5" /><span><span className="font-medium text-text">Show the sole agent’s name in Telegram</span><span className="mt-0.5 block text-text-dim">{connection.name_sync_error ? `Name update needs attention: ${connection.name_sync_error}` : connection.synced_bot_name ? `Telegram currently shows “${connection.synced_bot_name}”.` : connection.routed_agent_count > 1 ? `This bot routes to ${connection.routed_agent_count} agents, so Telegram keeps “${connection.original_bot_name || connection.name}”.` : "The original bot name is kept until this connection routes to exactly one agent."}</span></span></label>
           <label className="mt-3 grid gap-1 text-xs text-text-muted sm:max-w-md"><span className="font-medium text-text">Response feedback</span><select value={connection.response_feedback || "live"} onChange={(event) => setResponseFeedback(event.target.value as "live" | "typing" | "off")} disabled={busy !== ""} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="live">Live preview (recommended)</option><option value="typing">Typing only</option><option value="off">Off</option></select><span className="text-text-dim">Private chats get Telegram’s native animated draft; groups show typing until the durable final message arrives.</span></label>
           {mode === "public" && <div className="mt-4 rounded border border-warn bg-bg px-3 py-2 text-xs text-text-muted">Public intake accepts any private Telegram user and creates a public conversation. Pairing is safer for internal bots.</div>}
@@ -2254,28 +1940,33 @@ export default function ConversationsPanel({ projectId, instanceId }: NativePane
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [agentsError, setAgentsError] = useState("");
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
+ const [inboxTotal,setInboxTotal]=useState(0);
+const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
   // Same breakpoint the dashboard chat page uses for its right-hand
   // context column.
   const hasContextColumn = useMediaQuery("(min-width: 1024px)");
 
+  useEffect(()=>{setConversations([]);setSelectedId("");},[projectId,instanceId,showArchived]);
+  const listStateRef=useRef({scope:"",count:0,selected:""});
+  const listScope=`${projectId}:${instanceId}:${showArchived}`;
+  listStateRef.current=listStateRef.current.scope===listScope ? {scope:listScope,count:conversations.length,selected:selectedId} : {scope:listScope,count:0,selected:""};
   const loadConversations = useCallback(async () => {
+    const snapshot={...listStateRef.current};
     try {
       const [chats, unreadEntries, inbox] = await Promise.all([
-        apiGet<Conversation[]>(
-          agentScopedPath(`/chats${showArchived ? "?archived=1" : ""}`, instanceId),
-          projectId,
-        ),
+        refreshConversationList(agentScopedPath(`/chats${showArchived ? "?archived=1" : ""}`, instanceId),projectId,snapshot.count,snapshot.selected),
         apiGet<UnreadEntry[]>(agentScopedPath("/unread-summary", instanceId), projectId),
-        apiGet<InboxItem[]>(agentScopedPath("/inbox?limit=100", instanceId), projectId),
+        apiGet<InboxPage>(agentScopedPath("/inbox?page=1&limit=100", instanceId), projectId),
       ]);
+      if(snapshot.scope!==listStateRef.current.scope)return;
       const scoped = projectId
         ? chats.filter((c) => !c.project_id || c.project_id === projectId)
         : chats;
-      setConversations(scoped);
+      if(listStateRef.current.count<=Math.max(100,snapshot.count))setConversations(scoped);
       setUnread(new Map(unreadEntries.map((e) => [e.conversation_id, e])));
-      setInboxItems(inbox);
+      setInboxItems(inbox.items);setInboxTotal(inbox.total);setInboxAttention(inbox.attention ?? {});
       setSelectedId((current) =>
-        current && scoped.some((c) => c.id === current) ? current : (scoped[0]?.id ?? ""),
+        (scoped.some(row=>row.id===current) ? current : scoped[0]?.id) || "",
       );
     } catch {
       /* transient */
@@ -2300,25 +1991,6 @@ export default function ConversationsPanel({ projectId, instanceId }: NativePane
     );
   }, [agents, projectId]);
 
-  // Viewing a conversation marks it seen. Depends on `unread` (not
-  // just the selection) so it also fires when the summary loads after
-  // auto-selection and when new rows land while the conversation is
-  // open — with only [selectedId] the closure read a stale empty map
-  // and unread counts never cleared.
-  useEffect(() => {
-    if (!selectedId) return;
-    const entry = unread.get(selectedId);
-    if (!entry || entry.unread === 0) return;
-    // Mark up to the latest KNOWN id. (The previous sentinel,
-    // Number.MAX_SAFE_INTEGER >> 1, is -1 in JS — bitwise ops coerce
-    // to 32-bit — so every mark stored -1 and nothing ever read as
-    // seen.)
-    apiPost(`/seen`, { chat_id: selectedId, last_seen_id: entry.latest_id }, projectId).then(
-      () => loadConversations(),
-      () => {},
-    );
-  }, [selectedId, unread, loadConversations]);
-
   const selected = useMemo(
     () => conversations.find((c) => c.id === selectedId) ?? null,
     [conversations, selectedId],
@@ -2328,33 +2000,8 @@ export default function ConversationsPanel({ projectId, instanceId }: NativePane
   // the conversation row and a count badge on the Inbox tab. Ranks:
   // error alert > warn alert > approval > info alert; reports count
   // in the badge but never earn a dot.
-  const attentionByConv = useMemo(() => {
-    const rank = (m: Message) =>
-      m.component_kind === "alert" && m.severity === "error"
-        ? 4
-        : m.component_kind === "alert" && m.severity === "warn"
-          ? 3
-          : m.component_kind === "approval"
-            ? 2
-            : m.component_kind === "alert"
-              ? 1
-              : 0;
-    const map = new Map<string, number>();
-    for (const item of inboxItems) {
-      const r = rank(item.message);
-      if (r === 0) continue;
-      const prev = map.get(item.message.conversation_id) ?? 0;
-      if (r > prev) map.set(item.message.conversation_id, r);
-    }
-    return map;
-  }, [inboxItems]);
-  const inboxHasError = useMemo(
-    () =>
-      inboxItems.some(
-        (i) => i.message.component_kind === "alert" && i.message.severity === "error",
-      ),
-    [inboxItems],
-  );
+  const attentionByConv = useMemo(() => new Map(Object.entries(inboxAttention)), [inboxAttention]);
+  const inboxHasError = Object.values(inboxAttention).some(rank => rank === 4);
   const attentionDotClass = (r: number) =>
     r >= 4 ? "bg-error" : r === 3 ? "bg-warn" : r === 2 ? "bg-accent" : "bg-info";
 
@@ -2370,9 +2017,12 @@ export default function ConversationsPanel({ projectId, instanceId }: NativePane
     setDetailsOpen(true);
   };
 
-  const openConversation = (conversationID: string) => {
-    setTab("chats");
-    setSelectedId(conversationID);
+  const openConversation = async (conversationID: string) => {
+    try {
+      const conv=await apiGet<Conversation>(`/chats?id=${encodeURIComponent(conversationID)}`,projectId);
+      setConversations(current => current.some(c=>c.id===conv.id) ? current : [conv,...current]);
+      setTab("chats");setSelectedId(conversationID);
+    } catch(err) {setAgentsError(String(err));}
   };
 
   return (
@@ -2402,11 +2052,11 @@ export default function ConversationsPanel({ projectId, instanceId }: NativePane
             >
               <Glyph d={entry.glyph} size={14} />
               {entry.label}
-              {entry.id === "inbox" && inboxItems.length > 0 && (
+              {entry.id === "inbox" && inboxTotal > 0 && (
                 <span
                   className={`text-xs px-1.5 py-0.5 rounded-full text-bg ${inboxHasError ? "bg-error" : "bg-accent"}`}
                 >
-                  {inboxItems.length}
+                  {inboxTotal}
                 </span>
               )}
             </button>
@@ -2478,6 +2128,7 @@ export default function ConversationsPanel({ projectId, instanceId }: NativePane
               </div>
             ) : (
               <ul className="divide-y divide-border">
+                <li><MoreConversations path={agentScopedPath(`/chats${showArchived?"?archived=1":""}`,instanceId)} projectId={projectId} rows={conversations} onRows={setConversations}/></li>
                 {conversations.map((c) => {
                   const unreadCount = unread.get(c.id)?.unread ?? 0;
                   return (
@@ -2529,12 +2180,13 @@ export default function ConversationsPanel({ projectId, instanceId }: NativePane
             </div>
           </aside>
           {selected ? (
-            <ConversationChat
+            <ConversationChat key={`${selected.project_id}:${selected.id}`}
               conversation={selected}
               archived={showArchived}
               onOpenDetails={openDetails}
               onActed={loadConversations}
               onRemoved={() => {
+                setConversations(current=>current.filter(c=>c.id!==selectedId));
                 setSelectedId("");
                 loadConversations();
               }}
@@ -2586,6 +2238,7 @@ export default function ConversationsPanel({ projectId, instanceId }: NativePane
           onClose={() => setDetailsOpen(false)}
           onChanged={loadConversations}
           onRemoved={() => {
+            setConversations(current=>current.filter(c=>c.id!==selectedId));
             setSelectedId("");
             loadConversations();
           }}

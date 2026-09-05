@@ -42,6 +42,27 @@ func defaultReplayResolver(ctx *sdk.AppCtx, backend string) (replay.Resolver, er
 	}
 }
 
+func replayResolverForSession(ctx *sdk.AppCtx, row *ComputerSession) (replay.Resolver, error) {
+	lease, err := leaseForSession(ctx.AppDB(), row.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return newReplayResolver(ctx, row.Backend)
+	}
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := leaseConfig(ctx, lease)
+	if err != nil {
+		return nil, err
+	}
+	switch row.Backend {
+	case "browserbase":
+		return browserbase.NewReplayResolver(cfg.APIKey), nil
+	case "steel":
+		return steel.NewReplayResolver(cfg.APIKey), nil
+	}
+	return nil, fmt.Errorf("unsupported recording backend %s", row.Backend)
+}
+
 func (a *App) toolBrowserRecording(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := strings.TrimSpace(stringArg(args, "session_id"))
 	if id == "" {
@@ -56,7 +77,7 @@ func (a *App) recordingMetadata(requestCtx context.Context, ctx *sdk.AppCtx, id 
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil, errors.New("computer session history is unavailable")
 	}
-	row, err := dbGetSession(ctx.AppDB(), id)
+	row, err := dbGetSessionMetadata(ctx.AppDB(), id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("session %s not found", id)
 	}
@@ -74,7 +95,7 @@ func (a *App) recordingMetadata(requestCtx context.Context, ctx *sdk.AppCtx, id 
 		return recordingOutput(ctx, row, "unavailable", nil, "provider session id is unavailable"), nil
 	}
 
-	resolver, err := newReplayResolver(ctx, row.Backend)
+	resolver, err := replayResolverForSession(ctx, row)
 	if err != nil {
 		_ = a.updateRecordingStatus(ctx, row, "failed", err.Error())
 		return recordingOutput(ctx, row, "failed", nil, err.Error()), nil
@@ -213,7 +234,7 @@ func recordingResolver(ctx *sdk.AppCtx, id string) (*ComputerSession, replay.Res
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil, nil, errors.New("computer session history is unavailable")
 	}
-	row, err := dbGetSession(ctx.AppDB(), id)
+	row, err := dbGetSessionMetadata(ctx.AppDB(), id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, fmt.Errorf("session %s not found", id)
 	}
@@ -226,7 +247,7 @@ func recordingResolver(ctx *sdk.AppCtx, id string) (*ComputerSession, replay.Res
 	if row.BackendSessionID == "" {
 		return row, nil, errors.New("provider session id is unavailable")
 	}
-	resolver, err := newReplayResolver(ctx, row.Backend)
+	resolver, err := replayResolverForSession(ctx, row)
 	return row, resolver, err
 }
 

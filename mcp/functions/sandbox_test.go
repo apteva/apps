@@ -13,7 +13,14 @@ func TestMain(m *testing.M) {
 	if maybeRunSandboxHelper() {
 		return
 	}
-	os.Exit(m.Run())
+	seed, err := os.MkdirTemp("", "functions-test-stdlib-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("APTEVA_FUNCTIONS_STDLIB_CACHE", seed)
+	code := m.Run()
+	_ = os.RemoveAll(seed)
+	os.Exit(code)
 }
 
 func TestBuildEnvironmentScrubsSidecarCredentials(t *testing.T) {

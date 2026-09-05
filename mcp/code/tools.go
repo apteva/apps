@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -10,6 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -30,12 +32,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "repos_create",
 			Description: "Create a repository. Args: name (required), framework? (blank | nextjs | static | go | python), " +
-				"description?, slug?. Walks the template tree into the new repo's storage_root.",
+				"description?, slug?, workspace_image?. Walks the template tree into the new repo's storage_root.",
 			InputSchema: schemaObject(map[string]any{
-				"name":        map[string]any{"type": "string"},
-				"framework":   map[string]any{"type": "string"},
-				"description": map[string]any{"type": "string"},
-				"slug":        map[string]any{"type": "string"},
+				"name":            map[string]any{"type": "string"},
+				"framework":       map[string]any{"type": "string"},
+				"description":     map[string]any{"type": "string"},
+				"slug":            map[string]any{"type": "string"},
+				"workspace_image": map[string]any{"type": "string"},
 			}, []string{"name"}),
 			Handler: a.toolReposCreate,
 		},
@@ -65,6 +68,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"env_json":  map[string]any{"type": "string"},
 			}, []string{"slug"}),
 			Handler: a.toolReposSetDeployHints,
+		},
+		{
+			Name:        "repos_set_workspace_image",
+			Description: "Set or clear the repository's preferred workspace image. Workspaces validates registry policy when the image is used. A changed image provisions a new linked workspace on the next workspace command only when the current workspace has no unapplied source changes; the prior workspace is retained. Args: slug, image (empty clears).",
+			InputSchema: schemaObject(map[string]any{
+				"slug":  map[string]any{"type": "string"},
+				"image": map[string]any{"type": "string"},
+			}, []string{"slug", "image"}),
+			Handler: a.toolReposSetWorkspaceImage,
 		},
 		{
 			Name: "repos_export",
@@ -162,9 +174,11 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Write or overwrite a file with full content. Best for new files or simple overwrites; use " +
 				"code_apply_patch for large existing-file rewrites. Args: slug, path, content.",
 			InputSchema: schemaObject(map[string]any{
-				"slug":    map[string]any{"type": "string"},
-				"path":    map[string]any{"type": "string"},
-				"content": map[string]any{"type": "string"},
+				"slug":            map[string]any{"type": "string"},
+				"path":            map[string]any{"type": "string"},
+				"expected_sha256": map[string]any{"type": "string"},
+				"create_only":     map[string]any{"type": "boolean"},
+				"content":         map[string]any{"type": "string"},
 			}, []string{"slug", "path", "content"}),
 			Handler: a.toolWriteFile,
 		},
@@ -174,10 +188,11 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Dry runs return patch_id; pass patch_id later to apply the exact reviewed patch without resending it. " +
 				"Preferred for large existing-file rewrites instead of code_write_file full-content overwrites.",
 			InputSchema: schemaObject(map[string]any{
-				"slug":     map[string]any{"type": "string"},
-				"patch":    map[string]any{"type": "string"},
-				"patch_id": map[string]any{"type": "string"},
-				"dry_run":  map[string]any{"type": "boolean"},
+				"slug":        map[string]any{"type": "string"},
+				"patch":       map[string]any{"type": "string"},
+				"patch_id":    map[string]any{"type": "string"},
+				"allow_fuzzy": map[string]any{"type": "boolean", "description": "Allow unique relocation and limited context drift; defaults to false."},
+				"dry_run":     map[string]any{"type": "boolean"},
 			}, []string{"slug"}),
 			Handler: a.toolApplyPatch,
 		},
@@ -259,11 +274,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"repo/template (from_slug) or an embedded template name (from_template). Args: name (required), " +
 				"slug?, description?, from_slug? (mutually exclusive with from_template), from_template?.",
 			InputSchema: schemaObject(map[string]any{
-				"name":          map[string]any{"type": "string"},
-				"slug":          map[string]any{"type": "string"},
-				"description":   map[string]any{"type": "string"},
-				"from_slug":     map[string]any{"type": "string"},
-				"from_template": map[string]any{"type": "string"},
+				"name":            map[string]any{"type": "string"},
+				"slug":            map[string]any{"type": "string"},
+				"description":     map[string]any{"type": "string"},
+				"from_project_id": map[string]any{"type": "string"},
+				"from_slug":       map[string]any{"type": "string"},
+				"from_template":   map[string]any{"type": "string"},
 			}, []string{"name"}),
 			Handler: a.toolReposFork,
 		},
@@ -293,6 +309,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"priority": map[string]any{"type": "string"},
 				"assignee": map[string]any{"type": "string"},
 				"q":        map[string]any{"type": "string"},
+				"offset":   map[string]any{"type": "integer", "minimum": 0},
 				"limit":    map[string]any{"type": "integer"},
 			}, []string{"slug"}),
 			Handler: a.toolIssuesList,
@@ -309,6 +326,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"priority": map[string]any{"type": "string"},
 				"assignee": map[string]any{"type": "string"},
 				"q":        map[string]any{"type": "string"},
+				"offset":   map[string]any{"type": "integer", "minimum": 0},
 				"limit":    map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolIssuesSearch,
@@ -317,8 +335,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "issues_get",
 			Description: "Get a native Code issue with comments, links, and activity. Args: slug, number.",
 			InputSchema: schemaObject(map[string]any{
-				"slug":   map[string]any{"type": "string"},
-				"number": map[string]any{"type": "integer"},
+				"slug":           map[string]any{"type": "string"},
+				"history_offset": map[string]any{"type": "integer", "minimum": 0},
+				"number":         map[string]any{"type": "integer"},
 			}, []string{"slug", "number"}),
 			Handler: a.toolIssuesGet,
 		},
@@ -442,22 +461,49 @@ func (a *App) MCPTools() []sdk.Tool {
 				"env_json":  map[string]any{"type": "string"},
 				"expose":    map[string]any{"type": "boolean"},
 			}, []string{"slug"}),
-			Handler: a.toolDevStart,
+			HandlerCtx: a.toolDevStartContext,
 		},
 		{
 			Name: "repos_run_command",
-			Description: "Run a finite repo command and wait for it to exit. Use this for builds, tests, lint, typecheck, generators, and validation commands such as 'bun run build' or 'go test ./...'. " +
+			Description: "Run a finite repo command and wait for it to exit. runtime defaults to workspace. runtime=local requires trusted_local_execution and uses the Code sidecar OS authority; runtime=workspace creates or reuses an isolated Workspaces environment, installs dependencies when inputs change, safely synchronizes source, and preserves its cache. Use this for builds, tests, lint, typecheck, generators, and validation commands. " +
 				"Do not use repos_dev_start for finite commands; repos_dev_start is only for long-running preview servers. " +
-				"For JS/Bun/Node repos with package.json, bootstraps dependencies first when node_modules is missing or dependency files changed. " +
-				"Returns structured status, exit_code, duration_ms, dependency_install_ran, stdout_tail, stderr_tail, and log_tail. Args: slug, command, env_json?, timeout_seconds? (default 300, max 1800), tail? (default 200).",
+				"For monorepos, workspace_paths selects editable doublestar globs and support_paths adds read-only build inputs; only the selected files are transferred and only workspace_paths may be applied back. Omitted scope arguments reuse the linked workspace scope; pass workspace_paths=[\"**\"] to switch back to the full repository. " +
+				"Returns structured status, runtime, workspace_id when applicable, exit_code, duration_ms, dependency_install_ran, and bounded logs. Args: slug, command, runtime? (local|workspace), profile? (go|bun|python|apteva), image? (allowlisted immutable workspace image override), workspace_paths?, support_paths?, env_json?, timeout_seconds? (default 300, max 1800), tail? (default 200).",
 			InputSchema: schemaObject(map[string]any{
 				"slug":            map[string]any{"type": "string"},
 				"command":         map[string]any{"type": "string"},
+				"runtime":         map[string]any{"type": "string", "enum": []string{"local", "workspace"}},
+				"profile":         map[string]any{"type": "string", "enum": []string{"go", "bun", "python", "apteva"}},
+				"image":           map[string]any{"type": "string"},
+				"workspace_paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 64},
+				"support_paths":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 64},
 				"env_json":        map[string]any{"type": "string"},
 				"timeout_seconds": map[string]any{"type": "integer"},
 				"tail":            map[string]any{"type": "integer"},
 			}, []string{"slug", "command"}),
-			Handler: a.toolRunCommand,
+			HandlerCtx: a.toolRunCommand,
+		},
+		{
+			Name:        "repos_workspace_changes",
+			Description: "Preview source changes produced in a repository's linked execution workspace. Returns added, modified, and deleted paths plus source revision digests and conflict state. Run this before applying workspace-generated changes. Args: slug.",
+			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
+			HandlerCtx:  a.toolWorkspaceChanges,
+		},
+		{
+			Name:        "repos_workspace_apply",
+			Description: "Apply a previously previewed workspace source revision back to Code. Requires expected_workspace_digest from repos_workspace_changes and refuses when Code changed after synchronization or preview. Git metadata and dependency/build caches are never replaced. Args: slug, expected_workspace_digest.",
+			InputSchema: schemaObject(map[string]any{
+				"slug": map[string]any{"type": "string"}, "expected_workspace_digest": map[string]any{"type": "string"},
+			}, []string{"slug", "expected_workspace_digest"}),
+			HandlerCtx: a.toolWorkspaceApply,
+		},
+		{
+			Name:        "repos_workspace_destroy",
+			Description: "Permanently destroy a repository's linked execution workspace and cached volumes, then unlink it from Code. Repository files in Code are retained. Requires confirm=true. Args: slug, confirm.",
+			InputSchema: schemaObject(map[string]any{
+				"slug": map[string]any{"type": "string"}, "confirm": map[string]any{"type": "boolean"},
+			}, []string{"slug", "confirm"}),
+			HandlerCtx: a.toolWorkspaceDestroy,
 		},
 		{
 			Name:        "repos_dev_stop",
@@ -481,12 +527,15 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolDevLogs,
 		},
 	}
-	return append(tools, a.gitMCPTools()...)
+	return authenticatedTools(append(tools, a.gitMCPTools()...))
 }
 
 // ─── repos_dev_* handlers ─────────────────────────────────────────
 
 func (a *App) toolDevStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolDevStartContext(context.Background(), ctx, args)
+}
+func (a *App) toolDevStartContext(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -499,7 +548,7 @@ func (a *App) toolDevStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if a.dev == nil {
 		return nil, errors.New("dev runtime not initialised")
 	}
-	dr, err := a.dev.startDevRun(ctx, startDevInput{
+	dr, err := a.dev.startDevRunContext(callCtx, ctx, startDevInput{
 		ProjectID: pid,
 		Repo:      repo,
 		Framework: strArg(args, "framework"),
@@ -516,10 +565,13 @@ func (a *App) toolDevStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// server for exact hostnames once DNS points at Apteva ingress.
 	exposeResult := map[string]any{"requested": false}
 	if boolArg(args, "expose") && dr != nil && dr.Status != "stopped" && dr.Port > 0 {
-		hostname, err := exposeDevRun(ctx, repo.Slug, dr.Port)
+		hostname, err := a.dev.expose(ctx, repo, dr)
 		if err != nil {
 			exposeResult = map[string]any{"requested": true, "registered": false, "error": err.Error()}
 		} else {
+
+			dr.IngressHostname = hostname
+			dr.PreviewURL = "https://" + hostname + "/"
 			exposeResult = map[string]any{"requested": true, "registered": true, "hostname": hostname}
 		}
 	}
@@ -548,7 +600,7 @@ func (a *App) toolDevStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// start, we registered <slug>.<dev_base_hostname>. Drop it now
 	// regardless of whether expose was requested; UnexposeIngress is
 	// idempotent on a missing hostname.
-	_ = unexposeDevRun(ctx, repo.Slug)
+	// stopDevRun removes the persisted ingress before releasing the port.
 	return map[string]any{"stopped": true}, nil
 }
 
@@ -594,7 +646,7 @@ func (a *App) toolDevLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"log": body, "available": true}, nil
 }
 
-func (a *App) toolRunCommand(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolRunCommand(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -604,12 +656,51 @@ func (a *App) toolRunCommand(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	if _, err := workspaceEnv(strArg(args, "env_json")); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(strArg(args, "command")) == "" {
+		return nil, errors.New("command required")
+	}
+	runtime := strings.ToLower(strings.TrimSpace(strArg(args, "runtime")))
+	if runtime == "" {
+		runtime = "workspace"
+	}
+	if runtime == "local" && !localExecutionEnabled(ctx) {
+		return nil, errors.New("local execution is disabled; use runtime=workspace or enable trusted_local_execution for this installation")
+	}
+	if runtime == "workspace" {
+		callCtx, untrack := a.commands.track(callCtx, repo.ID)
+		defer untrack()
+		release, err := a.commands.acquire(callCtx, repo.ID)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		prep, err := a.prepareExecutionWorkspace(callCtx, ctx, repo, strArg(args, "profile"), strArg(args, "image"), stringSliceArg(args, "workspace_paths"), stringSliceArg(args, "support_paths"))
+		if err != nil {
+			return nil, err
+		}
+		return a.runWorkspaceCommand(callCtx, ctx, prep, repoCommandInput{
+			Command: strArg(args, "command"), EnvJSON: strArg(args, "env_json"),
+			TimeoutSeconds: intArg(args, "timeout_seconds", 300), TailLines: intArg(args, "tail", 200),
+		})
+	}
+	if strArg(args, "image") != "" {
+		return nil, errors.New("image requires runtime=workspace")
+	}
+	if len(stringSliceArg(args, "workspace_paths"))+len(stringSliceArg(args, "support_paths")) > 0 {
+		return nil, errors.New("workspace_paths and support_paths require runtime=workspace")
+	}
+	if runtime != "" && runtime != "local" {
+		return nil, errors.New("runtime must be local or workspace")
+	}
 	pp, ok := a.storeFor(repo).(FileStoreLocalPath)
 	if !ok {
 		return nil, errors.New("repo command runner requires a local filesystem store")
 	}
 	srcDir := pp.RepoPath(repo.Slug)
-	res, err := a.runRepoCommand(repo, srcDir, repoCommandInput{
+	res, err := a.runRepoCommandContext(callCtx, repo, srcDir, repoCommandInput{
 		Command:        strArg(args, "command"),
 		EnvJSON:        strArg(args, "env_json"),
 		TimeoutSeconds: intArg(args, "timeout_seconds", 300),
@@ -619,6 +710,79 @@ func (a *App) toolRunCommand(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	return res, nil
+}
+
+func (a *App) toolWorkspaceChanges(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
+		return nil, err
+	}
+	preview, _, _, _, err := a.workspaceChanges(ctx, repo)
+	return preview, err
+}
+
+func (a *App) toolWorkspaceApply(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
+		return nil, err
+	}
+	release, err := a.commands.acquire(callCtx, repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	result, err := a.applyWorkspaceChanges(ctx, repo, strArg(args, "expected_workspace_digest"))
+	if err != nil {
+		return nil, err
+	}
+	ctx.Emit("repo.workspace.applied", map[string]any{"id": repo.ID, "slug": repo.Slug, "workspace_id": result.WorkspaceID, "changes": len(result.Changes)})
+	return result, nil
+}
+
+func (a *App) toolWorkspaceDestroy(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if !boolArg(args, "confirm") {
+		return nil, errors.New("confirm=true is required because workspace destruction permanently deletes its cached volumes")
+	}
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
+		return nil, err
+	}
+	release, err := a.commands.acquire(callCtx, repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	link, err := dbGetRepoWorkspace(ctx.AppDB(), repo.ProjectID, repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	if link == nil {
+		return map[string]any{"slug": repo.Slug, "destroyed": false, "workspace_id": ""}, nil
+	}
+	var destroyed map[string]any
+	if err := ctx.PlatformAPI().CallAppResult(workspacesAppName, "workspace_destroy", map[string]any{
+		"workspace_id": link.WorkspaceID,
+		"confirm":      true,
+	}, &destroyed); err != nil {
+		return nil, fmt.Errorf("destroy execution workspace: %w", err)
+	}
+	if err := dbDeleteRepoWorkspace(ctx.AppDB(), repo.ProjectID, repo.ID); err != nil {
+		return nil, err
+	}
+	ctx.Emit("repo.workspace.destroyed", map[string]any{"id": repo.ID, "slug": repo.Slug, "workspace_id": link.WorkspaceID})
+	return map[string]any{"slug": repo.Slug, "destroyed": true, "workspace_id": link.WorkspaceID}, nil
 }
 
 // ─── repos_import_github handler ──────────────────────────────────
@@ -659,6 +823,7 @@ func (a *App) toolIssuesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if status == "" {
 		status = "all"
 	}
+	total := 0
 	issues, err := dbListIssues(ctx.AppDB(), pid, repo.ID, IssueListOptions{
 		State:    strArg(args, "state"),
 		Status:   status,
@@ -667,11 +832,12 @@ func (a *App) toolIssuesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		Assignee: strArg(args, "assignee"),
 		Q:        strArg(args, "q"),
 		Limit:    intArg(args, "limit", 100),
+		Offset:   intArg(args, "offset", 0), Total: &total,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"issues": issues, "count": len(issues)}, nil
+	return map[string]any{"issues": issues, "count": len(issues), "total": total, "offset": max(0, intArg(args, "offset", 0))}, nil
 }
 
 func (a *App) toolIssuesSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -687,6 +853,7 @@ func (a *App) toolIssuesSearch(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if state == "" {
 		state = "all"
 	}
+	total := 0
 	issues, err := dbSearchIssues(ctx.AppDB(), pid, IssueListOptions{
 		State:    state,
 		Status:   status,
@@ -696,11 +863,12 @@ func (a *App) toolIssuesSearch(ctx *sdk.AppCtx, args map[string]any) (any, error
 		RepoSlug: strArg(args, "repo"),
 		Q:        strArg(args, "q"),
 		Limit:    intArg(args, "limit", 100),
+		Offset:   intArg(args, "offset", 0), Total: &total,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"issues": issues, "count": len(issues)}, nil
+	return map[string]any{"issues": issues, "count": len(issues), "total": total, "offset": max(0, intArg(args, "offset", 0))}, nil
 }
 
 func (a *App) toolIssuesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -708,14 +876,14 @@ func (a *App) toolIssuesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	detail, err := dbGetIssueDetail(ctx.AppDB(), pid, repo.ID, intArg(args, "number", 0))
+	detail, err := dbGetIssueDetailPage(ctx.AppDB(), pid, repo.ID, intArg(args, "number", 0), intArg(args, "history_offset", 0), 200)
 	if err != nil {
 		return nil, err
 	}
 	if detail == nil {
 		return map[string]any{"issue": nil, "found": false}, nil
 	}
-	return map[string]any{"issue": detail.Issue, "comments": detail.Comments, "links": detail.Links, "events": detail.Events, "found": true}, nil
+	return map[string]any{"issue": detail.Issue, "comments": detail.Comments, "links": detail.Links, "events": detail.Events, "history_offset": detail.HistoryOffset, "history_limit": detail.HistoryLimit, "comments_total": detail.CommentsTotal, "events_total": detail.EventsTotal, "links_total": detail.LinksTotal, "found": true}, nil
 }
 
 func issueClaimant(callCtx context.Context, app *sdk.AppCtx) (string, string, error) {
@@ -1070,8 +1238,16 @@ func (a *App) toolReposFork(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// allocate a new slug + disk root.
 	var src treeReader
 	var srcID, parentKind string
+	framework := "blank"
 	if fromSlug != "" {
-		parent, err := dbGetRepoBySlug(ctx.AppDB(), pid, fromSlug)
+		sourceProject := strArg(args, "from_project_id")
+		if sourceProject == "" {
+			sourceProject = pid
+		}
+		parent, err := dbGetRepoBySlug(ctx.AppDB(), sourceProject, fromSlug)
+		if parent != nil && sourceProject != pid && (!parent.IsTemplate || parent.TemplateScope != "global" || parent.IsArchived()) {
+			return nil, errors.New("source template is not globally shared")
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1087,11 +1263,13 @@ func (a *App) toolReposFork(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			}
 			parent = gp
 		}
+		framework = parent.Framework
 		src = storeReader{s: a.storeFor(parent)}
 		srcID = parent.Slug
 		parentKind = "user"
 	} else {
 		// embedded
+		framework = fromTemplate
 		src = embeddedReader{}
 		srcID = fromTemplate
 		parentKind = "embedded"
@@ -1101,7 +1279,7 @@ func (a *App) toolReposFork(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		Name:        name,
 		Slug:        strArg(args, "slug"),
 		Description: strArg(args, "description"),
-		Framework:   "blank", // forks always start as blank — files come from the source tree
+		Framework:   framework,
 	}
 	r, err := dbCreateRepo(ctx.AppDB(), pid, in)
 	if err != nil {
@@ -1137,10 +1315,22 @@ func (a *App) toolReposFork(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // can fork shared templates without having to know which project owns
 // them.
 func findGlobalTemplate(db *sql.DB, slug string) (*Repo, error) {
-	row := db.QueryRow(`SELECT `+repoColumns+` FROM repositories
-		WHERE slug = ? AND is_template = 1 AND template_scope = 'global' AND archived_at IS NULL
-		LIMIT 1`, slug)
-	return scanRepoRow(row)
+	rows, err := db.Query(`SELECT `+repoColumns+` FROM repositories WHERE slug=? AND is_template=1 AND template_scope='global' AND archived_at IS NULL LIMIT 2`, slug)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result *Repo
+	for rows.Next() {
+		if result != nil {
+			return nil, errors.New("ambiguous global template slug; specify its source project")
+		}
+		result, err = scanRepoRow(rows)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, rows.Err()
 }
 
 // ─── repos_* handlers ──────────────────────────────────────────────
@@ -1165,10 +1355,11 @@ func (a *App) toolReposCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	in := CreateRepoInput{
-		Name:        strArg(args, "name"),
-		Slug:        strArg(args, "slug"),
-		Description: strArg(args, "description"),
-		Framework:   strArg(args, "framework"),
+		Name:           strArg(args, "name"),
+		Slug:           strArg(args, "slug"),
+		Description:    strArg(args, "description"),
+		Framework:      strArg(args, "framework"),
+		WorkspaceImage: strArg(args, "workspace_image"),
 	}
 	r, err := dbCreateRepo(ctx.AppDB(), pid, in)
 	if err != nil {
@@ -1182,7 +1373,9 @@ func (a *App) toolReposCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	count, err := applyTemplate(repoStore, r.Slug, r.Framework)
 	if err != nil {
-		ctx.Logger().Warn("template apply failed", "slug", r.Slug, "framework", r.Framework, "err", err)
+		_ = repoStore.DropRepo(r.Slug)
+		_ = dbHardDeleteRepo(ctx.AppDB(), pid, r.Slug)
+		return nil, err
 	}
 	if count > 0 {
 		_ = dbRecordImport(ctx.AppDB(), r.ID, "template:"+r.Framework)
@@ -1291,6 +1484,25 @@ func (a *App) toolReposSetDeployHints(ctx *sdk.AppCtx, args map[string]any) (any
 	return map[string]any{"repository": r}, nil
 }
 
+func (a *App) toolReposSetWorkspaceImage(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	if slug == "" {
+		return nil, errors.New("slug required")
+	}
+	r, err := dbSetWorkspaceImage(ctx.AppDB(), pid, slug, strArg(args, "image"))
+	if err != nil {
+		return nil, err
+	}
+	ctx.Emit("repo.updated", map[string]any{
+		"id": r.ID, "slug": r.Slug, "name": r.Name, "framework": r.Framework,
+	})
+	return map[string]any{"repository": r}, nil
+}
+
 func (a *App) toolReposExport(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -1304,8 +1516,11 @@ func (a *App) toolReposExport(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	var buf bytes.Buffer
+	buf := inlineExportBuffer{limit: int(envLimit("CODE_EXPORT_INLINE_BYTES", 8<<20))}
 	if err := zipRepo(&buf, a.storeFor(repo), slug); err != nil {
+		if errors.Is(err, errInlineExportLimit) {
+			return map[string]any{"inline": false, "download_url": "/api/apps/code/api/repos/" + url.PathEscape(slug) + "/export?project_id=" + url.QueryEscape(pid) + "&install_id=" + url.QueryEscape(os.Getenv("APTEVA_INSTALL_ID")), "format": "zip", "hint": errInlineExportLimit.Error()}, nil
+		}
 		return nil, fmt.Errorf("zip repo: %w", err)
 	}
 	sum := sha256.Sum256(buf.Bytes())
@@ -1476,7 +1691,7 @@ func (a *App) toolWriteFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	content := strArg(args, "content")
 	slug := strArg(args, "slug")
-	meta, err := a.storeFor(repo).Write(slug, rel, []byte(content))
+	meta, err := writeConditional(a.storeFor(repo), slug, rel, []byte(content), strArg(args, "expected_sha256"), boolArg(args, "create_only"))
 	if err != nil {
 		return nil, err
 	}
@@ -1508,7 +1723,12 @@ func (a *App) toolApplyPatch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if patch == "" {
 		return nil, errors.New("patch or patch_id required")
 	}
-	res, err := applyUnifiedPatch(a.storeFor(repo), repoStoreKey(repo), patch, boolArg(args, "dry_run"))
+	var res *PatchResult
+	if id := strArg(args, "patch_id"); id != "" {
+		res, err = applyPatchPreview(a.storeFor(repo), repoStoreKey(repo), id)
+	} else {
+		res, err = applyUnifiedPatchOptions(a.storeFor(repo), repoStoreKey(repo), patch, boolArg(args, "dry_run"), boolArg(args, "allow_fuzzy"))
+	}
 	if err != nil {
 		return nil, err
 	}

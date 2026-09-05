@@ -2651,12 +2651,12 @@ func TestHTTPRoutesUseCanonicalToolHandlers(t *testing.T) {
 	t.Cleanup(func() { globalCtx = nil })
 
 	openBody := map[string]any{
-		"action":     "open",
-		"backend":    "local",
-		"url":        "https://example.test/app",
-		"context_id": "ctx-login",
-		"persist":    false,
-		"proxy":      proxy,
+		"action":              "open",
+		"backend":             "local",
+		"url":                 "https://example.test/app",
+		"provider_context_id": "ctx-login",
+		"persist":             false,
+		"proxy":               proxy,
 		"viewport": map[string]any{
 			"width":  1200,
 			"height": 700,
@@ -3324,6 +3324,10 @@ func TestAgents0412GeneratedAlexaOpenUsesDefaultCloudLifetime(t *testing.T) {
 		t.Fatalf("settings update: %v", err)
 	}
 
+	if _, err := dbCreateContext(ctx.AppDB(), contextCreateInput{Name: "Alexa Patreon", Backend: "browserbase", ProviderContextID: "saved-alexa", PersistDefault: true}); err != nil {
+		t.Fatal(err)
+	}
+
 	out, err := app.toolBrowserSession(ctx, agents0412GeneratedAlexaOpenArgs())
 	if err != nil {
 		t.Fatalf("generated Alexa open: %v", err)
@@ -3673,6 +3677,11 @@ func (f *fakeComp) ExecuteAction(action backends.Action) error {
 	f.mu.Unlock()
 	if f.executeActionHook != nil {
 		if err := f.executeActionHook(action); err != nil {
+			return err
+		}
+	}
+	if f.executeActionHook == nil && f.executeHook != nil {
+		if err := f.executeHook(action); err != nil {
 			return err
 		}
 	}

@@ -1,0 +1,10 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/crm
+cpu: Apple M1 Pro
+BenchmarkAuditSuppressionScan/suppressions_100-10         	   34789	      3068 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAuditSuppressionScan/suppressions_1000-10        	    3669	     32775 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAuditSuppressionScan/suppressions_10000-10       	     314	    370457 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIndexedSuppressions-10                           	 1274342	        97.83 ns/op	      48 B/op	       1 allocs/op
+PASS
+ok  	github.com/apteva/apps/mcp/crm	0.950s

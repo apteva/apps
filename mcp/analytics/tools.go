@@ -70,16 +70,13 @@ func (a *App) toolTrack(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		UpsertKey: stringArg(args, "upsert_key"),
 		Props:     propsJSON,
 	}
-	validation, err := validateEventAgainstSpecs(ctx.AppDB(), ev)
+	ev.DeliveryID = stringArg(args, "delivery_id")
+	id, err := insertEvent(toolWriter(ctx), ev)
 	if err != nil {
-		return nil, err
-	}
-	if validation.Reject {
-		return validationFailure(ctx.AppDB(), ev, validation), nil
-	}
-
-	id, err := insertEvent(ctx.AppDB(), ev)
-	if err != nil {
+		var rejected *rejectedEventError
+		if errors.As(err, &rejected) {
+			return validationFailure(toolWriter(ctx), ev, rejected.Outcome), nil
+		}
 		return nil, fmt.Errorf("insert: %w", err)
 	}
 
@@ -111,7 +108,7 @@ func (a *App) toolQuery(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, fmt.Errorf("group_by: %w", err)
 		}
 		if len(keys) > 0 {
-			buckets, err := queryGrouped(ctx.AppDB(), f, keys, limit)
+			buckets, err := queryGrouped(toolReader(ctx), f, keys, limit)
 			if err != nil {
 				return nil, err
 			}
@@ -119,7 +116,7 @@ func (a *App) toolQuery(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 	}
 
-	rows, err := queryRows(ctx.AppDB(), f, limit)
+	rows, err := queryRows(toolReader(ctx), f, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +128,7 @@ func (a *App) toolCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	n, err := countEvents(ctx.AppDB(), f)
+	n, err := countEvents(toolReader(ctx), f)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +144,7 @@ func (a *App) toolTop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := topByPropsKey(ctx.AppDB(), f, by, intArg(args, "limit"))
+	rows, err := topByPropsKey(toolReader(ctx), f, by, intArg(args, "limit"))
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +156,7 @@ func (a *App) toolTopics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := listTopics(ctx.AppDB(), projectID, stringArg(args, "app"))
+	rows, err := listTopics(toolReader(ctx), projectID, stringArg(args, "app"))
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +180,7 @@ func (a *App) toolSum(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := sumByValue(ctx.AppDB(), f, value, groupBy, intArg(args, "limit"))
+	rows, err := sumByValue(toolReader(ctx), f, value, groupBy, intArg(args, "limit"))
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +192,7 @@ func (a *App) toolSumMoney(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return moneyScalarForWidget(ctx.AppDB(), f, args)
+	return moneyScalarForWidget(toolReader(ctx), f, args)
 }
 
 func (a *App) toolFXRateUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -203,7 +200,7 @@ func (a *App) toolFXRateUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
-	rate, err := upsertFXRate(ctx.AppDB(), projectID, FXRate{
+	rate, err := upsertFXRate(toolWriter(ctx), projectID, FXRate{
 		BaseCurrency:  stringArg(args, "base_currency"),
 		QuoteCurrency: stringArg(args, "quote_currency"),
 		AsOf:          int64Arg(args, "as_of"),
@@ -221,7 +218,7 @@ func (a *App) toolFXRatesList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	rates, err := listFXRates(ctx.AppDB(), projectID, stringArg(args, "base_currency"), stringArg(args, "quote_currency"), int64Arg(args, "since"), int64Arg(args, "until"), intArg(args, "limit"))
+	rates, err := listFXRates(toolReader(ctx), projectID, stringArg(args, "base_currency"), stringArg(args, "quote_currency"), int64Arg(args, "since"), int64Arg(args, "until"), intArg(args, "limit"))
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +230,7 @@ func (a *App) toolEventSpecsList(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	specs, err := listEventSpecs(ctx.AppDB(), specFilter{
+	specs, err := listEventSpecs(toolReader(ctx), specFilter{
 		ProjectID: projectID,
 		App:       stringArg(args, "app"),
 		Status:    stringArg(args, "status"),
@@ -253,7 +250,7 @@ func (a *App) toolEventSpecsForApp(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
-	specs, err := listEventSpecs(ctx.AppDB(), specFilter{
+	specs, err := listEventSpecs(toolReader(ctx), specFilter{
 		ProjectID: projectID,
 		App:       app,
 		Status:    "active",
@@ -271,7 +268,7 @@ func (a *App) toolEventSpecsForApp(ctx *sdk.AppCtx, args map[string]any) (any, e
 
 func (a *App) toolEventSpecGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id := int64Arg(args, "id"); id > 0 {
-		spec, err := getEventSpecByID(ctx.AppDB(), id)
+		spec, err := getEventSpecByID(toolReader(ctx), id)
 		if err != nil {
 			return nil, err
 		}
@@ -284,7 +281,7 @@ func (a *App) toolEventSpecGet(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
-	spec, err := getEventSpec(ctx.AppDB(), projectID, stringArg(args, "app"), stringArg(args, "topic"))
+	spec, err := getEventSpec(toolReader(ctx), projectID, stringArg(args, "app"), stringArg(args, "topic"))
 	if err != nil {
 		return nil, err
 	}
@@ -305,17 +302,26 @@ func (a *App) toolEventSpecUpsert(ctx *sdk.AppCtx, args map[string]any) (any, er
 	var existing *EventSpec
 	var existingErr error
 	if id := int64Arg(args, "id"); id > 0 {
-		existing, existingErr = getEventSpecByID(ctx.AppDB(), id)
+		existing, existingErr = getEventSpecByID(toolWriter(ctx), id)
+		if existingErr != nil {
+			return nil, existingErr
+		}
 		if existingErr == nil {
 			if err := ensureSpecInCurrentProject(ctx, args, existing.ProjectID); err != nil {
 				return nil, err
+			}
+			if _, ok := args["app"]; !ok {
+				spec.App = existing.App
+			}
+			if _, ok := args["topic"]; !ok {
+				spec.Topic = existing.Topic
 			}
 			if spec.App != existing.App || spec.Topic != existing.Topic {
 				return nil, errors.New("app and topic cannot be changed; create a new spec")
 			}
 		}
 	} else {
-		existing, existingErr = getEventSpec(ctx.AppDB(), projectID, spec.App, spec.Topic)
+		existing, existingErr = getEventSpec(toolWriter(ctx), projectID, spec.App, spec.Topic)
 	}
 	if existingErr == nil {
 		spec, replaceProperties, err = mergeEventSpecPatch(existing, spec, args)
@@ -328,7 +334,7 @@ func (a *App) toolEventSpecUpsert(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if existingErr != nil {
 		spec.ID = 0
 	}
-	saved, err := upsertEventSpec(ctx.AppDB(), spec, replaceProperties)
+	saved, err := upsertEventSpec(toolWriter(ctx), spec, replaceProperties)
 	if err != nil {
 		return nil, err
 	}
@@ -337,6 +343,12 @@ func (a *App) toolEventSpecUpsert(ctx *sdk.AppCtx, args map[string]any) (any, er
 
 func mergeEventSpecPatch(existing *EventSpec, patch EventSpec, args map[string]any) (EventSpec, bool, error) {
 	merged := *existing
+	if expected, ok := args["updated_at"]; ok {
+		version, _ := numericValue(expected)
+		if int64(version) != existing.UpdatedAt {
+			return EventSpec{}, false, errors.New("spec changed; reload before saving")
+		}
+	}
 	merged.Properties = existing.Properties
 	if id := int64Arg(args, "id"); id > 0 && id != existing.ID {
 		return EventSpec{}, false, fmt.Errorf("id %d does not match existing spec %d", id, existing.ID)
@@ -401,7 +413,7 @@ func (a *App) toolEventSpecDelete(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	res, err := ctx.AppDB().Exec(`DELETE FROM event_specs WHERE id=? AND project_id=?`, id, projectID)
+	res, err := toolWriter(ctx).Exec(`DELETE FROM event_specs WHERE id=? AND project_id=?`, id, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -416,17 +428,17 @@ func (a *App) toolEventPropertyUpsert(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	spec, err := getEventSpecByID(ctx.AppDB(), prop.EventSpecID)
+	spec, err := getEventSpecByID(toolWriter(ctx), prop.EventSpecID)
 	if err != nil {
 		return nil, err
 	}
 	if err := ensureSpecInCurrentProject(ctx, args, spec.ProjectID); err != nil {
 		return nil, err
 	}
-	if err := upsertEventPropertySpec(ctx.AppDB(), prop); err != nil {
+	if err := upsertEventPropertySpec(toolWriter(ctx), prop); err != nil {
 		return nil, err
 	}
-	spec, err = getEventSpecByID(ctx.AppDB(), prop.EventSpecID)
+	spec, err = getEventSpecByID(toolWriter(ctx), prop.EventSpecID)
 	if err != nil {
 		return nil, err
 	}
@@ -439,14 +451,14 @@ func (a *App) toolEventPropertyDelete(ctx *sdk.AppCtx, args map[string]any) (any
 	if specID <= 0 || key == "" {
 		return nil, errors.New("event_spec_id and key required")
 	}
-	spec, err := getEventSpecByID(ctx.AppDB(), specID)
+	spec, err := getEventSpecByID(toolWriter(ctx), specID)
 	if err != nil {
 		return nil, err
 	}
 	if err := ensureSpecInCurrentProject(ctx, args, spec.ProjectID); err != nil {
 		return nil, err
 	}
-	_, err = ctx.AppDB().Exec(`DELETE FROM event_property_specs WHERE event_spec_id=? AND key=?`, specID, key)
+	_, err = toolWriter(ctx).Exec(`DELETE FROM event_property_specs WHERE event_spec_id=? AND key=?`, specID, key)
 	if err != nil {
 		return nil, err
 	}
@@ -463,11 +475,11 @@ func (a *App) toolEventValidate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, err
 	}
 	ev.ProjectID = projectID
-	out, err := validateEventAgainstSpecs(ctx.AppDB(), ev)
+	out, err := validateEventAgainstSpecs(toolReader(ctx), ev)
 	if err != nil {
 		return nil, err
 	}
-	return validationResult(ctx.AppDB(), ev, out), nil
+	return validationResult(toolReader(ctx), ev, out), nil
 }
 
 func (a *App) toolEventViolations(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -475,7 +487,7 @@ func (a *App) toolEventViolations(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	rows, err := listEventSpecViolations(ctx.AppDB(), f, intArg(args, "limit"))
+	rows, err := listEventSpecViolations(toolReader(ctx), f, intArg(args, "limit"))
 	if err != nil {
 		return nil, err
 	}
@@ -535,7 +547,7 @@ func ensureSpecInCurrentProject(ctx *sdk.AppCtx, args map[string]any, specProjec
 	return nil
 }
 
-func validationResult(db *sql.DB, ev EventInsert, out validationOutcome) map[string]any {
+func validationResult(db sqlRunner, ev EventInsert, out validationOutcome) map[string]any {
 	resp := map[string]any{
 		"valid":      len(out.Violations) == 0,
 		"reject":     out.Reject,
@@ -545,12 +557,22 @@ func validationResult(db *sql.DB, ev EventInsert, out validationOutcome) map[str
 	}
 	if spec, err := getEventSpec(db, ev.ProjectID, ev.App, ev.Topic); err == nil {
 		resp["spec"] = spec.App + "." + spec.Topic
-		resp["example"] = exampleEventForSpec(spec)
+		example := exampleEventForSpec(spec)
+		resp["example"] = example
+		raw, _ := json.Marshal(example["props"])
+		candidate := EventInsert{App: spec.App, Topic: spec.Topic, ProjectID: ev.ProjectID, Props: string(raw), Source: "track", UserID: stringArg(example, "user_id"), SessionID: stringArg(example, "session_id")}
+		_, checked, _, exampleErr := prepareEvent(db, candidate)
+		resp["example_valid"] = exampleErr == nil && len(checked.Violations) == 0
+		if exampleErr != nil {
+			resp["example_error"] = exampleErr.Error()
+		} else if len(checked.Violations) > 0 {
+			resp["example_violations"] = checked.Violations
+		}
 	}
 	return resp
 }
 
-func validationFailure(db *sql.DB, ev EventInsert, out validationOutcome) map[string]any {
+func validationFailure(db sqlRunner, ev EventInsert, out validationOutcome) map[string]any {
 	resp := validationResult(db, ev, out)
 	resp["error"] = firstViolationType(out.Violations)
 	return resp
@@ -601,14 +623,37 @@ func exampleEventForSpec(spec *EventSpec) map[string]any {
 }
 
 func exampleValue(prop EventPropertySpec) any {
+	candidates := []string{}
 	if prop.ExampleValue != "" {
-		return prop.ExampleValue
+		candidates = append(candidates, prop.ExampleValue)
 	}
-	if len(prop.AllowedValues) > 0 {
-		return prop.AllowedValues[0].Value
+	for _, v := range prop.AllowedValues {
+		candidates = append(candidates, v.Value)
 	}
-	if len(prop.EnumValues) > 0 {
-		return prop.EnumValues[0]
+	candidates = append(candidates, prop.EnumValues...)
+	for _, raw := range candidates {
+		var value any = raw
+		if prop.Type != "string" && prop.Type != "" {
+			if json.Unmarshal([]byte(raw), &value) != nil || !valueMatchesType(value, prop.Type) {
+				continue
+			}
+		}
+		if len(prop.EnumValues) > 0 && !stringIn(fmt.Sprint(value), prop.EnumValues) {
+			continue
+		}
+		if len(prop.AllowedValues) > 0 {
+			allowed := false
+			for _, v := range prop.AllowedValues {
+				if v.Value == fmt.Sprint(value) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				continue
+			}
+		}
+		return value
 	}
 	switch prop.Type {
 	case "number", "timestamp":
@@ -764,6 +809,9 @@ func ingestPolicyFromAny(raw any) (*EventIngestPolicy, error) {
 	}
 	var policy EventIngestPolicy
 	if err := json.Unmarshal(b, &policy); err != nil {
+		return nil, err
+	}
+	if err := validateIngestPolicy(&policy, false); err != nil {
 		return nil, err
 	}
 	normalizeIngestPolicy(&policy)

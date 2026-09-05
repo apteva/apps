@@ -132,6 +132,7 @@ func platformSupportsInbox(platform, kind, action string) bool {
 // webhook handlers) hands to upsertInboxItem. Platform-side fetchers
 // populate this; the repo layer doesn't care where it came from.
 type inboxUpsertInput struct {
+	Outbound         bool
 	ProjectID        string
 	SocialAccountID  int64
 	Platform         string
@@ -158,7 +159,12 @@ type inboxUpsertInput struct {
 // notification. Dedup is via UNIQUE(social_account_id, kind,
 // external_id) — re-polls and (future) webhook replays are no-ops on
 // the body/permalink axis but DO refresh fetched_at.
-func upsertInboxItem(db *sql.DB, in inboxUpsertInput) (int64, bool, error) {
+func upsertInboxItem(db *sql.DB, in inboxUpsertInput) (resultID int64, wasInserted bool, resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			recordInboxWriteError(db, in.SocialAccountID, resultErr)
+		}
+	}()
 	if in.SocialAccountID == 0 {
 		return 0, false, errors.New("social_account_id required")
 	}
@@ -185,10 +191,10 @@ func upsertInboxItem(db *sql.DB, in inboxUpsertInput) (int64, bool, error) {
 		_, uerr := db.Exec(
 			`UPDATE inbox_items
 			   SET body=?, author_name=?, author_handle=?, author_avatar_url=?,
-			       permalink=?, media_json=?, raw_json=?, fetched_at=CURRENT_TIMESTAMP
+			       permalink=?, media_json=?, raw_json=?, external_post_id=COALESCE(NULLIF(?,''),external_post_id), fetched_at=CURRENT_TIMESTAMP
 			 WHERE id=?`,
 			in.Body, in.AuthorName, in.AuthorHandle, in.AuthorAvatarURL,
-			in.Permalink, nullableStr(in.MediaJSON), nullableStr(in.RawJSON),
+			in.Permalink, nullableStr(in.MediaJSON), nullableStr(in.RawJSON), in.ExternalPostID,
 			existingID,
 		)
 		return existingID, false, uerr
@@ -202,13 +208,13 @@ func upsertInboxItem(db *sql.DB, in inboxUpsertInput) (int64, bool, error) {
 		   (project_id, social_account_id, platform, kind, external_id,
 		    parent_external_id, post_id, external_post_id,
 		    author_external_id, author_name, author_handle, author_avatar_url,
-		    body, media_json, permalink, rating, occurred_at, raw_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    body, media_json, permalink, rating, occurred_at, raw_json, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.ProjectID, in.SocialAccountID, in.Platform, in.Kind, in.ExternalID,
 		nullableStr(in.ParentExternalID), nullableInt(in.PostID), nullableStr(in.ExternalPostID),
 		nullableStr(in.AuthorExternalID), in.AuthorName, in.AuthorHandle, in.AuthorAvatarURL,
 		in.Body, nullableStr(in.MediaJSON), in.Permalink, nullableInt(int64(in.Rating)),
-		in.OccurredAt.UTC().Format(time.RFC3339), nullableStr(in.RawJSON),
+		in.OccurredAt.UTC().Format(time.RFC3339), nullableStr(in.RawJSON), map[bool]string{true: "read", false: "unread"}[in.Outbound],
 	)
 	if ierr != nil {
 		return 0, false, ierr
@@ -354,6 +360,21 @@ func getInboxItem(db *sql.DB, projectID string, id int64) (*inboxItem, error) {
 // item has no parent and no children — caller falls back to the
 // single-row response.
 func getInboxThread(db *sql.DB, projectID string, item *inboxItem) ([]inboxItem, error) {
+	return getInboxThreadPage(db, projectID, item, 200, 0)
+}
+func getInboxThreadPage(db *sql.DB, projectID string, item *inboxItem, limit int, before int64) ([]inboxItem, error) {
+	if limit < 1 || limit > 501 {
+		limit = 200
+	}
+	var beforeTime string
+	if before > 0 {
+		var err error
+		beforeTime, err = inboxCursorTime(db, projectID, item, before)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if item == nil {
 		return nil, nil
 	}
@@ -376,7 +397,11 @@ func getInboxThread(db *sql.DB, projectID string, item *inboxItem) ([]inboxItem,
 		}
 	}
 	rows, err := db.Query(
-		`SELECT id, project_id, social_account_id, platform, kind, external_id,
+		`WITH RECURSIVE descendants(external_id) AS (
+ SELECT external_id FROM inbox_items WHERE project_id=? AND social_account_id=? AND kind=? AND external_id=?
+ UNION SELECT child.external_id FROM inbox_items child JOIN descendants parent ON child.parent_external_id=parent.external_id
+ WHERE child.project_id=? AND child.social_account_id=? AND child.kind=?
+ ) SELECT id, project_id, social_account_id, platform, kind, external_id,
 		        COALESCE(parent_external_id,''), COALESCE(post_id,0), COALESCE(external_post_id,''),
 		        COALESCE(author_external_id,''), COALESCE(author_name,''),
 		        COALESCE(author_handle,''), COALESCE(author_avatar_url,''),
@@ -384,9 +409,11 @@ func getInboxThread(db *sql.DB, projectID string, item *inboxItem) ([]inboxItem,
 		        COALESCE(rating,0), occurred_at, fetched_at, status
 		 FROM inbox_items
 		 WHERE project_id=? AND social_account_id=? AND kind=?
-		   AND (external_id=? OR parent_external_id=?)
-		 ORDER BY occurred_at ASC`,
-		projectID, item.SocialAccountID, item.Kind, rootExternal, rootExternal,
+		   AND (external_id IN (SELECT external_id FROM descendants) OR (kind='dm' AND external_post_id<>'' AND external_post_id=?))
+		 AND (?=0 OR (occurred_at,id)<(?,?))
+ ORDER BY occurred_at DESC,id DESC LIMIT ?`,
+		projectID, item.SocialAccountID, item.Kind, rootExternal, projectID, item.SocialAccountID, item.Kind,
+		projectID, item.SocialAccountID, item.Kind, item.ExternalPostID, before, beforeTime, before, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -410,6 +437,9 @@ func getInboxThread(db *sql.DB, projectID string, item *inboxItem) ([]inboxItem,
 			it.Media = json.RawMessage(mediaJSON)
 		}
 		out = append(out, it)
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
 	}
 	return out, rows.Err()
 }
@@ -470,4 +500,13 @@ func placeholders(n int) string {
 		return ""
 	}
 	return strings.Repeat("?,", n-1) + "?"
+}
+
+func inboxCursorTime(db *sql.DB, pid string, item *inboxItem, id int64) (string, error) {
+	if item == nil {
+		return "", errors.New("inbox item required")
+	}
+	var value string
+	err := db.QueryRow(`SELECT occurred_at FROM inbox_items WHERE id=? AND project_id=? AND social_account_id=? AND kind=?`, id, pid, item.SocialAccountID, item.Kind).Scan(&value)
+	return value, err
 }

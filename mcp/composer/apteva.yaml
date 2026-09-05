@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.7.3
+version: 0.7.4
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — layered visual tracks, timed audio tracks, optional
@@ -10,6 +10,16 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.7.4 fixes opacity for fullscreen and layered image/video renders and
+  brings FFmpeg output into parity with the live preview for crop, rounded
+  corners, shadows, and eased camera keyframes. Composer V2 is available by
+  default with native rectangles, ellipses, gradients, borders, and structured
+  shadows for polished cards. V1 and V2 text gain wrapping, fitting, padding,
+  line-height, and safe-area diagnostics. Render jobs now report measured
+  FFmpeg and native-frame progress, remote shell values preserve special
+  characters, and stored/emitted diagnostics redact credentials while keeping
+  actionable stage, executor, command, and stderr details.
 
   v0.7.3 makes asset_inspect local-first for Storage assets, matching the
   renderer. Private disk-backed blobs are now probed directly instead of
@@ -44,8 +54,8 @@ description: |
   Medium, Semibold, and Bold plus Go Mono Regular and Bold, resolves every
   requested family and weight to an explicit font file for local and remote
   renders, and reports substitutions such as Arial to Inter. Validation and
-  render QA also warn when unsupported V1 letter_spacing or line_height values
-  would otherwise be ignored.
+  render QA also warn when unsupported V1 letter_spacing values would otherwise
+  be ignored.
 
   v0.6.1 implements composition-level timing reflow across layered tracks.
   Clips sharing a section_id or group_id now move as one timed section when

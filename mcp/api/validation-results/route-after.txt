@@ -1,0 +1,21 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/api
+cpu: Apple M1 Pro
+BenchmarkAuditMatchRoute/10-2         	 1946787	       675.2 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/10-2         	 1622883	       884.5 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/10-2         	 1351654	      1791 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/10-2         	 1000000	      1287 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/10-2         	 1986103	      1467 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/100-2        	 1000000	      3221 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/100-2        	 1000000	      1209 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/100-2        	  990282	      1395 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/100-2        	  813919	      1707 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/100-2        	  934408	      2662 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/1000-2       	   32574	     35507 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/1000-2       	   31683	     70183 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/1000-2       	  127585	     42843 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/1000-2       	   33795	     64832 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAuditMatchRoute/1000-2       	   42712	     50625 ns/op	      16 B/op	       1 allocs/op
+PASS
+ok  	github.com/apteva/apps/mcp/api	43.079s

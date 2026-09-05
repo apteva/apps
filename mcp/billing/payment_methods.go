@@ -175,6 +175,9 @@ func (a *App) toolPaymentMethodDetach(ctx *sdk.AppCtx, args map[string]any) (any
 		if err != nil {
 			return nil, err
 		}
+		if err := requireMethodConnection(ctx, bound, pm); err != nil {
+			return nil, err
+		}
 		if err := executeStripe(ctx, bound, "detach_payment_method", map[string]any{
 			"payment_method_id": pm.ProviderPaymentMethodID,
 		}, nil); err != nil {
@@ -459,6 +462,35 @@ func dbPaymentMethodUpsert(db *sql.DB, pm *PaymentMethod) (*PaymentMethod, error
 		return nil, err
 	}
 	defer tx.Rollback()
+	var tombstone int
+	if err = tx.QueryRow("SELECT count(*) FROM billing_detached_methods WHERE provider_id=?", pm.ProviderPaymentMethodID).Scan(&tombstone); err != nil {
+		return nil, err
+	}
+	if tombstone != 0 {
+		return nil, errors.New("detached payment method cannot be reactivated by replay")
+	}
+	var owner int
+	if err = tx.QueryRow("SELECT count(*) FROM customers WHERE id=? AND project_id=? AND deleted_at IS NULL", pm.CustomerID, pm.ProjectID).Scan(&owner); err != nil {
+		return nil, err
+	}
+	if owner != 1 {
+		return nil, errors.New("customer not found in project")
+	}
+	existing, err := dbPaymentMethodByProviderIDTx(tx, pm.Provider, pm.ProviderPaymentMethodID)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		if existing.ProjectID != pm.ProjectID || existing.CustomerID != pm.CustomerID || existing.ProviderCustomerID != pm.ProviderCustomerID {
+			return nil, errors.New("payment method belongs to a different customer")
+		}
+		if existing.DetachedAt != "" || existing.Status == "detached" {
+			return nil, errors.New("detached payment method cannot be reactivated by replay")
+		}
+		// An attachment replay must not overwrite a later default selection.
+		tx.Rollback()
+		return dbPaymentMethodGet(db, pm.ProjectID, existing.ID)
+	}
 	if pm.IsDefault {
 		if _, err := tx.Exec(
 			`UPDATE billing_payment_methods
@@ -467,10 +499,6 @@ func dbPaymentMethodUpsert(db *sql.DB, pm *PaymentMethod) (*PaymentMethod, error
 			pm.ProjectID, pm.CustomerID); err != nil {
 			return nil, err
 		}
-	}
-	existing, err := dbPaymentMethodByProviderIDTx(tx, pm.Provider, pm.ProviderPaymentMethodID)
-	if err != nil {
-		return nil, err
 	}
 	var id int64
 	if existing != nil {
@@ -547,7 +575,6 @@ func dbPaymentMethodByProviderIDTx(tx *sql.Tx, provider, providerPMID string) (*
 		        pm.currency, pm.metadata, pm.created_at, pm.updated_at, pm.detached_at
 		 FROM billing_payment_methods pm
 		 WHERE pm.provider = ? AND pm.provider_payment_method_id = ?
-		   AND pm.detached_at IS NULL
 		 LIMIT 1`, provider, providerPMID)
 	pm, err := scanPaymentMethod(row)
 	if errors.Is(err, sql.ErrNoRows) {

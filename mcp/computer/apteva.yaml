@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.86
+version: 0.7.88
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.86 adds
-  provider-neutral media embed state, terminal media waits, draft-save
-  diagnostics, and rendered-media guidance after unmatched text waits.
+  Watch, steer, and replay hosted browser sessions. v0.7.88 improves stable
+  control targeting, framework input state, tab activation, session cleanup,
+  and observation efficiency, with expanded live LLM regression coverage.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -199,6 +199,15 @@ provides:
         so the agent verifies the player rather than blindly retrying.
         They also include compact safety_targets for loading, disabled, or
         consequential controls; full structured som is returned with include_som=true.
+    - name: browser_download
+      description: |
+        List, wait for, or export files captured by an active browser session.
+        A successful click does not prove that a download completed. If
+        computer_use returns downloads_started, call action=wait with that
+        dl_* id until the browser reports completed, failed, or cancelled;
+        then call action=get. get returns the browser-captured bytes through
+        Core's blobref mechanism and never refetches the source URL. Computer
+        does not unzip or interpret downloaded files. Actions: list, wait, get.
     - name: computer_context_create
       description: |
         Create or import an app-managed browser context. Args: name,

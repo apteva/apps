@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 
@@ -17,31 +19,40 @@ import (
 //	(repo_id, repo_path, source_hash) so a fresh boot pays the
 //	round-trip once and subsequent reads reuse.
 func resolveVersionSource(ctx *sdk.AppCtx, v *FunctionVersion) ([]byte, error) {
-	if v.SourceKind == "inline" {
+	return resolveVersionSourceContext(context.Background(), ctx, v)
+}
+func resolveVersionSourceContext(parent context.Context, ctx *sdk.AppCtx, v *FunctionVersion) ([]byte, error) {
+	if v.SourceKind == "inline" || (v.Source != "" && hashSource([]byte(v.Source)) == v.SourceHash) {
 		return []byte(v.Source), nil
 	}
 	if v.RepoID == nil || v.RepoPath == "" {
 		return nil, errors.New("repo source missing repo_id or repo_path")
 	}
-	if cached, ok := sourceCache.get(*v.RepoID, v.RepoPath, v.SourceHash); ok {
-		return cached, nil
-	}
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return nil, errors.New("repo source requires PlatformAPI; not available in this context")
+	}
+	if cached, ok := sourceCache.get(*v.RepoID, ctx.CurrentProject()+"|"+v.RepoPath, v.SourceHash); ok {
+		return cached, nil
 	}
 	// code_read_file returns {"path","content","line_count",...}.
 	var resp struct {
 		Content string `json:"content"`
 	}
-	if err := ctx.PlatformAPI().CallAppResult("code", "code_read_file", map[string]any{
-		"repo_id": *v.RepoID,
-		"path":    v.RepoPath,
-	}, &resp); err != nil {
+	input, _ := json.Marshal(map[string]any{"repo_id": *v.RepoID, "path": v.RepoPath})
+	result := dispatchPlatformFrame(parent, ctx, wireResponse{Type: "call", App: "code", Tool: "code_read_file", Input: input})
+	if !result.OK {
+		return nil, errors.New(result.Error)
+	}
+	if err := json.Unmarshal(result.Result, &resp); err != nil {
 		return nil, err
 	}
+
 	bytes := []byte(resp.Content)
+	if v.SourceHash != "" && hashSource(bytes) != v.SourceHash {
+		return nil, errors.New("repository source no longer matches this version; redeploy to snapshot the new source")
+	}
 	if v.SourceHash != "" {
-		sourceCache.put(*v.RepoID, v.RepoPath, v.SourceHash, bytes)
+		sourceCache.put(*v.RepoID, ctx.CurrentProject()+"|"+v.RepoPath, v.SourceHash, bytes)
 	}
 	return bytes, nil
 }
@@ -82,6 +93,9 @@ func (c *repoSourceCache) put(repoID int64, path, hash string, bytes []byte) {
 	defer c.mu.Unlock()
 	if c.m == nil {
 		c.m = map[repoKey]repoEntry{}
+	}
+	if len(c.m) >= 128 {
+		clear(c.m)
 	}
 	c.m[repoKey{repoID, path}] = repoEntry{hash, bytes}
 }

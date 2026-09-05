@@ -52,6 +52,8 @@ type Element struct {
 	AccessibleName    string                  `json:"accessible_name,omitempty"`
 	Type              string                  `json:"type,omitempty"`
 	Placeholder       string                  `json:"placeholder,omitempty"`
+	Checked           *bool                   `json:"checked,omitempty"`
+	Indeterminate     bool                    `json:"indeterminate,omitempty"`
 	CurrentValue      *string                 `json:"current_value,omitempty"`
 	Pattern           string                  `json:"pattern,omitempty"`
 	FormatHint        string                  `json:"format_hint,omitempty"`
@@ -217,7 +219,8 @@ const EnumScript = `
   }
   function fieldMetadata(el, name) {
     var tag = String(el.tagName || '').toLowerCase();
-    if (tag !== 'input' && tag !== 'textarea') return null;
+    if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') return null;
+    if (String(el.type || '').toLowerCase() === 'password') return null;
     var type = clean(el.type).toLowerCase();
     var placeholder = clean(el.getAttribute('placeholder'));
     var pattern = clean(el.getAttribute('pattern'));
@@ -233,7 +236,7 @@ const EnumScript = `
     var semantic = clean(name + ' ' + placeholder + ' ' + pattern).toLowerCase();
     var dateLike = type === 'date' || type === 'datetime-local' ||
       (/^(text|search|tel|)$/.test(type) && (!!hint || /\b(date|day|month|year|datum|fecha|data)\b/.test(semantic) || /[mdy]{1,4}\s*[\/.\-]\s*[mdy]{1,4}/i.test(semantic)));
-    if (!dateLike) return null;
+    if (!dateLike) return {placeholder:placeholder,current_value:current.slice(0,4096),pattern:pattern,format_hint:type === 'time' ? 'HH:mm' : '',date_like:false};
     if (!hint) {
       var lang = String(el.lang || document.documentElement.lang || navigator.language || '').toLowerCase();
       if (lang) hint = lang === 'en-us' || lang.indexOf('en-us-') === 0 ? 'mm/dd/yyyy' : 'dd/mm/yyyy';
@@ -394,7 +397,8 @@ const EnumScript = `
         var key = targetKey(el);
         var stableID = compactID(key);
         var name = accessibleName(el);
-        var text = (el.innerText || el.value || name ||
+        var password = String(el.type || '').toLowerCase() === 'password';
+        var text = (el.innerText || (!password && el.value) || name ||
                     el.getAttribute('aria-placeholder') ||
                     el.getAttribute('placeholder') ||
                     el.getAttribute('data-placeholder') ||
@@ -424,6 +428,10 @@ const EnumScript = `
         var tag = el.tagName.toLowerCase();
         var role = el.getAttribute('role') || '';
         var field = fieldMetadata(el, name);
+        var ariaChecked = el.getAttribute('aria-checked');
+        var nativeCheck = tag === 'input' && /^(checkbox|radio)$/.test(el.type);
+        var mixed = !!el.indeterminate || ariaChecked === 'mixed';
+        var checked = mixed ? null : (nativeCheck ? !!el.checked : (ariaChecked === 'true' ? true : (ariaChecked === 'false' ? false : null)));
         var disabled = !!(el.disabled || (el.matches && el.matches(':disabled')) ||
           el.getAttribute('aria-disabled') === 'true' || (el.closest && el.closest('[inert]')));
         var targetBusy = targetLoading(el, styleWin);
@@ -441,7 +449,7 @@ const EnumScript = `
           type: el.type || '',
           placeholder: field ? field.placeholder : '', current_value: field ? field.current_value : null,
           pattern: field ? field.pattern : '', format_hint: field ? field.format_hint : '',
-          date_like: !!field, validity: field ? field.validity : null,
+          checked: checked, indeterminate: mixed, date_like: !!(field && field.date_like), validity: field ? field.validity : null,
           disabled: disabled, loading: targetBusy, target_loading: targetBusy,
           container_loading: containerBusy, page_loading_indicators: pageBusy,
           dangerous: effect !== '', effect: semantic, destructive_effect: effect,
@@ -584,35 +592,19 @@ const EnumScript = `
     if (!dominated) keep.push(ci);
   }
 
-  // ─── Pass 3: occlusion check (lenient — false positives hurt) ─
-  // Modal overlays cover elements; the DOM still lists them, but
-  // they're not clickable. We sample elementFromPoint at three
-  // points along the candidate's horizontal centerline.
-  //
-  // CRITICAL: cost asymmetry. A false-positive (pruning a real
-  // clickable) is much worse than a false-negative (keeping an
-  // un-clickable one). The agent loops and gets stuck on the first;
-  // recovers by trying another label on the second. So this check
-  // is intentionally LENIENT.
-  //
-  // We only prune a candidate when the topmost element at its
-  // center sample IS ITSELF a meaningful interactive (button,
-  // input, [role=button], onclick handler, etc.) AND is not the
-  // candidate's ancestor/descendant. A non-interactive wrapper
-  // div (decorative dimmer, layout container) lets the candidate
-  // through — clicks reach the candidate via pointer-events
-  // bubbling in most cases. We bias toward labeling, not toward
-  // pruning.
-  function isUsefulInteractive(el) {
-    if (!el) return false;
-    var t = el.tagName;
-    if (t === 'A' || t === 'BUTTON' || t === 'INPUT' ||
-        t === 'TEXTAREA' || t === 'SELECT') return true;
-    if (el.getAttribute('role')) return true;
-    if (el.hasAttribute('onclick') || el.hasAttribute('data-trigger')) return true;
-    var ti = el.getAttribute('tabindex');
-    if (ti !== null && ti !== '-1') return true;
-    return false;
+  // ─── Pass 3: hit testing ────────────────────────────────────
+  // elementFromPoint already ignores pointer-events:none decorations. An
+  // unrelated div that wins hit testing blocks input just like a button does;
+  // its events do not bubble to a covered sibling. Keep partially exposed
+  // targets if any sample is reachable, including same-origin frame/shadow UI.
+  function deepestHit(doc, x, y) {
+    var top = doc.elementFromPoint(x, y);
+    for (var depth=0; top && top.shadowRoot && top.shadowRoot.elementFromPoint && depth<8; depth++) {
+      var inner=top.shadowRoot.elementFromPoint(x,y);
+      if (!inner || inner===top) break;
+      top=inner;
+    }
+    return top;
   }
   var visible = [];
   for (var i = 0; i < keep.length; i++) {
@@ -622,25 +614,23 @@ const EnumScript = `
       [c.x + Math.max(2, Math.min(c.w - 2, c.w * 0.25)), c.y + c.h / 2],
       [c.x + Math.max(2, Math.min(c.w - 2, c.w * 0.75)), c.y + c.h / 2]
     ];
-    var pruned = false;
-    for (var p = 0; p < probes.length && !pruned; p++) {
+    var reachable = false;
+    for (var p = 0; p < probes.length && !reachable; p++) {
       var px = probes[p][0], py = probes[p][1];
       if (px < 0 || py < 0 || px >= vw || py >= vh) continue;
-      var top = document.elementFromPoint(px, py);
+      var top = deepestHit(document, px, py);
+      var owner = c.el.ownerDocument;
+      if (owner && owner !== document) {
+        var frame = owner.defaultView && owner.defaultView.frameElement;
+        if (frame && top === frame) {
+          var rect = frame.getBoundingClientRect();
+          top = deepestHit(owner, px-rect.left, py-rect.top);
+        }
+      }
       if (!top) continue;
-      // Topmost relates to the candidate (self/descendant/ancestor)
-      // → not occluded.
-      if (top === c.el || c.el.contains(top) || top.contains(c.el)) {
-        continue;
-      }
-      // Topmost is unrelated. Only prune if it's a real interactive
-      // — otherwise treat as decorative pass-through and KEEP the
-      // candidate.
-      if (isUsefulInteractive(top)) {
-        pruned = true;
-      }
+      if (top === c.el || c.el.contains(top) || top.contains(c.el) || (top.tagName==='LABEL' && top.control===c.el)) reachable = true;
     }
-    if (!pruned) visible.push(c);
+    if (reachable) visible.push(c);
   }
 
   // ─── Pass 4: rank, cap, label ────────────────────────────────
@@ -676,6 +666,7 @@ const EnumScript = `
       tag: c.tag, role: c.role, text: c.text, accessible_name: c.accessible_name, type: c.type,
       placeholder: c.placeholder, current_value: c.current_value, pattern: c.pattern,
       format_hint: c.format_hint, date_like: c.date_like, validity: c.validity,
+      checked: c.checked, indeterminate: c.indeterminate,
       disabled: c.disabled, loading: c.loading, target_loading: c.target_loading,
       container_loading: c.container_loading, page_loading_indicators: c.page_loading_indicators,
       dangerous: c.dangerous, effect: c.effect, destructive_effect: c.destructive_effect,

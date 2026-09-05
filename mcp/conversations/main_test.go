@@ -24,6 +24,7 @@ type recordingPlatform struct {
 	tk.BasePlatformClient
 	events                 []capturedEvent
 	threadEvents           []capturedThreadEvent
+	trackedEvents          []sdk.AgentEventRequest
 	appCalls               []capturedAppCall
 	spawns                 []sdk.ThreadSpawnRequest
 	ensures                []sdk.ThreadEnsureRequest
@@ -103,6 +104,13 @@ func (p *recordingPlatform) SendEvent(instanceID int64, message string) error {
 	return nil
 }
 
+func (p *recordingPlatform) SendTrackedAgentEvent(req sdk.AgentEventRequest) (*sdk.AgentEventReceipt, error) {
+	if p.failSend {
+		return nil, fmt.Errorf("agent offline")
+	}
+	p.trackedEvents = append(p.trackedEvents, req)
+	return &sdk.AgentEventReceipt{SourceEventID: req.SourceEventID, ThreadID: req.ThreadID, Accepted: true}, nil
+}
 func (p *recordingPlatform) SendThreadEvent(target sdk.ThreadRef, message any) error {
 	text, _ := message.(string)
 	p.threadEvents = append(p.threadEvents, capturedThreadEvent{Ref: target, Message: text})
@@ -569,16 +577,17 @@ func TestApprovalRoundTripForwardsToAgentThread(t *testing.T) {
 	if cardStatus(updated) != "approve" {
 		t.Fatalf("card status = %q, want approve", cardStatus(updated))
 	}
-	// The verdict must land on the thread that asked.
-	if len(platform.threadEvents) != 1 {
-		t.Fatalf("thread events = %d, want 1", len(platform.threadEvents))
+	// The verdict must land on the original thread with a stable receipt id.
+	if len(platform.trackedEvents) != 1 {
+		t.Fatalf("approval dispatches=%+v", platform.trackedEvents)
 	}
-	ev := platform.threadEvents[0]
-	if ev.Ref.AgentID != 41 || ev.Ref.ThreadID != "thread-9" {
-		t.Fatalf("forwarded to %+v, want agent 41 thread-9", ev.Ref)
+	ev := platform.trackedEvents[0]
+	if ev.AgentID != 41 || ev.ThreadID != "thread-9" {
+		t.Fatalf("wrong target %+v", ev)
 	}
-	if !strings.Contains(ev.Message, "action=approve") || !strings.Contains(ev.Message, "go ahead") {
-		t.Fatalf("event payload missing verdict/note: %q", ev.Message)
+	text, _ := ev.Message.(string)
+	if !strings.Contains(text, "action=approve") || !strings.Contains(text, "go ahead") || !strings.Contains(text, msg.ConversationID) || ev.SourceEventID == "" {
+		t.Fatalf("missing stable verdict: %+v", ev)
 	}
 
 	// Second action on a resolved card must be refused, not re-forwarded.
@@ -1143,6 +1152,9 @@ func TestEnsureFailureNeverFallsBackAndRetryKeepsEventID(t *testing.T) {
 	}
 	// Retry the same durable row after the agent returns.
 	platform.ensureErr = nil
+	if _, err := app.store.db.Exec(`UPDATE deliveries SET next_attempt_at=CURRENT_TIMESTAMP WHERE message_id=?`, transcript[0].ID); err != nil {
+		t.Fatal(err)
+	}
 	app.attemptDelivery(ctx, "agent-inbound:41", conv, &transcript[0])
 	if len(platform.ensures) != 2 || len(platform.ensures[1].Events) != 1 || len(platform.spawns) != 0 {
 		t.Fatalf("recovery ensures=%+v spawns=%+v", platform.ensures, platform.spawns)
@@ -1394,8 +1406,8 @@ func TestBackgroundApprovalRoundTrip(t *testing.T) {
 	if _, err := app.resolveApproval(ctx, msg, "approve", "", 1); err != nil {
 		t.Fatal(err)
 	}
-	if len(platform.threadEvents) != 1 || platform.threadEvents[0].Ref.ThreadID != "main" {
-		t.Fatalf("verdict routing = %+v, want thread main", platform.threadEvents)
+	if len(platform.trackedEvents) != 1 || platform.trackedEvents[0].ThreadID != "main" || platform.trackedEvents[0].SourceEventID == "" {
+		t.Fatalf("verdict routing=%+v", platform.trackedEvents)
 	}
 }
 

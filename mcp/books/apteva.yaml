@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: books
 display_name: Books
-version: 0.2.1
+version: 0.2.2
 description: |
   Publication-ready book workspace for Apteva. Write structured manuscripts,
   manage covers and images, validate EPUB 3, typeset print PDFs, and build
@@ -48,6 +48,8 @@ provides:
       description: Fetch one manuscript node with body content.
     - name: book_nodes_update
       description: Update a node's title, body, status, summary, or target word count.
+    - name: book_node_body_edit
+      description: Atomically append, prepend, or replace exact text in a manuscript body with an optional checksum guard.
     - name: book_nodes_move
       description: Move a node to a new parent or position.
     - name: book_nodes_delete

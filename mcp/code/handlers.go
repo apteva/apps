@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -122,20 +123,22 @@ func (a *App) httpCreateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name        string `json:"name"`
-		Slug        string `json:"slug"`
-		Framework   string `json:"framework"`
-		Description string `json:"description"`
+		Name           string `json:"name"`
+		Slug           string `json:"slug"`
+		Framework      string `json:"framework"`
+		Description    string `json:"description"`
+		WorkspaceImage string `json:"workspace_image"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	repo, err := dbCreateRepo(globalCtx.AppDB(), pid, CreateRepoInput{
-		Name:        body.Name,
-		Slug:        body.Slug,
-		Framework:   body.Framework,
-		Description: body.Description,
+		Name:           body.Name,
+		Slug:           body.Slug,
+		Framework:      body.Framework,
+		Description:    body.Description,
+		WorkspaceImage: body.WorkspaceImage,
 	})
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -149,7 +152,10 @@ func (a *App) httpCreateRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	count, err := applyTemplate(repoStore, repo.Slug, repo.Framework)
 	if err != nil {
-		globalCtx.Logger().Warn("template apply failed", "slug", repo.Slug, "err", err)
+		_ = repoStore.DropRepo(repo.Slug)
+		_ = dbHardDeleteRepo(globalCtx.AppDB(), pid, repo.Slug)
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	if count > 0 {
 		_ = dbRecordImport(globalCtx.AppDB(), repo.ID, "template:"+repo.Framework)
@@ -188,32 +194,16 @@ func (a *App) httpRepoMeta(w http.ResponseWriter, r *http.Request, slug string) 
 			"repository": repo, "file_count": len(files), "total_size": size,
 		})
 	case http.MethodPatch:
-		var body struct {
-			Name        *string `json:"name"`
-			Description *string `json:"description"`
-			BuildCmd    *string `json:"build_cmd"`
-			StartCmd    *string `json:"start_cmd"`
-			Port        *int    `json:"port"`
-			EnvJSON     *string `json:"env_json"`
-		}
+		var body repoMetadataPatch
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		if body.Name != nil || body.Description != nil {
-			if _, err := dbPatchRepo(globalCtx.AppDB(), pid, slug, body.Name, body.Description); err != nil {
-				httpErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
+		repo, err := dbPatchRepoMetadata(globalCtx.AppDB(), pid, slug, body)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
 		}
-		if body.BuildCmd != nil || body.StartCmd != nil || body.Port != nil || body.EnvJSON != nil {
-			h := DeployHints{BuildCmd: body.BuildCmd, StartCmd: body.StartCmd, Port: body.Port, EnvJSON: body.EnvJSON}
-			if _, err := dbSetDeployHints(globalCtx.AppDB(), pid, slug, h); err != nil {
-				httpErr(w, http.StatusBadRequest, err.Error())
-				return
-			}
-		}
-		repo, _ := dbGetRepoBySlug(globalCtx.AppDB(), pid, slug)
 		if globalCtx != nil && repo != nil {
 			globalCtx.Emit("repo.updated", map[string]any{
 				"id": repo.ID, "slug": repo.Slug, "name": repo.Name, "framework": repo.Framework,
@@ -312,17 +302,29 @@ func (a *App) httpRepoFile(w http.ResponseWriter, r *http.Request, slug, rawPath
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("ETag", `"`+shaOf(body)+`"`)
+		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(body)
 
 	case http.MethodPut:
+		r.Body = http.MaxBytesReader(w, r.Body, maxFileBytes())
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			httpErr(w, http.StatusBadRequest, err.Error())
+			status := http.StatusBadRequest
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			httpErr(w, status, err.Error())
 			return
 		}
-		meta, err := repoStore.Write(slug, rel, body)
+		meta, err := writeConditional(repoStore, slug, rel, body, strings.Trim(r.Header.Get("If-Match"), `"`), r.Header.Get("If-None-Match") == "*")
 		if err != nil {
-			httpErr(w, http.StatusInternalServerError, err.Error())
+			status := http.StatusInternalServerError
+			if errors.Is(err, errRevisionConflict) {
+				status = http.StatusConflict
+			}
+			httpErr(w, status, err.Error())
 			return
 		}
 		emitFileChange(globalCtx, "file.changed", slug, rel)
@@ -612,6 +614,7 @@ func (a *App) httpRepoImport(w http.ResponseWriter, r *http.Request, slug string
 		return
 	}
 	_ = dbRecordImport(globalCtx.AppDB(), repo.ID, "zip")
+	globalCtx.Emit("repo.imported", map[string]any{"slug": slug})
 	httpJSON(w, map[string]any{"files_imported": count})
 }
 
@@ -679,6 +682,7 @@ func (a *App) httpIssuesCollection(w http.ResponseWriter, r *http.Request) {
 	if status == "" {
 		status = "all"
 	}
+	total := 0
 	issues, err := dbSearchIssues(globalCtx.AppDB(), pid, IssueListOptions{
 		RepoSlug: r.URL.Query().Get("repo"),
 		State:    state,
@@ -688,12 +692,13 @@ func (a *App) httpIssuesCollection(w http.ResponseWriter, r *http.Request) {
 		Assignee: r.URL.Query().Get("assignee"),
 		Q:        r.URL.Query().Get("q"),
 		Limit:    atoiOr(r.URL.Query().Get("limit"), 100),
+		Offset:   atoiOr(r.URL.Query().Get("offset"), 0), Total: &total,
 	})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"issues": issues, "count": len(issues)})
+	httpJSON(w, map[string]any{"issues": issues, "count": len(issues), "total": total, "offset": max(0, atoiOr(r.URL.Query().Get("offset"), 0))})
 }
 
 func (a *App) httpRepoIssuesCollection(w http.ResponseWriter, r *http.Request, slug string) {
@@ -708,6 +713,7 @@ func (a *App) httpRepoIssuesCollection(w http.ResponseWriter, r *http.Request, s
 		if status == "" {
 			status = "all"
 		}
+		total := 0
 		issues, err := dbListIssues(globalCtx.AppDB(), pid, repo.ID, IssueListOptions{
 			State:    state,
 			Status:   status,
@@ -716,19 +722,20 @@ func (a *App) httpRepoIssuesCollection(w http.ResponseWriter, r *http.Request, s
 			Assignee: r.URL.Query().Get("assignee"),
 			Q:        r.URL.Query().Get("q"),
 			Limit:    atoiOr(r.URL.Query().Get("limit"), 100),
+			Offset:   atoiOr(r.URL.Query().Get("offset"), 0), Total: &total,
 		})
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		httpJSON(w, map[string]any{"issues": issues, "count": len(issues)})
+		httpJSON(w, map[string]any{"issues": issues, "count": len(issues), "total": total, "offset": max(0, atoiOr(r.URL.Query().Get("offset"), 0))})
 	case http.MethodPost:
 		var body IssueCreateInput
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		iss, err := dbCreateIssue(globalCtx.AppDB(), pid, repo, body)
+		iss, err := dbCreateIssue(globalCtx.AppDB(), pid, repo, func() IssueCreateInput { body.CreatedBy = httpActor(r); return body }())
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -773,7 +780,7 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 				httpJSON(w, map[string]any{"issue": issueCardData(iss)})
 				return
 			}
-			detail, err := dbGetIssueDetail(globalCtx.AppDB(), pid, repo.ID, n)
+			detail, err := dbGetIssueDetailPage(globalCtx.AppDB(), pid, repo.ID, n, atoiOr(r.URL.Query().Get("history_offset"), 0), 200)
 			if err != nil {
 				httpErr(w, http.StatusInternalServerError, err.Error())
 				return
@@ -785,6 +792,7 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 				httpErr(w, http.StatusBadRequest, "invalid JSON")
 				return
 			}
+			body.Actor = httpActor(r)
 			updated, err := dbUpdateIssue(globalCtx.AppDB(), iss, body)
 			if err != nil {
 				httpErr(w, http.StatusBadRequest, err.Error())
@@ -808,7 +816,7 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		comment, err := dbAddIssueComment(globalCtx.AppDB(), iss.ID, body.Author, body.Body)
+		comment, err := dbAddIssueComment(globalCtx.AppDB(), iss.ID, httpActor(r), body.Body)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -867,7 +875,7 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 		if reason == "" {
 			reason = issueReasonCompleted
 		}
-		updated, err := dbUpdateIssue(globalCtx.AppDB(), iss, IssuePatch{State: &state, StateReason: &reason, Status: &status, Actor: body.Actor})
+		updated, err := dbUpdateIssue(globalCtx.AppDB(), iss, IssuePatch{State: &state, StateReason: &reason, Status: &status, Actor: httpActor(r)})
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -884,7 +892,7 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 		state := issueStateOpen
 		status := issueStatusTodo
 		reason := ""
-		updated, err := dbUpdateIssue(globalCtx.AppDB(), iss, IssuePatch{State: &state, StateReason: &reason, Status: &status, Actor: body.Actor})
+		updated, err := dbUpdateIssue(globalCtx.AppDB(), iss, IssuePatch{State: &state, StateReason: &reason, Status: &status, Actor: httpActor(r)})
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -907,7 +915,7 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		link, err := issuePathLink(globalCtx.AppDB(), iss, body.Path, body.LineStart, body.LineEnd, body.Title, body.Actor)
+		link, err := issuePathLink(globalCtx.AppDB(), iss, body.Path, body.LineStart, body.LineEnd, body.Title, httpActor(r))
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -1226,7 +1234,7 @@ func (a *App) httpRepoDev(w http.ResponseWriter, r *http.Request, slug, action s
 			httpErr(w, http.StatusInternalServerError, "dev runtime not initialised")
 			return
 		}
-		dr, err := a.dev.startDevRun(globalCtx, startDevInput{
+		dr, err := a.dev.startDevRunContext(r.Context(), globalCtx, startDevInput{
 			ProjectID: pid, Repo: repo,
 			Framework: body.Framework, RunCmd: body.RunCmd, EnvJSON: body.EnvJSON,
 		})
@@ -1242,7 +1250,10 @@ func (a *App) httpRepoDev(w http.ResponseWriter, r *http.Request, slug, action s
 			return
 		}
 		if a.dev != nil {
-			_ = a.dev.stopDevRun(globalCtx, pid, repo.ID)
+			if err := a.dev.stopDevRun(globalCtx, pid, repo.ID); err != nil {
+				httpErr(w, http.StatusConflict, err.Error())
+				return
+			}
 		}
 		dr, _ := dbGetDevRun(globalCtx.AppDB(), pid, repo.ID)
 		emitDevEvent(globalCtx, repo, dr)
@@ -1307,12 +1318,6 @@ func streamLogSSE(w http.ResponseWriter, r *http.Request, path string) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	body, _ := tailFile(path, 200)
-	if body != "" {
-		writeSSE(w, body)
-		flusher.Flush()
-	}
-
 	f, err := os.Open(path)
 	if err != nil {
 		writeSSEEvent(w, "error", err.Error())
@@ -1320,13 +1325,35 @@ func streamLogSSE(w http.ResponseWriter, r *http.Request, path string) {
 		return
 	}
 	defer f.Close()
-	if _, err := f.Seek(0, io.SeekEnd); err != nil {
-		writeSSEEvent(w, "error", err.Error())
-		flusher.Flush()
+	info, err := f.Stat()
+	if err != nil {
 		return
 	}
-
+	id := filepath.Base(path)
+	offset := max(int64(0), info.Size()-64*1024)
+	if last := r.Header.Get("Last-Event-ID"); strings.HasPrefix(last, id+":") {
+		if parsed, e := strconv.ParseInt(strings.TrimPrefix(last, id+":"), 10, 64); e == nil && parsed >= 0 && parsed <= info.Size() {
+			offset = parsed
+		}
+	}
+	_, _ = f.Seek(offset, io.SeekStart)
 	buf := make([]byte, 16*1024)
+	send := func() {
+		for {
+			n, e := f.Read(buf)
+			if n > 0 {
+				offset += int64(n)
+				fmt.Fprintf(w, "id: %s:%d\n", id, offset)
+				writeSSE(w, string(buf[:n]))
+				flusher.Flush()
+			}
+			if e != nil || n == 0 {
+				return
+			}
+		}
+	}
+	send()
+	lastMod := info.ModTime()
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -1334,11 +1361,16 @@ func streamLogSSE(w http.ResponseWriter, r *http.Request, path string) {
 		case <-r.Context().Done():
 			return
 		case <-tick.C:
-			n, _ := f.Read(buf)
-			if n > 0 {
-				writeSSE(w, string(buf[:n]))
-				flusher.Flush()
+			if now, e := f.Stat(); e == nil {
+				if now.Size() < offset || (now.Size() <= offset && !now.ModTime().Equal(lastMod)) {
+					offset = 0
+					_, _ = f.Seek(0, io.SeekStart)
+					writeSSEEvent(w, "reset", "")
+					flusher.Flush()
+				}
+				lastMod = now.ModTime()
 			}
+			send()
 		}
 	}
 }

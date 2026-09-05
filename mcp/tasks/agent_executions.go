@@ -28,7 +28,7 @@ func scanTaskAgentExecution(row rowScanner) (*TaskAgentExecution, error) {
 func upsertTaskAgentExecutionTx(tx *sql.Tx, execution TaskAgentExecution) error {
 	var deadline any
 	if execution.DeadlineAt != nil {
-		deadline = execution.DeadlineAt.UTC().Format(time.RFC3339Nano)
+		deadline = execution.DeadlineAt.UTC().Format(timeFormat)
 	}
 	_, err := tx.Exec(`INSERT INTO task_agent_executions
 		(source_event_id, task_id, purpose, execution_id, thread_id, state, reason,
@@ -37,10 +37,10 @@ func upsertTaskAgentExecutionTx(tx *sql.Tx, execution TaskAgentExecution) error 
 		ON CONFLICT(source_event_id) DO UPDATE SET
 			execution_id=CASE WHEN task_agent_executions.execution_id='' THEN excluded.execution_id ELSE task_agent_executions.execution_id END,
 			thread_id=CASE WHEN task_agent_executions.thread_id='' THEN excluded.thread_id ELSE task_agent_executions.thread_id END,
-			updated_at=excluded.updated_at`, execution.SourceEventID, execution.TaskID,
+			updated_at=CASE WHEN task_agent_executions.updated_at < excluded.updated_at THEN excluded.updated_at ELSE task_agent_executions.updated_at END`, execution.SourceEventID, execution.TaskID,
 		execution.Purpose, execution.ExecutionID, execution.ThreadID, execution.State,
-		execution.Reason, execution.Sequence, execution.DispatchedAt.UTC().Format(time.RFC3339Nano),
-		execution.UpdatedAt.UTC().Format(time.RFC3339Nano), deadline)
+		execution.Reason, execution.Sequence, execution.DispatchedAt.UTC().Format(timeFormat),
+		execution.UpdatedAt.UTC().Format(timeFormat), deadline)
 	return err
 }
 
@@ -72,10 +72,10 @@ func (s *taskStore) RecordTerminalizationExecution(taskID, sourceID, executionID
 	result, err := s.db.Exec(`UPDATE task_agent_executions SET
 		execution_id=CASE WHEN execution_id='' THEN ? ELSE execution_id END,
 		thread_id=CASE WHEN thread_id='' THEN ? ELSE thread_id END,
-		updated_at=?, deadline_at=?
+		updated_at=CASE WHEN sequence=0 THEN ? ELSE updated_at END, deadline_at=CASE WHEN sequence=0 THEN ? ELSE deadline_at END
 		WHERE source_event_id=? AND task_id=? AND purpose=?
 		AND (execution_id='' OR execution_id=?)`, executionID, threadID,
-		at.Format(time.RFC3339Nano), deadline.Format(time.RFC3339Nano), sourceID,
+		at.Format(timeFormat), deadline.Format(timeFormat), sourceID,
 		taskID, agentTerminalizationPurpose, executionID)
 	if err != nil {
 		return err
@@ -98,7 +98,7 @@ func (s *taskStore) ClaimSettledTerminalizations(now time.Time, projectID string
 		AND agent_settle_deadline_at<=? AND state IN ('queued','running')
 		AND NOT EXISTS (SELECT 1 FROM task_agent_executions e
 			WHERE e.task_id=tasks.id AND e.purpose=?)`
-	args := []any{sdk.AgentEventSettled, now.Format(time.RFC3339Nano), agentTerminalizationPurpose}
+	args := []any{sdk.AgentEventSettled, now.Format(timeFormat), agentTerminalizationPurpose}
 	if projectID != "" {
 		query += ` AND project_id=?`
 		args = append(args, projectID)
@@ -147,12 +147,11 @@ func (s *taskStore) claimTerminalization(taskID string, now time.Time) (*Task, b
 		return task, false, nil
 	}
 	sourceID := taskTerminalizationSourceID(taskID)
-	deadline := now.Add(agentSettleGrace)
 	result, err := tx.Exec(`INSERT OR IGNORE INTO task_agent_executions
 		(source_event_id, task_id, purpose, thread_id, dispatched_at, updated_at, deadline_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`, sourceID, taskID, agentTerminalizationPurpose,
-		task.AssignedThreadID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
-		deadline.Format(time.RFC3339Nano))
+		task.AssignedThreadID, now.Format(timeFormat), now.Format(timeFormat),
+		nil)
 	if err != nil {
 		return nil, false, err
 	}
@@ -161,15 +160,18 @@ func (s *taskStore) claimTerminalization(taskID string, now time.Time) (*Task, b
 		return task, false, err
 	}
 	if _, err = tx.Exec(`UPDATE tasks SET agent_settle_deadline_at=NULL, updated_at=? WHERE id=?`,
-		now.Format(time.RFC3339Nano), taskID); err != nil {
+		now.Format(timeFormat), taskID); err != nil {
 		return nil, false, err
 	}
 	event, err := insertEvent(tx, TaskEvent{TaskID: taskID, AgentID: task.AgentID,
 		EventType: "terminalization_requested", ThreadID: "tasks:lifecycle",
 		FromState: task.State, ToState: task.State, Data: map[string]any{
-			"source_event_id": sourceID, "deadline_at": deadline,
+			"source_event_id": sourceID,
 		}})
 	if err != nil {
+		return nil, false, err
+	}
+	if err := enqueueDeliveryTx(tx, task, task.AssignedThreadID, "task.terminalization_required", "terminalization:"+task.ID, now); err != nil {
 		return nil, false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -195,7 +197,7 @@ func (s *taskStore) ApplyTerminalizationLifecycle(deliveryID, taskID, projectID 
 	insert, err := tx.Exec(`INSERT OR IGNORE INTO agent_event_lifecycle_deliveries
 		(delivery_id, task_id, execution_id, lifecycle_type, sequence, processed_at)
 		VALUES (?, ?, ?, ?, ?, ?)`, deliveryID, taskID, lifecycle.ExecutionID,
-		lifecycle.Type, lifecycle.Sequence, processedAt.Format(time.RFC3339Nano))
+		lifecycle.Type, lifecycle.Sequence, processedAt.Format(timeFormat))
 	if err != nil {
 		return nil, false, err
 	}
@@ -240,11 +242,11 @@ func (s *taskStore) ApplyTerminalizationLifecycle(deliveryID, taskID, projectID 
 	var deadline any
 	switch lifecycle.Type {
 	case sdk.AgentEventClaimed:
-		deadline = eventAt.Add(agentSettleGrace).Format(time.RFC3339Nano)
+		deadline = eventAt.Add(agentSettleGrace).Format(timeFormat)
 	case sdk.AgentEventActive:
 		deadline = nil
 	case sdk.AgentEventSettled:
-		deadline = eventAt.Add(agentSettleGrace).Format(time.RFC3339Nano)
+		deadline = eventAt.Add(agentSettleGrace).Format(timeFormat)
 	case sdk.AgentEventError:
 		deadline = nil
 	default:
@@ -253,7 +255,7 @@ func (s *taskStore) ApplyTerminalizationLifecycle(deliveryID, taskID, projectID 
 	_, err = tx.Exec(`UPDATE task_agent_executions SET execution_id=?, thread_id=?, state=?, reason=?,
 		sequence=?, updated_at=?, deadline_at=? WHERE source_event_id=?`, lifecycle.ExecutionID,
 		lifecycle.ThreadID, lifecycle.Type, lifecycle.Reason, lifecycle.Sequence,
-		eventAt.Format(time.RFC3339Nano), deadline, lifecycle.SourceEventID)
+		eventAt.Format(timeFormat), deadline, lifecycle.SourceEventID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -290,8 +292,14 @@ func (s *taskStore) ApplyTerminalizationLifecycle(deliveryID, taskID, projectID 
 
 func failOccurrenceTx(tx *sql.Tx, task *Task, message, step string, now time.Time) error {
 	if _, err := tx.Exec(`UPDATE tasks SET state='failed', error=?, current_step=?,
-		agent_settle_deadline_at=NULL, updated_at=?, completed_at=? WHERE id=? AND state IN ('queued','running')`,
-		message, step, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), task.ID); err != nil {
+		agent_settle_deadline_at=NULL, updated_at=?, completed_at=? WHERE id=? AND state IN ('queued','running','waiting','blocked')`,
+		message, step, now.Format(timeFormat), now.Format(timeFormat), task.ID); err != nil {
+		return err
+	}
+	failedTask := *task
+	failedTask.State = stateFailed
+	failedTask.Error = message
+	if err := enqueueTerminalTx(tx, &failedTask, true, "execution_failed", now); err != nil {
 		return err
 	}
 	if task.ParentTaskID != "" {
@@ -310,7 +318,7 @@ func (s *taskStore) FailExpiredTerminalizations(now time.Time, projectID string)
 	query := `SELECT e.task_id FROM task_agent_executions e JOIN tasks t ON t.id=e.task_id
 		WHERE e.purpose=? AND e.deadline_at IS NOT NULL AND e.deadline_at<=?
 		AND t.state IN ('queued','running')`
-	args := []any{agentTerminalizationPurpose, now.UTC().Format(time.RFC3339Nano)}
+	args := []any{agentTerminalizationPurpose, now.UTC().Format(timeFormat)}
 	if projectID != "" {
 		query += ` AND t.project_id=?`
 		args = append(args, projectID)
@@ -369,7 +377,7 @@ func (s *taskStore) failExpiredTerminalization(taskID string, now time.Time) (*T
 		return nil, false, err
 	}
 	if _, err := tx.Exec(`UPDATE task_agent_executions SET deadline_at=NULL, updated_at=? WHERE source_event_id=?`,
-		now.Format(time.RFC3339Nano), execution.SourceEventID); err != nil {
+		now.Format(timeFormat), execution.SourceEventID); err != nil {
 		return nil, false, err
 	}
 	event, err := insertEvent(tx, TaskEvent{TaskID: taskID, AgentID: task.AgentID,

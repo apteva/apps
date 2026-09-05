@@ -23,7 +23,7 @@ var (
 )
 
 func telegramMarkdownToHTML(source string) string {
-	source = strings.ReplaceAll(telegramTextLimit(source), "\r\n", "\n")
+	source = strings.ReplaceAll(strings.TrimSpace(source), "\r\n", "\n")
 	if source == "" {
 		return ""
 	}
@@ -95,27 +95,33 @@ func telegramMarkdownInlineHTML(source string) string {
 		})
 	}
 
-	source = protect(source, telegramMarkdownCode, func(parts []string) string {
-		return "<code>" + html.EscapeString(parts[1]) + "</code>"
-	})
-	source = protect(source, telegramMarkdownLink, func(parts []string) string {
-		return `<a href="` + html.EscapeString(parts[2]) + `">` + telegramMarkdownInlineHTML(parts[1]) + `</a>`
-	})
-	source = protect(source, telegramMarkdownBold, func(parts []string) string {
-		return "<b>" + telegramMarkdownInlineHTML(parts[1]) + "</b>"
-	})
-	source = protect(source, telegramMarkdownBoldUS, func(parts []string) string {
-		return "<b>" + telegramMarkdownInlineHTML(parts[1]) + "</b>"
-	})
-	source = protect(source, telegramMarkdownStrike, func(parts []string) string {
-		return "<s>" + telegramMarkdownInlineHTML(parts[1]) + "</s>"
-	})
-	source = protect(source, telegramMarkdownItalic, func(parts []string) string {
-		return "<i>" + telegramMarkdownInlineHTML(parts[1]) + "</i>"
-	})
+	var render func(string) string
+	render = func(source string) string {
+		source = protect(source, telegramMarkdownCode, func(parts []string) string {
+			return "<code>" + html.EscapeString(parts[1]) + "</code>"
+		})
+		source = protect(source, telegramMarkdownLink, func(parts []string) string {
+			return `<a href="` + html.EscapeString(parts[2]) + `">` + render(parts[1]) + `</a>`
+		})
+		source = protect(source, telegramMarkdownBold, func(parts []string) string {
+			return "<b>" + render(parts[1]) + "</b>"
+		})
+		source = protect(source, telegramMarkdownBoldUS, func(parts []string) string {
+			return "<b>" + render(parts[1]) + "</b>"
+		})
+		source = protect(source, telegramMarkdownStrike, func(parts []string) string {
+			return "<s>" + render(parts[1]) + "</s>"
+		})
+		source = protect(source, telegramMarkdownItalic, func(parts []string) string {
+			return "<i>" + render(parts[1]) + "</i>"
+		})
 
-	escaped := html.EscapeString(source)
-	for index, fragment := range fragments {
+		return html.EscapeString(source)
+	}
+
+	escaped := render(source)
+	for index := len(fragments) - 1; index >= 0; index-- {
+		fragment := fragments[index]
 		escaped = strings.ReplaceAll(escaped, fmt.Sprintf("\ue000%d\ue001", index), fragment)
 	}
 	return escaped

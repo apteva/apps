@@ -1,7 +1,7 @@
 // CustomerCard - billing's chat-attachment for a customer. Used when
 // the agent surfaces a billing account snapshot in conversation.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   AppCardHeader,
   Card,
@@ -19,6 +19,7 @@ interface Customer {
 }
 
 interface Lifetime {
+ currency?:string; mixed_currencies?:boolean; by_currency?: Array<{currency:string;outstanding_cents:number;invoiced_cents:number;paid_cents:number}>;
   invoice_count?: number;
   invoiced_cents?: number;
   paid_cents?: number;
@@ -40,6 +41,7 @@ interface ContextPayload {
 }
 
 interface Props {
+ installId?: number;
   customer_id: number;
   projectId?: string;
   preview?: boolean;
@@ -81,6 +83,7 @@ function useBillingEvents(
   projectId: string | undefined,
   onEvent: (ev: { topic: string; data: { id?: number } }) => void,
 ) {
+ const handler=useRef(onEvent);handler.current=onEvent;
   useEffect(() => {
     if (!projectId) return;
 
@@ -94,13 +97,13 @@ function useBillingEvents(
       };
     }).__aptevaAppEvents;
     if (bridge) {
-      return bridge.subscribe("billing", projectId, onEvent as any);
+      return bridge.subscribe("billing", projectId, (ev)=>handler.current(ev) as any);
     }
     const url = `/api/app-events/billing?project_id=${encodeURIComponent(projectId)}`;
     const es = new EventSource(url, { withCredentials: true });
     es.onmessage = (e) => {
       try {
-        onEvent(JSON.parse(e.data));
+        handler.current(JSON.parse(e.data));
       } catch {
         /* ignore malformed frames */
       }
@@ -112,6 +115,7 @@ function useBillingEvents(
 
 export default function CustomerCard({
   customer_id,
+ installId,
   projectId,
   preview,
 }: Props) {
@@ -120,14 +124,17 @@ export default function CustomerCard({
   );
   const [missing, setMissing] = useState(false);
 
+ const request=useRef(0);
   const refetch = () => {
+ const version=++request.current;
     if (preview) return;
     if (!projectId) return;
     const url =
       `/api/apps/billing/customers/${customer_id}/context` +
-      `?project_id=${encodeURIComponent(projectId)}`;
+      `?project_id=${encodeURIComponent(projectId)}${installId ? `&install_id=${installId}`:""}`;
     fetch(url, { credentials: "same-origin" })
       .then((r) => {
+ if(version!==request.current)return null;
         if (r.status === 404) {
           setMissing(true);
           return null;
@@ -135,6 +142,7 @@ export default function CustomerCard({
         return r.json();
       })
       .then((j) => {
+ if(version!==request.current)return;
         if (j && j.customer) {
           setData(j as ContextPayload);
           setMissing(false);
@@ -145,7 +153,7 @@ export default function CustomerCard({
       });
   };
 
-  useEffect(refetch, [customer_id, projectId, preview]);
+  useEffect(()=>{setData(preview?previewSample:null);setMissing(false);refetch();return ()=>{request.current++}}, [customer_id, projectId,installId, preview]);
 
   useBillingEvents(preview ? undefined : projectId, (ev) => {
     if (
@@ -182,7 +190,7 @@ export default function CustomerCard({
   }
 
   const c = data.customer;
-  const currency = c.currency || "USD";
+  const currency = data.lifetime?.currency || c.currency || "USD";
   const lt = data.lifetime || {};
   const openInvoices = data.open_invoices || [];
   const openCount = openInvoices.length;
@@ -206,7 +214,7 @@ export default function CustomerCard({
               Outstanding
             </div>
             <div className="text-2xl font-semibold text-text leading-tight">
-              {fmtMoney(outstanding, currency)}
+              {lt.mixed_currencies ? lt.by_currency?.map(g=>fmtMoney(g.outstanding_cents,g.currency)).join(" + "):fmtMoney(outstanding,currency)}
             </div>
           </div>
           <div className="flex flex-col items-end gap-1.5">
@@ -246,11 +254,11 @@ export default function CustomerCard({
           items={[
             {
               label: "Invoiced",
-              value: fmtMoney(Number(lt.invoiced_cents || 0), currency),
+              value: lt.mixed_currencies ? lt.by_currency?.map(g=>fmtMoney(g.invoiced_cents,g.currency)).join(" + "):fmtMoney(Number(lt.invoiced_cents || 0),currency),
             },
             {
               label: "Paid",
-              value: fmtMoney(Number(lt.paid_cents || 0), currency),
+              value: lt.mixed_currencies ? lt.by_currency?.map(g=>fmtMoney(g.paid_cents,g.currency)).join(" + "):fmtMoney(Number(lt.paid_cents || 0),currency),
             },
             {
               label: "Invoices",

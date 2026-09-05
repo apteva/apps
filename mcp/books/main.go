@@ -15,7 +15,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: books
 display_name: Books
-version: 0.2.1
+version: 0.2.2
 description: |
   Publication-ready book workspace for Apteva. Write structured manuscripts,
   manage covers and images, validate EPUB 3, typeset print PDFs, and build
@@ -48,6 +48,7 @@ provides:
     - { name: book_nodes_list, description: "List manuscript nodes for a book as an ordered tree." }
     - { name: book_nodes_get, description: "Fetch one manuscript node with body content." }
     - { name: book_nodes_update, description: "Update a node's title, body, status, summary, or target word count." }
+    - { name: book_node_body_edit, description: "Atomically append, prepend, or replace exact text in a manuscript body with an optional checksum guard." }
     - { name: book_nodes_move, description: "Move a node to a new parent or position." }
     - { name: book_nodes_delete, description: "Delete a manuscript node." }
     - { name: book_notes_create, description: "Create a note attached to a book or manuscript node." }
@@ -99,7 +100,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("books requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("books mounted", "version", "0.2.1")
+	ctx.Logger().Info("books mounted", "version", "0.2.2")
 	return nil
 }
 
@@ -151,13 +152,22 @@ func (a *App) MCPTools() []sdk.Tool {
 			"status":            map[string]any{"type": "string"},
 			"target_word_count": map[string]any{"type": "integer"},
 		}, []string{"book_id", "title"}), Handler: a.toolNodesCreate},
-		{Name: "book_nodes_list", Description: "List manuscript nodes for a book as an ordered tree.", InputSchema: schemaObject(map[string]any{
-			"book_id": map[string]any{"type": "integer"},
+		{Name: "book_nodes_list", Description: "List manuscript node metadata as an ordered tree. Bodies are omitted by default; fetch one body with book_nodes_get.", InputSchema: schemaObject(map[string]any{
+			"book_id":      map[string]any{"type": "integer"},
+			"include_body": map[string]any{"type": "boolean"},
 		}, []string{"book_id"}), Handler: a.toolNodesList},
 		{Name: "book_nodes_get", Description: "Fetch one manuscript node with body content.", InputSchema: schemaObject(map[string]any{
 			"id": map[string]any{"type": "integer"},
 		}, []string{"id"}), Handler: a.toolNodesGet},
 		{Name: "book_nodes_update", Description: "Update a node and snapshot a revision.", InputSchema: schemaObject(nodeUpdateSchema(), []string{"id"}), Handler: a.toolNodesUpdate},
+		{Name: "book_node_body_edit", Description: "Atomically edit part of a manuscript body without resubmitting the whole node. Use expected_body_sha256 to reject stale edits.", InputSchema: schemaObject(map[string]any{
+			"id":                   map[string]any{"type": "integer"},
+			"operation":            map[string]any{"type": "string", "enum": []string{"append", "prepend", "replace"}},
+			"content":              map[string]any{"type": "string"},
+			"match":                map[string]any{"type": "string"},
+			"expected_body_sha256": map[string]any{"type": "string"},
+			"change_summary":       map[string]any{"type": "string"},
+		}, []string{"id", "operation", "content"}), Handler: a.toolNodeBodyEdit},
 		{Name: "book_nodes_move", Description: "Move a node to a new parent or position.", InputSchema: schemaObject(map[string]any{
 			"id":        map[string]any{"type": "integer"},
 			"parent_id": map[string]any{"type": "integer"},

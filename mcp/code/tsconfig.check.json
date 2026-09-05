@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "paths": {
+      "@apteva/ui-kit": [
+        "../../../ui-kit/src/index.ts"
+      ],
+      "react": [
+        "../../node_modules/@types/react/index.d.ts"
+      ],
+      "react/*": [
+        "../../node_modules/@types/react/*"
+      ],
+      "lucide-react": [
+        "../../node_modules/lucide-react/dist/lucide-react.d.ts"
+      ]
+    },
+    "types": [
+      "bun",
+      "react",
+      "react-dom"
+    ]
+  },
+  "include": [
+    "ui/**/*.tsx",
+    "ui/**/*.ts"
+  ],
+  "exclude": [
+    "ui/**/*.test.ts"
+  ]
+}

@@ -12,10 +12,13 @@ import (
 )
 
 func TestRunPreservesBlockSpacingInText(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real Chromium extraction is covered by tier 2")
+	}
 	ctx, cancel := chromedp.NewContext(context.Background())
 	defer cancel()
 
-	ctx, cancel = context.WithTimeout(ctx, 20*time.Second)
+	ctx, cancel = context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 
 	html := `<html><head><title>Example Domain</title></head><body><main><h1>Example Domain</h1><p>This domain is for use in documentation examples without needing permission.</p><p>Avoid use in operations.</p><a href="https://example.com/more">Learn more</a></main></body></html>`
@@ -44,10 +47,13 @@ func TestRunPreservesBlockSpacingInText(t *testing.T) {
 }
 
 func TestRunExtractsRegions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real Chromium extraction is covered by tier 2")
+	}
 	ctx, cancel := chromedp.NewContext(context.Background())
 	defer cancel()
 
-	ctx, cancel = context.WithTimeout(ctx, 20*time.Second)
+	ctx, cancel = context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 
 	html := `<html><head><title>Regions</title></head><body>

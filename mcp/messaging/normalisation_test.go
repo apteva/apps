@@ -46,11 +46,11 @@ func TestNormaliseAddress_Phone(t *testing.T) {
 		{channelSMS, "tel:+15551234567", "+15551234567", false}, // tolerates legacy URI
 		{channelWhatsApp, "+15551234567", "+15551234567", false},
 		{channelWhatsApp, "whatsapp:+15551234567", "+15551234567", false},
-		{channelSMS, "+1", "", true},                   // too short
-		{channelSMS, "15551234567", "", true},          // missing +
-		{channelSMS, "+0551234567", "", true},          // leading zero
-		{channelSMS, "alice@x.com", "", true},          // not a phone
-		{channelSMS, "+1555-123-4567", "", true},       // dashes not allowed
+		{channelSMS, "+1", "", true},             // too short
+		{channelSMS, "15551234567", "", true},    // missing +
+		{channelSMS, "+0551234567", "", true},    // leading zero
+		{channelSMS, "alice@x.com", "", true},    // not a phone
+		{channelSMS, "+1555-123-4567", "", true}, // dashes not allowed
 	}
 	for _, tc := range cases {
 		got, err := normaliseAddress(tc.channel, tc.in)

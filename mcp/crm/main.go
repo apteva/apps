@@ -14,10 +14,14 @@ package main
 
 import (
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"os"
 	"strconv"
@@ -31,425 +35,8 @@ import (
 // ─── Manifest (also lives in apteva.yaml; embedded so the running
 // binary is self-describing for `crm --help` etc.) ─────────────────
 
-const manifestYAML = `schema: apteva-app/v1
-name: crm
-display_name: CRM
-version: 0.9.1
-description: |
-  Contacts store for Apteva agents and human teams. Multi-value channels,
-  typed custom attributes with provenance, append-only activity log,
-  soft-delete + merge.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - platform.instances.read
-    - platform.apps.call
-  apps:
-    - name: messaging
-      version: ">=0.13.46"
-      optional: true
-      reason: "Delivers messages and attachments, and supplies delivery and suppression events for per-channel messageability."
-      events:
-        - message.event
-        - suppression.changed
-    - name: storage
-      version: ">=0.10.0"
-      optional: true
-      reason: "Lets operators choose project files in the CRM composer and open persisted attachment content."
-    - name: email-checker
-      version: ">=0.5.0"
-      optional: true
-      reason: "Adds optional deliverability checks for newly stored email channels and operator-requested SMTP probes."
-  integrations:
-    - role: messaging
-      kind: app
-      compatible_app_names: [messaging]
-      capabilities: [message.send]
-      required: false
-      label: "Messaging (optional)"
-      hint: "When bound, CRM gains Send/Reply tools with attachments, accepts inbound mail/SMS/WhatsApp media, and tracks per-channel delivery and suppression state. Messaging v0.13.46 or newer is required. Without it, CRM is a standalone contact store."
-    - role: email_verification
-      kind: app
-      compatible_app_names: [email-checker]
-      capabilities: [email.verify]
-      tools:
-        email.verify: email_check
-      required: false
-      label: "Email verification (optional)"
-      hint: "When bound, CRM annotates new email channels with Email Checker deliverability results. CRM remains fully functional when it is absent or temporarily unavailable."
-provides:
-  skills:
-    - name: crm
-      description: Use CRM tools for contacts, customer conversations, lists, segments, leads, opportunities, pipelines, and messaging-related CRM work.
-      body_file: skills/crm/SKILL.md
-      metadata:
-        category: productivity
-        agent_plugins: "1.0.0"
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - name: contacts_search
-      description: Filtered contact search.
-    - name: contacts_get
-      description: Authoritative current-state read with core fields, channels, per-transport deliverability/messageability, tags, custom attributes, and active list memberships; excludes history and opportunities.
-    - name: contacts_get_context
-      description: Authoritative pre-flight read with complete current state plus bounded recent activities, conversations, and opportunities with truncation metadata.
-    - name: contacts_create
-      description: Create a contact with channels, tags, and attributes.
-    - name: contacts_update
-      description: Partial-patch a contact, including channel replacement.
-    - name: contacts_upsert_by_channel
-      description: Find-or-create by email or phone.
-    - name: contacts_verify_email
-      description: Re-check one stored email channel, optionally including a direct SMTP probe, and persist its deliverability metadata.
-    - name: contacts_merge
-      description: Merge one contact into another.
-    - name: contacts_log_activity
-      description: Append to a contact's timeline.
-    - name: contacts_set_attribute
-      description: Write one custom-attribute value with provenance.
-    - name: contacts_define_attribute
-      description: Create or update an attribute definition.
-    - name: contacts_send_message
-      description: Real external send with body/template content and attachments from Storage IDs, HTTPS URLs, or base64.
-    - name: contacts_reply
-      description: Real external reply with body/template content and attachments from Storage IDs, HTTPS URLs, or base64.
-    - name: contacts_send_test
-      description: Real external test send. Pass body and omit unused template and optional fields.
-    - name: messaging_senders_list
-      description: List verified senders from the bound Messaging app.
-    - name: messaging_templates_list
-      description: List templates from the bound Messaging app, especially approved WhatsApp templates.
-    - name: messaging_whatsapp_session_check
-      description: Check whether a WhatsApp contact is inside the 24-hour free-form reply window.
-    - name: messaging_inbound_receive
-      description: Receive an inbound message and normalized attachment metadata dispatched by Messaging and attach it to CRM contact activity.
-    - name: contacts_list_messageable
-      description: List contacts with at least one non-suppressed, non-quarantined route for the requested email, SMS, or WhatsApp transport.
-    - name: contacts_resolve_audience
-      description: Resolve a segment, list, or single contact into channel-eligible recipients, exclusions, and exact raw/eligible counts with cursor pagination.
-    - name: contacts_list_conversations
-      description: List a contact's recent conversations (with status + priority).
-    - name: contacts_get_conversation
-      description: Fetch one conversation with its full activity chain.
-    - name: contacts_set_conversation_status
-      description: Set a conversation's status (open/pending/closed/spam) and/or priority.
-    - name: conversations_inbox
-      description: Cross-contact triage queue of conversations; supports status/channel/from/to/list/tag filters and paging.
-    - name: pipelines_list
-      description: List CRM sales pipelines and allowed stages.
-    - name: pipeline_create
-      description: Create a CRM sales pipeline with ordered stages.
-    - name: pipeline_stage_create
-      description: Create a stage in a pipeline.
-    - name: pipeline_stage_update
-      description: Update a pipeline stage.
-    - name: pipeline_stage_archive
-      description: Archive a pipeline stage.
-    - name: opportunities_create
-      description: Create a pipeline-tracked opportunity for a contact.
-    - name: opportunities_update
-      description: Update an opportunity or move it between stages.
-    - name: opportunities_search
-      description: Search opportunities by pipeline, stage, contact, status, offer, sender, list, or tag.
-    - name: opportunities_get
-      description: Fetch one opportunity with contact context and stage history.
-    - name: routing_rules_create
-      description: Create an inbound routing rule (recipient/sender -> add_to_list/add_tag).
-    - name: routing_rules_list
-      description: List inbound routing rules.
-    - name: routing_rules_delete
-      description: Delete (archive) an inbound routing rule.
-    - name: lists_create
-      description: Create a new contact list.
-    - name: lists_list
-      description: List active lists in this project.
-    - name: lists_get
-      description: Fetch one list (by id or slug).
-    - name: lists_update
-      description: Partial-patch a list (name, description, sender defaults, inbound pattern).
-    - name: lists_archive
-      description: Archive (soft-delete) a list.
-    - name: lists_add_contact
-      description: Add a contact to a list. Idempotent.
-    - name: lists_remove_contact
-      description: Remove a contact from a list.
-    - name: lists_membership
-      description: Which active lists is a contact on?
-    - name: lists_eval
-      description: Return the active contact_ids in a list (paged).
-    - name: segments_create
-      description: Create a saved filter (dynamic or static).
-    - name: segments_list
-      description: List segments in this project.
-    - name: segments_get
-      description: Fetch one segment with its definition.
-    - name: segments_update
-      description: Partial-patch a segment.
-    - name: segments_delete
-      description: Archive a segment.
-    - name: segments_eval
-      description: Evaluate a segment and return matching contact IDs.
-    - name: segments_count
-      description: TTL-cached segment size.
-    - name: segments_materialise
-      description: Freeze a segment's dynamic membership into a snapshot.
-  ui_panels:
-    - slot: project.page
-      label: Contacts
-      icon: contacts
-      entry: /ui/CrmPanel.mjs
-  publishes:
-    - name: contact.added
-      description: A contact was created or first materialised from inbound messaging; list_ids contains its active list memberships after creation routing completes.
-      payload:
-        id: integer
-        display_name: string
-        first_name: string
-        last_name: string
-        archived: boolean
-        list_ids: array<integer>
-    - name: contact.updated
-      description: A contact's core fields, channels, attributes, tags, or list-driven metadata changed.
-      payload:
-        id: integer
-        display_name: string
-        first_name: string
-        last_name: string
-        archived: boolean
-    - name: contact.channel.deliverability.changed
-      description: A contact email, SMS, or WhatsApp route changed delivery, quarantine, suppression, or effective messageability state.
-      payload:
-        contact_id: integer
-        channel_id: integer
-        transport: string
-        status: string
-        suppressed: boolean
-        quarantined: boolean
-        messageable: boolean
-        messageability_reason: string
-    - name: contact.deleted
-      description: A contact was archived/soft-deleted.
-      payload:
-        id: integer
-    - name: contact.merged
-      description: Two contacts were merged; the loser row is marked merged and data moved to the winner.
-      payload:
-        winner_id: integer
-        loser_id: integer
-    - name: contact.activity.added
-      description: An activity row was appended to a contact timeline.
-      payload:
-        contact_id: integer
-        activity_id: integer
-        conversation_id: integer
-        kind: string
-        source: string
-    - name: conversation.status.changed
-      description: A conversation's workflow status or priority changed, including inbound auto-reopen and spam handling.
-      payload:
-        conversation_id: integer
-        contact_id: integer
-        status: string
-        priority: string
-        reason: string
-    - name: conversation.message.received
-      description: A Messaging inbound message was attached to a CRM conversation; use this for agent wakeups on external replies.
-      payload:
-        contact_id: integer
-        conversation_id: integer
-        activity_id: integer
-        kind: string
-        channel: string
-        source: string
-        thread_state: string
-        thread_created: boolean
-        messaging_id: integer
-    - name: list.created
-      description: A contact list was created.
-      payload:
-        id: integer
-        slug: string
-        name: string
-    - name: list.updated
-      description: A contact list's metadata changed.
-      payload:
-        id: integer
-    - name: list.archived
-      description: A contact list was archived.
-      payload:
-        id: integer
-    - name: list.member.added
-      description: A contact was added to a list.
-      payload:
-        list_id: integer
-        contact_id: integer
-    - name: list.member.removed
-      description: A contact was removed from a list.
-      payload:
-        list_id: integer
-        contact_id: integer
-    - name: segment.created
-      description: A saved segment was created.
-      payload:
-        id: integer
-        name: string
-        kind: string
-    - name: segment.updated
-      description: A saved segment's metadata or definition changed.
-      payload:
-        id: integer
-    - name: segment.archived
-      description: A saved segment was archived.
-      payload:
-        id: integer
-    - name: segment.materialised
-      description: A dynamic segment was frozen into a static membership snapshot.
-      payload:
-        id: integer
-        count: integer
-    - name: pipeline.created
-      description: A sales pipeline was created.
-      payload:
-        pipeline_id: integer
-    - name: pipeline.stage.created
-      description: A stage was added to a sales pipeline.
-      payload:
-        pipeline_id: integer
-        stage_id: integer
-    - name: pipeline.stage.updated
-      description: A pipeline stage was updated or archived.
-      payload:
-        pipeline_id: integer
-        stage_id: integer
-        archived: boolean
-    - name: opportunity.created
-      description: >-
-        An opportunity was created for a contact. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure.
-      payload:
-        opportunity_id: integer
-        contact_id: integer
-        pipeline_id: integer
-        stage_id: integer
-        status: string
-        title: string
-        stage_category: string
-        value: number
-        currency: string
-        stage_probability: number
-    - name: opportunity.updated
-      description: >-
-        An opportunity was updated. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure.
-      payload:
-        opportunity_id: integer
-        contact_id: integer
-        pipeline_id: integer
-        stage_id: integer
-        status: string
-        title: string
-        stage_category: string
-        value: number
-        currency: string
-        stage_probability: number
-    - name: opportunity.stage.changed
-      description: >-
-        An opportunity moved to another pipeline stage. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
-      payload:
-        opportunity_id: integer
-        contact_id: integer
-        pipeline_id: integer
-        stage_id: integer
-        status: string
-        title: string
-        stage_category: string
-        value: number
-        currency: string
-        stage_probability: number
-        previous_stage_id: integer
-    - name: opportunity.status.changed
-      description: >-
-        An opportunity changed status. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
-      payload:
-        opportunity_id: integer
-        contact_id: integer
-        pipeline_id: integer
-        stage_id: integer
-        status: string
-        title: string
-        stage_category: string
-        value: number
-        currency: string
-        stage_probability: number
-        previous_stage_id: integer
-    - name: opportunity.won
-      description: >-
-        An opportunity was marked won. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
-      payload:
-        opportunity_id: integer
-        contact_id: integer
-        pipeline_id: integer
-        stage_id: integer
-        status: string
-        title: string
-        stage_category: string
-        value: number
-        currency: string
-        stage_probability: number
-        previous_stage_id: integer
-    - name: opportunity.lost
-      description: >-
-        An opportunity was marked lost. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
-      payload:
-        opportunity_id: integer
-        contact_id: integer
-        pipeline_id: integer
-        stage_id: integer
-        status: string
-        title: string
-        stage_category: string
-        value: number
-        currency: string
-        stage_probability: number
-        previous_stage_id: integer
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/crm
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/crm.db
-  migrations: migrations/
-config_schema:
-  - name: email_verification_mode
-    type: select
-    default: local
-    label: Automatic email verification
-    options: [off, local, smtp]
-    description: Check only new or changed email channels. Local avoids direct SMTP probing; SMTP enables it. Has no effect unless Email Checker is bound.
-  - name: email_verification_policy
-    type: select
-    default: annotate
-    label: Email verification policy
-    options: [annotate, reject_definitive]
-    description: Annotate always saves contacts. Reject definitive blocks only conclusive invalid email signals; verifier errors and uncertain results remain fail-open.
-  - name: email_verification_timeout_seconds
-    type: number
-    default: 5
-    label: Email verification timeout (seconds)
-    description: Per-email timeout for automatic and manual checks, from 1 to 60 seconds.
-  - name: email_verification_block_disposable
-    type: bool
-    default: false
-    label: Reject disposable emails in strict mode
-    description: When enabled with reject_definitive, disposable-provider signals reject the write. Off by default.
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 type App struct{}
 
@@ -477,7 +64,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
-func (a *App) Workers() []sdk.Worker          { return a.deliverabilityWorkers() }
+func (a *App) Workers() []sdk.Worker {
+	return append(a.deliverabilityWorkers(), crmOutboxWorker(), sdk.Worker{Name: "crm-event-outbox-retention", Schedule: "@every 1m", Run: pruneCRMEvents})
+}
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{
 		{Event: "message.event", Handler: a.handleMessagingDeliveryEvent},
@@ -506,6 +95,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Messaging dependency read surface for the CRM panel. These
 		// route through CRM's bound messaging install instead of having
 		// the browser guess a messaging install_id.
+		{Pattern: "/messaging/delivery-recovery", Handler: a.handleHTTPDeliveryRecovery},
+		{Pattern: "/messaging/reply-route", Handler: a.handleHTTPReplyRoute},
+		{Pattern: "/messaging/routes", Handler: a.handleHTTPMessagingRoutes},
 		{Pattern: "/messaging/senders", Handler: a.handleHTTPMessagingSenders},
 		{Pattern: "/messaging/templates", Handler: a.handleHTTPMessagingTemplates},
 		{Pattern: "/messaging/whatsapp-session", Handler: a.handleHTTPMessagingWhatsAppSession},
@@ -661,6 +253,9 @@ func (a *App) handleHTTPSetAttribute(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if c, err := dbGetByID(ctx.AppDB(), pid, id); err == nil && c != nil {
+		emitContact(ctx, pid, "contact.updated", c)
+	}
 	httpJSON(w, map[string]any{"ok": true})
 }
 
@@ -693,7 +288,7 @@ func (a *App) handleHTTPPostActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	occurred, _ := body["occurred_at"].(string)
 	if occurred == "" {
-		occurred = time.Now().UTC().Format(time.RFC3339)
+		occurred = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	source, _ := body["source"].(string)
 	act, err := dbLogActivity(ctx.AppDB(), pid, id, kind, bodyText, occurred, source)
@@ -701,6 +296,7 @@ func (a *App) handleHTTPPostActivity(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	emitCRMEvent(ctx, pid, "contact.activity.added", map[string]any{"contact_id": id, "activity_id": act.ID, "kind": act.Kind})
 	httpJSON(w, map[string]any{"activity": act})
 }
 
@@ -857,6 +453,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"from":                   map[string]any{"type": "string"},
 				"list_id":                map[string]any{"type": "integer"},
 				"conversation_id":        map[string]any{"type": "integer"},
+				"reply_to_activity_id":   map[string]any{"type": "integer", "minimum": 1},
 				"template_id":            map[string]any{"type": "integer", "minimum": 0},
 				"content_sid":            map[string]any{"type": "string"},
 				"template_vars":          map[string]any{"type": "object"},
@@ -869,11 +466,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_reply",
-			Description: "REAL EXTERNAL SEND: reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Never use this to test configuration. For a free-form reply, OMIT template_id, content_sid, template_vars, and other unused optional fields. A reply may contain body/body_html, a template, attachments, or any combination. attachments accepts Storage IDs, public HTTPS URLs, or base64 files; attachment_storage_ids is shorthand for Storage files (maximum 20 files / 25 MB total). Sets In-Reply-To/References for email and automatically deduplicates identical replies for five minutes unless idempotency_key is supplied. Sender precedence: from > list.default_sender > install default. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars.",
+			Description: "REAL EXTERNAL SEND: reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Never use this to test configuration. For a free-form reply, OMIT template_id, content_sid, template_vars, and other unused optional fields. A reply may contain body/body_html, a template, attachments, or any combination. attachments accepts Storage IDs, public HTTPS URLs, or base64 files; attachment_storage_ids is shorthand for Storage files (maximum 20 files / 25 MB total). Sets In-Reply-To/References for email and automatically deduplicates identical replies for five minutes unless idempotency_key is supplied. Sender precedence: from > original receiving identity > list.default_sender > install default. Recipient is selected inbound Reply-To/From; blocked replies never switch addresses. Select a specific inbound message with reply_to_activity_id. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars.",
 			InputSchema: messageInputSchema(map[string]any{
 				"id":                     map[string]any{"type": "integer", "minimum": 1},
 				"body":                   map[string]any{"type": "string"},
 				"conversation_id":        map[string]any{"type": "integer"},
+				"reply_to_activity_id":   map[string]any{"type": "integer", "minimum": 1},
 				"subject":                map[string]any{"type": "string"},
 				"body_html":              map[string]any{"type": "string"},
 				"from":                   map[string]any{"type": "string"},
@@ -1264,10 +862,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "lists_eval",
-			Description: "Return the active contact_ids in a list, paged. Same shape as segments_eval so downstream consumers (e.g. campaigns) handle either uniformly. Args: id (list id), limit? (default 5000, max 50000).",
+			Description: "Return the active contact_ids in a list, paged. Same shape as segments_eval so downstream consumers (e.g. campaigns) handle either uniformly. Args: id (list id), limit? (default/max 5000), after_contact_id?. Follow next_after_contact_id until an empty page.",
 			InputSchema: schemaObject(map[string]any{
-				"id":    map[string]any{"type": "integer"},
-				"limit": map[string]any{"type": "integer"},
+				"id":               map[string]any{"type": "integer"},
+				"limit":            map[string]any{"type": "integer"},
+				"after_contact_id": map[string]any{"type": "integer", "minimum": 0},
 			}, []string{"id"}),
 			Handler: a.toolListsEval,
 		},
@@ -1326,10 +925,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "segments_eval",
-			Description: "Evaluate a segment and return matching contact IDs. Dynamic kind re-runs the filter; static returns the snapshot. Args: id, limit? (default 200, max 5000).",
+			Description: "Evaluate a segment and return matching contact IDs. Dynamic kind re-runs the filter; static returns the snapshot. Args: id, limit? (default 200, max 5000), after_contact_id?. Follow next_after_contact_id until an empty page.",
 			InputSchema: schemaObject(map[string]any{
-				"id":    map[string]any{"type": "integer"},
-				"limit": map[string]any{"type": "integer"},
+				"id":               map[string]any{"type": "integer"},
+				"limit":            map[string]any{"type": "integer"},
+				"after_contact_id": map[string]any{"type": "integer", "minimum": 0},
 			}, []string{"id"}),
 			Handler: a.toolSegmentsEval,
 		},
@@ -1390,6 +990,7 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 // ─── Domain types ──────────────────────────────────────────────────
 
 type Contact struct {
+	MergedIntoID   int64       `json:"merged_into_id,omitempty"`
 	ID             int64       `json:"id"`
 	ProjectID      string      `json:"project_id,omitempty"`
 	FirstName      string      `json:"first_name,omitempty"`
@@ -1728,7 +1329,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	emitListMembershipsAdded(ctx, c.ID, listIDs)
+	emitListMembershipsAdded(ctx, pid, c.ID, listIDs)
 	emitContact(ctx, pid, "contact.added", c)
 	out := map[string]any{"contact": c, "email_verifications": verifications}
 	if len(listIDs) > 0 {
@@ -1824,7 +1425,7 @@ func (a *App) toolMerge(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	if ctx != nil {
-		ctx.Emit("contact.merged", map[string]any{
+		emitCRMEvent(ctx, pid, "contact.merged", map[string]any{
 			"winner_id": winner, "loser_id": loser,
 		})
 	}
@@ -1882,20 +1483,20 @@ func addContactToLists(ctx *sdk.AppCtx, pid string, contactID int64, args map[st
 		if lid == 0 {
 			continue
 		}
-		if err := dbListAddContact(db, pid, lid, contactID, source); err == nil {
+		if changed, err := dbListAddContactChanged(db, pid, lid, contactID, source); err == nil && changed {
 			applied = append(applied, lid)
-			ctx.Emit("list.member.added", map[string]any{"list_id": lid, "contact_id": contactID})
+			emitCRMEvent(ctx, pid, "list.member.added", map[string]any{"list_id": lid, "contact_id": contactID})
 		}
 	}
 	return applied
 }
 
-func emitListMembershipsAdded(ctx *sdk.AppCtx, contactID int64, listIDs []int64) {
+func emitListMembershipsAdded(ctx *sdk.AppCtx, pid string, contactID int64, listIDs []int64) {
 	if ctx == nil {
 		return
 	}
 	for _, listID := range listIDs {
-		ctx.Emit("list.member.added", map[string]any{"list_id": listID, "contact_id": contactID})
+		emitCRMEvent(ctx, pid, "list.member.added", map[string]any{"list_id": listID, "contact_id": contactID})
 	}
 }
 
@@ -2030,7 +1631,7 @@ func (a *App) toolLogActivity(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	occurred, _ := args["occurred_at"].(string)
 	if occurred == "" {
-		occurred = time.Now().UTC().Format(time.RFC3339)
+		occurred = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	source, _ := args["source"].(string)
 	act, err := dbLogActivity(ctx.AppDB(), pid, cid, kind, body, occurred, source)
@@ -2038,7 +1639,7 @@ func (a *App) toolLogActivity(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	if ctx != nil {
-		ctx.Emit("contact.activity.added", map[string]any{
+		emitCRMEvent(ctx, pid, "contact.activity.added", map[string]any{
 			"contact_id":      cid,
 			"activity_id":     act.ID,
 			"conversation_id": act.ConversationID,
@@ -2062,6 +1663,9 @@ func (a *App) toolSetAttribute(ctx *sdk.AppCtx, args map[string]any) (any, error
 	source, _ := args["source"].(string)
 	if err := dbSetAttribute(ctx.AppDB(), pid, cid, key, args["value"], source); err != nil {
 		return nil, err
+	}
+	if c, err := dbGetByID(ctx.AppDB(), pid, cid); err == nil && c != nil {
+		emitContact(ctx, pid, "contact.updated", c)
 	}
 	return map[string]any{"ok": true}, nil
 }
@@ -2147,7 +1751,7 @@ func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
 		writeContactVerificationHTTPError(w, err)
 		return
 	}
-	emitListMembershipsAdded(ctx, c.ID, listIDs)
+	emitListMembershipsAdded(ctx, pid, c.ID, listIDs)
 	emitContact(ctx, pid, "contact.added", c)
 	out := map[string]any{"contact": c, "email_verifications": verifications}
 	if len(listIDs) > 0 {
@@ -2298,13 +1902,13 @@ func (a *App) handleHTTPArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := ctx.AppDB().Exec(
-		`UPDATE contacts SET status='archived', updated_at = CURRENT_TIMESTAMP, deleted_at = CURRENT_TIMESTAMP
+		`UPDATE contacts SET status='archived', updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ? AND project_id = ?`, id, pid); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if ctx != nil {
-		ctx.Emit("contact.deleted", map[string]any{"id": id})
+		emitCRMEvent(ctx, pid, "contact.deleted", map[string]any{"id": id})
 	}
 	httpJSON(w, map[string]any{"archived": true})
 }
@@ -2399,6 +2003,9 @@ func dbCreate(db *sql.DB, pid string, args map[string]any) (*Contact, error) {
 }
 
 func dbCreateWithChannelVerifications(db *sql.DB, pid string, args map[string]any, verifications map[string]channelVerificationRecord) (*Contact, error) {
+	if err := seedSystemAttributes(db, pid); err != nil {
+		return nil, err
+	}
 	c := &Contact{
 		ProjectID:   pid,
 		FirstName:   strArg(args, "first_name"),
@@ -2410,7 +2017,7 @@ func dbCreateWithChannelVerifications(db *sql.DB, pid string, args map[string]an
 		Status:      "active",
 		Source:      strArg(args, "source"),
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	// Validate all relation inputs before opening the write transaction.
 	// The same checks run again while writing where necessary so a
@@ -2515,7 +2122,7 @@ func dbCreateWithChannelVerifications(db *sql.DB, pid string, args map[string]an
 	return fresh, nil
 }
 
-func dbGetByID(db *sql.DB, pid string, id int64) (*Contact, error) {
+func dbGetByID(db sqlQueryExecer, pid string, id int64) (*Contact, error) {
 	c, err := scanContact(db.QueryRow(
 		`SELECT id, project_id, first_name, last_name, display_name, pronouns,
 			primary_email, primary_phone, company, job_title, owner_user_id,
@@ -2524,6 +2131,11 @@ func dbGetByID(db *sql.DB, pid string, id int64) (*Contact, error) {
 		id, pid))
 	if err == sql.ErrNoRows {
 		return nil, nil
+	}
+	if err == nil && c != nil && c.Status == "merged" {
+		if err = db.QueryRow(`WITH RECURSIVE survivor(id,depth) AS (SELECT ?,0 UNION ALL SELECT m.winner_id,depth+1 FROM contact_merges m JOIN survivor s ON m.loser_id=s.id WHERE m.project_id=? AND depth<100) SELECT id FROM survivor ORDER BY depth DESC LIMIT 1`, id, pid).Scan(&c.MergedIntoID); err != nil {
+			return nil, err
+		}
 	}
 	return c, err
 }
@@ -2576,7 +2188,7 @@ func dbGetByPrimary(db *sql.DB, pid, kind, value string) (*Contact, error) {
 		col = "primary_phone"
 	}
 	row := db.QueryRow(
-		`SELECT id FROM contacts WHERE project_id = ? AND `+col+` = ? AND deleted_at IS NULL LIMIT 1`,
+		`SELECT id FROM contacts WHERE project_id = ? AND `+col+` = ? AND deleted_at IS NULL AND status != 'merged' LIMIT 1`,
 		pid, value)
 	var id int64
 	if err := row.Scan(&id); err != nil {
@@ -2601,8 +2213,12 @@ func dbGetByPrimary(db *sql.DB, pid, kind, value string) (*Contact, error) {
 	if err != nil || c == nil {
 		return c, err
 	}
-	_ = loadChannels(db, c)
-	_ = loadTags(db, c)
+	if err := loadChannels(db, c); err != nil {
+		return nil, err
+	}
+	if err := loadTags(db, c); err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
@@ -2692,7 +2308,7 @@ func dbSearch(db *sql.DB, pid, q string, filters []any, limit, offset int) ([]*C
 		primary_email, primary_phone, company, job_title, owner_user_id,
 		status, source, first_contact_at, last_contact_at, created_at, updated_at
 		FROM contacts WHERE ` + strings.Join(where, " AND ") +
-		` ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+		` ORDER BY julianday(updated_at) DESC, id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 	rows, err := db.Query(q2, args...)
 	if err != nil {
@@ -2721,7 +2337,34 @@ func buildAttributeFilterClause(pid, key, op string, val any) (string, []any, er
 	if op == "" {
 		op = "eq"
 	}
-	col, casted, err := attrColumnForOp(op, val)
+	if values, ok := val.([]any); ok {
+		raw, err := json.Marshal(values)
+		if err != nil {
+			return "", nil, err
+		}
+		if op != "eq" && op != "neq" {
+			return "", nil, errors.New("array filters support eq or neq")
+		}
+		comparison := `NOT EXISTS(SELECT value FROM json_each(ca.value_text) EXCEPT SELECT value FROM json_each(?)) AND NOT EXISTS(SELECT value FROM json_each(?) EXCEPT SELECT value FROM json_each(ca.value_text))`
+		if op == "neq" {
+			comparison = "NOT (" + comparison + ")"
+		}
+		return `EXISTS(SELECT 1 FROM contact_attributes ca JOIN contact_attribute_defs cad ON cad.id=ca.def_id WHERE ca.contact_id=contacts.id AND ca.project_id=? AND cad.key=? AND cad.type='multi_select' AND ` + comparison + `)`, []any{pid, key, string(raw), string(raw)}, nil
+	}
+	if op == "contains" {
+		return `EXISTS(SELECT 1 FROM contact_attributes ca JOIN contact_attribute_defs cad ON cad.id=ca.def_id WHERE ca.contact_id=contacts.id AND ca.project_id=? AND cad.key=? AND ((cad.type='multi_select' AND EXISTS(SELECT 1 FROM json_each(ca.value_text) WHERE value=?)) OR (cad.type!='multi_select' AND ca.value_text LIKE ?)))`, []any{pid, key, val, "%" + fmt.Sprint(val) + "%"}, nil
+	}
+
+	// Choose the stored column from the definition, never from the operand shape.
+	col := `(CASE cad.type WHEN 'number' THEN ca.value_number WHEN 'bool' THEN ca.value_bool WHEN 'date' THEN ca.value_date ELSE ca.value_text END)`
+	if op == "is_null" || op == "is_not_null" {
+		prefix := "NOT EXISTS"
+		if op == "is_not_null" {
+			prefix = "EXISTS"
+		}
+		return prefix + ` (SELECT 1 FROM contact_attributes ca JOIN contact_attribute_defs cad ON cad.id=ca.def_id WHERE ca.contact_id=contacts.id AND ca.project_id=? AND cad.key=? AND ` + col + ` IS NOT NULL)`, []any{pid, key}, nil
+	}
+	_, casted, err := attrColumnForOp(op, val)
 	if err != nil {
 		return "", nil, err
 	}
@@ -2729,10 +2372,7 @@ func buildAttributeFilterClause(pid, key, op string, val any) (string, []any, er
 	if err != nil {
 		return "", nil, err
 	}
-	clause := `EXISTS (SELECT 1 FROM contact_attributes ca
-		JOIN contact_attribute_defs cad ON cad.id = ca.def_id
-		WHERE ca.contact_id = contacts.id AND ca.project_id = ?
-		  AND cad.key = ? AND ` + opSQL + `)`
+	clause := `EXISTS (SELECT 1 FROM contact_attributes ca JOIN contact_attribute_defs cad ON cad.id=ca.def_id WHERE ca.contact_id=contacts.id AND ca.project_id=? AND cad.key=? AND ` + opSQL + `)`
 	return clause, append([]any{pid, key}, opArgs...), nil
 }
 
@@ -2834,15 +2474,31 @@ func dbUpdateWithChannelVerifications(db *sql.DB, pid string, id int64, patch ma
 	allowed := map[string]bool{
 		"first_name": true, "last_name": true, "display_name": true, "pronouns": true,
 		"company": true, "job_title": true, "owner_user_id": true,
-		"primary_email": true, "primary_phone": true,
+
 		"status": true, "first_contact_at": true, "last_contact_at": true,
 	}
+	if status, ok := patch["status"]; ok && status != "active" && status != "archived" && status != "spam" {
+		return nil, errors.New("status must be active, archived, or spam; use merge for merged records")
+	}
+	for _, key := range []string{"primary_email", "primary_phone"} {
+		if _, ok := patch[key]; ok {
+			return nil, fmt.Errorf("%s is read-only; update channels instead", key)
+		}
+	}
+	for _, key := range []string{"first_contact_at", "last_contact_at"} {
+		if v, ok := patch[key]; ok && v != nil {
+			if _, err := time.Parse(time.RFC3339, anyString(v)); err != nil {
+				return nil, fmt.Errorf("%s must be RFC3339", key)
+			}
+		}
+	}
+
 	// Validate keys: surface unknown fields rather than silently drop.
 	// Pre-v0.5.4 the loop just skipped non-allowed keys, which made
 	// patch.attributes a silent no-op — backfill scripts thought they
 	// were succeeding. Now we either route the key (attributes →
 	// dbSetAttribute) or error.
-	known := map[string]bool{"attributes": true, "channels": true}
+	known := map[string]bool{"attributes": true, "channels": true, "expected_updated_at": true}
 	for k := range allowed {
 		known[k] = true
 	}
@@ -2871,6 +2527,19 @@ func dbUpdateWithChannelVerifications(db *sql.DB, pid string, id int64, patch ma
 	}
 	defer tx.Rollback()
 
+	// Compare under the writer lock, before any relation update.
+	result, err := tx.Exec(`UPDATE contacts SET updated_at=? WHERE project_id=? AND id=? AND deleted_at IS NULL AND status!='merged' AND (?='' OR updated_at=?)`, time.Now().UTC().Format(time.RFC3339Nano), pid, id, strArg(patch, "expected_updated_at"), strArg(patch, "expected_updated_at"))
+	if err != nil {
+		return nil, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if n != 1 {
+		return nil, errors.New("contact changed or is unavailable; reload before saving")
+	}
+
 	sets := []string{}
 	args := []any{}
 	for k, v := range patch {
@@ -2882,7 +2551,7 @@ func dbUpdateWithChannelVerifications(db *sql.DB, pid string, id int64, patch ma
 	}
 	if len(sets) > 0 {
 		sets = append(sets, "updated_at = ?")
-		args = append(args, time.Now().UTC().Format(time.RFC3339))
+		args = append(args, time.Now().UTC().Format(time.RFC3339Nano))
 		if source != "" {
 			sets = append(sets, "source = ?")
 			args = append(args, source)
@@ -2907,6 +2576,10 @@ func dbUpdateWithChannelVerifications(db *sql.DB, pid string, id int64, patch ma
 			return nil, err
 		}
 	}
+	// Relation writes may touch timestamps; finish with a fresh revision token.
+	if _, err := tx.Exec(`UPDATE contacts SET updated_at=? WHERE project_id=? AND id=?`, time.Now().UTC().Format(time.RFC3339Nano), pid, id); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -2914,8 +2587,12 @@ func dbUpdateWithChannelVerifications(db *sql.DB, pid string, id int64, patch ma
 	if err != nil || c == nil {
 		return c, err
 	}
-	_ = loadChannels(db, c)
-	_ = loadTags(db, c)
+	if err := loadChannels(db, c); err != nil {
+		return nil, err
+	}
+	if err := loadTags(db, c); err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
@@ -2943,6 +2620,9 @@ func parseChannelInputs(raw any) ([]channelInput, error) {
 	if !ok {
 		return nil, fmt.Errorf("channels: expected array of {kind,value,label,is_primary}, got %T", raw)
 	}
+	if len(arr) > 100 {
+		return nil, errors.New("at most 100 channels per contact")
+	}
 	channels := make([]channelInput, 0, len(arr))
 	kindHasPrimary := map[string]bool{}
 	seenChannel := map[string]bool{}
@@ -2955,6 +2635,17 @@ func parseChannelInputs(raw any) ([]channelInput, error) {
 		value := normaliseChannel(kind, anyString(m["value"]))
 		if kind == "" || value == "" {
 			return nil, fmt.Errorf("channels[%d]: kind and value required", i)
+		}
+		switch kind {
+		case "email", "phone", "linkedin", "twitter", "github", "website", "other_url":
+		default:
+			return nil, fmt.Errorf("unsupported channel kind %q", kind)
+		}
+		if kind == "email" {
+			addr, err := mail.ParseAddress(value)
+			if err != nil || addr.Address != value {
+				return nil, fmt.Errorf("invalid email address %q", value)
+			}
 		}
 		channelKey := kind + "\x00" + value
 		if seenChannel[channelKey] {
@@ -2994,6 +2685,9 @@ func applyChannelsPatchTx(tx *sql.Tx, pid string, contactID int64, raw any, sour
 }
 
 func applyParsedChannelsPatchTx(tx *sql.Tx, pid string, contactID int64, channels []channelInput, source string, verifications map[string]channelVerificationRecord) error {
+	if _, err := tx.Exec(`UPDATE contact_channels SET is_primary=0 WHERE project_id=? AND contact_id=?`, pid, contactID); err != nil {
+		return err
+	}
 	seenKind := map[string]bool{}
 	wanted := map[string]bool{}
 	for _, ch := range channels {
@@ -3081,9 +2775,9 @@ func applyParsedChannelsPatchTx(tx *sql.Tx, pid string, contactID int64, channel
 	}
 	_, err = tx.Exec(
 		`UPDATE contacts
-		 SET primary_email = ?, primary_phone = ?, updated_at = CURRENT_TIMESTAMP
+		 SET primary_email = ?, primary_phone = ?, updated_at = ?
 		 WHERE id = ? AND project_id = ?`,
-		emailArg, phoneArg, contactID, pid,
+		emailArg, phoneArg, time.Now().UTC().Format(time.RFC3339Nano), contactID, pid,
 	)
 	return err
 }
@@ -3234,7 +2928,7 @@ func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source stri
 	// Verify both contacts belong to this project.
 	var n int
 	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM contacts WHERE id IN (?, ?) AND project_id = ?`,
+		`SELECT COUNT(*) FROM contacts WHERE id IN (?, ?) AND project_id = ? AND deleted_at IS NULL AND status != 'merged'`,
 		loserID, winnerID, pid).Scan(&n); err != nil {
 		return err
 	}
@@ -3245,6 +2939,34 @@ func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source stri
 	exec := func(query string, args ...any) error {
 		_, err := tx.Exec(query, args...)
 		return err
+	}
+
+	// Prefer existing winner primaries; normalize inherited primaries after moving.
+	if err := exec(`UPDATE contact_channels SET is_primary=0 WHERE contact_id=? AND project_id=? AND kind IN (SELECT kind FROM contact_channels WHERE contact_id=? AND project_id=?)`, loserID, pid, winnerID, pid); err != nil {
+		return err
+	}
+	// SMS and WhatsApp have one persistent thread per contact. Consolidate first.
+	for _, transport := range []string{"sms", "whatsapp"} {
+		var losing, winning int64
+		err := tx.QueryRow(`SELECT l.id,w.id FROM contact_conversations l JOIN contact_conversations w ON w.project_id=l.project_id AND w.channel=l.channel WHERE l.project_id=? AND l.contact_id=? AND w.contact_id=? AND l.channel=?`, pid, loserID, winnerID, transport).Scan(&losing, &winning)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := exec(`UPDATE contact_activities SET conversation_id=? WHERE project_id=? AND conversation_id=?`, winning, pid, losing); err != nil {
+			return err
+		}
+		if err := exec(`UPDATE OR IGNORE conversation_participants SET conversation_id=? WHERE project_id=? AND conversation_id=?`, winning, pid, losing); err != nil {
+			return err
+		}
+		if err := exec(`UPDATE contact_conversations SET last_activity_at=(SELECT last_activity_at FROM contact_conversations WHERE id IN (?,?) ORDER BY julianday(last_activity_at) DESC LIMIT 1), status=(SELECT status FROM contact_conversations WHERE id IN (?,?) ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'pending' THEN 1 WHEN 'closed' THEN 2 ELSE 3 END LIMIT 1), priority=(SELECT priority FROM contact_conversations WHERE id IN (?,?) ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END LIMIT 1) WHERE id=?`, winning, losing, winning, losing, winning, losing, winning); err != nil {
+			return err
+		}
+		if err := exec(`DELETE FROM contact_conversations WHERE project_id=? AND id=?`, pid, losing); err != nil {
+			return err
+		}
 	}
 
 	// Move channels and attributes. Winner values take precedence when
@@ -3325,6 +3047,12 @@ func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source stri
 		return err
 	}
 
+	if err := exec(`UPDATE contact_channels SET is_primary=1 WHERE project_id=? AND contact_id=? AND id IN (SELECT MIN(id) FROM contact_channels WHERE project_id=? AND contact_id=? AND kind NOT IN (SELECT kind FROM contact_channels WHERE project_id=? AND contact_id=? AND is_primary=1) GROUP BY kind)`, pid, winnerID, pid, winnerID, pid, winnerID); err != nil {
+		return err
+	}
+	if err := exec(`UPDATE contacts SET first_contact_at=(SELECT first_contact_at FROM contacts WHERE id IN (?,?) AND first_contact_at IS NOT NULL ORDER BY julianday(first_contact_at) LIMIT 1),last_contact_at=(SELECT last_contact_at FROM contacts WHERE id IN (?,?) AND last_contact_at IS NOT NULL ORDER BY julianday(last_contact_at) DESC LIMIT 1) WHERE project_id=? AND id=?`, loserID, winnerID, loserID, winnerID, pid, winnerID); err != nil {
+		return err
+	}
 	// Rebuild the denormalised primary-channel mirrors from the surviving rows.
 	if err := exec(
 		`UPDATE contacts SET
@@ -3343,7 +3071,7 @@ func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source stri
 	// Mark loser as merged. Activities are kept; archive/soft-delete
 	// would lose timeline — explicit 'merged' status is clearer.
 	if err := exec(
-		`UPDATE contacts SET status='merged', updated_at = CURRENT_TIMESTAMP
+		`UPDATE contacts SET status='merged', primary_email=NULL, primary_phone=NULL, updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ? AND project_id = ?`,
 		loserID, pid); err != nil {
 		return err
@@ -3367,6 +3095,17 @@ func dbLogActivity(db *sql.DB, pid string, contactID int64, kind, body, occurred
 		return nil, err
 	}
 	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM contacts WHERE project_id=? AND id=? AND deleted_at IS NULL AND status!='merged'`, pid, contactID).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if exists != 1 {
+		return nil, errors.New("contact not found in this project")
+	}
+	if _, err := time.Parse(time.RFC3339, occurredAt); err != nil {
+		return nil, errors.New("occurred_at must be RFC3339")
+	}
+
 	res, err := tx.Exec(
 		`INSERT INTO contact_activities (project_id, contact_id, kind, body, occurred_at, source)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -3376,9 +3115,9 @@ func dbLogActivity(db *sql.DB, pid string, contactID int64, kind, body, occurred
 	}
 	id, _ := res.LastInsertId()
 	if _, err := tx.Exec(
-		`UPDATE contacts SET last_contact_at = ?, updated_at = CURRENT_TIMESTAMP
+		`UPDATE contacts SET last_contact_at = CASE WHEN last_contact_at IS NULL OR julianday(?) > julianday(last_contact_at) THEN ? ELSE last_contact_at END, first_contact_at=CASE WHEN first_contact_at IS NULL OR julianday(?)<julianday(first_contact_at) THEN ? ELSE first_contact_at END, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		 WHERE id = ? AND project_id = ?`,
-		occurredAt, contactID, pid); err != nil {
+		occurredAt, occurredAt, occurredAt, occurredAt, contactID, pid); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -3402,7 +3141,7 @@ func dbActivities(db *sql.DB, pid string, contactID int64, limit int) ([]*Activi
 				COALESCE(conversation_id, 0)
 		 FROM contact_activities
 		 WHERE project_id = ? AND contact_id = ?
-		 ORDER BY occurred_at DESC, id DESC LIMIT ?`,
+		 ORDER BY julianday(occurred_at) DESC, id DESC LIMIT ?`,
 		pid, contactID, limit)
 	if err != nil {
 		return nil, err
@@ -3411,7 +3150,11 @@ func dbActivities(db *sql.DB, pid string, contactID int64, limit int) ([]*Activi
 	out := []*Activity{}
 	for rows.Next() {
 		a := &Activity{}
-		if err := rows.Scan(&a.ID, &a.ContactID, &a.Kind, &a.Body, &a.OccurredAt, &a.Source, &a.ConversationID); err == nil {
+		if err := rows.Scan(&a.ID, &a.ContactID, &a.Kind, &a.Body, &a.OccurredAt, &a.Source, &a.ConversationID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		{
 			out = append(out, a)
 		}
 	}
@@ -3486,6 +3229,9 @@ func dbSetAttribute(db sqlQueryExecer, pid string, contactID int64, key string, 
 	case "number":
 		switch v := value.(type) {
 		case float64:
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return errors.New("attribute number must be finite")
+			}
 			vn = sql.NullFloat64{Float64: v, Valid: true}
 		case int:
 			vn = sql.NullFloat64{Float64: float64(v), Valid: true}
@@ -3655,6 +3401,9 @@ func dbDefineAttribute(db *sql.DB, pid, key, label, typ string, enumValues []any
 }
 
 func dbListAttrDefs(db *sql.DB, pid string) ([]map[string]any, error) {
+	if err := seedSystemAttributes(db, pid); err != nil {
+		return nil, err
+	}
 	rows, err := db.Query(
 		`SELECT key, label, type, COALESCE(enum_values,''), required, sort_order, is_system
 		 FROM contact_attribute_defs WHERE project_id = ? ORDER BY sort_order, key`,
@@ -3669,7 +3418,7 @@ func dbListAttrDefs(db *sql.DB, pid string) ([]map[string]any, error) {
 		var required, isSystem int
 		var sortOrder int
 		if err := rows.Scan(&key, &label, &typ, &enumStr, &required, &sortOrder, &isSystem); err != nil {
-			continue
+			return nil, err
 		}
 		var enumVals []any
 		if enumStr != "" {
@@ -3681,7 +3430,7 @@ func dbListAttrDefs(db *sql.DB, pid string) ([]map[string]any, error) {
 			"sort_order": sortOrder, "is_system": isSystem != 0,
 		})
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func loadChannels(db *sql.DB, c *Contact) error {
@@ -3706,7 +3455,11 @@ func loadChannels(db *sql.DB, c *Contact) error {
 		if err := rows.Scan(&ch.ID, &ch.Kind, &ch.Value, &ch.Label, &primary, &ch.VerifiedAt, &ch.Source,
 			&ch.VerificationVerdict, &ch.VerificationConfidence, &ch.VerificationReason,
 			&ch.VerificationRecommendation, &ch.VerificationSource, &ch.VerificationSuggestedValue,
-			&ch.VerificationCheckedAt, &verificationDetails); err == nil {
+			&ch.VerificationCheckedAt, &verificationDetails); err != nil {
+			rows.Close()
+			return err
+		}
+		{
 			ch.IsPrimary = primary != 0
 			if verificationDetails != "" {
 				_ = json.Unmarshal([]byte(verificationDetails), &ch.VerificationDetails)
@@ -3733,7 +3486,7 @@ func loadChannels(db *sql.DB, c *Contact) error {
 
 // dbAddTag idempotently attaches a tag to a contact. Used by the
 // inbound classifier to mark automated/no-reply senders.
-func dbAddTag(db *sql.DB, pid string, contactID int64, tag string) error {
+func dbAddTag(db sqlQueryExecer, pid string, contactID int64, tag string) error {
 	_, err := db.Exec(
 		`INSERT OR IGNORE INTO contact_tags (project_id, contact_id, tag_name) VALUES (?, ?, ?)`,
 		pid, contactID, tag)
@@ -3752,11 +3505,15 @@ func loadTags(db *sql.DB, c *Contact) error {
 	c.Tags = []string{}
 	for rows.Next() {
 		var t string
-		if err := rows.Scan(&t); err == nil {
+		if err := rows.Scan(&t); err != nil {
+			rows.Close()
+			return err
+		}
+		{
 			c.Tags = append(c.Tags, t)
 		}
 	}
-	return nil
+	return rows.Err()
 }
 
 func loadAttributes(db *sql.DB, c *Contact) error {
@@ -3781,7 +3538,7 @@ func loadAttributes(db *sql.DB, c *Contact) error {
 		var vn sql.NullFloat64
 		var vb sql.NullBool
 		if err := rows.Scan(&key, &label, &typ, &vt, &vn, &vd, &vb, &src, &setAt); err != nil {
-			continue
+			return err
 		}
 		var v any
 		switch typ {
@@ -3821,7 +3578,7 @@ func loadAttributes(db *sql.DB, c *Contact) error {
 			Source: src, SetAt: setAt,
 		})
 	}
-	return nil
+	return rows.Err()
 }
 
 // ─── Tiny utils ─────────────────────────────────────────────────────
@@ -3845,6 +3602,9 @@ func intArg(args map[string]any, key string, def int) int {
 func int64Arg(args map[string]any, key string) int64 {
 	switch v := args[key].(type) {
 	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) || v >= math.MaxInt64 || v < math.MinInt64 {
+			return 0
+		}
 		return int64(v)
 	case int:
 		return int64(v)
@@ -4008,7 +3768,15 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {
 
 func decodeJSONBodyLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
-	return json.NewDecoder(r.Body).Decode(dst)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return errors.New("body must contain exactly one JSON value")
+	}
+	return nil
 }
 
 func httpErr(w http.ResponseWriter, code int, msg string) {

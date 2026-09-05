@@ -34,7 +34,7 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	if err != nil {
 		return nil, err
 	}
-	profile, image, err := resolveProfile(app, strArg(args, "profile"))
+	profile, image, err := resolveProfile(app, strArg(args, "profile"), strArg(args, "image"))
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +51,29 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	if sourceArchive != "" && !allowArchive {
 		return nil, errors.New("source archives are accepted only from authenticated app callers")
 	}
+	sourcePaths, err := sourcePathsArg(args, "source_paths")
+	if err != nil {
+		return nil, err
+	}
+	sourceDigest := strings.TrimSpace(strArg(args, "source_digest"))
+	if sourceArchive == "" && (sourceDigest != "" || len(sourcePaths) > 0) {
+		return nil, errors.New("source metadata requires source_archive_base64")
+	}
+	if sourceArchive != "" && (sourceDigest != "" || len(sourcePaths) > 0) {
+		if err := validateSourceArchive(sourceArchive, sourcePaths); err != nil {
+			return nil, err
+		}
+	}
 	idempotencyKey := callerIdempotencyKey(callCtx, actor)
+	if requested := strArg(args, "idempotency_key"); requested != "" {
+		if actor.InstallID <= 0 || actor.AppName == "" {
+			return nil, errors.New("idempotency_key override is available only to authenticated app callers")
+		}
+		if len(requested) > 200 || strings.IndexByte(requested, 0) >= 0 {
+			return nil, errors.New("idempotency_key must be at most 200 characters without NUL")
+		}
+		idempotencyKey = actor.Kind + ":" + actor.ID + ":" + requested
+	}
 	if idempotencyKey != "" {
 		existing, err := getWorkspaceByIdempotency(app.AppDB(), actor.ProjectID, idempotencyKey)
 		if err != nil {
@@ -87,6 +109,7 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		RepoLabel: strArg(args, "repo_label"), BranchLabel: strArg(args, "branch_label"),
 		OriginLabel: strArg(args, "origin_label"), OriginHref: originHref,
 		DirtyState: "unknown", UnpushedState: "unknown",
+		SourceDigest: sourceDigest, SourceManifest: sourcePaths,
 		CreatedAt: now.Format(time.RFC3339), UpdatedAt: now.Format(time.RFC3339),
 		LastActivityAt: now.Format(time.RFC3339), ExpiresAt: expires.Format(time.RFC3339),
 		DeleteAt: deleteAt.Format(time.RFC3339),
@@ -99,7 +122,7 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		}
 		return nil, err
 	}
-	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "workspace.provisioning", actor, "Workspace provisioning started", map[string]any{"profile": profile})
+	_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "workspace.provisioning", actor, "Workspace provisioning started", map[string]any{"profile": profile, "image": image})
 
 	input := map[string]any{
 		"name":  "workspace-" + strings.TrimPrefix(w.ID, "wsp_")[:12],
@@ -147,11 +170,15 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 			return nil, err
 		}
 		_ = recordActivity(app.AppDB(), w.ID, w.ProjectID, "source.imported", actor, "Source archive imported", nil)
+		w.SourceSyncedAt = nowUTC()
 	}
 	updates := map[string]any{
 		"workload_id": w.WorkloadID, "lifecycle_status": statusRunning,
 		"runtime_status": firstNonEmpty(runOut.Workload.Status, "running"),
 		"health_status":  runOut.Workload.HealthStatus, "last_error": "", "updated_at": nowUTC(),
+	}
+	if sourceArchive != "" {
+		updates["source_synced_at"] = w.SourceSyncedAt
 	}
 	if err := updateWorkspace(app.AppDB(), w.ID, updates); err != nil {
 		return nil, err
@@ -162,6 +189,13 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 }
 
 func (a *App) startCommand(callCtx context.Context, app *sdk.AppCtx, args map[string]any, actor Actor, w *Workspace) (*Command, error) {
+	release := a.lockWorkspace(w.ID)
+	defer release()
+	var err error
+	w, err = requireWorkspace(app.AppDB(), w.ProjectID, w.ID)
+	if err != nil {
+		return nil, err
+	}
 	if w.LifecycleStatus != statusRunning {
 		return nil, fmt.Errorf("workspace is not executable in status %q", w.LifecycleStatus)
 	}

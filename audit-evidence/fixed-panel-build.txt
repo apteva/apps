@@ -1,0 +1,9 @@
+Found 1 panel source(s):
+   mcp/crm/ui/CrmPanel.tsx
+✓ mcp/crm/ui/CrmPanel.tsx → CrmPanel.mjs (112.2 KB)
+
+Verifying panel imports against host React surface…
+vendor surface: 45 names (Activity, Children, Component, Fragment, Profiler, PureComponent…)
+✓ crm/ui/CrmPanel.mjs
+
+1 panel(s) all importable against the host React surface.

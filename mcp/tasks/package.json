@@ -1,0 +1,16 @@
+{
+  "name": "@apteva/tasks-ui-tests",
+  "private": true,
+  "scripts": {
+    "test": "bun test ui",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "happy-dom": "^20.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "typescript": "^5.9.2"
+  }
+}

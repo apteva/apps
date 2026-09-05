@@ -126,20 +126,16 @@ func (s *devSupervisor) startRemoteRun(ctx *sdk.AppCtx, in startDevInput, srcDir
 	})
 }
 
-// stopRemoteRun asks the Simulator app to shut the sim down. Best-
-// effort: errors are logged but don't block marking the row stopped,
-// since the user's intent ("stop this") is satisfied locally either
-// way and a leaked sim is reaped by the Simulator app's own cap +
-// reconcile.
-func (s *devSupervisor) stopRemoteRun(ctx *sdk.AppCtx, dr *DevRun) {
-	if dr.SimID == "" || ctx.PlatformAPI() == nil {
-		return
+// stopRemoteRun preserves the recovery handle if Simulator shutdown fails.
+func (s *devSupervisor) stopRemoteRun(ctx *sdk.AppCtx, dr *DevRun) error {
+	if dr.SimID == "" {
+		return nil
 	}
-	var ignored map[string]any
-	if err := ctx.PlatformAPI().CallAppResult(simulatorAppName, "sims_shutdown",
-		map[string]any{"sim_id": dr.SimID, "_project_id": dr.ProjectID}, &ignored); err != nil {
-		ctx.Logger().Warn("simulator shutdown failed", "sim_id", dr.SimID, "err", err)
+	if ctx.PlatformAPI() == nil {
+		return fmt.Errorf("platform unavailable; simulator was not stopped")
 	}
+	var result map[string]any
+	return ctx.PlatformAPI().CallAppResult(simulatorAppName, "sims_shutdown", map[string]any{"sim_id": dr.SimID, "_project_id": dr.ProjectID}, &result)
 }
 
 // tarRepoSource walks srcDir and produces a base64(gzip(tar)) of the
@@ -151,6 +147,9 @@ func tarRepoSource(srcDir string) (string, error) {
 	gz := gzip.NewWriter(b64)
 	tw := tar.NewWriter(gz)
 
+	limits := currentImportLimits()
+	var total int64
+	count := 0
 	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -174,6 +173,11 @@ func tarRepoSource(srcDir string) (string, error) {
 		if !info.Mode().IsRegular() {
 			return nil // skip symlinks/devices
 		}
+		count++
+		if err := checkImportEntry(limits, rel, info.Size(), total, count); err != nil {
+			return err
+		}
+		total += info.Size()
 		hdr, err := tar.FileInfoHeader(info, "")
 		if err != nil {
 			return err

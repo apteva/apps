@@ -47,7 +47,10 @@ import (
 //go:embed apteva.yaml
 var manifestYAML []byte
 
-type App struct{}
+type App struct {
+	sweepCancel context.CancelFunc
+	sweepDone   chan struct{}
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest(manifestYAML)
@@ -67,21 +70,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// via the install's config_schema). Boot fails loud here when s3
 	// creds are missing — better than silently routing writes to the
 	// wrong place.
-	bound := ctx.IntegrationFor("backend")
-	id, whoamiErr := ctx.PlatformAPI().WhoAmI()
-	if id != nil {
-		ctx.Logger().Info("storage backend role probe",
-			"bindings", id.Bindings,
-			"resolved_bound", bound)
-	} else {
-		ctx.Logger().Warn("storage backend role probe — WhoAmI returned nil identity",
-			"err", fmt.Sprintf("%v", whoamiErr),
-			"gateway", os.Getenv("APTEVA_GATEWAY_URL"),
-			"token", os.Getenv("APTEVA_APP_TOKEN"))
-	}
 	be, err := initBackend(ctx)
 	if err != nil {
 		return fmt.Errorf("init backend: %w", err)
+	}
+	if err := verifyBackendIdentity(ctx, be); err != nil {
+		return err
 	}
 	globalBackend = be
 
@@ -96,6 +90,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := os.MkdirAll(uploadsDir(ctx), 0755); err != nil {
 		return fmt.Errorf("mkdir uploads: %w", err)
 	}
+	if err := recoverStorageState(ctx); err != nil {
+		return err
+	}
 	ctx.Logger().Info("storage mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"backend", be.Kind(),
@@ -105,10 +102,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// Background sweeper for stale upload sessions. Runs once on
 	// boot (so a restart immediately reclaims anything older than
 	// the TTL) and then on the configured interval. Goroutine has
-	// no shutdown — apps don't have a clean teardown signal in
-	// v0.1, but the sweeper does nothing destructive past the TTL
-	// gate so an abrupt exit is fine.
+	// exits when OnUnmount cancels the lifecycle context.
+	sweepCtx, cancel := context.WithCancel(context.Background())
+	a.sweepCancel = cancel
+	a.sweepDone = make(chan struct{})
 	go func() {
+		defer close(a.sweepDone)
+		sweepBlobCleanup(ctx)
 		sweepStaleUploads(ctx)
 		sweepStalePendingUploads(ctx)
 		interval := configuredSweepInterval(ctx)
@@ -118,7 +118,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		)
 		t := time.NewTicker(interval)
 		defer t.Stop()
-		for range t.C {
+		for {
+			select {
+			case <-sweepCtx.Done():
+				return
+			case <-t.C:
+			}
+			sweepBlobCleanup(ctx)
 			sweepStaleUploads(ctx)
 			sweepStalePendingUploads(ctx)
 		}
@@ -126,7 +132,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.sweepCancel != nil {
+		a.sweepCancel()
+		<-a.sweepDone
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
@@ -172,7 +184,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"source":         map[string]any{"type": "string"},
 				"visibility":     map[string]any{"type": "string"},
 			}, []string{"name", "content_base64"}),
-			Handler: a.toolUpload,
+			HandlerCtx: a.toolUploadCtx,
 		},
 		{
 			Name:        "files_get",
@@ -182,7 +194,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "files_get_url",
-			Description: "Mint a signed time-limited URL. Args: id, ttl_seconds?, disposition? (inline|attachment), delivery? (apteva|direct|proxy). Proxy streams through Storage without exposing or redirecting to the backend. Existing S3 callers that omit delivery retain direct delivery; new callers should choose explicitly.",
+			Description: "Mint a signed time-limited URL. Args: id, ttl_seconds?, disposition? (inline|attachment), delivery? (apteva|direct|proxy). Proxy streams through Storage without exposing or redirecting to the backend. Omitting delivery uses revocable Storage delivery. Explicit direct links remain valid until their expiry.",
 			InputSchema: schemaObject(map[string]any{
 				"id":          map[string]any{"type": "integer"},
 				"ttl_seconds": map[string]any{"type": "integer"},
@@ -208,6 +220,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"tag":          map[string]any{"type": "string"},
 				"source":       map[string]any{"type": "string"},
 				"limit":        map[string]any{"type": "integer"},
+				"offset":       map[string]any{"type": "integer"},
 			}, nil),
 			HandlerCtx: a.toolSearchCtx,
 		},
@@ -218,6 +231,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"folder":    map[string]any{"type": "string"},
 				"recursive": map[string]any{"type": "boolean"},
 				"limit":     map[string]any{"type": "integer"},
+				"offset":    map[string]any{"type": "integer"},
 			}, nil),
 			HandlerCtx: a.toolListCtx,
 		},
@@ -295,12 +309,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "files_from_url",
 			Description: "Fetch a remote URL into storage. Args: url, name?, folder?, tags?.",
 			InputSchema: schemaObject(map[string]any{
-				"url":    map[string]any{"type": "string"},
-				"name":   map[string]any{"type": "string"},
-				"folder": map[string]any{"type": "string"},
-				"tags":   map[string]any{"type": "array"},
+				"url":        map[string]any{"type": "string"},
+				"name":       map[string]any{"type": "string"},
+				"folder":     map[string]any{"type": "string"},
+				"tags":       map[string]any{"type": "array"},
+				"visibility": map[string]any{"type": "string", "enum": []string{"private", "signed", "public"}},
 			}, []string{"url"}),
-			Handler: a.toolFromURL,
+			HandlerCtx: a.toolFromURLCtx,
 		},
 		{
 			Name:        "storage_upload_init",
@@ -510,12 +525,15 @@ func normaliseFilename(s string) string {
 // has been doing this inline since v0.1; this just exposes the same
 // semantics as a proper MCP tool so agents and other apps can call
 // it without learning storage's HTTP surface.
-func (a *App) toolCreateFolderCtx(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolCreateFolderCtx(c context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	path := normaliseFolder(strArg(args, "path"))
+	path, err := authorizeFolder(c, "files.write", strArg(args, "path"))
+	if err != nil {
+		return nil, err
+	}
 	if path == "" || path == "/" {
 		return nil, errors.New("path required (e.g. '/raw/2026-05/')")
 	}
@@ -541,8 +559,14 @@ func (a *App) toolCreateFolderCtx(_ context.Context, ctx *sdk.AppCtx, args map[s
 }
 
 func renameFolderArgs(args map[string]any) (string, string, error) {
-	from := normaliseFolder(strArg(args, "from"))
-	to := normaliseFolder(strArg(args, "to"))
+	from, err := validateFolder(strArg(args, "from"))
+	if err != nil {
+		return "", "", err
+	}
+	to, err := validateFolder(strArg(args, "to"))
+	if err != nil {
+		return "", "", err
+	}
 	if from == "" || from == "/" {
 		return "", "", errors.New("from required and cannot be root")
 	}
@@ -583,11 +607,30 @@ func (a *App) toolRenameFolder(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func (a *App) toolUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolUploadCtx(context.Background(), ctx, args)
+}
+
+func (a *App) toolUploadCtx(c context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	folder, err := authorizeFolder(c, "files.write", strArg(args, "folder"))
+	if err != nil {
+		return nil, err
+	}
+	if err = validateVisibility(strArg(args, "visibility")); err != nil {
+		return nil, err
+	}
+	release, err := acquireTransfer(c)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	name := normaliseFilename(strArg(args, "name"))
+	name, err := validateFilename(strArg(args, "name"))
+	if err != nil {
+		return nil, err
+	}
 	if name == "" {
 		return nil, errors.New("name required")
 	}
@@ -595,7 +638,7 @@ func (a *App) toolUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if b64 == "" {
 		return nil, errors.New("content_base64 required")
 	}
-	maxBytes := maxUploadBytes(ctx)
+	maxBytes := min(maxUploadBytes(ctx), 25<<20)
 	if int64(len(b64)) > maxUploadRequestBytes(maxBytes) {
 		return nil, fmt.Errorf("encoded upload exceeds max_upload_size_mb")
 	}
@@ -608,13 +651,13 @@ func (a *App) toolUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	in := uploadInput{
 		Name:        name,
-		Folder:      normaliseFolder(strArg(args, "folder")),
+		Folder:      folder,
 		ContentType: strArg(args, "content_type"),
 		Tags:        strArrayArg(args, "tags"),
 		Source:      strArg(args, "source"),
 		Visibility:  effectiveVisibility(ctx, strArg(args, "visibility")),
 	}
-	f, existed, err := saveBytes(ctx, pid, in, body)
+	f, existed, err := saveStream(c, ctx, pid, in, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -666,6 +709,9 @@ func (a *App) toolGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("file not found")
 	}
 	ttl := intArg(args, "ttl_seconds", defaultSignedTTL(ctx))
+	if ttl > 7*24*3600 {
+		ttl = 7 * 24 * 3600
+	}
 	if ttl <= 0 {
 		ttl = defaultSignedTTL(ctx)
 	}
@@ -677,22 +723,11 @@ func (a *App) toolGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	be := backend()
 	delivery := strings.ToLower(strings.TrimSpace(strArg(args, "delivery")))
-	legacyDirect := delivery == "" && be.Kind() == "s3"
 	if delivery == "" {
-		if legacyDirect {
-			delivery = "direct"
-		} else {
-			delivery = "apteva"
-		}
+		delivery = "apteva"
 	}
 	if delivery != "apteva" && delivery != "direct" && delivery != "proxy" {
 		return nil, errors.New("delivery must be one of: apteva, direct, proxy")
-	}
-	// Preserve the pre-v0.10.25 behavior for S3 consumers that omit both
-	// fields: they still receive an attachment-oriented direct URL. Explicit
-	// calls and stable Apteva URLs default to inline.
-	if legacyDirect && strings.TrimSpace(strArg(args, "disposition")) == "" {
-		requestedDisposition = DispositionAttachment
 	}
 	disposition := effectiveContentDisposition(requestedDisposition, f.ContentType)
 	options := GetObjectOptions{
@@ -776,37 +811,16 @@ func (a *App) toolGetContent(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 
 	key := objectKey(f.SHA256, f.StorageKey)
-	var data []byte
-	if path, ok := backend().LocalPath(key); ok {
-		data, err = os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read disk: %w", err)
-		}
-	} else {
-		// S3 / remote backend — presign briefly + http.GET.
-		signedURL, err := backend().PresignGet(context.Background(), key, GetObjectOptions{
-			Filename: f.Name, ContentType: f.ContentType, Disposition: DispositionAttachment,
-		}, 5*time.Minute)
-		if err != nil {
-			return nil, fmt.Errorf("presign: %w", err)
-		}
-		req, err := http.NewRequest(http.MethodGet, signedURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		client := &http.Client{Timeout: 60 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("fetch presigned: %w", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("presigned URL: status %d", resp.StatusCode)
-		}
-		data, err = io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
-		if err != nil {
-			return nil, err
-		}
+	c, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	read, err := backend().OpenObject(c, key, ObjectReadOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer read.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(read.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
 	}
 	if int64(len(data)) > maxBytes {
 		return nil, fmt.Errorf("file %d exceeded %d bytes during read", id, maxBytes)
@@ -821,46 +835,12 @@ func (a *App) toolGetContent(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}, nil
 }
 
-func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	limit := intArg(args, "limit", 50)
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	out, err := dbSearch(ctx.AppDB(), pid, searchOpts{
-		Q:           strArg(args, "q"),
-		Folder:      strArg(args, "folder"),
-		ContentType: strArg(args, "content_type"),
-		SHA256:      strArg(args, "sha256"),
-		Tag:         strArg(args, "tag"),
-		Source:      strArg(args, "source"),
-		Limit:       limit,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"files": out, "count": len(out)}, nil
+func (a *App) toolSearch(app *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.listFilesPage(context.Background(), app, args, false)
 }
 
-func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	folder := normaliseFolder(strArg(args, "folder"))
-	recursive, _ := args["recursive"].(bool)
-	limit := intArg(args, "limit", 200)
-	if limit <= 0 || limit > 500 {
-		limit = 200
-	}
-	out, err := dbListFolder(ctx.AppDB(), pid, folder, recursive, limit)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"files": out, "count": len(out), "folder": folder, "recursive": recursive}, nil
+func (a *App) toolList(app *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.listFilesPage(context.Background(), app, args, true)
 }
 
 func (a *App) toolListFolders(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -888,12 +868,12 @@ func (a *App) toolMove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	updates := map[string]any{}
 	if v, ok := args["folder"]; ok {
 		if s, ok := v.(string); ok {
-			updates["folder"] = normaliseFolder(s)
+			updates["folder"] = s
 		}
 	}
 	if v, ok := args["name"]; ok {
 		if s, ok := v.(string); ok {
-			updates["name"] = normaliseFilename(s)
+			updates["name"] = s
 		}
 	}
 	if len(updates) == 0 {
@@ -907,7 +887,6 @@ func (a *App) toolMove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// media's storageevents.go cascade, FileCard chat attachments)
 	// can react instantly. Existed=false because move/rename is
 	// always a real change — the dedup short-circuit doesn't apply.
-	emitFileEvent(ctx, "file.updated", f, false)
 	return map[string]any{"file": f}, nil
 }
 
@@ -989,65 +968,60 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolFromURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolFromURLCtx(context.Background(), ctx, args)
+}
+
+func (a *App) toolFromURLCtx(c context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	url := strArg(args, "url")
-	if url == "" {
-		return nil, errors.New("url required")
-	}
-	// Many CDNs (vecteezy, cloudfront-fronted hosts, anything behind
-	// Cloudflare's bot scoring) reject requests with Go's default
-	// User-Agent of "Go-http-client/1.1". Spoof a recent Chrome on
-	// macOS — same approach we use elsewhere when fetching public
-	// content. Accept matches what a browser would send.
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "*/*")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("fetch %s: status %d", url, resp.StatusCode)
-	}
-	maxBytes := maxUploadBytes(ctx)
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	folder, err := authorizeFolder(c, "files.write", strArg(args, "folder"))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(body)) > maxBytes {
-		return nil, fmt.Errorf("remote response exceeds max_upload_size_mb (%d bytes > %d)", len(body), maxBytes)
+	if err = validateVisibility(strArg(args, "visibility")); err != nil {
+		return nil, err
+	}
+	u, err := url.Parse(strArg(args, "url"))
+	if err != nil {
+		return nil, err
+	}
+	if err = validateImportURL(u); err != nil {
+		return nil, err
+	}
+	release, err := acquireTransfer(c)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	req, err := http.NewRequestWithContext(c, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Apteva-Storage/0.11)")
+	req.Header.Set("Accept", "*/*")
+	client := importClient(ctx)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("fetch status %d", resp.StatusCode)
 	}
 	name := strArg(args, "name")
 	if name == "" {
-		name = filepath.Base(url)
+		name = filepath.Base(u.Path)
 	}
-	in := uploadInput{
-		Name:        normaliseFilename(name),
-		Folder:      normaliseFolder(strArg(args, "folder")),
-		ContentType: resp.Header.Get("Content-Type"),
-		Tags:        strArrayArg(args, "tags"),
-		Source:      "imported",
-		Visibility:  configuredDefaultVisibility(ctx),
-	}
-	f, existed, err := saveBytes(ctx, pid, in, body)
+	in := uploadInput{Name: name, Folder: folder, ContentType: resp.Header.Get("Content-Type"), Tags: strArrayArg(args, "tags"), Source: "imported", Visibility: strArg(args, "visibility")}
+	f, existed, err := saveStream(c, ctx, pid, in, resp.Body)
 	if err != nil {
 		return nil, err
 	}
 	emitFileEvent(ctx, "file.added", f, existed)
-	return map[string]any{
-		"id":           f.ID,
-		"url":          absoluteContentURL(ctx, f),
-		"sha256":       f.SHA256,
-		"was_existing": existed,
-	}, nil
+	return map[string]any{"id": f.ID, "url": absoluteContentURL(ctx, f), "sha256": f.SHA256, "was_existing": existed}, nil
 }
 
 // ─── HTTP handlers ─────────────────────────────────────────────────
@@ -1193,13 +1167,9 @@ func (a *App) httpMintSignedURL(w http.ResponseWriter, r *http.Request, id int64
 		Delivery    string `json:"delivery"`
 		Disposition string `json:"disposition"`
 	}
-	if r.ContentLength > 0 {
-		// Body is optional — a TTL of 0 / missing falls back to the
-		// install's default (24h today).
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body); err != nil && err != io.EOF {
-			httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
-			return
-		}
+	if err := decodeJSON(r, &body, 1024, true); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	args := map[string]any{"_project_id": pid, "id": id}
 	if body.TTLSeconds > 0 {
@@ -1244,7 +1214,7 @@ func (a *App) httpFromURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(io.LimitReader(r.Body, 32*1024)).Decode(&body); err != nil {
+	if err := decodeJSON(r, &body, 32*1024, false); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -1255,8 +1225,12 @@ func (a *App) httpFromURL(w http.ResponseWriter, r *http.Request) {
 	// resolveProjectFromArgs path finds it on global-scope installs —
 	// same reason httpUpload does this for its JSON body.
 	body["_project_id"] = pid
-	out, err := a.toolFromURL(ctx, body)
+	out, err := a.toolFromURLCtx(context.WithValue(r.Context(), actorContextKey{}, requestActor(r)), ctx, body)
 	if err != nil {
+		if errors.Is(err, errInternalImportForbidden) {
+			httpErr(w, http.StatusForbidden, err.Error())
+			return
+		}
 		// Match toolFromURL error semantics: upstream-status / url-required
 		// errors are caller mistakes (400), everything else is a 500.
 		msg := err.Error()
@@ -1324,7 +1298,7 @@ func (a *App) httpRenameFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSON(r, &body, 32*1024, false); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1427,18 +1401,6 @@ func (a *App) httpListOrSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	folderRaw := q.Get("folder")
-	if folderRaw != "" {
-		folder := normaliseFolder(folderRaw)
-		recursive := q.Get("recursive") == "true" || q.Get("recursive") == "1"
-		out, err := dbListFolder(ctx.AppDB(), pid, folder, recursive, 200)
-		if err != nil {
-			httpErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		httpJSON(w, map[string]any{"files": out, "folder": folder, "recursive": recursive})
-		return
-	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	// 200 was the historical cap; anything above silently reset to 50
 	// (the default page size for UIs). That dropped the result set
@@ -1458,17 +1420,22 @@ func (a *App) httpListOrSearch(w http.ResponseWriter, r *http.Request) {
 		Q: q.Get("q"), Folder: q.Get("folder"),
 		ContentType: q.Get("content_type"), SHA256: q.Get("sha256"),
 		Tag: q.Get("tag"), Source: q.Get("source"),
-		Limit: limit, Offset: offset,
+		Limit: limit + 1, Offset: offset, Recursive: q.Get("recursive") == "true" || q.Get("recursive") == "1", SortByName: q.Get("folder") != "",
 	})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	hasMore := len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
 	httpJSON(w, map[string]any{
-		"files":       out,
+		"files":  out,
+		"folder": q.Get("folder"), "recursive": q.Get("recursive") == "true",
 		"offset":      offset,
 		"next_offset": offset + len(out),
-		"has_more":    len(out) == limit,
+		"has_more":    hasMore,
 	})
 }
 
@@ -1518,13 +1485,13 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {
 		// error even though the caller did pass project_id (just in
 		// the query string, not the body).
 		var body map[string]any
-		jerr := json.NewDecoder(r.Body).Decode(&body)
+		jerr := decodeJSON(r, &body, maxUploadRequestBytes(min(maxBytes, 25<<20)), false)
 		if jerr == nil {
 			if body == nil {
 				body = map[string]any{}
 			}
 			body["_project_id"] = pid
-			out, err := a.toolUpload(ctx, body)
+			out, err := a.toolUploadCtx(context.WithValue(r.Context(), actorContextKey{}, requestActor(r)), ctx, body)
 			if err != nil {
 				if strings.Contains(err.Error(), "exceeds max_upload_size_mb") {
 					httpErr(w, http.StatusRequestEntityTooLarge, err.Error())
@@ -1544,6 +1511,12 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "expected multipart/form-data or JSON body")
 		return
 	}
+	release, err := acquireTransfer(r.Context())
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	defer release()
 	// #nosec G120 -- r.Body is bounded by MaxBytesReader above.
 	if err := r.ParseMultipartForm(1 << 20); err != nil {
 		var maxErr *http.MaxBytesError
@@ -1563,29 +1536,23 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	body, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if int64(len(body)) > maxBytes {
-		httpErr(w, http.StatusRequestEntityTooLarge,
-			fmt.Sprintf("upload exceeds max_upload_size_mb (%d bytes > %d)", len(body), maxBytes))
-		return
-	}
 	in := uploadInput{
-		Name:        normaliseFilename(header.Filename),
-		Folder:      normaliseFolder(r.FormValue("folder")),
+		Name:        header.Filename,
+		Folder:      r.FormValue("folder"),
 		ContentType: header.Header.Get("Content-Type"),
 		Source:      ifEmpty(strings.TrimSpace(r.FormValue("source")), "human"),
-		Visibility:  effectiveVisibility(ctx, r.FormValue("visibility")),
+		Visibility:  r.FormValue("visibility"),
 	}
 	if t := r.FormValue("tags"); t != "" {
 		in.Tags = parseUploadTags(t)
 	}
-	f, existed, err := saveBytes(ctx, pid, in, body)
+	f, existed, err := saveStream(context.WithValue(r.Context(), actorContextKey{}, requestActor(r)), ctx, pid, in, file)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "exceeds max_upload_size_mb") {
+			code = http.StatusRequestEntityTooLarge
+		}
+		httpErr(w, code, err.Error())
 		return
 	}
 	emitFileEvent(ctx, "file.added", f, existed)
@@ -1658,7 +1625,7 @@ func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64,
 	q := r.URL.Query()
 	sig := q.Get("sig")
 	exp, _ := strconv.ParseInt(q.Get("exp"), 10, 64)
-	authed := r.Header.Get("X-User-ID") != ""
+	authed := !strings.HasPrefix(r.URL.Path, "/public/") && r.Header.Get("X-User-ID") != ""
 	authorizedBySignature := false
 	visibility := f.Visibility
 	if visibility != "public" && visibility != "signed" && visibility != "private" {
@@ -1693,28 +1660,23 @@ func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64,
 	key := objectKey(f.SHA256, f.StorageKey)
 	contentType := safeResponseContentType(f.ContentType)
 	disposition := effectiveContentDisposition(requestedDisposition, contentType)
-	options := GetObjectOptions{
-		Filename: f.Name, ContentType: contentType, Disposition: disposition,
-	}
 
 	// Disk: serve via http.ServeFile (Range + Last-Modified + 304 for
-	// free). S3 / remote: 302-redirect to a freshly-minted presigned
-	// URL so bytes never proxy through us. The TTL is short — long
-	// enough to cover slow downloads, short enough that the URL
-	// shouldn't be useful past the request that minted it.
+	// free). Remote canonical requests use the streaming proxy so future
+	// reads continue to enforce visibility and share generations.
 	if path, ok := backend().LocalPath(key); ok {
 		etag := `"` + f.SHA256 + `"`
 		w.Header().Set("ETag", etag)
 		switch visibility {
 		case "public":
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
 		case "signed":
 			if authorizedBySignature {
 				remaining := exp - time.Now().Unix()
 				if remaining < 0 {
 					remaining = 0
 				}
-				w.Header().Set("Cache-Control", fmt.Sprintf("private, max-age=%d", remaining))
+				w.Header().Set("Cache-Control", "private, no-store")
 			} else {
 				w.Header().Set("Cache-Control", "private, no-store")
 			}
@@ -1732,37 +1694,22 @@ func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64,
 		return
 	}
 
-	// A canonical remote URL must never cache the short-lived Location value.
-	// It also never answers 304: each GET needs a fresh backend signature.
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if r.Method == http.MethodHead {
-		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Content-Disposition", contentDispositionHeader(disposition, f.Name))
-		w.Header().Set("Content-Length", strconv.FormatInt(f.SizeBytes, 10))
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	presignTTL := 15 * time.Minute
+	// Authorization above has already checked the original carrier. Route the
+	// remote read through the same streaming implementation used by proxy links.
+	rr := r.Clone(r.Context())
+	uu := *r.URL
+	rr.URL = &uu
+	proxyExp := time.Now().Add(time.Minute).Unix()
 	if authorizedBySignature {
-		remaining := time.Until(time.Unix(exp, 0))
-		if remaining <= 0 {
-			httpErr(w, http.StatusForbidden, "invalid or expired signature")
-			return
-		}
-		if remaining < presignTTL {
-			presignTTL = remaining
-		}
+		proxyExp = exp
 	}
-	url, err := backend().PresignGet(r.Context(), key, options, presignTTL)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "presign: "+err.Error())
-		return
-	}
-	w.Header().Set("Location", url)
-	w.WriteHeader(http.StatusFound)
+	query := rr.URL.Query()
+	query.Set("project_id", f.ProjectID)
+	query.Set("sig", signProxyFile(f.ID, f.ProjectID, proxyExp, disposition))
+	query.Set("exp", strconv.FormatInt(proxyExp, 10))
+	rr.URL.RawQuery = query.Encode()
+	a.httpServeProxy(w, rr, id, disposition)
+
 }
 
 // httpServeProxy is the explicit bandwidth-through-Storage delivery path.
@@ -1953,6 +1900,9 @@ func (w *proxyResponseRecorder) WriteError() error   { return w.writeError }
 func applyProxyMetadataHeaders(headers http.Header, f *File, metadata ObjectMetadata) {
 	if metadata.ContentType != "" {
 		headers.Set("Content-Type", safeResponseContentType(metadata.ContentType))
+		if effectiveContentDisposition(DispositionInline, metadata.ContentType) == DispositionAttachment {
+			headers.Set("Content-Disposition", contentDispositionHeader(DispositionAttachment, f.Name))
+		}
 	}
 	etag := metadata.ETag
 	if etag == "" {
@@ -2025,16 +1975,16 @@ func (a *App) httpPatch(w http.ResponseWriter, r *http.Request, id int64) {
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSON(r, &body, 32*1024, false); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	updates := map[string]any{}
 	if v, ok := body["folder"].(string); ok {
-		updates["folder"] = normaliseFolder(v)
+		updates["folder"] = v
 	}
 	if v, ok := body["name"].(string); ok {
-		updates["name"] = normaliseFilename(v)
+		updates["name"] = v
 	}
 	if v, ok := body["visibility"].(string); ok {
 		vis := visibilityOrDefault(v)
@@ -2110,12 +2060,16 @@ func emitFileEvent(ctx *sdk.AppCtx, topic string, f *File, existed bool) {
 // ─── Disk + DB helpers ─────────────────────────────────────────────
 
 type uploadInput struct {
-	Name        string
-	Folder      string
-	ContentType string
-	Tags        []string
-	Source      string
-	Visibility  string
+	ExpectedSHA  string
+	ExpectedSize int64
+	UploadID     string
+	UserID       int64
+	Name         string
+	Folder       string
+	ContentType  string
+	Tags         []string
+	Source       string
+	Visibility   string
 }
 
 // saveBytes writes the bytes to disk, computes sha256, dedupes if a
@@ -2123,48 +2077,7 @@ type uploadInput struct {
 // returns the resulting file row + a boolean indicating whether the
 // content was already present.
 func saveBytes(ctx *sdk.AppCtx, pid string, in uploadInput, body []byte) (*File, bool, error) {
-	hash := sha256.Sum256(body)
-	hex := hex.EncodeToString(hash[:])
-
-	// Dedup at the row level: same project + sha256 + name + folder
-	// returns the existing row. Same content under a different name
-	// is allowed (different rows, but same disk blob). v0.1 still
-	// writes a fresh blob for non-exact matches; v0.2 reference-
-	// counts.
-	if existing, err := dbFindExact(ctx.AppDB(), pid, hex, in.Folder, in.Name); err == nil && existing != nil {
-		return existing, true, nil
-	}
-
-	key := uuid.NewString() + extOf(in.Name, in.ContentType)
-	if err := backend().Put(
-		context.Background(),
-		objectKey(hex, key),
-		in.ContentType,
-		bytes.NewReader(body),
-		int64(len(body)),
-	); err != nil {
-		return nil, false, fmt.Errorf("backend put: %w", err)
-	}
-	tagsJSON, _ := json.Marshal(in.Tags)
-	if in.Visibility == "" {
-		in.Visibility = "private"
-	}
-	res, err := ctx.AppDB().Exec(
-		`INSERT INTO files
-			(project_id, name, folder, storage_key, content_type, size_bytes,
-			 sha256, uploaded_by, source, tags, visibility)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, in.Name, in.Folder, key, in.ContentType, len(body),
-		hex, callerLabel(), in.Source, string(tagsJSON), in.Visibility)
-	if err != nil {
-		return nil, false, err
-	}
-	id, _ := res.LastInsertId()
-	f, err := dbGetByID(ctx.AppDB(), pid, id)
-	if err != nil {
-		return nil, false, err
-	}
-	return f, false, nil
+	return saveStream(context.Background(), ctx, pid, in, bytes.NewReader(body))
 }
 
 // dbFindExact returns the file whose (project, sha, folder, name)
@@ -2313,6 +2226,7 @@ func populateFileURL(f *File) *File {
 type searchOpts struct {
 	Q, Folder, ContentType, SHA256, Tag, Source string
 	Limit, Offset                               int
+	Recursive, SortByName                       bool
 }
 
 func dbSearch(db *sql.DB, pid string, opts searchOpts) ([]*File, error) {
@@ -2327,25 +2241,34 @@ func dbSearchFiltered(db *sql.DB, pid string, opts searchOpts, allow func(*File)
 	where := []string{"project_id = ?", "deleted_at IS NULL"}
 	args := []any{pid}
 	if opts.Q != "" {
-		where = append(where, "name LIKE ?")
-		args = append(args, "%"+strings.ToLower(opts.Q)+"%")
+		where = append(where, `name LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLike(opts.Q)+"%")
 	}
 	if opts.Folder != "" {
-		where = append(where, "folder = ?")
-		args = append(args, normaliseFolder(opts.Folder))
+		folder, err := validateFolder(opts.Folder)
+		if err != nil {
+			return nil, err
+		}
+		if opts.Recursive {
+			where = append(where, "folder >= ? AND folder < ? AND substr(folder,1,length(?))=?")
+			args = append(args, folder, folder+"\U0010ffff", folder, folder)
+		} else {
+			where = append(where, "folder = ?")
+			args = append(args, folder)
+		}
 	}
 	if opts.ContentType != "" {
-		where = append(where, "content_type LIKE ?")
-		args = append(args, opts.ContentType+"%")
+		where = append(where, `content_type LIKE ? ESCAPE '\'`)
+		args = append(args, escapeLike(opts.ContentType)+"%")
 	}
 	if opts.SHA256 != "" {
 		where = append(where, "sha256 = ?")
 		args = append(args, strings.ToLower(opts.SHA256))
 	}
 	if opts.Tag != "" {
-		// JSON array contains the literal "<tag>" — cheap LIKE for v0.1.
-		where = append(where, `tags LIKE ?`)
-		args = append(args, `%"`+opts.Tag+`"%`)
+		// Match a literal JSON array element, including percent/underscore.
+		where = append(where, `EXISTS(SELECT 1 FROM json_each(files.tags) WHERE json_each.type='text' AND json_each.value=?)`)
+		args = append(args, opts.Tag)
 	}
 	if opts.Source != "" {
 		where = append(where, "source = ?")
@@ -2357,6 +2280,9 @@ func dbSearchFiltered(db *sql.DB, pid string, opts searchOpts, allow func(*File)
 	}
 	q := `SELECT ` + fileSelectColumns + ` FROM files WHERE ` + strings.Join(where, " AND ") +
 		` ORDER BY updated_at DESC, id DESC`
+	if opts.SortByName {
+		q = `SELECT ` + fileSelectColumns + ` FROM files WHERE ` + strings.Join(where, " AND ") + ` ORDER BY folder,name,id`
+	}
 	if allow == nil {
 		q += ` LIMIT ? OFFSET ?`
 		offset := opts.Offset
@@ -2371,12 +2297,17 @@ func dbSearchFiltered(db *sql.DB, pid string, opts searchOpts, allow func(*File)
 	}
 	defer rows.Close()
 	out := make([]*File, 0, limit)
+	skipped := 0
 	for rows.Next() {
 		f, err := scanFile(rows, false)
 		if err != nil {
 			return nil, err
 		}
 		if allow != nil && !allow(f) {
+			continue
+		}
+		if allow != nil && skipped < max(opts.Offset, 0) {
+			skipped++
 			continue
 		}
 		out = append(out, f)
@@ -2387,6 +2318,7 @@ func dbSearchFiltered(db *sql.DB, pid string, opts searchOpts, allow func(*File)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	rows.Close()
 	for _, f := range out {
 		populateFileURL(f)
 	}
@@ -2398,56 +2330,7 @@ func dbListFolder(db *sql.DB, pid, folder string, recursive bool, limit int) ([]
 }
 
 func dbListFolderFiltered(db *sql.DB, pid, folder string, recursive bool, limit int, allow func(*File) bool) ([]*File, error) {
-	folder = normaliseFolder(folder)
-	if limit <= 0 {
-		limit = 200
-	}
-	var rows *sql.Rows
-	var err error
-	if recursive {
-		q := `SELECT ` + fileSelectColumns + ` FROM files WHERE project_id = ? AND folder LIKE ?
-			 AND deleted_at IS NULL ORDER BY folder, name`
-		args := []any{pid, folder + "%"}
-		if allow == nil {
-			q += ` LIMIT ?`
-			args = append(args, limit)
-		}
-		rows, err = db.Query(q, args...)
-	} else {
-		q := `SELECT ` + fileSelectColumns + ` FROM files WHERE project_id = ? AND folder = ?
-			 AND deleted_at IS NULL ORDER BY name`
-		args := []any{pid, folder}
-		if allow == nil {
-			q += ` LIMIT ?`
-			args = append(args, limit)
-		}
-		rows, err = db.Query(q, args...)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]*File, 0, limit)
-	for rows.Next() {
-		f, err := scanFile(rows, false)
-		if err != nil {
-			return nil, err
-		}
-		if allow != nil && !allow(f) {
-			continue
-		}
-		out = append(out, f)
-		if len(out) >= limit {
-			break
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for _, f := range out {
-		populateFileURL(f)
-	}
-	return out, nil
+	return dbSearchFiltered(db, pid, searchOpts{Folder: normaliseFolder(folder), Recursive: recursive, SortByName: true, Limit: limit}, allow)
 }
 
 // dbFolderHasFiles reports whether any non-deleted file exists at
@@ -2488,63 +2371,54 @@ func dbListChildFolders(db *sql.DB, pid, parent string) ([]string, error) {
 }
 
 func dbListChildFolderInfos(db *sql.DB, pid, parent string) ([]FolderInfo, error) {
-	parent = normaliseFolder(parent)
-	rows, err := db.Query(
-		`SELECT folder, COALESCE(created_at,''), COALESCE(updated_at,''), COALESCE(size_bytes,0)
-		 FROM files
-		 WHERE project_id = ? AND folder LIKE ? AND folder != ? AND deleted_at IS NULL
-		 ORDER BY folder`,
-		pid, parent+"%", parent)
+	parent, err := validateFolder(parent)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`WITH descendants AS (
+ SELECT substr(folder,length(?)+1) AS suffix,min(created_at) AS created_at,max(updated_at) AS updated_at,count(*) AS file_count,sum(size_bytes) AS size_bytes FROM files
+ WHERE project_id=? AND folder>=? AND folder<? AND substr(folder,1,length(?))=? AND folder!=? AND deleted_at IS NULL
+ GROUP BY folder
+ ), children AS (SELECT substr(suffix,1,instr(suffix,'/')-1) AS child,created_at,updated_at,file_count,size_bytes FROM descendants)
+ SELECT child,COALESCE(min(created_at),''),COALESCE(max(updated_at),''),sum(file_count),COALESCE(sum(size_bytes),0) FROM children WHERE child!='' GROUP BY child ORDER BY child`, parent, pid, parent, parent+"\U0010ffff", parent, parent, parent)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	seen := map[string]int{}
 	out := []FolderInfo{}
 	for rows.Next() {
-		var folder, createdAt, updatedAt string
-		var sizeBytes int64
-		if err := rows.Scan(&folder, &createdAt, &updatedAt, &sizeBytes); err != nil {
-			continue
+		var f FolderInfo
+		if err = rows.Scan(&f.Name, &f.CreatedAt, &f.UpdatedAt, &f.FileCount, &f.SizeBytes); err != nil {
+			return nil, err
 		}
-		// Take the first path segment after parent.
-		rel := strings.TrimPrefix(folder, parent)
-		if rel == "" {
-			continue
-		}
-		seg := rel
-		if i := strings.IndexByte(rel, '/'); i >= 0 {
-			seg = rel[:i]
-		}
-		if seg == "" {
-			continue
-		}
-		idx, ok := seen[seg]
-		if !ok {
-			path := parent + seg + "/"
-			idx = len(out)
-			seen[seg] = idx
-			out = append(out, FolderInfo{
-				Name:      seg,
-				Path:      path,
-				CreatedAt: createdAt,
-				UpdatedAt: updatedAt,
-			})
-		}
-		info := &out[idx]
-		info.FileCount++
-		info.SizeBytes += sizeBytes
-		if createdAt != "" && (info.CreatedAt == "" || createdAt < info.CreatedAt) {
-			info.CreatedAt = createdAt
-		}
-		if updatedAt != "" && (info.UpdatedAt == "" || updatedAt > info.UpdatedAt) {
-			info.UpdatedAt = updatedAt
-		}
+		f.Path = parent + f.Name + "/"
+		out = append(out, f)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func dbUpdate(db *sql.DB, pid string, id int64, updates map[string]any) (*File, error) {
+	catalogMu.Lock()
+	defer catalogMu.Unlock()
+	if raw, ok := updates["folder"].(string); ok {
+		v, e := validateFolder(raw)
+		if e != nil {
+			return nil, e
+		}
+		updates["folder"] = v
+	}
+	if raw, ok := updates["name"].(string); ok {
+		v, e := validateFilename(raw)
+		if e != nil {
+			return nil, e
+		}
+		updates["name"] = v
+	}
+	if raw, ok := updates["visibility"].(string); ok {
+		if e := validateVisibility(raw); e != nil {
+			return nil, e
+		}
+	}
 	allowed := map[string]bool{
 		"name": true, "folder": true, "tags": true,
 		"visibility": true, "metadata": true,
@@ -2561,18 +2435,31 @@ func dbUpdate(db *sql.DB, pid string, id int64, updates map[string]any) (*File, 
 	if len(sets) == 0 {
 		return dbGetByID(db, pid, id)
 	}
+	if vis, ok := updates["visibility"].(string); ok && vis != "public" {
+		sets = append(sets, "share_generation = share_generation + 1")
+	}
 	sets = append(sets, "updated_at = CURRENT_TIMESTAMP")
 	args = append(args, id, pid)
 	_, err := db.Exec(
-		`UPDATE files SET `+strings.Join(sets, ", ")+` WHERE id = ? AND project_id = ?`,
+		`UPDATE files SET `+strings.Join(sets, ", ")+` WHERE id = ? AND project_id = ? AND deleted_at IS NULL`,
 		args...)
 	if err != nil {
 		return nil, err
 	}
-	return dbGetByID(db, pid, id)
+	f, err := dbGetByID(db, pid, id)
+	if err == nil {
+		emitFileEvent(globalCtx, "file.updated", f, false)
+	}
+	return f, err
 }
 
 func dbRenameFolder(db *sql.DB, pid, from, to string) ([]*File, error) {
+	return dbRenameFolderAuthorized(db, pid, from, to, nil)
+}
+
+func dbRenameFolderAuthorized(db *sql.DB, pid, from, to string, allow func(string) error) ([]*File, error) {
+	catalogMu.Lock()
+	defer catalogMu.Unlock()
 	from = normaliseFolder(from)
 	to = normaliseFolder(to)
 	tx, err := db.Begin()
@@ -2580,16 +2467,40 @@ func dbRenameFolder(db *sql.DB, pid, from, to string) ([]*File, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
+	if allow != nil {
+		rows, e := tx.Query(`SELECT DISTINCT folder FROM files WHERE project_id=? AND deleted_at IS NULL AND substr(folder,1,length(?))=?`, pid, from, from)
+		if e != nil {
+			return nil, e
+		}
+		for rows.Next() {
+			var folder string
+			if e = rows.Scan(&folder); e != nil {
+				rows.Close()
+				return nil, e
+			}
+			for _, target := range []string{folder, to + strings.TrimPrefix(folder, from)} {
+				if e = allow(target); e != nil {
+					rows.Close()
+					return nil, e
+				}
+			}
+		}
+		e = rows.Err()
+		rows.Close()
+		if e != nil {
+			return nil, e
+		}
+	}
 	// One set-based update replaces the former SELECT + one UPDATE per
 	// file + one reload per file. RETURNING preserves the response/event
 	// payload without additional database round trips.
 	rows, err := tx.Query(
 		`UPDATE files
-		 SET folder = ? || substr(folder, ?), updated_at = CURRENT_TIMESTAMP
+		 SET folder = ? || substr(folder, length(?)+1), updated_at = CURRENT_TIMESTAMP
 		 WHERE project_id = ? AND deleted_at IS NULL
-		   AND (folder = ? OR substr(folder, 1, ?) = ?)
+		   AND (folder = ? OR substr(folder, 1, length(?)) = ?)
 		 RETURNING `+fileSelectColumns,
-		to, len(from)+1, pid, from, len(from), from,
+		to, from, pid, from, from, from,
 	)
 	if err != nil {
 		return nil, err
@@ -2648,42 +2559,48 @@ func dbHardDelete(db *sql.DB, pid string, id int64) error {
 //
 // Returns hard=true when bytes were physically removed.
 func deleteFile(ctx *sdk.AppCtx, pid string, id int64, keepRecord bool) (bool, error) {
-	prior, _ := dbGetByID(ctx.AppDB(), pid, id)
-	if prior == nil {
-		// Already gone; treat as success so the caller doesn't
-		// loop on a stale view of the catalog.
-		return false, nil
-	}
-
-	if keepRecord {
-		if err := dbSoftDelete(ctx.AppDB(), pid, id); err != nil {
-			return false, err
-		}
-		emitFileEvent(ctx, "file.deleted", prior, false)
-		return false, nil
-	}
-
-	if err := dbHardDelete(ctx.AppDB(), pid, id); err != nil {
+	catalogMu.Lock()
+	prior, err := scanFile(ctx.AppDB().QueryRow(`SELECT `+fileSelectColumns+` FROM files WHERE id=? AND project_id=?`, id, pid), false)
+	if err != nil || prior == nil {
+		catalogMu.Unlock()
 		return false, err
 	}
-	// Best-effort blob removal via the backend. Failure here doesn't
-	// roll back the row deletion (rolling back would re-introduce a
-	// row pointing at potentially-already-gone bytes — worse). The
-	// blob becomes an orphan a future sweep can reclaim.
+	if keepRecord {
+		err = dbSoftDelete(ctx.AppDB(), pid, id)
+		catalogMu.Unlock()
+		if err == nil {
+			emitFileEvent(ctx, "file.deleted", prior, false)
+		}
+		return false, err
+	}
 	key := objectKey(prior.SHA256, prior.StorageKey)
-	if err := backend().Delete(context.Background(), key); err != nil {
-		ctx.Logger().Warn("blob removal failed; row deleted but bytes remain",
-			"id", id, "key", key, "err", err)
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		catalogMu.Unlock()
+		return false, err
+	}
+	_, err = tx.Exec(`INSERT INTO blob_cleanup(object_key) VALUES(?) ON CONFLICT(object_key) DO UPDATE SET not_before=0`, key)
+	if err == nil {
+		_, err = tx.Exec(`DELETE FROM files WHERE id=? AND project_id=?`, id, pid)
+	}
+	if err == nil {
+		err = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	catalogMu.Unlock()
+	if err != nil {
+		return false, err
 	}
 	emitFileEvent(ctx, "file.deleted", prior, false)
-	return true, nil
+	return cleanupBlob(ctx, key), nil
 }
 
 // ─── Signed URL ────────────────────────────────────────────────────
 
 func signFile(id int64, expires int64) string {
 	mac := hmac.New(sha256.New, signingKey())
-	fmt.Fprintf(mac, "%d:%d", id, expires)
+	fmt.Fprintf(mac, "storage-share:v2:%d:%d:%s:%s", id, expires, os.Getenv("APTEVA_INSTALL_ID"), shareGeneration(id))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -2703,8 +2620,8 @@ func verifySignature(id int64, expires int64, sig string) bool {
 // URL therefore cannot be rewritten into a proxy URL.
 func signProxyFile(id int64, projectID string, expires int64, disposition ContentDisposition) string {
 	mac := hmac.New(sha256.New, signingKey())
-	fmt.Fprintf(mac, "storage-proxy:v1:%d:%d:%d:%s:%s",
-		id, expires, len(projectID), projectID, disposition)
+	fmt.Fprintf(mac, "storage-proxy:v2:%d:%d:%d:%s:%s:%s:%s",
+		id, expires, len(projectID), projectID, disposition, os.Getenv("APTEVA_INSTALL_ID"), shareGeneration(id))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -2720,12 +2637,34 @@ func verifyProxySignature(id int64, projectID string, expires int64, disposition
 // value across this sidecar's lifetime; rotates when the platform
 // re-spawns. v0.2 may move to a per-install key persisted in app DB.
 func signingKey() []byte {
-	tok := os.Getenv("APTEVA_APP_TOKEN")
-	if tok == "" {
-		tok = "storage-app-default-secret"
+	if globalCtx == nil || globalCtx.AppDB() == nil {
+		return ephemeralSigningKey
 	}
-	h := sha256.Sum256([]byte("apteva-storage-sign:" + tok))
-	return h[:]
+	var key string
+	if err := globalCtx.AppDB().QueryRow(`SELECT value FROM storage_state WHERE key='signing_key'`).Scan(&key); err == nil {
+		return []byte(key)
+	}
+	candidate := uuid.NewString() + uuid.NewString()
+	if _, err := globalCtx.AppDB().Exec(`INSERT INTO storage_state(key,value) VALUES('signing_key',?) ON CONFLICT(key) DO NOTHING`, candidate); err != nil {
+		return ephemeralSigningKey
+	}
+	if err := globalCtx.AppDB().QueryRow(`SELECT value FROM storage_state WHERE key='signing_key'`).Scan(&key); err != nil {
+		return ephemeralSigningKey
+	}
+	return []byte(key)
+}
+
+var ephemeralSigningKey = []byte(uuid.NewString() + uuid.NewString())
+
+func shareGeneration(id int64) string {
+	if globalCtx == nil || globalCtx.AppDB() == nil {
+		return "0"
+	}
+	var generation string
+	if err := globalCtx.AppDB().QueryRow(`SELECT project_id||':'||share_generation FROM files WHERE id=? AND deleted_at IS NULL`, id).Scan(&generation); err != nil {
+		return "missing"
+	}
+	return generation
 }
 
 // ─── Misc helpers ──────────────────────────────────────────────────
@@ -2884,6 +2823,9 @@ func defaultSignedTTL(ctx *sdk.AppCtx) int {
 	if n <= 0 {
 		return 86400
 	}
+	if n > 7*24*3600 {
+		n = 7 * 24 * 3600
+	}
 	return n
 }
 
@@ -2896,9 +2838,8 @@ func maxUploadBytes(ctx *sdk.AppCtx) int64 {
 	if mb <= 0 {
 		mb = 100
 	}
-	const maxInt64 = int64(^uint64(0) >> 1)
-	if mb > maxInt64/(1024*1024) {
-		return maxInt64
+	if mb > 10240 {
+		mb = 10240
 	}
 	return mb * 1024 * 1024
 }

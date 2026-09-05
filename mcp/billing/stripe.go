@@ -49,7 +49,7 @@ func requireProcessor(ctx *sdk.AppCtx) (*sdk.BoundIntegration, error) {
 // executeStripe runs a Stripe integration tool by its catalog name
 // (create_checkout_session, create_customer, etc.) and decodes the
 // upstream JSON response into `out`.
-func executeStripe(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, tool string, input map[string]any, out any) error {
+func executeStripeRaw(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, tool string, input map[string]any, out any) error {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, input)
 	if err != nil {
 		return fmt.Errorf("stripe %s: %w", tool, err)
@@ -132,10 +132,11 @@ func ensureStripeWebhook(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) error {
 			"checkout.session.expired",
 			"payment_intent.succeeded",
 			"payment_intent.payment_failed",
+			"payment_intent.canceled",
 			"setup_intent.succeeded",
 			"setup_intent.setup_failed",
 			"payment_method.detached",
-			"charge.refunded",
+			"charge.refunded", "refund.created", "refund.updated", "refund.failed",
 		},
 	})
 	if err != nil {
@@ -190,16 +191,19 @@ func (a *App) createStripeSetupSession(ctx *sdk.AppCtx, pid string, cust *Custom
 		"apteva_set_default": strconv.FormatBool(req.SetDefault),
 	})
 	input := map[string]any{
-		"mode":                 "setup",
-		"customer":             stripeCustomerID,
-		"payment_method_types": req.PaymentMethodTypes,
-		"success_url":          successURL,
-		"cancel_url":           cancelURL,
-		"client_reference_id":  fmt.Sprintf("cust_%d_setup", cust.ID),
-		"metadata":             metadata,
+		"mode":     "setup",
+		"customer": stripeCustomerID,
+
+		"success_url":         successURL,
+		"cancel_url":          cancelURL,
+		"client_reference_id": fmt.Sprintf("cust_%d_setup", cust.ID),
+		"metadata":            metadata,
 		"setup_intent_data": map[string]any{
 			"metadata": metadata,
 		},
+	}
+	for i, method := range req.PaymentMethodTypes {
+		input[fmt.Sprintf("payment_method_types[%d]", i)] = method
 	}
 	var sess struct {
 		ID          string `json:"id"`
@@ -237,8 +241,33 @@ func ensureStripeCustomer(ctx *sdk.AppCtx, pid string, cust *Customer, bound *sd
 	if cust == nil {
 		return "", errors.New("customer required")
 	}
-	if strings.TrimSpace(cust.ExternalID) != "" {
-		return cust.ExternalID, nil
+	if bound == nil {
+		return "", errors.New("payment_processor integration required")
+	}
+	unlock := operationLock(fmt.Sprintf("customer-provider:%d:%d", cust.ID, bound.ConnectionID))
+	defer unlock()
+	var providerID string
+	if err := ctx.AppDB().QueryRow("SELECT provider_id FROM billing_customer_provider_ids WHERE customer_id=? AND connection_id=?", cust.ID, bound.ConnectionID).Scan(&providerID); err == nil {
+		return providerID, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	// Legacy external IDs must be verified on this connection before adopting them.
+	if cust.ExternalID != "" {
+		var remote struct {
+			ID      string `json:"id"`
+			Deleted bool   `json:"deleted"`
+		}
+		if err := executeStripeRaw(ctx, bound, "get_customer", map[string]any{"customer_id": cust.ExternalID}, &remote); err != nil {
+			return "", fmt.Errorf("verify legacy customer: %w", err)
+		}
+		if remote.ID != cust.ExternalID || remote.Deleted {
+			return "", errors.New("legacy Stripe customer no longer exists")
+		}
+		if _, err := ctx.AppDB().Exec("INSERT INTO billing_customer_provider_ids(customer_id,connection_id,provider_id) VALUES(?,?,?)", cust.ID, bound.ConnectionID, remote.ID); err != nil {
+			return "", err
+		}
+		return remote.ID, nil
 	}
 	input := map[string]any{
 		"email": cust.Email,
@@ -260,10 +289,22 @@ func ensureStripeCustomer(ctx *sdk.AppCtx, pid string, cust *Customer, bound *sd
 	if out.ID == "" {
 		return "", errors.New("Stripe returned no customer id")
 	}
-	if _, err := ctx.AppDB().Exec(
-		`UPDATE customers SET external_id = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ? AND project_id = ?`, out.ID, cust.ID, pid); err != nil {
-		ctx.Logger().Warn("stripe customer id persistence failed", "customer_id", cust.ID, "err", err.Error())
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("INSERT INTO billing_customer_provider_ids(customer_id,connection_id,provider_id) VALUES(?,?,?) ON CONFLICT(customer_id,connection_id) DO UPDATE SET provider_id=excluded.provider_id", cust.ID, bound.ConnectionID, out.ID); err != nil {
+		return "", err
+	}
+	if _, err = tx.Exec("UPDATE customers SET external_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?", out.ID, cust.ID, pid); err != nil {
+		return "", err
+	}
+	if err = tx.Commit(); err != nil {
+		return "", err
+	}
+	if err = finishProviderOperation(ctx.AppDB(), out.ID); err != nil {
+		return "", err
 	}
 	return out.ID, nil
 }
@@ -293,6 +334,9 @@ func (a *App) toolInvoicesCreatePaymentSession(ctx *sdk.AppCtx, args map[string]
 	id := int64Arg(args, "invoice_id")
 	if id == 0 {
 		return nil, errors.New("invoice_id required")
+	}
+	if out, found, err := a.replayPayment(ctx, pid, id, "create_checkout_session", args); found {
+		return out, err
 	}
 	bound, err := requireProcessor(ctx)
 	if err != nil {
@@ -329,7 +373,7 @@ func (a *App) toolInvoicesCreatePaymentSession(ctx *sdk.AppCtx, args map[string]
 	}
 	idempotencyKey := strings.TrimSpace(strArg(args, "idempotency_key"))
 	if idempotencyKey == "" {
-		idempotencyKey = fmt.Sprintf("invoice-%d-%d", inv.ID, time.Now().UTC().UnixNano())
+		idempotencyKey = fmt.Sprintf("invoice-%d-balance-%d", inv.ID, inv.TotalCents-inv.AmountPaidCents)
 	}
 	if len(idempotencyKey) > 255 {
 		return nil, errors.New("idempotency_key must be at most 255 characters")
@@ -375,6 +419,7 @@ func (a *App) toolInvoicesCreatePaymentSession(ctx *sdk.AppCtx, args map[string]
 			"apteva_customer_id":    fmt.Sprintf("%d", inv.CustomerID),
 			"apteva_project_id":     pid,
 			"apteva_invoice_number": inv.Number,
+			"apteva_set_default":    strconv.FormatBool(setDefaultPaymentMethod),
 		},
 	}
 	if expiresAt := int64Arg(args, "expires_at"); expiresAt > 0 {
@@ -551,6 +596,9 @@ func (a *App) toolInvoicesCreatePaymentIntent(ctx *sdk.AppCtx, args map[string]a
 	if len(key) > 255 {
 		return nil, errors.New("idempotency_key must be at most 255 characters")
 	}
+	if out, found, err := a.replayPayment(ctx, pid, invoiceID, "create_payment_intent", args); found {
+		return out, err
+	}
 	bound, err := requireProcessor(ctx)
 	if err != nil {
 		return nil, err
@@ -614,7 +662,7 @@ func (a *App) toolInvoicesCreatePaymentIntent(ctx *sdk.AppCtx, args map[string]a
 		"amount": amountDue, "currency": strings.ToLower(inv.Currency), "customer": providerCustomerID,
 		"confirm": false, "automatic_payment_methods": map[string]any{"enabled": true}, "idempotency_key": key,
 		"description": firstString(inv.Number, fmt.Sprintf("Invoice #%d", inv.ID)),
-		"metadata":    map[string]any{"apteva_project_id": pid, "apteva_invoice_id": fmt.Sprint(inv.ID), "apteva_customer_id": fmt.Sprint(inv.CustomerID), "apteva_idempotency_key": key},
+		"metadata":    map[string]any{"apteva_project_id": pid, "apteva_invoice_id": fmt.Sprint(inv.ID), "apteva_customer_id": fmt.Sprint(inv.CustomerID), "apteva_idempotency_key": key, "apteva_set_default": strconv.FormatBool(setDefaultPaymentMethod)},
 	}
 	if savePaymentMethod {
 		input["setup_future_usage"] = "off_session"
@@ -690,9 +738,10 @@ func (a *App) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 	// Verify via the platform connection layer and parse only the
 	// authenticated event it returns.
 	var event struct {
-		ID   string `json:"id"`
-		Type string `json:"type"`
-		Data struct {
+		Created int64  `json:"created"`
+		ID      string `json:"id"`
+		Type    string `json:"type"`
+		Data    struct {
 			Object json.RawMessage `json:"object"`
 		} `json:"data"`
 	}
@@ -716,7 +765,23 @@ func (a *App) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.dispatchStripeEvent(ctx, event.ID, event.Type, event.Data.Object); err != nil {
+	if event.ID == "" || event.Type == "" {
+		httpErr(w, 400, "event id and type required")
+		return
+	}
+	bound := ctx.IntegrationFor("payment_processor")
+	var eventObject map[string]any
+	if err := json.Unmarshal(event.Data.Object, &eventObject); err != nil {
+		httpErr(w, 400, "invalid event object")
+		return
+	}
+	eventObject["_billing_event_created"] = event.Created
+	event.Data.Object, _ = json.Marshal(eventObject)
+	if _, err := ctx.AppDB().Exec("INSERT OR IGNORE INTO billing_webhook_inbox(id,connection_id,event_type,object_json,created_at) VALUES(?,?,?,?,?)", event.ID, bound.ConnectionID, event.Type, string(event.Data.Object), time.Now().Unix()); err != nil {
+		httpErr(w, 500, "cannot persist verified event")
+		return
+	}
+	if err := a.drainWebhookInbox(ctx); err != nil {
 		ctx.Logger().Warn("stripe webhook dispatch failed",
 			"event_id", event.ID, "type", event.Type, "err", err.Error())
 		httpErr(w, http.StatusInternalServerError, "webhook processing failed")
@@ -741,7 +806,7 @@ func (a *App) dispatchStripeEvent(ctx *sdk.AppCtx, eventID, eventType string, ob
 		return a.handleCheckoutSessionTerminal(ctx, obj, "expired")
 	case "payment_intent.succeeded":
 		return a.handlePaymentIntent(ctx, obj)
-	case "payment_intent.payment_failed":
+	case "payment_intent.payment_failed", "payment_intent.canceled":
 		return a.handlePaymentIntent(ctx, obj)
 	case "setup_intent.succeeded":
 		return a.handleSetupIntentSucceeded(ctx, obj)
@@ -749,6 +814,8 @@ func (a *App) dispatchStripeEvent(ctx *sdk.AppCtx, eventID, eventType string, ob
 		return a.handleSetupIntentFailed(ctx, obj)
 	case "payment_method.detached":
 		return a.handlePaymentMethodDetached(ctx, obj)
+	case "refund.created", "refund.updated", "refund.failed":
+		return a.handleRefundObject(ctx, obj)
 	case "charge.refunded":
 		return a.handleChargeRefunded(ctx, obj)
 	case "invoice.paid":
@@ -788,7 +855,7 @@ func (a *App) handlePaymentIntent(ctx *sdk.AppCtx, obj json.RawMessage) error {
 	if intent.Currency != "" && !strings.EqualFold(intent.Currency, expectedCurrency) {
 		return fmt.Errorf("payment intent %s currency mismatch: got %s want %s", intent.ID, intent.Currency, expectedCurrency)
 	}
-	if sessionStatus == "completed" {
+	if sessionStatus == "completed" && intent.Status != "succeeded" {
 		return nil
 	}
 	inv, err := dbInvoiceGetByID(ctx.AppDB(), pid, invoiceID)
@@ -799,7 +866,7 @@ func (a *App) handlePaymentIntent(ctx *sdk.AppCtx, obj json.RawMessage) error {
 	switch intent.Status {
 	case "succeeded":
 		now := nowRFC3339()
-		pay, paid, err := dbPaymentRecord(ctx.AppDB(), pid, invoiceID, expectedAmount, "stripe", intent.ID, now,
+		pay, paid, err := dbPaymentRecord(ctx.AppDB(), pid, invoiceID, expectedAmount, "stripe", intent.ID, providerReceivedAt(intent.EventCreated),
 			fmt.Sprintf("Stripe PaymentIntent %s", intent.ID), "system:stripe-webhook")
 		if err != nil {
 			return err
@@ -813,13 +880,20 @@ func (a *App) handlePaymentIntent(ctx *sdk.AppCtx, obj json.RawMessage) error {
 				return err
 			}
 		}
+		if err := persistPaymentConnection(projectCtx, pay); err != nil {
+			return err
+		}
+		if err := finishProviderOperation(ctx.AppDB(), intent.ID); err != nil {
+			return err
+		}
 		emitInvoicePaid(projectCtx, paid, pay)
 		ctx.Logger().Info("stripe payment intent recorded", "invoice_id", invoiceID, "payment_id", pay.ID, "intent", intent.ID)
-	case "requires_payment_method", "canceled":
+	case "canceled":
 		if _, err := ctx.AppDB().Exec(`UPDATE billing_checkout_sessions SET status='failed' WHERE provider='stripe' AND provider_session_id=?`, intent.ID); err != nil {
 			return err
 		}
 		emitInvoice(projectCtx, "invoice.payment_failed", inv)
+		return finishProviderOperation(ctx.AppDB(), intent.ID)
 	}
 	return nil
 }
@@ -840,7 +914,10 @@ func (a *App) handleCheckoutSessionTerminal(ctx *sdk.AppCtx, obj json.RawMessage
 		 WHERE provider = 'stripe' AND provider_session_id = ? AND status = 'pending'`,
 		status, sess.ID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return finishProviderOperation(ctx.AppDB(), sess.ID)
 }
 
 // handleCheckoutCompleted is the payment-confirmation path. The
@@ -852,6 +929,7 @@ func (a *App) handleCheckoutSessionTerminal(ctx *sdk.AppCtx, obj json.RawMessage
 // no-op.
 func (a *App) handleCheckoutCompleted(ctx *sdk.AppCtx, obj json.RawMessage) error {
 	var sess struct {
+		EventCreated      int64             `json:"_billing_event_created"`
 		ID                string            `json:"id"`
 		AmountTotal       int64             `json:"amount_total"`
 		Currency          string            `json:"currency"`
@@ -907,7 +985,7 @@ func (a *App) handleCheckoutCompleted(ctx *sdk.AppCtx, obj json.RawMessage) erro
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	pay, inv, err := dbPaymentRecord(ctx.AppDB(), pid, invoiceID, sess.AmountTotal,
-		"stripe", externalID, now,
+		"stripe", externalID, providerReceivedAt(sess.EventCreated),
 		fmt.Sprintf("Stripe Checkout Session %s", sess.ID),
 		"system:stripe-webhook")
 	if err != nil {
@@ -925,6 +1003,12 @@ func (a *App) handleCheckoutCompleted(ctx *sdk.AppCtx, obj json.RawMessage) erro
 		); err != nil {
 			return fmt.Errorf("save checkout payment method: %w", err)
 		}
+	}
+	if err := persistPaymentConnection(ctx, pay); err != nil {
+		return err
+	}
+	if err := finishProviderOperation(ctx.AppDB(), sess.ID); err != nil {
+		return err
 	}
 	emitInvoicePaid(ctx, inv, pay)
 	ctx.Logger().Info("stripe payment recorded",
@@ -949,9 +1033,19 @@ func (a *App) saveCheckoutPaymentMethod(ctx *sdk.AppCtx, pid string, customerID 
 	if intent.PaymentMethod == "" {
 		return fmt.Errorf("payment intent %s has no payment_method", paymentIntentID)
 	}
+	var detached int
+	if err := ctx.AppDB().QueryRow("SELECT count(*) FROM billing_detached_methods WHERE provider_id=?", intent.PaymentMethod).Scan(&detached); err != nil {
+		return err
+	}
+	if detached > 0 {
+		return nil
+	}
 	pm, err := fetchStripePaymentMethod(ctx, bound, intent.PaymentMethod)
 	if err != nil {
 		return err
+	}
+	if providerCustomerID == "" || pm.ProviderCustomerID != providerCustomerID || intent.Customer != providerCustomerID {
+		return errors.New("saved method customer does not match checkout customer")
 	}
 	pm.ProjectID = pid
 	pm.CustomerID = customerID
@@ -968,6 +1062,9 @@ func (a *App) saveCheckoutPaymentMethod(ctx *sdk.AppCtx, pid string, customerID 
 	if err != nil {
 		return err
 	}
+	if _, err := ctx.AppDB().Exec("INSERT OR REPLACE INTO billing_method_connections(method_id,connection_id) VALUES(?,?)", saved.ID, bound.ConnectionID); err != nil {
+		return err
+	}
 	emitPaymentMethod(ctx, "payment_method.attached", saved)
 	return nil
 }
@@ -981,8 +1078,26 @@ func (a *App) handleCollectionPaymentIntent(ctx *sdk.AppCtx, obj json.RawMessage
 		return nil
 	}
 	attempt, err := dbCollectionAttemptByIntent(ctx.AppDB(), "stripe", intent.ID)
-	if err != nil || attempt == nil {
+	if err != nil {
 		return err
+	}
+	if attempt == nil {
+		aid := atoi64(intent.Metadata["apteva_collection_attempt"])
+		pid := intent.Metadata["apteva_project_id"]
+		if aid != 0 && pid != "" {
+			attempt, err = dbCollectionAttemptGet(ctx.AppDB(), pid, aid)
+			if err != nil {
+				return err
+			}
+			if attempt != nil {
+				if _, err = ctx.AppDB().Exec("UPDATE billing_collection_attempts SET provider_payment_intent_id=? WHERE id=? AND provider_payment_intent_id IS NULL", intent.ID, aid); err != nil {
+					return err
+				}
+			}
+		}
+		if attempt == nil {
+			return errors.New("payment intent has no persisted billing correlation yet")
+		}
 	}
 	inv, err := dbInvoiceGetByID(ctx.AppDB(), attempt.ProjectID, attempt.InvoiceID)
 	if err != nil || inv == nil {
@@ -1016,6 +1131,23 @@ func (a *App) handleSetupIntentSucceeded(ctx *sdk.AppCtx, obj json.RawMessage) e
 	if si.PaymentMethod == "" {
 		return fmt.Errorf("setup_intent %s has no payment_method", si.ID)
 	}
+	var storedPID string
+	var storedCID int64
+	if err := ctx.AppDB().QueryRow(`SELECT project_id,customer_id FROM billing_setup_sessions WHERE provider_customer_id=? AND provider_setup_intent_id=?`, si.Customer, si.ID).Scan(&storedPID, &storedCID); err != nil {
+		return errors.New("setup intent awaiting persisted session correlation")
+	}
+	if storedPID != pid {
+		return errors.New("setup project mismatch")
+	}
+	customerID = storedCID
+
+	var detached int
+	if err := ctx.AppDB().QueryRow("SELECT count(*) FROM billing_detached_methods WHERE provider_id=?", si.PaymentMethod).Scan(&detached); err != nil {
+		return err
+	}
+	if detached > 0 {
+		return nil
+	}
 	pm := &PaymentMethod{
 		ProjectID:               pid,
 		CustomerID:              customerID,
@@ -1031,6 +1163,9 @@ func (a *App) handleSetupIntentSucceeded(ctx *sdk.AppCtx, obj json.RawMessage) e
 	}
 	if bound := ctx.IntegrationFor("payment_processor"); bound != nil {
 		if fetched, err := fetchStripePaymentMethod(ctx, bound, si.PaymentMethod); err == nil && fetched != nil {
+			if fetched.ProviderCustomerID != si.Customer {
+				return errors.New("setup payment method customer mismatch")
+			}
 			pm.ProviderCustomerID = firstString(pm.ProviderCustomerID, fetched.ProviderCustomerID)
 			pm.Type = firstString(fetched.Type, pm.Type)
 			pm.DisplayBrand = fetched.DisplayBrand
@@ -1041,7 +1176,7 @@ func (a *App) handleSetupIntentSucceeded(ctx *sdk.AppCtx, obj json.RawMessage) e
 			pm.Currency = fetched.Currency
 			pm.DelayedNotification = fetched.DelayedNotification
 		} else if err != nil {
-			ctx.Logger().Warn("stripe payment method fetch failed", "payment_method", si.PaymentMethod, "err", err.Error())
+			return fmt.Errorf("fetch setup payment method: %w", err)
 		}
 	}
 	if pm.Type == "sepa_debit" {
@@ -1054,6 +1189,11 @@ func (a *App) handleSetupIntentSucceeded(ctx *sdk.AppCtx, obj json.RawMessage) e
 	created, err := dbPaymentMethodUpsert(ctx.AppDB(), pm)
 	if err != nil {
 		return fmt.Errorf("save payment method: %w", err)
+	}
+	if b := ctx.IntegrationFor("payment_processor"); b != nil {
+		if _, err := ctx.AppDB().Exec("INSERT OR REPLACE INTO billing_method_connections(method_id,connection_id) VALUES(?,?)", created.ID, b.ConnectionID); err != nil {
+			return err
+		}
 	}
 	emitPaymentMethod(ctx, "payment_method.attached", created)
 	return nil
@@ -1082,6 +1222,9 @@ func (a *App) handlePaymentMethodDetached(ctx *sdk.AppCtx, obj json.RawMessage) 
 	}
 	if raw.ID == "" {
 		return nil
+	}
+	if _, err := ctx.AppDB().Exec("INSERT OR IGNORE INTO billing_detached_methods(provider_id) VALUES(?)", raw.ID); err != nil {
+		return err
 	}
 	pm, err := dbPaymentMethodByProviderID(ctx.AppDB(), "stripe", raw.ID)
 	if err != nil || pm == nil {
@@ -1152,94 +1295,34 @@ func fetchStripePaymentMethod(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, prov
 	return pm, nil
 }
 
-// handleChargeRefunded records a negative-amount payment row for a
-// refund. Stripe's charge.refunded event fires with the refund
-// amount in `amount_refunded` (cumulative). We record the DELTA
-// from the previous refund, but for v0.8.0 simplicity we just record
-// the full amount_refunded once with idempotency on the charge id.
+// Charge totals and individual refund events converge on the same source-payment ledger.
 func (a *App) handleChargeRefunded(ctx *sdk.AppCtx, obj json.RawMessage) error {
-	var charge struct {
-		ID             string            `json:"id"`
-		PaymentIntent  string            `json:"payment_intent"`
-		Amount         int64             `json:"amount"`
-		AmountRefunded int64             `json:"amount_refunded"`
-		Currency       string            `json:"currency"`
-		Metadata       map[string]string `json:"metadata"`
+	var c struct {
+		ID             string `json:"id"`
+		PaymentIntent  string `json:"payment_intent"`
+		AmountRefunded int64  `json:"amount_refunded"`
+		Currency       string `json:"currency"`
 		Refunds        struct {
-			Data []struct {
-				ID     string `json:"id"`
-				Amount int64  `json:"amount"`
-				Status string `json:"status"`
-			} `json:"data"`
+			Data []json.RawMessage `json:"data"`
 		} `json:"refunds"`
 	}
-	if err := json.Unmarshal(obj, &charge); err != nil {
-		return fmt.Errorf("decode charge: %w", err)
+	if err := json.Unmarshal(obj, &c); err != nil {
+		return err
 	}
-	if charge.AmountRefunded <= 0 {
-		return nil
+	if c.PaymentIntent == "" {
+		return errors.New("refund charge missing payment intent")
 	}
-	// Find invoice via payment_intent — we recorded the PI as the
-	// payment's external_id, so look it up.
-	if charge.PaymentIntent == "" {
-		return fmt.Errorf("charge %s has no payment_intent", charge.ID)
-	}
-	var invoiceID int64
-	var pid, paymentCurrency string
-	if err := ctx.AppDB().QueryRow(
-		`SELECT invoice_id, project_id, currency FROM payments
-		 WHERE method = 'stripe' AND external_id = ?
-		 LIMIT 1`,
-		charge.PaymentIntent).Scan(&invoiceID, &pid, &paymentCurrency); err != nil {
-		return fmt.Errorf("no payment found for payment_intent %s: %w", charge.PaymentIntent, err)
-	}
-	if charge.Currency != "" && !strings.EqualFold(charge.Currency, paymentCurrency) {
-		return fmt.Errorf("refund currency mismatch: got %s want %s", charge.Currency, paymentCurrency)
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	var inv *Invoice
-	recordedIndividual := false
-	for _, refund := range charge.Refunds.Data {
-		if refund.ID == "" || refund.Amount <= 0 || (refund.Status != "" && refund.Status != "succeeded") {
-			continue
-		}
-		recordedIndividual = true
-		refundExternalID := charge.ID + ":refund:" + refund.ID
-		_, current, err := dbPaymentRecord(ctx.AppDB(), pid, invoiceID, -refund.Amount,
-			"stripe", refundExternalID, now,
-			fmt.Sprintf("Stripe refund %s on %s", refund.ID, charge.ID),
-			"system:stripe-webhook")
-		if err != nil {
-			return fmt.Errorf("record refund %s: %w", refund.ID, err)
-		}
-		inv = current
-	}
-	if !recordedIndividual {
-		// Some API versions omit the expanded refunds list. Reconcile the
-		// cumulative amount_refunded against refund rows already stored for
-		// this charge and record only the delta.
-		var already int64
-		if err := ctx.AppDB().QueryRow(
-			`SELECT COALESCE(-SUM(amount_cents), 0) FROM payments
-			 WHERE method = 'stripe' AND project_id = ? AND invoice_id = ?
-			   AND (external_id = ? OR external_id LIKE ?)`,
-			pid, invoiceID, charge.ID+":refund", charge.ID+":refund:%").Scan(&already); err != nil {
+	for _, raw := range c.Refunds.Data {
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
 			return err
 		}
-		delta := charge.AmountRefunded - already
-		if delta <= 0 {
-			return nil
+		m["payment_intent"] = c.PaymentIntent
+		m["currency"] = c.Currency
+		b, _ := json.Marshal(m)
+		if err := a.storeRefundIdentity(ctx, b); err != nil {
+			return err
 		}
-		extID := fmt.Sprintf("%s:refund:%d", charge.ID, charge.AmountRefunded)
-		_, current, err := dbPaymentRecord(ctx.AppDB(), pid, invoiceID, -delta,
-			"stripe", extID, now,
-			fmt.Sprintf("Stripe cumulative refund on %s", charge.ID),
-			"system:stripe-webhook")
-		if err != nil {
-			return fmt.Errorf("record refund: %w", err)
-		}
-		inv = current
 	}
-	emitInvoice(ctx, "invoice.refunded", inv)
-	return nil
+	return a.reconcileRefundTotal(ctx, c.PaymentIntent, c.Currency, c.ID, c.AmountRefunded)
 }

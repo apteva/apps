@@ -25,6 +25,16 @@ func (s *LocalFileStore) ReadPage(slug, relPath string, offset, limit int) (*Rea
 		return nil, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file")
+	}
+	if info.Size() <= 1<<20 {
+		return cachedReadPage(f, full, relPath, info, offset, limit)
+	}
 	if offset <= 0 {
 		offset = 1
 	}
@@ -44,9 +54,11 @@ func (s *LocalFileStore) ReadPage(slug, relPath string, offset, limit int) (*Rea
 	var size int64
 	longLines := 0
 	lineWasTruncated := false
+	pendingLine := false
 	for {
 		fragment, readErr := reader.ReadSlice('\n')
 		if len(fragment) > 0 {
+			pendingLine = true
 			_, _ = hash.Write(fragment)
 			size += int64(len(fragment))
 			if line >= offset && line < offset+limit {
@@ -66,8 +78,9 @@ func (s *LocalFileStore) ReadPage(slug, relPath string, offset, limit int) (*Rea
 				}
 			}
 		}
-		lineComplete := readErr == nil || (errors.Is(readErr, io.EOF) && len(fragment) > 0)
+		lineComplete := readErr == nil || (errors.Is(readErr, io.EOF) && pendingLine)
 		if lineComplete {
+			pendingLine = false
 			total++
 			if line >= offset && line < offset+limit {
 				value, truncated := truncateLine(current.String(), maxReadLineChars)

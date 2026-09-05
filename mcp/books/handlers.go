@@ -113,7 +113,7 @@ func (a *App) handleBooksItem(w http.ResponseWriter, r *http.Request) {
 				httpErr(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			httpJSON(w, map[string]any{"nodes": nodeTree(nodes)})
+			httpJSON(w, map[string]any{"nodes": nodeTreeForList(nodes, r.URL.Query().Get("include_body") == "1")})
 		case http.MethodPost:
 			var n BookNode
 			if err := decodeJSON(r, &n); err != nil {
@@ -324,7 +324,7 @@ func (a *App) handleNodesItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusNotFound, "node not found")
 			return
 		}
-		httpJSON(w, map[string]any{"node": n})
+		httpJSON(w, map[string]any{"node": n, "body_sha256": nodeBodySHA256(n.BodyMarkdown)})
 	case http.MethodPatch:
 		var fields map[string]any
 		if err := decodeJSON(r, &fields); err != nil {
@@ -343,6 +343,27 @@ func (a *App) handleNodesItem(w http.ResponseWriter, r *http.Request) {
 		}
 		httpJSON(w, map[string]any{"deleted": true, "id": id})
 	case http.MethodPost:
+		if tail == "body" {
+			var fields map[string]any
+			if err := decodeJSON(r, &fields); err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			result, err := editNodeBody(
+				app.AppDB(), id, strArg(fields, "operation"), strArg(fields, "content"),
+				strArg(fields, "match"), strArg(fields, "expected_body_sha256"), strArg(fields, "change_summary"),
+			)
+			if errors.Is(err, errNodeEditConflict) {
+				httpErr(w, http.StatusConflict, err.Error())
+				return
+			}
+			if err != nil {
+				writeStoreErr(w, err, "node not found")
+				return
+			}
+			httpJSON(w, map[string]any{"updated": true, "edit": result})
+			return
+		}
 		var body struct {
 			ParentID *int64 `json:"parent_id"`
 			Position int    `json:"position"`

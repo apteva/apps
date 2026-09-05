@@ -37,11 +37,25 @@ func (p *recordingAppPlatform) CallAppResult(app, tool string, input map[string]
 	return nil
 }
 
+type eventTestPlatform struct {
+	tk.BasePlatformClient
+	project string
+	sent    atomic.Int32
+}
+
+func (p *eventTestPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error) {
+	return &sdk.PlatformInstance{ID: id, ProjectID: p.project}, nil
+}
+func (p *eventTestPlatform) SendEvent(int64, string) error { p.sent.Add(1); return nil }
+func (p *eventTestPlatform) GetGrants(int64) (*sdk.GrantsResponse, error) {
+	return &sdk.GrantsResponse{DefaultEffect: "allow"}, nil
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────
 
 func newTestCtx(t *testing.T, opts ...tk.Option) *sdk.AppCtx {
 	t.Helper()
-	full := append([]tk.Option{tk.WithProjectID("test-proj")}, opts...)
+	full := append([]tk.Option{tk.WithProjectID("test-proj"), tk.WithPlatform(&eventTestPlatform{project: "test-proj"})}, opts...)
 	return tk.NewAppCtx(t, "apteva.yaml", full...)
 }
 
@@ -598,7 +612,7 @@ func TestHTTPTargetTimeout_Resolution(t *testing.T) {
 	}
 }
 
-func TestDispatcher_EventTarget_NoPlatformClient_TestModeOK(t *testing.T) {
+func TestDispatcher_EventTarget_DeliveredThroughPlatform(t *testing.T) {
 	ctx := newTestCtx(t)
 	mustSchedule(t, ctx, map[string]any{
 		"name":     "remind",
@@ -647,8 +661,8 @@ func TestDispatcher_RandomAdvancesFromLogicalOccurrence(t *testing.T) {
 		t.Fatal(err)
 	}
 	afterFirst, _ := dbGetJob(ctx.AppDB(), "test-proj", j.ID)
-	if afterFirst.ScheduledFor != occurrences[1].Format(time.RFC3339) {
-		t.Fatalf("next occurrence=%q, want next deterministic slot %q", afterFirst.ScheduledFor, occurrences[1].Format(time.RFC3339))
+	if afterFirst.ScheduledFor != occurrences[1].UTC().Format(time.RFC3339) {
+		t.Fatalf("next occurrence=%q, want next deterministic slot %q", afterFirst.ScheduledFor, occurrences[1].UTC().Format(time.RFC3339))
 	}
 	if err := dispatchTick(context.Background(), ctx); err != nil {
 		t.Fatal(err)
@@ -857,7 +871,7 @@ func TestDispatcher_ExecutesBatchConcurrently(t *testing.T) {
 
 func TestDispatcher_IsolatesCurrentProject(t *testing.T) {
 	t.Setenv("APTEVA_PROJECT_ID", "")
-	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(&eventTestPlatform{project: "project-a"}))
 	for _, pid := range []string{"project-a", "project-b"} {
 		if _, err := dbScheduleJob(ctx.AppDB(), pid, map[string]any{
 			"name":     pid,

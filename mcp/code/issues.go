@@ -78,10 +78,15 @@ type IssueEvent struct {
 }
 
 type IssueDetail struct {
-	Issue    *Issue          `json:"issue"`
-	Comments []*IssueComment `json:"comments"`
-	Links    []*IssueLink    `json:"links"`
-	Events   []*IssueEvent   `json:"events"`
+	HistoryOffset int             `json:"history_offset"`
+	HistoryLimit  int             `json:"history_limit"`
+	CommentsTotal int             `json:"comments_total"`
+	EventsTotal   int             `json:"events_total"`
+	LinksTotal    int             `json:"links_total"`
+	Issue         *Issue          `json:"issue"`
+	Comments      []*IssueComment `json:"comments"`
+	Links         []*IssueLink    `json:"links"`
+	Events        []*IssueEvent   `json:"events"`
 }
 
 type IssueListOptions struct {
@@ -93,6 +98,8 @@ type IssueListOptions struct {
 	RepoSlug string
 	Q        string
 	Limit    int
+	Offset   int
+	Total    *int
 }
 
 type IssueCreateInput struct {
@@ -288,12 +295,24 @@ func dbQueryIssues(db *sql.DB, query string, args []any, opt IssueListOptions) (
 		like := "%" + opt.Q + "%"
 		args = append(args, like, like)
 	}
-	query += ` ORDER BY CASE i.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, i.updated_at DESC, i.number DESC`
+	if opt.Total != nil {
+		from := strings.Index(query, " FROM repo_issues i JOIN repositories")
+		if from < 0 {
+			return nil, errors.New("invalid issue query")
+		}
+		if err := db.QueryRow("SELECT COUNT(*)"+query[from:], args...).Scan(opt.Total); err != nil {
+			return nil, err
+		}
+	}
+	query += ` ORDER BY CASE i.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, i.updated_at DESC, i.number DESC, i.id DESC`
 	if opt.Limit <= 0 || opt.Limit > 200 {
 		opt.Limit = 100
 	}
-	query += ` LIMIT ?`
-	args = append(args, opt.Limit)
+	if opt.Offset < 0 {
+		opt.Offset = 0
+	}
+	query += ` LIMIT ? OFFSET ?`
+	args = append(args, opt.Limit, opt.Offset)
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -331,23 +350,32 @@ func dbGetIssueByNumber(db *sql.DB, projectID string, repoID int64, number int) 
 }
 
 func dbGetIssueDetail(db *sql.DB, projectID string, repoID int64, number int) (*IssueDetail, error) {
+	return dbGetIssueDetailPage(db, projectID, repoID, number, 0, 200)
+}
+func dbGetIssueDetailPage(db *sql.DB, projectID string, repoID int64, number, offset, limit int) (*IssueDetail, error) {
+	offset = max(0, offset)
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
 	iss, err := dbGetIssueByNumber(db, projectID, repoID, number)
 	if err != nil || iss == nil {
 		return nil, err
 	}
-	comments, err := dbListIssueComments(db, iss.ID)
+	comments, err := dbListIssueCommentsPage(db, iss.ID, offset, limit)
 	if err != nil {
 		return nil, err
 	}
-	links, err := dbListIssueLinks(db, iss.ID)
+	links, err := dbListIssueLinksPage(db, iss.ID, offset, limit)
 	if err != nil {
 		return nil, err
 	}
-	events, err := dbListIssueEvents(db, iss.ID)
+	events, err := dbListIssueEventsPage(db, iss.ID, offset, limit)
 	if err != nil {
 		return nil, err
 	}
-	return &IssueDetail{Issue: iss, Comments: comments, Links: links, Events: events}, nil
+	detail := &IssueDetail{Issue: iss, Comments: comments, Links: links, Events: events, HistoryOffset: offset, HistoryLimit: limit}
+	err = db.QueryRow(`SELECT (SELECT COUNT(*) FROM repo_issue_comments WHERE issue_id=?),(SELECT COUNT(*) FROM repo_issue_events WHERE issue_id=?),(SELECT COUNT(*) FROM repo_issue_links WHERE issue_id=?)`, iss.ID, iss.ID, iss.ID).Scan(&detail.CommentsTotal, &detail.EventsTotal, &detail.LinksTotal)
+	return detail, err
 }
 
 func dbUpdateIssue(db *sql.DB, iss *Issue, patch IssuePatch) (*Issue, error) {
@@ -665,7 +693,10 @@ func dbAddIssueComment(db *sql.DB, issueID int64, author, body string) (*IssueCo
 }
 
 func dbListIssueComments(db *sql.DB, issueID int64) ([]*IssueComment, error) {
-	rows, err := db.Query(`SELECT id, issue_id, author, body, created_at FROM repo_issue_comments WHERE issue_id = ? ORDER BY created_at ASC, id ASC`, issueID)
+	return dbListIssueCommentsPage(db, issueID, 0, 200)
+}
+func dbListIssueCommentsPage(db *sql.DB, issueID int64, offset, limit int) ([]*IssueComment, error) {
+	rows, err := db.Query(`SELECT id, issue_id, author, body, created_at FROM repo_issue_comments WHERE issue_id = ? ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`, issueID, limit, max(0, offset))
 	if err != nil {
 		return nil, err
 	}
@@ -707,13 +738,13 @@ func dbAddIssueLink(db *sql.DB, issueID int64, kind, target, title string, data 
 	if err := insertIssueEventTx(tx, issueID, "linked", actor, map[string]any{"kind": kind, "target": target}); err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
+	_ = res
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	if id == 0 {
-		row := db.QueryRow(`SELECT id FROM repo_issue_links WHERE issue_id = ? AND kind = ? AND target = ?`, issueID, kind, target)
-		_ = row.Scan(&id)
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM repo_issue_links WHERE issue_id=? AND kind=? AND target=?`, issueID, kind, target).Scan(&id); err != nil {
+		return nil, err
 	}
 	row := db.QueryRow(`SELECT id, issue_id, kind, target, title, data_json, created_at FROM repo_issue_links WHERE id = ?`, id)
 	var l IssueLink
@@ -724,7 +755,10 @@ func dbAddIssueLink(db *sql.DB, issueID int64, kind, target, title string, data 
 }
 
 func dbListIssueLinks(db *sql.DB, issueID int64) ([]*IssueLink, error) {
-	rows, err := db.Query(`SELECT id, issue_id, kind, target, title, data_json, created_at FROM repo_issue_links WHERE issue_id = ? ORDER BY created_at ASC, id ASC`, issueID)
+	return dbListIssueLinksPage(db, issueID, 0, 200)
+}
+func dbListIssueLinksPage(db *sql.DB, issueID int64, offset, limit int) ([]*IssueLink, error) {
+	rows, err := db.Query(`SELECT id, issue_id, kind, target, title, data_json, created_at FROM repo_issue_links WHERE issue_id = ? ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`, issueID, limit, max(0, offset))
 	if err != nil {
 		return nil, err
 	}
@@ -751,7 +785,10 @@ func insertIssueEventTx(tx *sql.Tx, issueID int64, typ, actor string, data map[s
 }
 
 func dbListIssueEvents(db *sql.DB, issueID int64) ([]*IssueEvent, error) {
-	rows, err := db.Query(`SELECT id, issue_id, event_type, actor, data_json, created_at FROM repo_issue_events WHERE issue_id = ? ORDER BY created_at ASC, id ASC`, issueID)
+	return dbListIssueEventsPage(db, issueID, 0, 200)
+}
+func dbListIssueEventsPage(db *sql.DB, issueID int64, offset, limit int) ([]*IssueEvent, error) {
+	rows, err := db.Query(`SELECT id, issue_id, event_type, actor, data_json, created_at FROM repo_issue_events WHERE issue_id = ? ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`, issueID, limit, max(0, offset))
 	if err != nil {
 		return nil, err
 	}

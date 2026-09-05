@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { parseJSON, corsEnabledFrom, corsOriginsFrom, corsCredentialsFrom, updatedCORS, LatestRequest, fetchPanelRows } from "./policy";
+import { useCallback, useEffect, useState, useRef } from "react";
 import type { ReactNode } from "react";
 
 interface NativePanelProps {
@@ -8,6 +9,9 @@ interface NativePanelProps {
 }
 
 interface APIRecord {
+ browser_origins_pending?: boolean;
+ browser_origins_error?: string;
+ exposure_error?: string;
   id: number;
   slug: string;
   name: string;
@@ -88,7 +92,18 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
   const [view, setView] = useState<View>("details");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [notice, setNotice] = useState("");
   const [secret, setSecret] = useState("");
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [logBefore, setLogBefore] = useState(0);
+  useEffect(() => { setLogBefore(0); }, [selected?.id, projectId, installId]);
+  const [detailOwner, setDetailOwner] = useState("");
+  const apiRequests = useRef(new LatestRequest());
+  const detailRequests = useRef(new LatestRequest());
+  const scope = `${projectId}:${installId}`;
+  const currentScope = useRef(scope); currentScope.current = scope;
+  const currentSelection = useRef(selected?.id); currentSelection.current = selected?.id;
+  useEffect(() => { setSecret(""); setNotice(""); setErr(""); setApis([]); setSelected(null); setDetailOwner(""); return () => { apiRequests.current.cancel(); detailRequests.current.cancel(); }; }, [scope]);
 
   const withParams = useCallback(
     () => new URLSearchParams({ project_id: projectId, install_id: String(installId) }).toString(),
@@ -98,11 +113,13 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
   const apiUrl = useCallback((path: string) => `${API}${path}?${withParams()}`, [withParams]);
 
   const loadAPIs = useCallback(async () => {
+    const request = apiRequests.current.begin();
     try {
-      const r = await fetch(apiUrl("/apis"), { credentials: "same-origin" });
+      const r = await fetch(apiUrl("/apis"), { credentials: "same-origin", signal: request.signal });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       const j = (await r.json()) as { apis: APIRecord[] };
       const rows = j.apis || [];
+      if (!request.current() || currentScope.current !== scope) return;
       setApis(rows);
       setSelected((cur) => {
         if (!rows.length) return null;
@@ -111,43 +128,30 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
       });
       setErr("");
     } catch (e) {
+      if (!request.current() || currentScope.current !== scope) return;
       setErr((e as Error).message);
       setApis([]);
       setSelected(null);
     }
-  }, [apiUrl]);
+  }, [apiUrl, scope]);
 
   const loadDetail = useCallback(async (api: APIRecord | null) => {
-    if (!api) {
-      setRoutes([]);
-      setKeys([]);
-      setLogs([]);
-      return;
-    }
-    const [routeRes, keyRes, logRes] = await Promise.allSettled([
-      fetch(apiUrl(`/apis/${api.id}/routes`), { credentials: "same-origin" }),
-      fetch(apiUrl(`/apis/${api.id}/keys`), { credentials: "same-origin" }),
-      fetch(apiUrl(`/apis/${api.id}/logs`), { credentials: "same-origin" }),
-    ]);
-    if (routeRes.status === "fulfilled" && routeRes.value.ok) {
-      const j = (await routeRes.value.json().catch(() => ({ routes: [] }))) as { routes: APIRoute[] };
-      setRoutes(j.routes || []);
-    } else {
-      setRoutes([]);
-    }
-    if (keyRes.status === "fulfilled" && keyRes.value.ok) {
-      const j = (await keyRes.value.json().catch(() => ({ keys: [] }))) as { keys: APIKey[] };
-      setKeys(j.keys || []);
-    } else {
-      setKeys([]);
-    }
-    if (logRes.status === "fulfilled" && logRes.value.ok) {
-      const j = (await logRes.value.json().catch(() => ({ logs: [] }))) as { logs: RequestLog[] };
-      setLogs(j.logs || []);
-    } else {
-      setLogs([]);
-    }
-  }, [apiUrl]);
+    const request = detailRequests.current.begin();
+    setDetailOwner(""); setRoutes([]); setKeys([]); setLogs([]);
+    if (!api || view === "details") { setLoadingDetail(false); return; }
+    const owner = `${scope}:${api.id}:${view}`;
+    setLoadingDetail(true);
+    try {
+      const rows = await fetchPanelRows(fetch, apiUrl(`/apis/${api.id}/${view}`) + (view === "logs" ? `&before_id=${logBefore}` : ""), view, request.signal);
+      if (!request.current() || currentScope.current !== scope || currentSelection.current !== api.id) return;
+      if (view === "routes") setRoutes(rows);
+      if (view === "keys") setKeys(rows);
+      if (view === "logs") setLogs(rows);
+      setDetailOwner(owner); setErr("");
+    } catch (e) {
+      if (request.current() && currentScope.current === scope) setErr((e as Error).message);
+    } finally { if (request.current()) setLoadingDetail(false); }
+  }, [apiUrl, scope, view, logBefore]);
 
   useEffect(() => { loadAPIs(); }, [loadAPIs]);
   useEffect(() => { loadDetail(selected); }, [selected, loadDetail]);
@@ -160,13 +164,15 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
       body: JSON.stringify({ tool, args }),
     });
     if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
-    return r.json();
-  }, [apiUrl]);
+    const result = await r.json();
+    if (currentScope.current !== scope) throw new Error("Project selection changed; refresh to see the result.");
+    if (result.browser_origins_synced === false || result.exposure_error) setNotice(result.browser_origins_error || result.exposure_error || "Browser policy synchronization is pending.");
+    return result;
+  }, [apiUrl, scope]);
 
   const refresh = useCallback(async () => {
     await loadAPIs();
-    await loadDetail(selected);
-  }, [loadAPIs, loadDetail, selected]);
+  }, [loadAPIs]);
 
   return (
     <div className="h-full flex flex-col bg-bg text-text">
@@ -190,11 +196,14 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
         </div>
         <div className="flex items-center gap-2 text-xs text-text-dim">
           {busy && <span>working...</span>}
-          <button type="button" className={buttonCls} onClick={refresh}>Refresh</button>
+          <button type="button" className={buttonCls} onClick={refresh} disabled={busy}>Refresh</button>
         </div>
       </div>
 
+      {notice && <div className="mx-4 mt-3 text-sm text-amber-600">{notice}</div>}
       {err && <div className="mx-4 mt-4 p-3 rounded border border-red-500/30 bg-red-500/10 text-sm text-red-300 whitespace-pre-wrap">{err}</div>}
+      {selected?.browser_origins_pending && <div className="mx-4 mt-3 text-sm text-amber-600">Browser policy sync pending: {selected.browser_origins_error || "retrying"}</div>}
+      {selected?.exposure_error && <div className="mx-4 mt-3 text-sm text-red-500">{selected.exposure_error}</div>}
       {secret && <div className="mx-4 mt-4 p-3 rounded border border-green/30 bg-green/10 text-sm font-mono break-all">{secret}</div>}
 
       <div className="flex-1 min-h-0 grid grid-cols-[280px_minmax(0,1fr)]">
@@ -207,8 +216,10 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
               try {
                 await callTool("api_create", args);
                 await loadAPIs();
+                return true;
               } catch (e) {
                 setErr((e as Error).message);
+                return false;
               } finally {
                 setBusy(false);
               }
@@ -219,6 +230,7 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
               <button
                 key={api.id}
                 type="button"
+                disabled={busy}
                 className={`w-full text-left px-4 py-3 border-b border-border hover:bg-surface-2 ${selected?.id === api.id ? "bg-surface-2" : ""}`}
                 onClick={() => { setSelected(api); setSecret(""); }}
               >
@@ -245,6 +257,7 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
                   await loadAPIs();
                 } catch (e) {
                   setErr((e as Error).message);
+                  return false;
                 } finally {
                   setBusy(false);
                 }
@@ -259,6 +272,7 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
                   await loadAPIs();
                 } catch (e) {
                   setErr((e as Error).message);
+                  return false;
                 } finally {
                   setBusy(false);
                 }
@@ -267,16 +281,20 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
           ) : view === "routes" ? (
             <RoutesView
               api={selected}
-              routes={routes}
-              busy={busy}
+              routes={detailOwner === `${scope}:${selected.id}:${view}` ? routes : []}
+              busy={busy || loadingDetail || detailOwner !== `${scope}:${selected.id}:${view}`}
+              projectId={projectId}
+              installId={installId}
               onAdd={async (args) => {
                 setBusy(true);
                 setErr("");
                 try {
                   await callTool("api_route_add", { api_id: selected.id, ...args });
                   await loadDetail(selected);
+                  return true;
                 } catch (e) {
                   setErr((e as Error).message);
+                  return false;
                 } finally {
                   setBusy(false);
                 }
@@ -289,6 +307,7 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
                   await loadDetail(selected);
                 } catch (e) {
                   setErr((e as Error).message);
+                  return false;
                 } finally {
                   setBusy(false);
                 }
@@ -296,8 +315,8 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
             />
           ) : view === "keys" ? (
             <KeysView
-              keys={keys}
-              busy={busy}
+              keys={detailOwner === `${scope}:${selected.id}:${view}` ? keys : []}
+              busy={busy || loadingDetail || detailOwner !== `${scope}:${selected.id}:${view}`}
               onCreate={async (name) => {
                 setBusy(true);
                 setErr("");
@@ -306,8 +325,10 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
                   const out = await callTool("api_key_create", { api_id: selected.id, name }) as { secret?: string };
                   setSecret(out.secret || "");
                   await loadDetail(selected);
+                  return true;
                 } catch (e) {
                   setErr((e as Error).message);
+                  return false;
                 } finally {
                   setBusy(false);
                 }
@@ -320,13 +341,14 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
                   await loadDetail(selected);
                 } catch (e) {
                   setErr((e as Error).message);
+                  return false;
                 } finally {
                   setBusy(false);
                 }
               }}
             />
           ) : (
-            <LogsView logs={logs} />
+            <div><div className="flex gap-2 p-3"><button className={buttonCls} disabled={loadingDetail || logBefore === 0} onClick={() => setLogBefore(0)}>Newest</button><button className={buttonCls} disabled={loadingDetail || detailOwner !== `${scope}:${selected.id}:${view}` || logs.length < 100} onClick={() => setLogBefore(logs[logs.length-1].id)}>Older</button></div><LogsView logs={detailOwner === `${scope}:${selected.id}:${view}` ? logs : []} /></div>
           )}
         </main>
       </div>
@@ -334,7 +356,7 @@ export default function ApiPanel({ projectId, installId }: NativePanelProps) {
   );
 }
 
-function CreateAPIForm({ busy, onCreate }: { busy: boolean; onCreate(args: Record<string, unknown>): Promise<void> }) {
+function CreateAPIForm({ busy, onCreate }: { busy: boolean; onCreate(args: Record<string, unknown>): Promise<boolean> }) {
   const [slug, setSlug] = useState("");
   const [name, setName] = useState("");
   return (
@@ -342,7 +364,7 @@ function CreateAPIForm({ busy, onCreate }: { busy: boolean; onCreate(args: Recor
       className="p-4 border-b border-border space-y-2"
       onSubmit={async (e) => {
         e.preventDefault();
-        await onCreate({ slug: slug.trim(), name: name.trim() || slug.trim(), auth: { kind: "public" }, cors: {} });
+        if (!await onCreate({ slug: slug.trim(), name: name.trim() || slug.trim(), auth: { kind: "public" }, cors: {} })) return;
         setSlug("");
         setName("");
       }}
@@ -357,8 +379,8 @@ function CreateAPIForm({ busy, onCreate }: { busy: boolean; onCreate(args: Recor
 function DetailsView({ api, busy, onSave, onDelete }: {
   api: APIRecord;
   busy: boolean;
-  onSave(patch: Record<string, unknown>): Promise<void>;
-  onDelete(): Promise<void>;
+  onSave(patch: Record<string, unknown>): Promise<unknown>;
+  onDelete(): Promise<unknown>;
 }) {
   const [name, setName] = useState(api.name);
   const [description, setDescription] = useState(api.description || "");
@@ -366,7 +388,7 @@ function DetailsView({ api, busy, onSave, onDelete }: {
   const [dnsMode, setDNSMode] = useState(api.dns_mode || "manual");
   const [status, setStatus] = useState(api.status || "active");
   const [allowHTTP, setAllowHTTP] = useState(!!api.allow_http);
-  const [authKind, setAuthKind] = useState(parseAuthKind(api.auth_json));
+  const [authKind, setAuthKind] = useState(parseAuthKind(api.auth_json) || "public");
   const [corsEnabled, setCORSEnabled] = useState(corsEnabledFrom(api.cors_json));
   const [corsOrigins, setCORSOrigins] = useState(corsOriginsFrom(api.cors_json).join("\n"));
   const [corsCredentials, setCORSCredentials] = useState(corsCredentialsFrom(api.cors_json));
@@ -378,7 +400,7 @@ function DetailsView({ api, busy, onSave, onDelete }: {
     setDNSMode(api.dns_mode || "manual");
     setStatus(api.status || "active");
     setAllowHTTP(!!api.allow_http);
-    setAuthKind(parseAuthKind(api.auth_json));
+    setAuthKind(parseAuthKind(api.auth_json) || "public");
     setCORSEnabled(corsEnabledFrom(api.cors_json));
     setCORSOrigins(corsOriginsFrom(api.cors_json).join("\n"));
     setCORSCredentials(corsCredentialsFrom(api.cors_json));
@@ -396,12 +418,8 @@ function DetailsView({ api, busy, onSave, onDelete }: {
           dns_mode: dnsMode,
           status,
           allow_http: allowHTTP,
-          auth: { kind: authKind },
-          cors: corsEnabled ? {
-            enabled: true,
-            origins: corsOrigins.split(/[\s,]+/).map((origin) => origin.trim()).filter(Boolean),
-            credentials: corsCredentials,
-          } : {},
+          auth: { kind: authKind || "public" },
+          cors: updatedCORS(api.cors_json, corsEnabled, corsOrigins, corsCredentials),
         });
       }}
     >
@@ -468,12 +486,13 @@ function DetailsView({ api, busy, onSave, onDelete }: {
   );
 }
 
-function RoutesView({ api, routes, busy, onAdd, onDelete }: {
+function RoutesView({ api, routes, busy, onAdd, onDelete, projectId, installId }: {
+ projectId: string; installId: number;
   api: APIRecord;
   routes: APIRoute[];
   busy: boolean;
-  onAdd(args: Record<string, unknown>): Promise<void>;
-  onDelete(id: number): Promise<void>;
+  onAdd(args: Record<string, unknown>): Promise<boolean>;
+  onDelete(id: number): Promise<unknown>;
 }) {
   const [method, setMethod] = useState("GET");
   const [path, setPath] = useState("/");
@@ -487,7 +506,7 @@ function RoutesView({ api, routes, busy, onAdd, onDelete }: {
   const [eventResource, setEventResource] = useState("");
   const [coalesceMS, setCoalesceMS] = useState("200");
 
-  const publicBase = api.hostname ? `https://${api.hostname}` : `/api/apps/api/gw/${api.slug}`;
+  const publicBase = api.hostname ? `https://${api.hostname}` : `/api/apps/api/gw/${api.slug}?${new URLSearchParams({project_id: projectId, install_id: String(installId)})}`;
 
   return (
     <div className="min-h-full flex flex-col">
@@ -495,7 +514,7 @@ function RoutesView({ api, routes, busy, onAdd, onDelete }: {
         className="p-4 border-b border-border grid grid-cols-1 lg:grid-cols-[100px_minmax(140px,1fr)_120px_minmax(180px,1.4fr)_minmax(140px,1fr)_120px] gap-2 items-end"
         onSubmit={async (e) => {
           e.preventDefault();
-          await onAdd({
+          const saved = await onAdd({
             method,
             path_pattern: path,
             target_kind: targetKind,
@@ -506,10 +525,11 @@ function RoutesView({ api, routes, busy, onAdd, onDelete }: {
               topics: eventTopics.split(",").map((topic) => topic.trim()).filter(Boolean),
               match: eventMatchPath.trim() ? { [eventMatchPath.trim()]: eventMatchCondition(eventMatchValue) } : {},
               output: { type: "invalidate", resource: eventResource.trim() },
-              coalesce_ms: Number(coalesceMS) || 200,
+              coalesce_ms: Number(coalesceMS),
             } : {},
             enabled: true,
           });
+          if (!saved) return;
           setTargetRef("");
           setTargetPath("");
         }}
@@ -526,7 +546,7 @@ function RoutesView({ api, routes, busy, onAdd, onDelete }: {
             <Field label="Optional match path"><input className={inputCls} value={eventMatchPath} onChange={(e) => setEventMatchPath(e.target.value)} placeholder="data.table" /></Field>
             <Field label="Match value(s)"><input className={inputCls} value={eventMatchValue} onChange={(e) => setEventMatchValue(e.target.value)} placeholder="appels, ventes, prospects" disabled={!eventMatchPath.trim()} /></Field>
             <Field label="Public resource"><input className={inputCls} value={eventResource} onChange={(e) => setEventResource(e.target.value)} placeholder="$data.table" /></Field>
-            <Field label="Coalesce (ms)"><input className={inputCls} type="number" min="1" max="5000" value={coalesceMS} onChange={(e) => setCoalesceMS(e.target.value)} /></Field>
+            <Field label="Coalesce (ms)"><input className={inputCls} type="number" min="0" max="5000" value={coalesceMS} onChange={(e) => setCoalesceMS(e.target.value)} /></Field>
             <div className="lg:col-span-3 text-xs text-text-dim self-end pb-2">Comma-separated values create a safe allowlist. Use $data.&lt;field&gt; as the public resource to project only that constrained value.</div>
           </div>
         )}
@@ -551,13 +571,13 @@ function RoutesView({ api, routes, busy, onAdd, onDelete }: {
 function KeysView({ keys, busy, onCreate, onRevoke }: {
   keys: APIKey[];
   busy: boolean;
-  onCreate(name: string): Promise<void>;
-  onRevoke(id: number): Promise<void>;
+  onCreate(name: string): Promise<boolean>;
+  onRevoke(id: number): Promise<unknown>;
 }) {
   const [name, setName] = useState("");
   return (
     <div className="min-h-full flex flex-col">
-      <form className="p-4 border-b border-border flex gap-2 items-end" onSubmit={async (e) => { e.preventDefault(); await onCreate(name || "default"); setName(""); }}>
+      <form className="p-4 border-b border-border flex gap-2 items-end" onSubmit={async (e) => { e.preventDefault(); if (await onCreate(name || "default")) setName(""); }}>
         <Field label="Name"><input className={inputCls + " w-72"} value={name} onChange={(e) => setName(e.target.value)} placeholder="production" /></Field>
         <button type="submit" className={primaryBtn} disabled={busy}>Create</button>
       </form>
@@ -621,16 +641,6 @@ function DataTable({ columns, rows }: { columns: string[]; rows: (ReactNode[])[]
   );
 }
 
-function parseJSON(s?: string): Record<string, unknown> {
-  if (!s) return {};
-  try {
-    const parsed = JSON.parse(s);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
 function eventMatchCondition(raw: string): string | { in: string[] } {
   const values = raw.split(",").map((value) => value.trim()).filter(Boolean);
   return values.length > 1 ? { in: values } : values[0] || "";
@@ -639,23 +649,6 @@ function eventMatchCondition(raw: string): string | { in: string[] } {
 function parseAuthKind(s?: string): string {
   const obj = parseJSON(s);
   return typeof obj.kind === "string" ? obj.kind : "";
-}
-
-function corsEnabledFrom(s?: string): boolean {
-  const obj = parseJSON(s);
-  return obj.enabled === true || obj.enabled === "true" || corsOriginsFrom(s).length > 0;
-}
-
-function corsOriginsFrom(s?: string): string[] {
-  const obj = parseJSON(s);
-  if (Array.isArray(obj.origins)) return obj.origins.filter((origin): origin is string => typeof origin === "string");
-  if (typeof obj.allow_origin === "string" && obj.allow_origin !== "*") return [obj.allow_origin];
-  return [];
-}
-
-function corsCredentialsFrom(s?: string): boolean {
-  const obj = parseJSON(s);
-  return obj.credentials === true || obj.credentials === "true" || obj.allow_credentials === true || obj.allow_credentials === "true";
 }
 
 function eventsSummary(s?: string): string {

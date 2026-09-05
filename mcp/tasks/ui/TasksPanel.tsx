@@ -11,51 +11,35 @@ import {
   taskAPI,
   useAgentNames,
   useTasks,
+  useTaskDialog,
 } from "./taskShared";
 
 type View = "active" | "attention" | "scheduled" | "completed" | "all";
 
 export default function TasksPanel(props: HostProps) {
-  const { tasks, loading, error, reload } = useTasks(props, { limit: "500" });
   const names = useAgentNames(props.projectId);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [view, setView] = useState<View>("active");
   const [agentId, setAgentId] = useState(0);
   const [search, setSearch] = useState("");
+  const { tasks, loading, error, reload, hasMore, loadMore } = useTasks(props, { limit: "100", view, agent_id: agentId ? String(agentId) : "", q: search.trim(), include_runs: "true" });
   const [selected, setSelected] = useState<Task | null>(null);
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
+    let active = true;
+    setAgents([]); setSelected(null); setCreating(false);
     if (!props.projectId) return;
     fetch(`/api/agents?project_id=${encodeURIComponent(props.projectId)}`, {
       credentials: "same-origin",
     })
       .then((response) => (response.ok ? response.json() : []))
-      .then(setAgents)
-      .catch(() => setAgents([]));
+      .then(value => { if (active) setAgents(value); })
+      .catch(() => { if (active) setAgents([]); });
+    return () => { active = false; };
   }, [props.projectId]);
 
-  const visible = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return tasks.filter((task) => {
-      if (task.parent_task_id) return false;
-      if (agentId && task.agent_id !== agentId) return false;
-      if (view === "active" && !isActive(task)) return false;
-      if (view === "attention" && !["blocked", "failed"].includes(task.state))
-        return false;
-      if (view === "scheduled" && !isScheduleDefinition(task))
-        return false;
-      if (view === "completed" && task.state !== "completed") return false;
-      if (
-        needle &&
-        !`${task.title} ${task.description || ""} ${task.current_step || ""} ${task.result || ""}`
-          .toLowerCase()
-          .includes(needle)
-      )
-        return false;
-      return true;
-    });
-  }, [tasks, view, agentId, search]);
+  const visible = tasks;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
@@ -136,6 +120,7 @@ export default function TasksPanel(props: HostProps) {
               No matching tasks.
             </div>
           )}
+          {hasMore && <button disabled={loading} onClick={() => void loadMore()} className="w-full p-3 text-xs text-accent">Load more tasks</button>}
         </div>
       </main>
       {creating && (
@@ -183,7 +168,10 @@ function NewTask({
     "" | "once" | "interval" | "cron"
   >("");
   const [scheduleValue, setScheduleValue] = useState("");
-  const [timezone, setTimezone] = useState("UTC");
+  const dialogRef = useTaskDialog(onClose);
+  const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const [timezone, setTimezone] = useState(localTimezone);
+  const [idempotencyKey] = useState(() => crypto.randomUUID());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const create = async () => {
@@ -195,14 +183,15 @@ function NewTask({
       if (scheduleKind === "once")
         schedule = {
           kind: "once",
-          at: new Date(scheduleValue).toISOString(),
-          timezone,
+          at: localScheduleISO(scheduleValue),
+          timezone: localTimezone,
         };
       if (scheduleKind === "interval")
         schedule = { kind: "interval", every: scheduleValue, timezone };
       if (scheduleKind === "cron")
         schedule = { kind: "cron", cron: scheduleValue, timezone };
       const response = await taskAPI.create(props, {
+        idempotency_key: idempotencyKey,
         agent_id: agentId,
         title: title.trim(),
         description: description.trim(),
@@ -219,6 +208,7 @@ function NewTask({
   };
   return (
     <div
+      ref={dialogRef} tabIndex={-1}
       className="fixed inset-0 z-[100] grid place-items-center p-4"
       role="dialog"
       aria-modal="true"
@@ -305,8 +295,10 @@ function NewTask({
                   className="rounded border border-border bg-bg-input px-3 py-2 text-xs text-text placeholder:text-text-dim"
                 />
               )}
-              {scheduleKind && (
+              {scheduleKind === "once" && <span className="self-center text-xs text-text-muted">Local time · {localTimezone}{scheduleValue && <span className="block">{schedulePreview(scheduleValue)}</span>}</span>}
+              {scheduleKind && scheduleKind !== "once" && (
                 <input
+                  aria-label="Schedule timezone"
                   value={timezone}
                   onChange={(event) => setTimezone(event.target.value)}
                   placeholder="UTC"
@@ -357,4 +349,23 @@ function Field({
       {children}
     </label>
   );
+}
+
+export function localScheduleISO(value: string): string {
+  const parsed = new Date(value);
+  const [date, time] = value.split("T");
+  if (!date || !time || !Number.isFinite(parsed.getTime())) throw new Error("Enter a valid local date and time");
+  const [year, month, day] = date.split("-").map(Number);
+  const [hour, minute] = time.split(":").map(Number);
+  if (parsed.getFullYear() !== year || parsed.getMonth() + 1 !== month || parsed.getDate() !== day || parsed.getHours() !== hour || parsed.getMinutes() !== minute) throw new Error("This local time does not exist because of a daylight-saving transition");
+  for (let minutes = 15; minutes <= 180; minutes += 15) {
+    const later = new Date(parsed.getTime() + minutes * 60000);
+    if (later.getFullYear() === year && later.getMonth() + 1 === month && later.getDate() === day && later.getHours() === hour && later.getMinutes() === minute) throw new Error("This local time occurs twice during a daylight-saving transition. Choose an unambiguous time.");
+  }
+  return parsed.toISOString();
+}
+
+function schedulePreview(value: string) {
+  try { return `Run at ${localScheduleISO(value)}`; }
+  catch (reason) { return reason instanceof Error ? reason.message : "Invalid date"; }
 }

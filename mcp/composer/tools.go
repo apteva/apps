@@ -25,7 +25,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "composition_create",
-			Description: "Create a V1 timeline composition. Args: name?, tracks, markers?, soundtrack?, background?, output?. Video and audio clips can reuse source assets with source_start/source_end and playback_rate; retained audio stays synchronized. Visual clips can crop normalized source regions and animate source-space focus/zoom through transform.keyframes with oversampled subpixel rendering. Timeline markers preserve external recording events for editing. The first visual track is the fullscreen base layer; additional visual tracks render timed image/video layers with clip-level fit, position, offset, width, height, scale, opacity, z_index, or layout. Returns {id, version, duration_seconds}.",
+			Description: "Create a V1 timeline composition, or pass spec with version composer/v2 for native shape/text scene graphs. V2 shapes support rectangles, ellipses, gradients, borders, radii, and shadows. V1 args: name?, tracks, markers?, soundtrack?, background?, output?. Video and audio clips can reuse source assets with source_start/source_end and playback_rate; retained audio stays synchronized. Visual clips can crop normalized source regions and animate source-space focus/zoom through transform.keyframes. Returns {id, version, duration_seconds}.",
 			InputSchema: schemaObject(map[string]any{
 				"name":       map[string]any{"type": "string"},
 				"tracks":     map[string]any{"type": "array"},
@@ -47,7 +47,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_validate",
-			Description: "Validate a V1 composition before saving/rendering. Args: edit_json? (string) or V1 fields. Returns version, duration_seconds, renderer ('ffmpeg'), warnings, errors.",
+			Description: "Validate a Composer V1 or V2 composition before saving/rendering. Args: spec, edit_json, or V1 fields. Returns version, duration_seconds, renderer, warnings, and errors including safe-area diagnostics.",
 			InputSchema: schemaObject(map[string]any{
 				"spec":      map[string]any{"type": "object"},
 				"edit_json": map[string]any{"type": "string"},
@@ -56,7 +56,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_examples",
-			Description: "Return composition examples agents can adapt. Experimental V2 examples are hidden in public installs.",
+			Description: "Return Composer V2 examples with native shapes, text, motion, and browser scene graphs that agents can adapt.",
 			InputSchema: schemaObject(map[string]any{}, nil),
 			Handler:     a.toolCompositionExamples,
 		},

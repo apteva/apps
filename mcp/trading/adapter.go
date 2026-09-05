@@ -10,6 +10,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -244,6 +245,28 @@ func brokerFor(ctx *sdk.AppCtx, pf *Portfolio) (*boundBroker, error) {
 	}
 	if pick == nil {
 		return nil, errBrokerUnbound
+	}
+	brokerBindingMu.Lock()
+	defer brokerBindingMu.Unlock()
+	if pf.ID > 0 {
+		var pinned int64
+		err := ctx.AppDB().QueryRow(`SELECT connection_id FROM broker_bindings WHERE portfolio_id=?`, pf.ID).Scan(&pinned)
+		if err == nil {
+			found := false
+			for i := range conns {
+				if conns[i].ID == pinned && (conns[i].Status == "" || conns[i].Status == "active" || conns[i].Status == "connected") {
+					pick = &conns[i]
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, errors.New("pinned broker connection unavailable")
+			}
+		}
+	}
+	if err := pinBroker(ctx, pf, pick.ID); err != nil {
+		return nil, err
 	}
 	return &boundBroker{Adapter: a, ConnectionID: pick.ID}, nil
 }

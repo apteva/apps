@@ -9,6 +9,7 @@ package main
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -62,24 +63,44 @@ type tokenBucket struct {
 }
 
 type rateLimiter struct {
-	mu sync.Mutex
-	m  map[string]*tokenBucket
+	mu    sync.Mutex
+	m     map[string]*tokenBucket
+	rate  float64
+	burst float64
 }
 
+var collectAdmissionLimiter = &rateLimiter{m: map[string]*tokenBucket{}, rate: 500, burst: 1000}
 var collectLimiter = &rateLimiter{m: map[string]*tokenBucket{}}
 
 func (rl *rateLimiter) allow(key string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	now := time.Now()
+	rate, burst := rl.rate, rl.burst
+	if rate <= 0 {
+		rate = ratePerSec
+	}
+	if burst <= 0 {
+		burst = rateBurst
+	}
+	if len(rl.m) >= 4096 {
+		for k, b := range rl.m {
+			if now.Sub(b.last) > 5*time.Minute {
+				delete(rl.m, k)
+			}
+		}
+		if len(rl.m) >= 4096 && rl.m[key] == nil {
+			return false
+		}
+	}
 	b := rl.m[key]
 	if b == nil {
-		rl.m[key] = &tokenBucket{tokens: rateBurst - 1, last: now}
+		rl.m[key] = &tokenBucket{tokens: burst - 1, last: now}
 		return true
 	}
-	b.tokens += now.Sub(b.last).Seconds() * ratePerSec
-	if b.tokens > rateBurst {
-		b.tokens = rateBurst
+	b.tokens += now.Sub(b.last).Seconds() * rate
+	if b.tokens > burst {
+		b.tokens = burst
 	}
 	b.last = now
 	if b.tokens < 1 {
@@ -89,22 +110,25 @@ func (rl *rateLimiter) allow(key string) bool {
 	return true
 }
 
-// originAllowed enforces a key's allowed-origins list, but only when the
-// request actually carries an Origin/Referer host — pixel GETs often
-// don't, so this is a best-effort guard, not a hard wall.
+// originAllowed requires Origin/Referer evidence when an allowlist is set.
+// Public clients can spoof these headers; this is an abuse control, not identity.
 func originAllowed(wk *WriteKey, r *http.Request) bool {
 	if len(wk.AllowedOrigins) == 0 {
 		return true
 	}
-	host := hostOf(r.Header.Get("Origin"))
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = r.Header.Get("Referer")
+	}
+	host := hostOf(origin)
 	if host == "" {
 		host = hostOf(r.Header.Get("Referer"))
 	}
 	if host == "" {
-		return true // nothing to check against
+		return false // Configured origin policies require origin evidence.
 	}
 	for _, o := range wk.AllowedOrigins {
-		if strings.EqualFold(hostOf(o), host) || strings.EqualFold(o, host) {
+		if (strings.Contains(o, "://") && canonicalOrigin(o) == canonicalOrigin(origin)) || (!strings.Contains(o, "://") && strings.EqualFold(o, host)) {
 			return true
 		}
 	}
@@ -147,14 +171,50 @@ func collectProps(q url.Values) map[string]any {
 			}
 		}
 	}
+	// Standard location fields cannot retain secrets in URLs, including extra props overrides.
+	for _, key := range []string{"url", "path", "referrer"} {
+		if value, ok := props[key].(string); ok {
+			if i := strings.IndexAny(value, "?#"); i >= 0 {
+				props[key] = value[:i]
+			}
+		}
+	}
 	return props
 }
 
 // GET /collect — public tag ingest. See file header.
 func (a *App) handleCollect(w http.ResponseWriter, r *http.Request) {
 	setCollectCORS(w, r)
+	if len(r.URL.RawQuery) > 16384 {
+		w.Header().Set("X-Apa", "payload-too-large")
+		writePixel(w)
+		return
+	}
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	if peer := net.ParseIP(ip); peer != nil && peer.IsLoopback() {
+		parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			candidate := net.ParseIP(strings.TrimSpace(parts[i]))
+			if candidate != nil && !candidate.IsLoopback() && !candidate.IsPrivate() {
+				ip = candidate.String()
+				break
+			}
+		}
+	}
+	if !collectAdmissionLimiter.allow("ip:" + ip) {
+		w.Header().Set("X-Apa", "rate-limited")
+		writePixel(w)
+		return
+	}
 	q := r.URL.Query()
-	wk := lookupActiveWriteKey(globalCtx.AppDB(), q.Get("k"))
+	if len(q.Get("k")) > 256 || len(q.Get("eid")) > 128 || len(q.Get("e")) > 256 {
+		writePixel(w)
+		return
+	}
+	wk := lookupActiveWriteKey(requestReadDB(r), q.Get("k"))
 	if wk != nil && originAllowed(wk, r) && collectLimiter.allow(wk.Key) {
 		event := q.Get("e")
 		if event == "" {
@@ -164,18 +224,21 @@ func (a *App) handleCollect(w http.ResponseWriter, r *http.Request) {
 		if b, err := json.Marshal(collectProps(q)); err == nil {
 			propsJSON = string(b)
 		}
-		id, err := insertEvent(globalCtx.AppDB(), EventInsert{
-			TS:        time.Now().UnixMilli(),
-			App:       wk.Site,
-			Topic:     event,
-			ProjectID: wk.ProjectID,
-			UserID:    q.Get("uid"),
-			SessionID: q.Get("sid"),
-			Source:    "web",
-			Props:     propsJSON,
+		id, err := insertEvent(requestWriteDB(r), EventInsert{
+			TS:         0,
+			DeliveryID: q.Get("eid"),
+			App:        wk.Site,
+			Topic:      event,
+			ProjectID:  wk.ProjectID,
+			UserID:     q.Get("uid"),
+			SessionID:  q.Get("sid"),
+			Source:     "web",
+			Props:      propsJSON,
 		})
 		if err == nil {
-			touchWriteKey(globalCtx.AppDB(), wk.ID)
+			if err := touchWriteKeyEvent(requestWriteDB(r), wk.ID, id); err != nil {
+				globalCtx.Logger().Warn("tracking key counter", "err", err)
+			}
 			globalCtx.EmitWithProject("event.recorded", wk.ProjectID, map[string]any{
 				"id": id, "app": wk.Site, "topic": event, "ts": time.Now().UnixMilli(),
 			})
@@ -187,4 +250,17 @@ func (a *App) handleCollect(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Apa", "dropped")
 	}
 	writePixel(w)
+}
+
+func canonicalOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if port != "" && !((u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80")) {
+		host = net.JoinHostPort(host, port)
+	}
+	return strings.ToLower(u.Scheme) + "://" + host
 }

@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -60,10 +61,16 @@ func seedTenant(t *testing.T, app *App, slug, status string) string {
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
+	port := 65535
+	var used int
+	_ = app.store.db.QueryRow(`SELECT COUNT(*) FROM fleet_port_reservations WHERE instance_id=0 AND port=?`, port).Scan(&used)
+	if used > 0 {
+		port, _ = allocatePort()
+	}
 	tn := &Tenant{
 		Slug:       slug,
 		Kind:       KindLocal,
-		BaseURL:    "http://localhost:65535",
+		BaseURL:    fmt.Sprintf("http://localhost:%d", port),
 		ConfigDir:  filepath.Join(localDataRoot(), slug),
 		OwnerEmail: slug + "@example.com",
 		Status:     status,
@@ -84,13 +91,16 @@ func fakeTenantServer(t *testing.T, authOK bool) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "version": "0.9.5"})
 	})
-	mux.HandleFunc("/api/auth/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/auth/me", func(w http.ResponseWriter, r *http.Request) {
 		if !authOK {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"user_id": 1, "email": "admin@local"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"user_id": 1, "email": "admin@local", "role": "admin"})
+	})
+	mux.HandleFunc("/api/auth/status", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"needs_setup": false})
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

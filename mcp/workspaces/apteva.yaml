@@ -2,12 +2,17 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.3.0
+version: 0.5.0
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
   UI while the required Containers app owns Docker workloads, volumes,
-  command execution, and bounded logs. v0.3.0 gives each workspace a persistent
+  command execution, and bounded logs. v0.4.0 adds a generic, app-only source
+  round trip: producers can refresh managed files without deleting caches,
+  export a filtered source snapshot, and acknowledge an applied revision.
+  v0.5.0 lets operators and originating apps select an allowlisted custom
+  container image per workspace while retaining approved runtime profiles.
+  v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
   variables, installed tools, writable files, and background services remain
   available to later commands.
@@ -41,7 +46,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: workspaces_create
-      description: "Create a local development workspace from an approved runtime profile. Args: name, purpose?, profile? (go|bun|python|apteva), ttl_minutes?, owner_label?, repo_label?, branch_label?, origin_label?, origin_href?."
+      description: "Create a local development workspace from an approved runtime profile, optionally overriding it with an allowlisted digest-pinned image. Args: name, purpose?, profile? (go|bun|python|apteva), image?, ttl_minutes?, owner_label?, repo_label?, branch_label?, origin_label?, origin_href?."
       requires: workspaces.write
     - name: workspaces_list
       description: "List current-project workspaces. Args: status?, include_destroyed?, limit?."
@@ -74,13 +79,19 @@ provides:
       description: "Permanently destroy a workspace and its volumes. Requires confirm=true. Git safety is only authoritative when the originating app supplied dirty/unpushed state. Args: workspace_id, confirm."
       requires: workspaces.write
     - name: workspace_create_for_resource
-      description: "Create a workspace for a caller-owned resource, optionally importing a bounded tar.gz source archive. Authenticated app callers only."
+      description: "Create a workspace for a caller-owned resource with an optional allowlisted digest-pinned image override and bounded tar.gz source archive. Authenticated app callers only."
       exposure: app_only
     - name: workspace_context_update
       description: "Update origin labels, navigation, and consumer-reported dirty/unpushed safety state. Authenticated originating app only."
       exposure: app_only
     - name: workspace_source_export
-      description: "Export a bounded tar.gz snapshot of /workspace for the authenticated originating app. Args: workspace_id, path?."
+      description: "Export a bounded tar.gz snapshot for the authenticated originating app. managed=true filters workspace state and build/dependency caches. Args: workspace_id, path?, managed?, exclude_paths?."
+      exposure: app_only
+    - name: workspace_source_sync
+      description: "Refresh caller-managed source files while preserving workspace caches and unrelated files. Authenticated originating app only."
+      exposure: app_only
+    - name: workspace_source_accept
+      description: "Record the source revision accepted by the originating app after it applies exported changes. Authenticated originating app only."
       exposure: app_only
   publishes:
     - name: workspace.created
@@ -158,6 +169,16 @@ config_schema:
     default: ""
     label: Apteva workspace image
     description: Optional combined Go, Bun, and Python image for the approved Apteva profile.
+  - name: custom_image_prefixes
+    type: text
+    default: "ghcr.io/apteva/"
+    label: Allowed custom image prefixes
+    description: Comma or whitespace-separated prefixes accepted for per-workspace image overrides.
+  - name: custom_image_require_digest
+    type: boolean
+    default: true
+    label: Require immutable custom images
+    description: Require per-workspace image overrides to use an @sha256 digest.
   - name: default_cpu
     type: text
     default: "2"

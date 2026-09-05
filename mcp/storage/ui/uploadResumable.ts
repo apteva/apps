@@ -1,3 +1,4 @@
+import { sha256 as createSHA256 } from "@noble/hashes/sha2.js";
 // Resumable parallel-chunk uploader for the storage app's /uploads
 // HTTP routes. Mirrors the S3 multipart-upload pattern omnikit uses:
 // each part is an independent PUT, parts run concurrently up to a
@@ -126,7 +127,24 @@ async function uploadChunked(
   file: File,
   opts: UploadResumableOptions,
 ): Promise<UploadedFile> {
-  const init = (await jsonFetch<InitResponse>("POST", `${STORAGE_API}/uploads${scopeQS(opts)}`, {
+  const sha256 = opts.sha256 || await hashFile(file, opts.signal);
+  opts.signal?.throwIfAborted();
+  const resumeKey = "storage-upload:" + JSON.stringify([opts.projectId, opts.installId, opts.folder || "/", file.name, file.size, file.type, sha256, opts.visibility, opts.tags]);
+  let init: InitResponse | undefined;
+  let confirmed: { n: number; size: number }[] = [];
+  let saved: InitResponse | null = null;
+  try { saved = JSON.parse(localStorage.getItem(resumeKey) || "null"); } catch {}
+  if (saved?.upload_id) {
+    const response = await fetch(`${STORAGE_API}/uploads/${saved.upload_id}${scopeQS(opts)}`, { credentials: "same-origin", signal: opts.signal });
+    if (response.ok) {
+      const status = await response.json();
+      if (status.declared_size === file.size) { init = saved; confirmed = status.parts || []; }
+    } else if (response.status !== 404 && response.status !== 403) {
+      throw new Error(`Resume failed: ${response.status}`);
+    }
+  }
+  if (!init) {
+  init = (await jsonFetch<InitResponse>("POST", `${STORAGE_API}/uploads${scopeQS(opts)}`, {
     body: {
       filename: file.name,
       size: file.size,
@@ -134,13 +152,17 @@ async function uploadChunked(
       folder: opts.folder ?? "/",
       tags: opts.tags,
       visibility: opts.visibility,
-      sha256: opts.sha256,
+      sha256,
     },
     signal: opts.signal,
   })).body;
 
+    try { localStorage.setItem(resumeKey, JSON.stringify(init)); } catch {}
+  }
+
   if (init.was_existing && init.file) {
     opts.onProgress?.(file.size, file.size);
+    try { localStorage.removeItem(resumeKey); } catch {}
     return init.file;
   }
   if (!init.upload_id) {
@@ -152,7 +174,8 @@ async function uploadChunked(
   // if the AbortController is later misplaced. Best-effort.
   opts.onUploadIdAssigned?.(id);
   const partSize = init.part_size ?? defaultPartSize;
-  const parallel = Math.max(1, opts.parallel ?? init.max_parallel ?? defaultParallel);
+  if (!Number.isInteger(partSize) || partSize <= 0) throw new Error("Invalid upload part size");
+  const parallel = Math.min(8, Math.max(1, opts.parallel ?? init.max_parallel ?? defaultParallel));
 
   // Build the parts queue (1-indexed, S3-style). Each entry is
   // {n, start, end} so workers can slice without recomputing.
@@ -164,30 +187,30 @@ async function uploadChunked(
   }
   type Part = { n: number; start: number; end: number };
   const queue: Part[] = [];
+  const confirmedSizes = new Map(confirmed.map(p => [p.n, p.size]));
   for (let n = 1; n <= totalParts; n++) {
     const start = (n - 1) * partSize;
     const end = Math.min(start + partSize, file.size);
-    queue.push({ n, start, end });
+    if (confirmedSizes.get(n) !== end - start) queue.push({ n, start, end });
   }
 
   // Track per-part status so onProgress aggregates cleanly.
   // partBytes[n] = bytes the server has confirmed for part n.
-  const partBytes = new Map<number, number>();
-  const reportProgress = () => {
-    let total = 0;
-    for (const v of partBytes.values()) total += v;
-    opts.onProgress?.(total, file.size);
-  };
+  const partBytes = new Map<number, number>(confirmed.map(p => [p.n, p.size]));
+  let confirmedBytes = [...partBytes.values()].reduce((a,b) => a+b, 0);
+  const reportProgress = () => opts.onProgress?.(confirmedBytes, file.size);
+  reportProgress();
 
   // Worker drains the queue. On error we retry with exp backoff;
   // after maxRetriesPerPart we let the error bubble up and the
   // overall upload aborts.
   let firstErr: Error | null = null;
+  let nextPart = 0;
   const work = async () => {
-    while (queue.length > 0) {
+    while (nextPart < queue.length) {
       if (opts.signal?.aborted) return;
       if (firstErr) return; // sibling worker tripped; bail
-      const part = queue.shift();
+      const part = queue[nextPart++];
       if (!part) return;
       let attempt = 0;
       while (attempt < maxRetriesPerPart) {
@@ -204,6 +227,7 @@ async function uploadChunked(
             throw new Error(`PUT part ${part.n} → ${res.status}: ${await res.text()}`);
           }
           const j = (await res.json()) as { size: number };
+          confirmedBytes += j.size - (partBytes.get(part.n) || 0);
           partBytes.set(part.n, j.size);
           reportProgress();
           break;
@@ -237,13 +261,17 @@ async function uploadChunked(
       `${STORAGE_API}/uploads/${id}/complete${scopeQS(opts)}`,
       { body: {}, signal: opts.signal },
     )).body;
+    try { localStorage.removeItem(resumeKey); } catch {}
     return completion.file;
   } catch (e) {
     // User cancel OR per-part retry exhaustion both leak partial
     // bytes on disk if we don't wipe the session. Fire-and-forget
     // DELETE — server is idempotent on missing sessions, so a
     // race with the sweeper is harmless.
-    abortServerSession(id, opts).catch(() => undefined);
+    if (opts.signal?.aborted || (e as DOMException).name === "AbortError") {
+      try { localStorage.removeItem(resumeKey); } catch {}
+      await abortServerSession(id, opts);
+    }
     throw e;
   }
 }
@@ -300,4 +328,11 @@ async function jsonFetch<T>(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+async function hashFile(file: File, signal?: AbortSignal): Promise<string> {
+ const hash = createSHA256.create(); const reader = file.stream().getReader();
+ try { while (true) { signal?.throwIfAborted(); const {done,value} = await reader.read(); if (done) break; hash.update(value); } }
+ finally { await reader.cancel(); reader.releaseLock(); }
+ return Array.from(hash.digest(), b => b.toString(16).padStart(2,"0")).join("");
 }

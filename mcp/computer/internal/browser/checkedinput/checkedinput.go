@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
@@ -131,11 +132,6 @@ func Set(ctx context.Context, target Target, req Request) (Result, error) {
     if (aria === 'false') return false;
     return null;
   }
-  function setNativeChecked(el, checked) {
-    var desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked');
-    if (desc && desc.set) desc.set.call(el, checked);
-    else el.checked = checked;
-  }
   var el = resolveTarget();
   if (!el) return {error:'set_checked: target not found'};
   if (el.__stale) return {error:'set_checked: stale_target: target no longer identifies the same live DOM element'};
@@ -153,20 +149,15 @@ func Set(ctx context.Context, target Target, req Request) (Result, error) {
   var changed = false;
   var actionDispatched = false;
   if (previous !== req.Checked) {
-    if (el.matches && el.matches('input[type="checkbox"],input[type="radio"]')) {
-      if (el.disabled) return {error:'set_checked: target is disabled'};
-      setNativeChecked(el, req.Checked);
-      el.dispatchEvent(new Event('input', {bubbles:true}));
-      el.dispatchEvent(new Event('change', {bubbles:true}));
-      changed = true;
-      actionDispatched = true;
-    } else {
-      eventClick(el);
-      await new Promise(function(r) { setTimeout(r, 120); });
-      changed = true;
-      actionDispatched = true;
-    }
+    // Native activation is also required for framework-controlled inputs:
+    // assigning checked and dispatching change can leave the app state stale.
+    if (el.matches && el.matches('input[type="radio"]') && !req.Checked) return {error:'set_checked: select another radio option to clear this selection'};
+    eventClick(el);
+    await new Promise(function(r) { setTimeout(r, 120); });
+    changed = true;
+    actionDispatched = true;
   }
+  if (!el.isConnected) return {error:'set_checked: target was replaced; refresh and verify its state'};
   var after = checkedState(el);
   if (after !== req.Checked) return {error:'set_checked: final state did not match requested state'};
   return {
@@ -190,7 +181,7 @@ func Set(ctx context.Context, target Target, req Request) (Result, error) {
 		OK    bool   `json:"ok"`
 		Error string `json:"error,omitempty"`
 	}
-	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &out, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(js, &out, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
 		return p.WithAwaitPromise(true)
 	})); err != nil {
 		return Result{}, err

@@ -45,6 +45,9 @@ type Workspace struct {
 	OriginHref        string   `json:"origin_href,omitempty"`
 	DirtyState        string   `json:"dirty_state"`
 	UnpushedState     string   `json:"unpushed_state"`
+	SourceDigest      string   `json:"source_digest,omitempty"`
+	SourceManifest    []string `json:"source_paths,omitempty"`
+	SourceSyncedAt    string   `json:"source_synced_at,omitempty"`
 	LastError         string   `json:"last_error"`
 	CreatedAt         string   `json:"created_at"`
 	UpdatedAt         string   `json:"updated_at"`

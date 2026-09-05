@@ -3,7 +3,7 @@
 // props:{invoice_id:N}}]) and the dashboard renders this under
 // the message bubble.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   AppCardHeader,
   Card,
@@ -28,6 +28,7 @@ interface InvoiceMeta {
 }
 
 interface Props {
+ installId?: number;
   invoice_id: number;
   projectId?: string;
   preview?: boolean;
@@ -88,6 +89,7 @@ function useBillingEvents(
   projectId: string | undefined,
   onEvent: (ev: { topic: string; data: { id?: number } }) => void,
 ) {
+ const handler=useRef(onEvent);handler.current=onEvent;
   useEffect(() => {
     if (!projectId) return;
 
@@ -101,13 +103,13 @@ function useBillingEvents(
       };
     }).__aptevaAppEvents;
     if (bridge) {
-      return bridge.subscribe("billing", projectId, onEvent as any);
+      return bridge.subscribe("billing", projectId, (ev)=>handler.current(ev) as any);
     }
     const url = `/api/app-events/billing?project_id=${encodeURIComponent(projectId)}`;
     const es = new EventSource(url, { withCredentials: true });
     es.onmessage = (e) => {
       try {
-        onEvent(JSON.parse(e.data));
+        handler.current(JSON.parse(e.data));
       } catch {
         /* ignore malformed frames */
       }
@@ -117,20 +119,23 @@ function useBillingEvents(
   }, [projectId]);
 }
 
-export default function InvoiceCard({ invoice_id, projectId, preview }: Props) {
+export default function InvoiceCard({ invoice_id, projectId, installId, preview }: Props) {
   const [meta, setMeta] = useState<InvoiceMeta | null>(
     preview ? previewSample : null,
   );
   const [missing, setMissing] = useState(false);
 
+ const request=useRef(0);
   const refetch = () => {
+ const version=++request.current;
     if (preview) return;
     if (!projectId) return;
     const url =
       `/api/apps/billing/invoices/${invoice_id}` +
-      `?project_id=${encodeURIComponent(projectId)}`;
+      `?project_id=${encodeURIComponent(projectId)}${installId ? `&install_id=${installId}`:""}`;
     fetch(url, { credentials: "same-origin" })
       .then((r) => {
+ if(version!==request.current)return null;
         if (r.status === 404) {
           setMissing(true);
           return null;
@@ -138,6 +143,7 @@ export default function InvoiceCard({ invoice_id, projectId, preview }: Props) {
         return r.json();
       })
       .then((j) => {
+ if(version!==request.current)return;
         if (j && j.invoice) {
           setMeta(j.invoice as InvoiceMeta);
           setMissing(false);
@@ -148,7 +154,7 @@ export default function InvoiceCard({ invoice_id, projectId, preview }: Props) {
       });
   };
 
-  useEffect(refetch, [invoice_id, projectId, preview]);
+  useEffect(()=>{setMeta(preview?previewSample:null);setMissing(false);refetch();return ()=>{request.current++}}, [invoice_id, projectId,installId, preview]);
 
   useBillingEvents(preview ? undefined : projectId, (ev) => {
     if (

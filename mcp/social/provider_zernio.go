@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -103,6 +104,7 @@ func zernioPlatformAllowed(platform string) bool {
 }
 
 func (a *App) toolAccountImportProvider(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	provider := strings.ToLower(strings.TrimSpace(toString(args["provider"])))
 	if provider == "" {
 		provider = zernioProviderSlug
@@ -284,6 +286,9 @@ func (a *App) upsertZernioSocialAccount(ctx *sdk.AppCtx, pid string, connID int6
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
 		row.Status = "skipped_existing"
+		if _, err := ctx.AppDB().Exec(`UPDATE social_accounts SET connection_id=?,status='active',display_name=?,avatar_url=?,provider_data=?,capabilities=? WHERE project_id=? AND provider_slug=? AND provider_account_id=?`, connID, row.DisplayName, nullable(za.Avatar), string(rawJSON), string(capsJSON), pid, zernioProviderSlug, za.AccountID); err != nil {
+			return row, err
+		}
 		_ = ctx.AppDB().QueryRow(
 			`SELECT id FROM social_accounts
 			  WHERE project_id=? AND provider_slug=? AND provider_account_id=?`,
@@ -339,7 +344,14 @@ func (a *App) startZernioAccountConnect(ctx *sdk.AppCtx, args map[string]any) (a
 	if strings.Contains(returnTo, "?") {
 		sep = "&"
 	}
-	returnURL := fmt.Sprintf("%s%spending=%d&provider=%s", returnTo, sep, pendingID, zernioProviderSlug)
+	nonce, err := callbackNonce()
+	if err != nil {
+		return nil, err
+	}
+	if _, err = ctx.AppDB().Exec(`UPDATE pending_accounts SET callback_nonce=? WHERE id=?`, nonce, pendingID); err != nil {
+		return nil, err
+	}
+	returnURL := fmt.Sprintf("%s%spending=%d&provider=%s", returnTo, sep, pendingID, zernioProviderSlug) + "&callback_nonce=" + url.QueryEscape(nonce)
 	connectInput := map[string]any{
 		"platform":     platform,
 		"profileId":    zProfileID,
@@ -401,10 +413,26 @@ func (a *App) resolveZernioProfileID(ctx *sdk.AppCtx, connID int64, args map[str
 }
 
 func (a *App) completeZernioOAuth(ctx *sdk.AppCtx, r *http.Request, row *pendingRow) (int64, bool) {
+	unlock := lockSocialResource(ctx, row.id, "oauth-callback")
+	defer unlock()
 	if row.connectionID == 0 {
 		return 0, false
 	}
+	ctx = ctx.WithProject(row.projectID)
 	q := r.URL.Query()
+	var nonce string
+	if err := ctx.AppDB().QueryRow(`SELECT callback_nonce FROM pending_accounts WHERE id=? AND project_id=? AND status='pending_oauth'`, row.id, row.projectID).Scan(&nonce); err != nil {
+		return row.connectionID, false
+	}
+	if nonce != "" && subtle.ConstantTimeCompare([]byte(nonce), []byte(q.Get("callback_nonce"))) != 1 {
+		return row.connectionID, false
+	}
+	if q.Get("state") != "" && row.providerState != "" && subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(row.providerState)) != 1 {
+		return row.connectionID, false
+	}
+	if nonce == "" && (q.Get("state") == "" || row.providerState == "" || q.Get("code") == "") {
+		return row.connectionID, false
+	}
 	state := strings.TrimSpace(q.Get("state"))
 	if state == "" {
 		state = row.providerState
@@ -433,20 +461,32 @@ func (a *App) completeZernioOAuth(ctx *sdk.AppCtx, r *http.Request, row *pending
 		if state == "" {
 			state = firstDeepStringRaw(raw, "state")
 		}
-		updateRes, _ := ctx.AppDB().Exec(
+		updateRes, err := ctx.AppDB().Exec(
 			`UPDATE pending_accounts SET status='ready', provider_state=?, provider_data=?
 			  WHERE id=? AND project_id=? AND status='pending_oauth'`,
 			state, string(raw), row.id, row.projectID,
 		)
+		if err != nil {
+			return row.connectionID, false
+		}
 		if n, _ := updateRes.RowsAffected(); n != 1 {
 			return row.connectionID, false
 		}
 	} else {
-		updateRes, _ := ctx.AppDB().Exec(
+		// Hosted OAuth redirects may omit a code. Confirm provider-side state
+		// using the vetted profile before marking our one-time callback ready.
+		accounts, err := ctx.PlatformAPI().ExecuteIntegrationTool(row.connectionID, "list_accounts", map[string]any{"profileId": row.providerProfileID})
+		if err != nil || accounts == nil || !accounts.Success || len(jsonItems(accounts.Data, "accounts", "data", "items")) == 0 {
+			return row.connectionID, false
+		}
+		updateRes, err := ctx.AppDB().Exec(
 			`UPDATE pending_accounts SET status='ready', provider_state=?
 			  WHERE id=? AND project_id=? AND status='pending_oauth'`,
 			state, row.id, row.projectID,
 		)
+		if err != nil {
+			return row.connectionID, false
+		}
 		if n, _ := updateRes.RowsAffected(); n != 1 {
 			return row.connectionID, false
 		}
@@ -888,6 +928,8 @@ func (a *App) checkZernioAccount(ctx *sdk.AppCtx, pid string, result accountChec
 }
 
 func (a *App) publishZernio(ctx *sdk.AppCtx, j publishJob) (string, string, error) {
+	unlock := lockSocialResource(ctx, j.connID, "delivery-connection")
+	defer unlock()
 	if j.providerAccountID == "" {
 		return "", "", errors.New("zernio-backed account missing provider_account_id")
 	}
@@ -898,15 +940,12 @@ func (a *App) publishZernio(ctx *sdk.AppCtx, j publishJob) (string, string, erro
 		if err != nil {
 			return "", "", err
 		}
-		_, platformID, platformURL := extractZernioPostIdentity(result.Raw)
+
 		_, _ = ctx.AppDB().Exec(
-			`UPDATE post_targets SET provider_post_id=?, provider_data=?, provider_sync_status='published', provider_updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			`UPDATE post_targets SET provider_post_id=?, provider_data=?, provider_sync_status='publishing', provider_updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 			result.ProviderPostID, string(result.Raw), j.targetID,
 		)
-		if platformID == "" {
-			platformID = result.ProviderPostID
-		}
-		return platformID, platformURL, nil
+		return providerPublicationResult(result.Raw, j.providerAccountID)
 	}
 	input := map[string]any{
 		"content":    j.body,
@@ -966,15 +1005,12 @@ func (a *App) publishZernio(ctx *sdk.AppCtx, j publishJob) (string, string, erro
 	if res == nil || !res.Success {
 		return "", "", upstreamError(res)
 	}
-	providerID, platformID, platformURL := extractZernioPostIdentity(res.Data)
+	providerID, _, _ := extractZernioPostIdentity(res.Data)
 	_, _ = ctx.AppDB().Exec(
 		`UPDATE post_targets SET provider_post_id=?, provider_data=? WHERE id=?`,
 		nullable(providerID), string(sanitizeRawJSON(res.Data)), j.targetID,
 	)
-	if platformID == "" {
-		platformID = providerID
-	}
-	return platformID, platformURL, nil
+	return providerPublicationResult(res.Data, j.providerAccountID)
 }
 
 func (a *App) importZernioPosts(ctx *sdk.AppCtx, pid string, out importResult, accountID, connID int64, providerAccountID string, profileID int64, limit int) importResult {
@@ -1387,14 +1423,20 @@ type zernioInboxReport struct {
 }
 
 func (a *App) syncZernioInbox(ctx *sdk.AppCtx, pid string, accountID, connID int64, providerAccountID, platform string) (zernioInboxReport, error) {
+	done := beginInboxSync(ctx, accountID)
+	defer done()
 	var report zernioInboxReport
+	var warnings []string
 	if providerAccountID == "" {
 		return report, errors.New("zernio account missing provider_account_id")
 	}
-	convRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_conversations", map[string]any{
+	convRes, err := collectInboxPages(ctx, accountID, connID, "list_conversations", map[string]any{
 		"accountId": providerAccountID,
 		"limit":     50,
 	})
+	if err != nil || convRes == nil || !convRes.Success {
+		warnings = append(warnings, "conversation collection failed")
+	}
 	if err == nil && convRes != nil && convRes.Success {
 		for _, conv := range jsonItems(convRes.Data, "conversations", "data", "items", "results") {
 			convID := firstString(conv, "id", "_id", "conversationId", "conversation_id")
@@ -1402,24 +1444,32 @@ func (a *App) syncZernioInbox(ctx *sdk.AppCtx, pid string, accountID, connID int
 				continue
 			}
 			report.Conversations++
-			msgRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_conversation_messages", map[string]any{
+			msgRes, err := collectInboxPages(ctx, accountID, connID, "list_conversation_messages", map[string]any{
 				"conversationId": convID,
 				"limit":          50,
 			})
 			if err != nil || msgRes == nil || !msgRes.Success {
+				warnings = append(warnings, "message collection failed")
 				continue
 			}
+
 			for _, msg := range jsonItems(msgRes.Data, "messages", "data", "items", "results") {
 				if a.upsertZernioInboxItem(ctx, pid, accountID, platform, inboxKindDM, convID, msg) {
 					report.Messages++
 				}
 			}
+			if w := finishInboxPages(ctx, accountID, msgRes); w != "" {
+				warnings = append(warnings, w)
+			}
 		}
 	}
-	commentRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_commented_posts", map[string]any{
+	commentRes, err := collectInboxPages(ctx, accountID, connID, "list_commented_posts", map[string]any{
 		"accountId": providerAccountID,
 		"limit":     50,
 	})
+	if err != nil || commentRes == nil || !commentRes.Success {
+		warnings = append(warnings, "comment collection failed")
+	}
 	if err == nil && commentRes != nil && commentRes.Success {
 		for _, post := range jsonItems(commentRes.Data, "posts", "data", "items", "results") {
 			postID := firstString(post, "id", "_id", "postId", "post_id", "platformPostId", "platform_post_id")
@@ -1427,19 +1477,35 @@ func (a *App) syncZernioInbox(ctx *sdk.AppCtx, pid string, accountID, connID int
 				continue
 			}
 			report.CommentPosts++
-			commentsRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_post_comments", map[string]any{
+			commentsRes, err := collectInboxPages(ctx, accountID, connID, "get_post_comments", map[string]any{
 				"postId": postID,
 				"limit":  100,
 			})
 			if err != nil || commentsRes == nil || !commentsRes.Success {
+				warnings = append(warnings, "comment collection failed")
 				continue
 			}
+
 			for _, c := range jsonItems(commentsRes.Data, "comments", "data", "items", "results") {
 				if a.upsertZernioInboxItem(ctx, pid, accountID, platform, inboxKindComment, postID, c) {
 					report.Comments++
 				}
 			}
+			if w := finishInboxPages(ctx, accountID, commentsRes); w != "" {
+				warnings = append(warnings, w)
+			}
 		}
+	}
+	for _, res := range []*sdk.ExecuteResult{convRes, commentRes} {
+		if len(warnings) > 0 {
+			break
+		}
+		if w := finishInboxPages(ctx, accountID, res); w != "" {
+			warnings = append(warnings, w)
+		}
+	}
+	if len(warnings) > 0 {
+		return report, fmt.Errorf("partial inbox sync: %s", strings.Join(warnings, "; "))
 	}
 	return report, nil
 }
@@ -1544,6 +1610,7 @@ func (a *App) zernioInboxReply(ctx *sdk.AppCtx, item *inboxItem, message inboxMe
 	_ = markInboxRepliedByExternalID(ctx.AppDB(), item.SocialAccountID, item.Kind, item.ExternalID)
 	if item.Kind == inboxKindDM && extID != "" {
 		_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+			Outbound:         true,
 			ProjectID:        item.ProjectID,
 			SocialAccountID:  item.SocialAccountID,
 			Platform:         item.Platform,

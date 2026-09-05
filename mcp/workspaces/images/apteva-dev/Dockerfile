@@ -11,15 +11,20 @@ COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 
 RUN groupadd --gid 1000 workspace \
     && useradd --uid 1000 --gid workspace --create-home --shell /bin/bash workspace \
-    && mkdir -p /workspace /cache \
+    && mkdir -p /workspace /cache/go/bin \
+    && printf '%s\n' 'export PATH=/cache/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin' \
+        > /etc/profile.d/workspace-path.sh \
     && chown -R workspace:workspace /workspace /cache
 
 ENV HOME=/workspace/.home \
     XDG_CACHE_HOME=/cache/xdg \
+    GOPATH=/cache/go \
+    GOBIN=/cache/go/bin \
     GOCACHE=/cache/go/build \
     GOMODCACHE=/cache/go/pkg/mod \
     BUN_INSTALL_CACHE_DIR=/cache/bun \
-    PIP_CACHE_DIR=/cache/pip
+    PIP_CACHE_DIR=/cache/pip \
+    PATH=/cache/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
 
 USER workspace
 WORKDIR /workspace

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"strings"
 
@@ -18,7 +19,7 @@ func (a *App) gitMCPTools() []sdk.Tool {
 				"description": map[string]any{"type": "string"}, "framework": map[string]any{"type": "string"},
 				"connection_id": map[string]any{"type": "integer"},
 			}, []string{"remote_url"}),
-			Handler: a.toolGitImport,
+			HandlerCtx: a.toolGitImport,
 		},
 		{
 			Name:        "repos_git_connect",
@@ -27,25 +28,25 @@ func (a *App) gitMCPTools() []sdk.Tool {
 				"slug": map[string]any{"type": "string"}, "remote_url": map[string]any{"type": "string"},
 				"branch": map[string]any{"type": "string"}, "connection_id": map[string]any{"type": "integer"},
 			}, []string{"slug", "remote_url"}),
-			Handler: a.toolGitConnect,
+			HandlerCtx: a.toolGitConnect,
 		},
 		{
 			Name:        "repos_git_status",
 			Description: "Get branch, HEAD, upstream, ahead/behind counts, and changed or conflicted paths. Args: slug.",
 			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
-			Handler:     a.toolGitStatus,
+			HandlerCtx:  a.toolGitStatus,
 		},
 		{
 			Name:        "repos_git_fetch",
 			Description: "Fetch and prune origin tracking refs without changing checked-out files. Args: slug, actor?.",
 			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "actor": map[string]any{"type": "string"}}, []string{"slug"}),
-			Handler:     a.toolGitFetch,
+			HandlerCtx:  a.toolGitFetch,
 		},
 		{
 			Name:        "repos_git_pull",
 			Description: "Fetch then fast-forward the current branch. Refuses dirty, conflicted, detached, or diverged repositories. Args: slug, actor?.",
 			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}, "actor": map[string]any{"type": "string"}}, []string{"slug"}),
-			Handler:     a.toolGitPull,
+			HandlerCtx:  a.toolGitPull,
 		},
 		{
 			Name:        "repos_git_commit",
@@ -56,7 +57,7 @@ func (a *App) gitMCPTools() []sdk.Tool {
 				"author_name": map[string]any{"type": "string"}, "author_email": map[string]any{"type": "string"},
 				"actor": map[string]any{"type": "string"},
 			}, []string{"slug", "message"}),
-			Handler: a.toolGitCommit,
+			HandlerCtx: a.toolGitCommit,
 		},
 		{
 			Name:        "repos_git_push",
@@ -65,7 +66,7 @@ func (a *App) gitMCPTools() []sdk.Tool {
 				"slug": map[string]any{"type": "string"}, "set_upstream": map[string]any{"type": "boolean"},
 				"actor": map[string]any{"type": "string"},
 			}, []string{"slug"}),
-			Handler: a.toolGitPush,
+			HandlerCtx: a.toolGitPush,
 		},
 		{
 			Name:        "repos_git_diff",
@@ -74,7 +75,7 @@ func (a *App) gitMCPTools() []sdk.Tool {
 				"slug": map[string]any{"type": "string"}, "base": map[string]any{"type": "string"},
 				"max_bytes": map[string]any{"type": "integer"},
 			}, []string{"slug"}),
-			Handler: a.toolGitDiff,
+			HandlerCtx: a.toolGitDiff,
 		},
 		{
 			Name:        "repos_git_log",
@@ -82,13 +83,13 @@ func (a *App) gitMCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"slug": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"},
 			}, []string{"slug"}),
-			Handler: a.toolGitLog,
+			HandlerCtx: a.toolGitLog,
 		},
 		{
 			Name:        "repos_git_branches",
 			Description: "List local and origin-tracking branches, including the current branch and upstream. Args: slug.",
 			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
-			Handler:     a.toolGitBranches,
+			HandlerCtx:  a.toolGitBranches,
 		},
 		{
 			Name:        "repos_git_branch_create",
@@ -97,7 +98,7 @@ func (a *App) gitMCPTools() []sdk.Tool {
 				"slug": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"},
 				"start_point": map[string]any{"type": "string"}, "actor": map[string]any{"type": "string"},
 			}, []string{"slug", "name"}),
-			Handler: a.toolGitBranchCreate,
+			HandlerCtx: a.toolGitBranchCreate,
 		},
 		{
 			Name:        "repos_git_switch",
@@ -106,7 +107,7 @@ func (a *App) gitMCPTools() []sdk.Tool {
 				"slug": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"},
 				"actor": map[string]any{"type": "string"},
 			}, []string{"slug", "name"}),
-			Handler: a.toolGitSwitch,
+			HandlerCtx: a.toolGitSwitch,
 		},
 	}
 }
@@ -118,7 +119,7 @@ func (a *App) requireGit() (*gitService, error) {
 	return a.git, nil
 }
 
-func (a *App) toolGitImport(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolGitImport(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	service, err := a.requireGit()
 	if err != nil {
 		return nil, err
@@ -127,7 +128,7 @@ func (a *App) toolGitImport(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return service.Import(ctx, GitImportInput{
+	return service.withContext(callCtx).Import(ctx, GitImportInput{
 		RemoteURL: strArg(args, "remote_url"), Ref: strArg(args, "ref"),
 		Name: strArg(args, "name"), Slug: strArg(args, "slug"),
 		Description: strArg(args, "description"), Framework: strArg(args, "framework"),
@@ -148,108 +149,108 @@ func (a *App) gitRepoFromArgs(ctx *sdk.AppCtx, args map[string]any) (*gitService
 	return service, repo, err
 }
 
-func (a *App) toolGitConnect(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolGitConnect(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	service, repo, err := a.gitRepoFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	return service.Connect(ctx, repo, GitConnectInput{
+	return service.withContext(callCtx).Connect(ctx, repo, GitConnectInput{
 		RemoteURL: strArg(args, "remote_url"), Branch: strArg(args, "branch"),
 		ConnectionID: int64(intArg(args, "connection_id", 0)),
 	})
 }
 
-func (a *App) toolGitStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolGitStatus(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	service, repo, err := a.gitRepoFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	return service.Status(ctx, repo)
+	return service.withContext(callCtx).Status(ctx, repo)
 }
 
-func (a *App) toolGitFetch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolGitFetch(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	service, repo, err := a.gitRepoFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	return service.Fetch(ctx, repo, strArg(args, "actor"))
+	return service.withContext(callCtx).Fetch(ctx, repo, strArg(args, "actor"))
 }
 
-func (a *App) toolGitPull(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolGitPull(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	service, repo, err := a.gitRepoFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	return service.Pull(ctx, repo, strArg(args, "actor"))
+	return service.withContext(callCtx).Pull(ctx, repo, strArg(args, "actor"))
 }
 
-func (a *App) toolGitCommit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolGitCommit(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	service, repo, err := a.gitRepoFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	return service.Commit(ctx, repo, strArg(args, "message"), stringSliceArg(args, "paths"),
+	return service.withContext(callCtx).Commit(ctx, repo, strArg(args, "message"), stringSliceArg(args, "paths"),
 		strArg(args, "author_name"), strArg(args, "author_email"), strArg(args, "actor"))
 }
 
-func (a *App) toolGitPush(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolGitPush(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	service, repo, err := a.gitRepoFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	return service.Push(ctx, repo, strArg(args, "actor"), boolArg(args, "set_upstream"))
+	return service.withContext(callCtx).Push(ctx, repo, strArg(args, "actor"), boolArg(args, "set_upstream"))
 }
 
-func (a *App) toolGitDiff(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolGitDiff(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	service, repo, err := a.gitRepoFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	diff, truncated, err := service.Diff(ctx, repo, strArg(args, "base"), intArg(args, "max_bytes", 256<<10))
+	diff, truncated, err := service.withContext(callCtx).Diff(ctx, repo, strArg(args, "base"), intArg(args, "max_bytes", 256<<10))
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"diff": diff, "truncated": truncated}, nil
 }
 
-func (a *App) toolGitLog(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolGitLog(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	service, repo, err := a.gitRepoFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	commits, err := service.Log(ctx, repo, intArg(args, "limit", 50))
+	commits, err := service.withContext(callCtx).Log(ctx, repo, intArg(args, "limit", 50))
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"commits": commits, "count": len(commits)}, nil
 }
 
-func (a *App) toolGitBranches(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolGitBranches(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	service, repo, err := a.gitRepoFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	branches, err := service.Branches(ctx, repo)
+	branches, err := service.withContext(callCtx).Branches(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"branches": branches, "count": len(branches)}, nil
 }
 
-func (a *App) toolGitBranchCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolGitBranchCreate(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	service, repo, err := a.gitRepoFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	return service.CreateBranch(ctx, repo, strArg(args, "name"), strArg(args, "start_point"), strArg(args, "actor"))
+	return service.withContext(callCtx).CreateBranch(ctx, repo, strArg(args, "name"), strArg(args, "start_point"), strArg(args, "actor"))
 }
 
-func (a *App) toolGitSwitch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolGitSwitch(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	service, repo, err := a.gitRepoFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	return service.Switch(ctx, repo, strArg(args, "name"), strArg(args, "actor"))
+	return service.withContext(callCtx).Switch(ctx, repo, strArg(args, "name"), strArg(args, "actor"))
 }
 
 func stringSliceArg(args map[string]any, key string) []string {

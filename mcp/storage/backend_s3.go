@@ -70,7 +70,7 @@ func newS3Backend(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, bucket string) (
 	}
 
 	client, err := minio.New(resolved.endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(resolved.accessKey, resolved.secretKey, ""),
+		Creds:  credentials.New(&refreshingS3Credentials{app: ctx, connectionID: bound.ConnectionID, location: *resolved, value: credentials.Value{AccessKeyID: resolved.accessKey, SecretAccessKey: resolved.secretKey, SignerType: credentials.SignatureV4}, expires: time.Now().Add(5 * time.Minute)}),
 		Secure: resolved.useSSL,
 		Region: resolved.region,
 		BucketLookup: func() minio.BucketLookupType {

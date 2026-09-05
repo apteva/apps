@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -260,6 +261,8 @@ type SetOfMarkTarget struct {
 	AccessibleName    string         `json:"accessible_name,omitempty"`
 	Type              string         `json:"type,omitempty"`
 	Placeholder       string         `json:"placeholder,omitempty"`
+	Checked           *bool          `json:"checked,omitempty"`
+	Indeterminate     bool           `json:"indeterminate,omitempty"`
 	CurrentValue      *string        `json:"current_value,omitempty"`
 	Pattern           string         `json:"pattern,omitempty"`
 	FormatHint        string         `json:"format_hint,omitempty"`
@@ -293,22 +296,23 @@ type FieldValidity struct {
 // ScrollRegion is one independently scrollable viewport or DOM container.
 // IDs are stable for the current document and are accepted by scroll actions.
 type ScrollRegion struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Role       string `json:"role"`
-	X          int    `json:"x"`
-	Y          int    `json:"y"`
-	W          int    `json:"w"`
-	H          int    `json:"h"`
-	ScrollLeft int    `json:"scroll_left"`
-	ScrollTop  int    `json:"scroll_top"`
-	MaxScrollX int    `json:"max_scroll_x"`
-	MaxScrollY int    `json:"max_scroll_y"`
-	CanScrollX bool   `json:"can_scroll_x"`
-	CanScrollY bool   `json:"can_scroll_y"`
-	ParentID   string `json:"parent_id,omitempty"`
-	OpenedBy   string `json:"opened_by,omitempty"`
-	Document   bool   `json:"document"`
+	ContentHints []string `json:"content_hints,omitempty"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Role         string   `json:"role"`
+	X            int      `json:"x"`
+	Y            int      `json:"y"`
+	W            int      `json:"w"`
+	H            int      `json:"h"`
+	ScrollLeft   int      `json:"scroll_left"`
+	ScrollTop    int      `json:"scroll_top"`
+	MaxScrollX   int      `json:"max_scroll_x"`
+	MaxScrollY   int      `json:"max_scroll_y"`
+	CanScrollX   bool     `json:"can_scroll_x"`
+	CanScrollY   bool     `json:"can_scroll_y"`
+	ParentID     string   `json:"parent_id,omitempty"`
+	OpenedBy     string   `json:"opened_by,omitempty"`
+	Document     bool     `json:"document"`
 }
 
 // ScrollResult reports observed movement, not merely wheel-event delivery.
@@ -417,6 +421,48 @@ type StabilityWaiter interface {
 // active document for rendered media and draft-save state.
 type MediaObserver interface {
 	ObserveMedia() (MediaObservation, error)
+}
+
+type DownloadStatus string
+
+const (
+	DownloadInProgress DownloadStatus = "in_progress"
+	DownloadCompleted  DownloadStatus = "completed"
+	DownloadFailed     DownloadStatus = "failed"
+	DownloadCancelled  DownloadStatus = "cancelled"
+)
+
+// Download is safe browser-visible metadata. Provider identifiers, local
+// paths, signed URLs, and downloaded bytes are deliberately excluded.
+type Download struct {
+	OriginalFilename string         `json:"-"` // Provider identity; never use as a filesystem path.
+	ID               string         `json:"id"`
+	Filename         string         `json:"filename"`
+	MIMEType         string         `json:"mime_type,omitempty"`
+	Size             int64          `json:"size,omitempty"`
+	ReceivedBytes    int64          `json:"received_bytes,omitempty"`
+	SHA256           string         `json:"sha256,omitempty"`
+	Status           DownloadStatus `json:"status"`
+	ErrorCode        string         `json:"error_code,omitempty"`
+	SourceOrigin     string         `json:"source_origin,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	CompletedAt      *time.Time     `json:"completed_at,omitempty"`
+}
+
+// DownloadManager is an optional, session-bound backend capability. IDs are
+// opaque within one browser session and never represent filesystem paths.
+type DownloadManager interface {
+	ListDownloads(ctx context.Context) ([]Download, error)
+	WaitForDownload(ctx context.Context, id string) (Download, error)
+	OpenDownload(ctx context.Context, id string) (io.ReadCloser, Download, error)
+}
+
+// DownloadEventSource lets computer_use include compact downloads_started
+// metadata without waiting for completion. Absence is harmless: callers can
+// always discover downloads through browser_download(action=list).
+type DownloadEventSource interface {
+	DownloadEventCursor() uint64
+	DownloadsStartedSince(cursor uint64) []Download
 }
 
 // TabInfo describes one browser page target inside a provider session.

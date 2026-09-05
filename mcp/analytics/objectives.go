@@ -241,8 +241,8 @@ func validateObjectiveMetricQuery(q *ObjectiveMetricQuery) error {
 	if !oneOf(q.Aggregation, "count", "distinct", "sum", "sum_money", "average", "min", "max", "latest", "change") {
 		return errors.New("query aggregation must be count, distinct, sum_money, sum, average, min, max, latest or change")
 	}
-	if q.Source != "" && !oneOf(q.Source, "track", "auto") {
-		return errors.New("query source must be track or auto")
+	if q.Source != "" && !oneOf(q.Source, "track", "auto", "web", "bus", "rollup") {
+		return errors.New("query source must be track, auto, web, bus or rollup")
 	}
 	switch q.Aggregation {
 	case "count":
@@ -288,7 +288,7 @@ func oneOf(value string, allowed ...string) bool {
 	return false
 }
 
-func createObjective(db *sql.DB, projectID string, in ObjectiveWrite) (*Objective, error) {
+func createObjective(db sqlDatabase, projectID string, in ObjectiveWrite) (*Objective, error) {
 	if err := validateObjectiveWrite(&in, true); err != nil {
 		return nil, err
 	}
@@ -317,7 +317,7 @@ func createObjective(db *sql.DB, projectID string, in ObjectiveWrite) (*Objectiv
 	return getObjective(db, projectID, id)
 }
 
-func updateObjective(db *sql.DB, projectID string, id int64, in ObjectiveWrite) (*Objective, error) {
+func updateObjective(db sqlDatabase, projectID string, id int64, in ObjectiveWrite) (*Objective, error) {
 	if err := validateObjectiveWrite(&in, false); err != nil {
 		return nil, err
 	}
@@ -339,10 +339,7 @@ func updateObjective(db *sql.DB, projectID string, id int64, in ObjectiveWrite) 
 		if len(in.Targets) == 0 {
 			return nil, errors.New("at least one target required")
 		}
-		if _, err := tx.Exec(`DELETE FROM objective_targets WHERE objective_id=?`, id); err != nil {
-			return nil, err
-		}
-		if err := replaceObjectiveTargets(tx, id, in.Targets, now); err != nil {
+		if err := updateObjectiveTargets(tx, id, in.Targets, now); err != nil {
 			return nil, err
 		}
 	}
@@ -368,7 +365,7 @@ func replaceObjectiveTargets(tx *sql.Tx, objectiveID int64, targets []ObjectiveT
 	return nil
 }
 
-func getObjective(db *sql.DB, projectID string, id int64) (*Objective, error) {
+func getObjective(db sqlRunner, projectID string, id int64) (*Objective, error) {
 	var o Objective
 	var archived sql.NullInt64
 	err := db.QueryRow(`SELECT id, project_id, name, description, owner_type, owner_id, status, created_by, created_at, updated_at, archived_at
@@ -388,7 +385,7 @@ func getObjective(db *sql.DB, projectID string, id int64) (*Objective, error) {
 	return &o, nil
 }
 
-func listObjectives(db *sql.DB, projectID, status, search string, includeArchived bool, limit int) ([]Objective, error) {
+func listObjectives(db sqlRunner, projectID, status, search string, includeArchived bool, limit int) ([]Objective, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -438,13 +435,14 @@ func listObjectives(db *sql.DB, projectID, status, search string, includeArchive
 	return out, nil
 }
 
-func listObjectiveTargets(db *sql.DB, objectiveID int64) ([]ObjectiveTarget, error) {
+func listObjectiveTargets(db sqlRunner, objectiveID int64) ([]ObjectiveTarget, error) {
 	rows, err := db.Query(`SELECT id, objective_id, name, metric_key, target_value, unit, currency, direction,
 		period_start, period_end, timezone, query_json, created_at, updated_at
-		FROM objective_targets WHERE objective_id=? ORDER BY period_start, id`, objectiveID)
+		FROM objective_targets WHERE objective_id=? AND retired_at IS NULL ORDER BY period_start, id`, objectiveID)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	var out []ObjectiveTarget
 	for rows.Next() {
 		var t ObjectiveTarget
@@ -477,7 +475,7 @@ func listObjectiveTargets(db *sql.DB, objectiveID int64) ([]ObjectiveTarget, err
 	return out, nil
 }
 
-func archiveObjective(db *sql.DB, projectID string, id int64) error {
+func archiveObjective(db sqlRunner, projectID string, id int64) error {
 	now := time.Now().UnixMilli()
 	res, err := db.Exec(`UPDATE objectives SET status='archived', archived_at=?, updated_at=? WHERE id=? AND project_id=? AND status!='archived'`, now, now, id, projectID)
 	if err != nil {
@@ -489,7 +487,7 @@ func archiveObjective(db *sql.DB, projectID string, id int64) error {
 	return nil
 }
 
-func evaluateObjective(db *sql.DB, projectID string, objectiveID int64) ([]TargetProgress, error) {
+func evaluateObjective(db sqlRunner, projectID string, objectiveID int64) ([]TargetProgress, error) {
 	o, err := getObjective(db, projectID, objectiveID)
 	if err != nil {
 		return nil, err
@@ -501,13 +499,13 @@ func evaluateObjective(db *sql.DB, projectID string, objectiveID int64) ([]Targe
 	return out, nil
 }
 
-func evaluateObjectiveTarget(db *sql.DB, projectID string, target ObjectiveTarget) TargetProgress {
+func evaluateObjectiveTarget(db sqlRunner, projectID string, target ObjectiveTarget) TargetProgress {
 	return measureObjectiveTarget(db, projectID, target, true)
 }
 
 // measureObjectiveTarget powers live dashboard goal badges without turning a
 // read-only dashboard refresh into objective-progress history writes.
-func measureObjectiveTarget(db *sql.DB, projectID string, target ObjectiveTarget, persist bool) TargetProgress {
+func measureObjectiveTarget(db sqlRunner, projectID string, target ObjectiveTarget, persist bool) TargetProgress {
 	now := time.Now().UnixMilli()
 	progress := progressBase(target, now)
 	f := Filter{ProjectID: projectID, App: target.Query.App, Topic: target.Query.Topic, Source: target.Query.Source,
@@ -525,6 +523,14 @@ func measureObjectiveTarget(db *sql.DB, projectID string, target ObjectiveTarget
 		var result map[string]any
 		result, err = numericScalarForWidget(db, f, target.Query.Value, target.Query.Aggregation)
 		if result != nil {
+			if result["value"] == nil {
+				progress.Status = "no_data"
+				if persist {
+					_, _ = db.Exec(`INSERT INTO objective_progress(target_id,status,updated_at) VALUES(?,'no_data',?) ON CONFLICT(target_id) DO UPDATE SET actual_value=NULL,measured_at=NULL,status='no_data',error='',details_json='{}',updated_at=excluded.updated_at`, target.ID, now)
+				}
+				progress.Details = map[string]any{"matched_values": result["count"]}
+				return progress
+			}
 			actual, _ = result["value"].(float64)
 			details["matched_values"] = result["count"]
 			for _, key := range []string{"previous", "current", "change", "change_percent"} {
@@ -653,7 +659,7 @@ func dashboardGoalTargetIDs(config map[string]any) ([]int64, error) {
 	return out, nil
 }
 
-func validateDashboardGoalLinks(db *sql.DB, projectID string, config map[string]any) error {
+func validateDashboardGoalLinks(db sqlRunner, projectID string, config map[string]any) error {
 	ids, err := dashboardGoalTargetIDs(config)
 	if err != nil || len(ids) == 0 {
 		return err
@@ -667,7 +673,7 @@ func validateDashboardGoalLinks(db *sql.DB, projectID string, config map[string]
 	}
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM objective_targets t JOIN objectives o ON o.id=t.objective_id
-		WHERE o.project_id=? AND o.status!='archived' AND t.id IN (`+strings.Join(placeholders, ",")+`)`, args...).Scan(&count); err != nil {
+		WHERE o.project_id=? AND o.status!='archived' AND t.retired_at IS NULL AND t.id IN (`+strings.Join(placeholders, ",")+`)`, args...).Scan(&count); err != nil {
 		return err
 	}
 	if count != len(ids) {
@@ -678,7 +684,7 @@ func validateDashboardGoalLinks(db *sql.DB, projectID string, config map[string]
 
 // dashboardGoalsForWidgets resolves all linked targets in one project-scoped
 // query, evaluates each unique target once, and never updates progress cache.
-func dashboardGoalsForWidgets(db *sql.DB, projectID string, widgets []DashboardWidget) (map[int64][]DashboardGoalProgress, map[int64]string, error) {
+func dashboardGoalsForWidgets(db sqlRunner, projectID string, widgets []DashboardWidget) (map[int64][]DashboardGoalProgress, map[int64]string, error) {
 	widgetTargets := map[int64][]int64{}
 	errorsByWidget := map[int64]string{}
 	unique := map[int64]bool{}
@@ -711,7 +717,7 @@ func dashboardGoalsForWidgets(db *sql.DB, projectID string, widgets []DashboardW
 		t.direction, t.period_start, t.period_end, t.timezone, t.query_json, t.created_at, t.updated_at,
 		o.name, o.status
 		FROM objective_targets t JOIN objectives o ON o.id=t.objective_id
-		WHERE o.project_id=? AND o.status!='archived' AND t.id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+		WHERE o.project_id=? AND o.status!='archived' AND t.retired_at IS NULL AND t.id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -794,7 +800,7 @@ func objectiveCompletion(actual, target float64, direction string) (*float64, bo
 	return &pct, achieved
 }
 
-func cacheObjectiveProgressOK(db *sql.DB, targetID int64, actual float64, details map[string]any, now int64) {
+func cacheObjectiveProgressOK(db sqlRunner, targetID int64, actual float64, details map[string]any, now int64) {
 	raw, _ := json.Marshal(details)
 	_, _ = db.Exec(`INSERT INTO objective_progress (target_id, actual_value, measured_at, status, error, details_json, updated_at)
 		VALUES (?, ?, ?, 'ok', '', ?, ?)
@@ -802,13 +808,13 @@ func cacheObjectiveProgressOK(db *sql.DB, targetID int64, actual float64, detail
 		status='ok', error='', details_json=excluded.details_json, updated_at=excluded.updated_at`, targetID, actual, now, string(raw), now)
 }
 
-func cacheObjectiveProgressError(db *sql.DB, targetID int64, message string, now int64) {
+func cacheObjectiveProgressError(db sqlRunner, targetID int64, message string, now int64) {
 	_, _ = db.Exec(`INSERT INTO objective_progress (target_id, actual_value, measured_at, status, error, details_json, updated_at)
 		VALUES (?, NULL, NULL, 'error', ?, '{}', ?)
 		ON CONFLICT(target_id) DO UPDATE SET status='error', error=excluded.error, updated_at=excluded.updated_at`, targetID, message, now)
 }
 
-func cachedTargetProgress(db *sql.DB, target ObjectiveTarget) (*TargetProgress, error) {
+func cachedTargetProgress(db sqlRunner, target ObjectiveTarget) (*TargetProgress, error) {
 	var actual sql.NullFloat64
 	var measured sql.NullInt64
 	var status, message, detailsJSON string
@@ -846,7 +852,7 @@ func (a *App) handleObjectives(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		includeArchived := r.URL.Query().Get("include_archived") == "true"
-		rows, err := listObjectives(globalCtx.AppDB(), projectID, r.URL.Query().Get("status"), r.URL.Query().Get("search"), includeArchived, intQuery(r, "limit"))
+		rows, err := listObjectives(requestReadDB(r), projectID, r.URL.Query().Get("status"), r.URL.Query().Get("search"), includeArchived, intQuery(r, "limit"))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -862,12 +868,12 @@ func (a *App) handleObjectives(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
-		o, err := createObjective(globalCtx.AppDB(), projectID, body)
+		o, err := createObjective(requestWriteDB(r), projectID, body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		progress, _ := evaluateObjective(globalCtx.AppDB(), projectID, o.ID)
+		progress, _ := requestObjectiveProgress(r, projectID, o.ID)
 		writeJSON(w, map[string]any{"objective": o, "progress": progress})
 	default:
 		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
@@ -898,7 +904,7 @@ func (a *App) handleObjectiveItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		progress, err := evaluateObjective(globalCtx.AppDB(), projectID, id)
+		progress, err := requestObjectiveProgress(r, projectID, id)
 		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
 			return
@@ -916,7 +922,7 @@ func (a *App) handleObjectiveItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		o, err := getObjective(globalCtx.AppDB(), projectID, id)
+		o, err := getObjective(requestReadDB(r), projectID, id)
 		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
 			return
@@ -936,7 +942,7 @@ func (a *App) handleObjectiveItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
-		o, err := updateObjective(globalCtx.AppDB(), projectID, id, body)
+		o, err := updateObjective(requestWriteDB(r), projectID, id, body)
 		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
 			return
@@ -947,7 +953,7 @@ func (a *App) handleObjectiveItem(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, map[string]any{"objective": o})
 	case http.MethodDelete:
-		if err := archiveObjective(globalCtx.AppDB(), projectID, id); errors.Is(err, sql.ErrNoRows) {
+		if err := archiveObjective(requestWriteDB(r), projectID, id); errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
 		} else if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

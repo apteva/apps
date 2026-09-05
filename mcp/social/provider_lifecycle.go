@@ -248,12 +248,14 @@ func zernioWorkflowStatus(item, platformItem map[string]any) (status, requestedM
 		return "draft", postModeDraft, ""
 	case strings.Contains(raw, "fail") || strings.Contains(raw, "error"):
 		return "failed", postModePublish, scheduleAt
-	case strings.Contains(raw, "publish") || strings.Contains(raw, "complete") || publishedEvidence != "":
+	case raw == "published" || raw == "completed" || (raw == "" && publishedEvidence != ""):
 		return "published", postModePublish, scheduleAt
+	case raw == "publishing" || raw == "processing":
+		return "publishing", postModePublish, scheduleAt
 	case scheduleAt != "" || strings.Contains(raw, "schedul") || strings.Contains(raw, "queue"):
 		return "scheduled", postModeSchedule, scheduleAt
 	default:
-		return "published", postModePublish, scheduleAt
+		return "publishing", postModePublish, scheduleAt
 	}
 }
 
@@ -285,28 +287,50 @@ func (a *App) reconcileImportedProviderPost(
 		accountID, providerPostID,
 	).Scan(&targetID, &postID)
 	if err == nil {
-		storedPublishedAt := any(nil)
-		if status == "published" {
-			storedPublishedAt = nullable(publishedAt)
+		unlock := lockSocialPost(ctx, postID)
+		defer unlock()
+		var source, localStatus string
+		var priorRevision int64
+		if err := ctx.AppDB().QueryRow(`SELECT source,status,revision FROM posts WHERE id=? AND project_id=?`, postID, pid).Scan(&source, &localStatus, &priorRevision); err != nil {
+			return false, err
 		}
-		_, err = ctx.AppDB().Exec(
-			`UPDATE posts SET body=?, status=?, requested_mode=?, schedule_at=?, external_media_urls=?,
-			        created_at=COALESCE(NULLIF(?,''),created_at), published_at=?,
-			        provider_sync_mode='mirror', source='provider', updated_at=CURRENT_TIMESTAMP
-			  WHERE id=? AND project_id=?`,
-			body, status, requestedMode, nullable(scheduleAt), string(mediaJSON), createdAt, storedPublishedAt, postID, pid,
-		)
+		tx, err := ctx.AppDB().Begin()
 		if err != nil {
 			return false, err
 		}
-		_, err = ctx.AppDB().Exec(
-			`UPDATE post_targets SET status=?, platform_post_id=?, platform_url=?, provider_data=?,
-			        provider_sync_status=?, provider_updated_at=CURRENT_TIMESTAMP,
-			        published_at=CASE WHEN ?='published' THEN ? ELSE NULL END
-			  WHERE id=?`,
-			status, nullable(platformPostID), nullable(platformURL), string(rawJSON), status, status, nullable(publishedAt), targetID,
-		)
-		return false, err
+		defer tx.Rollback()
+		targetStatus := status
+		reviewing := localStatus == "draft" || localStatus == "approved" || localStatus == "in_review" || localStatus == "rejected"
+		if source != "provider" && reviewing {
+			targetStatus = "draft"
+		}
+		if source == "provider" && !reviewing {
+			_, err = tx.Exec(`UPDATE posts SET created_at=COALESCE(NULLIF(?,''),created_at),published_at=CASE WHEN ?='published' THEN NULLIF(?,'') ELSE NULL END,body=?,requested_mode=?,schedule_at=?,external_media_urls=?,revision=revision+CASE WHEN body<>? THEN 1 ELSE 0 END,approved_revision=CASE WHEN body<>? THEN 0 ELSE approved_revision END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, createdAt, status, publishedAt, body, requestedMode, nullable(scheduleAt), string(mediaJSON), body, body, postID, pid)
+			if err != nil {
+				return false, err
+			}
+		}
+		_, err = tx.Exec(`UPDATE post_targets SET status=?,platform_post_id=?,platform_url=?,provider_data=?,provider_sync_status=?,provider_updated_at=CURRENT_TIMESTAMP,published_at=CASE WHEN ?='published' THEN ? ELSE NULL END WHERE id=?`, targetStatus, nullable(platformPostID), nullable(platformURL), string(rawJSON), status, status, nullable(publishedAt), targetID)
+		if err != nil {
+			return false, err
+		}
+
+		var currentRevision int64
+		if err = tx.QueryRow(`SELECT revision FROM posts WHERE id=?`, postID).Scan(&currentRevision); err != nil {
+			return false, err
+		}
+		if currentRevision != priorRevision {
+			if err = recordPostRevisionTx(tx, postID, currentRevision, "provider:zernio"); err != nil {
+				return false, err
+			}
+		}
+		if err = tx.Commit(); err != nil {
+			return false, err
+		}
+		if !reviewing {
+			a.rollupPostStatus(ctx, postID)
+		}
+		return false, nil
 	}
 	if err != sql.ErrNoRows {
 		return false, err
@@ -351,6 +375,7 @@ func (a *App) reconcileImportedProviderPost(
 }
 
 func (a *App) toolAccountProviderSyncUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	accountID := int64(intArg(args, "social_account_id", intArg(args, "id", 0)))
 	if accountID <= 0 {
 		return mcpError("social_account_id required"), nil

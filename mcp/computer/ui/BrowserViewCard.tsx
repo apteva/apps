@@ -57,11 +57,16 @@ export default function BrowserViewCard(props: BrowserViewProps) {
   useEffect(() => {
     if (props.preview || !id || requestedMode === "snapshot") return;
     let active = true;
+    let busy = false;
+    const controller = new AbortController();
+    setPresentation(null); setStream(null);
     const refresh = async () => {
+      if (busy) return;
+      busy = true;
       try {
         const [presentationResponse, streamResponse] = await Promise.all([
-          fetch(sessionURL(id, "presentation", props.projectId), { credentials: "include" }),
-          fetch(sessionURL(id, "stream", props.projectId), { credentials: "include" }),
+          fetch(sessionURL(id, "presentation", props.projectId), { credentials: "include", signal: controller.signal }),
+          fetch(sessionURL(id, "stream", props.projectId), { credentials: "include", signal: controller.signal }),
         ]);
         if (!presentationResponse.ok || !streamResponse.ok) throw new Error("Browser view unavailable");
         const nextPresentation = (await presentationResponse.json()) as Presentation;
@@ -76,12 +81,13 @@ export default function BrowserViewCard(props: BrowserViewProps) {
         }
       } catch (cause) {
         if (active) setError(cause instanceof Error ? cause.message : String(cause));
-      }
+      } finally { busy = false; }
     };
     void refresh();
     const interval = window.setInterval(refresh, 3000);
     return () => {
       active = false;
+      controller.abort();
       window.clearInterval(interval);
     };
   }, [id, props.preview, props.projectId, requestedMode]);

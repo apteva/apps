@@ -1,8 +1,8 @@
 // Tables v0.1 — typed-row database app.
 //
 // User-defined tables are persisted as physical sqlite tables named
-// t_<id>. Every physical table has three reserved columns the user
-// can't override: id (INTEGER PRIMARY KEY), created_at, updated_at.
+// t_<id>. Every physical table has four reserved columns the user
+// can't override: id (INTEGER PRIMARY KEY), created_at, updated_at, _revision.
 // User columns are validated against a closed type set (text, number,
 // bool, datetime, json, file_id) on every insert/update.
 //
@@ -14,6 +14,8 @@
 package main
 
 import (
+	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"sync"
@@ -22,104 +24,14 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: tables
-display_name: Tables
-version: 0.1.14
-description: Typed-row database for Apteva agents and human teams.
-author: Apteva
-icon: /ui/icon.svg
-icon_style: monochrome
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - { name: tables_create,    description: "Create a new table with typed columns." }
-    - { name: tables_list,      description: "List tables visible to this install." }
-    - { name: tables_describe,  description: "Schema + row count for one table." }
-    - { name: tables_alter,     description: "Add/rename/drop columns." }
-    - { name: tables_drop,      description: "Delete a table and its rows." }
-    - { name: indexes_create,   description: "Create a validated composite index." }
-    - { name: indexes_list,     description: "List a table's indexes." }
-    - { name: indexes_drop,     description: "Drop a user-managed index." }
-    - { name: rows_insert,      description: "Insert one or many rows; atomic." }
-    - { name: rows_upsert,      description: "Insert or update rows by key; atomic." }
-    - { name: rows_get,         description: "Fetch one row by id." }
-    - { name: rows_update,      description: "Patch fields on a row." }
-    - { name: rows_delete,      description: "Delete by id, or by filter + confirm." }
-    - { name: rows_search,      description: "Filtered list with typed predicates." }
-    - { name: rows_count,       description: "Count rows matching a filter." }
-    - { name: rows_aggregate,   description: "Single-table grouped aggregations." }
-    - { name: tables_query,     description: "Read-only SELECT escape hatch." }
-  publishes:
-    - name: table.created
-      description: A table was created.
-      payload:
-        id: integer
-        name: string
-        scope: string
-        columns: array
-    - name: table.altered
-      description: A table schema changed.
-      payload:
-        name: string
-        columns: array
-    - name: table.dropped
-      description: A table was dropped.
-      payload:
-        name: string
-    - name: row.inserted
-      description: Rows were inserted into a table.
-      payload:
-        table: string
-        ids: array
-        count: integer
-    - name: row.updated
-      description: Rows were updated in a table. Single-row updates include the changed fields and current row.
-      payload:
-        table: string
-        id: integer
-        count: integer
-        fields: object
-        row: object
-    - name: row.deleted
-      description: Rows were deleted from a table.
-      payload:
-        table: string
-        id: integer
-        deleted: integer
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/tables
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/tables.db
-  migrations: migrations/
-config_schema:
-  - { name: max_rows_per_table, type: text, default: "1000000" }
-  - { name: max_query_rows, type: text, default: "1000" }
-  - { name: max_query_ms, type: text, default: "2000" }
-  - { name: max_read_queue_ms, type: text, default: "1000" }
-  - { name: max_read_conns, type: text, default: "4" }
-  - { name: slow_query_ms, type: text, default: "250" }
-  - { name: max_query_bytes, type: text, default: "4194304" }
-  - { name: max_value_bytes, type: text, default: "1048576" }
-  - { name: max_batch_rows, type: text, default: "1000" }
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 type App struct {
-	schemaMu sync.RWMutex
-	cache    schemaCache
+	schemaMu   contextRWMutex
+	locksMu    sync.Mutex
+	tableLocks map[schemaCacheKey]*tableLockRef
+	cache      schemaCache
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -133,6 +45,9 @@ func (a *App) Manifest() sdk.Manifest {
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("tables requires a db block")
+	}
+	if err := a.upgradeAll(ctx); err != nil {
+		return err
 	}
 	globalCtx = ctx
 	if ctx.AppReadDB() != ctx.AppDB() {
@@ -180,7 +95,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"type": "object",
 			"properties": map[string]any{
 				"col":   map[string]any{"type": "string"},
-				"op":    map[string]any{"type": "string", "enum": []string{"eq", "neq", "lt", "lte", "gt", "gte", "contains", "in", "between", "is_null", "is_not_null"}},
+				"op":    map[string]any{"type": "string", "enum": []string{"eq", "neq", "lt", "lte", "gt", "gte", "contains", "like", "in", "between", "is_null", "is_not_null"}},
 				"value": map[string]any{},
 			},
 			"required": []string{"col", "op"},
@@ -231,10 +146,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			},
 		},
 	}
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{
 			Name:        "tables_create",
-			Description: "Create a new project-confined typed table. Args: name, columns ([{name, type, nullable?, default?}]). Reserved column names: id, created_at, updated_at. Returns {id, name, columns}.",
+			Description: "Create a new project-confined typed table. Args: name, columns ([{name, type, nullable?, default?}]). Reserved column names: id, created_at, updated_at, _revision. Returns {id, name, columns}.",
 			InputSchema: schemaObject(map[string]any{
 				"name":    map[string]any{"type": "string"},
 				"columns": map[string]any{"type": "array", "items": colSchema},
@@ -244,8 +159,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tables_list",
-			Description: "List tables visible to this install. No args. Returns [{id, name, scope, columns, row_count, created_at}].",
-			InputSchema: schemaObject(map[string]any{}, nil),
+			Description: "List tables visible to this install. Args: summary? (omit columns), limit? (default 100, max 1000), offset?. Returns {tables, has_more, next_offset}.",
+			InputSchema: schemaObject(map[string]any{"summary": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer"}, "offset": map[string]any{"type": "integer"}}, nil),
 			Handler:     a.toolTablesList,
 		},
 		{
@@ -295,11 +210,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "indexes_drop",
-			Description: "Drop a user-managed index. Args: table, name, confirm=true. Managed upsert indexes cannot be dropped.",
+			Description: "Drop a user-managed index. Args: table, name, confirm=true. Pass release_managed=true to deliberately remove a managed uniqueness guarantee.",
 			InputSchema: schemaObject(map[string]any{
-				"table":   map[string]any{"type": "string"},
-				"name":    map[string]any{"type": "string"},
-				"confirm": map[string]any{"type": "boolean"},
+				"table":           map[string]any{"type": "string"},
+				"name":            map[string]any{"type": "string"},
+				"release_managed": map[string]any{"type": "boolean"},
+				"confirm":         map[string]any{"type": "boolean"},
 			}, []string{"table", "name", "confirm"}),
 			Handler: a.toolIndexesDrop,
 		},
@@ -327,7 +243,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Fetch one row by id. Args: table, id, select? (list of column names — defaults to all columns; reserved id/created_at/updated_at are valid picks), hydrate_files? (resolve file_id columns to {id, url}). Returns {row, found}.",
 			InputSchema: schemaObject(map[string]any{
 				"table":         map[string]any{"type": "string"},
-				"id":            map[string]any{"type": "integer"},
+				"id":            positiveIDSchema(),
 				"select":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				"hydrate_files": map[string]any{"type": "boolean"},
 			}, []string{"table", "id"}),
@@ -335,11 +251,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "rows_update",
-			Description: "Patch fields on a row. Args: table, id, fields (object keyed by column name). Touches updated_at. Returns the new row.",
+			Description: "Patch fields on a row. Args: table, id, fields (object keyed by column name). Touches updated_at and increments _revision. Optional expected_revision rejects stale edits. Returns the new row.",
 			InputSchema: schemaObject(map[string]any{
-				"table":  map[string]any{"type": "string"},
-				"id":     map[string]any{"type": "integer"},
-				"fields": map[string]any{"type": "object"},
+				"table":             map[string]any{"type": "string"},
+				"id":                positiveIDSchema(),
+				"select":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"fields":            map[string]any{"type": "object"},
+				"expected_revision": positiveIDSchema(),
+				"expected_table_id": positiveIDSchema(),
 			}, []string{"table", "id", "fields"}),
 			Handler: a.toolRowsUpdate,
 		},
@@ -347,22 +266,25 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "rows_delete",
 			Description: "Delete by id, or by filter when where is supplied + confirm=true. Returns {deleted}.",
 			InputSchema: schemaObject(map[string]any{
-				"table":   map[string]any{"type": "string"},
-				"id":      map[string]any{"type": "integer"},
-				"where":   whereSchema,
-				"confirm": map[string]any{"type": "boolean"},
+				"table":             map[string]any{"type": "string"},
+				"id":                positiveIDSchema(),
+				"where":             whereSchema,
+				"expected_revision": positiveIDSchema(),
+				"expected_table_id": positiveIDSchema(),
+				"confirm":           map[string]any{"type": "boolean"},
 			}, []string{"table"}),
 			Handler: a.toolRowsDelete,
 		},
 		{
 			Name:        "rows_search",
-			Description: "Filter, sort, paginate. Args: table, where?, order_by?, limit?, offset?, select?, include_total? (default true). Set include_total=false to skip COUNT and return has_more. Returns {rows, total?, has_more, truncated}.",
+			Description: "Filter, sort, paginate. Args: table, where?, order_by?, limit?, offset?, select?, include_total? (default true). Set include_total=false to skip COUNT. Pass next_cursor as cursor for subsequent pages; cursors are tied to the table, schema, filter and sort. Returns {rows, total?, has_more, truncated}.",
 			InputSchema: schemaObject(map[string]any{
 				"table":         map[string]any{"type": "string"},
 				"where":         whereSchema,
 				"order_by":      map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
 				"offset":        map[string]any{"type": "integer"},
+				"cursor":        map[string]any{"type": "string"},
 				"select":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				"include_total": map[string]any{"type": "boolean"},
 			}, []string{"table"}),
@@ -400,6 +322,18 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolTablesQuery,
 		},
 	}
+	for i := range tools {
+		handler := tools[i].Handler
+		tools[i].HandlerCtx = func(callCtx context.Context, appCtx *sdk.AppCtx, args map[string]any) (any, error) {
+			cp := make(map[string]any, len(args)+1)
+			for k, v := range args {
+				cp[k] = v
+			}
+			cp["_request_context"] = callCtx
+			return handler(appCtx, cp)
+		}
+	}
+	return tools
 }
 
 func main() { sdk.Run(&App{}) }
@@ -415,3 +349,10 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 }
 
 func errf(format string, args ...any) error { return fmt.Errorf(format, args...) }
+
+func positiveIDSchema() map[string]any {
+	return map[string]any{"oneOf": []any{map[string]any{"type": "integer", "minimum": 1}, map[string]any{"type": "string", "pattern": "^[1-9][0-9]*$"}}, "description": "Exact positive ID; use a decimal string above JavaScript's safe integer range."}
+}
+
+// Opt in to exact numeric decoding on SDK versions supporting this capability.
+func (a *App) PreserveJSONNumbers() bool { return true }

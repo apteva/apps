@@ -16,7 +16,16 @@ func testDashboardDB(t *testing.T) *sql.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, name := range []string{"001_init.sql", "004_dashboards.sql", "005_event_specs.sql", "006_dashboard_config.sql", "007_integrity_performance.sql", "009_fx_rates.sql", "010_reference_sets.sql"} {
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		t.Fatal(err)
+	}
+	names, err := filepath.Glob("migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range names {
+		name := filepath.Base(path)
 		b, err := os.ReadFile(filepath.Join("migrations", name))
 		if err != nil {
 			t.Fatalf("read migration %s: %v", name, err)
@@ -166,10 +175,10 @@ func TestTimeseriesWidgetCanSumNumericProperty(t *testing.T) {
 	if len(series) != 2 {
 		t.Fatalf("series len = %d, want 2: %#v", len(series), series)
 	}
-	if series[0]["bucket"] != "2026-06-15" || series[0]["count"] != int64(2) || series[0]["value"] != 25.0 {
+	if series[0]["bucket"] != "2026-06-15T00:00:00Z" || series[0]["count"] != int64(2) || series[0]["value"] != 25.0 {
 		t.Fatalf("first bucket = %#v, want 2026-06-15 count 2 value 25", series[0])
 	}
-	if series[1]["bucket"] != "2026-06-16" || series[1]["count"] != int64(1) || series[1]["value"] != 7.0 {
+	if series[1]["bucket"] != "2026-06-16T00:00:00Z" || series[1]["count"] != int64(1) || series[1]["value"] != 7.0 {
 		t.Fatalf("second bucket = %#v, want 2026-06-16 count 1 value 7", series[1])
 	}
 }

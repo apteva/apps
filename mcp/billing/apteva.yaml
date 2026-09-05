@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.12.5
+version: 0.13.0
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -39,7 +39,7 @@ icon_style: monochrome
 tags: [billing, invoices, payments, finance]
 
 scopes: [project, global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.27.4"
 
 requires:
   permissions:
@@ -48,13 +48,15 @@ requires:
     - platform.connections.execute             # run Stripe tools and reconcile its webhook via the bound connection
     - platform.connections.read_public_config  # expose only Stripe's catalog-marked publishable key to Elements
   apps:
+    - name: storage
+      optional: true
     - name: catalog
       optional: true                           # free-form line items keep working without catalog
   integrations:
     - role: payment_processor                  # Stripe (or any future processor) for card-payable invoices
       kind: integration
       compatible_slugs: [stripe]
-      capabilities: [customers.create, checkout_sessions.create, checkout_sessions.get, payment_intents.create, payment_intents.get, refunds.create, payment_methods.get, payment_methods.detach, webhooks.receive]
+      capabilities: [customers.create, checkout_sessions.create, checkout_sessions.get, payment_intents.create, payment_intents.get, refunds.create, refunds.get, payment_intents.cancel, checkout_sessions.expire, setup_intents.get, payment_methods.get, payment_methods.detach, webhooks.receive]
       tools:
         customers.create:         create_customer
         customers.search:         search_customers
@@ -63,6 +65,11 @@ requires:
         payment_intents.create:    create_payment_intent
         payment_intents.get:       get_payment_intent
         refunds.create:           create_refund
+        refunds.get:              get_refund
+        customers.get:            get_customer
+        setup_intents.get:        get_setup_intent
+        payment_intents.cancel:   cancel_payment_intent
+        checkout_sessions.expire: expire_checkout_session
         payment_methods.get:      get_payment_method
         payment_methods.detach:   detach_payment_method
       required: false                          # billing still works without it — manual payments only
@@ -78,7 +85,7 @@ provides:
     - name: payment_processor_public_config
       description: Return browser-safe payment configuration such as Stripe's publishable key.
     - name: customers_search
-      description: Filtered customer search by name / email / external_id / metadata.
+      description: Search customers by name or email, with limit and offset.
     - name: customers_get
       description: Fetch one customer (snapshot only).
     - name: customers_get_context
@@ -89,6 +96,16 @@ provides:
       description: Partial-patch a customer.
     - name: customers_merge
       description: Merge one customer into another. Reassigns invoices + payments.
+    - name: billing_reconciliation_status
+      description: Inspect pending or uncertain provider operations and event delivery.
+    - name: invoices_history
+      description: Page through full payment and audit history using limit and offset.
+    - name: invoices_delete
+      description: Delete an unissued draft invoice.
+    - name: invoices_cancel_payment
+      description: Cancel an active provider payment after reconciling its state.
+    - name: invoices_resume_collection
+      description: Explicitly release a refund hold and permit collection again.
     - name: invoices_create
       description: Create a DRAFT invoice with optional initial line items and an optional accounting_date (YYYY-MM-DD). Provider arg ('local' | 'stripe') falls back to install default. Provider is frozen after create.
     - name: invoices_create_from_prepared_lines
@@ -96,7 +113,7 @@ provides:
     - name: invoices_add_line_item
       description: Append a line item to a DRAFT invoice. Errors on non-draft invoices.
     - name: invoices_finalize
-      description: Transition draft → open. Mints invoice number. v0.1.0 supports provider=local only.
+      description: Finalize an invoice and freeze its document. Zero-total invoices settle immediately.
     - name: invoices_update
       description: Patch an invoice. Always-allowed fields (any status) — notes, accounting_date, due_date, metadata. Draft-only fields — customer_id, currency, line_items (replaces array).
     - name: invoices_void
@@ -248,6 +265,8 @@ provides:
         status: string
         total_cents: integer
         currency: string
+    - name: payment.recorded
+      description: A payment was recorded. Stable event_id supports consumer deduplication.
     - name: invoice.paid
       description: A billing invoice received a payment event; listeners should inspect status for fully paid invoices.
       payload:
@@ -354,7 +373,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: billing/v0.12.5
+    ref: billing/v0.13.0
     entry: mcp/billing
   port: 8080
   health_check: /health

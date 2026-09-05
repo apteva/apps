@@ -34,7 +34,7 @@ func (a *App) handleAdminRolesCreate(w http.ResponseWriter, r *http.Request) {
 		Name        string `json:"name"`
 		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -62,7 +62,7 @@ func (a *App) handleAdminRolesUpdate(w http.ResponseWriter, r *http.Request) {
 		Name        *string `json:"name"`
 		Description *string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -112,7 +112,7 @@ func (a *App) handleAdminRolePermissionsSet(w http.ResponseWriter, r *http.Reque
 	var body struct {
 		PermissionIDs *[]int64 `json:"permission_ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -153,7 +153,7 @@ func (a *App) handleAdminPermissionsCreate(w http.ResponseWriter, r *http.Reques
 		Name        string `json:"name"`
 		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -181,7 +181,7 @@ func (a *App) handleAdminPermissionsUpdate(w http.ResponseWriter, r *http.Reques
 		Name        *string `json:"name"`
 		Description *string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -231,7 +231,7 @@ func (a *App) handleAdminUserRolesSet(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RoleIDs *[]int64 `json:"role_ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -405,6 +405,9 @@ func (a *App) toolPermissionsDelete(ctx *sdk.AppCtx, args map[string]any) (any, 
 }
 
 func (a *App) toolRolePermissionsSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateIDArray(args, "permission_ids"); err != nil {
+		return nil, err
+	}
 	pid, org, roleID, err := rbacMutationArgs(ctx, args, "role_id")
 	if err != nil {
 		return nil, err
@@ -422,6 +425,9 @@ func (a *App) toolRolePermissionsSet(ctx *sdk.AppCtx, args map[string]any) (any,
 }
 
 func (a *App) toolUserRolesSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateIDArray(args, "role_ids"); err != nil {
+		return nil, err
+	}
 	pid, org, userID, err := rbacMutationArgs(ctx, args, "user_id")
 	if err != nil {
 		return nil, err
@@ -471,6 +477,11 @@ func int64SliceArg(args map[string]any, key string) []int64 {
 		out := make([]int64, 0, len(values))
 		for _, value := range values {
 			switch n := value.(type) {
+			case json.Number:
+				v, err := n.Int64()
+				if err == nil {
+					out = append(out, v)
+				}
 			case float64:
 				out = append(out, int64(n))
 			case int:
@@ -483,4 +494,30 @@ func int64SliceArg(args map[string]any, key string) []int64 {
 	default:
 		return []int64{}
 	}
+}
+
+func validateIDArray(args map[string]any, key string) error {
+	value, ok := args[key]
+	if !ok || value == nil {
+		return errors.New(key + " must be an integer array")
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	var ids []any
+	d := json.NewDecoder(strings.NewReader(string(raw)))
+	d.UseNumber()
+	if err = d.Decode(&ids); err != nil || ids == nil {
+		return errors.New(key + " must be an integer array")
+	}
+	if len(ids) > 256 {
+		return errors.New(key + " permits at most 256 entries")
+	}
+	for _, id := range ids {
+		if _, ok := strictID(id, true); !ok {
+			return errors.New(key + " must contain positive integer IDs")
+		}
+	}
+	return nil
 }

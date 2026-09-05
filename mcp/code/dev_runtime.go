@@ -317,11 +317,12 @@ func exists(p string) bool {
 // One entry per (project_id, repo_id). The DB row in dev_runs is the
 // durable state; this struct is the live cmd handle for stop/restart.
 type devSupervisor struct {
-	mu      sync.Mutex
-	all     map[int64]*devProcess // keyed by dev_runs.id
-	dataDir string
-	store   FileStore
-	app     *App
+	starting map[int64]context.CancelFunc
+	mu       sync.Mutex
+	all      map[int64]*devProcess // keyed by dev_runs.id
+	dataDir  string
+	store    FileStore
+	app      *App
 
 	portRangeStart int
 	portRangeEnd   int
@@ -335,6 +336,8 @@ type devProcess struct {
 	server   *http.Server // non-nil for static
 	logFile  *os.File
 	stopCh   chan struct{}
+	keepPort bool
+	stopping bool
 }
 
 func newDevSupervisor(dataDir string, store FileStore, app *App, portStart, portEnd int) *devSupervisor {
@@ -363,6 +366,9 @@ func (s *devSupervisor) put(p *devProcess) {
 func (s *devSupervisor) drop(id int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if p := s.all[id]; p != nil && !p.keepPort {
+		releaseDevPort(p.Port)
+	}
 	delete(s.all, id)
 }
 
@@ -391,12 +397,21 @@ type startDevInput struct {
 // spawn / mount, persist the new state. Returns once the supervisor
 // has started; the readiness probe runs in a goroutine.
 func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun, error) {
+	return s.startDevRunContext(context.Background(), ctx, in)
+}
+func (s *devSupervisor) startDevRunContext(callCtx context.Context, ctx *sdk.AppCtx, in startDevInput) (*DevRun, error) {
 	if in.Repo == nil {
 		return nil, errors.New("repo required")
 	}
-	startCtx, cancelStart := context.WithTimeout(context.Background(), 10*time.Minute)
+	if _, err := workspaceEnv(in.EnvJSON); err != nil {
+		return nil, err
+	}
+	startCtx, cancelStart := context.WithTimeout(callCtx, 10*time.Minute)
 	defer cancelStart()
 	if s.app != nil {
+		var untrack context.CancelFunc
+		startCtx, untrack = s.app.commands.track(startCtx, in.Repo.ID)
+		defer untrack()
 		release, err := s.app.commands.acquire(startCtx, in.Repo.ID)
 		if err != nil {
 			return nil, err
@@ -418,8 +433,18 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 	// stale process might still be alive if a previous start succeeded
 	// and the panel called start again.
 	if existing, _ := dbGetDevRun(ctx.AppDB(), in.ProjectID, in.Repo.ID); existing != nil {
-		_ = s.stopDevRun(ctx, in.ProjectID, in.Repo.ID)
+		if err := s.stopDevRun(ctx, in.ProjectID, in.Repo.ID); err != nil {
+			return nil, err
+		}
 	}
+
+	s.mu.Lock()
+	if s.starting == nil {
+		s.starting = map[int64]context.CancelFunc{}
+	}
+	s.starting[in.Repo.ID] = cancelStart
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); delete(s.starting, in.Repo.ID); s.mu.Unlock() }()
 
 	fw := in.Framework
 	if fw == "" {
@@ -437,17 +462,26 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 		return s.startRemoteRun(ctx, in, srcDir, fw, def.RemoteRunner)
 	}
 
+	if (fw != "static" || strings.TrimSpace(in.RunCmd) != "") && !localExecutionEnabled(ctx) {
+		return nil, errors.New("local dev commands require trusted_local_execution=true; use Workspaces for untrusted code")
+	}
 	port, err := s.allocateDevPort()
 	if err != nil {
 		return nil, err
 	}
 
-	logPath := s.logPathForRepo(in.Repo.ID)
+	spawned := false
+	defer func() {
+		if !spawned {
+			releaseDevPort(port)
+		}
+	}()
+	logPath := s.logPathForRepo(in.Repo.ID) + fmt.Sprintf(".%d", time.Now().UnixNano())
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir log dir: %w", err)
 	}
-	// Truncate on each start — dev runs aren't archived; the file
-	// stays small and the user sees only the current session's output.
+	// Keep unique run identities for SSE resume and a bounded log history.
+	pruneDevLogs(s.logPathForRepo(in.Repo.ID), 2)
 	logF, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open log: %w", err)
@@ -481,21 +515,28 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 	if in.ProjectID != "" {
 		processEnv = append(processEnv, "APTEVA_PROJECT_ID="+in.ProjectID)
 	}
-	if plan, err := nodeDepsInstallPlan(srcDir); err != nil {
+	if plan, err := nodeDepsInstallPlan(srcDir); fw == "static" && strings.TrimSpace(in.RunCmd) == "" {
+		// Serving static files does not execute repository scripts.
+	} else if err != nil {
 		logF.Close()
 		return nil, err
 	} else if plan.Needed {
 		if err := installNodeDeps(startCtx, srcDir, logOut, plan, processEnv); err != nil {
-			_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{
-				"status":     "crashed",
-				"stopped_at": time.Now().UTC().Format(time.RFC3339),
-				"error":      err.Error(),
-			})
+			if startCtx.Err() != nil {
+				s.markStopped(ctx, dr.ID)
+			} else {
+				s.markCrashed(ctx, dr.ID, err.Error())
+			}
 			logF.Close()
 			return nil, err
 		}
 	}
 
+	if err := startCtx.Err(); err != nil {
+		logF.Close()
+		s.markStopped(ctx, dr.ID)
+		return nil, err
+	}
 	if err := s.spawn(ctx, dr, srcDir, fw, in.RunCmd, in.EnvJSON, port, logF, logOut); err != nil {
 		_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{
 			"status":     "crashed",
@@ -503,6 +544,11 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 			"error":      err.Error(),
 		})
 		logF.Close()
+		return nil, err
+	}
+	spawned = true
+	if err := startCtx.Err(); err != nil {
+		_ = s.stopDevRun(ctx, in.ProjectID, in.Repo.ID)
 		return nil, err
 	}
 	return dbGetDevRun(ctx.AppDB(), in.ProjectID, in.Repo.ID)
@@ -584,16 +630,47 @@ func dependencyFingerprint(srcDir string) (string, error) {
 		Sum  string
 	}
 	entries := make([]entry, 0, len(dependencyFingerprintFiles))
+	names := map[string]bool{}
 	for _, name := range dependencyFingerprintFiles {
-		body, err := os.ReadFile(filepath.Join(srcDir, name))
+		names[name] = true
+	}
+	names["pnpm-workspace.yaml"] = true
+	err := filepath.WalkDir(srcDir, func(full string, d os.DirEntry, err error) error {
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return "", err
+			return err
 		}
-		sum := sha256.Sum256(body)
-		entries = append(entries, entry{Path: name, Sum: fmt.Sprintf("%x", sum[:])})
+		rel, err := filepath.Rel(srcDir, full)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if shouldSkipGenerated(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() || !names[d.Name()] {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() > maxFileBytes() {
+			return fmt.Errorf("invalid dependency manifest %s", rel)
+		}
+		body, err := os.ReadFile(full)
+		if err != nil {
+			return err
+		}
+		entries = append(entries, entry{Path: filepath.ToSlash(rel), Sum: shaOf(body)})
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
 	body, _ := json.Marshal(entries)
@@ -657,7 +734,7 @@ func installNodeDeps(ctx context.Context, srcDir string, logF io.Writer, plan no
 // path (exec.Cmd + supervisor goroutine). Both end up in s.all so
 // stopDevRun can shut them down uniformly.
 func (s *devSupervisor) spawn(ctx *sdk.AppCtx, dr *DevRun, srcDir, framework, runCmd, envJSON string, port int, logF *os.File, logOut io.Writer) error {
-	if framework == "static" {
+	if framework == "static" && strings.TrimSpace(runCmd) == "" {
 		return s.spawnStatic(ctx, dr, srcDir, port, logF, logOut)
 	}
 	return s.spawnProcess(ctx, dr, srcDir, framework, runCmd, envJSON, port, logF, logOut)
@@ -672,27 +749,25 @@ func (s *devSupervisor) spawnStatic(ctx *sdk.AppCtx, dr *DevRun, srcDir string, 
 		return fmt.Errorf("listen :%d: %w", port, err)
 	}
 	stop := make(chan struct{})
+	p := &devProcess{DevRunID: dr.ID, Port: port, server: srv, logFile: logF, stopCh: stop}
+	s.put(p)
+	_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{"status": "live", "pid": 0})
 	go func() {
 		defer close(stop)
 		fmt.Fprintf(logOut, "+ in-process FileServer (cwd=%s, port=%d)\n", srcDir, port)
 		err := srv.Serve(ln)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			fmt.Fprintf(logOut, "static server error: %v\n", err)
 			s.markCrashed(ctx, dr.ID, err.Error())
-		} else {
-			fmt.Fprintf(logOut, "=== static server stopped at %s ===\n", time.Now().UTC().Format(time.RFC3339))
 		}
+		s.mu.Lock()
+		if err := s.cleanupIngress(ctx, dr); err != nil {
+			p.keepPort = true
+			s.markCrashed(ctx, dr.ID, "ingress cleanup failed: "+err.Error())
+		}
+		s.mu.Unlock()
 		_ = logF.Close()
+		s.drop(dr.ID)
 	}()
-
-	p := &devProcess{
-		DevRunID: dr.ID, Port: port, server: srv, logFile: logF, stopCh: stop,
-	}
-	s.put(p)
-	_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{
-		"status": "live",
-		"pid":    os.Getpid(),
-	})
 	return nil
 }
 
@@ -738,6 +813,7 @@ func (s *devSupervisor) spawnProcess(ctx *sdk.AppCtx, dr *DevRun, srcDir, framew
 	// Supervisor goroutine — waits for the process, demotes the row.
 	go func() {
 		defer close(stop)
+		defer cancel()
 		err := cmd.Wait()
 		exit := -1
 		if cmd.ProcessState != nil {
@@ -753,30 +829,54 @@ func (s *devSupervisor) spawnProcess(ctx *sdk.AppCtx, dr *DevRun, srcDir, framew
 			if err != nil {
 				msg = err.Error()
 			}
-			s.markCrashed(ctx, dr.ID, msg)
+			current, _ := dbGetDevRun(ctx.AppDB(), dr.ProjectID, dr.RepoID)
+			if current == nil || current.Status != "crashed" || current.Error == "" {
+				s.markCrashed(ctx, dr.ID, msg)
+			}
 		}
+		s.mu.Lock()
+		if err := s.cleanupIngress(ctx, dr); err != nil {
+			p.keepPort = true
+			s.markCrashed(ctx, dr.ID, "process exited; ingress cleanup failed: "+err.Error())
+		}
+		s.mu.Unlock()
 		s.drop(dr.ID)
 	}()
 
-	// Tiny readiness probe — TCP-connect to the port for up to 5s.
-	// Once the listener appears we mark the row 'live'. Doesn't block
-	// the caller; the panel polls status via /api/repos/<slug>/dev/status.
+	// Probe until ready, exit, cancellation or the configured startup deadline.
 	go func() {
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
-			if err == nil {
-				_ = conn.Close()
-				_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{"status": "live"})
+		timer := time.NewTimer(time.Duration(envLimit("CODE_DEV_STARTUP_TIMEOUT_SECONDS", 120)) * time.Second)
+		defer timer.Stop()
+		tick := time.NewTicker(150 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
 				return
+			case <-cctx.Done():
+				return
+			case <-timer.C:
+				s.markCrashed(ctx, dr.ID, "startup deadline exceeded; process terminated")
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+				select {
+				case <-stop:
+				case <-time.After(processStopGrace):
+					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				}
+				return
+			case <-tick.C:
+				conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
+				if err == nil {
+					conn.Close()
+					s.mu.Lock()
+					if s.all[dr.ID] == p {
+						_, _ = ctx.AppDB().Exec("UPDATE dev_runs SET status='live' WHERE id=? AND started_at=? AND status='starting'", dr.ID, dr.StartedAt)
+					}
+					s.mu.Unlock()
+					return
+				}
 			}
-			time.Sleep(150 * time.Millisecond)
 		}
-		// Probe timed out, but the process might still come up — leave
-		// status='starting' so the panel can show "starting…" and the
-		// supervisor goroutine will eventually flip it to crashed if
-		// the process exits, or stay starting if it actually listens
-		// later.
 	}()
 
 	return nil
@@ -818,23 +918,49 @@ func mergeDevEnv(dataDir, envJSON string, port int, projectID string) ([]string,
 // Remote runs (runner=simulator) have no local process — instead we
 // ask the Simulator app to shut the sim down. See stopRemoteRun.
 func (s *devSupervisor) stopDevRun(ctx *sdk.AppCtx, projectID string, repoID int64) error {
+	s.mu.Lock()
+	cancel := s.starting[repoID]
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	dr, err := dbGetDevRun(ctx.AppDB(), projectID, repoID)
 	if err != nil || dr == nil {
-		return nil
+		return err
+	}
+	s.mu.Lock()
+	p := s.all[dr.ID]
+	if p != nil {
+		p.stopping = true
+	}
+	err = s.cleanupIngress(ctx, dr)
+	s.mu.Unlock()
+	if err != nil {
+		return err
 	}
 	if dr.Runner == "simulator" {
-		s.stopRemoteRun(ctx, dr)
+		if err := s.stopRemoteRun(ctx, dr); err != nil {
+			return err
+		}
 		_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{
 			"status":     "stopped",
 			"stopped_at": time.Now().UTC().Format(time.RFC3339),
 		})
 		return nil
 	}
-	p := s.get(dr.ID)
+	if p == nil && (dr.Status == "live" || dr.Status == "starting" || dr.Status == "orphaned") && dr.PID > 0 && processAlive(dr.PID) {
+		return errors.New("orphan process is still alive; inspect it before stopping or restarting this run")
+	}
 	if p != nil {
 		s.shutdownProcess(p)
 		s.drop(dr.ID)
 	}
+	// A concurrent crash may have recorded a failed cleanup. Retain the
+	// port until the persisted route has been removed successfully.
+	if err := s.cleanupIngress(ctx, dr); err != nil {
+		return err
+	}
+	releaseDevPort(dr.Port)
 	_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{
 		"status":     "stopped",
 		"stopped_at": time.Now().UTC().Format(time.RFC3339),
@@ -851,6 +977,7 @@ func (s *devSupervisor) shutdownProcess(p *devProcess) {
 		return
 	}
 	if p.cancel != nil {
+		defer p.cancel()
 		// Send SIGTERM to the process group first; CommandContext's
 		// cancel sends SIGKILL after Wait returns. The graceful step
 		// matters because next dev wants to flush its compile cache
@@ -897,7 +1024,24 @@ func (s *devSupervisor) reconcileOrphanDevRuns(ctx *sdk.AppCtx) error {
 		return err
 	}
 	for _, dr := range rows {
+		if dr.Runner == "simulator" {
+			continue
+		}
 		if dr.PID > 0 && processAlive(dr.PID) {
+			// PID liveness is not proof of identity. Retain the recovery record and
+			// reserve the port; never signal a PID inherited from an earlier process.
+			devPortMu.Lock()
+			reservedDevPorts[dr.Port] = true
+			devPortMu.Unlock()
+			_ = s.cleanupIngress(ctx, dr)
+			_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{"status": "orphaned", "error": "supervisor restarted; verify and stop the original process before restarting"})
+			continue
+		}
+		if err := s.cleanupIngress(ctx, dr); err != nil {
+			devPortMu.Lock()
+			reservedDevPorts[dr.Port] = true
+			devPortMu.Unlock()
+			s.markCrashed(ctx, dr.ID, "ingress cleanup failed: "+err.Error())
 			continue
 		}
 		_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{
@@ -928,6 +1072,11 @@ func processAlive(pid int) bool {
 // keep running as orphans (Setpgid means they don't die when the
 // parent does on macOS/Linux).
 func (s *devSupervisor) stopAll() {
+	s.mu.Lock()
+	for _, cancel := range s.starting {
+		cancel()
+	}
+	s.mu.Unlock()
 	for _, p := range s.all_() {
 		s.shutdownProcess(p)
 	}
@@ -940,6 +1089,9 @@ func (s *devSupervisor) stopAll() {
 // orphan still has a port in use, though in practice the OS frees
 // it as soon as the holding process exits).
 var devPortMu sync.Mutex
+var reservedDevPorts = map[int]bool{}
+
+func releaseDevPort(port int) { devPortMu.Lock(); delete(reservedDevPorts, port); devPortMu.Unlock() }
 
 // allocateDevPort picks the first free port in the configured range.
 // Wildcard probe — same hardening as deploy v0.3.2 — so a foreign
@@ -949,7 +1101,8 @@ func (s *devSupervisor) allocateDevPort() (int, error) {
 	devPortMu.Lock()
 	defer devPortMu.Unlock()
 	for p := s.portRangeStart; p <= s.portRangeEnd; p++ {
-		if devPortFree(p) {
+		if !reservedDevPorts[p] && devPortFree(p) {
+			reservedDevPorts[p] = true
 			return p, nil
 		}
 	}
@@ -1028,4 +1181,13 @@ func tailFile(path string, lines int) (string, error) {
 		}
 	}
 	return s, nil
+}
+
+func pruneDevLogs(base string, keep int) {
+	paths, _ := filepath.Glob(base + ".*")
+	sort.Strings(paths)
+	for len(paths) > keep {
+		_ = os.Remove(paths[0])
+		paths = paths[1:]
+	}
 }

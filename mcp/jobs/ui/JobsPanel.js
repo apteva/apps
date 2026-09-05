@@ -18,6 +18,7 @@
     jobs: [],
     selectedId: null,
     runs: [],
+    listVersion: 0, detailVersion: 0, nextCursor: null, runsCursor: null, detail: null, busy: false,
   };
 
   function el(tag, props = {}, ...children) {
@@ -40,7 +41,7 @@
 
   function withProject(path, extra = {}) {
     const u = new URL(API + path, window.location.origin);
-    if (projectId) u.searchParams.set("project_id", projectId);
+    if (projectId) u.searchParams.set("project_id", projectId); else u.searchParams.set("scope", "global");
     if (installId) u.searchParams.set("install_id", installId);
     for (const [k, v] of Object.entries(extra)) {
       if (v !== undefined && v !== null && v !== "") u.searchParams.set(k, String(v));
@@ -72,6 +73,7 @@
       return "every " + s + "s";
     }
     if (j.schedule_kind === "cron") return "cron: " + j.cron_expr;
+    if (j.schedule_kind === "random" && j.random) return `${j.random.runs_per_period} random/day · ${j.random.window_start}-${j.random.window_end}`;
     return j.schedule_kind;
   }
   function relTime(s) {
@@ -89,19 +91,24 @@
   }
 
   // ────── List ─────────────────────────────────────────────────────
-  async function loadList() {
+  async function loadList(before) {
+    const version = ++state.listVersion;
     setStatus("Loading…");
     try {
       const filt = {};
+      if (typeof before === "number") filt.before = before;
       const sf = document.getElementById("status-filter").value;
       if (sf) filt.status = sf;
       if (ownerApp) filt.owner_app = ownerApp;
       const r = await api("GET", "/jobs", null, filt);
-      state.jobs = r.jobs || [];
+      if (version !== state.listVersion) return;
+      state.jobs = typeof before === "number" ? [...state.jobs, ...(r.jobs || [])] : r.jobs || [];
+      state.nextCursor = r.next_cursor;
+      document.getElementById("load-more").hidden = !state.nextCursor;
       renderList();
-      setStatus(`${state.jobs.length} jobs${ownerApp ? " · " + ownerApp : ""}`);
+      setStatus(`${state.jobs.length} loaded${ownerApp ? " · " + ownerApp : ""}`);
     } catch (e) {
-      setStatus("Error: " + e.message);
+      if (version === state.listVersion) setStatus("Error: " + e.message);
     }
   }
   function renderList() {
@@ -110,6 +117,7 @@
     for (const j of state.jobs) {
       const li = el("li", {
         class: "job-row" + (j.id === state.selectedId ? " selected" : ""),
+        tabindex: "0", onkeydown: e => {if(e.key === "Enter" || e.key === " "){e.preventDefault();selectJob(j.id);}},
         onclick: () => selectJob(j.id),
       },
         el("span", { class: "job-name" }, j.name),
@@ -127,14 +135,16 @@
   // ────── Detail / runs ────────────────────────────────────────────
   async function selectJob(id) {
     state.selectedId = id;
+    const version = ++state.detailVersion;
+    document.getElementById("detail").textContent = "Loading…";
     renderList();
     try {
-      const j = (await api("GET", "/jobs/" + id)).job;
-      const runs = (await api("GET", "/jobs/" + id + "/runs")).runs || [];
-      state.runs = runs;
-      renderDetail(j, runs);
+      const [result, history] = await Promise.all([api("GET", "/jobs/" + id), api("GET", "/jobs/" + id + "/runs")]);
+      if (version !== state.detailVersion || id !== state.selectedId) return;
+      state.detail = result.job;state.runs = history.runs || [];state.runsCursor = history.next_cursor;
+      renderDetail(result.job, state.runs);
     } catch (e) {
-      document.getElementById("detail").textContent = "Error: " + e.message;
+      if (version === state.detailVersion && id === state.selectedId) document.getElementById("detail").textContent = "Error: " + e.message;
     }
   }
   function renderDetail(j, runs) {
@@ -146,13 +156,16 @@
       " · next: " + relTime(j.next_run_at)));
     d.appendChild(el("pre", { class: "target" }, JSON.stringify(j.target, null, 2)));
 
-    const actions = el("div", { class: "actions" },
-      el("button", { onclick: async () => { await api("POST", "/jobs/" + j.id + "/run-now"); selectJob(j.id); loadList(); } }, "Run now"),
-      el("button", { class: "danger", onclick: async () => {
-          if (!confirm("Cancel this job?")) return;
-          await api("DELETE", "/jobs/" + j.id);
-          selectJob(j.id); loadList();
-      } }, "Cancel"),
+    const action = async (method, suffix) => {
+      if (state.busy || state.selectedId !== j.id) return;
+      state.busy = true;
+      try {await api(method, "/jobs/" + j.id + suffix);if (state.selectedId === j.id) await selectJob(j.id);await loadList();}
+      catch(e) {setStatus("Action failed: " + e.message);}
+      finally {state.busy = false;}
+    };
+    const actions = el("div", {class: "actions"},
+      el("button", {disabled: j.status === "running" || j.status === "cancelled" ? "" : null, onclick: () => action("POST", "/run-now")}, "Run now"),
+      el("button", {class: "danger", disabled: ["done","failed","cancelled"].includes(j.status) ? "" : null, onclick: () => {if(confirm("Cancel this job?")) action("DELETE", "");}}, "Cancel"),
     );
     d.appendChild(actions);
 
@@ -179,12 +192,20 @@
     }
     tbl.appendChild(tbody);
     d.appendChild(tbl);
+    if (state.runsCursor) d.appendChild(el("button", {onclick: async () => {
+      const version = ++state.detailVersion;
+      try {const page = await api("GET", "/jobs/"+j.id+"/runs", null, {before: state.runsCursor});
+        if(version !== state.detailVersion || state.selectedId !== j.id) return;
+        state.runs.push(...page.runs);state.runsCursor = page.next_cursor;renderDetail(j,state.runs);
+      } catch(e) {setStatus("History failed: " + e.message);}
+    }}, "Load older runs"));
   }
 
   // ────── Boot ─────────────────────────────────────────────────────
   document.getElementById("refresh").addEventListener("click", loadList);
   document.getElementById("status-filter").addEventListener("change", loadList);
+  document.getElementById("load-more").addEventListener("click", () => loadList(state.nextCursor));
   loadList();
   // Soft refresh every 5s so "running" / "next run" stay current.
-  setInterval(loadList, 5000);
+  setInterval(() => {if (state.jobs.length <= 100) loadList();}, 30000);
 })();

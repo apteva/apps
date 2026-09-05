@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,7 @@ import (
 )
 
 type RefundRequest struct {
+	ReopenInvoice     bool   `json:"reopen_invoice"`
 	ID                int64  `json:"id"`
 	InvoiceID         int64  `json:"invoice_id"`
 	PaymentID         int64  `json:"payment_id"`
@@ -32,88 +34,95 @@ func (a *App) toolInvoicesRefund(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	invoiceID := int64Arg(args, "invoice_id")
+	iid := int64Arg(args, "invoice_id")
 	key := strings.TrimSpace(strArg(args, "idempotency_key"))
-	if invoiceID == 0 || key == "" {
-		return nil, errors.New("invoice_id and idempotency_key required")
+	if iid <= 0 || key == "" || len(key) > 200 {
+		return nil, errors.New("invoice_id and idempotency_key (max 200 characters) required")
 	}
-	if len(key) > 200 {
-		return nil, errors.New("idempotency_key must be at most 200 characters")
-	}
-	if existing, err := dbRefundByKey(ctx.AppDB(), pid, key); err != nil {
-		return nil, err
-	} else if existing != nil {
-		return map[string]any{"refund": existing}, nil
-	}
-	invoice, err := dbInvoiceGetByID(ctx.AppDB(), pid, invoiceID)
-	if err != nil || invoice == nil {
-		return nil, firstRefundErr(err, errors.New("invoice not found"))
-	}
-	if invoice.AmountPaidCents <= 0 {
-		return nil, errors.New("invoice has no refundable paid balance")
-	}
+	unlock := operationLock(fmt.Sprintf("refund-invoice:%s:%d", pid, iid))
+	defer unlock()
 	amount := int64Arg(args, "amount_cents")
-	if amount == 0 {
-		amount = invoice.AmountPaidCents
-	}
-	if amount <= 0 || amount > invoice.AmountPaidCents {
-		return nil, errors.New("amount_cents must be positive and cannot exceed the refundable paid balance")
-	}
-	reason := strings.ToLower(strings.TrimSpace(strArg(args, "reason")))
-	if reason == "" {
-		reason = "requested_by_customer"
+	reason := firstString(strArg(args, "reason"), "requested_by_customer")
+	if requestReason := strArg(args, "reason"); requestReason == "" {
+		if old, e := dbRefundByKey(ctx.AppDB(), pid, key); e == nil && old != nil {
+			reason = old.Reason
+		}
 	}
 	if reason != "duplicate" && reason != "fraudulent" && reason != "requested_by_customer" {
-		return nil, errors.New("reason must be duplicate, fraudulent, or requested_by_customer")
+		return nil, errors.New("invalid refund reason")
 	}
-	payment, err := dbRefundableStripePayment(ctx.AppDB(), pid, invoiceID, amount)
-	if err != nil || payment == nil {
-		return nil, firstRefundErr(err, errors.New("invoice has no Stripe payment large enough for this refund"))
-	}
-	request, err := dbRefundCreate(ctx.AppDB(), pid, invoice, payment, amount, reason, key)
+	request, err := dbRefundByKey(ctx.AppDB(), pid, key)
 	if err != nil {
 		return nil, err
+	}
+	if request != nil {
+		if request.InvoiceID != iid || (amount != 0 && amount != request.AmountCents) || reason != request.Reason || (args["reopen_invoice"] != nil && boolFromArg(args, "reopen_invoice") != request.ReopenInvoice) {
+			return nil, errors.New("refund key reused with different parameters")
+		}
+		if request.Status == "succeeded" || request.Status == "failed" {
+			return map[string]any{"refund": request}, nil
+		}
+	} else {
+		inv, err := dbInvoiceGetByID(ctx.AppDB(), pid, iid)
+		if err != nil {
+			return nil, err
+		}
+		if inv == nil {
+			return nil, errors.New("invoice not found")
+		}
+		if amount == 0 {
+			amount = inv.AmountPaidCents
+		}
+		if amount <= 0 || amount > inv.AmountPaidCents {
+			return nil, errors.New("refund exceeds paid balance")
+		}
+		payment, err := dbRefundableStripePayment(ctx.AppDB(), pid, iid, amount)
+		if err != nil {
+			return nil, err
+		}
+		if payment == nil {
+			return nil, errors.New("no original Stripe payment has sufficient unreserved refundable balance")
+		}
+		request, err = dbRefundCreate(ctx.AppDB(), pid, inv, payment, amount, reason, key, boolFromArg(args, "reopen_invoice"))
+		if err != nil {
+			return nil, err
+		}
 	}
 	bound, err := requireProcessor(ctx)
 	if err != nil {
-		_ = dbRefundFail(ctx.AppDB(), pid, request.ID, err.Error())
 		return nil, err
 	}
-	var providerResponse struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
+	if err = requirePaymentConnection(ctx, bound, request); err != nil {
+		return nil, err
 	}
-	err = executeStripe(ctx, bound, "create_refund", map[string]any{
-		"payment_intent": payment.ExternalID,
-		"amount":         amount,
-		"reason":         reason,
-		"metadata": map[string]any{
-			"apteva_project_id": pid, "apteva_invoice_id": fmt.Sprintf("%d", invoiceID),
-			"apteva_refund_request_id": fmt.Sprintf("%d", request.ID), "apteva_idempotency_key": key,
-		},
-	}, &providerResponse)
+	var result map[string]any
+	err = executeStripe(ctx, bound, "create_refund", map[string]any{"payment_intent": request.ProviderPaymentID, "amount": request.AmountCents, "reason": request.Reason, "idempotency_key": key, "metadata": map[string]any{"apteva_project_id": pid, "apteva_invoice_id": fmt.Sprint(iid), "apteva_refund_request_id": fmt.Sprint(request.ID), "apteva_idempotency_key": key}}, &result)
 	if err != nil {
-		_ = dbRefundFail(ctx.AppDB(), pid, request.ID, err.Error())
+		ctx.AppDB().Exec("UPDATE billing_refund_requests SET error=? WHERE id=?", err.Error(), request.ID)
 		return nil, err
 	}
-	status := strings.ToLower(providerResponse.Status)
-	if status == "" || status == "pending" {
-		status = "submitted"
-	} else if status == "succeeded" {
-		status = "succeeded"
-	} else {
-		status = "submitted"
+	id := strArg(result, "id")
+	if id == "" {
+		return nil, errors.New("provider returned no refund id")
 	}
-	if err := dbRefundSubmitted(ctx.AppDB(), pid, request.ID, providerResponse.ID, status); err != nil {
+	status := "submitted"
+	switch strArg(result, "status") {
+	case "succeeded":
+		status = "submitted"
+	case "failed", "canceled":
+		status = "failed"
+	}
+	if err = dbRefundSubmitted(ctx.AppDB(), pid, request.ID, id, status); err != nil {
+		return nil, err
+	}
+	result["payment_intent"] = request.ProviderPaymentID
+	result["amount"] = request.AmountCents
+	result["currency"] = strings.ToLower(request.Currency)
+	raw, _ := json.Marshal(result)
+	if err = a.handleRefundObject(ctx, raw); err != nil {
 		return nil, err
 	}
 	request, err = dbRefundByID(ctx.AppDB(), pid, request.ID)
-	if err == nil {
-		ctx.Emit("invoice.refund_requested", map[string]any{
-			"invoice_id": invoiceID, "refund_request_id": request.ID,
-			"amount_cents": amount, "currency": invoice.Currency,
-		})
-	}
 	return map[string]any{"refund": request}, err
 }
 
@@ -123,7 +132,8 @@ func dbRefundableStripePayment(db *sql.DB, pid string, invoiceID, amount int64) 
 		        method, external_id, received_at, notes, created_at
 		   FROM payments
 		  WHERE project_id=? AND invoice_id=? AND method='stripe'
-		    AND amount_cents>=? AND external_id LIKE 'pi_%'
+		    AND amount_cents - COALESCE((SELECT -SUM(r.amount_cents) FROM payments r WHERE r.source_payment_id=payments.id),0)
+ - COALESCE((SELECT SUM(rr.amount_cents) FROM billing_refund_requests rr WHERE rr.payment_id=payments.id AND rr.status IN ('pending','submitted')),0)>=? AND external_id LIKE 'pi_%'
 		  ORDER BY amount_cents ASC, received_at DESC, id DESC LIMIT 1`,
 		pid, invoiceID, amount)
 	var payment Payment
@@ -148,21 +158,29 @@ func dbRefundableStripePayment(db *sql.DB, pid string, invoiceID, amount int64) 
 	return &payment, nil
 }
 
-func dbRefundCreate(db *sql.DB, pid string, invoice *Invoice, payment *Payment, amount int64, reason, key string) (*RefundRequest, error) {
+func dbRefundCreate(db *sql.DB, pid string, invoice *Invoice, payment *Payment, amount int64, reason, key string, reopen ...bool) (*RefundRequest, error) {
+	reopenInvoice := len(reopen) > 0 && reopen[0]
 	result, err := db.Exec(
 		`INSERT INTO billing_refund_requests
 		   (project_id, invoice_id, payment_id, provider, provider_payment_id,
-		    idempotency_key, amount_cents, currency, reason)
-		 VALUES (?, ?, ?, 'stripe', ?, ?, ?, ?, ?)
+		    idempotency_key, amount_cents, currency, reason, reopen_invoice)
+		 SELECT ?, ?, ?, 'stripe', ?, ?, ?, ?, ?, ?
+ WHERE (SELECT amount_cents-COALESCE((SELECT -SUM(amount_cents) FROM payments r WHERE r.source_payment_id=p.id),0)-COALESCE((SELECT SUM(amount_cents) FROM billing_refund_requests rr WHERE rr.payment_id=p.id AND status IN ('pending','submitted')),0) FROM payments p WHERE p.id=?)>=?
+ AND (SELECT amount_paid_cents-COALESCE((SELECT SUM(amount_cents) FROM billing_refund_requests rr WHERE rr.invoice_id=i.id AND status IN ('pending','submitted')),0) FROM invoices i WHERE i.id=?)>=?
 		 ON CONFLICT(project_id, idempotency_key) DO NOTHING`,
-		pid, invoice.ID, payment.ID, payment.ExternalID, key, amount, invoice.Currency, reason)
+		pid, invoice.ID, payment.ID, payment.ExternalID, key, amount, invoice.Currency, reason, boolInt(reopenInvoice), payment.ID, amount, invoice.ID, amount)
 	if err != nil {
 		return nil, err
 	}
-	if id, _ := result.LastInsertId(); id != 0 {
+	if n, _ := result.RowsAffected(); n == 1 {
+		id, _ := result.LastInsertId()
 		return dbRefundByID(db, pid, id)
 	}
-	return dbRefundByKey(db, pid, key)
+	existing, err := dbRefundByKey(db, pid, key)
+	if err == nil && existing == nil {
+		return nil, errors.New("refundable balance was reserved concurrently")
+	}
+	return existing, err
 }
 
 func dbRefundSubmitted(db *sql.DB, pid string, id int64, providerRefundID, status string) error {
@@ -173,7 +191,7 @@ func dbRefundSubmitted(db *sql.DB, pid string, id int64, providerRefundID, statu
 	_, err := db.Exec(
 		`UPDATE billing_refund_requests
 		    SET provider_refund_id=?, status=?, error='', updated_at=CURRENT_TIMESTAMP`+completed+`
-		  WHERE project_id=? AND id=?`,
+		  WHERE project_id=? AND id=? AND status<>'succeeded'`,
 		providerRefundID, status, pid, id)
 	return err
 }
@@ -200,7 +218,7 @@ func dbRefundByKey(db *sql.DB, pid, key string) (*RefundRequest, error) {
 func refundSelect() string {
 	return `SELECT id, invoice_id, payment_id, provider, provider_payment_id,
 		provider_refund_id, idempotency_key, amount_cents, currency, reason,
-		status, error, created_at, updated_at, completed_at
+		status, error, created_at, updated_at, completed_at, reopen_invoice
 		FROM billing_refund_requests`
 }
 
@@ -211,7 +229,7 @@ func scanRefund(scanner rowScanner) (*RefundRequest, error) {
 		&refund.ID, &refund.InvoiceID, &refund.PaymentID, &refund.Provider,
 		&refund.ProviderPaymentID, &refund.ProviderRefundID, &refund.IdempotencyKey,
 		&refund.AmountCents, &refund.Currency, &refund.Reason, &refund.Status,
-		&refund.Error, &refund.CreatedAt, &refund.UpdatedAt, &completed,
+		&refund.Error, &refund.CreatedAt, &refund.UpdatedAt, &completed, &refund.ReopenInvoice,
 	); err != nil {
 		return nil, err
 	}

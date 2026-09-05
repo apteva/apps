@@ -1,0 +1,49 @@
+name: Analytics validation
+on:
+  pull_request:
+    paths: ['mcp/analytics/**', '.github/workflows/analytics.yml']
+  push:
+    paths: ['mcp/analytics/**', '.github/workflows/analytics.yml']
+permissions:
+  contents: read
+jobs:
+  analytics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOWORK: 'off'
+      ANALYTICS_BROWSER_DIR: /tmp/analytics-browser-ci
+    defaults:
+      run:
+        working-directory: mcp/analytics
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.6'
+          cache-dependency-path: mcp/analytics/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.13'
+      - run: bun install --frozen-lockfile
+        working-directory: .
+      - run: bun install --frozen-lockfile
+      - run: go vet ./...
+      - run: go test -race -coverprofile=/tmp/analytics-coverage.out ./...
+      - run: go test -run '^$' -fuzz '^FuzzDimensionIdentity$' -fuzztime=15s
+      - run: bun test ui
+      - run: bun run typecheck
+      - run: bun run scripts/build-ui.ts
+      - run: go build -o /tmp/analytics .
+        env:
+          CGO_ENABLED: '0'
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - run: bunx --no-install playwright install --with-deps chromium
+      - run: bun run test:browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: analytics-validation
+          path: |
+            /tmp/analytics-browser-ci
+            /tmp/analytics-coverage.out

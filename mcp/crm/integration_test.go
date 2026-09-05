@@ -10,6 +10,9 @@ package main
 // Run with:  go test -tags integration ./...
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -160,4 +163,58 @@ func strconvFormatInt(i int64) string {
 		out = "-" + out
 	}
 	return out
+}
+
+// Both binaries run with temporary SQLite databases. The local gateway supplies
+// install identity and relays real MCP envelopes; no provider is configured.
+func TestSidecar_RealMessagingBindingAndRouting(t *testing.T) {
+	messaging := tk.SpawnSidecar(t, "../messaging", tk.WithProjectID("test-proj"))
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/apps/callback/whoami":
+			json.NewEncoder(w).Encode(map[string]any{"app_name": "crm", "install_id": 99, "project_id": "test-proj", "bindings": map[string]any{"messaging": 42}})
+		case "/api/apps/callback/agents/42":
+			json.NewEncoder(w).Encode(map[string]any{"id": 42, "name": "messaging", "status": "running", "project_id": "test-proj"})
+		case "/api/app-events/internal/emit":
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/api/apps/callback/apps/messaging/call":
+			var body struct {
+				Tool  string         `json:"tool"`
+				Input map[string]any `json:"input"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			result, err := messaging.MCPRaw("tools/call", map[string]any{"name": body.Tool, "arguments": body.Input})
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			payload, _ := json.Marshal(result)
+			json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"content": []any{map[string]any{"type": "text", "text": string(payload)}}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+	crm := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL), tk.WithEnv("APTEVA_INSTALL_ID", "99"))
+	var routes map[string]any
+	res := crm.GET("/messaging/routes", &routes)
+	if res.Status != 200 {
+		t.Fatalf("read bound routes: %d %s", res.Status, res.Body)
+	}
+	var configured map[string]any
+	res = crm.POST("/messaging/routes", map[string]any{"channel": "email"}, &configured)
+	if res.Status != 200 {
+		t.Fatalf("configure bound routes: %d %s", res.Status, res.Body)
+	}
+	got := messaging.MCP("inbound_route_list", map[string]any{})
+	encoded, _ := json.Marshal(got)
+	if !strings.Contains(string(encoded), "crm") {
+		t.Fatalf("real Messaging has no CRM route: %s", encoded)
+	}
+	// Read-only sender lookup traverses the actual bound app's MCP endpoint.
+	crm.MCP("messaging_senders_list", map[string]any{"channel": "email"})
 }

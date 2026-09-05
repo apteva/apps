@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"os"
 	"strings"
 
@@ -66,7 +67,7 @@ func EnumerateViaAX(ctx context.Context, viewportWidth, viewportHeight int) []El
 	var documents []*domsnapshot.DocumentSnapshot
 	var snapshotStrings []string
 	var frameTree *page.FrameTree
-	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+	if err := cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		if err := accessibility.Enable().Do(ctx); err != nil {
 			return fmt.Errorf("accessibility.Enable: %w", err)
 		}
@@ -209,7 +210,7 @@ func enumerateChildFrames(ctx context.Context, tree *page.FrameTree, viewportWid
 
 func evaluateInFrame(ctx context.Context, frameID cdp.FrameID, expression string, dst any) error {
 	var raw []byte
-	err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+	err := cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		worldID, err := page.CreateIsolatedWorld(frameID).WithWorldName("apteva-som").Do(ctx)
 		if err != nil {
 			return err
@@ -375,7 +376,7 @@ func filterAXByOcclusion(ctx context.Context, candidates []Element) []Element {
   return keep;
 })()`, string(payload))
 	var keep []int
-	if err := chromedp.Run(ctx, chromedp.Evaluate(script, &keep)); err != nil {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(script, &keep)); err != nil {
 		return candidates
 	}
 	out := make([]Element, 0, len(keep))

@@ -1,5 +1,22 @@
 # Workspaces
 
+## v0.5.0
+
+- Accept an operator-allowlisted, digest-pinned image per workspace while
+  retaining profiles for toolchain and lifecycle policy.
+- Let Code forward repository and command image preferences without giving it
+  direct access to the Containers runtime.
+- Publish the multi-architecture Apteva development image definition with
+  persistent language caches and login-shell-safe tool paths.
+
+## v0.4.0
+
+- Add an app-only, Git-agnostic source round trip: create with a producer
+  revision, refresh managed files without deleting dependency caches, export a
+  filtered source archive, and acknowledge the revision accepted upstream.
+- Keep optimistic revision checks and the originating app-install boundary on
+  every source operation. Workspaces still does not commit, merge, or push.
+
 ## v0.3.0
 
 - Give every workspace a named, long-lived PTY shell session. `cd`, exported
@@ -43,7 +60,8 @@ The product boundary is deliberate:
 - Stop/resume, TTL extension, and confirmed permanent destruction.
 - Automatic expiration: stop at `expires_at`, preserve the container and volumes for the
   configured recovery window, then delete them at `delete_at`.
-- App-only creation with a bounded source archive and app-only source export.
+- App-only creation, exact managed-source refresh, filtered source export, and
+  accepted-revision tracking.
 - App-only origin/Git-safety context updates without taking ownership of Git.
 
 Only one tracked command may execute in a workspace at a time. Commands share a
@@ -68,18 +86,34 @@ The combined Apteva image definition lives under
 `images/apteva-dev/Dockerfile`. Build it locally with:
 
 ```bash
-docker build -t apteva/workspace-dev:0.1.0 images/apteva-dev
+docker build -t apteva/workspace-dev:0.1.1 images/apteva-dev
 ```
 
-Then set the Workspaces app's `apteva_image` configuration to
-`apteva/workspace-dev:0.1.0`.
+The published multi-architecture image is available as
+`ghcr.io/apteva/workspace-dev:0.1.1`. Prefer its immutable digest when using it
+as a profile image or per-workspace override.
+
+Workspace creation may also pass an explicit `image`. Explicit images are
+validated against `custom_image_prefixes` and, by default, must use an
+immutable `@sha256` digest. The requested image overrides the selected
+profile's configured image; the profile still describes the expected
+toolchain. Workspaces records the exact image and passes it unchanged to
+Containers.
 
 ## Source handoff
 
 An authenticated originating app can call `workspace_create_for_resource` with
-`source_archive_base64`, then later call `workspace_source_export`. Containers
-validates and transfers the tar.gz archive. The current Containers defaults are
-8 MB compressed, 128 MB expanded, and 20,000 archive entries.
+`source_archive_base64`, `source_digest`, and `source_paths`. It can later call
+`workspace_source_sync` with `expected_source_digest` to refresh only the files
+it manages. Paths removed from the new manifest are deleted; dependency caches,
+the workspace home, and unrelated files are preserved.
+
+`workspace_source_export` with `managed=true` builds a filtered source archive
+that excludes Git metadata, workspace state, dependencies, and common build
+outputs. After reconciling that archive into its source of truth, the producer
+calls `workspace_source_accept` to advance the recorded revision. Containers
+validates and transfers all tar.gz archives. The current limits are 8 MB
+compressed, 128 MB expanded, and 20,000 entries.
 
 Source-capsule producers should normalize archive file ownership to uid/gid
 1000 so the non-root combined Apteva profile can edit imported files.

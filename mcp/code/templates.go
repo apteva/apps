@@ -1,8 +1,9 @@
 package main
 
 import (
-	"errors"
+	"fmt"
 	"io/fs"
+	"os"
 	"strings"
 )
 
@@ -20,7 +21,7 @@ type treeReader interface {
 type storeReader struct{ s FileStore }
 
 func (r storeReader) ListPaths(slug string) ([]string, error) {
-	files, err := r.s.List(slug, "", true)
+	files, err := listSourceFiles(r.s, slug, "", true, false)
 	if err != nil {
 		return nil, err
 	}
@@ -48,21 +49,28 @@ func (embeddedReader) ListPaths(framework string) ([]string, error) {
 	var out []string
 	err := fs.WalkDir(templatesFS, root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return fs.SkipAll
+			if err != nil {
+				return fmt.Errorf("embedded template %q is unavailable: %w", framework, err)
 			}
 			return err
 		}
 		if d.IsDir() {
 			return nil
 		}
-		out = append(out, strings.TrimPrefix(p, root+"/"))
+		rel := strings.TrimPrefix(p, root+"/")
+		if rel == "go.mod.tmpl" {
+			rel = "go.mod"
+		}
+		out = append(out, rel)
 		return nil
 	})
 	return out, err
 }
 
 func (embeddedReader) ReadFile(framework, p string) ([]byte, error) {
+	if framework == "go" && p == "go.mod" {
+		p = "go.mod.tmpl"
+	}
 	return templatesFS.ReadFile("templates/" + framework + "/" + p)
 }
 
@@ -91,16 +99,28 @@ func fork(src treeReader, srcID string, dst FileStore, dstSlug string) (int, err
 	if err != nil {
 		return 0, err
 	}
-	n := 0
+	changes := []fileMutation{}
 	for _, p := range paths {
 		body, err := src.ReadFile(srcID, p)
 		if err != nil {
-			return n, err
+			return 0, err
 		}
-		if _, err := dst.Write(dstSlug, p, body); err != nil {
-			return n, err
+		mode := os.FileMode(0644)
+		if reader, ok := src.(storeReader); ok {
+			meta, err := reader.s.Stat(srcID, p)
+			if err != nil {
+				return 0, err
+			}
+			if meta.Mode != 0 {
+				mode = os.FileMode(meta.Mode)
+			}
 		}
-		n++
+		changes = append(changes, fileMutation{Path: p, Body: body, Mode: mode})
 	}
-	return n, nil
+	return withRepoWrite(dst, dstSlug, func(raw FileStore) (int, error) {
+		if err := applyFileMutations(raw, dstSlug, changes); err != nil {
+			return 0, err
+		}
+		return len(changes), nil
+	})
 }

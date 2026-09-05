@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
+	"github.com/apteva/apps/mcp/computer/internal/browser/providerhttp"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,6 +26,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
+	"github.com/apteva/apps/mcp/computer/internal/browser/downloads"
 	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
@@ -35,6 +39,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/stability"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
+	cdpbrowser "github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/target"
@@ -94,6 +99,8 @@ type Options struct {
 }
 
 type Computer struct {
+	tabManager       *cdptabs.Manager
+	tabTrackers      map[string]*stability.Tracker
 	apiKey           string
 	projectID        string
 	opts             Options
@@ -134,6 +141,9 @@ type Computer struct {
 
 	recoveryMu            sync.Mutex
 	lastScreenshotRecover *computer.ScreenshotRecoveryInfo
+	downloads             *downloads.Tracker
+	downloadProviderMu    sync.Mutex
+	downloadProviderIDs   map[string]string
 }
 
 // New constructs a Browserbase-backed Computer. NO session is created
@@ -161,7 +171,7 @@ func NewWithOptions(apiKey, projectID string, display computer.DisplaySize, opts
 		projectID: projectID,
 		opts:      opts,
 		display:   display,
-		http:      &http.Client{Timeout: 30 * time.Second},
+		http:      providerhttp.New(30 * time.Second),
 	}, nil
 }
 
@@ -458,8 +468,11 @@ func (c *Computer) requestRelease() error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
 	}
 	return nil
@@ -478,7 +491,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			return nil, fmt.Errorf("%s: %w", action.Type, err)
 		}
 		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "click":
 		ctx, cancel := c.actionContext(action.Type)
@@ -486,7 +499,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := c.executeClick(ctx, action, 1, true); err != nil {
 			return nil, fmt.Errorf("click: %w", err)
 		}
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "double_click":
 		ctx, cancel := c.actionContext(action.Type)
@@ -494,7 +507,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := c.executeClick(ctx, action, 2, false); err != nil {
 			return nil, fmt.Errorf("double_click: %w", err)
 		}
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "type":
 		ctx, cancel := c.actionContext(action.Type)
@@ -504,7 +517,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			return nil, fmt.Errorf("type: %w", err)
 		}
 		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "key":
 		ctx, cancel := c.actionContext(action.Type)
@@ -513,7 +526,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			return nil, fmt.Errorf("key: %w", err)
 		}
 		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "scroll":
 		ctx, cancel := c.actionContext(action.Type)
@@ -522,7 +535,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			return nil, fmt.Errorf("scroll: %w", err)
 		}
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "wait":
 		dur := action.Duration
@@ -534,7 +547,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := sleepWithContext(ctx, time.Duration(dur)*time.Millisecond); err != nil {
 			return nil, fmt.Errorf("wait: %w", err)
 		}
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "wait_for_stable":
 		_, cancel := c.actionContext(action.Type)
@@ -542,7 +555,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if _, err := c.WaitForStable(action.QuietMS, action.TimeoutMS); err != nil {
 			return nil, fmt.Errorf("wait_for_stable: %w", err)
 		}
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "wait_for":
 		_, cancel := c.actionContext(action.Type)
@@ -550,7 +563,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if _, err := c.WaitForOutcome(action.Conditions, action.Match, action.QuietMS, action.TimeoutMS); err != nil {
 			return nil, fmt.Errorf("wait_for: %w", err)
 		}
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "upload_file":
 		c.moveToTarget(c.ctx, action)
@@ -564,7 +577,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		c.cueTarget(c.ctx, action, cueSelector, "File uploaded")
 		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "select_option":
 		ctx, cancel := c.actionContext(action.Type)
@@ -576,7 +589,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		c.cueTarget(ctx, action, res.Selector, "Option selected")
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "set_checked":
 		ctx, cancel := c.actionContext(action.Type)
@@ -592,7 +605,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		c.cueTarget(ctx, action, res.Selector, caption)
 		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "set_temporal":
 		ctx, cancel := c.actionContext(action.Type)
@@ -604,7 +617,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		c.cueTarget(ctx, action, res.Selector, "Date/time set")
 		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "set_text":
 		ctx, cancel := c.actionContext(action.Type)
@@ -616,57 +629,23 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		c.cueTarget(ctx, action, res.Selector, "Text updated")
 		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action.Type)
 	}
 }
 
+func (c *Computer) finishAction(action computer.Action) ([]byte, error) {
+	if action.NoScreenshot {
+		return nil, nil
+	}
+	return c.Screenshot()
+}
 func (c *Computer) ExecuteAction(action computer.Action) error {
-	if c.ctx == nil {
-		return fmt.Errorf("browserbase: no active session — call browser_session open first")
-	}
-	switch action.Type {
-	case "click":
-		ctx, cancel := c.actionContext(action.Type)
-		defer cancel()
-		if err := c.executeClick(ctx, action, 1, true); err != nil {
-			return fmt.Errorf("click: %w", err)
-		}
-		return nil
-	case "double_click":
-		ctx, cancel := c.actionContext(action.Type)
-		defer cancel()
-		if err := c.executeClick(ctx, action, 2, false); err != nil {
-			return fmt.Errorf("double_click: %w", err)
-		}
-		return nil
-	case "wait":
-		dur := action.Duration
-		if dur <= 0 {
-			dur = 1000
-		}
-		ctx, cancel := c.actionContext(action.Type)
-		defer cancel()
-		return sleepWithContext(ctx, time.Duration(dur)*time.Millisecond)
-	case "wait_for_stable":
-		_, cancel := c.actionContext(action.Type)
-		defer cancel()
-		_, err := c.WaitForStable(action.QuietMS, action.TimeoutMS)
-		return err
-	case "wait_for":
-		_, cancel := c.actionContext(action.Type)
-		defer cancel()
-		_, err := c.WaitForOutcome(action.Conditions, action.Match, action.QuietMS, action.TimeoutMS)
-		return err
-	case "scroll":
-		ctx, cancel := c.actionContext(action.Type)
-		defer cancel()
-		return c.scroll(ctx, action)
-	default:
-		return fmt.Errorf("browserbase action-only unsupported for %s", action.Type)
-	}
+	action.NoScreenshot = true
+	_, err := c.Execute(action)
+	return err
 }
 
 // scroll dispatches a real CDP mouseWheel event at (x, y). Browserbase
@@ -756,7 +735,7 @@ func (c *Computer) executeClick(ctx context.Context, action computer.Action, cli
 			return null;
 		})()`, x, y)
 		var focusedTag string
-		_ = chromedp.Run(ctx, chromedp.Evaluate(focusJS, &focusedTag))
+		_ = cdputil.Run(ctx, chromedp.Evaluate(focusJS, &focusedTag))
 		if focusedTag != "" {
 			fmt.Fprintf(os.Stderr, "[BROWSERBASE] click focused <%s>\n", strings.ToLower(focusedTag))
 		}
@@ -767,7 +746,7 @@ func (c *Computer) executeClick(ctx context.Context, action computer.Action, cli
 
 func (c *Computer) selectOption(ctx context.Context, action computer.Action) (selectinput.Result, error) {
 	c.setLastSelectResult(nil)
-	target := selectinput.Target{Selector: action.Selector}
+	target := selectinput.Target{ID: action.TargetID, Selector: action.Selector}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -813,7 +792,7 @@ func (c *Computer) setChecked(ctx context.Context, action computer.Action) (chec
 
 func (c *Computer) setTemporal(ctx context.Context, action computer.Action) (temporalinput.Result, error) {
 	c.setLastTemporalResult(nil)
-	target := temporalinput.Target{Selector: action.Selector}
+	target := temporalinput.Target{ID: action.TargetID, Selector: action.Selector}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -837,7 +816,7 @@ func (c *Computer) setTemporal(ctx context.Context, action computer.Action) (tem
 
 func (c *Computer) setText(ctx context.Context, action computer.Action) (textinput.SetResult, error) {
 	c.setLastTextResult(nil)
-	target := textinput.Target{Selector: action.Selector}
+	target := textinput.Target{ID: action.TargetID, Selector: action.Selector}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -949,7 +928,7 @@ func (c *Computer) uploadFile(action computer.Action) (fileupload.Result, error)
 	if c.sessionID == "" {
 		return fileupload.Result{}, fmt.Errorf("browserbase: no active session")
 	}
-	target := fileupload.Target{Selector: action.Selector}
+	target := fileupload.Target{ID: action.TargetID, Selector: action.Selector}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -1166,7 +1145,7 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 	// returns the raw screenshot.
 	if options.Annotate && som.Enabled() {
 		var raw json.RawMessage
-		if err := chromedp.Run(c.ctx, chromedp.Evaluate(som.EnumScript, &raw)); err != nil {
+		if err := cdputil.Run(c.ctx, chromedp.Evaluate(som.EnumScript, &raw)); err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSERBASE] som enum failed: %v\n", err)
 			return buf, nil
 		}
@@ -1238,7 +1217,7 @@ func (c *Computer) recoverScreenshotWithFreshTarget(cause error) ([]byte, *compu
 	browserCtx := cdp.WithExecutor(c.ctx, cc.Browser)
 
 	var newTargetID target.ID
-	err := chromedp.Run(c.ctx, chromedp.ActionFunc(func(context.Context) error {
+	err := cdputil.Run(c.ctx, chromedp.ActionFunc(func(context.Context) error {
 		var createErr error
 		newTargetID, createErr = target.CreateTarget(currentURL).Do(browserCtx)
 		return createErr
@@ -1250,7 +1229,7 @@ func (c *Computer) recoverScreenshotWithFreshTarget(cause error) ([]byte, *compu
 		return nil, nil, fmt.Errorf("browserbase screenshot recovery switch target: %w", err)
 	}
 	waitCtx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
-	_ = chromedp.Run(waitCtx, chromedp.WaitReady("body", chromedp.ByQuery))
+	_ = cdputil.Run(waitCtx, chromedp.WaitReady("body", chromedp.ByQuery))
 	cancel()
 	time.Sleep(500 * time.Millisecond)
 	buf, err := c.captureScreenshot()
@@ -1292,7 +1271,7 @@ func (c *Computer) captureScreenshot() ([]byte, error) {
 		}
 		ctx, cancel := context.WithTimeout(c.ctx, screenshotCaptureTimeout)
 		var buf []byte
-		err := chromedp.Run(ctx,
+		err := cdputil.Run(ctx,
 			chromedp.ActionFunc(func(ctx context.Context) error {
 				b, err := page.CaptureScreenshot().
 					WithFormat(page.CaptureScreenshotFormatJpeg).
@@ -1347,6 +1326,7 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 			ID: e.ID, Label: e.Label, X: e.X, Y: e.Y, W: e.W, H: e.H,
 			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
 			Placeholder: e.Placeholder, CurrentValue: e.CurrentValue, Pattern: e.Pattern,
+			Checked: e.Checked, Indeterminate: e.Indeterminate,
 			FormatHint: e.FormatHint, DateLike: e.DateLike, Validity: e.Validity,
 			Disabled: e.Disabled, Loading: e.Loading, TargetLoading: e.TargetLoading,
 			ContainerLoading: e.ContainerLoading, PageLoadingCount: e.PageLoadingCount,
@@ -1368,7 +1348,7 @@ func (c *Computer) SessionID() string   { return c.sessionID }
 func (c *Computer) ContextID() string   { return c.contextID }
 func (c *Computer) CurrentURL() string {
 	var url string
-	_ = chromedp.Run(c.ctx, chromedp.Location(&url))
+	_ = cdputil.Run(c.ctx, chromedp.Location(&url))
 	return url
 }
 
@@ -1460,8 +1440,8 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 	} else {
 		fmt.Fprintf(os.Stderr, "[BROWSERBASE] debug URL unavailable: %v\n", derr)
 	}
-	fmt.Fprintf(os.Stderr, "[BROWSERBASE] session ready id=%s context=%s debug=%s display=%dx%d\n",
-		c.sessionID, c.contextID, c.debugURL, c.display.Width, c.display.Height)
+	fmt.Fprintf(os.Stderr, "[BROWSERBASE] session ready id=%s context=%s display=%dx%d\n",
+		c.sessionID, c.contextID, c.display.Width, c.display.Height)
 	if o.URL != "" {
 		return c.navigate(o.URL)
 	}
@@ -1509,21 +1489,52 @@ func (c *Computer) establishCDP(connectURL string) error {
 		remoteCancel()
 		return err
 	}
+	downloadTracker := downloads.New(downloads.Options{
+		DownloadPath: "downloads",
+		Behavior:     cdpbrowser.SetDownloadBehaviorBehaviorAllow,
+		Open:         c.openDownloadedFile,
+		Lifetime:     browserCtx,
+	})
+	if err := downloadTracker.Attach(ctx); err != nil {
+		cancel()
+		browserCancel()
+		remoteCancel()
+		return fmt.Errorf("browserbase: enable downloads: %w", err)
+	}
+	downloadReady := false
+	defer func() {
+		if !downloadReady {
+			_ = downloadTracker.Close()
+		}
+	}()
 	c.allocCancel = func() {
 		browserCancel()
 		remoteCancel()
 	}
 	c.allocCtx = browserCtx
 	c.ctx = ctx
+	c.downloads = downloadTracker
+	c.downloadProviderMu.Lock()
+	c.downloadProviderIDs = make(map[string]string)
+	c.downloadProviderMu.Unlock()
 	c.attachStabilityTracker()
 	c.cancel = cancel
 	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
 		return fmt.Errorf("reapply browser environment: %w", err)
 	}
+	downloadReady = true
 	return nil
 }
 
 func (c *Computer) attachStabilityTracker() {
+	id := cdptabs.ActiveID(c.ctx)
+	if c.tabTrackers == nil {
+		c.tabTrackers = make(map[string]*stability.Tracker)
+	}
+	if tracker := c.tabTrackers[id]; tracker != nil {
+		c.stabilityTracker = tracker
+		return
+	}
 	c.stabilityTracker = nil
 	if c.ctx == nil {
 		return
@@ -1534,6 +1545,7 @@ func (c *Computer) attachStabilityTracker() {
 		return
 	}
 	c.stabilityTracker = tracker
+	c.tabTrackers[id] = tracker
 }
 
 func (c *Computer) WaitForStable(quietMS, timeoutMS int) (stability.Result, error) {
@@ -1583,6 +1595,10 @@ func pickInitialPageTarget(infos []*target.Info) target.ID {
 // releaseCDP cancels the chromedp context + allocator. Safe to call
 // when no session is attached (no-op).
 func (c *Computer) releaseCDP() {
+	if c.downloads != nil {
+		_ = c.downloads.Close()
+		c.downloads = nil
+	}
 	if c.cancel != nil {
 		c.cancel()
 		c.cancel = nil
@@ -1592,6 +1608,8 @@ func (c *Computer) releaseCDP() {
 		c.allocCancel = nil
 	}
 	c.allocCtx = nil
+	c.tabManager = nil
+	c.tabTrackers = nil
 	c.ctx = nil
 }
 
@@ -1605,15 +1623,29 @@ func (c *Computer) ActiveTabID() string {
 
 func (c *Computer) SwitchTab(tabID string) error {
 	if tabID == c.ActiveTabID() {
-		return nil
+		return cdptabs.Activate(c.ctx, tabID)
 	}
-	ctx, cancel, err := cdptabs.Switch(c.ctx, tabID)
+	if c.tabManager == nil {
+		c.tabManager = cdptabs.NewManager(c.ctx, c.cancel)
+	}
+	ctx, cancel, created, err := c.tabManager.Switch(tabID)
 	if err != nil {
 		return err
+	}
+	if created && c.downloads != nil {
+		if err := c.downloads.Attach(ctx); err != nil {
+			return err
+		}
 	}
 	c.ctx = ctx
 	c.cancel = cancel
 	c.attachStabilityTracker()
+	c.labelMu.Lock()
+	c.lastLabels = nil
+	c.labelMu.Unlock()
+	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1634,7 +1666,16 @@ func (c *Computer) CloseTab(tabID string) error {
 			return fmt.Errorf("switch fallback tab: %w", err)
 		}
 	}
-	return cdptabs.Close(c.ctx, tabID)
+	if err := cdptabs.Close(c.ctx, tabID); err != nil {
+		return err
+	}
+	if c.tabManager != nil {
+		if detached := c.tabManager.Forget(tabID); detached != nil && c.downloads != nil {
+			c.downloads.Detach(detached)
+		}
+	}
+	delete(c.tabTrackers, tabID)
+	return nil
 }
 
 // navigate is a small CDP nav wrapper used by OpenSession after a
@@ -1683,6 +1724,10 @@ func (c *Computer) fetchSessionConnectURL(sessionID string) (string, error) {
 }
 
 func (c *Computer) Close() error {
+	if c.downloads != nil {
+		_ = c.downloads.Close()
+		c.downloads = nil
+	}
 	// Officially release the session so Browserbase stops billing minutes
 	// and has a clean close point for persisting context state. Keep the
 	// CDP connection open until after the release request so the session
@@ -1694,7 +1739,8 @@ func (c *Computer) Close() error {
 		c.lastUsage = nil
 		c.usageMu.Unlock()
 	}
-	if err := c.requestRelease(); err != nil {
+	releaseErr := c.requestRelease()
+	if err := releaseErr; err != nil {
 		fmt.Fprintf(os.Stderr, "[BROWSERBASE] release failed id=%s: %v\n", c.sessionID, err)
 	} else if c.sessionID != "" {
 		fmt.Fprintf(os.Stderr, "[BROWSERBASE] session released id=%s\n", c.sessionID)
@@ -1712,13 +1758,176 @@ func (c *Computer) Close() error {
 		c.allocCancel()
 	}
 	c.allocCtx = nil
+	c.tabManager = nil
+	c.tabTrackers = nil
 	c.ctx = nil
 	c.cancel = nil
 	c.allocCancel = nil
-	c.sessionID = ""
+	if releaseErr == nil {
+		c.sessionID = ""
+	}
 	c.contextID = ""
 	c.contextPersist = false
-	return nil
+	return releaseErr
+}
+
+func (c *Computer) ListDownloads(ctx context.Context) ([]computer.Download, error) {
+	if c.downloads == nil {
+		return nil, downloads.ErrClosed
+	}
+	return c.downloads.ListDownloads(ctx)
+}
+
+func (c *Computer) WaitForDownload(ctx context.Context, id string) (computer.Download, error) {
+	if c.downloads == nil {
+		return computer.Download{}, downloads.ErrClosed
+	}
+	return c.downloads.WaitForDownload(ctx, id)
+}
+
+func (c *Computer) OpenDownload(ctx context.Context, id string) (io.ReadCloser, computer.Download, error) {
+	if c.downloads == nil {
+		return nil, computer.Download{}, downloads.ErrClosed
+	}
+	return c.downloads.OpenDownload(ctx, id)
+}
+
+func (c *Computer) DownloadEventCursor() uint64 {
+	if c.downloads == nil {
+		return 0
+	}
+	return c.downloads.DownloadEventCursor()
+}
+
+func (c *Computer) DownloadsStartedSince(cursor uint64) []computer.Download {
+	if c.downloads == nil {
+		return nil
+	}
+	return c.downloads.DownloadsStartedSince(cursor)
+}
+
+type browserbaseDownloadList struct {
+	Downloads []struct {
+		ID        string `json:"id"`
+		SessionID string `json:"sessionId"`
+		Filename  string `json:"filename"`
+		Size      int64  `json:"size"`
+		CreatedAt string `json:"createdAt"`
+	} `json:"downloads"`
+}
+
+var errDownloadNotSynchronized = errors.New("browserbase download not yet synchronized")
+
+func (c *Computer) openDownloadedFile(ctx context.Context, _ string, meta computer.Download) (io.ReadCloser, error) {
+	syncCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	var providerID string
+	for {
+		var err error
+		providerID, err = c.browserbaseDownloadID(syncCtx, meta)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, errDownloadNotSynchronized) {
+			return nil, err
+		}
+		select {
+		case <-syncCtx.Done():
+			return nil, fmt.Errorf("download_bytes_unavailable: browserbase synchronization: %w", syncCtx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/downloads/%s", apiBase, providerID), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-BB-API-Key", c.apiKey)
+	req.Header.Set("Accept", "application/octet-stream")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("download_bytes_unavailable: browserbase HTTP %d", resp.StatusCode)
+	}
+	return resp.Body, nil
+}
+
+func (c *Computer) browserbaseDownloadID(ctx context.Context, meta computer.Download) (string, error) {
+	c.downloadProviderMu.Lock()
+	defer c.downloadProviderMu.Unlock()
+	if id := c.downloadProviderIDs[meta.ID]; id != "" {
+		return id, nil
+	}
+	filename := meta.OriginalFilename
+	if filename == "" {
+		filename = meta.Filename
+	}
+	// Filename/size cannot identify multiple browser events, even if the
+	// provider has only indexed one of them so far. Never guess by order.
+	if c.downloads != nil {
+		items, err := c.downloads.ListDownloads(ctx)
+		if err != nil {
+			return "", err
+		}
+		for _, item := range items {
+			original := item.OriginalFilename
+			if original == "" {
+				original = item.Filename
+			}
+			if item.ID != meta.ID && original == filename && (item.Size == 0 || meta.Size == 0 || item.Size == meta.Size) {
+				return "", errors.New("download_identity_ambiguous: multiple browser downloads share the same filename and size")
+			}
+		}
+	}
+
+	used := make(map[string]bool, len(c.downloadProviderIDs))
+	for _, id := range c.downloadProviderIDs {
+		used[id] = true
+	}
+
+	requestURL := fmt.Sprintf("%s/downloads?sessionId=%s&filename=%s&limit=100", apiBase, url.QueryEscape(c.sessionID), url.QueryEscape(filename))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("X-BB-API-Key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("download_bytes_unavailable: browserbase list HTTP %d", resp.StatusCode)
+	}
+	var listed browserbaseDownloadList
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&listed); err != nil {
+		return "", fmt.Errorf("download_bytes_unavailable: browserbase list: %w", err)
+	}
+	var matched []string
+	for _, candidate := range listed.Downloads {
+		if candidate.ID == "" || used[candidate.ID] || candidate.SessionID != "" && candidate.SessionID != c.sessionID || candidate.Filename != filename {
+			continue
+		}
+		if meta.Size > 0 && candidate.Size > 0 && meta.Size != candidate.Size {
+			continue
+		}
+		matched = append(matched, candidate.ID)
+	}
+	if len(matched) > 1 {
+		return "", errors.New("download_identity_ambiguous: provider returned multiple matching downloads")
+	}
+	if len(matched) == 1 {
+		if c.downloadProviderIDs == nil {
+			c.downloadProviderIDs = make(map[string]string)
+		}
+		c.downloadProviderIDs[meta.ID] = matched[0]
+		return matched[0], nil
+	}
+	return "", errDownloadNotSynchronized
 }
 
 const (
@@ -1815,3 +2024,28 @@ func waitUsageRetry(ctx context.Context, delay time.Duration) error {
 		return nil
 	}
 }
+
+func (c *Computer) RefreshSemantics() error {
+	var raw json.RawMessage
+	if err := cdputil.Run(c.ctx, chromedp.Evaluate(som.EnumScript, &raw)); err != nil {
+		return err
+	}
+	elements, err := som.UnmarshalElements(raw)
+	if err != nil {
+		return err
+	}
+	if som.ShouldAugmentAX(elements) {
+		elements = som.MergeAX(elements, som.EnumerateViaAX(c.ctx, c.display.Width, c.display.Height))
+	}
+	labels := make(map[int]som.Element, len(elements))
+	for _, el := range elements {
+		labels[el.Label] = el
+	}
+	c.labelMu.Lock()
+	c.lastLabels = labels
+	c.labelMu.Unlock()
+	c.refreshScrollRegions()
+	return nil
+}
+
+func (c *Computer) BindRequest(ctx context.Context) func() { return cdputil.Bind(c.ctx, ctx) }

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -94,6 +95,8 @@ type instagramSyncReport struct {
 // Warnings. Cursors get bumped at the end so the next sync only
 // fetches deltas where Meta's pagination supports it.
 func syncInstagramAccount(ctx *sdk.AppCtx, pid string, accountID int64) (*instagramSyncReport, error) {
+	done := beginInboxSync(ctx, accountID)
+	defer done()
 	if pid == "" {
 		return nil, errors.New("project_id required")
 	}
@@ -115,13 +118,8 @@ func syncInstagramAccount(ctx *sdk.AppCtx, pid string, accountID int64) (*instag
 		report.NewMentions = n
 		report.Warnings = append(report.Warnings, warns...)
 	}
-	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO inbox_cursors (social_account_id, kind, cursor, last_sync_at)
-		 VALUES (?, ?, '', CURRENT_TIMESTAMP)
-		 ON CONFLICT(social_account_id, kind) DO UPDATE SET
-		   last_sync_at=excluded.last_sync_at, last_error=NULL`,
-		accountID, "all",
-	)
+	_, _ = ctx.AppDB().Exec(`INSERT INTO inbox_cursors(social_account_id,kind,cursor,last_sync_at,last_error) VALUES (?,'all','',CURRENT_TIMESTAMP,?) ON CONFLICT(social_account_id,kind) DO UPDATE SET last_sync_at=excluded.last_sync_at,last_error=excluded.last_error`, accountID, nullable(strings.Join(report.Warnings, "; ")))
+
 	return report, nil
 }
 
@@ -191,7 +189,7 @@ func syncInstagramComments(ctx *sdk.AppCtx, projectID string, creds *igAccountCr
 }
 
 func fetchAndUpsertIGComments(ctx *sdk.AppCtx, projectID string, creds *igAccountCreds, postID int64, mediaID string) (int, string) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "list_media_comments", map[string]any{
+	res, err := collectInboxPages(ctx, creds.AccountID, creds.ConnID, "list_media_comments", map[string]any{
 		"mediaId":      mediaID,
 		"access_token": creds.PageToken,
 		"limit":        25,
@@ -219,7 +217,7 @@ func fetchAndUpsertIGComments(ctx *sdk.AppCtx, projectID string, creds *igAccoun
 			}
 		}
 	}
-	return added, ""
+	return added, finishInboxPages(ctx, creds.AccountID, res)
 }
 
 func upsertIGComment(ctx *sdk.AppCtx, projectID string, creds *igAccountCreds, postID int64, mediaID, parentID string, c igCommentNode) bool {
@@ -291,7 +289,7 @@ type igMessageNode struct {
 // naturally; parent_external_id links replies to their parent
 // message when the conversation has more than one.
 func syncInstagramDMs(ctx *sdk.AppCtx, projectID string, creds *igAccountCreds) (int, []string) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "list_conversations", map[string]any{
+	res, err := collectInboxPages(ctx, creds.AccountID, creds.ConnID, "list_conversations", map[string]any{
 		"instagramAccountId": creds.IGUserID,
 		"platform":           "instagram",
 		"access_token":       creds.PageToken,
@@ -318,11 +316,14 @@ func syncInstagramDMs(ctx *sdk.AppCtx, projectID string, creds *igAccountCreds) 
 			warns = append(warns, w)
 		}
 	}
+	if warning := finishInboxPages(ctx, creds.AccountID, res); warning != "" {
+		warns = append(warns, warning)
+	}
 	return added, warns
 }
 
 func expandAndUpsertIGConversation(ctx *sdk.AppCtx, projectID string, creds *igAccountCreds, conversationID string) (int, string) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "get_conversation", map[string]any{
+	res, err := collectInboxPages(ctx, creds.AccountID, creds.ConnID, "get_conversation", map[string]any{
 		"conversationId": conversationID,
 		"access_token":   creds.PageToken,
 	})
@@ -350,10 +351,7 @@ func expandAndUpsertIGConversation(ctx *sdk.AppCtx, projectID string, creds *igA
 	for _, m := range msgs {
 		// Skip our own outbound — we already wrote a 'replied' row when
 		// we sent it via instagramInboxReply.
-		if m.From.ID == creds.IGUserID {
-			prevID = m.ID
-			continue
-		}
+
 		occurred := parseIGTimestamp(m.CreatedTime)
 		mediaJSON := normalizeInboxMediaJSON(m.Attachments)
 		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
@@ -362,6 +360,7 @@ func expandAndUpsertIGConversation(ctx *sdk.AppCtx, projectID string, creds *igA
 			Platform:         "instagram",
 			Kind:             inboxKindDM,
 			ExternalID:       m.ID,
+			Outbound:         m.From.ID == creds.IGUserID,
 			ParentExternalID: prevID,
 			AuthorExternalID: m.From.ID,
 			AuthorName:       m.From.Username,
@@ -378,7 +377,7 @@ func expandAndUpsertIGConversation(ctx *sdk.AppCtx, projectID string, creds *igA
 		}
 		prevID = m.ID
 	}
-	return added, ""
+	return added, finishInboxPages(ctx, creds.AccountID, res)
 }
 
 // igTagNode is the shape of /{ig-user-id}/tags response items —
@@ -396,7 +395,7 @@ type igTagNode struct {
 }
 
 func syncInstagramMentions(ctx *sdk.AppCtx, projectID string, creds *igAccountCreds) (int, []string) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "list_my_tags", map[string]any{
+	res, err := collectInboxPages(ctx, creds.AccountID, creds.ConnID, "list_my_tags", map[string]any{
 		"instagramAccountId": creds.IGUserID,
 		"access_token":       creds.PageToken,
 		"limit":              25,
@@ -440,6 +439,9 @@ func syncInstagramMentions(ctx *sdk.AppCtx, projectID string, creds *igAccountCr
 		if inserted {
 			added++
 		}
+	}
+	if warning := finishInboxPages(ctx, creds.AccountID, res); warning != "" {
+		return added, []string{warning}
 	}
 	return added, nil
 }
@@ -498,6 +500,7 @@ func igReplyToComment(ctx *sdk.AppCtx, out inboxOutcome, creds *igAccountCreds, 
 	// Record our own reply as an inbox row so the thread renders
 	// without waiting for the next poll.
 	_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		Outbound:         true,
 		ProjectID:        item.ProjectID,
 		SocialAccountID:  creds.AccountID,
 		Platform:         "instagram",
@@ -560,6 +563,7 @@ func igSendDM(ctx *sdk.AppCtx, out inboxOutcome, creds *igAccountCreds, item *in
 			mediaJSON = marshalInboxAttachments([]inboxAttachment{*part.Attachment})
 		}
 		_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+			Outbound:         true,
 			ProjectID:        item.ProjectID,
 			SocialAccountID:  creds.AccountID,
 			Platform:         "instagram",

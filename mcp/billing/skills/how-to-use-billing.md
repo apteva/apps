@@ -188,8 +188,8 @@ is supported for reconciliation, but always include the provider's unique
 - Don't render a PDF for a draft — finalize first so the file shows the real number.
 - Don't try to set `status` directly via `customers_update`-style
   patches — the lifecycle tools own status.
-- Don't void a paid invoice expecting a refund — record a payment
-  with `amount_cents < 0` instead.
+- Don't void a paid invoice expecting a refund. Use `invoices_refund` for Stripe
+  refunds; a negative manual ledger entry only records money already returned.
 - Don't include sensitive data (card numbers, SSNs) in `notes` or
   `metadata`. Notes show in the dashboard panel; metadata is JSON
   the agent can read back.
@@ -203,3 +203,28 @@ Run `invoices_get(id=…)` before mutating an invoice. The `status`,
 `provider`, `total_cents`, `amount_paid_cents`, and `audit_log`
 fields are usually enough to make the right decision without
 asking the user.
+
+
+## Retry, refund, and history rules
+
+Reuse the same `idempotency_key` and original arguments when a provider call times
+out. Never create a new key just to escape a pending operation. Check
+`billing_reconciliation_status`; uncertain operations are recovered in the
+background and older ambiguous requests require review.
+
+`invoices_refund` sends a real provider refund and records its lifecycle. A refund
+puts collection on hold by default. Set `reopen_invoice=true` only when the debt
+remains due; otherwise use a separate accounting correction as appropriate.
+`invoices_resume_collection` is an explicit decision to collect again.
+`invoices_cancel_payment` retires an active provider payment after checking its
+current state. Drafts can be removed with `invoices_delete`.
+
+Use server search with `limit`/`offset` and inspect `has_more`. For complete invoice
+history use `invoices_history`; its payments, audit entries, and refund requests
+have independent continuation flags. Customer totals are grouped by currency in
+`by_currency`; never add those values without an explicit conversion.
+
+Finalized PDF/print identities are immutable snapshots. Set tax treatment
+explicitly before finalization; exempt/reverse-charge invoices require zero tax.
+Pass the intended invoice currency and retain catalog IDs and metadata when
+updating line items. Negative-total documents cannot be finalized as invoices.

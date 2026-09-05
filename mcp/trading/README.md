@@ -8,6 +8,12 @@ ledger, authoritative exchange sessions, forward point-in-time universe
 snapshots, auditable portfolio postings, and an event-driven data-quality desk.
 Version 0.7 adds native portfolio risk profiles, enforceable percentage limits,
 high-water drawdown halts, and percentage objectives with live progress.
+Version 0.8 adds venue-neutral execution profiles, maker/taker economics,
+quote-aware spread and slippage simulation, exchange constraints, runtime venue
+health, and an auditable fee/funding/cost ledger shared by paper and live modes.
+Version 0.9 adds enforced portfolio tradable-universe policies and durable,
+generic strategy scorecards with backtest evidence and staged paper/live
+promotion gates.
 
 Same canonical layout as `apps/mcp/crm` and `apps/mcp/storage`: a Go
 sidecar serving MCP tools + REST routes, with two UI surfaces under
@@ -17,7 +23,7 @@ sidecar serving MCP tools + REST routes, with two UI surfaces under
 
 ```
 apps/mcp/trading/
-├── apteva.yaml             # manifest — kind: source, declares 40 mcp_tools
+├── apteva.yaml             # manifest — kind: source, declares 50 mcp_tools
 ├── go.mod / go.sum
 ├── main.go                 # App impl, HTTP routes, Workers wiring
 ├── tools.go                # MCP tools (the agent's surface)
@@ -87,7 +93,10 @@ by apteva-server. Bare paths shown here.
 | `GET`  | `/portfolios/{id}` | Snapshot |
 | `PATCH`| `/portfolios/{id}` | Status only — `{ "status": "active\|paused\|halted" }` |
 | `GET`  | `/portfolios/{id}/positions` | Open positions, mark-decorated |
+| `GET`  | `/portfolios/{id}/execution-costs` | Fee, rebate, spread, slippage, and funding ledger with totals |
+| `POST` | `/portfolios/{id}/funding` | Idempotently record a venue-reported funding payment |
 | `GET/PUT` | `/portfolios/{id}/risk` | Resolved policy and state / set preset or custom limits |
+| `GET/PUT` | `/portfolios/{id}/universe-policy` | Read or enforce allowed symbols, exclusions, or a reference universe |
 | `GET/POST` | `/portfolios/{id}/objectives` | List live objective progress / create objective |
 | `PATCH` | `/portfolios/{id}/objectives/{objective_id}` | Update, pause, or archive objective |
 | `GET` | `/risk-profiles` | Conservative, balanced, and aggressive defaults |
@@ -96,6 +105,7 @@ by apteva-server. Bare paths shown here.
 | `GET`  | `/portfolios/{id}/journal?kind=…&limit=…` | Read journal |
 | `GET`  | `/quotes/{symbol}` | Latest mark |
 | `GET`  | `/universe` | All currently-known marks |
+| `GET/PUT` | `/execution/venues` | List or update venue/class/symbol execution profiles |
 | `GET`  | `/healthz/details` | Engine, stream, provider, and reference-data health |
 | `GET`  | `/reference/status` | Coverage counts, checkpoints, and survivorship status |
 | `GET`  | `/reference/securities?q=…&as_of=…` | Stable security and dated listing identities |
@@ -104,6 +114,9 @@ by apteva-server. Bare paths shown here.
 | `GET`  | `/reference/quality` | Open ingestion, identity, and accounting issues |
 | `GET`  | `/reference/postings?portfolio_id=…` | Auditable broker-observed and simulated action effects |
 | `POST` | `/reference/sync` | Trigger an immediate idempotent reference-data reconciliation |
+| `GET/PUT` | `/strategies/{id}/scorecard?portfolio_id=…` | Read scorecard evidence / configure generic pass criteria |
+| `POST` | `/strategies/{id}/scorecard/evaluate` | Persist an immutable evaluation for a completed backtest |
+| `POST` | `/strategies/{id}/promotion` | Promote, demote, or suspend one strategy for one portfolio |
 
 ## Reference-data behavior
 
@@ -120,21 +133,73 @@ visible for broker reconciliation instead of being guessed from incomplete
 terms. Broker-backed portfolios treat broker positions and activities as the
 accounting source of truth.
 
-## MCP tools (40)
+## Execution profiles and costs
 
-**Portfolio and execution (13):** `portfolio_create`, `brokers_list`,
+Every order resolves one execution profile in this order: built-in venue and
+asset-class defaults, the stored venue wildcard, an optional symbol override,
+then authoritative instrument constraints. Profiles cover venue status,
+calendar/session policy, maker and taker fee bps, fee currency, spread and
+slippage models, minimum quantity/notional, quantity step, price tick, funding,
+and post-only/reduce-only capabilities.
+
+New orders fail with structured rejection codes when a venue is in maintenance
+or outage, its retry circuit is open, the session is closed, or quantity,
+notional, step, and tick rules are invalid. Existing paper orders wait through
+temporary closures and resume when the venue is executable. Crypto profiles are
+continuous by default; exchange-traded assets use the normalized calendar.
+
+Paper market orders cross the current bid/ask (or a configured fallback spread)
+and apply taker slippage. Resting limit orders use maker economics; marketable
+limits use taker economics and respect their price cap. Each fill records its
+fee currency, liquidity role, spread cost, slippage cost, venue, and source.
+Broker commissions are retained in their native currency and converted to the
+portfolio quote currency when a trustworthy conversion mark exists. Actual
+funding payments are ingested idempotently rather than inferred from a rate.
+
+Venue adapter failures feed a per-venue health circuit. Five consecutive
+failures open an exponential retry window, reject new orders visibly, and emit
+`venue.health.changed`; successful reconciliation closes it. Profile edits,
+funding, and fills also publish app-bus events consumed by the execution desk.
+
+## Trading governance
+
+Each portfolio can enforce one of three tradable-universe modes: all symbols in
+its allowed asset classes, an explicit symbol allowlist, or point-in-time
+membership in a normalized reference universe. Explicit exclusions and optional
+active-listing checks apply to every common order path and automated strategy.
+A symbol removed from the universe may still be sold down from an existing
+holding, while outstanding exit orders are reserved to prevent an accidental
+oversell or short.
+
+Strategy scorecards are portfolio-specific and accept generic minimum/maximum
+criteria over recorded backtest metrics. Evaluations persist the strategy
+version, dataset identity, metric values, checks, and the exact policy hash.
+Changing a scorecard therefore invalidates old evidence for future promotion.
+Promotion proceeds one stage at a time through research, paper candidate,
+paper, live candidate, and live; suspension immediately blocks execution.
+Enforcement is opt-in for existing portfolios, then requires paper stage for a
+broker-paper portfolio and live stage for a broker-live portfolio.
+
+## MCP tools (50)
+
+**Portfolio and execution (19):** `portfolio_create`, `brokers_list`,
 `portfolio_list`, `portfolio_get`, `account_summary`, `positions_list`,
 `orders_list`, `order_place`, `order_cancel`, `watchlist_add`,
-`watchlist_remove`, `portfolio_pause`, `portfolio_arm_live`.
+`watchlist_remove`, `portfolio_pause`, `portfolio_arm_live`,
+`venue_profiles_list`, `venue_profile_update`, `execution_costs_list`,
+`funding_payment_record`, `portfolio_universe_get`,
+`portfolio_universe_update`.
 
 **Market and reference data (8):** `market_quote`, `market_history`,
 `market_source`, `market_calendar`, `reference_data_status`,
 `security_resolve`, `corporate_actions_list`, `exchange_sessions_list`.
 
-**Strategy and backtesting (10):** `strategy_create`, `strategy_update`,
+**Strategy and backtesting (14):** `strategy_create`, `strategy_update`,
 `strategy_get`, `strategy_list`, `strategy_validate`, `strategy_evaluate`,
 `strategy_assign`, `strategy_backtest_create`, `strategy_validate_backtest`,
-`backtest_market_step`.
+`backtest_market_step`, `strategy_scorecard_get`,
+`strategy_scorecard_update`, `strategy_scorecard_evaluate`,
+`strategy_promotion_update`.
 
 **Alerts and journal (3):** `alert_create`, `journal_write`, `journal_read`.
 

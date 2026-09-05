@@ -17,152 +17,25 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
 )
 
-// manifestYAML mirrors apteva.yaml — keep both in sync (version too);
-// TestManifestMatchesAptevaYAML enforces it.
-const manifestYAML = `schema: apteva-app/v1
-
-name: conversations
-display_name: Conversations
-version: 0.18.2
-description: |
-  One conversation system for dashboard chat and the inbox
-  (approvals, reports, alerts, status). Inbox items are messages — an
-  agent's approval request is a typed card in its conversation, and
-  the inbox is a priority-ordered view over those rows, so acting on
-  a card anywhere updates every surface at once. Other apps raise
-  inbox items via inbox_post; surface delivery and inbound agent turns
-  go through one crash-safe, idempotent ledger. Telegram bots connect through platform-managed integration
-  connections with guided pairing, automatic public intake, one-time
-  invites, group discovery, and webhook health—without exposing bot
-  credentials or asking operators for numeric Telegram IDs. When one
-  agent owns every route, the bot can use that agent's display name;
-  shared routing automatically restores the original bot identity.
-  Telegram response feedback supports native live drafts in private
-  chats, typing-only feedback, or an operator-controlled off mode.
-author: Apteva
-homepage: https://github.com/apteva/apps/tree/main/mcp/conversations
-icon: /ui/icon.svg
-icon_style: monochrome
-tags: [chat, inbox, channels, approvals, notifications]
-
-scopes: [global]
-min_apteva_version: "0.15.3"
-
-requires:
-  permissions:
-    - db.write.app
-    - platform.apps.call
-    - platform.instances.read
-    - platform.instances.write
-    - platform.threads.write
-    - platform.telemetry.read
-    - platform.connections.read
-    - platform.connections.execute
-  integrations:
-    - role: telegram_bot
-      kind: integration
-      mode: multiple
-      compatible_slugs: [telegram]
-      required: false
-      label: "Telegram bots (optional)"
-      hint: "Bind the Telegram integration connections Conversations may use for project chat routes."
-
-provides:
-  http_routes:
-    - prefix: /
-    - prefix: /telegram-webhook/
-      no_auth: true
-  mcp_tools:
-    - { name: send,             description: "Reply from the originating conversation thread to that exact conversation. Args: conversation_id, text, phase? (acknowledgement|progress|final), components?, attachments?. Main routes requested outcomes back to the originating thread; generic workers report to their parent and are never granted Conversations tools. Use short paragraphs and simple lists; avoid Markdown tables, raw HTML, and transport-specific syntax. Basic formatting is adapted per bound surface." }
-    - { name: request_approval, description: "Ask the operator to approve gated work owned by main or by the originating conversation thread, using that conversation's exact id. Generic workers report the blocked decision to their parent instead. Refused in public conversations. Args: conversation_id, title, body?, actions? (default Approve/Deny). The verdict returns to the asking thread as approval.result." }
-    - { name: report,           description: "Main-thread global output only: file a substantive report into an operator conversation. Conversation threads and generic workers report results to their parent/main instead. Refused in public conversations. Args: conversation_id, title, summary, period?, sections?." }
-    - { name: alert,            description: "Raise a global alert from main, or a conversation-local urgent alert from the originating conversation thread using its exact id. Generic workers report problems to their parent. Refused in public conversations. Args: conversation_id, text, severity? (info|warn|error)." }
-    - { name: create,           description: "Main-thread conversation management only: create a conversation led by this agent. Conversation threads and generic workers do not create conversations. Args: title. Title-idempotent per agent." }
-    - { name: list,             description: "Main-thread conversation management only: list conversations this agent participates in. Conversation threads already have their exact id; generic workers report to their parent. Args: limit?, query?." }
-    - { name: history,          description: "Read a conversation transcript. Main may inspect a participating conversation; a conversation thread may read only its own exact conversation; generic workers are not granted this tool. Args: conversation_id, since_id?, limit?." }
-    - { name: inbox_post, exposure: app_only, description: "INTERNAL - sibling-app entry point via CallAppResult; agent calls are refused. Agents use conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?. When callback_tool is set, actions call back into the posting app." }
-  ui_panels:
-    - slot: project.page
-      label: Conversations
-      icon: message-circle
-      entry: /ui/ConversationsPanel.mjs
-
-  ui_components:
-    - name: agent-conversations
-      label: Agent conversations
-      description: Chat with one agent through its durable conversations.
-      entry: /ui/AgentConversationsWidget.mjs
-      slots: [dashboard.build]
-      suggested: true
-      visibility: attached
-      supported_sizes: [full]
-      default_size: full
-      settings_schema:
-        type: object
-        properties:
-          display_mode:
-            type: string
-            title: Conversation layout
-            enum: [browser, single]
-            default: browser
-          show_new_conversation:
-            type: boolean
-            title: Show new conversation
-            default: true
-    - name: inbox-overview
-      label: Inbox
-      description: Pending approvals, alerts, and reports from agents.
-      entry: /ui/InboxWidget.mjs
-      slots: [dashboard.home]
-      suggested: true
-      visibility: project
-      supported_sizes: [half, full]
-      default_size: half
-
-  workers:
-    - name: delivery-retry
-      schedule: "@every 10s"
-    - name: telegram-maintenance
-      schedule: "@every 1h"
-
-  skills:
-    - name: using-conversations
-      command: /conversations
-      body_file: skills/using-conversations.md
-      description: |
-        Reply discipline (acknowledge, work, one final outcome), where
-        inbox items live (list, reuse, create with stable topic
-        titles), alert/report cadence, main-thread output ownership,
-        the approval round-trip, Telegram onboarding and routing, and room etiquette. Load before
-        messaging people or raising inbox items.
-      metadata:
-        category: communication
-        icon: message-circle
-
-runtime:
-  kind: source
-  source: { repo: github.com/apteva/apps, ref: main, entry: mcp/conversations }
-  port: 8080
-  health_check: /health
-
-db:
-  driver: sqlite
-  path: /data/conversations.db
-  migrations: migrations/
-
-upgrade_policy: auto-patch
-`
+// Embed the source installer manifest so runtime metadata cannot drift.
+//
+//go:embed apteva.yaml
+var manifestYAML string
 
 type App struct {
+	asyncDelivery    bool
+	deliveryWorker   *deliveryWorker
 	store            *store
 	hub              *hub
 	adapters         *adapterRegistry
@@ -172,7 +45,7 @@ type App struct {
 	telemetryStop func()
 }
 
-func main() { sdk.Run(&App{}) }
+func main() { sdk.Run(&App{asyncDelivery: true}) }
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -190,6 +63,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.hub = newHub()
 	a.adapters = newAdapterRegistry(a, a.hub)
 	a.streamer = newStreamer(a.hub)
+	a.streamer.throttle = 40 * time.Millisecond
+	a.streamer.resolve = func(agentID int64, threadID string) string {
+		var id string
+		err := a.store.db.QueryRow(`SELECT c.id FROM conversations c JOIN conversation_agent_threads t ON t.conversation_id=c.id JOIN participants p ON p.conversation_id=c.id AND p.agent_id=t.agent_id WHERE t.agent_id=? AND t.thread_id=? AND c.archived_at IS NULL`, agentID, threadID).Scan(&id)
+		if err != nil {
+			return ""
+		}
+		return id
+	}
 	a.telegramFeedback = newTelegramFeedbackManager(a)
 	a.streamer.onFrame = a.telegramFeedback.OnFrame
 	mountedCtx = ctx
@@ -200,7 +82,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	// Crash recovery: anything the ledger recorded but never confirmed
 	// goes out again according to its persisted retry schedule.
-	if redelivered, err := a.redeliverPending(ctx); err != nil {
+	if a.asyncDelivery {
+		a.startDeliveryWorker(ctx)
+		a.wakeDeliveries()
+	} else if redelivered, err := a.redeliverPending(ctx); err != nil {
 		ctx.Logger().Warn("pending redelivery incomplete", "err", err)
 	} else if redelivered > 0 {
 		ctx.Logger().Info("redelivered pending messages", "count", redelivered)
@@ -210,6 +95,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.deliveryWorker != nil {
+		close(a.deliveryWorker.stop)
+		a.deliveryWorker.done.Wait()
+	}
+	legacyThreadPlatforms.Delete(a)
 	if a.telemetryStop != nil {
 		a.telemetryStop()
 	}
@@ -225,6 +115,10 @@ func (a *App) Workers() []sdk.Worker {
 			Name:     "delivery-retry",
 			Schedule: "@every 10s",
 			Run: func(_ context.Context, app *sdk.AppCtx) error {
+				if a.deliveryWorker != nil {
+					a.wakeDeliveries()
+					return nil
+				}
 				_, err := a.redeliverPending(app)
 				return err
 			},
@@ -233,6 +127,9 @@ func (a *App) Workers() []sdk.Worker {
 			Name:     "telegram-maintenance",
 			Schedule: "@every 1h",
 			Run: func(_ context.Context, _ *sdk.AppCtx) error {
+				if err := a.store.PruneDeliveryHistory(); err != nil {
+					return err
+				}
 				if err := a.store.PruneTelegramState(); err != nil {
 					return err
 				}
@@ -241,7 +138,9 @@ func (a *App) Workers() []sdk.Worker {
 		},
 	}
 }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{{Event: sdk.AgentEventLifecycleEvent, Handler: a.handleApprovalLifecycle}}
+}
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
@@ -345,14 +244,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"conversations_create to make one). With callback_tool set, inbox actions call back into the " +
 				"posting app.",
 			InputSchema: schemaObject(map[string]any{
-				"kind":          map[string]any{"type": "string", "enum": []string{"report", "alert", "approval"}},
-				"title":         map[string]any{"type": "string"},
-				"body":          map[string]any{"type": "string"},
-				"severity":      map[string]any{"type": "string"},
-				"actions":       map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
-				"sections":      map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
-				"callback_tool": map[string]any{"type": "string"},
-				"agent_id":      map[string]any{"type": "integer"},
+				"kind":              map[string]any{"type": "string", "enum": []string{"report", "alert", "approval"}},
+				"title":             map[string]any{"type": "string"},
+				"body":              map[string]any{"type": "string"},
+				"severity":          map[string]any{"type": "string"},
+				"actions":           map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"sections":          map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"callback_tool":     map[string]any{"type": "string"},
+				"client_message_id": map[string]any{"type": "string", "maxLength": 200, "description": "Stable request key scoped to the authenticated app install. Reuse only for identical retries."},
+				"agent_id":          map[string]any{"type": "integer"},
 			}, []string{"kind", "title"}),
 			HandlerCtx: a.toolInboxPost,
 		},
@@ -390,6 +290,13 @@ func requireAgentCaller(ctx context.Context) (*callIdentity, error) {
 // thread, if any. Conversations owns this relationship in its store; neither
 // Core nor the SDK needs to classify threads as main/conversation/worker.
 func (a *App) boundConversation(from *callIdentity) (*Conversation, error) {
+	var retired int
+	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM retired_conversation_threads WHERE project_id=? AND agent_id=? AND thread_id=?`, from.ProjectID, from.AgentID, from.ThreadID).Scan(&retired); err != nil {
+		return nil, err
+	}
+	if retired > 0 {
+		return nil, errors.New("originating conversation was deleted; thread is retired")
+	}
 	return a.store.ConversationForAgentThread(from.ProjectID, from.AgentID, from.ThreadID)
 }
 
@@ -415,7 +322,7 @@ func (a *App) requireGlobalCaller(from *callIdentity, tool string) error {
 // one.
 func requireOperatorAudience(conv *Conversation, kind string) error {
 	if conv.Audience == "public" {
-		return fmt.Errorf("%s refused: %q is a public (visitor) conversation — raise the %s in an operator conversation (conversations_list / conversations_create) and reference conversation %s there; reply to the visitor with conversations_send only",
+		return fmt.Errorf("%s refused: %q is a public (visitor) conversation — send an escalation to parent/main, which raises the %s in an operator conversation and references conversation %s; this bound thread must reply to the visitor using conversations_send only",
 			kind, conv.Title, kind, conv.ID)
 	}
 	return nil
@@ -505,7 +412,7 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 		return nil, err
 	}
 	// The durable reply supersedes any pending thinking bubble.
-	a.streamer.settleAck(conv.ID)
+	a.streamer.settleAck(conv.ID, from.AgentID)
 	return map[string]any{"message_id": msg.ID, "conversation_id": conv.ID, "phase": msg.Phase,
 		"inserted": inserted, "duplicate_suppressed": !inserted}, nil
 }
@@ -676,19 +583,11 @@ func (a *App) toolList(ctx context.Context, _ *sdk.AppCtx, args map[string]any) 
 		return nil, err
 	}
 	limit := intArg(args, "limit", 50)
-	conversations, err := a.store.ListConversationsForAgent(from.ProjectID, from.AgentID, limit)
+	conversations, err := a.store.SearchConversationsForAgent(from.ProjectID, from.AgentID, strings.TrimSpace(stringArg(args, "query")), limit)
 	if err != nil {
 		return nil, err
 	}
-	if query := strings.ToLower(strings.TrimSpace(stringArg(args, "query"))); query != "" {
-		filtered := conversations[:0]
-		for _, c := range conversations {
-			if strings.Contains(strings.ToLower(c.Title), query) {
-				filtered = append(filtered, c)
-			}
-		}
-		conversations = filtered
-	}
+
 	return map[string]any{"conversations": conversations}, nil
 }
 
@@ -817,7 +716,7 @@ func approvalActionsArg(args map[string]any) ([]approvalAction, error) {
 	for i := range actions {
 		actions[i].ID = strings.TrimSpace(actions[i].ID)
 		actions[i].Label = strings.TrimSpace(actions[i].Label)
-		if actions[i].ID == "" || actions[i].Label == "" || seen[actions[i].ID] {
+		if actions[i].ID == "" || actions[i].ID == "pending" || actions[i].ID == "resolved" || actions[i].Label == "" || seen[actions[i].ID] {
 			return nil, errors.New("each action requires a unique id and non-empty label")
 		}
 		seen[actions[i].ID] = true

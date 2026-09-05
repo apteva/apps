@@ -3,18 +3,22 @@ package main
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestApplyAlpacaMarketPayloadPersistsQuoteAndClosedBar(t *testing.T) {
 	ctx := newTestCtx(t)
+	_, _ = ctx.AppDB().Exec(`DELETE FROM marks WHERE symbol='AAPL'`)
 	coalescer := &markEventCoalescer{add: make(chan *Mark, 8), cancel: func() {}}
 	payload := []byte(`[
 		{"T":"q","S":"AAPL","bp":226.10,"ap":226.12,"bs":4,"as":7,"t":"2026-01-03T14:30:00Z"},
 		{"T":"t","S":"AAPL","p":226.11,"s":25,"t":"2026-01-03T14:30:00.100Z"},
 		{"T":"b","S":"AAPL","o":226,"h":226.2,"l":225.9,"c":226.11,"v":1012,"n":42,"vw":226.07,"t":"2026-01-03T14:30:00Z"}
 	]`)
+	payload = []byte(strings.Replace(string(payload), "2026-01-03T14:30:00Z", time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano), 1))
+	payload = []byte(strings.Replace(string(payload), "2026-01-03T14:30:00.100Z", time.Now().UTC().Format(time.RFC3339Nano), 1))
 	if err := applyAlpacaMarketPayload(ctx, "iex", payload, coalescer); err != nil {
 		t.Fatal(err)
 	}

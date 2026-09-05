@@ -66,9 +66,9 @@ directive: |
   together, so their messages may race and arrive in any order.
 
   Collect all four worker messages before writing their reported milestones.
-  Then issue the four exact 40% tasks_update calls together in one parallel tool
+  Then issue the four exact 40% tasks_set_progress calls together in one parallel tool
   batch, one call per matching task. After that batch returns, issue the four
-  exact 80% tasks_update calls together in a second parallel tool batch. This is
+  exact 80% tasks_set_progress calls together in a second parallel tool batch. This is
   the simultaneous-write portion of the test; do not serialize either progress
   batch. After the 80% batch returns, issue the four matching tasks_complete
   calls together in one parallel tool batch. Each task must be completed exactly
@@ -185,73 +185,74 @@ assert:
       thread_id: stress-worker-delta
       count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       min_count: 12
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         progress: 40
         current_step: Alpha worker started
       min_count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         progress: 80
         current_step: Alpha worker finished
       min_count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         progress: 40
         current_step: Beta worker started
       min_count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         progress: 80
         current_step: Beta worker finished
       min_count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         progress: 40
         current_step: Gamma worker started
       min_count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         progress: 80
         current_step: Gamma worker finished
       min_count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         progress: 40
         current_step: Delta worker started
       min_count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         progress: 80
         current_step: Delta worker finished
       min_count: 1
   - tool_not_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       args:
         state: waiting
   - tool_called_with:
       tool: tasks_complete
       thread_id: main
       count: 4
+  - tool_not_called: tasks_update
   - tool_called_with:
       tool: tasks_complete
       thread_id: main

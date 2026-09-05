@@ -1,8 +1,7 @@
 package main
 
 import (
-	"errors"
-	"fmt"
+	"database/sql"
 	"strings"
 	"sync"
 	"time"
@@ -42,7 +41,7 @@ func normalizeSchedule(input ScheduleInput, now time.Time) (normalizedSchedule, 
 	}
 	loc, err := time.LoadLocation(n.Timezone)
 	if err != nil {
-		return n, fmt.Errorf("invalid schedule timezone %q", n.Timezone)
+		return n, validationError("invalid schedule timezone %q", n.Timezone)
 	}
 	if n.OverlapPolicy == "" {
 		n.OverlapPolicy = "skip"
@@ -51,51 +50,51 @@ func normalizeSchedule(input ScheduleInput, now time.Time) (normalizedSchedule, 
 		n.CatchupPolicy = "skip"
 	}
 	if n.OverlapPolicy != "skip" || n.CatchupPolicy != "skip" {
-		return n, errors.New("overlap_policy and catchup_policy currently support only skip")
+		return n, validationError("overlap_policy and catchup_policy currently support only skip")
 	}
 	switch n.Kind {
 	case scheduleOnce:
 		at, after := strings.TrimSpace(input.At), strings.TrimSpace(input.After)
 		if (at == "") == (after == "") {
-			return n, errors.New("once schedule requires exactly one of at or after")
+			return n, validationError("once schedule requires exactly one of at or after")
 		}
 		var next time.Time
 		if after != "" {
 			d, parseErr := time.ParseDuration(after)
 			if parseErr != nil || d < time.Minute {
-				return n, errors.New("once after must be a duration of at least 1m")
+				return n, validationError("once after must be a duration of at least 1m")
 			}
 			next = now.Add(d)
 		} else {
 			next, err = time.Parse(time.RFC3339, at)
 			if err != nil {
-				return n, errors.New("once at must be RFC3339")
+				return n, validationError("once at must be RFC3339")
 			}
 		}
 		next = next.UTC()
 		if !next.After(now) {
-			return n, errors.New("once schedule must be in the future")
+			return n, validationError("once schedule must be in the future")
 		}
 		n.Expression, n.NextRunAt = next.Format(time.RFC3339), next
 	case scheduleInterval:
 		d, parseErr := time.ParseDuration(strings.TrimSpace(input.Every))
 		if parseErr != nil || d < time.Minute {
-			return n, errors.New("interval every must be at least 1m")
+			return n, validationError("interval every must be at least 1m")
 		}
 		n.Expression, n.NextRunAt = d.String(), now.Add(d)
 	case scheduleCron:
 		expr := strings.Join(strings.Fields(input.Cron), " ")
 		parsed, parseErr := scheduleParser.Parse(expr)
 		if parseErr != nil {
-			return n, fmt.Errorf("invalid five-field cron: %w", parseErr)
+			return n, validationError("invalid five-field cron: %v", parseErr)
 		}
 		next := parsed.Next(now.In(loc)).UTC()
 		if next.IsZero() {
-			return n, errors.New("cron has no future occurrence")
+			return n, validationError("cron has no future occurrence")
 		}
 		n.Expression, n.NextRunAt = expr, next
 	default:
-		return n, errors.New("schedule kind must be once, interval, or cron")
+		return n, validationError("schedule kind must be once, interval, or cron")
 	}
 	return n, nil
 }
@@ -110,7 +109,7 @@ func mergeSchedulePatch(task *Task, patch ScheduleInput, now time.Time) (normali
 		kind = task.ScheduleKind
 	}
 	if kind == "" {
-		return normalizedSchedule{}, false, errors.New("schedule kind is required when adding a schedule")
+		return normalizedSchedule{}, false, validationError("schedule kind is required when adding a schedule")
 	}
 	timezone := strings.TrimSpace(patch.Timezone)
 	if timezone == "" {
@@ -180,7 +179,8 @@ func nextOccurrence(task *Task, scheduledFor, now time.Time) (*time.Time, error)
 		}
 		next := scheduledFor.Add(d)
 		if !next.After(now) {
-			next = now.Add(d)
+			// Skip missed runs while preserving the original interval phase.
+			next = now.Add(d - now.Sub(scheduledFor)%d)
 		}
 		return &next, nil
 	case scheduleCron:
@@ -195,7 +195,7 @@ func nextOccurrence(task *Task, scheduledFor, now time.Time) (*time.Time, error)
 		next := parsed.Next(now.In(loc)).UTC()
 		return &next, nil
 	default:
-		return nil, errors.New("task is not scheduled")
+		return nil, validationError("task is not scheduled")
 	}
 }
 
@@ -205,67 +205,106 @@ func (s *taskStore) SetSchedule(id, actor string, input ScheduleInput) (*Task, e
 }
 
 func (s *taskStore) Pause(id, actor string) (*Task, error) {
-	task, err := s.Get(id)
-	if err != nil {
-		return nil, err
-	}
-	if task.ScheduleKind == "" || terminalState(task.State) {
-		return nil, errors.New("task is not an active schedule")
-	}
-	_, err = s.db.Exec(`UPDATE tasks SET schedule_enabled=0, updated_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), id)
-	if err != nil {
-		return nil, err
-	}
-	return s.recordSimpleEvent(id, actor, "schedule_paused", task.State, task.State, nil)
+	return s.changeScheduleEnabled(id, actor, false)
 }
-
 func (s *taskStore) Resume(id, actor string) (*Task, error) {
-	task, err := s.Get(id)
+	return s.changeScheduleEnabled(id, actor, true)
+}
+func (s *taskStore) changeScheduleEnabled(id, actor string, enabled bool) (*Task, error) {
+	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
-	if task.ScheduleKind == "" || terminalState(task.State) {
-		return nil, errors.New("task is not a resumable schedule")
-	}
-	input := ScheduleInput{Kind: task.ScheduleKind, Timezone: task.ScheduleTimezone, OverlapPolicy: task.ScheduleOverlapPolicy, CatchupPolicy: task.ScheduleCatchupPolicy}
-	switch task.ScheduleKind {
-	case scheduleOnce:
-		input.At = task.ScheduleExpression
-	case scheduleInterval:
-		input.Every = task.ScheduleExpression
-	case scheduleCron:
-		input.Cron = task.ScheduleExpression
-	}
-	// A past one-time schedule is resumed as an immediate one-minute durable run.
-	if task.ScheduleKind == scheduleOnce {
-		input.At = ""
-		input.After = "1m"
-	}
-	n, err := normalizeSchedule(input, time.Now().UTC())
+	defer tx.Rollback()
+	task, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
 	if err != nil {
 		return nil, err
 	}
-	_, err = s.db.Exec(`UPDATE tasks SET schedule_enabled=1, next_run_at=?, updated_at=? WHERE id=?`, n.NextRunAt.Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano), id)
+	if !isScheduleDefinitionTask(task) {
+		return nil, validationError("task is not an active schedule definition")
+	}
+	if task.ScheduleEnabled == enabled {
+		return task, nil
+	}
+	now := s.now()
+	next := task.NextRunAt
+	if enabled && (next == nil || !next.After(now)) {
+		if task.ScheduleKind == scheduleOnce {
+			value := now.Add(time.Minute)
+			next = &value
+		} else {
+			next, err = nextOccurrence(task, now, now)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	var nextValue any
+	if next != nil {
+		nextValue = next.Format(timeFormat)
+	}
+	if _, err = tx.Exec(`UPDATE tasks SET schedule_enabled=?, next_run_at=?,updated_at=? WHERE id=?`, enabled, nextValue, now.Format(timeFormat), id); err != nil {
+		return nil, err
+	}
+	kind := "schedule_paused"
+	if enabled {
+		kind = "schedule_resumed"
+	}
+	event, err := insertEvent(tx, TaskEvent{TaskID: id, AgentID: task.AgentID, EventType: kind, ThreadID: actor, FromState: task.State, ToState: task.State, Data: map[string]any{"next_run_at": nextValue}})
 	if err != nil {
 		return nil, err
 	}
-	return s.recordSimpleEvent(id, actor, "schedule_resumed", task.State, task.State, map[string]any{"next_run_at": n.NextRunAt})
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	s.emit(event)
+	return s.Get(id)
 }
 
+// Manual occurrences consume no recurring cadence and do not resume a paused series.
 func (s *taskStore) RunNow(id, actor string) (*Task, error) {
-	task, err := s.Get(id)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
-	if task.ScheduleKind == "" || terminalState(task.State) {
-		return nil, errors.New("task is not a runnable schedule")
-	}
-	now := time.Now().UTC()
-	_, err = s.db.Exec(`UPDATE tasks SET schedule_enabled=1, next_run_at=?, updated_at=? WHERE id=?`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id)
+	defer tx.Rollback()
+	parent, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
 	if err != nil {
 		return nil, err
 	}
-	return s.recordSimpleEvent(id, actor, "schedule_run_requested", task.State, task.State, nil)
+	if !isScheduleDefinitionTask(parent) {
+		return nil, validationError("task is not a runnable schedule definition")
+	}
+	now := s.now()
+	var events []TaskEvent
+	var run *Task
+	if parent.ScheduleKind == scheduleOnce {
+		run, err = s.activateOneTimeTx(tx, parent, actor, now, now, &events)
+	} else {
+		var active int
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM tasks WHERE parent_task_id=? AND state IN ('queued','running','waiting','blocked')`, id).Scan(&active); err != nil {
+			return nil, err
+		}
+		if active > 0 {
+			return nil, validationError("schedule already has an open occurrence")
+		}
+		run, _, err = s.createTx(tx, CreateTaskInput{AgentID: parent.AgentID, ProjectID: parent.ProjectID, Title: parent.Title, Description: parent.Description, CreatedByThreadID: parent.CreatedByThreadID, AssignedThreadID: parent.AssignedThreadID, ParentTaskID: parent.ID, ScheduledFor: &now, OccurrenceKey: "manual:" + newID(""), OperationKey: parent.OperationKey}, now, &events)
+	}
+	if err != nil {
+		return nil, err
+	}
+	event, err := insertEvent(tx, TaskEvent{TaskID: id, AgentID: parent.AgentID, EventType: "schedule_run_requested", ThreadID: actor, FromState: parent.State, ToState: parent.State, Data: map[string]any{"occurrence_id": run.ID}})
+	if err != nil {
+		return nil, err
+	}
+	events = append(events, event)
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	for _, event := range events {
+		s.emit(event)
+	}
+	return run, nil
 }
 
 func (s *taskStore) recordSimpleEvent(id, actor, eventType, from, to string, data map[string]any) (*Task, error) {
@@ -299,48 +338,45 @@ func (s *taskStore) activateOneTime(id, actor string, scheduledFor, now time.Tim
 		return nil, false, err
 	}
 	defer tx.Rollback()
-
 	current, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
 	if err != nil {
 		return nil, false, err
 	}
-	if current.ScheduleKind != scheduleOnce || !current.ScheduleEnabled || current.NextRunAt == nil || current.State != stateWaiting || !current.NextRunAt.Equal(scheduledFor) {
+	if !isScheduleDefinitionTask(current) || current.ScheduleKind != scheduleOnce || !current.ScheduleEnabled || current.NextRunAt == nil || !current.NextRunAt.Equal(scheduledFor) {
 		return current, false, nil
 	}
-
-	now = now.UTC()
-	scheduledFor = scheduledFor.UTC()
-	step := "Scheduled work is ready"
-	_, err = tx.Exec(`UPDATE tasks SET
-		state=?, progress=NULL, current_step=?, schedule_enabled=0,
-		scheduled_for=?, next_run_at=NULL, updated_at=?
-		WHERE id=?`, stateQueued, step,
-		scheduledFor.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id)
+	var events []TaskEvent
+	task, err := s.activateOneTimeTx(tx, current, actor, scheduledFor, now, &events)
 	if err != nil {
 		return nil, false, err
 	}
-	event, err := insertEvent(tx, TaskEvent{
-		TaskID: id, AgentID: current.AgentID, EventType: "state_changed",
-		ThreadID: actor, FromState: current.State, ToState: stateQueued,
-		Data: map[string]any{
-			"progress": nil, "current_step": step,
-			"assigned_thread_id":  current.AssignedThreadID,
-			"execution_thread_id": current.ExecutionThreadID,
-			"schedule_enabled":    false, "next_run_at": nil,
-			"scheduled_for": scheduledFor,
-		},
-	})
-	if err != nil {
+	if err = tx.Commit(); err != nil {
 		return nil, false, err
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, false, err
-	}
-	updated, err := s.Get(id)
-	if err == nil {
+	for _, event := range events {
 		s.emit(event)
 	}
-	return updated, true, err
+	return task, true, nil
+}
+
+func (s *taskStore) activateOneTimeTx(tx *sql.Tx, current *Task, actor string, scheduledFor, now time.Time, events *[]TaskEvent) (*Task, error) {
+	_, err := tx.Exec(`UPDATE tasks SET state='queued',progress=NULL,current_step='Scheduled work is ready',schedule_enabled=0,scheduled_for=?,next_run_at=NULL,updated_at=? WHERE id=?`, scheduledFor.UTC().Format(timeFormat), now.UTC().Format(timeFormat), current.ID)
+	if err != nil {
+		return nil, err
+	}
+	task, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, current.ID))
+	if err != nil {
+		return nil, err
+	}
+	event, err := insertEvent(tx, TaskEvent{TaskID: current.ID, AgentID: current.AgentID, EventType: "state_changed", ThreadID: actor, FromState: current.State, ToState: stateQueued, Data: map[string]any{"current_step": task.CurrentStep, "schedule_enabled": false, "next_run_at": nil, "scheduled_for": scheduledFor}})
+	if err != nil {
+		return nil, err
+	}
+	if err = enqueueCreatedTaskTx(tx, task, now); err != nil {
+		return nil, err
+	}
+	*events = append(*events, event)
+	return task, nil
 }
 
 type scheduler struct {
@@ -350,33 +386,27 @@ type scheduler struct {
 }
 
 func (s *scheduler) Tick(now time.Time, projectID string) error {
+	err := s.tickState(now, projectID)
+	deliveryErr := s.app.drainDeliveries("", projectID, now)
+	if deliveryErr != nil {
+		s.app.logger().Warn("tasks pending deliveries", "err", deliveryErr)
+	}
+	return err
+}
+func (s *scheduler) tickState(now time.Time, projectID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	expired, err := s.store.FailExpiredTerminalizations(now.UTC(), projectID)
-	if err != nil {
+	if _, err := s.store.FailExpiredTerminalizations(now.UTC(), projectID); err != nil {
 		return err
 	}
-	for _, task := range expired {
-		reason := strings.TrimSpace(strings.SplitN(task.Error, ":", 2)[0])
-		if reason == "" {
-			reason = "agent_exited_without_terminal_status"
-		}
-		_ = s.app.notifyExecutionFailure(task, reason)
-	}
-	settled, err := s.store.ClaimSettledTerminalizations(now.UTC(), projectID)
-	if err != nil {
+	if _, err := s.store.ClaimSettledTerminalizations(now.UTC(), projectID); err != nil {
 		return err
-	}
-	for _, task := range settled {
-		if notifyErr := s.app.notifyTerminalization(task, now.UTC()); notifyErr != nil {
-			s.app.logger().Warn("tasks terminalization wake", "task_id", task.ID, "err", notifyErr.Error())
-		}
 	}
 	if err := s.reconcileUnaccepted(now.UTC(), projectID); err != nil {
 		return err
 	}
-	query := `SELECT ` + taskColumns + ` FROM tasks WHERE schedule_enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=?`
-	args := []any{now.UTC().Format(time.RFC3339Nano)}
+	query := `SELECT ` + taskColumns + ` FROM tasks WHERE state='waiting' AND scheduled_for IS NULL AND schedule_enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=?`
+	args := []any{now.UTC().Format(timeFormat)}
 	if projectID != "" {
 		query += ` AND project_id=?`
 		args = append(args, projectID)
@@ -418,7 +448,7 @@ func (s *scheduler) reconcileUnaccepted(now time.Time, projectID string) error {
 		AND dispatched_at IS NOT NULL AND accepted_at IS NULL
 		AND COALESCE(last_dispatch_attempt_at, dispatched_at)<=?`
 	eligibleBefore := now.Add(-dispatchRetryInterval)
-	args := []any{eligibleBefore.Format(time.RFC3339Nano)}
+	args := []any{eligibleBefore.Format(timeFormat)}
 	if projectID != "" {
 		query += ` AND project_id=?`
 		args = append(args, projectID)
@@ -446,152 +476,70 @@ func (s *scheduler) reconcileUnaccepted(now time.Time, projectID string) error {
 			return reconcileErr
 		}
 		switch action {
-		case dispatchReconcileRetry:
-			eventType := "task.ready"
-			if updated.RecoveryOfTaskID != "" {
-				eventType = "task.recovery.ready"
-			}
-			if notifyErr := s.app.notifyAssigned(updated, updated.AssignedThreadID, eventType); notifyErr != nil {
-				s.app.logger().Warn("tasks scheduler redispatch", "task_id", updated.ID,
-					"attempt", updated.DispatchAttempts, "err", notifyErr.Error())
-			}
 		case dispatchReconcileFail:
 			s.app.logger().Warn("tasks scheduler unaccepted dispatch exhausted", "task_id", updated.ID,
 				"attempts", updated.DispatchAttempts)
-			_ = s.app.notifyDispatchFailure(updated)
+			// The terminal receipt is in the same transaction as failure.
 		}
 	}
 	return nil
 }
 
-// An open run with no activity for staleRunMultiple cadences (clamped to
-// [staleRunMinAge, staleRunMaxAge]) is treated as wedged and auto-failed, so a
-// single stuck run cannot block every future occurrence of its schedule.
-const (
-	staleRunMultiple = 10
-	staleRunMinAge   = time.Hour
-	staleRunMaxAge   = 24 * time.Hour
-)
-
-func staleRunThreshold(cadence time.Duration) time.Duration {
-	threshold := time.Duration(staleRunMultiple) * cadence
-	if threshold < staleRunMinAge {
-		return staleRunMinAge
+func (s *scheduler) materialize(snapshot *Task, now time.Time) error {
+	if snapshot.NextRunAt == nil {
+		return nil
 	}
-	if threshold > staleRunMaxAge {
-		return staleRunMaxAge
-	}
-	return threshold
-}
-
-// scheduleCadence derives the cadence from the schedule expression itself, not
-// from next_run_at bookkeeping — a blocked schedule's bookkeeping gaps grow with
-// the blockage, which would inflate the stale threshold exactly when it matters.
-func scheduleCadence(task *Task, now time.Time) time.Duration {
-	switch task.ScheduleKind {
-	case scheduleInterval:
-		if d, err := time.ParseDuration(task.ScheduleExpression); err == nil {
-			return d
-		}
-	case scheduleCron:
-		if loc, err := time.LoadLocation(task.ScheduleTimezone); err == nil {
-			if parsed, parseErr := scheduleParser.Parse(task.ScheduleExpression); parseErr == nil {
-				first := parsed.Next(now.In(loc))
-				return parsed.Next(first).Sub(first)
-			}
-		}
-	}
-	return 0
-}
-
-func (s *scheduler) openRuns(parentID string) ([]*Task, error) {
-	rows, err := s.store.db.Query(`SELECT `+taskColumns+` FROM tasks WHERE parent_task_id=? AND state IN ('queued','running','waiting','blocked')`, parentID)
+	tx, err := s.store.db.Begin()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer rows.Close()
-	runs := []*Task{}
-	for rows.Next() {
-		run, err := scanTask(rows)
-		if err != nil {
-			return nil, err
-		}
-		runs = append(runs, run)
+	defer tx.Rollback()
+	parent, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, snapshot.ID))
+	if err != nil {
+		return err
 	}
-	return runs, rows.Err()
-}
-
-func (s *scheduler) materialize(parent *Task, now time.Time) error {
-	if parent.NextRunAt == nil {
+	if !isScheduleDefinitionTask(parent) || !parent.ScheduleEnabled || parent.NextRunAt == nil || !parent.NextRunAt.Equal(*snapshot.NextRunAt) || !parent.UpdatedAt.Equal(snapshot.UpdatedAt) {
 		return nil
 	}
 	scheduledFor := parent.NextRunAt.UTC()
+	var events []TaskEvent
 	if parent.ScheduleKind == scheduleOnce {
-		run, activated, err := s.store.activateOneTime(parent.ID, "tasks:scheduler", scheduledFor, now)
+		if _, err = s.store.activateOneTimeTx(tx, parent, "tasks:scheduler", scheduledFor, now, &events); err != nil {
+			return err
+		}
+	} else {
+		next, err := nextOccurrence(parent, scheduledFor, now)
 		if err != nil {
 			return err
 		}
-		if !activated {
-			return nil
+		var active int
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM tasks WHERE parent_task_id=? AND state IN ('queued','running','waiting','blocked')`, parent.ID).Scan(&active); err != nil {
+			return err
 		}
-		return s.dispatch(run, now, "task.ready")
-	}
-	next, err := nextOccurrence(parent, scheduledFor, now)
-	if err != nil {
-		return err
-	}
-	open, err := s.openRuns(parent.ID)
-	if err != nil {
-		return err
-	}
-	active := 0
-	staleAfter := staleRunThreshold(scheduleCadence(parent, now))
-	for _, run := range open {
-		if idle := now.Sub(run.UpdatedAt); idle >= staleAfter {
-			failed := stateFailed
-			msg := fmt.Sprintf("run exceeded max age (no activity for %s, limit %s); auto-failed by scheduler", idle.Round(time.Second), staleAfter)
-			updated, _, failErr := s.store.Update(run.ID, "tasks:scheduler", UpdateTaskInput{State: &failed, Error: &msg})
-			if failErr != nil {
-				s.app.logger().Warn("tasks scheduler stale run", "task_id", run.ID, "err", failErr.Error())
-				active++
-				continue
+		if active > 0 {
+			// A business-progress timestamp is not a lease. Only explicit terminal
+			// outcomes or tracked execution reconciliation can release the overlap guard.
+			event, err := insertEvent(tx, TaskEvent{TaskID: parent.ID, AgentID: parent.AgentID, EventType: "occurrence_skipped_overlap", ThreadID: "tasks:scheduler", FromState: parent.State, ToState: parent.State, Data: map[string]any{"scheduled_for": scheduledFor}})
+			if err != nil {
+				return err
 			}
-			s.app.logger().Warn("tasks scheduler stale run", "task_id", run.ID, "idle", idle.String())
-			_ = s.app.notifyCreator(updated)
-			continue
+			events = append(events, event)
+		} else {
+			// Occurrence identity retains the canonical pre-upgrade representation.
+			key := scheduledFor.Format(time.RFC3339Nano)
+			if _, _, err = s.store.createTx(tx, CreateTaskInput{AgentID: parent.AgentID, ProjectID: parent.ProjectID, Title: parent.Title, Description: parent.Description, CreatedByThreadID: parent.CreatedByThreadID, AssignedThreadID: parent.AssignedThreadID, ParentTaskID: parent.ID, ScheduledFor: &scheduledFor, OccurrenceKey: key, IdempotencyKey: parent.ID + ":" + key, OperationKey: parent.OperationKey}, now, &events); err != nil {
+				return err
+			}
 		}
-		active++
-	}
-	if active > 0 {
-		// Advance only next_run_at: bumping last_run_at here would make a
-		// blocked schedule look like it just ran.
-		_, err = s.store.db.Exec(`UPDATE tasks SET next_run_at=?, updated_at=? WHERE id=?`, next.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), parent.ID)
-		if err == nil {
-			_, _ = s.store.recordSimpleEvent(parent.ID, "tasks:scheduler", "occurrence_skipped_overlap", parent.State, parent.State, map[string]any{"scheduled_for": scheduledFor})
+		if _, err = tx.Exec(`UPDATE tasks SET next_run_at=?,updated_at=? WHERE id=?`, next.Format(timeFormat), now.Format(timeFormat), parent.ID); err != nil {
+			return err
 		}
+	}
+	if err = tx.Commit(); err != nil {
 		return err
 	}
-	key := scheduledFor.Format(time.RFC3339Nano)
-	run, _, err := s.store.Create(CreateTaskInput{AgentID: parent.AgentID, ProjectID: parent.ProjectID, Title: parent.Title, Description: parent.Description, State: stateQueued, CreatedByThreadID: parent.CreatedByThreadID, AssignedThreadID: parent.AssignedThreadID, ParentTaskID: parent.ID, ScheduledFor: &scheduledFor, OccurrenceKey: key, IdempotencyKey: parent.ID + ":" + key, OperationKey: parent.OperationKey})
-	if err != nil {
-		return err
-	}
-	_, err = s.store.db.Exec(`UPDATE tasks SET next_run_at=?, updated_at=? WHERE id=?`, next.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), parent.ID)
-	if err != nil {
-		return err
-	}
-	return s.dispatch(run, now, "task.ready")
-}
-
-func (s *scheduler) dispatch(run *Task, now time.Time, eventType string) error {
-	dispatched, _, err := s.store.MarkDispatched(run.ID, "tasks:scheduler", now)
-	if err != nil {
-		return err
-	}
-	if err := s.app.notifyAssigned(dispatched, dispatched.AssignedThreadID, eventType); err != nil {
-		// The durable occurrence remains queued. Reconciliation will retry this
-		// same task ID instead of turning a transient delivery error into failure.
-		return fmt.Errorf("scheduler dispatch attempt 1 failed; queued for retry: %w", err)
+	for _, event := range events {
+		s.store.emit(event)
 	}
 	return nil
 }

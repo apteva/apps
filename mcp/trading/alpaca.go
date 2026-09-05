@@ -299,9 +299,10 @@ func alpacaParsePositions(raw json.RawMessage) (map[string]brokerBalance, error)
 	out := map[string]brokerBalance{}
 	for _, p := range positions {
 		qty := parseFloat(p.Qty)
-		if qty == 0 || strings.EqualFold(p.Side, "short") {
-			// Short positions are out of scope for v0.2 (the engine is
-			// long-only). Skip them rather than corrupt local state.
+		if !finite(qty) || qty < 0 || strings.EqualFold(p.Side, "short") {
+			return nil, fmt.Errorf("unsupported broker position %s: long-only account reconciliation required", p.Symbol)
+		}
+		if qty == 0 {
 			continue
 		}
 		canonical := fromAlpacaSymbol(p.Symbol)

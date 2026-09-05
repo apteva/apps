@@ -79,3 +79,5 @@ apteva-core.log
 # land in a repo.
 mcp/*/scripts/.env.local
 mcp/*/scripts/.env
+
+.code-test-results/

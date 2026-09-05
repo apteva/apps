@@ -35,7 +35,7 @@ func (a *App) handleGitImport(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	result, err := service.Import(globalCtx, GitImportInput{
+	result, err := service.withContext(r.Context()).Import(globalCtx, GitImportInput{
 		RemoteURL: body.RemoteURL, Ref: body.Ref, Name: body.Name, Slug: body.Slug,
 		Description: body.Description, Framework: body.Framework, ProjectID: pid,
 		ConnectionID: body.ConnectionID,
@@ -95,7 +95,7 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			httpErr(w, http.StatusMethodNotAllowed, "GET")
 			return
 		}
-		status, err := service.Status(globalCtx, repo)
+		status, err := service.withContext(r.Context()).Status(globalCtx, repo)
 		if err != nil {
 			writeGitHTTPError(w, err)
 			return
@@ -115,7 +115,7 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		result, err := service.Connect(globalCtx, repo, GitConnectInput{RemoteURL: body.RemoteURL, Branch: body.Branch, ConnectionID: body.ConnectionID})
+		result, err := service.withContext(r.Context()).Connect(globalCtx, repo, GitConnectInput{RemoteURL: body.RemoteURL, Branch: body.Branch, ConnectionID: body.ConnectionID})
 		if err != nil {
 			writeGitHTTPError(w, err)
 			return
@@ -134,11 +134,11 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 		var status *GitStatus
 		switch action {
 		case "fetch":
-			status, err = service.Fetch(globalCtx, repo, body.Actor)
+			status, err = service.withContext(r.Context()).Fetch(globalCtx, repo, httpActor(r))
 		case "pull":
-			status, err = service.Pull(globalCtx, repo, body.Actor)
+			status, err = service.withContext(r.Context()).Pull(globalCtx, repo, httpActor(r))
 		case "push":
-			status, err = service.Push(globalCtx, repo, body.Actor, body.SetUpstream)
+			status, err = service.withContext(r.Context()).Push(globalCtx, repo, httpActor(r), body.SetUpstream)
 		}
 		if err != nil {
 			writeGitHTTPError(w, err)
@@ -161,7 +161,7 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		status, err := service.Commit(globalCtx, repo, body.Message, body.Paths, body.AuthorName, body.AuthorEmail, body.Actor)
+		status, err := service.withContext(r.Context()).Commit(globalCtx, repo, body.Message, body.Paths, body.AuthorName, body.AuthorEmail, httpActor(r))
 		if err != nil {
 			writeGitHTTPError(w, err)
 			return
@@ -173,7 +173,7 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			return
 		}
 		maxBytes, _ := strconv.Atoi(r.URL.Query().Get("max_bytes"))
-		diff, truncated, err := service.Diff(globalCtx, repo, r.URL.Query().Get("base"), maxBytes)
+		diff, truncated, err := service.withContext(r.Context()).Diff(globalCtx, repo, r.URL.Query().Get("base"), maxBytes)
 		if err != nil {
 			writeGitHTTPError(w, err)
 			return
@@ -185,7 +185,7 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			return
 		}
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		commits, err := service.Log(globalCtx, repo, limit)
+		commits, err := service.withContext(r.Context()).Log(globalCtx, repo, limit)
 		if err != nil {
 			writeGitHTTPError(w, err)
 			return
@@ -196,7 +196,7 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			httpErr(w, http.StatusMethodNotAllowed, "GET")
 			return
 		}
-		branches, err := service.Branches(globalCtx, repo)
+		branches, err := service.withContext(r.Context()).Branches(globalCtx, repo)
 		if err != nil {
 			writeGitHTTPError(w, err)
 			return
@@ -216,7 +216,7 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		status, err := service.CreateBranch(globalCtx, repo, body.Name, body.StartPoint, body.Actor)
+		status, err := service.withContext(r.Context()).CreateBranch(globalCtx, repo, body.Name, body.StartPoint, httpActor(r))
 		if err != nil {
 			writeGitHTTPError(w, err)
 			return
@@ -235,7 +235,7 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		status, err := service.Switch(globalCtx, repo, body.Name, body.Actor)
+		status, err := service.withContext(r.Context()).Switch(globalCtx, repo, body.Name, httpActor(r))
 		if err != nil {
 			writeGitHTTPError(w, err)
 			return

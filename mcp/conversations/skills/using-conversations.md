@@ -117,10 +117,12 @@ site chatbot visitor, not an operator. There you only ever reply, with
 `conversations_send`: courteous, on-topic, nothing internal. Alerts,
 reports, and approvals are structurally refused in public
 conversations. When a visitor request needs operator attention (a
-refund over the limit, a decision, an incident), raise the approval or
-alert in an OPERATOR conversation and mention the public conversation
-id in it, then tell the visitor you are checking — the operator
-decides in the inbox, and you relay the outcome.
+refund over the limit, a decision, an incident), send parent/main one
+escalation containing the public conversation id, requested decision, and
+reply thread. Main finds or creates an OPERATOR conversation and raises the
+approval there, then sends the decision back to the originating thread.
+The public thread must never create, list, or write to another conversation.
+Tell the visitor you are checking and relay the decision when main replies.
 
 ## Reading context
 

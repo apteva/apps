@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,7 +98,13 @@ func (a *App) handleHTTPBacktests(w http.ResponseWriter, r *http.Request) {
 		}
 		httpJSON(w, 200, out)
 	case action == "run" && r.Method == http.MethodPost:
-		out, err := runBacktestToEnd(run)
+		var out map[string]any
+		var err error
+		if run.RunKind == "strategy" {
+			out, err = runStrategyBacktestToEndContext(r.Context(), run)
+		} else {
+			out, err = runBacktestToEnd(run)
+		}
 		if err != nil {
 			_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "failed", err.Error())
 			_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "error", err.Error(), nil)
@@ -719,6 +726,7 @@ func stepBacktestRun(run *BacktestRun) (map[string]any, error) {
 		"_project_id":  run.ProjectID,
 		"portfolio_id": run.EnvironmentPortfolioID,
 		"run_id":       run.ID,
+		"replay_at":    backtestReplayTime(run, step).Format(time.RFC3339Nano),
 		"step":         step,
 		"prices":       prices,
 	}, &ignored); err != nil {
@@ -1170,58 +1178,87 @@ func backtestSummaryPrices(run *BacktestRun) []map[string]any {
 }
 
 func (a *App) toolBacktestMarketStep(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if sdk.CurrentEnvironmentID() == "" {
+		return nil, errors.New("replay mutation requires isolated environment")
+	}
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
 	portfolioID := int64Arg(args, "portfolio_id", 0)
+	runID := int64Arg(args, "run_id", 0)
 	step := intArg(args, "step", 0)
-	raw, _ := args["prices"].([]any)
-	updated := []map[string]any{}
+	pf, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
+	if err != nil || pf.Mode == "live" || !portfolioUsesBacktestPricing(ctx.AppDB(), portfolioID) {
+		return nil, errors.New("isolated replay portfolio required")
+	}
+	at, err := time.Parse(time.RFC3339Nano, strArg(args, "replay_at"))
+	if err != nil || step <= 0 || runID <= 0 {
+		return nil, errors.New("run_id, positive step and valid replay_at required")
+	}
+	raw, ok := args["prices"].([]any)
+	if !ok || len(raw) == 0 {
+		return nil, errors.New("replay prices required")
+	}
+	bytes, _ := json.Marshal(raw)
+	digest := fmt.Sprintf("%x", sha256.Sum256(bytes))
+	var marks []*Mark
+	seen := map[string]bool{}
 	for _, item := range raw {
 		row, ok := item.(map[string]any)
 		if !ok {
-			continue
+			return nil, errors.New("invalid replay row")
 		}
-		symbol := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["symbol"])))
-		if symbol == "" {
-			continue
-		}
+		symbol := canonicalSymbol(strArg(row, "symbol"))
 		price := anyFloat(row["price"])
-		if price <= 0 {
-			continue
+		if symbol == "" || seen[symbol] || !finite(price) || price <= 0 {
+			return nil, errors.New("invalid or duplicate replay price")
 		}
-		cls := strings.TrimSpace(fmt.Sprint(row["asset_class"]))
-		if cls == "" {
-			cls = inferAssetClass(symbol)
+		seen[symbol] = true
+		class := inferAssetClass(symbol)
+		m := &Mark{Symbol: symbol, AssetClass: class, Price: price, Source: "backtest", MarkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		if class == "polymarket" {
+			m.NoPrice = ptr(1 - price)
 		}
-		prev := anyFloat(row["prev_close"])
-		if prev <= 0 {
-			prev = price
+		marks = append(marks, m)
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var oldRun int64
+	var oldStep int
+	var oldDigest, oldAt string
+	err = tx.QueryRow(`SELECT run_id,step,digest,replay_at FROM replay_steps WHERE portfolio_id=?`, portfolioID).Scan(&oldRun, &oldStep, &oldDigest, &oldAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if err == nil && oldRun == runID && oldStep == step && oldDigest == digest && oldAt == at.Format(time.RFC3339Nano) {
+		return map[string]any{"updated": 0, "replayed": true}, nil
+	}
+	if (oldRun != 0 && oldRun != runID) || step != oldStep+1 {
+		return nil, errors.New("replay sequence conflict")
+	}
+	if oldAt != "" {
+		previous, _ := time.Parse(time.RFC3339Nano, oldAt)
+		if !at.After(previous) {
+			return nil, errors.New("replay clock must advance")
 		}
-		mark := &Mark{
-			Symbol:     symbol,
-			AssetClass: cls,
-			Price:      price,
-			PrevClose:  &prev,
-			MarkedAt:   time.Now().UTC().Format(time.RFC3339),
-		}
-		if cls == "polymarket" {
-			no := 1 - price
-			mark.NoPrice = &no
-		}
-		if err := dbUpsertMark(ctx.AppDB(), mark); err != nil {
+	}
+	for _, m := range marks {
+		if err := dbUpsertMarkExec(tx, m); err != nil {
 			return nil, err
 		}
-		updated = append(updated, map[string]any{"symbol": symbol, "price": price, "asset_class": cls})
 	}
-	if portfolioID > 0 {
-		_, _ = dbInsertJournal(ctx.AppDB(), pid, portfolioID, "note",
-			fmt.Sprintf("Backtest market step %d loaded %d mark(s).", step, len(updated)),
-			map[string]any{"source": "backtest_market_step", "step": step, "prices": updated})
+	if _, err := tx.Exec(`INSERT INTO replay_steps(portfolio_id,run_id,step,digest,replay_at) VALUES(?,?,?,?,?) ON CONFLICT(portfolio_id) DO UPDATE SET step=excluded.step,digest=excluded.digest,replay_at=excluded.replay_at`, portfolioID, runID, step, digest, at.Format(time.RFC3339Nano)); err != nil {
+		return nil, err
 	}
-	emit("trading.backtest.market_step", map[string]any{"portfolio_id": portfolioID, "step": step, "prices": updated})
-	return map[string]any{"updated": len(updated), "prices": updated}, nil
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	emit("trading.backtest.market_step", map[string]any{"portfolio_id": portfolioID, "step": step, "prices": raw})
+	return map[string]any{"updated": len(marks), "prices": raw}, nil
 }
 
 func backtestDirective(run *BacktestRun) string {

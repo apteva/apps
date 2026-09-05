@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -38,7 +37,6 @@ import (
 // Multiple tenant_update calls for the same version race for cache
 // dir creation; rather than installing twice, hold a lock for the
 // whole resolve-and-install path.
-var versionInstallMu sync.Mutex
 
 // httpUpdateClient is separate from httpClient (the health poller's
 // short-timeout client) — npm metadata calls are typically fast but
@@ -276,8 +274,11 @@ func ensureVersionInstalled(ctx context.Context, version string) (binPath string
 		}
 		return "", err
 	}
-	versionInstallMu.Lock()
-	defer versionInstallMu.Unlock()
+	unlock, lockErr := lockResource(ctx, "local-version:"+version)
+	if lockErr != nil {
+		return "", lockErr
+	}
+	defer unlock()
 
 	dir := filepath.Join(versionsRoot(), version)
 	runtime := versionedRuntimePaths(dir)
@@ -352,6 +353,10 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer done()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
 	// kind=remote (tenant_connect to an external apteva-server) is
 	// out of scope — fleet doesn't supervise the binary. kind=local
 	// covers both true-local (instance_id=0) and hosted-on-VPS
@@ -373,6 +378,11 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	if requested == t.CurrentVersion && requested == t.TargetVersion {
+		if t.IsHosted() {
+			if err := a.store.clearOperationLease(t.ID); err != nil {
+				return nil, fmt.Errorf("clear completed update lease: %w", err)
+			}
+		}
 		return map[string]any{
 			"tenant":  a.publicTenantView(t),
 			"updated": false,
@@ -382,6 +392,11 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if requested == t.CurrentVersion {
 		if err := a.store.setTargetVersion(t.ID, requested); err != nil {
 			return nil, err
+		}
+		if t.IsHosted() {
+			if err := a.store.clearOperationLease(t.ID); err != nil {
+				return nil, fmt.Errorf("clear completed update lease: %w", err)
+			}
 		}
 		updated, _, _ := a.store.get(t.ID)
 		return map[string]any{
@@ -393,8 +408,15 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	oldTarget := t.TargetVersion
 	oldVersion := tenantVersion(t)
-	wasRunning := t.Status == StatusActive || t.Status == StatusSetupPending
-	restoreTarget := func() { _ = a.store.setTargetVersion(t.ID, oldTarget) }
+	rollbackTarget := oldTarget
+	if rollbackTarget == requested && oldVersion != requested {
+		// A retry after an interrupted update sees the requested target pin,
+		// but the last verified runtime is still current_version. Rollback
+		// must restore that verified version, not preserve the failed pin.
+		rollbackTarget = oldVersion
+	}
+	wasRunning := hostedTenantExpectedRunning(t.Status)
+	restoreTarget := func() { _ = a.store.setTargetVersion(t.ID, rollbackTarget) }
 
 	port, _ := portFromBaseURL(t.BaseURL)
 	if port == 0 || t.ConfigDir == "" {
@@ -405,6 +427,30 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// stopped tenant remains stopped; only a tenant that was already running
 	// is stopped and restarted.
 	if t.IsHosted() {
+		if err := a.store.setOperationLease(t.ID, "update", "preparing", requested, oldVersion, rollbackTarget); err != nil {
+			return nil, fmt.Errorf("persist hosted update lease: %w", err)
+		}
+		leaseActive := true
+		preserveLease := false
+		defer func() {
+			if leaseActive && !preserveLease {
+				_ = a.store.clearOperationLease(t.ID)
+			}
+		}()
+		clearLease := func() error {
+			if err := a.store.clearOperationLease(t.ID); err != nil {
+				return err
+			}
+			leaseActive = false
+			return nil
+		}
+		setLeasePhase := func(phase string) error {
+			if err := a.store.setOperationLeasePhase(t.ID, phase); err != nil {
+				preserveLease = true
+				return fmt.Errorf("persist hosted update phase %s: %w", phase, err)
+			}
+			return nil
+		}
 		info, ierr := a.getInstanceInfo(ctx, t.InstanceID)
 		if ierr != nil {
 			return nil, ierr
@@ -421,40 +467,68 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			_ = a.store.recordEvent(t.ID, "update_prepared", "tool:tenant_update",
 				map[string]any{"version": requested, "instance_id": t.InstanceID, "preserved_status": t.Status})
 			updated, _, _ := a.store.get(t.ID)
+			if err := clearLease(); err != nil {
+				return nil, fmt.Errorf("clear hosted update lease: %w", err)
+			}
 			return map[string]any{
 				"tenant": a.publicTenantView(updated), "updated": true, "version": requested,
 				"started": false, "status": t.Status,
 				"note": "version prepared; tenant remained stopped",
 			}, nil
 		}
+		if err := setLeasePhase("stopping"); err != nil {
+			return nil, err
+		}
 		if err := stopHostedTenant(ctx, t.InstanceID, t.Slug, port, 10*time.Second); err != nil {
-			restoreTarget()
+			indeterminate := errors.Is(err, errHostedStopIndeterminate)
+			if indeterminate {
+				preserveLease = true
+				_ = a.store.setOperationLeasePhase(t.ID, "stop_indeterminate")
+			} else {
+				restoreTarget()
+			}
 			_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
-				map[string]any{"version": requested, "stage": "stop", "error": err.Error()})
+				map[string]any{"version": requested, "stage": "stop", "error": err.Error(), "lease_preserved": indeterminate})
+			if indeterminate {
+				return nil, fmt.Errorf("stop hosted outcome is indeterminate; automatic respawn is blocked until tenant_update is retried: %w", err)
+			}
 			return nil, fmt.Errorf("stop hosted: %w", err)
+		}
+		if err := setLeasePhase("starting"); err != nil {
+			return nil, err
 		}
 		newSpec := hostedSpawnSpecForTenant(t, info.PublicIPv4, port)
 		newSpec.AptevaVer = requested
 		_, _, sErr := a.spawnHostedTenant(ctx, newSpec)
 		if sErr != nil {
 			restoreTarget()
+			if err := setLeasePhase("rollback_starting"); err != nil {
+				return nil, fmt.Errorf("respawn hosted with apteva@%s: %v; %w", requested, sErr, err)
+			}
 			rollbackSpec := hostedSpawnSpecForTenant(t, info.PublicIPv4, port)
 			rollbackSpec.AptevaVer = oldVersion
 			_, _, rollbackErr := a.spawnHostedTenant(ctx, rollbackSpec)
 			_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
 				map[string]any{"version": requested, "stage": "spawn", "error": sErr.Error(), "rollback_error": errorString(rollbackErr)})
 			if rollbackErr != nil {
+				preserveLease = true
+				_ = a.store.setOperationLeasePhase(t.ID, "rollback_failed")
 				_ = a.store.setStatus(t.ID, StatusFailed, "tool:tenant_update")
 				return nil, fmt.Errorf("respawn hosted with apteva@%s: %v; rollback to %s also failed: %w", requested, sErr, oldVersion, rollbackErr)
 			}
 			return nil, fmt.Errorf("respawn hosted with apteva@%s: %w (previous version restored)", requested, sErr)
 		}
 		if err := a.store.setCurrentVersion(t.ID, requested); err != nil {
+			preserveLease = true
+			_ = a.store.setOperationLeasePhase(t.ID, "state_record_failed")
 			return nil, err
 		}
 		_ = a.store.recordEvent(t.ID, "updated", "tool:tenant_update",
 			map[string]any{"version": requested, "instance_id": t.InstanceID})
 		updated, _, _ := a.store.get(t.ID)
+		if err := clearLease(); err != nil {
+			return nil, fmt.Errorf("clear hosted update lease: %w", err)
+		}
 		return map[string]any{
 			"tenant":  a.publicTenantView(updated),
 			"updated": true,

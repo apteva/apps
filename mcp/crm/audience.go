@@ -118,6 +118,9 @@ func buildAudienceSource(db *sql.DB, pid string, args map[string]any) (*audience
 			args: []any{pid, segmentID},
 		}, nil
 	}
+	if err := validateSegmentReferences(db, pid, segment.ListID, segment.Definition); err != nil {
+		return nil, err
+	}
 	filter, err := compileSegmentDefinition(pid, segment.ListID, segment.Definition)
 	if err != nil {
 		return nil, err
@@ -146,6 +149,7 @@ func resolveAudience(db *sql.DB, source *audienceSource, pid, channel string, af
 	automated := `EXISTS (SELECT 1 FROM contact_tags t WHERE t.project_id = c.project_id
 		AND t.contact_id = c.id AND t.tag_name = 'automated')`
 	reason := `CASE
+ WHEN EXISTS(SELECT 1 FROM contact_attributes a JOIN contact_attribute_defs d ON d.id=a.def_id WHERE a.contact_id=c.id AND a.project_id=c.project_id AND d.key='do_not_contact' AND a.value_bool=1) THEN 'do_not_contact'
 		WHEN ` + fmt.Sprintf("%d", boolToInt(!includeAutomated)) + ` = 1 AND ` + automated + ` THEN 'automated'
 		WHEN ` + healthy + ` THEN 'eligible'
 		WHEN NOT EXISTS (SELECT 1 FROM contact_channels cc WHERE cc.project_id = c.project_id

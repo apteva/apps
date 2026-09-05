@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.1
+version: 0.9.2
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
-  append-only activity log, opportunities/pipelines, soft-delete + merge. Agents read/write via
+  append-only activity log, opportunities/pipelines, archival/restoration + merge. Agents read/write via
   MCP tools (find-or-create, search, log activity, set attribute, merge);
   the dashboard panel renders the same data with a structured detail view.
 
@@ -191,6 +191,7 @@ provides:
     - name: contact.added
       description: A contact was created or first materialised from inbound messaging; list_ids contains its active list memberships after creation routing completes.
       payload:
+        event_id: string
         id: integer
         display_name: string
         first_name: string
@@ -200,6 +201,7 @@ provides:
     - name: contact.updated
       description: A contact's core fields, channels, attributes, tags, or list-driven metadata changed.
       payload:
+        event_id: string
         id: integer
         display_name: string
         first_name: string
@@ -208,6 +210,7 @@ provides:
     - name: contact.channel.deliverability.changed
       description: A contact email, SMS, or WhatsApp route changed delivery, quarantine, suppression, or effective messageability state.
       payload:
+        event_id: string
         contact_id: integer
         channel_id: integer
         transport: string
@@ -219,15 +222,18 @@ provides:
     - name: contact.deleted
       description: A contact was archived/soft-deleted.
       payload:
+        event_id: string
         id: integer
     - name: contact.merged
       description: Two contacts were merged; the loser row is marked merged and data moved to the winner.
       payload:
+        event_id: string
         winner_id: integer
         loser_id: integer
     - name: contact.activity.added
       description: An activity row was appended to a contact timeline.
       payload:
+        event_id: string
         contact_id: integer
         activity_id: integer
         conversation_id: integer
@@ -236,6 +242,7 @@ provides:
     - name: conversation.status.changed
       description: A conversation's workflow status or priority changed, including inbound auto-reopen and spam handling.
       payload:
+        event_id: string
         conversation_id: integer
         contact_id: integer
         status: string
@@ -244,6 +251,7 @@ provides:
     - name: conversation.message.received
       description: A Messaging inbound message was attached to a CRM conversation; use this for agent wakeups on external replies.
       payload:
+        event_id: string
         contact_id: integer
         conversation_id: integer
         activity_id: integer
@@ -256,58 +264,70 @@ provides:
     - name: list.created
       description: A contact list was created.
       payload:
+        event_id: string
         id: integer
         slug: string
         name: string
     - name: list.updated
       description: A contact list's metadata changed.
       payload:
+        event_id: string
         id: integer
     - name: list.archived
       description: A contact list was archived.
       payload:
+        event_id: string
         id: integer
     - name: list.member.added
       description: A contact was added to a list.
       payload:
+        event_id: string
         list_id: integer
         contact_id: integer
     - name: list.member.removed
       description: A contact was removed from a list.
       payload:
+        event_id: string
         list_id: integer
         contact_id: integer
     - name: segment.created
       description: A saved segment was created.
       payload:
+        event_id: string
         id: integer
         name: string
         kind: string
     - name: segment.updated
       description: A saved segment's metadata or definition changed.
       payload:
+        event_id: string
         id: integer
     - name: segment.archived
       description: A saved segment was archived.
       payload:
+        event_id: string
         id: integer
     - name: segment.materialised
       description: A dynamic segment was frozen into a static membership snapshot.
       payload:
+        event_id: string
         id: integer
         count: integer
     - name: pipeline.created
       description: A sales pipeline was created.
       payload:
+        event_id: string
         pipeline_id: integer
     - name: pipeline.stage.created
       description: A stage was added to a sales pipeline.
       payload:
+        event_id: string
         pipeline_id: integer
         stage_id: integer
     - name: pipeline.stage.updated
       description: A pipeline stage was updated or archived.
       payload:
+        event_id: string
         pipeline_id: integer
         stage_id: integer
         archived: boolean
@@ -315,6 +335,7 @@ provides:
       description: >-
         An opportunity was created for a contact. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure.
       payload:
+        event_id: string
         opportunity_id: integer
         contact_id: integer
         pipeline_id: integer
@@ -329,6 +350,7 @@ provides:
       description: >-
         An opportunity was updated. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure.
       payload:
+        event_id: string
         opportunity_id: integer
         contact_id: integer
         pipeline_id: integer
@@ -343,6 +365,7 @@ provides:
       description: >-
         An opportunity moved to another pipeline stage. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
       payload:
+        event_id: string
         opportunity_id: integer
         contact_id: integer
         pipeline_id: integer
@@ -358,6 +381,7 @@ provides:
       description: >-
         An opportunity changed status. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
       payload:
+        event_id: string
         opportunity_id: integer
         contact_id: integer
         pipeline_id: integer
@@ -373,6 +397,7 @@ provides:
       description: >-
         An opportunity was marked won. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
       payload:
+        event_id: string
         opportunity_id: integer
         contact_id: integer
         pipeline_id: integer
@@ -388,6 +413,7 @@ provides:
       description: >-
         An opportunity was marked lost. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
       payload:
+        event_id: string
         opportunity_id: integer
         contact_id: integer
         pipeline_id: integer
@@ -415,6 +441,12 @@ db:
   migrations: migrations/
 
 config_schema:
+  - name: automated_inbound_policy
+    type: select
+    default: ignore_new
+    label: Automated inbound mail
+    options: [ignore_new, review_new]
+    description: Retain messages for existing contacts. Ignore new automated senders by default, or create contacts tagged automated for review and exclude them from default audiences.
   - name: email_verification_mode
     type: select
     default: local

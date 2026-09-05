@@ -23,6 +23,8 @@ type repoCommandInput struct {
 
 type repoCommandResult struct {
 	Status                string `json:"status"`
+	Runtime               string `json:"runtime,omitempty"`
+	WorkspaceID           string `json:"workspace_id,omitempty"`
 	Command               string `json:"command"`
 	ExitCode              int    `json:"exit_code"`
 	DurationMS            int64  `json:"duration_ms"`
@@ -37,6 +39,11 @@ type repoCommandResult struct {
 }
 
 func (a *App) runRepoCommand(repo *Repo, srcDir string, in repoCommandInput) (*repoCommandResult, error) {
+	return a.runRepoCommandContext(context.Background(), repo, srcDir, in)
+}
+func (a *App) runRepoCommandContext(callCtx context.Context, repo *Repo, srcDir string, in repoCommandInput) (*repoCommandResult, error) {
+	callCtx, untrack := a.commands.track(callCtx, repo.ID)
+	defer untrack()
 	command := strings.TrimSpace(in.Command)
 	if command == "" {
 		return nil, errors.New("command required")
@@ -55,13 +62,16 @@ func (a *App) runRepoCommand(repo *Repo, srcDir string, in repoCommandInput) (*r
 	if tailLines > 2000 {
 		tailLines = 2000
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(callCtx, timeout)
 	defer cancel()
 	release, err := a.commands.acquire(ctx, repo.ID)
 	if err != nil {
 		return &repoCommandResult{Status: "failed", Command: command, ExitCode: -1, TimedOut: isContextDeadline(err), Error: err.Error()}, nil
 	}
 	defer release()
+	if a.locks != nil {
+		defer a.locks.lock(repoStoreKey(repo))()
+	}
 	started := time.Now()
 
 	logPath := repoCommandLogPath(a.dataDir, repo.ID)
@@ -80,6 +90,7 @@ func (a *App) runRepoCommand(repo *Repo, srcDir string, in repoCommandInput) (*r
 
 	res := &repoCommandResult{
 		Status:   "failed",
+		Runtime:  "local",
 		Command:  command,
 		ExitCode: -1,
 		LogPath:  logPath,

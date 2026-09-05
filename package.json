@@ -4,17 +4,30 @@
   "description": "Frontend panel build deps for first-party Apteva apps. The panels themselves live under mcp/<app>/ui/*.tsx and are bundled by scripts/build-panels.ts. React + ui-kit are externalised; everything else (yaml round-trip, etc.) gets bundled into each panel that imports it.",
   "scripts": {
     "build:panels": "bun run scripts/build-panels.ts",
-    "verify:icons": "bun run scripts/verify-app-icons.ts"
+    "verify:icons": "bun run scripts/verify-app-icons.ts",
+    "typecheck:code": "tsc -p mcp/code/tsconfig.check.json",
+    "test:code:ui": "bun test mcp/code/ui/components/*.test.ts",
+    "test:code:browser": "playwright test --config mcp/code/playwright.config.ts"
   },
   "dependencies": {
     "dompurify": "^3.4.13",
     "highlight.js": "^11.12.0",
+    "hls.js": "1.7.2",
     "lucide-react": "^0.400.0",
     "marked": "^18.0.10",
     "recharts": "^3.8.1",
     "yaml": "^2.6.0"
   },
   "devDependencies": {
-    "@types/react": "^19.0.0"
+    "@types/react": "^19.0.0",
+    "@types/react-test-renderer": "19.1.0",
+    "happy-dom": "^20.14.0",
+    "react": "19.2.8",
+    "react-test-renderer": "19.2.8",
+    "typescript": "^7.0.2",
+    "@playwright/test": "^1.63.0",
+    "@types/bun": "^1.4.1",
+    "@types/react-dom": "^19.2.7",
+    "react-dom": "19.2.8"
   }
 }
