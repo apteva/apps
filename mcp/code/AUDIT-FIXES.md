@@ -66,6 +66,9 @@ contracts and operational limits.
 
 ## Verification results
 
+The release candidate was revalidated after merging current `main`, aligning
+React/React DOM to 19.2.8 and pinning app-sdk 0.75.0.
+
 - **192 Go tests/subtests passed (163 top-level)** in the final combined
   `go test -race -tags integration ./... -timeout 180s` run; no failed tests.
   This includes the original 16 audit regressions, actual sidecar HTTP/MCP
