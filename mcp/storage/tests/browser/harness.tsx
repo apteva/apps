@@ -1,7 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import { useState } from 'react';
-import StoragePanel from '../../ui/StoragePanel';
-import FileCard from '../../ui/FileCard';
+import StoragePanel from '/api/apps/storage/ui/StoragePanel.mjs';
+import FileCard from '/api/apps/storage/ui/FileCard.mjs';
 import {uploadResumable} from '../../ui/uploadResumable';
 const subscribers = new Set<(ev: unknown)=>void>();
 Object.assign(window, {__aptevaAppEvents:{subscribe:(_a: string,_p: string,handler:(ev:unknown)=>void)=>{subscribers.add(handler);return()=>subscribers.delete(handler)}},fireStorageEvent:(event:unknown)=>subscribers.forEach(fn=>fn(event)),uploadResumable});

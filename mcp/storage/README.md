@@ -1,9 +1,13 @@
-# Storage 0.11.1
+# Storage 0.11.2
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
 sidecar uses app-sdk v0.73.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
+
+Version 0.11.2 fixes the panel/card `jsxDEV` module-load crash. The build explicitly
+uses production JSX and checks the generated modules against the host import
+contract. Browser tests load the release `.mjs` files rather than rebuilding TSX.
 
 Version 0.11.1 returns HTTP 403 Forbidden when URL imports target blocked internal
 addresses, including after redirects. The import policy and error text are
@@ -115,6 +119,10 @@ GOWORK=off go test -race ./...
 GOWORK=off go test -tags integration ./... # Tier 2, real sidecar
 apteva test --tier all ./scenarios/   # All tiers, including real LLM scenarios
 ```
+
+To run the same browser checks using a running dashboard's actual React and
+UI-kit vendor modules, use `STORAGE_TEST_HOST_URL=http://127.0.0.1:5280 bun run test`.
+The fixture still intercepts API requests and uses disposable browser state.
 
 Live S3 profile (disposable local MinIO; no production bucket):
 

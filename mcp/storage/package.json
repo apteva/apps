@@ -2,8 +2,9 @@
   "name": "@apteva/storage-ui",
   "private": true,
   "scripts": {
-    "build": "bun build ui/StoragePanel.tsx ui/FileCard.tsx --outdir ui --format esm --external react --external react/jsx-runtime --external @apteva/ui-kit --entry-naming '[name].mjs' --minify --sourcemap=external",
-    "test": "bunx playwright test",
+    "build": "bun scripts/build-ui.ts && bun run verify:bundles",
+    "verify:bundles": "bun tests/verify-bundles.ts",
+    "test": "bun run verify:bundles && bunx playwright test",
     "typecheck": "bunx tsc --noEmit"
   },
   "dependencies": {
