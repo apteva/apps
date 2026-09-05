@@ -80,7 +80,6 @@ document.getElementById('update').addEventListener('click', function () {
 		t.Fatal(err)
 	}
 
-	started := time.Now()
 	if _, err := c.Execute(computer.Action{Type: "click", Selector: "#update"}); err != nil {
 		t.Fatalf("click Update: %v", err)
 	}
@@ -95,6 +94,9 @@ document.getElementById('update').addEventListener('click', function () {
 		}
 	}
 
+	// Measure the outcome wait itself; click/navigation/screenshot rendering
+	// has its own work and can exceed this bound under concurrent browser load.
+	started := time.Now()
 	result, err := c.WaitForOutcome([]computer.WaitCondition{
 		{Type: "url_changed", Value: server.URL + "/edit"},
 		{Type: "text_present", Value: "Saved"},

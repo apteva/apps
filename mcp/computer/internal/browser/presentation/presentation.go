@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"time"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
@@ -52,7 +53,7 @@ func BeforeClick(ctx context.Context, x, y int, options computer.PresentationOpt
 	moveMS := positive(options.PointerDurationMS, DemoPointerDurationMS)
 	clickMS := positive(options.ClickEffectMS, DemoClickEffectMS)
 	var shown bool
-	if err := chromedp.Run(ctx, chromedp.Evaluate(pointerScript(x, y, moveMS, clickMS), &shown)); err != nil {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(pointerScript(x, y, moveMS, clickMS), &shown)); err != nil {
 		return fmt.Errorf("presentation cursor: %w", err)
 	}
 	if err := sleepContext(ctx, time.Duration(moveMS+90)*time.Millisecond); err != nil {
@@ -79,7 +80,7 @@ func CueTarget(
 	moveMS := positive(options.PointerDurationMS, DemoPointerDurationMS)
 	clickMS := positive(options.ClickEffectMS, DemoClickEffectMS)
 	var shown bool
-	if err := chromedp.Run(ctx, chromedp.Evaluate(
+	if err := cdputil.Run(ctx, chromedp.Evaluate(
 		targetCueScript(selector, fallbackX, fallbackY, hasFallback, caption, moveMS, clickMS, true),
 		&shown,
 	)); err != nil {
@@ -104,7 +105,7 @@ func MoveToTarget(
 	moveMS := positive(options.PointerDurationMS, DemoPointerDurationMS)
 	clickMS := positive(options.ClickEffectMS, DemoClickEffectMS)
 	var shown bool
-	if err := chromedp.Run(ctx, chromedp.Evaluate(
+	if err := cdputil.Run(ctx, chromedp.Evaluate(
 		targetCueScript(selector, fallbackX, fallbackY, hasFallback, "", moveMS, clickMS, false),
 		&shown,
 	)); err != nil {

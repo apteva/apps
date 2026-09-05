@@ -56,7 +56,7 @@ func TestComputerAppBrowserSoMLabelClick(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	shot := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -122,7 +122,7 @@ func TestComputerAppBrowserDateTimeTyping(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	type field struct {
 		name string
@@ -215,7 +215,7 @@ func TestComputerAppBrowserbasePublicDatePickerSetTemporal(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -254,7 +254,7 @@ func TestComputerAppBrowserbasePublicSetText(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id":   sessionID,
@@ -321,7 +321,7 @@ func runComputerAppBrowserSetCheckedAndTemporal(t *testing.T, backend string) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -461,7 +461,7 @@ func TestComputerAppBrowserShortcutKeys(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	_ = sc.MCP("computer_use", map[string]any{"session_id": sessionID, "action": "click", "coordinate": fcoord(260, 104)})
 	_ = sc.MCP("computer_use", map[string]any{"session_id": sessionID, "action": "key", "key": "Tab"})
@@ -538,7 +538,7 @@ func TestLLMCustomComboboxUnavailableLive(t *testing.T) {
 	if os.Getenv("RUN_COMPUTER_LLM_TESTS") == "" {
 		t.Skip("set RUN_COMPUTER_LLM_TESTS=1")
 	}
-	if _, err := exec.LookPath("codex"); err != nil {
+	if _, err := exec.LookPath(computerLLMBinary()); err != nil {
 		t.Skip("codex CLI is required")
 	}
 	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
@@ -550,7 +550,7 @@ func TestLLMCustomComboboxUnavailableLive(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 	failure := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID, "action": "select_option",
 		"selector": "#aggregation-combobox", "text": "Monthly",
@@ -594,7 +594,7 @@ func TestComputerAppBrowserbasePublicMultiSelectOption(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -625,7 +625,7 @@ func runComputerAppBrowserSelectOption(t *testing.T, backend string) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -714,7 +714,7 @@ func TestComputerAppBrowserNewTabAutoFollow(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -773,7 +773,7 @@ func TestComputerAppBrowserSwitchTab(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	clickOut := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -862,7 +862,7 @@ func TestComputerAppBrowserCloseTab(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	clickOut := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -939,7 +939,7 @@ document.getElementById('fileUpload').addEventListener('change', function() {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -993,7 +993,7 @@ func TestComputerAppBrowserbasePublicUploadFromURL(t *testing.T) {
 	if sessionID == "" || providerSessionID == "" {
 		t.Fatalf("open returned incomplete session ids: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,

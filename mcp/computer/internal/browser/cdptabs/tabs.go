@@ -3,7 +3,9 @@ package cdptabs
 import (
 	"context"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"strings"
+	"time"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/chromedp/cdproto/cdp"
@@ -28,7 +30,9 @@ func List(ctx context.Context) ([]computer.TabInfo, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("no active browser session")
 	}
-	infos, err := chromedp.Targets(ctx)
+	bounded, cancel := cdputil.Context(ctx, cdputil.Timeout)
+	defer cancel()
+	infos, err := chromedp.Targets(bounded)
 	if err != nil {
 		return nil, err
 	}
@@ -85,12 +89,33 @@ func Switch(parent context.Context, tabID string) (context.Context, context.Canc
 	if strings.TrimSpace(tabID) == "" {
 		return nil, nil, fmt.Errorf("tab_id required")
 	}
+	if err := Activate(parent, tabID); err != nil {
+		return nil, nil, err
+	}
 	ctx, cancel := chromedp.NewContext(parent, chromedp.WithTargetID(target.ID(tabID)))
+	timer := time.AfterFunc(cdputil.Timeout, cancel)
+	defer timer.Stop()
 	if err := chromedp.Run(ctx); err != nil {
 		cancel()
 		return nil, nil, err
 	}
 	return ctx, cancel, nil
+}
+
+// Activate selects the actual browser tab before attaching domains. Background renderers
+// can suspend initialization, and a logical CDP switch alone leaves the browser
+// UI on the previous tab. Use the browser executor so the old page may be closed.
+func Activate(parent context.Context, tabID string) error {
+	if parent == nil || strings.TrimSpace(tabID) == "" {
+		return fmt.Errorf("browser context and tab_id required")
+	}
+	c := chromedp.FromContext(parent)
+	if c == nil || c.Browser == nil {
+		return fmt.Errorf("no browser connection")
+	}
+	ctx, cancel := cdputil.Context(parent, cdputil.Timeout)
+	defer cancel()
+	return target.ActivateTarget(target.ID(tabID)).Do(cdp.WithExecutor(ctx, c.Browser))
 }
 
 // Close closes a page target.
@@ -105,7 +130,9 @@ func Close(ctx context.Context, tabID string) error {
 	if c == nil || c.Browser == nil {
 		return fmt.Errorf("no browser connection")
 	}
-	browserCtx := cdp.WithExecutor(ctx, c.Browser)
+	bounded, cancel := cdputil.Context(ctx, cdputil.Timeout)
+	defer cancel()
+	browserCtx := cdp.WithExecutor(bounded, c.Browser)
 	return target.CloseTarget(target.ID(tabID)).Do(browserCtx)
 }
 
@@ -140,4 +167,42 @@ func PickFallback(tabs []computer.TabInfo, closedID string) string {
 		return firstNonInternal
 	}
 	return first
+}
+
+// Manager owns one attachment per target under a stable browser context.
+// The caller serializes access with its session action lock.
+type Manager struct {
+	root     context.Context
+	contexts map[string]context.Context
+	cancels  map[string]context.CancelFunc
+}
+
+func NewManager(root context.Context, cancel context.CancelFunc) *Manager {
+	id := ActiveID(root)
+	return &Manager{root: root, contexts: map[string]context.Context{id: root}, cancels: map[string]context.CancelFunc{id: cancel}}
+}
+func (m *Manager) Switch(id string) (context.Context, context.CancelFunc, bool, error) {
+	if ctx := m.contexts[id]; ctx != nil && ctx.Err() == nil {
+		if err := Activate(m.root, id); err != nil {
+			return nil, nil, false, err
+		}
+		return ctx, m.cancels[id], false, nil
+	}
+	ctx, cancel, err := Switch(m.root, id)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	m.contexts[id], m.cancels[id] = ctx, cancel
+	return ctx, cancel, true, nil
+}
+func (m *Manager) Forget(id string) context.Context {
+	forgotten := m.contexts[id]
+	// Keep the root context alive to own the browser transport even if its
+	// original page closes. All other attachments can be detached immediately.
+	if ctx := m.contexts[id]; ctx != nil && ctx != m.root {
+		m.cancels[id]()
+	}
+	delete(m.contexts, id)
+	delete(m.cancels, id)
+	return forgotten
 }

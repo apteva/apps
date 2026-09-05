@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	cdpruntime "github.com/chromedp/cdproto/runtime"
@@ -14,7 +15,7 @@ import (
 // player is not a claim that the player contains the asset the caller wanted.
 func ObserveMedia(ctx context.Context) (computer.MediaObservation, error) {
 	var observation computer.MediaObservation
-	err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+	err := cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		value, exception, err := cdpruntime.Evaluate("(" + mediaObservationFunction + ")()").WithReturnByValue(true).Do(ctx)
 		if err != nil {
 			return err

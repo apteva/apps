@@ -117,7 +117,28 @@ func dbGetSession(db *sql.DB, id string) (*ComputerSession, error) {
 		FROM computer_sessions WHERE id=?`, id))
 }
 
+func dbGetSessionMetadata(db *sql.DB, id string) (*ComputerSession, error) {
+	if db == nil {
+		return nil, errors.New("computer session store is unavailable")
+	}
+	return scanComputerSession(db.QueryRow(`
+		SELECT id, backend, backend_session_id, app_context_id, context_name,
+		       initial_url, current_url, width, height, status, close_reason,
+		       recording_status, opened_at, closed_at, updated_at,
+		       NULL, final_screenshot_mime, proxy_mode, proxy_provider,
+		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
+		       environment_json, proxy_bytes, usage_status, usage_measured_at
+		FROM computer_sessions WHERE id=?`, id))
+}
+
 func dbListSessions(db *sql.DB, limit int) ([]*ComputerSession, error) {
+	return dbListSessionsPage(db, limit, 0)
+}
+
+func dbListSessionsPage(db *sql.DB, limit, offset int) ([]*ComputerSession, error) {
+	if offset < 0 {
+		return nil, errors.New("history offset must not be negative")
+	}
 	if db == nil {
 		return nil, errors.New("computer session store is unavailable")
 	}
@@ -128,12 +149,12 @@ func dbListSessions(db *sql.DB, limit int) ([]*ComputerSession, error) {
 		SELECT id, backend, backend_session_id, app_context_id, context_name,
 		       initial_url, current_url, width, height, status, close_reason,
 		       recording_status, opened_at, closed_at, updated_at,
-		       final_screenshot, final_screenshot_mime, proxy_mode, proxy_provider,
+		       NULL, final_screenshot_mime, proxy_mode, proxy_provider,
 		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
 		       environment_json, proxy_bytes, usage_status, usage_measured_at
 		FROM computer_sessions
-		ORDER BY opened_at DESC
-		LIMIT ?`, limit)
+		ORDER BY opened_at DESC, id DESC
+		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -312,4 +333,20 @@ func nullableStringPointer(value *string) any {
 		return nil
 	}
 	return *value
+}
+
+// Retention is opt-in; never delete active sessions or pending provider cleanup.
+func dbPruneSessionHistory(db *sql.DB, before time.Time) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	const expired = `SELECT id FROM computer_sessions WHERE status NOT IN ('active','cleanup_pending') AND closed_at < ? AND NOT EXISTS (SELECT 1 FROM computer_provider_leases l WHERE l.session_id=computer_sessions.id AND l.terminal_status<>'released')`
+	for _, q := range []string{`DELETE FROM computer_session_navigation WHERE session_id IN (` + expired + `)`, `DELETE FROM computer_provider_leases WHERE session_id IN (` + expired + `)`, `DELETE FROM computer_sessions WHERE id IN (` + expired + `)`} {
+		if _, err := tx.Exec(q, before.UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

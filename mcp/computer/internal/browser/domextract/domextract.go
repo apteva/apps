@@ -2,6 +2,9 @@ package domextract
 
 import (
 	"context"
+	"encoding/json"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -13,6 +16,10 @@ import (
 const defaultMaxChars = 50000
 
 const extractScript = `(() => {
+  const formats = __FORMATS__, limit = __LIMIT__;
+  const want = (name) => !formats.length || formats.includes(name) || (name === 'structured_data' && formats.includes('json'));
+  const needContent = want('text') || want('markdown') || want('html');
+
   const cleanInline = (s) => String(s || '').replace(/\s+/g, ' ').trim();
   const normalizeBlocks = (s) => String(s || '')
     .replace(/\r/g, '\n')
@@ -39,9 +46,9 @@ const extractScript = `(() => {
     .filter(([k]) => k.startsWith(prefix))
     .map(([k, v]) => [k.slice(prefix.length), v]));
   const jsonLd = [];
-  for (const script of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
+  for (const script of (want('structured_data') ? Array.from(document.querySelectorAll('script[type="application/ld+json"]')).slice(0,100) : [])) {
     const raw = script.textContent || '';
-    if (!raw.trim()) continue;
+    if (!raw.trim() || raw.length > limit) continue;
     try {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) jsonLd.push(...parsed);
@@ -51,7 +58,7 @@ const extractScript = `(() => {
     }
   }
 
-  const clone = document.body ? document.body.cloneNode(true) : document.createElement('body');
+  const clone = needContent && document.body ? document.body.cloneNode(true) : document.createElement('body');
   for (const el of Array.from(clone.querySelectorAll('script,style,noscript,svg,template,iframe,canvas'))) {
     el.remove();
   }
@@ -70,10 +77,12 @@ const extractScript = `(() => {
     el.remove();
   }
 
+  let visited = 0, contentSize = 0;
   const textBlocks = [];
   const markdownBlocks = [];
   const pushTextBlock = (s) => {
-    const t = cleanInline(s);
+    const t = cleanInline(s).slice(0, Math.max(0, limit-contentSize));
+    contentSize += t.length;
     if (t) textBlocks.push(t);
     return t;
   };
@@ -82,7 +91,7 @@ const extractScript = `(() => {
     if (t) markdownBlocks.push(t);
   };
   const walkMarkdown = (node) => {
-    if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+    if (!node || node.nodeType !== Node.ELEMENT_NODE || contentSize >= limit || ++visited > 20000) return;
     const tag = node.tagName.toLowerCase();
     if (['script','style','noscript','svg','template','iframe','canvas','nav','header','footer','aside'].includes(tag)) return;
     if (/^h[1-6]$/.test(tag)) {
@@ -119,15 +128,15 @@ const extractScript = `(() => {
     }
     for (const child of Array.from(node.children)) walkMarkdown(child);
   };
-  walkMarkdown(root);
+  if (want('text') || want('markdown')) walkMarkdown(root);
   const text = textBlocks.length ? textBlocks.join('\n\n') : normalizeBlocks(root.innerText || root.textContent || '');
   const markdown = markdownBlocks.length ? markdownBlocks.join('\n\n') : text;
   const description = meta.description || meta['og:description'] || meta['twitter:description'] || '';
-  const links = Array.from(document.querySelectorAll('a[href]')).map((a) => ({
+  const links = (want('links') ? Array.from(document.querySelectorAll('a[href]')).slice(0,1000) : []).map((a) => ({
     url: abs(a.getAttribute('href')),
     text: cleanInline(a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '')
   })).filter((x) => /^https?:\/\//i.test(x.url));
-  const images = Array.from(document.querySelectorAll('img[src],source[srcset]')).map((img) => {
+  const images = (want('images') ? Array.from(document.querySelectorAll('img[src],source[srcset]')).slice(0,500) : []).map((img) => {
     const raw = img.getAttribute('src') || String(img.getAttribute('srcset') || '').split(/\s+/)[0];
     return abs(raw);
   }).filter(Boolean);
@@ -188,7 +197,7 @@ const extractScript = `(() => {
   ].join(',');
   const regions = [];
   const seenEls = new Set();
-  for (const el of Array.from(document.querySelectorAll(regionSelector))) {
+  for (const el of (want('regions') ? Array.from(document.querySelectorAll(regionSelector)).slice(0,2000) : [])) {
     if (!el || seenEls.has(el)) continue;
     seenEls.add(el);
     const tag = el.tagName.toLowerCase();
@@ -234,21 +243,21 @@ const extractScript = `(() => {
     url: location.href,
     title: cleanInline(document.title || meta['og:title'] || meta['twitter:title'] || ''),
     description,
-    text,
-    markdown,
-    html: root.innerHTML || '',
+    text: want('text') ? text.slice(0,limit) : '',
+    markdown: want('markdown') ? markdown.slice(0,limit) : '',
+    html: want('html') ? (root.innerHTML || '').slice(0,limit) : '',
     links,
     images,
     regions,
-    metadata: meta,
-    structured_data: {
+    metadata: want('metadata') ? meta : null,
+    structured_data: want('structured_data') ? {
       json_ld: jsonLd,
       open_graph: metaBucket('og:'),
       twitter: metaBucket('twitter:'),
       canonical: meta.canonical || '',
       title: cleanInline(document.title || meta['og:title'] || meta['twitter:title'] || ''),
       description
-    },
+    } : null,
     rendered: true,
     extraction_backend: 'browser_dom'
   };
@@ -257,23 +266,34 @@ const extractScript = `(() => {
 // Run extracts structured content from the active CDP target.
 func Run(ctx context.Context, opts computer.ExtractOptions) (computer.ExtractResult, error) {
 	if opts.WaitMS > 0 {
-		time.Sleep(time.Duration(opts.WaitMS) * time.Millisecond)
+		if err := cdputil.Sleep(ctx, time.Duration(opts.WaitMS)*time.Millisecond); err != nil {
+			return computer.ExtractResult{}, err
+		}
 	}
 	var out computer.ExtractResult
 	readability := "false"
 	if opts.Readability {
 		readability = "true"
 	}
-	script := strings.ReplaceAll(extractScript, "__READABILITY__", readability)
-	if err := chromedp.Run(ctx, chromedp.Evaluate(script, &out)); err != nil {
-		return computer.ExtractResult{}, err
-	}
-	out.ExtractionBackend = "browser_dom"
-	out.Rendered = true
 	max := opts.MaxChars
 	if max <= 0 {
 		max = defaultMaxChars
 	}
+	if max > 1000000 {
+		max = 1000000
+	}
+	formats := opts.Formats
+	if formats == nil {
+		formats = []string{}
+	}
+	formatsJSON, _ := json.Marshal(formats)
+	script := strings.NewReplacer("__READABILITY__", readability, "__FORMATS__", string(formatsJSON), "__LIMIT__", strconv.Itoa(max)).Replace(extractScript)
+	if err := cdputil.Run(ctx, chromedp.Evaluate(script, &out)); err != nil {
+		return computer.ExtractResult{}, err
+	}
+	out.ExtractionBackend = "browser_dom"
+	out.Rendered = true
+
 	out.Text = truncate(out.Text, max)
 	out.Markdown = truncate(out.Markdown, max)
 	out.HTML = truncate(out.HTML, max)

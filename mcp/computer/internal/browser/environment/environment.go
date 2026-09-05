@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"regexp"
 	"strings"
 	"time"
@@ -141,7 +142,7 @@ func Apply(ctx context.Context, opts computer.EnvironmentOptions, display comput
 	if opts.UserAgent != "" || len(opts.Languages) > 0 {
 		ua := opts.UserAgent
 		if ua == "" {
-			if err := chromedp.Run(ctx, chromedp.Evaluate(`navigator.userAgent`, &ua)); err != nil {
+			if err := cdputil.Run(ctx, chromedp.Evaluate(`navigator.userAgent`, &ua)); err != nil {
 				return fmt.Errorf("read current user agent: %w", err)
 			}
 		}
@@ -185,7 +186,7 @@ func Apply(ctx context.Context, opts computer.EnvironmentOptions, display comput
 	if len(actions) == 0 {
 		return nil
 	}
-	if err := chromedp.Run(ctx, actions...); err != nil {
+	if err := cdputil.Run(ctx, actions...); err != nil {
 		return fmt.Errorf("apply browser environment: %w", err)
 	}
 	return nil

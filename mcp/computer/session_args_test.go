@@ -114,6 +114,10 @@ func TestBrowserSessionFiltersProductionStyleSynthesizedTemplate(t *testing.T) {
 	}
 
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	if _, err := dbCreateContext(ctx.AppDB(), contextCreateInput{Name: "Saved Login", Backend: "browserbase", ProviderContextID: "saved-login", PersistDefault: true}); err != nil {
+		t.Fatal(err)
+	}
+
 	app := &App{reg: &registry{m: map[string]*session{}}}
 	out, err := app.toolBrowserSession(ctx, map[string]any{
 		"action": "open", "auto_create_context": false, "backend": "local",

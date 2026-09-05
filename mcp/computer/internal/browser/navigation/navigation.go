@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"net/url"
 	"strings"
 	"time"
@@ -40,7 +41,7 @@ func Run(parent context.Context, action, rawURL string, timeout time.Duration) e
 		return fmt.Errorf("unsupported navigation action %q", action)
 	}
 
-	err := chromedp.Run(ctx, task)
+	err := cdputil.Run(ctx, task)
 	if err == nil {
 		return nil
 	}
@@ -60,7 +61,7 @@ func RecoverTimeout(parent context.Context, cause error) (string, bool) {
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	var current string
-	err := chromedp.Run(ctx,
+	err := cdputil.Run(ctx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			_ = page.StopLoading().Do(ctx)
 			return nil

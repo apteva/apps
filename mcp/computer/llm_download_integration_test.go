@@ -33,7 +33,7 @@ func TestLLMUsesBrowserDownloadLifecycleLive(t *testing.T) {
 	if os.Getenv("RUN_COMPUTER_LLM_TESTS") == "" {
 		t.Skip("set RUN_COMPUTER_LLM_TESTS=1")
 	}
-	if _, err := exec.LookPath("codex"); err != nil {
+	if _, err := exec.LookPath(computerLLMBinary()); err != nil {
 		t.Skip("codex CLI is required for the authenticated LLM regression")
 	}
 
@@ -45,7 +45,7 @@ Goal: save a ZIP downloaded from an authenticated procurement portal into Storag
 The browser remains open. A guarded Computer click has just returned:
 {"action_dispatched":true,"downloads_started":[{"id":"dl_prod_123","filename":"RM6173-bid-pack.zip","status":"in_progress"}],"session_id":"br_prod_456"}
 
-The download URL used login cookies and a POST body. A successful click does not prove completion. Do not reconstruct or refetch the URL and do not put base64 in the plan. The Storage tool name is exactly "storage" and it accepts the blobref produced after Core handles a binary tool result.
+The download URL used login cookies and a POST body. A successful click does not prove completion. Do not reconstruct or refetch the URL and do not put base64 in the plan. The Computer tool name is exactly "browser_download" (no namespace prefix). The Storage tool name is exactly "storage" and it accepts the blobref produced after Core handles a binary tool result.
 
 Return exactly three ordered steps. For each step choose a tool and arguments. The final Storage step must identify which earlier step supplies its blobref using blob_source_step (one-based). Do not add list, sleep, HTTP fetch, unzip, or document-analysis steps.
 

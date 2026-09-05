@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"strings"
 	"sync"
 	"time"
@@ -53,7 +54,7 @@ type Tracker struct {
 func New(ctx context.Context) (*Tracker, error) {
 	t := &Tracker{ctx: ctx, inflight: make(map[network.RequestID]struct{}), frames: make(map[cdp.FrameID]struct{}), lastActivity: time.Now()}
 	chromedp.ListenTarget(ctx, t.observe)
-	err := chromedp.Run(ctx, network.Enable(), page.Enable(), chromedp.ActionFunc(func(ctx context.Context) error {
+	err := cdputil.Run(ctx, network.Enable(), page.Enable(), chromedp.ActionFunc(func(ctx context.Context) error {
 		if _, err := page.AddScriptToEvaluateOnNewDocument(installScript).Do(ctx); err != nil {
 			return err
 		}
@@ -116,12 +117,21 @@ func (t *Tracker) Wait(quietMS, timeoutMS int) (Result, error) {
 	if timeoutMS < quietMS {
 		timeoutMS = quietMS
 	}
+	waitCtx, cancel := context.WithTimeout(t.ctx, time.Duration(timeoutMS)*time.Millisecond)
+	defer cancel()
 	started := time.Now()
+	var last Result
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		state, err := readDOMState(t.ctx)
+		state, err := readDOMState(waitCtx)
 		if err != nil {
+			if waitCtx.Err() == context.DeadlineExceeded {
+				result := last
+				result.TimedOut = true
+				result.WaitedMS = int(time.Since(started) / time.Millisecond)
+				return result, &TimeoutError{Kind: "stable", Result: result}
+			}
 			return Result{}, err
 		}
 		t.mu.Lock()
@@ -129,6 +139,7 @@ func (t *Tracker) Wait(quietMS, timeoutMS int) (Result, error) {
 		activityQuiet := time.Since(t.lastActivity) >= time.Duration(quietMS)*time.Millisecond
 		t.mu.Unlock()
 		result := Result{WaitedMS: int(time.Since(started) / time.Millisecond), LoadingIndicators: state.LoadingIndicators, InflightRequests: inflight, LoadingFrames: frames}
+		last = result
 		if state.Ready && state.QuietForMS >= quietMS && state.LoadingIndicators == 0 && inflight == 0 && frames == 0 && activityQuiet {
 			result.Stable = true
 			return result, nil
@@ -175,13 +186,22 @@ func (t *Tracker) WaitForOutcome(conditions []computer.WaitCondition, match stri
 	if timeoutMS < quietMS {
 		timeoutMS = quietMS
 	}
+	waitCtx, cancel := context.WithTimeout(t.ctx, time.Duration(timeoutMS)*time.Millisecond)
+	defer cancel()
 	started := time.Now()
+	var last Result
 	var matchedSince time.Time
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		state, err := readOutcomeState(t.ctx, conditions)
+		state, err := readOutcomeState(waitCtx, conditions)
 		if err != nil {
+			if waitCtx.Err() == context.DeadlineExceeded {
+				result := last
+				result.TimedOut = true
+				result.WaitedMS = int(time.Since(started) / time.Millisecond)
+				return result, &TimeoutError{Kind: "outcome", Result: result}
+			}
 			return Result{}, err
 		}
 		if state.Error != "" {
@@ -204,6 +224,7 @@ func (t *Tracker) WaitForOutcome(conditions []computer.WaitCondition, match stri
 			Matched: matched, WaitedMS: int(time.Since(started) / time.Millisecond), Match: match,
 			CurrentURL: state.URL, Conditions: results, Media: state.Media,
 		}
+		last = result
 		if matched {
 			if matchedSince.IsZero() {
 				matchedSince = time.Now()
@@ -233,7 +254,7 @@ func readOutcomeState(ctx context.Context, conditions []computer.WaitCondition) 
 	}
 	var state outcomeState
 	expression := outcomeScript + "(" + string(rawConditions) + ")"
-	err = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+	err = cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		value, exception, err := cdpruntime.Evaluate(expression).WithReturnByValue(true).Do(ctx)
 		if err != nil {
 			return err
@@ -251,7 +272,7 @@ func readOutcomeState(ctx context.Context, conditions []computer.WaitCondition) 
 
 func readDOMState(ctx context.Context) (domState, error) {
 	var state domState
-	err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+	err := cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		value, exception, err := cdpruntime.Evaluate(snapshotScript).WithReturnByValue(true).Do(ctx)
 		if err != nil {
 			return err

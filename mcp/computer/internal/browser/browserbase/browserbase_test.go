@@ -340,10 +340,10 @@ func TestUsageFailureNeverPreventsProviderClose(t *testing.T) {
 	t.Cleanup(func() { apiBase = previousAPIBase })
 
 	c := &Computer{apiKey: "bb_key", sessionID: "bb_failure", http: srv.Client()}
-	if err := c.Close(); err != nil {
-		t.Fatalf("telemetry/release failure made Close fail: %v", err)
+	if err := c.Close(); err == nil {
+		t.Fatal("provider release failure must be reported")
 	}
-	if c.sessionID != "" || c.closedSessionID != "bb_failure" || postCalls != 1 {
+	if c.sessionID != "bb_failure" || c.closedSessionID != "bb_failure" || postCalls != 1 {
 		t.Fatalf("close state: active=%q closed=%q posts=%d", c.sessionID, c.closedSessionID, postCalls)
 	}
 	if _, err := c.SessionUsage(context.Background()); err == nil || getCalls != 1 {

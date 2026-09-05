@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 type ComputerSettings struct {
@@ -20,7 +21,20 @@ func defaultComputerSettings() ComputerSettings {
 	return ComputerSettings{DefaultBackend: "local", DefaultProxyMode: "auto"}
 }
 
+type settingsReader interface {
+	Query(string, ...any) (*sql.Rows, error)
+}
+
+var settingsWriteMu sync.Mutex
+
 func dbGetSettings(db *sql.DB) (ComputerSettings, error) {
+	if db == nil {
+		return defaultComputerSettings(), nil
+	}
+	return readSettings(db)
+}
+
+func readSettings(db settingsReader) (ComputerSettings, error) {
 	settings := defaultComputerSettings()
 	if db == nil {
 		return settings, nil
@@ -69,7 +83,14 @@ func dbUpdateSettings(db *sql.DB, patch map[string]any) (ComputerSettings, error
 	if db == nil {
 		return defaultComputerSettings(), fmt.Errorf("computer settings unavailable")
 	}
-	current, err := dbGetSettings(db)
+	settingsWriteMu.Lock()
+	defer settingsWriteMu.Unlock()
+	tx, err := db.Begin()
+	if err != nil {
+		return defaultComputerSettings(), err
+	}
+	defer tx.Rollback()
+	current, err := readSettings(tx)
 	if err != nil {
 		return current, err
 	}
@@ -121,7 +142,7 @@ func dbUpdateSettings(db *sql.DB, patch map[string]any) (ComputerSettings, error
 		"default_proxy_profile_id": next.DefaultProxyProfile,
 		"lock_proxy_policy":        formatSettingBool(next.LockProxyPolicy),
 	} {
-		if _, err := db.Exec(`
+		if _, err := tx.Exec(`
 			INSERT INTO computer_settings (key, value, updated_at)
 			VALUES (?, ?, ?)
 			ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
@@ -129,6 +150,9 @@ func dbUpdateSettings(db *sql.DB, patch map[string]any) (ComputerSettings, error
 		); err != nil {
 			return current, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return current, err
 	}
 	return next, nil
 }

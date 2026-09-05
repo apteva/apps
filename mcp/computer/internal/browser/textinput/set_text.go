@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"strings"
 
 	cdpinput "github.com/chromedp/cdproto/input"
@@ -16,6 +17,7 @@ import (
 )
 
 type Target struct {
+	ID       string
 	Selector string
 	X        int
 	Y        int
@@ -145,6 +147,11 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
     return el.matches('[contenteditable="true"],[contenteditable=""],[role="textbox"]');
   }
   function resolveTarget() {
+    if (target.ID) {
+      var state = window.__aptevaComputerSOM, saved = state && state.targets && state.targets[target.ID];
+      // A stable identity must never fall through to an old coordinate.
+      return saved && saved.element && saved.element.isConnected ? saved.element : null;
+    }
     var el=null;
     if (target.Selector) el=document.querySelector(target.Selector);
     if (!el && target.HasPoint) el=document.elementFromPoint(target.X,target.Y);
@@ -205,7 +212,7 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
 })(%s,%s)`, domselector.UniqueCSSPathFunction, string(targetJSON), string(reqJSON))
 
 	var prepared setPreparation
-	if err := chromedp.Run(ctx, chromedp.Evaluate(prepareJS, &prepared)); err != nil {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(prepareJS, &prepared)); err != nil {
 		return SetResult{}, err
 	}
 	if prepared.Error != "" {
@@ -268,7 +275,7 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
 		Verified   bool     `json:"verified"`
 		Stable     bool     `json:"stable"`
 	}
-	if err := chromedp.Run(ctx, chromedp.Evaluate(verifyJS, &verified, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(verifyJS, &verified, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
 		return p.WithAwaitPromise(true)
 	})); err != nil {
 		return SetResult{}, err
@@ -297,9 +304,9 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
 	}
 	if !verified.Verified {
 		if prepared.SingleLine {
-			return result, fmt.Errorf("set_text value mismatch after editor reconciliation: requested %q, actual %q", prepared.RequestedValue, verified.Text)
+			return result, fmt.Errorf("set_text value mismatch after editor reconciliation: requested %q, actual single-line value %q", prepared.RequestedValue, verified.Text)
 		}
-		return result, fmt.Errorf("set_text rendered text mismatch after editor reconciliation: requested %q, actual %q", prepared.RequestedValue, verified.Text)
+		return result, fmt.Errorf("set_text rendered text mismatch after editor reconciliation: requested %q, actual single-line value %q", prepared.RequestedValue, verified.Text)
 	}
 	if !verified.Stable {
 		return result, errors.New("set_text value did not stabilize after editor reconciliation")
@@ -329,7 +336,7 @@ func insertRichText(ctx context.Context, value string) error {
 			if line == "" {
 				continue
 			}
-			if err := chromedp.Run(ctx, cdpinput.InsertText(line)); err != nil {
+			if err := cdputil.Run(ctx, cdpinput.InsertText(line)); err != nil {
 				return err
 			}
 		}
@@ -349,5 +356,5 @@ func dispatchRichEnter(ctx context.Context, shift bool) error {
 	up := cdpinput.DispatchKeyEvent(cdpinput.KeyUp).
 		WithKey("Enter").WithCode("Enter").
 		WithWindowsVirtualKeyCode(13).WithModifiers(mods)
-	return chromedp.Run(ctx, down, up)
+	return cdputil.Run(ctx, down, up)
 }
