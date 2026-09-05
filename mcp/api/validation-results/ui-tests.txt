@@ -1,0 +1,12 @@
+bun test v1.3.13 (bf2e2cec)
+
+ui/policy.test.ts:
+(pass) CORS editing > preserves advanced policy settings during a simple edit [3.24ms]
+(pass) CORS editing > explicit false wins over existing origins and legacy aliases [1.03ms]
+(pass) slow prior selection cannot overwrite a newer completed selection [7.57ms]
+(pass) failed detail loading remains an error rather than an empty list [6.62ms]
+
+ 4 pass
+ 0 fail
+ 7 expect() calls
+Ran 4 tests across 1 file. [129.00ms]

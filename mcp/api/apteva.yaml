@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.5.0
+version: 0.6.0
 description: |
   Lightweight API gateway for Apteva SaaS projects. Owns public API
   hostnames, method/path routes, simple API keys, CORS policy, request
@@ -26,6 +26,9 @@ description: |
   v0.5.0 adds platform-managed browser-origin registration with delegated,
   route-aware preflight and exact origin enforcement for actual requests.
 
+  v0.6.0 hardens project isolation, authentication, streaming, proxying,
+  configuration reconciliation, and bounds resource usage with compiled routing.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/api
 icon: /ui/icon.svg
@@ -33,7 +36,7 @@ icon_style: monochrome
 tags: [api, gateway, rest, graphql, routing, saas]
 
 scopes: [project, global]
-min_apteva_version: "0.11.0"
+min_apteva_version: "0.42.3"
 
 requires:
   permissions:
@@ -41,6 +44,12 @@ requires:
     - platform.apps.call
     - platform.ingress.write
     - net.egress
+  integrations:
+    - role: upstream
+      kind: app
+      required: false
+      label: HTTP upstream app
+      hint: Bind an installed app before creating routes that target its HTTP endpoints.
   apps:
     - name: functions
       optional: true
