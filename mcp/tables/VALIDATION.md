@@ -34,10 +34,11 @@ Storage binding are handled by the platform when upgrading an installation.
 - Real sidecar smoke test passed over localhost HTTP/MCP: exact large JSON inputs
   and defaults, cursor pages, projected optimistic updates, graceful restart,
   legacy timestamp/schema migration and the first write after upgrade.
-- The shared panel verifier passed all four Tables bundles. Its workspace-wide
-  run still reports **two pre-existing failures** in DeployPanel.mjs and
-  GigsPanel.mjs (development JSX runtime imports). Both were verified unchanged
-  in the v0.1.14 baseline; those unrelated apps were not modified.
+- The shared panel verifier passed all four Tables bundles. After rebasing onto
+  current main, the workspace-wide run reports two unrelated failures in Storage's
+  StoragePanel.mjs and FileCard.mjs (development JSX runtime imports). Both files
+  are unchanged from main. The initial v0.1.14 audit instead found Deploy/Gigs
+  bundle failures; these unrelated apps were not modified by this release.
 
 Commands used:
 
@@ -61,6 +62,14 @@ env GOWORK=off go test ./...
 env GOWORK=off go test -race ./...
 env GOWORK=off go vet ./...
 ```
+
+Release reruns exposed a timing-sensitive concurrency fixture: 80 readers sharing
+four connections exceeded its two-second queue budget under race instrumentation
+on a busy host. The same workload passed three ordinary runs. Its test-only queue
+budget is now 30 seconds, with a 60-second overall bound; production timeouts are
+unchanged, and the dedicated read-queue timeout regression remains in place.
+The writer-cancellation fixture also now applies its 20 ms deadline after schema
+setup, so setup work does not consume the cancellation test's deadline.
 
 ## Performance
 

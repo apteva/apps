@@ -338,6 +338,10 @@ func TestReadQueueTimeoutReportsItsStage(t *testing.T) {
 
 func TestReadPool_MixedConcurrentSearchesAndWrites(t *testing.T) {
 	ctx, _, _ := newFileBackedTestCtx(t, "mixed-project")
+	// This checks concurrent correctness, not throughput. Eighty readers share
+	// four connections; race instrumentation and a busy host can exhaust the
+	// fixture's two-second queue budget. Timeout behavior has a dedicated test.
+	ctx.Config()["max_read_queue_ms"] = "30000"
 	app := &App{}
 	mustCall(t, app, ctx, "tables_create", map[string]any{
 		"name": "records",
@@ -398,7 +402,7 @@ func TestReadPool_MixedConcurrentSearchesAndWrites(t *testing.T) {
 	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(15 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("mixed read/write workload timed out")
 	}
 	close(errs)

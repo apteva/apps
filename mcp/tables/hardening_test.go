@@ -245,9 +245,11 @@ func TestLegacyUpgradeRollback(t *testing.T) {
 }
 
 func TestRequestAndWriterCancellation(t *testing.T) {
-	ctx := newTestCtx(t, tk.WithConfig(map[string]string{"max_write_ms": "20"}))
+	ctx := newTestCtx(t, tk.WithConfig(map[string]string{"max_write_ms": "30000"}))
 	app := &App{}
 	booksTable(t, app, ctx)
+	// Apply the short deadline only to the operations under test, not setup.
+	ctx.Config()["max_write_ms"] = "20"
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	for _, tool := range app.MCPTools() {
