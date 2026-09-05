@@ -13,6 +13,9 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+// Preserve policy refusals through net/http's URL error and the tool's wrapping.
+var errInternalImportForbidden = errors.New("internal network imports are not allowed for this host")
+
 // Internal imports are opt-in by exact hostname. DNS is validated at dial time;
 // the selected IP is dialled directly, preventing rebinding between checks.
 func importClient(app *sdk.AppCtx) *http.Client {
@@ -39,7 +42,7 @@ func importClient(app *sdk.AppCtx) *http.Client {
 		if !allowed[strings.ToLower(host)] {
 			for _, ip := range ips {
 				if !publicImportIP(ip) {
-					return nil, errors.New("internal network imports are not allowed for this host")
+					return nil, errInternalImportForbidden
 				}
 			}
 		}

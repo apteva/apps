@@ -176,6 +176,25 @@ func TestSidecar_DedupeMCP(t *testing.T) {
 
 func itoa(i int64) string { return strconv.FormatInt(i, 10) }
 
+func TestSidecar_InternalImportForbidden(t *testing.T) {
+	sc := spawnStorageSidecar(t, ".", tk.WithProjectID("test-proj"))
+	body := strings.NewReader(`{"url":"http://127.0.0.1:1/blocked.txt","name":"blocked.txt"}`)
+	req, err := http.NewRequest(http.MethodPost, sc.URL()+"/files/from-url", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+sc.Token())
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("blocked import status = %d, want 403", resp.StatusCode)
+	}
+}
+
 func spawnStorageSidecar(t *testing.T, dir string, opts ...tk.Option) *tk.Sidecar {
 	t.Helper()
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

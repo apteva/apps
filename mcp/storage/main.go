@@ -1227,6 +1227,10 @@ func (a *App) httpFromURL(w http.ResponseWriter, r *http.Request) {
 	body["_project_id"] = pid
 	out, err := a.toolFromURLCtx(context.WithValue(r.Context(), actorContextKey{}, requestActor(r)), ctx, body)
 	if err != nil {
+		if errors.Is(err, errInternalImportForbidden) {
+			httpErr(w, http.StatusForbidden, err.Error())
+			return
+		}
 		// Match toolFromURL error semantics: upstream-status / url-required
 		// errors are caller mistakes (400), everything else is a 500.
 		msg := err.Error()

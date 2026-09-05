@@ -1,9 +1,13 @@
-# Storage 0.11.0
+# Storage 0.11.1
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
 sidecar uses app-sdk v0.73.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
+
+Version 0.11.1 returns HTTP 403 Forbidden when URL imports target blocked internal
+addresses, including after redirects. The import policy and error text are
+unchanged; genuine upstream failures retain their existing status handling.
 
 ## Upgrade from 0.10.26
 
