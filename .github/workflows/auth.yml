@@ -1,9 +1,9 @@
 name: Auth checks
 on:
   pull_request:
-    paths: ['mcp/auth/**', 'scripts/build-panels.ts', '.github/workflows/auth.yml']
+    paths: ['mcp/auth/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', 'scripts/panel-react-surface.json', '.github/workflows/auth.yml']
   push:
-    paths: ['mcp/auth/**', 'scripts/build-panels.ts', '.github/workflows/auth.yml']
+    paths: ['mcp/auth/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', 'scripts/panel-react-surface.json', '.github/workflows/auth.yml']
 permissions:
   contents: read
 jobs:
@@ -24,11 +24,27 @@ jobs:
         working-directory: mcp/auth
       - run: go vet ./...
         working-directory: mcp/auth
-      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
         working-directory: mcp/auth
       - run: bun install --frozen-lockfile
         working-directory: mcp/auth/ui
       - run: bun run typecheck && bun test
         working-directory: mcp/auth/ui
       - run: bun run scripts/build-panels.ts --app auth
-      - run: git diff --exit-code -- mcp/auth/ui/AuthPanel.mjs mcp/auth/ui/AuthPanel.mjs.map
+      - name: Verify committed frontend artifacts
+        # Bun debug IDs can vary between identical builds.
+        run: |
+          python3 - <<'PYTHON'
+          import json, re, subprocess
+          from pathlib import Path
+          path = "mcp/auth/ui/AuthPanel.mjs"
+          committed = lambda p: subprocess.check_output(["git", "show", "HEAD:" + p], text=True)
+          normalize = lambda s: re.sub(r"^//# debugId=.*$", "", s, flags=re.M).strip()
+          assert normalize(committed(path)) == normalize(Path(path).read_text()), "Generated code differs"
+          original = json.loads(committed(path + ".map"))
+          rebuilt = json.loads(Path(path + ".map").read_text())
+          original.pop("debugId", None)
+          rebuilt.pop("debugId", None)
+          assert original == rebuilt, "Generated source map differs"
+          print("Auth bundle and source map match committed artifacts (excluding debug IDs).")
+          PYTHON
