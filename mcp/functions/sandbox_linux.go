@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ func platformSandboxSupported() bool { return true }
 func sandboxRequiredByDefault() bool { return true }
 
 func runSandboxHelper(args []string) error {
+	runtime.LockOSThread() // Landlock, no_new_privs and seccomp must reach exec on this same thread.
 	spec, target, targetArgs, err := parseSandboxArgs(args)
 	if err != nil {
 		return err
@@ -65,9 +67,26 @@ func applySeccomp() error {
 		unix.SYS_INIT_MODULE, unix.SYS_FINIT_MODULE, unix.SYS_DELETE_MODULE,
 		unix.SYS_KEXEC_LOAD, unix.SYS_OPEN_BY_HANDLE_AT,
 	}
-	filters := make([]unix.SockFilter, 0, 2+len(blocked)*2)
+	arch := uint32(0)
+	switch runtime.GOARCH {
+	case "amd64":
+		arch = unix.AUDIT_ARCH_X86_64
+	case "arm64":
+		arch = unix.AUDIT_ARCH_AARCH64
+	default:
+		return errors.New("unsupported sandbox syscall architecture")
+	}
+	filters := []unix.SockFilter{
+		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 4},
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: arch, Jt: 1},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_KILL_PROCESS},
+	}
+
 	// seccomp_data.nr is the first uint32 in struct seccomp_data.
 	filters = append(filters, unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0})
+	if runtime.GOARCH == "amd64" {
+		filters = append(filters, unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K, K: 0x40000000, Jf: 1}, unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_KILL_PROCESS})
+	}
 	for _, nr := range blocked {
 		filters = append(filters,
 			unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jf: 1, K: nr},
@@ -197,7 +216,7 @@ func applyLandlock(spec sandboxSpec) error {
 	// an older Landlock ABI reject these bits; retry without them below.
 	attr.Scoped = unix.LANDLOCK_SCOPE_SIGNAL | unix.LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET
 	ruleset, err := landlockCreate(&attr)
-	if err != nil {
+	if err != nil && !spec.RequireSandbox {
 		attr.Scoped = 0
 		ruleset, err = landlockCreate(&attr)
 	}

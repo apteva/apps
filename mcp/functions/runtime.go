@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,7 +29,7 @@ type runtimeSpec struct {
 	// Build runs the runtime's build step in buildDir. pkgManifest is
 	// the optional package_json (node dependency install); "" if none.
 	// May be a no-op (node with no deps).
-	Build func(buildDir, pkgManifest string) error
+	Build func(context.Context, string, string) error
 	// WorkerCmd returns how to launch a built worker for buildDir:
 	// the binary (PATH-resolved or an absolute path) and its args.
 	WorkerCmd func(buildDir string) (bin string, args []string)
@@ -51,14 +52,17 @@ var runtimes = map[string]runtimeSpec{
 		Stage: func(dir string) error {
 			return os.WriteFile(filepath.Join(dir, "node_harness.mjs"), nodeHarness, 0o600)
 		},
-		Build: func(dir, pkgManifest string) error {
+		Build: func(ctx context.Context, dir, pkgManifest string) error {
 			if strings.TrimSpace(pkgManifest) == "" {
-				return nil
+				return runBuildCmd(ctx, dir, "node syntax check", "node", "--check", "entry.mjs")
 			}
 			if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkgManifest), 0o600); err != nil {
 				return err
 			}
-			return runNpmInstall(dir)
+			if err := runNpmInstall(ctx, dir); err != nil {
+				return err
+			}
+			return runBuildCmd(ctx, dir, "node syntax check", "node", "--check", "entry.mjs")
 		},
 		WorkerCmd: func(dir string) (string, []string) {
 			return "node", []string{filepath.Join(dir, "node_harness.mjs")}
@@ -77,8 +81,8 @@ var runtimes = map[string]runtimeSpec{
 			gomod := "module aptevafn\n\ngo 1.22\n"
 			return os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600)
 		},
-		Build: func(dir, _ string) error {
-			return runGoBuild(dir)
+		Build: func(ctx context.Context, dir, _ string) error {
+			return runGoBuild(ctx, dir)
 		},
 		WorkerCmd: func(dir string) (string, []string) {
 			return filepath.Join(dir, "worker"), nil

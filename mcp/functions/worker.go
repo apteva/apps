@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -29,7 +31,7 @@ const coldStartTimeout = 15 * time.Second
 // function worker. Keep this high enough for integration/app-call results
 // that legitimately carry binary envelopes (for example Google Drive audio
 // download -> storage upload), while still rejecting truly runaway payloads.
-const maxFrame = 128 << 20 // 128 MiB
+const maxFrame = 8 << 20 // 8 MiB; larger objects must use storage references.
 
 // worker is one warm runtime process. It imports the function's
 // handler once at boot, then serves invocations one at a time over a
@@ -37,14 +39,19 @@ const maxFrame = 128 << 20 // 128 MiB
 // at a time — the pool provides concurrency by running several
 // workers per function.
 type worker struct {
-	fnID      int64
-	fnName    string
-	versionID int64
-	cmd       *exec.Cmd
-	conn      net.Conn
-	stderr    *capBuffer
-	tempDir   string
-	writeMu   sync.Mutex
+	owner               *pool
+	identity, signature string
+	memoryMB            int
+	abortOnce           sync.Once
+	diskCancel          context.CancelFunc
+	fnID                int64
+	fnName              string
+	versionID           int64
+	cmd                 *exec.Cmd
+	conn                net.Conn
+	stderr              *capBuffer
+	tempDir             string
+	writeMu             sync.Mutex
 
 	mu       sync.Mutex // serialises call(); guards dead + lastUsed + seq
 	dead     bool
@@ -103,10 +110,15 @@ type callResult struct {
 // end of a socketpair as fd 3, and blocks until it reports ready (or
 // the cold-start budget elapses).
 func startWorker(spec runtimeSpec, buildDir string, fn *Function, versionID int64) (*worker, error) {
+	return startWorkerContext(context.Background(), spec, buildDir, fn, versionID)
+}
+func startWorkerContext(parent context.Context, spec runtimeSpec, buildDir string, fn *Function, versionID int64) (*worker, error) {
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		return nil, fmt.Errorf("socketpair: %w", err)
 	}
+	syscall.CloseOnExec(fds[0])
+	syscall.CloseOnExec(fds[1])
 	parentFile := os.NewFile(uintptr(fds[0]), "fn-sock-parent")
 	childFile := os.NewFile(uintptr(fds[1]), "fn-sock-child")
 
@@ -159,14 +171,24 @@ func startWorker(spec runtimeSpec, buildDir string, fn *Function, versionID int6
 		return nil, fmt.Errorf("socket conn: %w", err)
 	}
 
+	diskCtx, diskCancel := context.WithCancel(context.Background())
 	w := &worker{
-		fnID: fn.ID, fnName: fn.Name, versionID: versionID,
+		diskCancel: diskCancel,
+		fnID:       fn.ID, fnName: fn.Name, versionID: versionID,
 		cmd: cmd, conn: conn, stderr: stderr, tempDir: tempDir, lastUsed: time.Now(),
 	}
 
+	watchDisk(diskCtx, w.tempDir, int64(envInt("APTEVA_FUNCTIONS_TEMP_MB", 128, 16, 8192))<<20, w.abort)
 	// Wait for the ready frame — handler module imported successfully.
-	_ = conn.SetReadDeadline(time.Now().Add(coldStartTimeout))
-	raw, err := readFrame(conn)
+	deadline := time.Now().Add(coldStartTimeout)
+	if d, ok := parent.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	_ = conn.SetReadDeadline(deadline)
+	stop := context.AfterFunc(parent, func() { w.abort() })
+	defer stop()
+	raw, release, err := readFrameOwned(conn)
+	defer release()
 	if err != nil {
 		w.shutdown()
 		return nil, fmt.Errorf("worker never reported ready (%v); logs: %s", err, stderr.String())
@@ -200,6 +222,7 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 		return nil, errors.New("worker is dead")
 	}
 
+	w.stderr.Reset()
 	w.seq++
 	id := w.seq
 	reqBytes, err := json.Marshal(wireRequest{ID: id, Event: event})
@@ -213,16 +236,8 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 	}
 
 	started := time.Now().UTC()
-	cancelWatch := make(chan struct{})
-	defer close(cancelWatch)
-	go func() {
-		select {
-		case <-parent.Done():
-			_ = w.conn.SetReadDeadline(time.Now())
-			_ = w.conn.SetWriteDeadline(time.Now())
-		case <-cancelWatch:
-		}
-	}()
+	stopCancel := context.AfterFunc(parent, func() { w.abort() })
+	defer stopCancel()
 	_ = w.conn.SetWriteDeadline(deadline)
 	if err := w.writeFrame(reqBytes); err != nil {
 		w.killLocked()
@@ -237,9 +252,14 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 	streamed := false
 	streamPreview := newCapBuffer(stdoutCap)
 
+	releaseFrame := func() {}
+	defer func() { releaseFrame() }()
 	for {
+		releaseFrame()
+		releaseFrame = func() {}
 		_ = w.conn.SetReadDeadline(deadline)
-		raw, err := readFrame(w.conn)
+		raw, release, err := readFrameOwned(w.conn)
+		releaseFrame = release
 		if err != nil {
 			finished := time.Now().UTC()
 			w.killLocked()
@@ -271,6 +291,10 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 		// service it and keep reading; the invocation result is still
 		// to come. Both kinds reply through the same callResult shape.
 		if msg.Type == "call" || msg.Type == "integration" {
+			if msg.ID != id {
+				w.killLocked()
+				return nil, errors.New("downstream call belongs to a completed invocation")
+			}
 			select {
 			case callSlots <- struct{}{}:
 			default:
@@ -281,8 +305,11 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 				_ = w.writeFrame(ansBytes)
 				continue
 			}
+			ownedRelease := releaseFrame
+			releaseFrame = func() {}
 			callWG.Add(1)
 			go func(frame wireResponse) {
+				defer ownedRelease()
 				defer callWG.Done()
 				defer func() { <-callSlots }()
 				w.serviceCallFrame(ctx, parent, deadline, frame)
@@ -297,7 +324,7 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 			}
 			streamed = true
 			if stream != nil {
-				if err := stream.Start(msg.StatusCode, msg.Headers); err != nil {
+				if err := streamOperation(parent, stream, func() error { return stream.Start(msg.StatusCode, msg.Headers) }); err != nil {
 					w.killLocked()
 					return nil, fmt.Errorf("start response stream: %w", err)
 				}
@@ -317,7 +344,7 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 			}
 			_, _ = streamPreview.Write(chunk)
 			if stream != nil {
-				if err := stream.Write(chunk); err != nil {
+				if err := streamOperation(parent, stream, func() error { return stream.Write(chunk) }); err != nil {
 					w.killLocked()
 					return nil, fmt.Errorf("write response stream: %w", err)
 				}
@@ -326,11 +353,16 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 		}
 
 		// Invocation result.
+		if msg.Type != "result" || msg.ID != id {
+			w.killLocked()
+			return nil, errors.New("invalid invocation result identity")
+		}
 		callsDone := make(chan struct{})
-		go func() {
-			callWG.Wait()
+		if len(callSlots) == 0 {
 			close(callsDone)
-		}()
+		} else {
+			go func() { callWG.Wait(); close(callsDone) }()
+		}
 		select {
 		case <-callsDone:
 		case <-parent.Done():
@@ -344,7 +376,7 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 		w.lastUsed = time.Now()
 		res := &invokeResult{
 			DurationMS: finished.Sub(started).Milliseconds(),
-			Stderr:     truncate(strings.Join(msg.Logs, "\n"), stderrCap),
+			Stderr:     truncate(strings.Join(msg.Logs, "\n")+w.stderr.String(), stderrCap),
 			Streamed:   streamed,
 		}
 		if msg.OK {
@@ -353,7 +385,7 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 			if streamed {
 				res.Response = streamPreview.String()
 			} else {
-				res.Response = truncate(string(msg.Result), stdoutCap)
+				res.Response = string(msg.Result)
 			}
 		} else {
 			res.Status = "error"
@@ -386,25 +418,46 @@ func (w *worker) writeFrame(payload []byte) error {
 }
 
 func (w *worker) serviceCallFrame(ctx *sdk.AppCtx, parent context.Context, deadline time.Time, msg wireResponse) {
-	answer := make(chan callResult, 1)
-	go func() {
-		if msg.Type == "call" {
-			answer <- servicePlatformCall(ctx, msg)
-		} else {
-			answer <- servicePlatformIntegration(ctx, msg)
+	p := w.owner
+	ans := callResult{Type: "call_result", CallID: msg.CallID}
+	if err := checkFunctionAccessInPool(p, ctx, w.fnID, msg); err != nil {
+		ans.Error = err.Error()
+	} else {
+		select {
+		case p.downstream <- struct{}{}:
+			// Custom SDK clients without a context method are isolated and retain their
+			// global slot until they finish. The production adapter cancels HTTP I/O.
+			if err := waitProtocol(parent, maxFrame); err != nil {
+				<-p.downstream
+				ans.Error = err.Error()
+				break
+			}
+			answer := make(chan callResult, 1)
+			go func() {
+				defer func() { <-p.downstream; protocolBytes.Add(-maxFrame) }()
+				defer func() {
+					if r := recover(); r != nil {
+						answer <- callResult{Type: "call_result", CallID: msg.CallID, Error: fmt.Sprint("downstream panic: ", r)}
+					}
+				}()
+				answer <- dispatchPlatformFrame(parent, ctx, msg)
+			}()
+			select {
+			case ans = <-answer:
+			case <-parent.Done():
+				ans.Error = "invocation canceled"
+			}
+		case <-parent.Done():
+			ans.Error = "invocation canceled"
 		}
-	}()
-	var ans callResult
-	select {
-	case ans = <-answer:
-	case <-parent.Done():
-		ans = callResult{Type: "call_result", CallID: msg.CallID, Error: "invocation deadline exceeded"}
 	}
 	ansBytes, err := json.Marshal(ans)
 	if err != nil {
 		return
 	}
-	_ = w.conn.SetWriteDeadline(deadline)
+	if len(ansBytes) > maxFrame {
+		ansBytes, _ = json.Marshal(callResult{Type: "call_result", CallID: msg.CallID, Error: "downstream result exceeds 8 MiB; use a storage reference"})
+	}
 	_ = w.writeFrame(ansBytes)
 }
 
@@ -428,6 +481,9 @@ func servicePlatformCall(ctx *sdk.AppCtx, msg wireResponse) callResult {
 			ans.Error = fmt.Sprintf("context.call input must be a JSON object: %v", err)
 			return ans
 		}
+	}
+	if input == nil {
+		input = map[string]any{}
 	}
 	if pid := strings.TrimSpace(ctx.CurrentProject()); pid != "" {
 		// Project context is dispatcher-owned. Never let function code
@@ -475,6 +531,9 @@ func servicePlatformIntegration(ctx *sdk.AppCtx, msg wireResponse) callResult {
 			ans.Error = fmt.Sprintf("context.integration input must be a JSON object: %v", err)
 			return ans
 		}
+	}
+	if input == nil {
+		input = map[string]any{}
 	}
 	if pid := strings.TrimSpace(ctx.CurrentProject()); pid != "" {
 		input["_project_id"] = pid
@@ -541,7 +600,7 @@ func resolveConnRef(ctx *sdk.AppCtx, raw json.RawMessage) (int64, string) {
 		return id, ""
 	}
 	// Slug — resolve in the current project.
-	return resolveConnSlug(ctx, asStr)
+	return resolveConnSlugContext(context.Background(), ctx, asStr)
 }
 
 // ── slug → id resolution + cache ──────────────────────────────────
@@ -568,6 +627,9 @@ var connSlugCache = struct {
 // whose app_slug matches `slug`. Errors when 0 (none) or >1 (ambiguous)
 // matches — multi-match disambiguation requires the explicit id.
 func resolveConnSlug(ctx *sdk.AppCtx, slug string) (int64, string) {
+	return resolveConnSlugContext(context.Background(), ctx, slug)
+}
+func resolveConnSlugContext(parent context.Context, ctx *sdk.AppCtx, slug string) (int64, string) {
 	pid := ctx.CurrentProject()
 	key := pid + "|" + slug
 	now := time.Now()
@@ -578,7 +640,13 @@ func resolveConnSlug(ctx *sdk.AppCtx, slug string) (int64, string) {
 	}
 	connSlugCache.Unlock()
 
-	conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{ProjectID: pid, AppSlug: slug})
+	var conns []sdk.PlatformConnection
+	var err error
+	if os.Getenv("APTEVA_APP_TOKEN") != "" && os.Getenv("APTEVA_GATEWAY_URL") != "" {
+		err = callbackRequest(parent, "GET", "/api/apps/callback/connections?project_id="+url.QueryEscape(pid)+"&app_slug="+url.QueryEscape(slug), nil, &conns)
+	} else {
+		conns, err = ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{ProjectID: pid, AppSlug: slug})
+	}
 	if err != nil {
 		return 0, fmt.Sprintf("context.integration: list connections failed: %v", err)
 	}
@@ -587,6 +655,9 @@ func resolveConnSlug(ctx *sdk.AppCtx, slug string) (int64, string) {
 		return 0, fmt.Sprintf("context.integration: no %q connection in this project. Add one from the Connections panel.", slug)
 	case 1:
 		connSlugCache.Lock()
+		if len(connSlugCache.m) > 1024 {
+			clear(connSlugCache.m)
+		}
 		connSlugCache.m[key] = connCacheEntry{id: conns[0].ID, expires: now.Add(connSlugTTL)}
 		connSlugCache.Unlock()
 		return conns[0].ID, ""
@@ -618,12 +689,23 @@ func (w *worker) idleSince() time.Time {
 }
 
 // killLocked terminates the worker; caller holds w.mu.
+func (w *worker) abort() {
+	w.abortOnce.Do(func() {
+		if w.diskCancel != nil {
+			w.diskCancel()
+		}
+		_ = w.conn.Close()
+		if w.cmd != nil && w.cmd.Process != nil {
+			_ = syscall.Kill(-w.cmd.Process.Pid, syscall.SIGKILL)
+		}
+	})
+}
 func (w *worker) killLocked() {
 	if w.dead {
 		return
 	}
 	w.dead = true
-	_ = w.conn.Close()
+	w.abort()
 	_ = killGroup(w.cmd)
 	if w.cmd != nil && w.cmd.Process != nil {
 		cleanupSandboxProcess(w.cmd.Process.Pid, sandboxWorker)
@@ -666,19 +748,30 @@ func writeAll(w io.Writer, payload []byte) error {
 }
 
 func readFrame(r io.Reader) ([]byte, error) {
+	b, release, err := readFrameOwned(r)
+	release()
+	return b, err
+}
+func readFrameOwned(r io.Reader) ([]byte, func(), error) {
+	noop := func() {}
 	var hdr [4]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return nil, err
+		return nil, noop, err
 	}
 	n := binary.BigEndian.Uint32(hdr[:])
 	if n > maxFrame {
-		return nil, fmt.Errorf("frame too large: %d bytes", n)
+		return nil, noop, fmt.Errorf("frame too large: %d bytes", n)
 	}
+	if !reserveProtocol(int64(n)) {
+		return nil, noop, errors.New("protocol memory capacity exhausted")
+	}
+	release := func() { protocolBytes.Add(-int64(n)) }
 	buf := make([]byte, n)
 	if _, err := io.ReadFull(r, buf); err != nil {
-		return nil, err
+		release()
+		return nil, noop, err
 	}
-	return buf, nil
+	return buf, release, nil
 }
 
 // killGroup SIGKILLs the worker's process group so children die with
@@ -781,4 +874,56 @@ func (c *capBuffer) String() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.buf.String()
+}
+
+func (c *capBuffer) Reset() { c.mu.Lock(); c.buf.Reset(); c.written = 0; c.mu.Unlock() }
+
+var protocolBytes atomic.Int64
+
+func reserveProtocol(n int64) bool {
+	limit := int64(envInt("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB", 128, 16, 1024)) << 20
+	for {
+		old := protocolBytes.Load()
+		if old+n > limit {
+			return false
+		}
+		if protocolBytes.CompareAndSwap(old, old+n) {
+			return true
+		}
+	}
+}
+
+func streamOperation(ctx context.Context, s invocationStream, f func() error) error {
+	if _, ok := s.(*httpInvocationStream); ok {
+		return f()
+	}
+	done := make(chan error, 1)
+	go func() { done <- f() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func waitProtocol(ctx context.Context, n int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if reserveProtocol(n) {
+		return nil
+	}
+	timer := time.NewTicker(time.Millisecond)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			if reserveProtocol(n) {
+				return nil
+			}
+		}
+	}
 }
