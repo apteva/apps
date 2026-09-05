@@ -1,3 +1,5 @@
+> Release follow-up: these audited fixes are included in CRM v0.9.2. The original implementation handoff below records the pre-release state. Release notes and upgrade limits are in `mcp/crm/RELEASE-v0.9.2.md`.
+
 # CRM v0.9.1 remediation
 
 Implemented in isolated branch `fix/crm-0.9.1-audit`, based on release

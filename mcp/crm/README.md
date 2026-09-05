@@ -1,11 +1,12 @@
-# CRM
+# CRM v0.9.2
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
 
-This branch repairs release `crm/v0.9.1`. It does not publish a new version.
+Release `crm/v0.9.2` repairs the correctness, concurrency and performance issues
+identified in the `crm/v0.9.1` audit.
 
 ## Capabilities
 

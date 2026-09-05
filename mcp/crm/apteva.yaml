@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.1
+version: 0.9.2
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
-  append-only activity log, opportunities/pipelines, soft-delete + merge. Agents read/write via
+  append-only activity log, opportunities/pipelines, archival/restoration + merge. Agents read/write via
   MCP tools (find-or-create, search, log activity, set attribute, merge);
   the dashboard panel renders the same data with a structured detail view.
 
